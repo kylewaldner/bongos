@@ -13,7 +13,7 @@ import json, os, subprocess, sys
 root, meta, origin = sys.argv[1:4]
 notice = open(os.path.join(root, "NOTICE")).read().splitlines()
 for p in json.load(open(meta))["packages"]:
-    if p.get("license") != "Apache-2.0":
+    if "Apache-2.0" not in (p.get("license") or ""):
         continue
     d = os.path.relpath(os.path.dirname(p["manifest_path"]), root)
     out = subprocess.run(["git", "-C", root, "diff", "--name-only", origin, "--", d],

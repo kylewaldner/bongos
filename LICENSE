@@ -3,7 +3,7 @@ option) any later version (GPL-3.0-or-later). The full text follows.
 
 The crates whose Cargo.toml declares `license = "Apache-2.0"`, including `gpui`,
 remain licensed under the Apache License, Version 2.0; see LICENSE-APACHE, which
-keeps Zed's copyright line. Zed's per-crate licence symlinks are kept as they are.
+keeps Zed's copyright line. Zed's per-crate license symlinks are kept as they are.
 
 bongos is a fork of Zed. ORIGIN.md records the fork: the Zed tag and commit it is
 based on, and the notice that the work was modified.
