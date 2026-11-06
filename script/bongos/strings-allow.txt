@@ -94,8 +94,6 @@ crates/markdown/src/mermaid.rs 1
 crates/markdown/src/parser.rs 3
 crates/node_runtime/src/node_runtime.rs 2
 crates/oauth_callback_server/src/oauth_callback_server.rs 2
-crates/onboarding/src/basics_page.rs 6
-crates/onboarding/src/onboarding.rs 1
 crates/open_router/src/open_router.rs 2
 crates/project/src/debugger/dap_command.rs 1
 crates/project/src/project_settings.rs 4
@@ -134,11 +132,9 @@ crates/ui/src/components/ai/agent_setup_button.rs 1
 crates/ui/src/components/collab/collab_notification.rs 1
 crates/ui/src/components/label/label.rs 1
 crates/ui/src/components/list/list_bullet_item.rs 1
-crates/ui/src/components/notification/announcement_toast.rs 1
 crates/util/src/util.rs 1
 crates/vim/src/surrounds.rs 3
 crates/windows_resources/src/windows_resources.rs 6
 crates/workspace/src/notifications.rs 4
 crates/workspace/src/pane_group.rs 2
-crates/workspace/src/welcome.rs 2
 crates/workspace/src/workspace.rs 1

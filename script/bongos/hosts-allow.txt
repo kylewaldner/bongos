@@ -28,8 +28,6 @@ crates/telemetry/src/telemetry.rs zed.dev
 
 # onboarding and feedback: step 19 (status.zed.dev link in zed.rs is a browser link and also stays)
 crates/ai_onboarding/src/young_account_banner.rs zed.dev
-crates/onboarding/src/multibuffer_hint.rs zed.dev
-crates/onboarding/src/onboarding.rs zed.dev
 crates/bongos/src/zed.rs status.zed.dev
 
 # collab, calls and rpc: the server crate is not built; the UI goes in steps 21 (collab) and 22 (calls)
@@ -51,7 +49,6 @@ crates/web_search_providers/src/cloud.rs zed.dev
 
 # feedback (step 19), marketplace (step 19a) and settings page entries (step 24)
 crates/extensions_ui/src/extensions_ui.rs zed.dev
-crates/feedback/src/feedback.rs zed.dev
 crates/settings_ui/src/page_data.rs zed.dev
 
 # The harness's own patterns. They name the hosts to detect or block, so they stay.

@@ -2132,7 +2132,6 @@ dependencies = [
  "extension_host",
  "extensions_ui",
  "feature_flags",
- "feedback",
  "file_finder",
  "fs",
  "futures 0.3.32",
@@ -2172,7 +2171,6 @@ dependencies = [
  "miniprofiler_ui",
  "node_runtime",
  "notifications",
- "onboarding",
  "outline",
  "outline_panel",
  "parking_lot",
@@ -5815,20 +5813,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "feedback"
-version = "0.1.0"
-dependencies = [
- "client",
- "extension_host",
- "gpui",
- "system_specs",
- "urlencoding",
- "util",
- "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -11000,38 +10984,6 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
-]
-
-[[package]]
-name = "onboarding"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "client",
- "cloud_api_types",
- "collections",
- "component",
- "db",
- "documented",
- "fs",
- "fuzzy",
- "gpui",
- "menu",
- "notifications",
- "picker",
- "project",
- "schemars 1.0.4",
- "serde",
- "settings",
- "telemetry",
- "theme",
- "theme_settings",
- "ui",
- "util",
- "vim_mode_setting",
- "workspace",
- "zed_actions",
- "zlog",
 ]
 
 [[package]]

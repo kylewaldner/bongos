@@ -525,7 +525,7 @@
     "show_branch_name": true,
     // Whether to show the project host and name in the titlebar.
     "show_project_items": true,
-    // Whether to show onboarding banners in the titlebar.
+    // Inert in bongos, which has no onboarding banners.
     "show_onboarding_banner": true,
     // Whether to show user picture in the titlebar.
     "show_user_picture": true,

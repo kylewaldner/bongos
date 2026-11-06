@@ -87,7 +87,7 @@ pub struct TitleBarSettingsContent {
     ///
     /// Default: false
     pub show_branch_status_icon: Option<bool>,
-    /// Whether to show onboarding banners in the title bar.
+    /// Inert in bongos, which has no onboarding banners.
     ///
     /// Default: true
     pub show_onboarding_banner: Option<bool>,

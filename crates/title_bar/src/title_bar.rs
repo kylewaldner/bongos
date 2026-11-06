@@ -1,6 +1,5 @@
 mod application_menu;
 pub mod collab;
-mod onboarding_banner;
 mod plan_chip;
 mod title_bar_settings;
 
@@ -30,7 +29,6 @@ use gpui::{
     StatefulInteractiveElement, Styled, Subscription, TaskExt, WeakEntity, Window, actions, div,
     pulsating_between,
 };
-use onboarding_banner::OnboardingBanner;
 use project::{
     Project, git_store::GitStoreEvent, project_settings::ProjectSettings,
     trusted_worktrees::TrustedWorktrees,
@@ -54,8 +52,6 @@ use workspace::{
 };
 
 use zed_actions::OpenRemote;
-
-pub use onboarding_banner::restore_banner;
 
 const MAX_PROJECT_NAME_LENGTH: usize = 40;
 const MAX_BRANCH_NAME_LENGTH: usize = 40;
@@ -187,7 +183,6 @@ pub struct TitleBar {
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     application_menu: Option<Entity<ApplicationMenu>>,
     _subscriptions: Vec<Subscription>,
-    banner: Option<Entity<OnboardingBanner>>,
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
     _diagnostics_subscription: Option<gpui::Subscription>,
 }
@@ -313,12 +308,6 @@ impl Render for TitleBar {
         );
 
         children.push(self.render_collaborator_list(window, cx).into_any_element());
-
-        if title_bar_settings.show_onboarding_banner {
-            if let Some(banner) = &self.banner {
-                children.push(banner.clone().into_any_element())
-            }
-        }
 
         let status = self.client.status();
         let status = &*status.borrow();
@@ -487,8 +476,6 @@ impl TitleBar {
             titlebar
         });
 
-        let banner = None;
-
         let mut this = Self {
             platform_titlebar,
             application_menu,
@@ -498,7 +485,6 @@ impl TitleBar {
             user_store,
             client,
             _subscriptions: subscriptions,
-            banner,
             screen_share_popover_handle: PopoverMenuHandle::default(),
             _diagnostics_subscription: None,
         };
