@@ -1,8 +1,8 @@
 # Hosts allowed in the source, as '<path> <host>' pairs. Anything else found by script/bongos/check-hosts fails gate 1.
 # Regenerate candidates with: script/bongos/check-hosts --list. Add an entry only with a reason.
 
-# Upstream endpoints that bongos removes, stubs or blocks. Entries go when the step lands; the host guard (step 10) blocks them meanwhile.
-# RPC, api and cloud hosts: step 10 (guard), step 14 (sign-in), step 15 (cloud client)
+# Upstream endpoints that bongos removes, stubs or blocks. Entries go when the step lands; the host guard (step 16) blocks them meanwhile.
+# RPC, api and cloud hosts: step 16 (guard), step 20 (sign-in), step 23 (cloud AI)
 crates/client/src/client.rs zed.dev
 crates/client/src/zed_urls.rs zed.dev
 crates/http_client/src/http_client.rs api-staging.zed.dev
@@ -12,22 +12,22 @@ crates/http_client/src/http_client.rs llm-staging.zed.dev
 crates/http_client/src/http_client.rs staging.zed.dev
 crates/http_client/src/http_client.rs zed.dev
 
-# server_url default, made .invalid in step 10
+# server_url default, made .invalid in step 16
 assets/settings/default.json zed.dev
 
-# telemetry and minidump upload: step 11
+# telemetry and minidump upload: step 17
 crates/client/src/telemetry.rs MINIDUMP_ENDPOINT
 crates/telemetry_events/src/telemetry_events.rs zed.dev
 crates/telemetry/src/telemetry.rs zed.dev
 crates/zed/src/reliability.rs MINIDUMP_ENDPOINT
 
-# onboarding and welcome: step 13 (status.zed.dev link in zed.rs is a browser link and also stays)
+# onboarding and feedback: step 19 (status.zed.dev link in zed.rs is a browser link and also stays)
 crates/ai_onboarding/src/young_account_banner.rs zed.dev
 crates/onboarding/src/multibuffer_hint.rs zed.dev
 crates/onboarding/src/onboarding.rs zed.dev
 crates/zed/src/zed.rs status.zed.dev
 
-# collab, calls and rpc: the server crate is not built; the UI goes in step 15
+# collab, calls and rpc: the server crate is not built; the UI goes in steps 21 (collab) and 22 (calls)
 crates/collab/Cargo.toml zed.dev
 crates/collab/README.md collab.zed.dev
 crates/collab/README.md staging-collab.zed.dev
@@ -40,7 +40,7 @@ crates/proto/Cargo.toml zed.dev
 crates/rpc/Cargo.toml zed.dev
 crates/ui/src/components/collab/collab_notification.rs zed.dev
 
-# cloud AI, web search and edit prediction provider ids: step 16
+# cloud AI (step 23), web search and edit prediction (step 24) provider ids
 crates/editor/src/edit_prediction.rs zed.dev
 crates/edit_prediction/src/zeta.rs zed.dev
 crates/edit_prediction_ui/src/edit_prediction_button.rs zed.dev
@@ -51,10 +51,19 @@ crates/settings_content/src/agent.rs zed.dev
 crates/settings_content/src/language_model.rs zed.dev
 crates/web_search_providers/src/cloud.rs zed.dev
 
-# feedback, marketplace and settings page entries: steps 12, 13 and 16
+# feedback (step 19), marketplace (step 19a) and settings page entries (step 24)
 crates/extensions_ui/src/extensions_ui.rs zed.dev
 crates/feedback/src/feedback.rs zed.dev
 crates/settings_ui/src/page_data.rs zed.dev
+
+# The harness's own patterns. They name the hosts to detect or block, so they stay.
+# lib.sh zed_hosts greps the proxy log for these hosts; the guard check needs the names
+script/bongos/lib.sh zed\.dev
+script/bongos/lib.sh zed\.industries
+# check-hosts names the two endpoint constants it searches for
+script/bongos/check-hosts CIMD_URL
+script/bongos/check-hosts MINIDUMP_ENDPOINT
+# smoke has no host pattern of its own: it calls lib.sh assert_zed_hosts and assert_no_zed_hosts, so no entry
 
 # Stays: documented in the EDD (Hosts table).
 # CIMD_URL is an id sent to OAuth servers; bongos does not fetch it (Risk 7)
