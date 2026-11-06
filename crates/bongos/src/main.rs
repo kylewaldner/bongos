@@ -540,7 +540,6 @@ fn main() {
         project::Project::init(&client, cx);
         debugger_ui::init(cx);
         debugger_tools::init(cx);
-        client::init(&client, cx);
         feature_flags::FeatureFlagStore::init(cx);
 
         let system_id = cx.foreground_executor().block_on(system_id).ok();
@@ -777,12 +776,6 @@ fn main() {
         initialize_workspace(app_state.clone(), cx);
 
         cx.activate(true);
-
-        cx.spawn({
-            let client = app_state.client.clone();
-            async move |cx| authenticate(client, cx).await
-        })
-        .detach_and_log_err(cx);
 
         let urls: Vec<_> = args
             .paths_or_urls

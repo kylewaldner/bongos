@@ -1190,13 +1190,6 @@ impl ThreadView {
         !self.local_queued_messages.is_empty()
     }
 
-    pub fn is_imported_thread(&self, cx: &App) -> bool {
-        let Some(thread) = self.as_native_thread(cx) else {
-            return false;
-        };
-        thread.read(cx).is_imported()
-    }
-
     // events
 
     pub fn handle_entry_view_event(

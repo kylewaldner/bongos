@@ -19,14 +19,13 @@ use cloud_api_client::websocket_protocol::MessageToClient;
 use cloud_api_client::{ClientApiError, CloudApiClient};
 use cloud_api_types::OrganizationId;
 use credentials_provider::CredentialsProvider;
-use feature_flags::FeatureFlagAppExt as _;
 use futures::{
     AsyncReadExt, FutureExt, SinkExt, Stream, StreamExt, TryFutureExt as _, TryStreamExt,
     channel::{mpsc, oneshot},
     future::BoxFuture,
     stream::BoxStream,
 };
-use gpui::{App, AsyncApp, Entity, Global, Task, TaskExt, WeakEntity, actions};
+use gpui::{App, AsyncApp, Entity, Global, Task, WeakEntity};
 use http_client::{HttpClient, HttpClientWithUrl, http, read_proxy_from_env};
 use parking_lot::{Mutex, RwLock};
 use postage::watch;
@@ -87,18 +86,6 @@ pub static ZED_ALWAYS_ACTIVE: LazyLock<bool> =
 pub const INITIAL_RECONNECTION_DELAY: Duration = Duration::from_millis(500);
 pub const MAX_RECONNECTION_DELAY: Duration = Duration::from_secs(30);
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
-
-actions!(
-    client,
-    [
-        /// Signs in to Zed account.
-        SignIn,
-        /// Signs out of Zed account.
-        SignOut,
-        /// Reconnects to the collaboration server.
-        Reconnect
-    ]
-);
 
 #[derive(Deserialize, RegisterSetting)]
 pub struct ClientSettings {
@@ -161,41 +148,6 @@ impl Settings for ProxySettings {
                 .map(ToOwned::to_owned),
         }
     }
-}
-
-pub fn init(client: &Arc<Client>, cx: &mut App) {
-    let client = Arc::downgrade(client);
-    cx.on_action({
-        let client = client.clone();
-        move |_: &SignIn, cx| {
-            if let Some(client) = client.upgrade() {
-                cx.spawn(async move |cx| client.sign_in_with_optional_connect(true, cx).await)
-                    .detach_and_log_err(cx);
-            }
-        }
-    })
-    .on_action({
-        let client = client.clone();
-        move |_: &SignOut, cx| {
-            if let Some(client) = client.upgrade() {
-                cx.spawn(async move |cx| {
-                    client.sign_out(cx).await;
-                })
-                .detach();
-            }
-        }
-    })
-    .on_action({
-        let client = client;
-        move |_: &Reconnect, cx| {
-            if let Some(client) = client.upgrade() {
-                cx.spawn(async move |cx| {
-                    client.reconnect(cx);
-                })
-                .detach();
-            }
-        }
-    });
 }
 
 pub type MessageToClientHandler = Box<dyn Fn(&MessageToClient, &mut App) + Send + Sync + 'static>;
@@ -976,116 +928,13 @@ impl Client {
         }
     }
 
-    /// Maintains a WebSocket connection with Cloud for receiving updates from the server.
-    ///
-    /// The connection is re-established with exponential backoff if it drops or fails to
-    /// establish.
-    fn connect_to_cloud(self: &Arc<Self>, cx: &AsyncApp) {
-        let this = self.clone();
-        let task = cx.spawn(async move |cx| {
-            #[cfg(any(test, feature = "test-support"))]
-            let mut rng = StdRng::seed_from_u64(0);
-            #[cfg(not(any(test, feature = "test-support")))]
-            let mut rng = StdRng::from_os_rng();
-
-            let mut delay = INITIAL_RECONNECTION_DELAY;
-            loop {
-                match Self::run_cloud_connection(&this, cx).await {
-                    Ok(()) => {
-                        log::info!("cloud websocket disconnected, will reconnect");
-                        delay = INITIAL_RECONNECTION_DELAY;
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "cloud websocket connect failed: {err:#}; retrying in {delay:?}"
-                        );
-                    }
-                }
-
-                let jitter = Duration::from_millis(rng.random_range(0..delay.as_millis() as u64));
-                cx.background_executor().timer(delay + jitter).await;
-                delay = cmp::min(delay * 2, MAX_RECONNECTION_DELAY);
-            }
-        });
-        self.state.write()._cloud_connection_task = Some(task);
-    }
-
-    /// Runs a single attempt of the cloud websocket connection, returning once the connection
-    /// closes (cleanly or otherwise) or fails to establish.
-    async fn run_cloud_connection(self: &Arc<Self>, cx: &mut AsyncApp) -> Result<()> {
-        let connect_task = cx.update({
-            let cloud_client = self.cloud_client.clone();
-            move |cx| cloud_client.connect(cx)
-        })?;
-        let connection = connect_task.await?;
-
-        let (mut messages, _cloud_io_task) = cx.update(|cx| connection.spawn(cx));
-
-        {
-            let mut state = self.state.write();
-            let mut cloud_connection_id = state.cloud_connection_id.0.borrow_mut();
-            *cloud_connection_id = cloud_connection_id.saturating_add(1);
-        }
-
-        while let Some(message) = messages.next().await {
-            if let Some(message) = message.log_err() {
-                self.handle_message_to_client(message, cx);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Performs a sign-in and also (optionally) connects to Collab.
-    ///
-    /// Only Zed staff automatically connect to Collab.
+    /// Signing in is permanently unavailable: the account stays signed out, and no request is made.
     pub async fn sign_in_with_optional_connect(
         self: &Arc<Self>,
-        try_provider: bool,
-        cx: &AsyncApp,
+        _try_provider: bool,
+        _cx: &AsyncApp,
     ) -> Result<()> {
-        // Don't try to sign in again if we're already connected to Collab, as it will temporarily disconnect us.
-        if self.status().borrow().is_connected() {
-            return Ok(());
-        }
-
-        let (is_staff_tx, is_staff_rx) = oneshot::channel::<bool>();
-        let mut is_staff_tx = Some(is_staff_tx);
-        cx.update(|cx| {
-            cx.on_flags_ready(move |state, _cx| {
-                if let Some(is_staff_tx) = is_staff_tx.take() {
-                    is_staff_tx.send(state.is_staff).log_err();
-                }
-            })
-            .detach();
-        });
-
-        let credentials = self.sign_in(try_provider, cx).await?;
-
-        self.connect_to_cloud(cx);
-
-        cx.update(move |cx| {
-            cx.spawn({
-                let client = self.clone();
-                async move |cx| {
-                    let is_staff = is_staff_rx.await?;
-                    if is_staff {
-                        match client.connect_with_credentials(credentials, cx).await {
-                            ConnectionResult::Timeout => Err(anyhow!("connection timed out")),
-                            ConnectionResult::ConnectionReset => Err(anyhow!("connection reset")),
-                            ConnectionResult::Result(result) => {
-                                result.context("client auth and connect")
-                            }
-                        }
-                    } else {
-                        Ok(())
-                    }
-                }
-            })
-            .detach_and_log_err(cx);
-        });
-
-        Ok(())
+        Err(anyhow!("signing in is not supported"))
     }
 
     pub async fn connect(
@@ -1861,14 +1710,6 @@ impl Client {
             .push(Box::new(handler));
     }
 
-    fn handle_message_to_client(self: &Arc<Client>, message: MessageToClient, cx: &AsyncApp) {
-        cx.update(|cx| {
-            for handler in self.message_to_client_handlers.lock().iter() {
-                handler(&message, cx);
-            }
-        });
-    }
-
     pub fn telemetry(&self) -> &Arc<Telemetry> {
         &self.telemetry
     }
@@ -2013,6 +1854,7 @@ mod tests {
     use proto::TypedEnvelope;
     use settings::SettingsStore;
     use std::future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_proxy_settings_trims_and_ignores_empty_proxy() {
@@ -2470,6 +2312,42 @@ mod tests {
     struct TestEntity {
         id: usize,
         subscription: Option<Subscription>,
+    }
+
+    #[gpui::test]
+    async fn test_sign_in_with_optional_connect_errors_without_http(cx: &mut TestAppContext) {
+        init_test(cx);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let http_client = FakeHttpClient::create({
+            let request_count = request_count.clone();
+            move |_request| {
+                request_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Ok(http_client::Response::builder()
+                        .status(200)
+                        .body(Default::default())
+                        .unwrap())
+                }
+            }
+        });
+        let client = cx.update(|cx| Client::new(Arc::new(FakeSystemClock::new()), http_client, cx));
+
+        let async_cx = cx.to_async();
+        assert!(
+            client
+                .sign_in_with_optional_connect(true, &async_cx)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .sign_in_with_optional_connect(false, &async_cx)
+                .await
+                .is_err()
+        );
+
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        assert!(client.status().borrow().is_signed_out());
     }
 
     fn init_test(cx: &mut TestAppContext) {

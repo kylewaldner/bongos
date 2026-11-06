@@ -1855,7 +1855,6 @@ pub mod evals {
         cx.update(|cx| {
             gpui_tokio::init(cx);
             settings::init(cx);
-            client::init(&client, cx);
             workspace::init(app_state.clone(), cx);
             let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
             language_model::init(cx);

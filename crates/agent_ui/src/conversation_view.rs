@@ -3447,6 +3447,7 @@ pub(crate) mod tests {
     use crate::thread_metadata_store::ThreadMetadataStore;
 
     use super::*;
+    use feature_flags::FeatureFlagAppExt as _;
 
     #[test]
     fn test_data_retention_error_maps_from_provider_error() {

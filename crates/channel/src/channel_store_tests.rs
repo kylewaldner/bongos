@@ -243,7 +243,6 @@ fn init_test(cx: &mut App) -> Entity<ChannelStore> {
     let client = Client::new(clock, http, cx);
     let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
 
-    client::init(&client, cx);
     crate::init(&client, user_store, cx);
 
     ChannelStore::global(cx)

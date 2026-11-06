@@ -177,7 +177,6 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
     cx.update(|cx| {
         gpui_tokio::init(cx);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
-        client::init(&app_state.client, cx);
         audio::init(cx);
         workspace::init(app_state.clone(), cx);
         release_channel::init(semver::Version::new(0, 0, 0), cx);
@@ -988,7 +987,6 @@ fn init_app_state(cx: &mut App) -> Arc<AppState> {
     let workspace_store = cx.new(|cx| workspace::WorkspaceStore::new(client.clone(), cx));
 
     theme_settings::init(theme::LoadThemes::JustBase, cx);
-    client::init(&client, cx);
 
     let app_state = Arc::new(AppState {
         client,
