@@ -5,8 +5,6 @@
 # RPC, api and cloud hosts: step 16 (guard), step 20 (sign-in), step 23 (cloud AI)
 crates/client/src/client.rs zed.dev
 crates/client/src/zed_urls.rs zed.dev
-crates/http_client/src/http_client.rs api-staging.zed.dev
-crates/http_client/src/http_client.rs api.zed.dev
 crates/http_client/src/http_client.rs cloud.zed.dev
 crates/http_client/src/http_client.rs llm-staging.zed.dev
 crates/http_client/src/http_client.rs staging.zed.dev
@@ -50,15 +48,15 @@ crates/web_search_providers/src/cloud.rs zed.dev
 crates/settings_ui/src/page_data.rs zed.dev
 
 # The harness's own patterns. They name the hosts to detect or block, so they stay.
-# lib.sh zed_hosts greps the proxy log for these hosts; the guard check needs the names
+# lib.sh zed_hosts and assert_no_marketplace_host grep the proxy log for these hosts; the guard check needs the names
 script/bongos/lib.sh zed\.dev
 script/bongos/lib.sh zed\.industries
-script/bongos/smoke api.zed.dev
-script/bongos/smoke .zed\.dev
+script/bongos/lib.sh .zed\.dev
+script/bongos/lib.sh api.zed.dev
 # check-hosts names the two endpoint constants it searches for
 script/bongos/check-hosts CIMD_URL
 script/bongos/check-hosts MINIDUMP_ENDPOINT
-# smoke has no host pattern of its own: it calls lib.sh assert_zed_hosts and assert_no_zed_hosts, so no entry
+# smoke has no host pattern of its own: it calls the lib.sh assert_* helpers, so no entry
 
 # Stays: documented in the EDD (Hosts table).
 # CIMD_URL is an id sent to OAuth servers; bongos does not fetch it (Risk 7)

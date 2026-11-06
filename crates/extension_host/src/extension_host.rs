@@ -8,7 +8,6 @@ mod extension_store_test;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use client::{Client, proto, telemetry::Telemetry};
-use cloud_api_types::ExtensionMetadata;
 use collections::{BTreeMap, FxHashSet, HashSet, btree_map};
 pub use extension::ExtensionManifest;
 use extension::extension_builder::{CompileExtensionOptions, ExtensionBuilder};
@@ -38,13 +37,10 @@ use language::{
 };
 use node_runtime::NodeRuntime;
 use project::ContextProviderWithTasks;
-use release_channel::ReleaseChannel;
 use remote::RemoteClient;
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use settings::{SemanticTokenRules, SettingsStore};
 use std::ops::RangeInclusive;
-use std::str::FromStr;
 use std::sync::LazyLock;
 use std::{
     cmp::Ordering,
@@ -54,7 +50,7 @@ use std::{
 };
 use task::TaskTemplates;
 use util::{ResultExt, paths::RemotePathBuf, rel_path::PathExt};
-use wasm_host::{WasmExtension, WasmHost, wit::is_supported_wasm_api_version};
+use wasm_host::{WasmExtension, WasmHost};
 
 pub use extension::{
     ExtensionLibraryKind, GrammarManifestEntry, OldExtensionManifest, SchemaVersion,
@@ -94,29 +90,6 @@ static SUPPRESSED_EXTENSIONS: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
 /// Returns the [`SchemaVersion`] range that is compatible with this version of Zed.
 pub fn schema_version_range() -> RangeInclusive<SchemaVersion> {
     SchemaVersion::ZERO..=CURRENT_SCHEMA_VERSION
-}
-
-/// Returns whether the given extension version is compatible with this version of Zed.
-pub fn is_version_compatible(
-    release_channel: ReleaseChannel,
-    extension_version: &ExtensionMetadata,
-) -> bool {
-    let schema_version = extension_version.manifest.schema_version.unwrap_or(0);
-    if CURRENT_SCHEMA_VERSION.0 < schema_version {
-        return false;
-    }
-
-    if let Some(wasm_api_version) = extension_version
-        .manifest
-        .wasm_api_version
-        .as_ref()
-        .and_then(|wasm_api_version| Version::from_str(wasm_api_version).ok())
-        && !is_supported_wasm_api_version(release_channel, wasm_api_version)
-    {
-        return false;
-    }
-
-    true
 }
 
 pub struct ExtensionStore {

@@ -477,7 +477,9 @@ impl ExtensionsPage {
                         .color(Color::Muted)
                         .truncate(),
                     )
-                    .child(Label::new("<>").size(LabelSize::Small)),
+                    .when(is_dev, |this| {
+                        this.child(Label::new("<>").size(LabelSize::Small))
+                    }),
             )
             .child(
                 h_flex()

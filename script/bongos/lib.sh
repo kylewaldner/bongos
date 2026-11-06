@@ -396,6 +396,14 @@ assert_no_zed_hosts() {
   fi
 }
 
+# The marketplace is off: bongos must never reach api.zed.dev. Not for stock, which does.
+assert_no_marketplace_host() {
+  if awk '{print $2}' "$RUN/proxy.log" | grep -qE '(^|\.)api\.zed\.dev$'; then
+    say "smoke: FAIL api.zed.dev in proxy.log: the marketplace is off"
+    exit 1
+  fi
+}
+
 # Negative control: stock must reach Zed's hosts, or the detector proves nothing.
 assert_zed_hosts() {
   poll 120 "a Zed host in proxy.log" zed_hosts >/dev/null
