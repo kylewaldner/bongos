@@ -943,12 +943,9 @@
     "expand_outlines_with_depth": 100,
   },
   "collaboration_panel": {
-    // Whether to show the collaboration panel button in the status bar.
-    "button": true,
-    // Where to dock the collaboration panel. Can be 'left' or 'right'.
+    // There is no collaboration panel. The agent and editor layout presets
+    // still read and write this dock position.
     "dock": "right",
-    // Default width of the collaboration panel.
-    "default_width": 240,
   },
   "git_panel": {
     // Whether to show the git panel button in the status bar.

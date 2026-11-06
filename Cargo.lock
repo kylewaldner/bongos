@@ -2106,7 +2106,6 @@ dependencies = [
  "client",
  "clock",
  "codestral",
- "collab_ui",
  "collections",
  "command_palette",
  "component",
@@ -3154,43 +3153,6 @@ dependencies = [
  "text",
  "zed_credentials_provider",
  "zeta_prompt",
-]
-
-[[package]]
-name = "collab_ui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "call",
- "channel",
- "client",
- "collections",
- "db",
- "editor",
- "feature_flags",
- "futures 0.3.32",
- "fuzzy",
- "gpui",
- "livekit_client",
- "menu",
- "notifications",
- "picker",
- "project",
- "release_channel",
- "rpc",
- "serde",
- "serde_json",
- "settings",
- "smallvec",
- "telemetry",
- "theme",
- "theme_settings",
- "time",
- "title_bar",
- "ui",
- "util",
- "workspace",
- "zed_actions",
 ]
 
 [[package]]

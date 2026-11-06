@@ -42,7 +42,6 @@ crates/bongos/src/zed/windows_only_instance.rs 2
 crates/bongos_version/src/bongos_version.rs 4
 crates/cli/src/main.rs 13
 crates/cloud_llm_client/src/predict_edits_v3.rs 3
-crates/collab_ui/src/notifications/incoming_call_notification.rs 1
 crates/context_server/src/context_server.rs 1
 crates/context_server/src/oauth.rs 2
 crates/copilot_chat/src/copilot_chat.rs 1
