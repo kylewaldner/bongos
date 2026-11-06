@@ -32,7 +32,7 @@ retained: see `LICENSE-GPL`, `LICENSE-APACHE` and `legal/`.
 
 ## References
 
-- Upstream: https://github.com/zed-industries/zed
+- Origin (Zed tag and commit this fork is based on): see [ORIGIN.md](ORIGIN.md)
 - Kyle's Emacs config: https://github.com/kylewaldner02/emacs.d (mirror of
   https://github.com/kylewaldner/emacs.d)
 - Kyle's emacsJ fork: https://github.com/kylewaldner02/emacsj (mirror of
