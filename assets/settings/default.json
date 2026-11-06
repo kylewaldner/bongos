@@ -527,11 +527,11 @@
     "show_project_items": true,
     // Inert in bongos, which has no onboarding banners.
     "show_onboarding_banner": true,
-    // Whether to show user picture in the titlebar.
+    // Inert in bongos, which has no signed-in user.
     "show_user_picture": true,
-    // Whether to show the user menu in the titlebar.
+    // Inert in bongos, which has no user menu.
     "show_user_menu": true,
-    // Whether to show the sign in button in the titlebar.
+    // Inert in bongos, which has no sign in.
     "show_sign_in": true,
     // Whether to show the menus in the titlebar.
     "show_menus": false,

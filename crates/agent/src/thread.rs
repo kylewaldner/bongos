@@ -1236,7 +1236,8 @@ pub struct Thread {
     pub(crate) prompt_capabilities_rx: watch::Receiver<acp::PromptCapabilities>,
     pub(crate) project: Entity<Project>,
     pub(crate) action_log: Entity<ActionLog>,
-    /// True if this thread was imported from a shared thread and can be synced.
+    /// True if this thread was imported from a thread exported to the clipboard. Kept for database
+    /// compatibility. Thread sharing is gone, so nothing syncs it and only that clipboard import sets it.
     imported: bool,
     /// If this is a subagent thread, contains context about the parent
     subagent_context: Option<SubagentContext>,

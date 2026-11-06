@@ -67,6 +67,8 @@ pub struct DbThread {
     pub model: Option<DbLanguageModel>,
     #[serde(default)]
     pub profile: Option<AgentProfileId>,
+    /// Kept for database compatibility. Thread sharing is gone, so nothing syncs it; only the
+    /// clipboard import sets it.
     #[serde(default)]
     pub imported: bool,
     #[serde(default)]
