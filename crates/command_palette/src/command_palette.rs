@@ -698,6 +698,15 @@ impl PickerDelegate for CommandPaletteDelegate {
 }
 
 pub fn humanize_action_name(name: &str) -> String {
+    let humanized = humanize_action_name_inner(name);
+    // The `zed::` action namespace is internal; the palette shows it as `bongos:`.
+    match humanized.strip_prefix("zed:") {
+        Some(rest) if name.starts_with("zed::") => format!("bongos:{rest}"),
+        _ => humanized,
+    }
+}
+
+fn humanize_action_name_inner(name: &str) -> String {
     let chars = name.chars().collect::<Vec<_>>();
     let capacity = name.len() + chars.iter().filter(|c| c.is_uppercase()).count();
     let mut result = String::with_capacity(capacity);
@@ -787,6 +796,11 @@ mod tests {
 
     #[test]
     fn test_humanize_action_name() {
+        assert_eq!(humanize_action_name("zed::About"), "bongos: about");
+        assert_eq!(
+            humanize_action_name("zed::OpenDefaultSettings"),
+            "bongos: open default settings"
+        );
         assert_eq!(
             humanize_action_name("editor::GoToDefinition"),
             "editor: go to definition"

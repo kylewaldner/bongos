@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Counts visible "Zed" strings per file and compares them with script/bongos/strings-allow.txt
+# ('<path> <max>' lines). Fails when a file's count is above its max or a counted file is not listed;
+# prints a reminder when a count is below its max. "Zed" is the case-sensitive word \bZed\b.
+# Counted lines:
+#   crates/**/*.rs      lines with "Zed" inside a "..." literal; lines starting with // are skipped;
+#                       tests dirs and test files are excluded, as in check-hosts
+#   crates/settings_content/src   also /// doc comment lines (they become schema descriptions)
+#   assets/settings/*.json, assets/keymaps/*.json   any line
+#   the literal .zed/ in any of those files
+#   check-strings --list   print every '<path> <count>' found, for building the allow list
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+[ "${1:-}" = "--list" ] || log_init check-strings
+
+allow="$here/strings-allow.txt"
+
+found() {
+  {
+    grep -rnE --binary-files=without-match --include='*.rs' \
+        --exclude-dir=target --exclude-dir=tests --exclude-dir=test_data --exclude-dir=fixtures \
+        --exclude-dir=benches --exclude='*_tests.rs' --exclude='*_test.rs' --exclude='tests.rs' \
+        -e '\bZed\b|\.zed/' crates 2>/dev/null || true
+    grep -rnE --binary-files=without-match --include='*.json' \
+        -e '\bZed\b|\.zed/' assets/settings assets/keymaps 2>/dev/null || true
+  } | awk -F: '
+    {
+      path = $1; line = $2; text = substr($0, length($1) + length($2) + 3)
+      if (path ~ /^assets\//) { print path; next }
+      trimmed = text; sub(/^[ \t]+/, "", trimmed)
+      if (trimmed ~ /^\/\/\//) {
+        if (path ~ /^crates\/settings_content\/src\//) print path
+        next
+      }
+      if (trimmed ~ /^\/\//) next
+      if (text ~ /"[^"]*\.zed\/[^"]*"/ || text ~ /"([^"]*[^A-Za-z0-9_"])?Zed([^A-Za-z0-9_"][^"]*)?"/) print path
+    }' | sort | uniq -c | awk '{print $2" "$1}'
+}
+
+if [ "${1:-}" = "--list" ]; then
+  found
+  exit 0
+fi
+
+hits=$(found)
+status=0
+declare -A max
+while read -r path n; do
+  [ -n "$path" ] && max[$path]=$n
+done < <(grep -vE '^[[:space:]]*(#|$)' "$allow" | sed 's/[[:space:]]*#.*$//')
+
+while read -r path n; do
+  [ -n "$path" ] || continue
+  if [ -z "${max[$path]:-}" ]; then
+    echo "bongos: $path has $n visible \"Zed\" strings and is not in script/bongos/strings-allow.txt"
+    status=1
+  elif [ "$n" -gt "${max[$path]}" ]; then
+    echo "bongos: $path has $n visible \"Zed\" strings, max ${max[$path]}; say bongos, or call it by name"
+    status=1
+  elif [ "$n" -lt "${max[$path]}" ]; then
+    echo "bongos: $path is down to $n (allowed ${max[$path]}); lower its max in strings-allow.txt"
+  fi
+done <<<"$hits"
+
+for path in "${!max[@]}"; do
+  grep -q "^$path " <<<"$hits" || echo "bongos: $path no longer has any; delete its line in strings-allow.txt"
+done
+if [ "$status" -ne 0 ]; then exit 1; fi
+SUMMARY="ok"

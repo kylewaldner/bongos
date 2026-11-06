@@ -28,6 +28,8 @@ fi
 
 run_check hosts "$here/check-hosts"
 
+run_check strings "$here/check-strings"
+
 run_check licenses "$BONGOS_ROOT/script/check-licenses"
 
 run_check license-fields "$here/check-license-fields"
