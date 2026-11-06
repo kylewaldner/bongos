@@ -7,6 +7,7 @@ Bongos is an Emacs-shaped Kotlin IDE and a hard fork of Zed, licensed GPL-3.0-or
 - Every `gh` command names `--repo kylewaldner/bongos`.
 - Commit messages are lowercase plain English with no prefix, no trailing period, and no `Co-Authored-By` or AI trailer.
 - Stage specific files, never `git add -A`.
+- Delegate work to subagents through the `model-routing` skill instead of doing it inline, and invoke it before the first delegation of a session.
 
 # Rust coding guidelines
 
