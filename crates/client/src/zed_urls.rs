@@ -15,7 +15,7 @@ fn server_url(cx: &App) -> &str {
 }
 
 fn docs_url(cx: &App) -> String {
-    let server_url = server_url(cx);
+    let server_url = "https://zed.dev";
     match ReleaseChannel::try_global(cx).unwrap_or_default() {
         ReleaseChannel::Stable => {
             format!("{server_url}/docs")
@@ -70,13 +70,37 @@ pub fn skills_docs(cx: &App) -> String {
 }
 
 /// Returns the URL to Zed's ACP registry blog post.
-pub fn acp_registry_blog(cx: &App) -> String {
-    format!(
-        "{server_url}/blog/acp-registry",
-        server_url = server_url(cx)
-    )
+pub fn acp_registry_blog(_cx: &App) -> String {
+    "https://zed.dev/blog/acp-registry".to_string()
 }
 
 pub fn shared_agent_thread_url(session_id: &str) -> String {
     format!("zed://agent/shared/{}", session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use settings::SettingsStore;
+
+    #[gpui::test]
+    fn test_doc_links_ignore_server_url(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut store = SettingsStore::test(cx);
+            store.update_user_settings(cx, |content| {
+                content.server_url = Some("https://bongos.invalid".to_string());
+            });
+            cx.set_global(store);
+
+            for url in [
+                ai_privacy_and_security(cx),
+                edit_prediction_docs(cx),
+                skills_docs(cx),
+                acp_registry_blog(cx),
+            ] {
+                assert!(url.starts_with("https://zed.dev/"), "{url}");
+            }
+        });
+    }
 }

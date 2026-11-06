@@ -12,8 +12,14 @@ crates/http_client/src/http_client.rs llm-staging.zed.dev
 crates/http_client/src/http_client.rs staging.zed.dev
 crates/http_client/src/http_client.rs zed.dev
 
-# server_url default, made .invalid in step 16
+# server_url default is .invalid; the file keeps zed.dev in docs and comment strings
 assets/settings/default.json zed.dev
+
+# the host guard names the hosts it blocks
+crates/bongos_net/src/bongos_net.rs cdn.agentclientprotocol.com
+crates/bongos_net/src/bongos_net.rs notzed.dev
+crates/bongos_net/src/bongos_net.rs zed.dev
+crates/bongos_net/src/bongos_net.rs zed.industries
 
 # telemetry and minidump upload: step 17
 crates/client/src/telemetry.rs MINIDUMP_ENDPOINT
@@ -63,7 +69,8 @@ script/bongos/check-hosts MINIDUMP_ENDPOINT
 crates/context_server/src/oauth.rs CIMD_URL
 crates/context_server/src/oauth.rs zed.dev
 
-# ACP registry and docs link (Question 2)
+# ACP registry and docs link (Question 2). The registry host is deliberately absent from the bongos_net block list, so
+# the guard passes requests to it; blocking it is one more entry in BLOCKED_HOSTS
 crates/agent_ui/src/agent_configuration.rs agentclientprotocol.com
 crates/project/src/agent_registry_store.rs cdn.agentclientprotocol.com
 crates/settings_ui/src/pages/external_agents_page.rs agentclientprotocol.com

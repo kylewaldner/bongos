@@ -2129,6 +2129,7 @@ dependencies = [
  "audio",
  "auto_update",
  "auto_update_ui",
+ "bongos_net",
  "bongos_version",
  "breadcrumbs",
  "call",
@@ -2281,6 +2282,16 @@ dependencies = [
  "zlog",
  "zlog_settings",
  "ztracing",
+]
+
+[[package]]
+name = "bongos_net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.32",
+ "http_client",
+ "smol",
 ]
 
 [[package]]

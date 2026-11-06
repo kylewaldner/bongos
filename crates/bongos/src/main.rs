@@ -516,7 +516,7 @@ fn main() {
             ReqwestClient::proxy_and_user_agent(proxy_url, &user_agent)
                 .expect("could not start HTTP client")
         };
-        cx.set_http_client(Arc::new(http));
+        cx.set_http_client(Arc::new(bongos_net::GuardedHttpClient::new(Arc::new(http))));
 
         <dyn Fs>::set_global(fs.clone(), cx);
 

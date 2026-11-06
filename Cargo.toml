@@ -214,6 +214,7 @@ members = [
     "crates/worktree",
     "crates/x_ai",
     "crates/bongos",
+    "crates/bongos_net",
     "crates/bongos_version",
     "crates/zed_actions",
     "crates/windows_resources",
@@ -466,6 +467,7 @@ workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
 bongos = { path = "crates/bongos" }
+bongos_net = { path = "crates/bongos_net" }
 bongos_version = { path = "crates/bongos_version" }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }
