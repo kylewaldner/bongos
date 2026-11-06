@@ -27,7 +27,8 @@ fn guarded_redirect_policy(limit: usize) -> redirect::Policy {
             .host_str()
             .is_some_and(bongos_net::is_blocked_host)
         {
-            log::warn!("bongos_net: blocked redirect to {}", attempt.url());
+            let host = attempt.url().host_str().unwrap_or("unknown").to_string();
+            log::warn!("bongos_net: blocked redirect to {host}");
             attempt.error(anyhow!("bongos does not follow redirects to blocked hosts"))
         } else if attempt.previous().len() >= limit {
             attempt.error(anyhow!("too many redirects"))
@@ -373,8 +374,11 @@ mod tests {
 
         let result = get(&format!("http://{origin_address}/"));
         origin_server.join().unwrap();
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => panic!("redirect to allowed host failed: {error:?}"),
+        };
         target_server.join().unwrap();
-        let response = result.unwrap();
         assert!(response.status().is_success(), "{:?}", response.status());
     }
 
