@@ -28,13 +28,6 @@ crates/onboarding/src/onboarding.rs zed.dev
 crates/zed/src/zed.rs status.zed.dev
 
 # collab, calls and rpc: the server crate is not built; the UI goes in steps 21 (collab) and 22 (calls)
-crates/collab/Cargo.toml zed.dev
-crates/collab/README.md collab.zed.dev
-crates/collab/README.md staging-collab.zed.dev
-crates/collab/README.md zed.dev
-crates/collab/src/lib.rs cloud.zed.dev
-crates/collab/src/lib.rs staging.zed.dev
-crates/collab/src/lib.rs zed.dev
 crates/collab_ui/src/collab_panel.rs zed.dev
 crates/proto/Cargo.toml zed.dev
 crates/rpc/Cargo.toml zed.dev
@@ -110,7 +103,6 @@ crates/repl/src/repl_sessions_ui.rs zed.dev
 crates/sandbox/src/sandbox.rs zed.dev
 crates/settings/src/keymap_file.rs zed.dev
 crates/terminal/src/terminal.rs zed.dev
-crates/theme_importer/src/main.rs zed.dev
 crates/theme_selector/src/icon_theme_selector.rs zed.dev
 crates/theme_selector/src/theme_selector.rs zed.dev
 crates/ui/src/components/button/button_link.rs zed.dev
