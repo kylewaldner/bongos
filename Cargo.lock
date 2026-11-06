@@ -2099,7 +2099,6 @@ dependencies = [
  "bongos_version",
  "breadcrumbs",
  "call",
- "channel",
  "chrono",
  "clap",
  "cli",
@@ -2169,7 +2168,6 @@ dependencies = [
  "mimalloc",
  "miniprofiler_ui",
  "node_runtime",
- "notifications",
  "outline",
  "outline_panel",
  "parking_lot",
@@ -2731,29 +2729,6 @@ checksum = "1a98d30140e3296250832bbaaff83b27dcd6fa3cc70fb6f1f3e5c9c0023b5317"
 dependencies = [
  "approx 0.4.0",
  "num-traits",
-]
-
-[[package]]
-name = "channel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "client",
- "clock",
- "collections",
- "futures 0.3.32",
- "gpui",
- "http_client",
- "language",
- "log",
- "postage",
- "release_channel",
- "rpc",
- "semver",
- "settings",
- "text",
- "time",
- "util",
 ]
 
 [[package]]
@@ -5771,14 +5746,11 @@ name = "file_finder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "channel",
- "client",
  "collections",
  "ctor",
  "editor",
  "file_icons",
  "futures 0.3.32",
- "fuzzy",
  "fuzzy_nucleo",
  "gpui",
  "language",
@@ -10345,17 +10317,9 @@ checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 name = "notifications"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "channel",
- "client",
  "component",
- "futures-lite 1.13.0",
  "gpui",
- "rpc",
- "sum_tree",
- "time",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -16582,7 +16546,6 @@ dependencies = [
  "anyhow",
  "arrayvec",
  "call",
- "channel",
  "chrono",
  "client",
  "cloud_api_types",
@@ -16591,15 +16554,12 @@ dependencies = [
  "fs",
  "git_ui",
  "gpui",
- "icons",
- "livekit_client",
  "notifications",
  "platform_title_bar",
  "project",
  "recent_projects",
  "release_channel",
  "remote",
- "remote_connection",
  "rpc",
  "schemars 1.0.4",
  "semver",

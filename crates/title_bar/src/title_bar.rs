@@ -1,5 +1,4 @@
 mod application_menu;
-pub mod collab;
 mod title_bar_settings;
 
 use crate::application_menu::{ApplicationMenu, show_menus};
@@ -18,7 +17,7 @@ use crate::application_menu::{
 };
 
 use call::ActiveCall;
-use client::{Client, UserStore};
+use client::UserStore;
 use command_palette_hooks::CommandPaletteFilter;
 
 use gpui::{
@@ -33,12 +32,11 @@ use remote::RemoteConnectionOptions;
 use settings::{Settings as _, SettingsStore};
 
 use std::any::TypeId;
-use std::sync::Arc;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
-    ButtonLike, ContextMenu, IconWithIndicator, Indicator, PopoverMenu, PopoverMenuHandle,
-    TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
+    ButtonLike, IconWithIndicator, Indicator, PopoverMenu, TintColor, Tooltip, prelude::*,
+    utils::platform_title_bar_height,
 };
 use util::ResultExt;
 use workspace::{MultiWorkspace, ToggleWorktreeSecurity, Workspace};
@@ -168,12 +166,10 @@ pub struct TitleBar {
     platform_titlebar: Entity<PlatformTitleBar>,
     project: Entity<Project>,
     user_store: Entity<UserStore>,
-    client: Arc<Client>,
     workspace: WeakEntity<Workspace>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     application_menu: Option<Entity<ApplicationMenu>>,
     _subscriptions: Vec<Subscription>,
-    screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
     _diagnostics_subscription: Option<gpui::Subscription>,
 }
 
@@ -297,17 +293,6 @@ impl Render for TitleBar {
                 .into_any_element(),
         );
 
-        children.push(self.render_collaborator_list(window, cx).into_any_element());
-
-        children.push(
-            h_flex()
-                .pr_1()
-                .gap_1()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(self.render_call_controls(window, cx))
-                .into_any_element(),
-        );
-
         if show_menus {
             self.platform_titlebar.update(cx, |this, _| {
                 this.set_button_layout(button_layout);
@@ -357,7 +342,6 @@ impl TitleBar {
         let project = workspace.project().clone();
         let git_store = project.read(cx).git_store().clone();
         let user_store = workspace.app_state().user_store.clone();
-        let client = workspace.app_state().client.clone();
         let active_call = ActiveCall::global(cx);
 
         let platform_style = PlatformStyle::platform();
@@ -425,9 +409,7 @@ impl TitleBar {
             multi_workspace,
             project,
             user_store,
-            client,
             _subscriptions: subscriptions,
-            screen_share_popover_handle: PopoverMenuHandle::default(),
             _diagnostics_subscription: None,
         };
 
@@ -1025,21 +1007,5 @@ impl TitleBar {
         } else {
             self._diagnostics_subscription = None;
         }
-    }
-
-    fn share_project(&mut self, cx: &mut Context<Self>) {
-        let active_call = ActiveCall::global(cx);
-        let project = self.project.clone();
-        active_call
-            .update(cx, |call, cx| call.share_project(project, cx))
-            .detach_and_log_err(cx);
-    }
-
-    fn unshare_project(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let active_call = ActiveCall::global(cx);
-        let project = self.project.clone();
-        active_call
-            .update(cx, |call, cx| call.unshare_project(project, cx))
-            .log_err();
     }
 }

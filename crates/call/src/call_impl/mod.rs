@@ -77,10 +77,6 @@ impl AnyActiveCall for ActiveCallEntity {
         Some(self.0.read(cx).room()?.read(cx).id())
     }
 
-    fn channel_id(&self, cx: &App) -> Option<ChannelId> {
-        self.0.read(cx).room()?.read(cx).channel_id()
-    }
-
     fn hang_up(&self, cx: &mut App) -> Task<Result<()>> {
         self.0.update(cx, |this, cx| this.hang_up(cx))
     }
@@ -138,16 +134,6 @@ impl AnyActiveCall for ActiveCallEntity {
 
     fn share_on_join(&self, cx: &App) -> bool {
         CallSettings::get_global(cx).share_on_join
-    }
-
-    fn join_channel(&self, channel_id: ChannelId, cx: &mut App) -> Task<Result<bool>> {
-        let task = self
-            .0
-            .update(cx, |this, cx| this.join_channel(channel_id, cx));
-        cx.spawn(async move |_cx| {
-            let result = task.await?;
-            Ok(result.is_some())
-        })
     }
 
     fn room_update_completed(&self, cx: &mut App) -> Task<()> {

@@ -1419,7 +1419,7 @@
     //   * "indexed": Use only the files Zed had indexed
     //   * "smart": Be smart and search for ignored when called from a gitignored worktree
     "include_ignored": "smart",
-    // Whether to include text channels in file finder results.
+    // Inert in bongos, which has no channels.
     "include_channels": false,
   },
   // Whether or not to remove any trailing whitespace from lines of a buffer

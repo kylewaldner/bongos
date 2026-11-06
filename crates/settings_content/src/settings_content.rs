@@ -869,7 +869,7 @@ pub struct FileFinderSettingsContent {
     ///
     /// Default: Smart
     pub include_ignored: Option<IncludeIgnoredContent>,
-    /// Whether to include text channels in file finder results.
+    /// Inert in bongos, which has no channels.
     ///
     /// Default: false
     pub include_channels: Option<bool>,

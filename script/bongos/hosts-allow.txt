@@ -3,7 +3,6 @@
 
 # Upstream endpoints that bongos removes, stubs or blocks. Entries go when the step lands; the host guard (step 16) blocks them meanwhile.
 # RPC, api and cloud hosts: step 16 (guard), step 20 (sign-in), step 23 (cloud AI)
-crates/client/src/client.rs zed.dev
 crates/client/src/zed_urls.rs zed.dev
 crates/http_client/src/http_client.rs cloud.zed.dev
 crates/http_client/src/http_client.rs llm-staging.zed.dev
@@ -110,7 +109,6 @@ crates/ui/src/components/list/list_bullet_item.rs zed.dev
 crates/util/src/paths.rs zed.dev
 crates/workspace/src/notifications.rs zed.dev
 crates/workspace/src/workspace_error.rs zed.dev
-crates/workspace/src/workspace.rs zed.dev
 crates/bongos/Cargo.toml zed.dev
 crates/bongos/src/main.rs zed.dev
 crates/bongos/src/zed/app_menus.rs zed.dev

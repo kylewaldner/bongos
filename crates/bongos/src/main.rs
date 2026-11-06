@@ -17,7 +17,7 @@ use agent_ui::AgentPanel;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
-use client::{Client, ProxySettings, RefreshLlmTokenListener, UserStore, parse_zed_link};
+use client::{Client, ProxySettings, RefreshLlmTokenListener, UserStore};
 use collections::HashMap;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
 use editor::Editor;
@@ -669,7 +669,6 @@ fn main() {
         outline_panel::init(cx);
         tasks_ui::init(cx);
         snippets_ui::init(cx);
-        channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
             setup_search_bar: |languages, toolbar, window, cx| {
@@ -691,7 +690,6 @@ fn main() {
         settings_profile_selector::init(cx);
         language_tools::init(cx);
         call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
-        notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         title_bar::init(cx);
         git_ui::init(cx);
         markdown_preview::init(cx);
@@ -779,7 +777,7 @@ fn main() {
         let urls: Vec<_> = args
             .paths_or_urls
             .iter()
-            .map(|arg| parse_url_arg(arg, cx))
+            .map(|arg| parse_url_arg(arg))
             .collect();
 
         // Check if any diff paths are directories to determine diff_all mode
@@ -1613,7 +1611,7 @@ impl ToString for IdType {
     }
 }
 
-fn parse_url_arg(arg: &str, cx: &App) -> String {
+fn parse_url_arg(arg: &str) -> String {
     match std::fs::canonicalize(Path::new(&arg)) {
         Ok(path) => format!("file://{}", path.display()),
         Err(_) => {
@@ -1621,7 +1619,6 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
                 || arg.starts_with("zed://")
                 || arg.starts_with("zed-cli://")
                 || arg.starts_with("ssh://")
-                || parse_zed_link(arg, cx).is_some()
             {
                 arg.into()
             } else {

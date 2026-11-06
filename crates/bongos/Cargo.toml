@@ -77,7 +77,6 @@ audio.workspace = true
 breadcrumbs.workspace = true
 call.workspace = true
 chrono.workspace = true
-channel.workspace = true
 clap.workspace = true
 cli.workspace = true
 client.workspace = true
@@ -153,7 +152,6 @@ migrator.workspace = true
 miniprofiler_ui.workspace = true
 mimalloc = { version = "0.1", optional = true }
 node_runtime.workspace = true
-notifications.workspace = true
 outline.workspace = true
 outline_panel.workspace = true
 parking_lot.workspace = true
