@@ -19,13 +19,13 @@ assets/settings/default.json zed.dev
 crates/client/src/telemetry.rs MINIDUMP_ENDPOINT
 crates/telemetry_events/src/telemetry_events.rs zed.dev
 crates/telemetry/src/telemetry.rs zed.dev
-crates/zed/src/reliability.rs MINIDUMP_ENDPOINT
+crates/bongos/src/reliability.rs MINIDUMP_ENDPOINT
 
 # onboarding and feedback: step 19 (status.zed.dev link in zed.rs is a browser link and also stays)
 crates/ai_onboarding/src/young_account_banner.rs zed.dev
 crates/onboarding/src/multibuffer_hint.rs zed.dev
 crates/onboarding/src/onboarding.rs zed.dev
-crates/zed/src/zed.rs status.zed.dev
+crates/bongos/src/zed.rs status.zed.dev
 
 # collab, calls and rpc: the server crate is not built; the UI goes in steps 21 (collab) and 22 (calls)
 crates/collab_ui/src/collab_panel.rs zed.dev
@@ -111,8 +111,8 @@ crates/util/src/paths.rs zed.dev
 crates/workspace/src/notifications.rs zed.dev
 crates/workspace/src/workspace_error.rs zed.dev
 crates/workspace/src/workspace.rs zed.dev
-crates/zed/Cargo.toml zed.dev
-crates/zed/src/main.rs zed.dev
-crates/zed/src/zed/app_menus.rs zed.dev
-crates/zed/src/zed/quick_action_bar/repl_menu.rs zed.dev
-crates/zed/src/zed.rs zed.dev
+crates/bongos/Cargo.toml zed.dev
+crates/bongos/src/main.rs zed.dev
+crates/bongos/src/zed/app_menus.rs zed.dev
+crates/bongos/src/zed/quick_action_bar/repl_menu.rs zed.dev
+crates/bongos/src/zed.rs zed.dev

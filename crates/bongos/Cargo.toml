@@ -1,7 +1,7 @@
 [package]
-description = "The fast, collaborative code editor."
+description = "The bongos editor."
 edition.workspace = true
-name = "zed"
+name = "bongos"
 version = "1.9.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
@@ -13,7 +13,7 @@ workspace = true
 
 [features]
 tracy = ["ztracing/tracy"]
-# LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
+# LEAK_BACKTRACE=1 cargo run --features bongos/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
 test-support = [
     "gpui/test-support",

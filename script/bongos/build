@@ -25,7 +25,7 @@ start=$(date +%s)
 # Cargo's output is kept in $out so the memory-kill check reads only this attempt.
 run_build() {
   local rc=0
-  cargo_limited build -p zed -p cli --locked --color never >"$out" 2>&1 || rc=$?
+  cargo_limited build -p bongos -p cli --locked --color never >"$out" 2>&1 || rc=$?
   cat "$out"
   return "$rc"
 }

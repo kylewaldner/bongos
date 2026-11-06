@@ -43,7 +43,7 @@ no_github() {
 run_check "no .github" no_github
 
 no_webrtc() {
-  if cargo tree -p zed --edges normal,build --locked | grep -E 'webrtc|livekit'; then
+  if cargo tree -p bongos --edges normal,build --locked | grep -E 'webrtc|livekit'; then
     echo "bongos: webrtc or livekit is still in the zed build"
     return 1
   fi
