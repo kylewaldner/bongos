@@ -149,7 +149,7 @@ pub struct SettingsContent {
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
 
-    /// Whether or not to automatically check for updates.
+    /// Inert in bongos, which never checks for updates; this key does nothing.
     ///
     /// Default: true
     pub auto_update: Option<bool>,

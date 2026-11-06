@@ -32,9 +32,8 @@ crates/agent_ui/src/thread_worktree_archive.rs 2
 crates/agent_ui/src/ui/end_trial_upsell.rs 2
 crates/ai_onboarding/src/ai_onboarding.rs 10
 crates/ai_onboarding/src/plan_definitions.rs 5
-crates/auto_update/src/auto_update.rs 8
+crates/auto_update/src/auto_update.rs 7
 crates/bongos/src/main.rs 4
-crates/bongos/src/reliability.rs 2
 crates/bongos/src/visual_test_runner.rs 1
 crates/bongos/src/zed/mac_only_instance.rs 4
 crates/bongos/src/zed/move_to_applications.rs 6
@@ -131,7 +130,6 @@ crates/task/src/vscode_debug_format.rs 2
 crates/theme/src/fallback_themes.rs 1
 crates/theme/src/icon_theme.rs 1
 crates/title_bar/src/collab.rs 1
-crates/title_bar/src/title_bar.rs 3
 crates/ui/src/components/ai/agent_setup_button.rs 1
 crates/ui/src/components/collab/collab_notification.rs 1
 crates/ui/src/components/label/label.rs 1
