@@ -185,19 +185,27 @@ find_lvp_icd() {
   return 1
 }
 
-# The upstream commit we are based on: commit= from UPSTREAM, else the upstream tag.
-upstream_commit() {
-  local f="$BONGOS_ROOT/UPSTREAM" c=""
-  if [ -f "$f" ]; then
-    c=$(sed -n 's/^commit=//p' "$f" | head -n1)
-  fi
-  echo "${c:-upstream/v1.9.0}"
+# The Zed commit bongos was forked from: the "Zed commit:" line of ORIGIN.md.
+origin_commit() {
+  sed -n 's/^Zed commit: *//p' "$BONGOS_ROOT/ORIGIN.md" 2>/dev/null | head -n1
 }
 
-# Package names of crates changed since the upstream commit.
+# The Zed tag bongos was forked from: the "Zed tag:" line of ORIGIN.md.
+origin_tag() {
+  sed -n 's/^Zed tag: *//p' "$BONGOS_ROOT/ORIGIN.md" 2>/dev/null | head -n1
+}
+
+# Where this branch left main: merge-base of HEAD and origin/main, else the fork commit.
+branch_base() {
+  local b
+  b=$(git -C "$BONGOS_ROOT" merge-base HEAD origin/main 2>/dev/null) || b=""
+  echo "${b:-$(origin_commit)}"
+}
+
+# Package names of crates changed on this branch since it left origin/main.
 changed_crates() {
   local base dirs meta
-  base=$(upstream_commit)
+  base=$(branch_base)
   dirs=$(git -C "$BONGOS_ROOT" diff --name-only "$base" HEAD -- crates \
     | awk -F/ 'NF>=2 {print $1"/"$2}' | sort -u)
   [ -n "$dirs" ] || return 0
@@ -378,7 +386,7 @@ zed_hosts() {
   awk '{print $2}' "$RUN/proxy.log" | grep -E '(^|\.)(zed\.dev|zed\.industries)$' | sort -u
 }
 
-# Warns until step 17, when it starts to fail.
+# Warns until step 25, when it starts to fail.
 assert_no_zed_hosts() {
   local hosts blocked
   hosts=$(zed_hosts | xargs || true)

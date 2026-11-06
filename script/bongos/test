@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate 3: unit and UI tests for the named crates, else the crates changed since upstream.
+# Gate 3: unit and UI tests for the named crates, else the crates changed on this branch.
 # Prints pass and fail counts, and the name and failure text of each failing test; the full output
 # is in the log.
 #   test [crate...]       BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
@@ -27,7 +27,7 @@ else
   done < <(changed_crates)
 fi
 if [ "${#crates[@]}" -eq 0 ]; then
-  echo "no crates named and none changed since upstream; nothing to run"
+  echo "no crates named and none changed on this branch; nothing to run"
   SUMMARY="nothing to run"
   summary_hook() { :; }
   exit 0

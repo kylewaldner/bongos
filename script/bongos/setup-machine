@@ -134,28 +134,7 @@ else
 fi
 
 # Repository setup: safe and idempotent.
-if git remote get-url upstream >/dev/null 2>&1; then
-  ok "remote upstream ($(git remote get-url upstream))"
-elif git remote add upstream https://github.com/zed-industries/zed.git; then
-  ok "remote upstream added"
-else
-  fail "could not add remote upstream"
-fi
-
-utag=$(sed -n 's/^tag=//p' UPSTREAM)
-ucommit=$(sed -n 's/^commit=//p' UPSTREAM)
-ref="upstream/$utag"
-if ! git cat-file -e "$ucommit^{commit}" 2>/dev/null; then
-  fail "tag $ref: commit $ucommit from UPSTREAM is not in this clone's history"
-elif have=$(git rev-parse -q --verify "refs/tags/$ref^{commit}"); then
-  if [ "$have" = "$ucommit" ]; then ok "tag $ref at $ucommit"; else fail "tag $ref points at $have, not $ucommit; leaving it alone"; fi
-elif git tag "$ref" "$ucommit"; then
-  ok "tag $ref created at $ucommit"
-else
-  fail "could not create tag $ref"
-fi
-
-# gh picks the default repository from the remotes; with upstream added it can pick Zed. Pin it to origin's repo.
+# gh picks the default repository from the remotes; a clone could pick another repository. Pin it to origin's repo.
 gh_repo=kylewaldner/bongos
 origin_url=$(git remote get-url origin 2>/dev/null)
 case "$origin_url" in
