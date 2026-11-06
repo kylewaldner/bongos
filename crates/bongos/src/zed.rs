@@ -5305,7 +5305,6 @@ mod tests {
                 "app_menu",
                 "assistant",
                 "assistant2",
-                "auto_update",
                 "branch_picker",
                 "bedrock",
                 "branches",
@@ -5538,6 +5537,43 @@ mod tests {
                 .unwrap();
         }
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_bundled_keymaps_load(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let keymaps_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/keymaps");
+            let mut loaded = 0;
+            for entry in walkdir_json(&keymaps_dir) {
+                let relative = entry.strip_prefix(&keymaps_dir).unwrap();
+                let asset_path = format!("keymaps/{}", relative.to_string_lossy());
+                // Binds the storybook app's actions, which bongos does not link.
+                if asset_path == "keymaps/storybook.json" {
+                    continue;
+                }
+                KeymapFile::load_asset(&asset_path, None, cx)
+                    .unwrap_or_else(|error| panic!("{asset_path}: {error}"));
+                loaded += 1;
+            }
+            assert!(loaded > 0);
+        });
+    }
+
+    fn walkdir_json(directory: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(walkdir_json(&path));
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                found.push(path);
+            }
+        }
+        found
     }
 
     pub(crate) fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {

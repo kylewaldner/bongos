@@ -134,7 +134,6 @@ crates/title_bar/src/collab.rs 1
 crates/title_bar/src/title_bar.rs 3
 crates/ui/src/components/ai/agent_setup_button.rs 1
 crates/ui/src/components/collab/collab_notification.rs 1
-crates/ui/src/components/collab/update_button.rs 3
 crates/ui/src/components/label/label.rs 1
 crates/ui/src/components/list/list_bullet_item.rs 1
 crates/ui/src/components/notification/announcement_toast.rs 1

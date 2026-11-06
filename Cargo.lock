@@ -193,7 +193,6 @@ name = "activity_indicator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "auto_update",
  "editor",
  "extension_host",
  "fs",
@@ -1336,34 +1335,7 @@ dependencies = [
  "tempfile",
  "util",
  "which 6.0.3",
- "workspace",
  "zlog",
-]
-
-[[package]]
-name = "auto_update_ui"
-version = "0.1.0"
-dependencies = [
- "agent_skills",
- "anyhow",
- "auto_update",
- "client",
- "db",
- "editor",
- "gpui",
- "markdown_preview",
- "notifications",
- "prompt_store",
- "release_channel",
- "semver",
- "serde",
- "serde_json",
- "smol",
- "telemetry",
- "ui",
- "util",
- "workspace",
- "zed_actions",
 ]
 
 [[package]]
@@ -2127,8 +2099,6 @@ dependencies = [
  "askpass",
  "assets",
  "audio",
- "auto_update",
- "auto_update_ui",
  "bongos_net",
  "bongos_version",
  "breadcrumbs",
@@ -16712,7 +16682,6 @@ dependencies = [
  "agent_settings",
  "anyhow",
  "arrayvec",
- "auto_update",
  "call",
  "channel",
  "chrono",
