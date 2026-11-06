@@ -17,6 +17,7 @@ doctest = true
 
 [dependencies]
 anyhow.workspace = true
+bongos_net.workspace = true
 bytes.workspace = true
 futures.workspace = true
 http_client.workspace = true

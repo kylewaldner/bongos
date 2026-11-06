@@ -20,6 +20,7 @@ crates/bongos_net/src/bongos_net.rs cdn.agentclientprotocol.com
 crates/bongos_net/src/bongos_net.rs notzed.dev
 crates/bongos_net/src/bongos_net.rs zed.dev
 crates/bongos_net/src/bongos_net.rs zed.industries
+crates/reqwest_client/src/reqwest_client.rs zed.dev
 
 # telemetry and minidump upload: step 17
 crates/client/src/telemetry.rs MINIDUMP_ENDPOINT

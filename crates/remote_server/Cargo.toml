@@ -42,6 +42,7 @@ git_hosting_providers.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui_tokio.workspace = true
+bongos_net.workspace = true
 http_client.workspace = true
 image.workspace = true
 json_schema_store.workspace = true

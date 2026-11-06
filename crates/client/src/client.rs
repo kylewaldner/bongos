@@ -1361,6 +1361,10 @@ impl Client {
                         .host_str()
                         .zip(rpc_url.port_or_known_default())
                         .context("missing host in rpc url")?;
+                    if bongos_net::is_blocked_host(rpc_host.0) {
+                        log::warn!("bongos_net: blocked {}", rpc_host.0);
+                        anyhow::bail!("bongos does not connect to {}", rpc_host.0);
+                    }
                     Ok(match proxy {
                         Some(proxy) => connect_proxy_stream(&proxy, rpc_host).await?,
                         None => Box::new(TcpStream::connect(rpc_host).await?),

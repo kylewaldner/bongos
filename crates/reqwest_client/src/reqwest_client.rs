@@ -18,6 +18,25 @@ const DEFAULT_CAPACITY: usize = 4096;
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static REDACT_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"key=[^&]+").unwrap());
 
+/// Follows up to `limit` redirects, but stops at one that targets a host `bongos_net` blocks, so an
+/// allowed host cannot send the request on further.
+fn guarded_redirect_policy(limit: usize) -> redirect::Policy {
+    redirect::Policy::custom(move |attempt| {
+        if attempt
+            .url()
+            .host_str()
+            .is_some_and(bongos_net::is_blocked_host)
+        {
+            log::warn!("bongos_net: blocked redirect to {}", attempt.url());
+            attempt.error(anyhow!("bongos does not follow redirects to blocked hosts"))
+        } else if attempt.previous().len() >= limit {
+            attempt.error(anyhow!("too many redirects"))
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 pub struct ReqwestClient {
     client: reqwest::Client,
     proxy: Option<Url>,
@@ -30,6 +49,7 @@ impl ReqwestClient {
         reqwest::Client::builder()
             .use_rustls_tls()
             .connect_timeout(Duration::from_secs(10))
+            .redirect_policy(guarded_redirect_policy(10))
     }
 
     pub fn new() -> Self {
@@ -237,8 +257,8 @@ impl http_client::HttpClient for ReqwestClient {
         if let Some(redirect_policy) = parts.extensions.get::<RedirectPolicy>() {
             request = request.redirect_policy(match redirect_policy {
                 RedirectPolicy::NoFollow => redirect::Policy::none(),
-                RedirectPolicy::FollowLimit(limit) => redirect::Policy::limited(*limit as usize),
-                RedirectPolicy::FollowAll => redirect::Policy::limited(100),
+                RedirectPolicy::FollowLimit(limit) => guarded_redirect_policy(*limit as usize),
+                RedirectPolicy::FollowAll => guarded_redirect_policy(100),
             });
         }
         let request = request.body(match body.0 {
@@ -280,6 +300,44 @@ mod tests {
     use http_client::{HttpClient, Url};
 
     use crate::ReqwestClient;
+
+    #[test]
+    fn test_redirect_to_blocked_host_is_refused() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            stream.read(&mut buffer).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://zed.dev/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let client = ReqwestClient::new();
+        let result = runtime.block_on(client.get(
+            &format!("http://{address}/"),
+            http_client::AsyncBody::empty(),
+            true,
+        ));
+        server.join().unwrap();
+        let Err(error) = result else {
+            panic!("redirect to zed.dev must fail");
+        };
+        assert!(
+            format!("{error:?}").contains("redirects to blocked hosts"),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn test_proxy_uri() {

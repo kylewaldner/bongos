@@ -2291,6 +2291,7 @@ dependencies = [
  "anyhow",
  "futures 0.3.32",
  "http_client",
+ "log",
  "smol",
 ]
 
@@ -2979,6 +2980,7 @@ dependencies = [
  "async-channel 2.5.0",
  "async-tungstenite",
  "base64 0.22.1",
+ "bongos_net",
  "chrono",
  "clock",
  "cloud_api_client",
@@ -13707,6 +13709,7 @@ dependencies = [
  "anyhow",
  "askpass",
  "async-channel 2.5.0",
+ "bongos_net",
  "cargo_toml",
  "clap",
  "client",
@@ -13881,6 +13884,7 @@ name = "reqwest_client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_net",
  "bytes 1.11.1",
  "futures 0.3.32",
  "gpui_util",

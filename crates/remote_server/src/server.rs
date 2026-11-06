@@ -687,7 +687,7 @@ pub fn execute_run(
 
             let http_client = {
                 let _guard = Tokio::handle(cx).enter();
-                Arc::new(
+                Arc::new(bongos_net::GuardedHttpClient::new(Arc::new(
                     ReqwestClient::proxy_and_user_agent(
                         proxy_url,
                         &format!(
@@ -698,7 +698,7 @@ pub fn execute_run(
                         ),
                     )
                     .expect("Could not start HTTP client"),
-                )
+                )))
             };
 
             let node_runtime =

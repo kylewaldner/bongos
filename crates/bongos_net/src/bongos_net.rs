@@ -50,6 +50,7 @@ impl HttpClient for GuardedHttpClient {
         if let Some(host) = req.uri().host()
             && is_blocked_host(host)
         {
+            log::warn!("bongos_net: blocked {host}");
             let message = format!("bongos does not contact {host}");
             return Box::pin(async move {
                 Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, message).into())
