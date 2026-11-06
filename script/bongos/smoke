@@ -3,6 +3,8 @@
 # logging proxy. `smoke [feature]` also runs scenarios/<feature>.sh.
 # BONGOS_REAL_GPU=1 uses the real GPU instead of lavapipe; the Selected GPU line is printed either way.
 # BONGOS_STOCK=1 runs the stock binary: no version or bongos-name checks, and Zed hosts are required.
+# The terminal gets one line per step, the screenshot path, the proxy summary (request count and
+# distinct hosts) and a last summary line; everything else is in the log (script/bongos/tail-log smoke).
 set -euo pipefail
 here="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
@@ -33,6 +35,7 @@ feature=${1:-}
 stock=${BONGOS_STOCK:-}
 RUN="$BONGOS_WORKSPACE/scratch/smoke/$(date +%Y%m%d-%H%M%S)${stock:+-stock}"
 mkdir -p "$RUN"
+log_init smoke
 sandbox_env
 
 APP_PID="" PROXY_PID="" XVFB_PID=""
@@ -49,15 +52,17 @@ cleanup() {
   done
   wait 2>/dev/null || true
   if [ "$rc" != 0 ]; then
-    echo "bongos: smoke FAILED (exit $rc); output in $RUN" >&2
+    echo "bongos: smoke FAILED (exit $rc); output in $RUN"
+    [ -f "$RUN/failure.png" ] && echo "smoke: failure screenshot $RUN/failure.png" >&3
+    SUMMARY="run: $RUN"
   fi
-  exit "$rc"
+  finish_report "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-step() { echo "bongos: smoke: $*"; }
+step() { say "smoke: $*"; }
 
 if [ ! -x "$BONGOS_BIN" ]; then
   echo "bongos: no binary at $BONGOS_BIN" >&2
@@ -66,7 +71,7 @@ fi
 
 # TEMPORARY (steps 5 to 7): BONGOS_SKIP_VERSION=1 skips only the version check; step 8 removes it.
 if [ -z "$stock" ] && [ -n "${BONGOS_SKIP_VERSION:-}" ]; then
-  echo "bongos: smoke: SKIPPING version check (BONGOS_SKIP_VERSION)" >&2
+  say "smoke: SKIPPING version check (BONGOS_SKIP_VERSION)"
 elif [ -z "$stock" ]; then
   step "1 version"
   version=$("$BONGOS_BIN" --version 2>&1 || true)
@@ -89,7 +94,7 @@ launch "$RUN/project"
 wait_for_window
 wait_for_title "$BONGOS_TITLE"
 assert_file "$HOME/$BONGOS_LOG_PATH" 'Selected GPU'
-grep -h 'Selected GPU' "$HOME/$BONGOS_LOG_PATH" | head -n1 | sed 's/^/bongos: smoke: /'
+say "smoke: $(grep -h 'Selected GPU' "$HOME/$BONGOS_LOG_PATH" | head -n1 | cut -c1-200)"
 poll 60 "a rendered frame" ui_rendered
 wait_for_settled
 
@@ -127,7 +132,7 @@ if [ -z "$stock" ]; then
     assert_file "$HOME/$BONGOS_CONFIG_PATH/settings.json"
     assert_file "$HOME/$BONGOS_CONFIG_PATH/keymap.json"
   else
-    echo "bongos: smoke: SKIPPING settings.json and keymap.json check (BONGOS_SKIP_FIRST_LAUNCH_CONFIG)" >&2
+    say "smoke: SKIPPING settings.json and keymap.json check (BONGOS_SKIP_FIRST_LAUNCH_CONFIG)"
   fi
   zed_paths=$(cd "$HOME" && find . -ipath '*zed*')
   if [ -n "$zed_paths" ]; then
@@ -147,10 +152,14 @@ quit_app
 
 step "9 hosts"
 assert_no_zed_hosts
+proxy_hosts=$(awk '{print $2}' "$RUN/proxy.log" | sort -u | xargs)
+proxy_count=$(wc -l <"$RUN/proxy.log")
+say "smoke: proxy: $proxy_count requests; hosts: ${proxy_hosts:-none}"
 sort -u "$RUN/proxy.log" | sed 's/^/bongos: proxy: /'
 
 if [ -n "$feature" ]; then
   . "$BONGOS_ROOT/script/bongos/scenarios/$feature.sh"
 fi
 
-echo "bongos: smoke passed; final screenshot: $RUN/final.png"
+say "smoke: screenshot $RUN/final.png"
+SUMMARY="proxy=${proxy_count}req/$(wc -w <<<"$proxy_hosts")hosts"

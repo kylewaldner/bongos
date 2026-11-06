@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Show the failing part of a log again.
+#   tail-log [name|path] [-n LINES] [-t] [-g PATTERN]
+# name is a script (build, test, check, smoke, ...): its newest log. With no name, the newest log of
+# any script. The default is the failing part (test failures, compiler errors, formatting diffs, or
+# the "bongos:" lines and the end of the log), at most 60 lines. -t shows the last LINES lines
+# instead; -g shows the lines matching PATTERN, with two lines of context.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+
+target="" lines=60 raw="" pattern=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n) lines=${2:?-n needs a number}; shift 2 ;;
+    -t) raw=1; shift ;;
+    -g) pattern=${2:?-g needs a pattern}; shift 2 ;;
+    -*) echo "usage: tail-log [name|path] [-n LINES] [-t] [-g PATTERN]" >&2; exit 2 ;;
+    *) target=$1; shift ;;
+  esac
+done
+
+if [ -z "$target" ]; then
+  # shellcheck disable=SC2012
+  file=$(ls -1t "$BONGOS_LOG_DIR"/*-2*.log 2>/dev/null | head -n1 || true)
+elif [ -f "$target" ]; then
+  file=$target
+else
+  file="$BONGOS_LOG_DIR/$target-latest.log"
+fi
+if [ ! -f "${file:-}" ]; then
+  echo "tail-log: no log found for ${target:-any script} in $BONGOS_LOG_DIR" >&2
+  exit 1
+fi
+
+if [ -n "$pattern" ]; then
+  grep -n -C2 -E -- "$pattern" "$file" | cut -c1-240 | head -n "$lines" || true
+elif [ -n "$raw" ]; then
+  tail -n "$lines" "$file" | cut -c1-240
+else
+  failure_excerpt "$file" "$lines"
+fi
+echo "tail-log: $(readlink -f "$file")"

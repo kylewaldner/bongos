@@ -8,16 +8,17 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
+log_init check-patches
 
 base=$(upstream_commit)
 list="$BONGOS_ROOT/UPSTREAM-PATCHES.md"
-[ -f "$list" ] || { echo "bongos: UPSTREAM-PATCHES.md is missing" >&2; exit 1; }
-git cat-file -e "$base^{commit}" 2>/dev/null || { echo "bongos: upstream commit $base is not in this clone" >&2; exit 1; }
+[ -f "$list" ] || { echo "bongos: UPSTREAM-PATCHES.md is missing"; exit 1; }
+git cat-file -e "$base^{commit}" 2>/dev/null || { echo "bongos: upstream commit $base is not in this clone"; exit 1; }
 
 # status<TAB>path for tracked changes against upstream, then untracked files as added.
 changes=$({ git diff --name-status --no-renames "$base"; git ls-files --others --exclude-standard | sed 's/^/A\t/'; })
 
-CHANGES="$changes" python3 -I - "$list" <<'PY'
+SUMMARY=$(CHANGES="$changes" python3 -I - "$list" <<'PY'
 import os, re, sys
 
 OUR_ROOT_FILES = {"UPSTREAM", "UPSTREAM-PATCHES.md"}
@@ -60,5 +61,6 @@ for p in patterns:
 if errors:
     print("\n".join("bongos: " + e for e in errors), file=sys.stderr)
     sys.exit(1)
-print(f"check-patches: ok ({len(changes)} changed paths, {len(patterns)} rows)")
+print(f"ok ({len(changes)} changed paths, {len(patterns)} rows)")
 PY
+)

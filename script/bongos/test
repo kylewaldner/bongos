@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # Gate 3: unit and UI tests for the named crates, else the crates changed since upstream.
+# Prints pass and fail counts, and the name and failure text of each failing test; the full output
+# is in the log.
 #   test [crate...]       BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
+log_init test
+
+# Counts over every cargo test run so far; the run that failed is included.
+summary_hook() {
+  local counts
+  counts=$(awk '/^test result:/ {for (i = 1; i < NF; i++) {if ($(i+1) ~ /^passed/) p += $i; if ($(i+1) ~ /^failed/) f += $i; if ($(i+1) ~ /^ignored/) g += $i}}
+    END {printf "passed=%d failed=%d ignored=%d", p, f, g}' "$LOG")
+  SUMMARY="$counts"
+}
 
 crates=()
 if [ "$#" -gt 0 ]; then
@@ -16,7 +27,9 @@ else
   done < <(changed_crates)
 fi
 if [ "${#crates[@]}" -eq 0 ]; then
-  echo "test: no crates named and none changed since upstream; nothing to run"
+  echo "no crates named and none changed since upstream; nothing to run"
+  SUMMARY="nothing to run"
+  summary_hook() { :; }
   exit 0
 fi
 
@@ -26,7 +39,7 @@ filter=()
 
 # A package with only a binary, such as zed, has no library: --lib would fail with "no library
 # targets". Split the packages and run the binary-only ones with --bins --tests.
-meta=$(cargo metadata --no-deps --format-version 1 --locked)
+meta=$(cat "$(cargo_meta_file)")
 libs=() bins=()
 for ((i = 1; i < ${#crates[@]}; i += 2)); do
   name=${crates[i]}
@@ -42,13 +55,13 @@ sys.exit(2)
     libs+=(-p "$name")
   else
     rc=$?
-    if [ "$rc" = 2 ]; then echo "bongos: no package named $name" >&2; exit 1; fi
+    if [ "$rc" = 2 ]; then echo "bongos: no package named $name"; exit 1; fi
     bins+=(-p "$name")
   fi
 done
 if [ "${#libs[@]}" -gt 0 ]; then
-  cargo_limited test "${libs[@]}" --lib --bins --tests --locked ${filter[@]+"${filter[@]}"}
+  cargo_limited test -q --color never "${libs[@]}" --lib --bins --tests --locked ${filter[@]+"${filter[@]}"}
 fi
 if [ "${#bins[@]}" -gt 0 ]; then
-  cargo_limited test "${bins[@]}" --bins --tests --locked ${filter[@]+"${filter[@]}"}
+  cargo_limited test -q --color never "${bins[@]}" --bins --tests --locked ${filter[@]+"${filter[@]}"}
 fi

@@ -8,6 +8,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
+[ "${1:-}" = "--list" ] || log_init check-hosts
 
 allow="$here/hosts-allow.txt"
 pattern='[A-Za-z0-9._-]*(zed\.dev|zed\.industries|agentclientprotocol\.com)|MINIDUMP_ENDPOINT|CIMD_URL'
@@ -29,9 +30,9 @@ fi
 allowed=$(grep -vE '^[[:space:]]*(#|$)' "$allow" | sed 's/[[:space:]]*#.*$//' | sort -u)
 new=$(comm -23 <(found) <(printf '%s\n' "$allowed")) || true
 if [ -n "$new" ]; then
-  echo "bongos: hosts not in script/bongos/hosts-allow.txt:" >&2
-  printf '  %s\n' "$new" >&2
-  echo "bongos: remove the call, or add '<path> <host>' with a comment saying why it is allowed" >&2
+  echo "bongos: hosts not in script/bongos/hosts-allow.txt:"
+  printf '  %s\n' "$new"
+  echo "bongos: remove the call, or add '<path> <host>' with a comment saying why it is allowed"
   exit 1
 fi
-echo "check-hosts: ok"
+SUMMARY="ok"
