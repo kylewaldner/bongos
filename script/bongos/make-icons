@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Regenerates every app icon from the two master SVGs in crates/bongos/resources
+# (app-icon.svg for release, app-icon-dev.svg for dev, nightly and preview).
+# Needs rsvg-convert and ImageMagick (convert or magick). Document.icns is rebuilt only when png2icns exists.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+
+command -v rsvg-convert >/dev/null || { echo "make-icons: rsvg-convert is required"; exit 1; }
+if command -v magick >/dev/null; then im=(magick); elif command -v convert >/dev/null; then im=(convert); else
+  echo "make-icons: ImageMagick (magick or convert) is required"; exit 1
+fi
+
+res=crates/bongos/resources
+raster() { rsvg-convert -w "$2" -h "$2" "$1" -o "$3"; }
+
+for pair in "app-icon:app-icon" "app-icon-dev:app-icon-dev" "app-icon-nightly:app-icon-dev" "app-icon-preview:app-icon-dev"; do
+  name=${pair%%:*}; master="$res/${pair##*:}.svg"
+  raster "$master" 512 "$res/$name.png"
+  raster "$master" 1024 "$res/$name@2x.png"
+  tmp=$(mktemp -d)
+  for s in 16 32 48 256; do raster "$master" $s "$tmp/$s.png"; done
+  "${im[@]}" "$tmp/16.png" "$tmp/32.png" "$tmp/48.png" "$tmp/256.png" "$res/windows/$name.ico"
+  rm -rf "$tmp"
+done
+
+for s in 16 24 32 48 64 128 256 512; do
+  mkdir -p "$res/icons/hicolor/${s}x${s}/apps"
+  raster "$res/app-icon.svg" $s "$res/icons/hicolor/${s}x${s}/apps/bongos.png"
+done
+mkdir -p "$res/icons/hicolor/scalable/apps"
+cp "$res/app-icon.svg" "$res/icons/hicolor/scalable/apps/bongos.svg"
+
+if command -v png2icns >/dev/null; then
+  tmp=$(mktemp -d)
+  for s in 16 32 48 128 256 512; do raster "$res/app-icon.svg" $s "$tmp/$s.png"; done
+  png2icns "$res/Document.icns" "$tmp"/16.png "$tmp"/32.png "$tmp"/48.png "$tmp"/128.png "$tmp"/256.png "$tmp"/512.png
+  rm -rf "$tmp"
+else
+  echo "make-icons: png2icns not found, Document.icns left as is (rebuild it with iconutil on macOS)"
+fi
+echo "make-icons: done"

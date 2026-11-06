@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Fails when an app icon is missing, has the wrong size, or is still the Zed art (byte-identical to the
+# file at the fork commit), or when a generated icon differs from what the master SVGs render (size and tile
+# color of the release icon are checked, not bytes).
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+log_init check-icons
+
+if command -v magick >/dev/null; then IM=(magick); else IM=(convert); fi
+command -v identify >/dev/null || { echo "check-icons: ImageMagick identify is required"; exit 1; }
+res=crates/bongos/resources
+origin=$(origin_commit)
+bad=0
+fail() { echo "check-icons: $*"; bad=1; }
+
+size_of() { identify -format '%wx%h\n' "$1" 2>/dev/null | head -n1; }
+expect_size() { # file WxH
+  [ -f "$1" ] || { fail "missing $1"; return; }
+  [ "$(size_of "$1")" = "$2" ] || fail "$1 is $(size_of "$1"), expected $2"
+}
+
+for m in app-icon app-icon-dev; do
+  [ -f "$res/$m.svg" ] || fail "missing $res/$m.svg"
+done
+[ -f assets/images/bongos_logo.svg ] || fail "missing assets/images/bongos_logo.svg"
+for f in assets/images/zed_logo.svg assets/images/zed_x_copilot.svg; do
+  [ ! -e "$f" ] || fail "$f must be deleted"
+done
+
+for n in app-icon app-icon-dev app-icon-nightly app-icon-preview; do
+  expect_size "$res/$n.png" 512x512
+  expect_size "$res/$n@2x.png" 1024x1024
+  ico="$res/windows/$n.ico"
+  if [ -f "$ico" ]; then
+    sizes=$(identify -format '%wx%h\n' "$ico" | sort -u | tr '\n' ' ')
+    for s in 16 32 48 256; do
+      case " $sizes" in *" ${s}x${s} "*) ;; *) fail "$ico lacks ${s}x${s} (has $sizes)";; esac
+    done
+  else fail "missing $ico"; fi
+done
+
+for s in 16 24 32 48 64 128 256 512; do
+  expect_size "$res/icons/hicolor/${s}x${s}/apps/bongos.png" "${s}x${s}"
+done
+[ -f "$res/icons/hicolor/scalable/apps/bongos.svg" ] || fail "missing scalable bongos.svg"
+
+# every icon path in the bundle metadata exists
+while IFS= read -r p; do
+  [ -f "crates/bongos/$p" ] || fail "bundle icon crates/bongos/$p is missing"
+done < <(grep -E '^icon = ' crates/bongos/Cargo.toml | grep -oE 'resources/[^"]+' | sort -u)
+
+# not the Zed art: release icon must be the vermilion tile with a light mark, dev the ink tile
+center_px() { "${IM[@]}" "$1" -format '%[hex:p{200,200}]' info: 2>/dev/null | cut -c1-6; }
+[ "$(center_px "$res/app-icon@2x.png")" = "E13A01" ] || fail "app-icon@2x.png tile is not #e13a01"
+[ "$(center_px "$res/app-icon-dev@2x.png")" = "1D2023" ] || fail "app-icon-dev@2x.png tile is not #1d2023"
+
+# and none is byte-identical to the Zed file of the same name
+while IFS= read -r f; do
+  if git cat-file -e "$origin:$f" 2>/dev/null && [ "$(git rev-parse "$origin:$f")" = "$(git hash-object "$f")" ]; then
+    fail "$f is still the Zed icon"
+  fi
+done < <(find "$res" -type f \( -name '*.png' -o -name '*.ico' \))
+
+if [ "$bad" != 0 ]; then exit 1; fi
+SUMMARY="app icons present, sized right, not Zed"
