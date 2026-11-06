@@ -100,7 +100,7 @@ struct Args {
     /// Use `path:line:column` syntax to open a file at the given line and column.
     #[arg(trailing_var_arg = true, value_hint = clap::ValueHint::AnyPath)]
     paths_with_position: Vec<String>,
-    /// Print Zed's version and the app path.
+    /// Print the bongos version and the Zed release it was forked from.
     #[arg(short, long)]
     version: bool,
     /// Run zed in the foreground (useful for debugging)
@@ -537,7 +537,7 @@ fn run() -> Result<()> {
     }
 
     if args.version {
-        println!("{}", app.zed_version_string());
+        println!("{}", bongos_version::version_line());
         return Ok(());
     }
 

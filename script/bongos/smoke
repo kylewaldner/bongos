@@ -69,15 +69,12 @@ if [ ! -x "$BONGOS_BIN" ]; then
   exit 1
 fi
 
-# TEMPORARY (steps 5 to 12): BONGOS_SKIP_VERSION=1 skips only the version check; step 13 removes it.
-if [ -z "$stock" ] && [ -n "${BONGOS_SKIP_VERSION:-}" ]; then
-  say "smoke: SKIPPING version check (BONGOS_SKIP_VERSION)"
-elif [ -z "$stock" ]; then
+if [ -z "$stock" ]; then
   step "1 version"
   version=$("$BONGOS_BIN" --version 2>&1 || true)
   tag=$(origin_tag)
-  if ! grep -qE '^bongos [0-9.]+ \(based on zed v[0-9.]+, upstream commit [0-9a-f]{7}\)$' <<<"$version" ||
-    ! grep -qF "based on zed ${tag:-no tag in ORIGIN.md}," <<<"$version"; then
+  if ! grep -qE '^bongos [0-9.]+ \(forked from Zed v[0-9.]+, [0-9a-f]{7}\)$' <<<"$version" ||
+    ! grep -qF "forked from Zed ${tag:-no tag in ORIGIN.md}," <<<"$version"; then
     echo "bongos: bad version line: $version" >&2
     exit 1
   fi

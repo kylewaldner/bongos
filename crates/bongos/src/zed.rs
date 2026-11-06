@@ -61,7 +61,7 @@ use project::{DirectoryLister, DisableAiSettings, ProjectItem};
 use project_panel::ProjectPanel;
 use quick_action_bar::QuickActionBar;
 use recent_projects::open_remote_project;
-use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
+use release_channel::{AppCommitSha, ReleaseChannel};
 use rope::Rope;
 use search::project_search::ProjectSearchBar;
 use settings::{
@@ -1452,15 +1452,15 @@ fn open_about_window(cx: &mut App) {
         fn new(cx: &mut Context<Self>) -> Self {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
-            let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            let full_version: SharedString = bongos_version::version_line().into();
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"
             } else {
                 ""
             };
-            let message: SharedString = format!("{release_channel_name} {version} {debug}").into();
+            let message: SharedString =
+                format!("{release_channel_name} {} {debug}", bongos_version::VERSION).into();
             let commit = AppCommitSha::try_global(cx)
                 .map(|sha| sha.full())
                 .filter(|commit| !commit.is_empty())
@@ -1614,7 +1614,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About bongos".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
@@ -2632,12 +2632,6 @@ mod tests {
     use assets::Assets;
     use collections::HashSet;
 
-    #[test]
-    fn test_licenses_asset_is_embedded() {
-        let licenses = Assets::get("licenses.md").expect("licenses.md should be embedded");
-        assert!(!licenses.data.is_empty());
-    }
-
     use editor::{
         DisplayPoint, Editor, MultiBufferOffset, SelectionEffects, display_map::DisplayRow,
     };
@@ -2671,6 +2665,25 @@ mod tests {
         item::{Item, ItemHandle},
         open_new, open_paths, pane,
     };
+
+    #[test]
+    fn test_licenses_asset_is_embedded() {
+        let licenses = Assets::get("licenses.md").expect("licenses.md should be embedded");
+        assert!(!licenses.data.is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_about_action_opens_one_window(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(init);
+        assert_eq!(cx.update(|cx| cx.windows().len()), 0);
+        cx.update(|cx| cx.dispatch_action(&About));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        cx.update(|cx| cx.dispatch_action(&About));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+    }
 
     async fn flush_workspace_serialization(
         window: &WindowHandle<MultiWorkspace>,

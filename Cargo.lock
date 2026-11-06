@@ -2129,6 +2129,7 @@ dependencies = [
  "audio",
  "auto_update",
  "auto_update_ui",
+ "bongos_version",
  "breadcrumbs",
  "call",
  "channel",
@@ -2281,6 +2282,10 @@ dependencies = [
  "zlog_settings",
  "ztracing",
 ]
+
+[[package]]
+name = "bongos_version"
+version = "0.1.0"
 
 [[package]]
 name = "borrow-or-share"
@@ -2929,6 +2934,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "askpass",
+ "bongos_version",
  "clap",
  "clap_complete",
  "clap_complete_nushell",

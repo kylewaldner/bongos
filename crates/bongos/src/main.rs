@@ -310,6 +310,11 @@ fn main() {
         option_env!("ZED_COMMIT_SHA").map(|commit_sha| AppCommitSha::new(commit_sha.to_string()));
     let app_version = AppVersion::load(env!("CARGO_PKG_VERSION"), version, app_commit_sha.clone());
 
+    if args.version {
+        println!("{}", bongos_version::version_line());
+        return;
+    }
+
     if args.system_specs {
         let system_specs = system_specs::SystemSpecs::new_stateless(
             app_version,
@@ -503,12 +508,7 @@ fn main() {
         zed::watch_settings_files(fs.clone(), cx);
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
 
-        let user_agent = format!(
-            "Zed/{} ({}; {})",
-            AppVersion::global(cx),
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        );
+        let user_agent = bongos_version::user_agent(std::env::consts::OS, std::env::consts::ARCH);
         let proxy_url = ProxySettings::get_global(cx).proxy_url();
         let http = {
             let _guard = Tokio::handle(cx).enter();
@@ -1767,6 +1767,10 @@ fn stdout_is_a_pty() -> bool {
 #[derive(Parser, Debug)]
 #[command(name = "zed", disable_version_flag = true, max_term_width = 100)]
 struct Args {
+    /// Print the bongos version and the Zed release it was forked from.
+    #[arg(long)]
+    version: bool,
+
     /// A sequence of space-separated paths or urls that you want to open.
     ///
     /// Use `path:line:row` syntax to open a file at a specific location.
