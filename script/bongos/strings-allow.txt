@@ -60,7 +60,6 @@ crates/edit_prediction_ui/src/edit_prediction_button.rs 1
 crates/etw_tracing/etw_tracing.rs 2
 crates/explorer_command_injector/src/explorer_command_injector.rs 2
 crates/extension_host/src/wasm_host/wit.rs 1
-crates/extensions_ui/src/extensions_ui.rs 19
 crates/git/src/repository.rs 6
 crates/git/src/status.rs 2
 crates/git_ui/src/text_diff_view.rs 1

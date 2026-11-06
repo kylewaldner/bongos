@@ -149,6 +149,10 @@ quit_app
 
 step "9 hosts"
 assert_no_zed_hosts
+if awk '{print $2}' "$RUN/proxy.log" | grep -qE '(^|\.)api\.zed\.dev$'; then
+  say "smoke: FAIL api.zed.dev in proxy.log: the marketplace is off"
+  exit 1
+fi
 proxy_hosts=$(awk '{print $2}' "$RUN/proxy.log" | sort -u | xargs)
 proxy_count=$(wc -l <"$RUN/proxy.log")
 say "smoke: proxy: $proxy_count requests; hosts: ${proxy_hosts:-none}"

@@ -47,13 +47,14 @@ crates/settings_content/src/language_model.rs zed.dev
 crates/web_search_providers/src/cloud.rs zed.dev
 
 # feedback (step 19), marketplace (step 19a) and settings page entries (step 24)
-crates/extensions_ui/src/extensions_ui.rs zed.dev
 crates/settings_ui/src/page_data.rs zed.dev
 
 # The harness's own patterns. They name the hosts to detect or block, so they stay.
 # lib.sh zed_hosts greps the proxy log for these hosts; the guard check needs the names
 script/bongos/lib.sh zed\.dev
 script/bongos/lib.sh zed\.industries
+script/bongos/smoke api.zed.dev
+script/bongos/smoke .zed\.dev
 # check-hosts names the two endpoint constants it searches for
 script/bongos/check-hosts CIMD_URL
 script/bongos/check-hosts MINIDUMP_ENDPOINT
