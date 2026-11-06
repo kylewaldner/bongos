@@ -66,14 +66,6 @@ pub static IMPERSONATE_LOGIN: LazyLock<Option<String>> = LazyLock::new(|| {
         .and_then(|s| if s.is_empty() { None } else { Some(s) })
 });
 
-pub static USE_WEB_LOGIN: LazyLock<bool> = LazyLock::new(|| std::env::var("ZED_WEB_LOGIN").is_ok());
-
-pub static ADMIN_API_TOKEN: LazyLock<Option<String>> = LazyLock::new(|| {
-    std::env::var("ZED_ADMIN_API_TOKEN")
-        .ok()
-        .and_then(|s| if s.is_empty() { None } else { Some(s) })
-});
-
 pub static ZED_APP_PATH: LazyLock<Option<PathBuf>> =
     LazyLock::new(|| std::env::var("ZED_APP_PATH").ok().map(PathBuf::from));
 

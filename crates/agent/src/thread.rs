@@ -1455,11 +1455,6 @@ impl Thread {
         Ok(temp_dir)
     }
 
-    /// Returns true if this thread was imported from a shared thread.
-    pub fn is_imported(&self) -> bool {
-        self.imported
-    }
-
     pub fn replay(
         &mut self,
         cx: &mut Context<Self>,
