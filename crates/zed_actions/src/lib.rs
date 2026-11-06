@@ -69,8 +69,6 @@ actions!(
         OpenLicenses,
         /// Opens the Zed status page.
         OpenStatusPage,
-        /// Opens the telemetry log.
-        OpenTelemetryLog,
         /// Opens the performance profiler.
         OpenPerformanceProfiler,
         /// Opens the onboarding view.

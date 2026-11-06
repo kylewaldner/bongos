@@ -1515,11 +1515,9 @@
   //
   // Default: true
   "word_diff_enabled": true,
-  // Control what info is collected by Zed.
+  // Bongos sends no telemetry or crash reports. `diagnostics` and `metrics` are inert.
   "telemetry": {
-    // Send debug info like crash reports.
     "diagnostics": true,
-    // Send anonymized usage data like what languages you're using Zed with.
     "metrics": true,
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention

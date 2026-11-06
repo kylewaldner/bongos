@@ -4,13 +4,12 @@ use crate::TelemetrySettings;
 use anyhow::{Context as _, Result};
 use clock::SystemClock;
 use fs::Fs;
+use futures::Future;
 use futures::channel::mpsc;
-use futures::{Future, StreamExt};
 use gpui::{App, AppContext as _, BackgroundExecutor, Task};
-use http_client::{self, AsyncBody, HttpClient, HttpClientWithUrl, Method, Request};
+use http_client::HttpClientWithUrl;
 use parking_lot::Mutex;
 use regex::Regex;
-use release_channel::ReleaseChannel;
 use settings::{Settings, SettingsStore};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -19,7 +18,7 @@ use std::io::Write;
 use std::sync::LazyLock;
 use std::time::Instant;
 use std::{env, mem, path::PathBuf, sync::Arc, time::Duration};
-use telemetry_events::{AssistantEventData, AssistantPhase, Event, EventRequestBody, EventWrapper};
+use telemetry_events::{AssistantEventData, AssistantPhase, Event, EventWrapper};
 
 pub struct TelemetrySubscription {
     pub historical_events: Result<HistoricalEvents>,
@@ -38,7 +37,6 @@ use self::event_coalescer::EventCoalescer;
 
 pub struct Telemetry {
     clock: Arc<dyn SystemClock>,
-    http_client: Arc<HttpClientWithUrl>,
     executor: BackgroundExecutor,
     state: Arc<Mutex<TelemetryState>>,
 }
@@ -49,8 +47,6 @@ struct TelemetryState {
     installation_id: Option<Arc<str>>, // Per app installation (different for dev, nightly, preview, and stable)
     session_id: Option<String>,        // Per app launch
     metrics_id: Option<Arc<str>>,      // Per logged-in user
-    release_channel: Option<ReleaseChannel>,
-    architecture: &'static str,
     events_queue: Vec<EventWrapper>,
     flush_events_task: Option<Task<()>>,
 
@@ -87,12 +83,6 @@ static ZED_CLIENT_CHECKSUM_SEED: LazyLock<Option<Vec<u8>>> = LazyLock::new(|| {
                 .ok()
                 .map(|s| s.as_bytes().into())
         })
-});
-
-pub static MINIDUMP_ENDPOINT: LazyLock<Option<String>> = LazyLock::new(|| {
-    option_env!("ZED_MINIDUMP_ENDPOINT")
-        .map(str::to_string)
-        .or_else(|| env::var("ZED_MINIDUMP_ENDPOINT").ok())
 });
 
 static DOTNET_PROJECT_FILES_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -178,13 +168,11 @@ pub fn os_version() -> String {
 impl Telemetry {
     pub fn new(
         clock: Arc<dyn SystemClock>,
-        client: Arc<HttpClientWithUrl>,
+        _client: Arc<HttpClientWithUrl>,
         cx: &mut App,
     ) -> Arc<Self> {
         let state = Arc::new(Mutex::new(TelemetryState {
             settings: *TelemetrySettings::get_global(cx),
-            architecture: env::consts::ARCH,
-            release_channel: ReleaseChannel::try_global(cx),
             system_id: None,
             installation_id: None,
             session_id: None,
@@ -228,27 +216,12 @@ impl Telemetry {
 
         let this = Arc::new(Self {
             clock,
-            http_client: client,
             executor: cx.background_executor().clone(),
             state,
         });
 
-        let (tx, mut rx) = mpsc::unbounded();
-        ::telemetry::init(tx);
-
-        cx.background_spawn({
-            let this = Arc::downgrade(&this);
-            async move {
-                if cfg!(feature = "test-support") {
-                    return;
-                }
-                while let Some(event) = rx.next().await {
-                    let Some(state) = this.upgrade() else { break };
-                    state.report_event(Event::Flexible(event))
-                }
-            }
-        })
-        .detach();
+        // The telemetry queue is deliberately never initialized: `telemetry::event!` finds no
+        // sender and drops the event, and nothing here ever sends a request.
 
         // We should only ever have one instance of Telemetry, leak the subscription to keep it alive
         // rather than store in TelemetryState, complicating spawn as subscriptions are not Send
@@ -505,7 +478,7 @@ impl Telemetry {
     ///
     /// The remote server cannot upload telemetry itself, so it forwards events
     /// (as a JSON-serialized [`Event`]) to the client. Since the OS metadata in
-    /// [`EventRequestBody`] is batch-level (describing the uploading client),
+    /// `EventRequestBody` is batch-level (describing the uploading client),
     /// the remote server's OS is attached as event properties instead, so the
     /// origin can still be distinguished downstream.
     pub fn report_remote_event(
@@ -627,31 +600,8 @@ impl Telemetry {
         self.state.lock().is_staff
     }
 
-    fn build_request(
-        self: &Arc<Self>,
-        // We take in the JSON bytes buffer so we can reuse the existing allocation.
-        mut json_bytes: Vec<u8>,
-        event_request: &EventRequestBody,
-    ) -> Result<Request<AsyncBody>> {
-        json_bytes.clear();
-        serde_json::to_writer(&mut json_bytes, event_request)?;
-
-        let checksum = calculate_json_checksum(&json_bytes).unwrap_or_default();
-
-        Ok(Request::builder()
-            .method(Method::POST)
-            .uri(
-                self.http_client
-                    .build_zed_api_url("/telemetry/events", &[])?
-                    .as_ref(),
-            )
-            .header("Content-Type", "application/json")
-            .header("x-zed-checksum", checksum)
-            .body(json_bytes.into())?)
-    }
-
     pub async fn flush_events_inner(self: &Arc<Self>) -> Result<()> {
-        let (json_bytes, request_body) = {
+        {
             let mut state = self.state.lock();
             state.first_event_date_time = None;
             let events = mem::take(&mut state.events_queue);
@@ -670,32 +620,6 @@ impl Telemetry {
                     file.write_all(b"\n")?;
                 }
             }
-
-            (
-                json_bytes,
-                EventRequestBody {
-                    system_id: state.system_id.as_deref().map(Into::into),
-                    installation_id: state.installation_id.as_deref().map(Into::into),
-                    session_id: state.session_id.clone(),
-                    metrics_id: state.metrics_id.as_deref().map(Into::into),
-                    is_staff: state.is_staff,
-                    app_version: state.app_version.clone(),
-                    os_name: state.os_name.clone(),
-                    os_version: state.os_version.clone(),
-                    architecture: state.architecture.to_string(),
-
-                    release_channel: state
-                        .release_channel
-                        .map(|channel| channel.display_name().to_owned()),
-                    events,
-                },
-            )
-        };
-
-        let request = self.build_request(json_bytes, &request_body)?;
-        let response = self.http_client.send(request).await?;
-        if response.status() != 200 {
-            log::error!("Failed to send events: HTTP {:?}", response.status());
         }
 
         anyhow::Ok(())
@@ -864,6 +788,55 @@ mod tests {
 
             assert!(is_empty_state(&telemetry));
         });
+    }
+
+    #[gpui::test]
+    async fn test_telemetry_sends_no_http_request(
+        executor: BackgroundExecutor,
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let clock = Arc::new(FakeSystemClock::new());
+        let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let http = FakeHttpClient::create({
+            let request_count = request_count.clone();
+            move |_| {
+                request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    Ok(http_client::Response::builder()
+                        .status(200)
+                        .body(Default::default())
+                        .unwrap())
+                }
+            }
+        });
+
+        let telemetry = cx.update(|cx| {
+            let telemetry = Telemetry::new(clock.clone(), http, cx);
+            telemetry.state.lock().max_queue_size = 2;
+            telemetry.start(
+                Some("system_id".to_string()),
+                Some("installation_id".to_string()),
+                "session_id".to_string(),
+                cx,
+            );
+            telemetry
+        });
+
+        cx.update(|_cx| {
+            ::telemetry::event!("Test Event");
+            for _ in 0..4 {
+                telemetry.report_event(Event::Flexible(FlexibleEvent {
+                    event_type: "test".to_string(),
+                    event_properties: HashMap::default(),
+                }));
+            }
+        });
+        executor.run_until_parked();
+        telemetry.flush_events().await;
+        executor.run_until_parked();
+
+        assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[gpui::test]

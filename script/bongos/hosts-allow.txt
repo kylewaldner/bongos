@@ -23,10 +23,8 @@ crates/bongos_net/src/bongos_net.rs zed.industries
 crates/reqwest_client/src/reqwest_client.rs zed.dev
 
 # telemetry and minidump upload: step 17
-crates/client/src/telemetry.rs MINIDUMP_ENDPOINT
 crates/telemetry_events/src/telemetry_events.rs zed.dev
 crates/telemetry/src/telemetry.rs zed.dev
-crates/bongos/src/reliability.rs MINIDUMP_ENDPOINT
 
 # onboarding and feedback: step 19 (status.zed.dev link in zed.rs is a browser link and also stays)
 crates/ai_onboarding/src/young_account_banner.rs zed.dev

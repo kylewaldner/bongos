@@ -2148,7 +2148,6 @@ dependencies = [
  "copilot",
  "copilot_chat",
  "copilot_ui",
- "crashes",
  "csv_preview",
  "dap_adapters",
  "db",
