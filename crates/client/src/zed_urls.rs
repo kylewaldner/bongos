@@ -74,10 +74,6 @@ pub fn acp_registry_blog(_cx: &App) -> String {
     "https://zed.dev/blog/acp-registry".to_string()
 }
 
-pub fn shared_agent_thread_url(session_id: &str) -> String {
-    format!("zed://agent/shared/{}", session_id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
