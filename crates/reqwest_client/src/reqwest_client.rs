@@ -301,34 +301,49 @@ mod tests {
 
     use crate::ReqwestClient;
 
-    #[test]
-    fn test_redirect_to_blocked_host_is_refused() {
+    /// Serves one request on `listener` with the raw `response`, after reading the request headers.
+    fn serve_once(
+        listener: std::net::TcpListener,
+        response: String,
+    ) -> std::thread::JoinHandle<()> {
         use std::io::{Read, Write};
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
             let mut buffer = [0u8; 1024];
-            stream.read(&mut buffer).unwrap();
-            stream
-                .write_all(
-                    b"HTTP/1.1 302 Found\r\nLocation: http://zed.dev/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .unwrap();
-        });
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+        })
+    }
 
+    fn get(url: &str) -> anyhow::Result<http_client::Response<http_client::AsyncBody>> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let _guard = runtime.enter();
         let client = ReqwestClient::new();
-        let result = runtime.block_on(client.get(
-            &format!("http://{address}/"),
-            http_client::AsyncBody::empty(),
-            true,
-        ));
+        runtime.block_on(client.get(url, http_client::AsyncBody::empty(), true))
+    }
+
+    #[test]
+    fn test_redirect_to_blocked_host_is_refused() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = serve_once(
+            listener,
+            "HTTP/1.1 302 Found\r\nLocation: http://zed.dev/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+        );
+
+        let result = get(&format!("http://{address}/"));
         server.join().unwrap();
         let Err(error) = result else {
             panic!("redirect to zed.dev must fail");
@@ -337,6 +352,30 @@ mod tests {
             format!("{error:?}").contains("redirects to blocked hosts"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn test_redirect_to_allowed_loopback_host_succeeds() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_server = serve_once(
+            target,
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+        );
+        let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let origin_server = serve_once(
+            origin,
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        );
+
+        let result = get(&format!("http://{origin_address}/"));
+        origin_server.join().unwrap();
+        target_server.join().unwrap();
+        let response = result.unwrap();
+        assert!(response.status().is_success(), "{:?}", response.status());
     }
 
     #[test]
