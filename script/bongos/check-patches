@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compares the files that differ from upstream with UPSTREAM-PATCHES.md, both ways.
 # Every changed upstream file needs a row, and every row must match a changed file. New files must be
-# under crates/bongos_*, script/bongos/, plans/, .claude/, or be one of our root files.
+# under crates/bongos_*, script/bongos/, or be one of our root files.
 # Compares the working tree (tracked changes and untracked files), so it works before a commit.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,8 +20,8 @@ changes=$({ git diff --name-status --no-renames "$base"; git ls-files --others -
 CHANGES="$changes" python3 -I - "$list" <<'PY'
 import os, re, sys
 
-OUR_ROOT_FILES = {"UPSTREAM", "UPSTREAM-PATCHES.md", "DISCOVERY.md", "EMACS-FEATURES.md"}
-OUR_PREFIXES = ("script/bongos/", "plans/", ".claude/")
+OUR_ROOT_FILES = {"UPSTREAM", "UPSTREAM-PATCHES.md"}
+OUR_PREFIXES = ("script/bongos/",)
 
 def expand(p):
     m = re.search(r"\{([^{}]*)\}", p)

@@ -1,15 +1,12 @@
 # Bongos
 
-Bongos is an Emacs-shaped Kotlin IDE and a hard fork of Zed, licensed GPL-3.0-or-later (see `plans/index.md` decisions 17 and 18). Zed's code in this repository is ours to delete, rename and rewrite.
+Bongos is an Emacs-shaped Kotlin IDE and a hard fork of Zed, licensed GPL-3.0-or-later. Zed's code in this repository is ours to delete, rename and rewrite.
 
-- To resume work, run the `bongos-continue` skill. To build features, run the `bongos-ship` skill.
-- Plans live in `plans/`. `plans/STATE.md` is the hand-off note.
 - The harness scripts are in `script/bongos/`. Use them instead of raw cargo, and run `. script/bongos/env.sh` first.
 - Never run a Zed or bongos binary with the real `HOME`.
-- Every `gh` command names `--repo kylewaldner02/bongos`.
+- Every `gh` command names `--repo kylewaldner/bongos`.
 - Commit messages are lowercase plain English with no prefix, no trailing period, and no `Co-Authored-By` or AI trailer.
 - Stage specific files, never `git add -A`.
-- Delegate through the `model-routing` skill.
 
 # Rust coding guidelines
 
