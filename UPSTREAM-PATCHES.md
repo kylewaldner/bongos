@@ -3,7 +3,7 @@
 Every file that differs from upstream Zed, as of the commit in `UPSTREAM`. `script/bongos/check-patches`
 compares this table with `git diff` against that commit, both ways: a changed upstream file with no row
 fails, and a row that matches no changed file fails. Files that bongos adds under `crates/bongos_*`,
-`script/bongos/`, `plans/`, `.claude/` and a few root files are ours and need no row.
+`script/bongos/` and a few root files are ours and need no row.
 
 A step that patches an upstream file adds its row in the same commit. The first column takes
 backticked paths, `dir/**` for a whole tree and `{a,b}` for alternatives.
@@ -27,3 +27,7 @@ backticked paths, `dir/**` for a whole tree and `{a,b}` for alternatives.
 | `crates/agent/src/tools/{edit_file_tool,list_directory_tool,grep_tool,read_file_tool}.rs` | test fixtures | `.zed` fixtures become `.bongos`, as the agent's local-settings protection reads `paths::local_settings_folder_name()` |
 | `crates/agent/src/tests/mod.rs` | test fixtures | Same: `.zed` fixture in one edit-tool test becomes `.bongos` |
 | `crates/zed/src/zed.rs` | test fixtures | `.zed` fixtures in `test_opening_project_settings_when_excluded` become `.bongos` |
+| `.rules` | deleted | bongos CLAUDE.md replaces Zed's agent instructions (feature 01 step 8) |
+| `AGENTS.md` | deleted | bongos CLAUDE.md replaces Zed's agent instructions (feature 01 step 8) |
+| `GEMINI.md` | deleted | bongos CLAUDE.md replaces Zed's agent instructions (feature 01 step 8) |
+| `CLAUDE.md` | symlink replaced by a real file | bongos CLAUDE.md replaces Zed's agent instructions (feature 01 step 8) |

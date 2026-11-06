@@ -149,6 +149,27 @@ else
   fail "could not create tag $ref"
 fi
 
+# gh picks the default repository from the remotes; with upstream added it can pick Zed. Pin it to origin's repo.
+gh_repo=kylewaldner/bongos
+origin_url=$(git remote get-url origin 2>/dev/null)
+case "$origin_url" in
+  git@github.com:kylewaldner/bongos|git@github.com:kylewaldner/bongos.git|https://github.com/kylewaldner/bongos|https://github.com/kylewaldner/bongos.git|ssh://git@github.com/kylewaldner/bongos|ssh://git@github.com/kylewaldner/bongos.git)
+    if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+      warn "gh default repository not checked; gh is missing or not logged in"
+    else
+      gh repo set-default "$gh_repo" >/dev/null 2>&1
+      if [ "$(gh repo set-default --view 2>/dev/null)" = "$gh_repo" ]; then
+        ok "gh default repository is $gh_repo"
+      else
+        fail "gh default repository is not $gh_repo; fix: gh repo set-default $gh_repo"
+      fi
+    fi
+    ;;
+  *)
+    warn "gh default repository not set; origin is $origin_url, not $gh_repo"
+    ;;
+esac
+
 echo "jobs: CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS, memory cap $(( $(mem_total_kb) * 9 / 10 / 1024 / 1024 )) GB"
 if [ "$fails" -gt 0 ]; then
   echo "setup-machine: $fails check(s) failed"
