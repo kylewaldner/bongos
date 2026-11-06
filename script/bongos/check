@@ -32,6 +32,8 @@ run_check licenses "$BONGOS_ROOT/script/check-licenses"
 
 run_check license-fields "$here/check-license-fields"
 
+run_check notice "$here/check-notice"
+
 no_github() {
   if [ -e .github ] || [ -n "$(git ls-files .github)" ]; then
     echo "bongos: .github must not exist; upstream workflows must not run here"
