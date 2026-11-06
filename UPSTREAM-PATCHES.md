@@ -3,7 +3,7 @@
 Every file that differs from upstream Zed, as of the commit in `UPSTREAM`. `script/bongos/check-patches`
 compares this table with `git diff` against that commit, both ways: a changed upstream file with no row
 fails, and a row that matches no changed file fails. Files that bongos adds under `crates/bongos_*`,
-`script/bongos/`, `plans/`, `.claude/` and a few root files are ours and need no row.
+`script/bongos/` and a few root files are ours and need no row.
 
 A step that patches an upstream file adds its row in the same commit. The first column takes
 backticked paths, `dir/**` for a whole tree and `{a,b}` for alternatives.
