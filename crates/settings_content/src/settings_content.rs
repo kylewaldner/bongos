@@ -512,15 +512,15 @@ impl From<Option<String>> for AudioOutputDeviceName {
     }
 }
 
-/// Control what info is collected by Zed.
+/// Bongos sends no telemetry or crash reports.
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Debug, MergeFrom)]
 pub struct TelemetrySettingsContent {
-    /// Send debug info like crash reports.
+    /// Inert. Bongos sends no crash reports or debug info.
     ///
     /// Default: true
     pub diagnostics: Option<bool>,
-    /// Send anonymized usage data like what languages you're using Zed with.
+    /// Inert. Bongos sends no usage data.
     ///
     /// Default: true
     pub metrics: Option<bool>,

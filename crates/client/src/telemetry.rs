@@ -832,6 +832,13 @@ mod tests {
                 }));
             }
         });
+        assert!(
+            telemetry
+                .queued_events()
+                .iter()
+                .all(|event| event.event_type != "Test Event"),
+            "telemetry::event! must not enqueue events"
+        );
         executor.run_until_parked();
         telemetry.flush_events().await;
         executor.run_until_parked();
