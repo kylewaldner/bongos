@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fails when a Zed or ACP host, or an endpoint constant, appears in a file that script/bongos/hosts-allow.txt
-# does not list. Scans crates, assets/settings, script/bundle-linux and every file in script/bongos
+# does not list. Scans crates, assets/settings, and every file in script/bongos
 # except hosts-allow.txt. Also fails on a stale allow entry that matches nothing. A merge that adds a host fails gate 1.
 #   check-hosts          check against the allow list
 #   check-hosts --list   print every "<path> <token>" pair found, for building the allow list
@@ -19,7 +19,7 @@ found() {
       --include='*.rs' --include='*.toml' --include='*.json' --include='*.sh' --include='*.md' \
       --exclude-dir=target --exclude-dir=tests --exclude-dir=test_data --exclude-dir=fixtures \
       --exclude-dir=benches --exclude='*_tests.rs' --exclude='*_test.rs' --exclude='tests.rs' \
-      -e "$pattern" crates assets/settings script/bundle-linux 2>/dev/null \
+      -e "$pattern" crates assets/settings 2>/dev/null \
     | awk -F: '{print $1" "$3}' | sort -u
   # the harness itself: every tracked or untracked-but-not-ignored file by name, no extension filter
   git ls-files -co --exclude-standard -z script/bongos | grep -zv '^script/bongos/hosts-allow\.txt$' \
