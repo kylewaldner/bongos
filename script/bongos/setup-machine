@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Check this machine can build and test bongos, and do the safe repository setup. Never uses sudo:
+# for missing packages it prints one install command. Exits non-zero if any check fails.
+set -uo pipefail
+here="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh" || exit 1
+. "$here/lib.sh"
+cd "$BONGOS_ROOT" || exit 1
+
+fails=0
+ok() { echo "OK   $1"; }
+warn() { echo "WARN $1"; }
+fail() { echo "FAIL $1"; fails=$((fails + 1)); }
+
+# Distro family from /etc/os-release.
+fam=""
+# shellcheck disable=SC1091
+. /etc/os-release 2>/dev/null || true
+case " ${ID:-} ${ID_LIKE:-} " in
+  *" arch "*) fam=arch ;;
+  *" debian "*|*" ubuntu "*) fam=debian ;;
+esac
+
+# Packages: script/linux's list for the family, plus what the harness runs.
+if [ "$fam" = arch ]; then
+  pkgs=(gcc clang musl cmake alsa-lib fontconfig glib2 libva wayland libgit2 libxcb libxkbcommon-x11
+    openssl zstd pkgconf sqlite pipewire xdg-desktop-portal jq git curl make python
+    xorg-server-xvfb xdotool imagemagick bubblewrap strace vulkan-icd-loader vulkan-swrast
+    lld llvm github-cli)
+  have_pkg() { pacman -T "$1" >/dev/null 2>&1; }
+  install_cmd() { echo "sudo pacman -S --needed $*"; }
+elif [ "$fam" = debian ]; then
+  pkgs=(gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev
+    libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld
+    llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential
+    pipewire xdg-desktop-portal pkg-config python3 xvfb xdotool imagemagick bubblewrap strace
+    mesa-vulkan-drivers gh)
+  have_pkg() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q '^install ok installed'; }
+  install_cmd() { echo "sudo apt install $*"; }
+else
+  fail "distro: ${PRETTY_NAME:-unknown} is neither Arch nor Debian family; package checks skipped"
+fi
+
+if [ -n "$fam" ]; then
+  missing=()
+  for p in "${pkgs[@]}"; do
+    # gh may be installed outside the package manager, for example in $BONGOS_WORKSPACE/bin.
+    case "$p" in gh|github-cli) command -v gh >/dev/null 2>&1 && continue ;; esac
+    have_pkg "$p" || missing+=("$p")
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    ok "packages ($fam, ${#pkgs[@]} checked)"
+  else
+    fail "packages: ${#missing[@]} missing: ${missing[*]}"
+    echo "     $(install_cmd "${missing[@]}")"
+  fi
+fi
+
+if command -v rustup >/dev/null 2>&1; then
+  ok "rustup ($(command -v rustup))"
+else
+  fail "rustup not found; install it (sudo pacman -S --needed rustup, or https://rustup.rs)"
+fi
+
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  ok "gh auth status"
+else
+  fail "gh is missing or not logged in; run gh auth login"
+fi
+
+for k in user.name user.email; do
+  if [ -n "$(git config "$k")" ]; then ok "git config $k"; else fail "git config $k is empty; git config --global $k <value>"; fi
+done
+
+if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15" timeout 40 git ls-remote --exit-code origin HEAD >/dev/null 2>&1; then
+  ok "ssh access to origin ($(git remote get-url origin))"
+else
+  fail "cannot reach origin over ssh without a prompt; check ssh keys and ~/.ssh/known_hosts for github.com"
+fi
+
+avail_kb=$(df --output=avail -k "$BONGOS_WORKSPACE" | tail -n1 | tr -d ' ')
+avail_gb=$((avail_kb / 1024 / 1024))
+if [ "$avail_gb" -lt 60 ]; then
+  fail "workspace space: ${avail_gb} GB free in $BONGOS_WORKSPACE; need at least 60 GB"
+elif [ "$avail_gb" -lt 150 ]; then
+  warn "workspace space: ${avail_gb} GB free in $BONGOS_WORKSPACE; 150 GB or more is comfortable"
+else
+  ok "workspace space: ${avail_gb} GB free in $BONGOS_WORKSPACE"
+fi
+
+if command -v bwrap >/dev/null 2>&1 && bwrap --dev-bind / / --unshare-net true >/dev/null 2>&1; then
+  ok "bwrap --unshare-net works"
+else
+  fail "bwrap is missing, or unprivileged user namespaces are disabled (check kernel.unprivileged_userns_clone and AppArmor)"
+fi
+
+# Xvfb on a free display, never :0 and never one that exists.
+if command -v Xvfb >/dev/null 2>&1; then
+  n=""
+  for c in $(seq 110 140); do
+    if [ ! -e "/tmp/.X11-unix/X$c" ] && [ ! -e "/tmp/.X$c-lock" ]; then n=$c; break; fi
+  done
+  if [ -z "$n" ]; then
+    fail "Xvfb: no free display between :110 and :140"
+  else
+    Xvfb ":$n" -screen 0 1280x800x24 -ac -nolisten tcp -extension Composite >"$TMPDIR/setup-xvfb.out" 2>&1 &
+    xpid=$!
+    up=""
+    for _ in $(seq 50); do
+      [ -S "/tmp/.X11-unix/X$n" ] && { up=1; break; }
+      kill -0 "$xpid" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill "$xpid" 2>/dev/null
+    wait "$xpid" 2>/dev/null
+    if [ -n "$up" ]; then ok "Xvfb starts on :$n"; else fail "Xvfb did not start on :$n; see $TMPDIR/setup-xvfb.out"; fi
+  fi
+else
+  fail "Xvfb is not installed"
+fi
+
+if icd=$(find_lvp_icd 2>&1); then ok "software Vulkan driver $icd"; else fail "${icd//$'\n'/ }"; fi
+
+if systemd-run --user --scope -q -p MemoryMax=1G true >/dev/null 2>&1; then
+  ok "systemd memory scope works"
+else
+  warn "systemd user scope unavailable; cargo will run without a memory cap"
+fi
+
+# Repository setup: safe and idempotent.
+if git remote get-url upstream >/dev/null 2>&1; then
+  ok "remote upstream ($(git remote get-url upstream))"
+elif git remote add upstream https://github.com/zed-industries/zed.git; then
+  ok "remote upstream added"
+else
+  fail "could not add remote upstream"
+fi
+
+utag=$(sed -n 's/^tag=//p' UPSTREAM)
+ucommit=$(sed -n 's/^commit=//p' UPSTREAM)
+ref="upstream/$utag"
+if ! git cat-file -e "$ucommit^{commit}" 2>/dev/null; then
+  fail "tag $ref: commit $ucommit from UPSTREAM is not in this clone's history"
+elif have=$(git rev-parse -q --verify "refs/tags/$ref^{commit}"); then
+  if [ "$have" = "$ucommit" ]; then ok "tag $ref at $ucommit"; else fail "tag $ref points at $have, not $ucommit; leaving it alone"; fi
+elif git tag "$ref" "$ucommit"; then
+  ok "tag $ref created at $ucommit"
+else
+  fail "could not create tag $ref"
+fi
+
+echo "jobs: CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS, memory cap $(( $(mem_total_kb) * 9 / 10 / 1024 / 1024 )) GB"
+if [ "$fails" -gt 0 ]; then
+  echo "setup-machine: $fails check(s) failed"
+  exit 1
+fi
+echo "setup-machine: all checks passed"

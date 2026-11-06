@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Gate 1: format, clippy on changed crates, hosts, patch list, no .github, no webrtc (from step 15).
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+
+# Set to 1 in step 15, when webrtc and livekit leave the build. Until then the tree rule below is off.
+BONGOS_CHECK_NO_WEBRTC=${BONGOS_CHECK_NO_WEBRTC:-0}
+
+echo "check: cargo fmt"
+cargo fmt --all -- --check
+
+crates=()
+while IFS= read -r c; do
+  [ -n "$c" ] && crates+=(-p "$c")
+done < <(changed_crates)
+if [ "${#crates[@]}" -gt 0 ]; then
+  echo "check: clippy ${crates[*]}"
+  require_space
+  cargo_limited clippy "${crates[@]}" --all-targets --locked -- --deny warnings
+else
+  echo "check: no changed crates, skipping clippy"
+fi
+
+echo "check: hosts"
+"$here/check-hosts"
+
+echo "check: patch list"
+"$here/check-patches"
+
+echo "check: no .github"
+if [ -e .github ] || [ -n "$(git ls-files .github)" ]; then
+  echo "bongos: .github must not exist; upstream workflows must not run here" >&2
+  exit 1
+fi
+
+if [ "$BONGOS_CHECK_NO_WEBRTC" = 1 ]; then
+  echo "check: no webrtc or livekit"
+  if cargo tree -p zed --edges normal,build --locked | grep -E 'webrtc|livekit'; then
+    echo "bongos: webrtc or livekit is still in the zed build" >&2
+    exit 1
+  fi
+fi
+
+echo "check: ok"

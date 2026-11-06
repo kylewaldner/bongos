@@ -1,0 +1,117 @@
+# Hosts allowed in the source, as '<path> <host>' pairs. Anything else found by script/bongos/check-hosts fails gate 1.
+# Regenerate candidates with: script/bongos/check-hosts --list. Add an entry only with a reason.
+
+# Upstream endpoints that bongos removes, stubs or blocks. Entries go when the step lands; the host guard (step 10) blocks them meanwhile.
+# RPC, api and cloud hosts: step 10 (guard), step 14 (sign-in), step 15 (cloud client)
+crates/client/src/client.rs zed.dev
+crates/client/src/zed_urls.rs zed.dev
+crates/http_client/src/http_client.rs api-staging.zed.dev
+crates/http_client/src/http_client.rs api.zed.dev
+crates/http_client/src/http_client.rs cloud.zed.dev
+crates/http_client/src/http_client.rs llm-staging.zed.dev
+crates/http_client/src/http_client.rs staging.zed.dev
+crates/http_client/src/http_client.rs zed.dev
+
+# server_url default, made .invalid in step 10
+assets/settings/default.json zed.dev
+
+# telemetry and minidump upload: step 11
+crates/client/src/telemetry.rs MINIDUMP_ENDPOINT
+crates/telemetry_events/src/telemetry_events.rs zed.dev
+crates/telemetry/src/telemetry.rs zed.dev
+crates/zed/src/reliability.rs MINIDUMP_ENDPOINT
+
+# onboarding and welcome: step 13 (status.zed.dev link in zed.rs is a browser link and also stays)
+crates/ai_onboarding/src/young_account_banner.rs zed.dev
+crates/onboarding/src/multibuffer_hint.rs zed.dev
+crates/onboarding/src/onboarding.rs zed.dev
+crates/zed/src/zed.rs status.zed.dev
+
+# collab, calls and rpc: the server crate is not built; the UI goes in step 15
+crates/collab/Cargo.toml zed.dev
+crates/collab/README.md collab.zed.dev
+crates/collab/README.md staging-collab.zed.dev
+crates/collab/README.md zed.dev
+crates/collab/src/lib.rs cloud.zed.dev
+crates/collab/src/lib.rs staging.zed.dev
+crates/collab/src/lib.rs zed.dev
+crates/collab_ui/src/collab_panel.rs zed.dev
+crates/proto/Cargo.toml zed.dev
+crates/rpc/Cargo.toml zed.dev
+crates/ui/src/components/collab/collab_notification.rs zed.dev
+
+# cloud AI, web search and edit prediction provider ids: step 16
+crates/editor/src/edit_prediction.rs zed.dev
+crates/edit_prediction/src/zeta.rs zed.dev
+crates/edit_prediction_ui/src/edit_prediction_button.rs zed.dev
+crates/language_model_core/src/provider.rs zed.dev
+crates/language_models_cloud/src/language_models_cloud.rs zed.dev
+crates/language_model/src/registry.rs zed.dev
+crates/settings_content/src/agent.rs zed.dev
+crates/settings_content/src/language_model.rs zed.dev
+crates/web_search_providers/src/cloud.rs zed.dev
+
+# feedback, marketplace and settings page entries: steps 12, 13 and 16
+crates/extensions_ui/src/extensions_ui.rs zed.dev
+crates/feedback/src/feedback.rs zed.dev
+crates/settings_ui/src/page_data.rs zed.dev
+
+# Stays: documented in the EDD (Hosts table).
+# CIMD_URL is an id sent to OAuth servers; bongos does not fetch it (Risk 7)
+crates/context_server/src/oauth.rs CIMD_URL
+crates/context_server/src/oauth.rs zed.dev
+
+# ACP registry and docs link (Question 2)
+crates/agent_ui/src/agent_configuration.rs agentclientprotocol.com
+crates/project/src/agent_registry_store.rs cdn.agentclientprotocol.com
+crates/settings_ui/src/pages/external_agents_page.rs agentclientprotocol.com
+
+# Stays: a link that opens the user's browser, a docs or comment string, an author email, or a test string. None is a bongos request.
+# browser, docs, comment or test string
+assets/settings/initial_debug_tasks.json zed.dev
+assets/settings/initial_local_debug_tasks.json zed.dev
+assets/settings/initial_local_settings.json zed.dev
+assets/settings/initial_server_settings.json zed.dev
+assets/settings/initial_tasks.json zed.dev
+assets/settings/initial_user_settings.json zed.dev
+crates/agent_ui/src/ui/mention_crease.rs zed.dev
+crates/cli/src/main.rs zed.dev
+crates/cloud_api_client/src/cloud_api_client.rs cloud.zed.dev
+crates/debugger_ui/src/debugger_panel.rs zed.dev
+crates/editor/src/hover_links.rs zed.dev
+crates/extension_api/src/extension_api.rs zed.dev
+crates/git/src/repository.rs zed.dev
+crates/gpui/Cargo.toml zed.dev
+crates/gpui/README.md zed.dev
+crates/install_cli/src/install_cli_binary.rs zed.dev
+crates/language_models/src/provider/open_ai.rs zed.dev
+crates/language_onboarding/src/python.rs zed.dev
+crates/language_tools/src/key_context_view.rs zed.dev
+crates/markdown/src/parser.rs zed.dev
+crates/migrator/src/migrator.rs zed.dev
+crates/multi_buffer/src/multi_buffer.rs zed.dev
+crates/open_router/src/open_router.rs zed.dev
+crates/project/src/project.rs zed.dev
+crates/recent_projects/src/remote_servers.rs zed.dev
+crates/release_channel/src/lib.rs zed.dev
+crates/remote/src/transport.rs zed.dev
+crates/remote/src/transport/ssh.rs zed.dev
+crates/repl/src/repl.rs zed.dev
+crates/repl/src/repl_sessions_ui.rs zed.dev
+crates/sandbox/src/sandbox.rs zed.dev
+crates/settings/src/keymap_file.rs zed.dev
+crates/terminal/src/terminal.rs zed.dev
+crates/theme_importer/src/main.rs zed.dev
+crates/theme_selector/src/icon_theme_selector.rs zed.dev
+crates/theme_selector/src/theme_selector.rs zed.dev
+crates/ui/src/components/button/button_link.rs zed.dev
+crates/ui/src/components/list/list_bullet_item.rs zed.dev
+crates/util/src/paths.rs zed.dev
+crates/workspace/src/notifications.rs zed.dev
+crates/workspace/src/workspace_error.rs zed.dev
+crates/workspace/src/workspace.rs zed.dev
+crates/zed/Cargo.toml zed.dev
+crates/zed/src/main.rs zed.dev
+crates/zed/src/zed/app_menus.rs zed.dev
+crates/zed/src/zed/quick_action_bar/repl_menu.rs zed.dev
+crates/zed/src/zed.rs zed.dev

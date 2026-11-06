@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Build the stock upstream app (the negative control for smoke) from the tag in a separate worktree,
+# and save it to $BONGOS_WORKSPACE/scratch/stock-zed/zed. Skips if that binary exists.
+#   stock-build [--force]
+# This script never runs the binary. Run it only with a throwaway HOME (BONGOS_STOCK=1 smoke does).
+set -euo pipefail
+here="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+
+force=0
+case "${1:-}" in
+  "") ;;
+  --force) force=1 ;;
+  *) echo "usage: stock-build [--force]" >&2; exit 2 ;;
+esac
+
+out="$BONGOS_WORKSPACE/scratch/stock-zed/zed"
+if [ -x "$out" ] && [ "$force" = 0 ]; then
+  echo "stock-build: $out exists; skipping (use --force to rebuild)"
+  exit 0
+fi
+
+tag="upstream/$(sed -n 's/^tag=//p' "$BONGOS_ROOT/UPSTREAM")"
+wt="$BONGOS_WORKSPACE/scratch/zed-ref"
+if ! git -C "$BONGOS_ROOT" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null; then
+  echo "bongos: tag $tag is missing; run script/bongos/setup-machine" >&2
+  exit 1
+fi
+if [ ! -e "$wt/.git" ]; then
+  mkdir -p "$(dirname "$wt")"
+  git -C "$BONGOS_ROOT" worktree add --detach "$wt" "refs/tags/$tag"
+fi
+
+require_space
+cd "$wt"
+cargo_limited build -p zed --locked
+mkdir -p "$(dirname "$out")"
+cp "$CARGO_TARGET_DIR/debug/zed" "$out.new"
+mv "$out.new" "$out"
+echo "stock-build: saved $out"

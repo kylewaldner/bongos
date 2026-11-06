@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Gate 4: run the real app in Xvfb with lavapipe, in a network namespace whose only exit is a
+# logging proxy. `smoke [feature]` also runs scenarios/<feature>.sh.
+# BONGOS_REAL_GPU=1 uses the real GPU instead of lavapipe; the Selected GPU line is printed either way.
+# BONGOS_STOCK=1 runs the stock binary: no version or bongos-name checks, and Zed hosts are required.
+set -euo pipefail
+here="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+
+if [ -z "${BONGOS_IN_SANDBOX:-}" ]; then
+  # Masking the real home means no bug here can touch real config. The workspace and the repository
+  # are bound back when they live under it (a desktop with everything in $HOME). --unshare-pid means
+  # that killing this script takes Xvfb, the proxy and the app with it, trap or no trap.
+  mask=(--tmpfs "$HOME")
+  for p in "$BONGOS_WORKSPACE" "$BONGOS_ROOT"; do
+    case "$p/" in "$HOME"/*) mask+=(--bind "$p" "$p") ;; esac
+  done
+  # Fail before the sandbox if the software Vulkan driver is missing.
+  [ "${BONGOS_REAL_GPU:-}" = 1 ] || find_lvp_icd >/dev/null
+  command -v bwrap >/dev/null || { echo "bongos: bwrap is not installed; run script/bongos/setup-machine" >&2; exit 1; }
+  exec bwrap --dev-bind / / --tmpfs /tmp --proc /proc "${mask[@]}" --chdir "$BONGOS_ROOT" \
+    --unshare-net --unshare-pid --new-session --die-with-parent \
+    --setenv BONGOS_IN_SANDBOX 1 -- "$here/smoke" "$@"
+fi
+
+if [ "$(wc -l </proc/net/route)" -gt 1 ]; then
+  echo "bongos: the sandbox has a network route; refusing to run" >&2
+  exit 1
+fi
+
+feature=${1:-}
+stock=${BONGOS_STOCK:-}
+RUN="$BONGOS_WORKSPACE/scratch/smoke/$(date +%Y%m%d-%H%M%S)${stock:+-stock}"
+mkdir -p "$RUN"
+sandbox_env
+
+APP_PID="" PROXY_PID="" XVFB_PID=""
+cleanup() {
+  local rc=$? pid
+  trap - EXIT
+  if [ "$rc" != 0 ] && [ -n "$XVFB_PID" ]; then
+    shot failure 2>/dev/null || true
+  fi
+  for pid in "$APP_PID" "$PROXY_PID" "$XVFB_PID"; do
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  wait 2>/dev/null || true
+  if [ "$rc" != 0 ]; then
+    echo "bongos: smoke FAILED (exit $rc); output in $RUN" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+step() { echo "bongos: smoke: $*"; }
+
+if [ ! -x "$BONGOS_BIN" ]; then
+  echo "bongos: no binary at $BONGOS_BIN" >&2
+  exit 1
+fi
+
+# TEMPORARY (steps 5 to 7): BONGOS_SKIP_VERSION=1 skips only the version check; step 8 removes it.
+if [ -z "$stock" ] && [ -n "${BONGOS_SKIP_VERSION:-}" ]; then
+  echo "bongos: smoke: SKIPPING version check (BONGOS_SKIP_VERSION)" >&2
+elif [ -z "$stock" ]; then
+  step "1 version"
+  version=$("$BONGOS_BIN" --version 2>&1 || true)
+  tag=$(sed -n 's/^tag=//p' "$BONGOS_ROOT/UPSTREAM" 2>/dev/null || true)
+  if ! grep -qE '^bongos [0-9.]+ \(based on zed v[0-9.]+, upstream commit [0-9a-f]{7}\)$' <<<"$version" ||
+    ! grep -qF "based on zed ${tag:-no UPSTREAM file}," <<<"$version"; then
+    echo "bongos: bad version line: $version" >&2
+    exit 1
+  fi
+fi
+
+cp -r "$BONGOS_ROOT/script/bongos/fixtures/hello" "$RUN/project"
+git -C "$RUN/project" init -q
+seed_settings
+start_display
+start_proxy
+
+step "2 launch"
+launch "$RUN/project"
+wait_for_window
+wait_for_title "$BONGOS_TITLE"
+assert_file "$HOME/$BONGOS_LOG_PATH" 'Selected GPU'
+grep -h 'Selected GPU' "$HOME/$BONGOS_LOG_PATH" | head -n1 | sed 's/^/bongos: smoke: /'
+poll 60 "a rendered frame" ui_rendered
+wait_for_settled
+
+step "3 file finder"
+act keys ctrl+p
+act type_text Main.kt
+keys Return
+wait_for_title 'Main\.kt'
+
+step "4 edit and save"
+keys ctrl+End
+type_text '// smoke'
+keys ctrl+s
+assert_file "$RUN/project/Main.kt" '// smoke'
+
+step "5 split"
+act keys ctrl+backslash
+shot split
+
+step "6 terminal"
+act keys ctrl+grave
+wait_for_terminal
+type_text 'pwd > terminal-ok.txt'
+keys Return
+assert_file "$RUN/project/terminal-ok.txt" "^$RUN/project\$"
+
+step "7 quit"
+if [ -n "$stock" ]; then
+  assert_zed_hosts
+fi
+quit_app
+if [ -z "$stock" ]; then
+  # TEMPORARY: bongos_app creates these on first launch in step 18, which removes this switch.
+  if [ -z "${BONGOS_SKIP_FIRST_LAUNCH_CONFIG:-}" ]; then
+    assert_file "$HOME/$BONGOS_CONFIG_PATH/settings.json"
+    assert_file "$HOME/$BONGOS_CONFIG_PATH/keymap.json"
+  else
+    echo "bongos: smoke: SKIPPING settings.json and keymap.json check (BONGOS_SKIP_FIRST_LAUNCH_CONFIG)" >&2
+  fi
+  zed_paths=$(cd "$HOME" && find . -ipath '*zed*')
+  if [ -n "$zed_paths" ]; then
+    echo "bongos: zed paths in the throwaway home: $zed_paths" >&2
+    exit 1
+  fi
+fi
+
+step "8 restore"
+launch
+wait_for_window
+wait_for_title 'Main\.kt'
+poll 60 "a rendered frame" ui_rendered
+wait_for_settled
+shot final
+quit_app
+
+step "9 hosts"
+assert_no_zed_hosts
+sort -u "$RUN/proxy.log" | sed 's/^/bongos: proxy: /'
+
+if [ -n "$feature" ]; then
+  . "$BONGOS_ROOT/script/bongos/scenarios/$feature.sh"
+fi
+
+echo "bongos: smoke passed; final screenshot: $RUN/final.png"

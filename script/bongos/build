@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Gate 2: build the app and cli. Appends time and sizes to $BONGOS_WORKSPACE/scratch/build-times.log.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+
+require_space
+
+log="$BONGOS_WORKSPACE/scratch/build-times.log"
+out="$TMPDIR/build.out"
+mkdir -p "$(dirname "$log")"
+start=$(date +%s)
+
+run_build() {
+  set +e
+  cargo_limited build -p zed -p cli --locked 2>&1 | tee "$out"
+  local rc=${PIPESTATUS[0]}
+  set -e
+  return "$rc"
+}
+
+jobs_used=$CARGO_BUILD_JOBS
+if ! run_build; then
+  if grep -qE 'SIGKILL|signal: 9|Killed|out of memory' "$out"; then
+    echo "bongos: build killed, probably by memory; retrying once at 3 jobs" >&2
+    export CARGO_BUILD_JOBS=3
+    jobs_used=3
+    run_build
+  else
+    exit 1
+  fi
+fi
+
+secs=$(( $(date +%s) - start ))
+size() { [ -e "$1" ] && du -b "$1" | cut -f1 || echo 0; }
+target_kb=$(du -sk "$CARGO_TARGET_DIR" | cut -f1)
+echo "$(date -Is) commit=$(git rev-parse --short HEAD) jobs=$jobs_used secs=$secs zed_bytes=$(size "$CARGO_TARGET_DIR/debug/bongos") cli_bytes=$(size "$CARGO_TARGET_DIR/debug/cli") target_kb=$target_kb" >> "$log"
+tail -n1 "$log"

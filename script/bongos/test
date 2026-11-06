@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Gate 3: unit and UI tests for the named crates, else the crates changed since upstream.
+#   test [crate...]       BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+
+crates=()
+if [ "$#" -gt 0 ]; then
+  for c in "$@"; do crates+=(-p "$c"); done
+else
+  while IFS= read -r c; do
+    [ -n "$c" ] && crates+=(-p "$c")
+  done < <(changed_crates)
+fi
+if [ "${#crates[@]}" -eq 0 ]; then
+  echo "test: no crates named and none changed since upstream; nothing to run"
+  exit 0
+fi
+
+require_space
+filter=()
+[ -n "${BONGOS_TEST_FILTER:-}" ] && filter=("$BONGOS_TEST_FILTER")
+
+# A package with only a binary, such as zed, has no library: --lib would fail with "no library
+# targets". Split the packages and run the binary-only ones with --bins --tests.
+meta=$(cargo metadata --no-deps --format-version 1 --locked)
+libs=() bins=()
+for ((i = 1; i < ${#crates[@]}; i += 2)); do
+  name=${crates[i]}
+  if printf '%s' "$meta" | python3 -I -c '
+import json, sys
+m = json.load(sys.stdin)
+for p in m["packages"]:
+    if p["name"] == sys.argv[1]:
+        sys.exit(0 if any(k in ("lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro")
+                          for t in p["targets"] for k in t["kind"]) else 1)
+sys.exit(2)
+' "$name"; then
+    libs+=(-p "$name")
+  else
+    rc=$?
+    if [ "$rc" = 2 ]; then echo "bongos: no package named $name" >&2; exit 1; fi
+    bins+=(-p "$name")
+  fi
+done
+if [ "${#libs[@]}" -gt 0 ]; then
+  cargo_limited test "${libs[@]}" --lib --bins --tests --locked ${filter[@]+"${filter[@]}"}
+fi
+if [ "${#bins[@]}" -gt 0 ]; then
+  cargo_limited test "${bins[@]}" --bins --tests --locked ${filter[@]+"${filter[@]}"}
+fi
