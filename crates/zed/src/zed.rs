@@ -2631,6 +2631,13 @@ mod tests {
     use super::*;
     use assets::Assets;
     use collections::HashSet;
+
+    #[test]
+    fn test_licenses_asset_is_embedded() {
+        let licenses = Assets::get("licenses.md").expect("licenses.md should be embedded");
+        assert!(!licenses.data.is_empty());
+    }
+
     use editor::{
         DisplayPoint, Editor, MultiBufferOffset, SelectionEffects, display_map::DisplayRow,
     };
