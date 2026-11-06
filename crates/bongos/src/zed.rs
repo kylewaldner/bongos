@@ -98,11 +98,10 @@ use workspace::{CloseIntent, CloseProject, CloseWindow, with_active_or_new_works
 use workspace::{Pane, notifications::DetachAndPromptErr};
 use zed_actions::{
     About, OpenAccountSettings, OpenBrowser, OpenDocs, OpenServerSettings, OpenSettingsFile,
-    OpenStatusPage, OpenZedUrl, Quit,
+    OpenZedUrl, Quit,
 };
 
 const DOCS_URL: &str = "https://zed.dev/docs/";
-const STATUS_URL: &str = "https://status.zed.dev";
 
 actions!(
     zed,
@@ -868,7 +867,6 @@ fn register_actions(
 ) {
     workspace
         .register_action(|_, _: &OpenDocs, _, cx| cx.open_url(DOCS_URL))
-        .register_action(|_, _: &OpenStatusPage, _, cx| cx.open_url(STATUS_URL))
         .register_action(
             |workspace: &mut Workspace,
              _: &input_latency_ui::DumpInputLatencyHistogram,

@@ -67,8 +67,6 @@ actions!(
         OpenDocs,
         /// Views open source licenses.
         OpenLicenses,
-        /// Opens the Zed status page.
-        OpenStatusPage,
         /// Opens the performance profiler.
         OpenPerformanceProfiler,
         /// Shows the auto-update notification for testing.

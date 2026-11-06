@@ -26,9 +26,8 @@ crates/reqwest_client/src/reqwest_client.rs zed.dev
 crates/telemetry_events/src/telemetry_events.rs zed.dev
 crates/telemetry/src/telemetry.rs zed.dev
 
-# onboarding and feedback: step 19 (status.zed.dev link in zed.rs is a browser link and also stays)
+# onboarding and feedback: step 19
 crates/ai_onboarding/src/young_account_banner.rs zed.dev
-crates/bongos/src/zed.rs status.zed.dev
 
 # collab, calls and rpc: the server crate is not built; the UI goes in steps 21 (collab) and 22 (calls)
 crates/collab_ui/src/collab_panel.rs zed.dev
