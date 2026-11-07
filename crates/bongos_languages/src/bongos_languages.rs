@@ -64,10 +64,6 @@ fn parse_config(source: &str) -> LanguageConfig {
     toml::from_str(source).expect("an embedded config.toml is valid")
 }
 
-fn kotlin_config() -> LanguageConfig {
-    parse_config(KOTLIN_CONFIG)
-}
-
 fn kotlin_queries() -> LanguageQueries {
     LanguageQueries {
         highlights: Some(include_str!("kotlin/highlights.scm").into()),
@@ -203,7 +199,7 @@ mod tests {
     fn highlight_query_captures_a_snippet() {
         let captured = captures(
             tree_sitter_kotlin::LANGUAGE,
-            kotlin_config(),
+            parse_config(KOTLIN_CONFIG),
             kotlin_queries(),
             include_str!("kotlin/highlights.scm"),
             SNIPPET,
