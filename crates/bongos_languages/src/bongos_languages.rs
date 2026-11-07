@@ -4,7 +4,12 @@
 //! (github.com/zed-extensions/kotlin, MIT, see `LICENSE-KOTLIN-EXTENSION`). The grammar is
 //! fwcd/tree-sitter-kotlin (MIT) at the commit that extension pins.
 //!
-//! Everything here is compiled into the binary: the grammar is linked in and the queries are embedded,
+//! The Java and TOML configs and queries in `src/java/` and `src/toml/` come from the Zed Java and TOML
+//! extensions (github.com/zed-extensions/java and github.com/zed-extensions/toml, Apache-2.0, see
+//! `LICENSE-JAVA-EXTENSION` and `LICENSE-TOML-EXTENSION`). The grammars are tree-sitter-java (MIT) and
+//! tree-sitter-toml-ng (MIT) from crates.io.
+//!
+//! Everything here is compiled into the binary: the grammars are linked in and the queries are embedded,
 //! so nothing is fetched at runtime.
 
 use std::sync::Arc;
@@ -12,15 +17,31 @@ use std::sync::Arc;
 use language::{LanguageConfig, LanguageQueries, LanguageRegistry, LoadedLanguage};
 
 const KOTLIN_CONFIG: &str = include_str!("kotlin/config.toml");
+const JAVA_CONFIG: &str = include_str!("java/config.toml");
+const TOML_CONFIG: &str = include_str!("toml/config.toml");
 
 /// Registers the built-in languages and their grammars with the registry.
 ///
-/// Registering a language under a name that is already registered replaces it, so a Kotlin
-/// language provided later by an extension never produces a second "Kotlin" entry.
+/// Registering a language under a name that is already registered replaces it, so a language
+/// provided later by an extension never produces a second entry with the same name.
 pub fn init(languages: &LanguageRegistry) {
-    languages.register_native_grammars([("kotlin", tree_sitter_kotlin::LANGUAGE)]);
+    languages.register_native_grammars([
+        ("kotlin", tree_sitter_kotlin::LANGUAGE),
+        ("java", tree_sitter_java::LANGUAGE),
+        ("toml", tree_sitter_toml_ng::LANGUAGE),
+    ]);
 
-    let config = kotlin_config();
+    register(languages, KOTLIN_CONFIG, kotlin_queries);
+    register(languages, JAVA_CONFIG, java_queries);
+    register(languages, TOML_CONFIG, toml_queries);
+}
+
+fn register(
+    languages: &LanguageRegistry,
+    config_source: &'static str,
+    queries: fn() -> LanguageQueries,
+) {
+    let config = parse_config(config_source);
     languages.register_language(
         config.name.clone(),
         config.grammar.clone(),
@@ -29,8 +50,8 @@ pub fn init(languages: &LanguageRegistry) {
         None,
         Arc::new(move || {
             Ok(LoadedLanguage {
-                config: kotlin_config(),
-                queries: kotlin_queries(),
+                config: parse_config(config_source),
+                queries: queries(),
                 context_provider: None,
                 toolchain_provider: None,
                 manifest_name: None,
@@ -39,8 +60,12 @@ pub fn init(languages: &LanguageRegistry) {
     );
 }
 
+fn parse_config(source: &str) -> LanguageConfig {
+    toml::from_str(source).expect("an embedded config.toml is valid")
+}
+
 fn kotlin_config() -> LanguageConfig {
-    toml::from_str(KOTLIN_CONFIG).expect("the embedded Kotlin config.toml is valid")
+    parse_config(KOTLIN_CONFIG)
 }
 
 fn kotlin_queries() -> LanguageQueries {
@@ -51,6 +76,30 @@ fn kotlin_queries() -> LanguageQueries {
         outline: Some(include_str!("kotlin/outline.scm").into()),
         injections: Some(include_str!("kotlin/injections.scm").into()),
         overrides: Some(include_str!("kotlin/overrides.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn java_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("java/highlights.scm").into()),
+        brackets: Some(include_str!("java/brackets.scm").into()),
+        indents: Some(include_str!("java/indents.scm").into()),
+        outline: Some(include_str!("java/outline.scm").into()),
+        injections: Some(include_str!("java/injections.scm").into()),
+        overrides: Some(include_str!("java/overrides.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn toml_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("toml/highlights.scm").into()),
+        brackets: Some(include_str!("toml/brackets.scm").into()),
+        indents: Some(include_str!("toml/indents.scm").into()),
+        outline: Some(include_str!("toml/outline.scm").into()),
+        injections: Some(include_str!("toml/injections.scm").into()),
+        overrides: Some(include_str!("toml/overrides.scm").into()),
         ..Default::default()
     }
 }
@@ -84,7 +133,7 @@ mod tests {
         }
         assert!(
             registry
-                .language_for_file_path(Path::new("Main.java"))
+                .language_for_file_path(Path::new("notes.txt"))
                 .is_none()
         );
 
@@ -105,45 +154,140 @@ mod tests {
         assert_eq!(kotlin, 1);
     }
 
-    #[test]
-    fn highlight_query_captures_a_snippet() {
-        let language = Language::new(kotlin_config(), Some(tree_sitter_kotlin::LANGUAGE.into()))
-            .with_queries(kotlin_queries())
-            .expect("every Kotlin query compiles against the grammar");
+    fn captures(
+        grammar: impl Into<tree_sitter::Language> + Copy,
+        config: LanguageConfig,
+        queries: LanguageQueries,
+        highlights: &str,
+        snippet: &str,
+    ) -> BTreeSet<(String, String)> {
+        let language = Language::new(config, Some(grammar.into()))
+            .with_queries(queries)
+            .expect("every query compiles against the grammar");
         assert!(language.grammar().is_some());
 
-        let ts_language: tree_sitter::Language = tree_sitter_kotlin::LANGUAGE.into();
+        let ts_language: tree_sitter::Language = grammar.into();
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&ts_language)
             .expect("the grammar ABI loads");
-        let tree = parser.parse(SNIPPET, None).unwrap();
+        let tree = parser.parse(snippet, None).unwrap();
         assert!(!tree.root_node().has_error());
 
-        let query = tree_sitter::Query::new(&ts_language, include_str!("kotlin/highlights.scm"))
-            .expect("highlights.scm compiles");
+        let query =
+            tree_sitter::Query::new(&ts_language, highlights).expect("highlights.scm compiles");
         let mut cursor = tree_sitter::QueryCursor::new();
         let mut captured = BTreeSet::new();
-        let mut matches = cursor.matches(&query, tree.root_node(), SNIPPET.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), snippet.as_bytes());
         while let Some(found) = matches.next() {
             for capture in found.captures {
                 let name = query.capture_names()[capture.index as usize].to_string();
-                captured.insert((name, &SNIPPET[capture.node.byte_range()]));
+                captured.insert((name, snippet[capture.node.byte_range()].to_string()));
             }
         }
-        for expected in [("keyword", "fun"), ("keyword", "val"), ("number", "1")] {
+        captured
+    }
+
+    fn assert_captured(captured: &BTreeSet<(String, String)>, expected: &[(&str, &str)]) {
+        for (prefix, text) in expected {
             assert!(
                 captured
                     .iter()
-                    .any(|(n, t)| n.starts_with(expected.0) && *t == expected.1),
-                "missing {expected:?} in {captured:?}"
+                    .any(|(name, found)| name.starts_with(prefix) && found == text),
+                "missing {prefix} {text:?} in {captured:?}"
             );
         }
+    }
+
+    #[test]
+    fn highlight_query_captures_a_snippet() {
+        let captured = captures(
+            tree_sitter_kotlin::LANGUAGE,
+            kotlin_config(),
+            kotlin_queries(),
+            include_str!("kotlin/highlights.scm"),
+            SNIPPET,
+        );
+        assert_captured(
+            &captured,
+            &[
+                ("keyword", "fun"),
+                ("keyword", "val"),
+                ("number", "1"),
+                ("function", "main"),
+            ],
+        );
+    }
+
+    #[gpui::test]
+    async fn java_selected_for_java_files(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        let available = registry
+            .language_for_file_path(Path::new("src/Main.java"))
+            .expect("no language for Main.java");
+        assert_eq!(available.name().as_ref(), "Java");
+
+        let language = registry.language_for_name("Java").await.unwrap();
+        assert!(language.grammar().is_some(), "Java loads with a grammar");
+    }
+
+    #[test]
+    fn java_highlight_query_captures_a_snippet() {
+        const JAVA_SNIPPET: &str = "public class Main { int count = 1; void run() { return; } }";
+        let captured = captures(
+            tree_sitter_java::LANGUAGE,
+            parse_config(JAVA_CONFIG),
+            java_queries(),
+            include_str!("java/highlights.scm"),
+            JAVA_SNIPPET,
+        );
+        assert_captured(
+            &captured,
+            &[
+                ("keyword", "class"),
+                ("keyword", "return"),
+                ("number", "1"),
+                ("function", "run"),
+                ("type", "Main"),
+            ],
+        );
+    }
+
+    #[gpui::test]
+    async fn toml_selected_for_toml_files(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        for path in ["Cargo.toml", "Cargo.lock", "a/b/pyproject.toml"] {
+            let available = registry
+                .language_for_file_path(Path::new(path))
+                .unwrap_or_else(|| panic!("no language for {path}"));
+            assert_eq!(available.name().as_ref(), "TOML", "{path}");
+        }
+
+        let language = registry.language_for_name("TOML").await.unwrap();
+        assert!(language.grammar().is_some(), "TOML loads with a grammar");
+    }
+
+    #[test]
+    fn toml_highlight_query_captures_a_snippet() {
+        const TOML_SNIPPET: &str = "[package]\nname = \"bongos\"\nversion = 1\n# note\n";
+        let captured = captures(
+            tree_sitter_toml_ng::LANGUAGE,
+            parse_config(TOML_CONFIG),
+            toml_queries(),
+            include_str!("toml/highlights.scm"),
+            TOML_SNIPPET,
+        );
+        assert_captured(
+            &captured,
+            &[
+                ("string", "\"bongos\""),
+                ("number", "1"),
+                ("comment", "# note"),
+            ],
+        );
         assert!(
-            captured
-                .iter()
-                .any(|(n, t)| n.starts_with("function") && *t == "main"),
-            "missing function capture for main in {captured:?}"
+            captured.iter().any(|(name, _)| name == "property"),
+            "missing property capture in {captured:?}"
         );
     }
 }
