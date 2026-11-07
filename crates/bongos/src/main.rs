@@ -269,27 +269,7 @@ fn main() {
         }
     }
 
-    let file_errors = init_paths();
-    if !file_errors.is_empty() {
-        files_not_created_on_launch(file_errors);
-        return;
-    }
-
-    bongos_app::ensure_config_files();
-
-    zlog::init();
-
-    if stdout_is_a_pty() {
-        zlog::init_output_stdout();
-    } else {
-        let result = zlog::init_output_file(paths::log_file(), Some(paths::old_log_file()));
-        if let Err(err) = result {
-            eprintln!("Could not open log file: {}... Defaulting to stdout", err);
-            zlog::init_output_stdout();
-        };
-    }
-    ztracing::init();
-
+    // These exits come before anything touches the disk, so `--version` creates no config or log files.
     let version = option_env!("ZED_BUILD_ID");
     let app_commit_sha =
         option_env!("ZED_COMMIT_SHA").map(|commit_sha| AppCommitSha::new(commit_sha.to_string()));
@@ -311,6 +291,27 @@ fn main() {
         println!("bongos System Specs (from CLI):\n{}", system_specs);
         return;
     }
+
+    let file_errors = init_paths();
+    if !file_errors.is_empty() {
+        files_not_created_on_launch(file_errors);
+        return;
+    }
+
+    bongos_app::ensure_config_files();
+
+    zlog::init();
+
+    if stdout_is_a_pty() {
+        zlog::init_output_stdout();
+    } else {
+        let result = zlog::init_output_file(paths::log_file(), Some(paths::old_log_file()));
+        if let Err(err) = result {
+            eprintln!("Could not open log file: {}... Defaulting to stdout", err);
+            zlog::init_output_stdout();
+        };
+    }
+    ztracing::init();
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(std::thread::available_parallelism().map_or(1, |n| n.get().div_ceil(2)))
