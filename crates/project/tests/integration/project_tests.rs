@@ -11710,7 +11710,7 @@ async fn test_repository_pending_ops_long_running_staging(
 }
 
 #[gpui::test]
-#[ignore = "fails on its own in this environment; pending ops code and this test body match upstream, so the cause is not a bongos change"]
+#[ignore = "scheduler-seed race: at the default seed 0 a scan clears a.txt pending ops before unstage_all, which then skips it as untracked; seeds 1 to 6 pass"]
 async fn test_repository_pending_ops_stage_all(
     executor: gpui::BackgroundExecutor,
     cx: &mut gpui::TestAppContext,
