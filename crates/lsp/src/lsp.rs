@@ -35,6 +35,7 @@ use std::{
     ops::DerefMut,
     path::PathBuf,
     pin::Pin,
+    process::ExitStatus,
     sync::{
         Arc, Weak,
         atomic::{AtomicI32, Ordering::SeqCst},
@@ -59,11 +60,21 @@ pub const DEFAULT_LSP_REQUEST_TIMEOUT: Duration =
 
 /// The shutdown timeout for LSP servers (including Prettier/Copilot).
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for a server process to exit after the `exit` notification, and again for its
+/// exit status after killing it.
+const SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 type NotificationHandler = Box<dyn Send + FnMut(Option<RequestId>, Value, &mut AsyncApp)>;
 type PendingRespondTasks = Arc<Mutex<HashMap<RequestId, Task<()>>>>;
 type ResponseHandler = Box<dyn Send + FnOnce(Result<String, Error>) -> Task<()>>;
 type IoHandler = Box<dyn Send + FnMut(IoKind, &str)>;
+type TerminationHandler = Box<dyn Send + FnOnce(Option<ExitStatus>)>;
+
+enum TerminationState {
+    Running(Option<TerminationHandler>),
+    ShutdownRequested,
+    Terminated(Option<ExitStatus>),
+}
 
 /// Kind of language server stdio given to an IO handler.
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +133,7 @@ pub struct LanguageServer {
     io_tasks: Mutex<Option<(Task<Option<()>>, Task<Option<()>>)>>,
     output_done_rx: Mutex<Option<barrier::Receiver>>,
     server: Arc<Mutex<Option<Child>>>,
+    termination: Arc<Mutex<TerminationState>>,
     workspace_folders: Option<Arc<Mutex<BTreeSet<Uri>>>>,
     root_uri: Uri,
 }
@@ -491,6 +503,8 @@ impl LanguageServer {
             Arc::new(Mutex::new(Some(HashMap::<_, ResponseHandler>::default())));
         let pending_respond_tasks = PendingRespondTasks::default();
         let io_handlers = Arc::new(Mutex::new(HashMap::default()));
+        let server = Arc::new(Mutex::new(server));
+        let termination = Arc::new(Mutex::new(TerminationState::Running(None)));
 
         let stdout_input_task = cx.spawn({
             let unhandled_notification_wrapper = {
@@ -518,8 +532,10 @@ impl LanguageServer {
             let response_handlers = response_handlers.clone();
             let io_handlers = io_handlers.clone();
             let pending_respond_tasks = pending_respond_tasks.clone();
+            let server = server.clone();
+            let termination = termination.clone();
             async move |cx| {
-                Self::handle_incoming_messages(
+                let result = Self::handle_incoming_messages(
                     stdout,
                     unhandled_notification_wrapper,
                     notification_handlers,
@@ -529,7 +545,9 @@ impl LanguageServer {
                     cx,
                 )
                 .log_err()
-                .await
+                .await;
+                Self::handle_stdout_closed(server, termination, cx.background_executor()).await;
+                result
             }
         });
         let stderr_input_task = stderr
@@ -600,7 +618,8 @@ impl LanguageServer {
             executor: cx.background_executor().clone(),
             io_tasks: Mutex::new(Some((input_task, output_task))),
             output_done_rx: Mutex::new(Some(output_done_rx)),
-            server: Arc::new(Mutex::new(server)),
+            server,
+            termination,
             workspace_folders,
             root_uri,
         }
@@ -670,6 +689,42 @@ impl LanguageServer {
             smol::future::yield_now().await;
         }
         input_handler.loop_handle.await
+    }
+
+    async fn handle_stdout_closed(
+        server: Arc<Mutex<Option<Child>>>,
+        termination: Arc<Mutex<TerminationState>>,
+        executor: &BackgroundExecutor,
+    ) {
+        if !matches!(*termination.lock(), TerminationState::Running(_)) {
+            return;
+        }
+        // The process may still be running with its stdout closed, so the wait is bounded.
+        let exit_status = server.lock().as_mut().map(|child| child.status());
+        let exit_status = match exit_status {
+            Some(exit_status) => {
+                let mut timer = executor.timer(SERVER_EXIT_TIMEOUT).fuse();
+                select! {
+                    exit_status = Box::pin(exit_status).fuse() => exit_status.log_err(),
+                    _ = timer => None,
+                }
+            }
+            None => None,
+        };
+        let handler = {
+            let mut termination = termination.lock();
+            match &mut *termination {
+                TerminationState::Running(handler) => {
+                    let handler = handler.take();
+                    *termination = TerminationState::Terminated(exit_status);
+                    handler
+                }
+                TerminationState::ShutdownRequested | TerminationState::Terminated(_) => None,
+            }
+        };
+        if let Some(handler) = handler {
+            handler(exit_status);
+        }
     }
 
     async fn handle_stderr<Stderr>(
@@ -1084,8 +1139,18 @@ impl LanguageServer {
     }
 
     /// Sends a shutdown request to the language server process and prepares the [`LanguageServer`] to be dropped.
+    ///
+    /// The returned future resolves once the process has exited and been reaped: it waits up to
+    /// [`SERVER_EXIT_TIMEOUT`] for the process to exit on its own after the `exit` notification,
+    /// then kills it and waits up to [`SERVER_EXIT_TIMEOUT`] again for its exit status.
     pub fn shutdown(&self) -> Option<impl 'static + Send + Future<Output = Option<()>> + use<>> {
         let tasks = self.io_tasks.lock().take()?;
+        {
+            let mut termination = self.termination.lock();
+            if matches!(*termination, TerminationState::Running(_)) {
+                *termination = TerminationState::ShutdownRequested;
+            }
+        }
 
         let response_handlers = self.response_handlers.clone();
         let next_id = AtomicI32::new(self.next_id.load(SeqCst));
@@ -1135,11 +1200,62 @@ impl LanguageServer {
             Self::notify_internal::<notification::Exit>(&notification_serializers, ()).ok();
             notification_serializers.close();
             output_done.recv().await;
-            server.lock().take().map(|mut child| child.kill());
+            let child = server.lock().take();
+            let exit_status = match child {
+                Some(child) => Self::wait_for_exit(child, &executor, &name, server_id).await,
+                None => None,
+            };
             drop(tasks);
-            log::debug!("language server shutdown finished");
+            log::debug!("language server shutdown finished, exit status {exit_status:?}");
             Some(())
         })
+    }
+
+    async fn wait_for_exit(
+        mut child: Child,
+        executor: &BackgroundExecutor,
+        name: &LanguageServerName,
+        server_id: LanguageServerId,
+    ) -> Option<ExitStatus> {
+        let mut exit_status = Box::pin(child.status()).fuse();
+        let mut timer = executor.timer(SERVER_EXIT_TIMEOUT).fuse();
+        select! {
+            exit_status = exit_status => return exit_status.log_err(),
+            _ = timer => {}
+        }
+        log::warn!(
+            "language server {name} (id {server_id}) did not exit within {SERVER_EXIT_TIMEOUT:?}, killing it"
+        );
+        child.kill().log_err();
+        let mut timer = executor.timer(SERVER_EXIT_TIMEOUT).fuse();
+        select! {
+            exit_status = exit_status => exit_status.log_err(),
+            _ = timer => {
+                log::error!("language server {name} (id {server_id}) did not exit after being killed");
+                None
+            }
+        }
+    }
+
+    /// Register a handler called once when the server's stdout closes without a shutdown having
+    /// been requested, with the process's exit status if it exited. If that already happened, the
+    /// handler is called immediately. Registering a handler replaces the previous one.
+    pub fn on_termination<F>(&self, handler: F)
+    where
+        F: 'static + Send + FnOnce(Option<ExitStatus>),
+    {
+        let mut termination = self.termination.lock();
+        match &mut *termination {
+            TerminationState::Running(current_handler) => {
+                *current_handler = Some(Box::new(handler));
+            }
+            TerminationState::Terminated(exit_status) => {
+                let exit_status = *exit_status;
+                drop(termination);
+                handler(exit_status);
+            }
+            TerminationState::ShutdownRequested => {}
+        }
     }
 
     /// Register a handler to handle incoming LSP notifications.
@@ -2241,6 +2357,126 @@ mod tests {
         drop(subscription);
         assert!(detached_payload_handle.upgrade().is_none());
         assert!(retained_payload_handle.upgrade().is_none());
+    }
+
+    /// Starts `sh -c script` as a language server. `$RESPONSE` holds a reply to the first request,
+    /// which is the shutdown request when nothing else is sent.
+    #[cfg(unix)]
+    fn start_shell_server(script: &str, cx: &mut TestAppContext) -> LanguageServer {
+        cx.executor().allow_parking();
+        let response = r#"{"jsonrpc":"2.0","id":0,"result":null}"#;
+        let response = format!("{CONTENT_LEN_HEADER}{}\r\n\r\n{response}", response.len());
+        LanguageServer::new(
+            Arc::new(Mutex::new(None)),
+            LanguageServerId(0),
+            LanguageServerName("shell".into()),
+            LanguageServerBinary {
+                path: "sh".into(),
+                arguments: vec!["-c".into(), script.into()],
+                env: Some(HashMap::from_iter([("RESPONSE".to_string(), response)])),
+            },
+            &std::env::temp_dir(),
+            None,
+            None,
+            &mut cx.to_async(),
+        )
+        .expect("sh should start")
+    }
+
+    /// `kill -0` succeeds for a running process and for a zombie, so failing means reaped.
+    #[cfg(unix)]
+    fn assert_reaped(process_id: u32) {
+        let status = std::process::Command::new("kill")
+            .args(["-0", &process_id.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill should run");
+        assert!(
+            !status.success(),
+            "process {process_id} is still running or a zombie"
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_shutdown_reaps_server_that_exits(cx: &mut TestAppContext) {
+        use std::sync::atomic::AtomicBool;
+
+        let server = start_shell_server(
+            r#"head -c 1 >/dev/null; printf '%s' "$RESPONSE"; cat >/dev/null; exit 0"#,
+            cx,
+        );
+        let terminated = Arc::new(AtomicBool::new(false));
+        server.on_termination({
+            let terminated = terminated.clone();
+            move |_| terminated.store(true, SeqCst)
+        });
+        let process_id = server.process_id().expect("server has a process");
+
+        let started = Instant::now();
+        // Awaited in a task because async-io wakes the test body's waker on every poll, so the
+        // test scheduler would never park and its clock, and so the exit timer, would not advance.
+        cx.background_spawn(server.shutdown().expect("first shutdown"))
+            .await;
+        assert!(
+            started.elapsed() < SERVER_EXIT_TIMEOUT,
+            "the server was killed instead of exiting on its own"
+        );
+        assert_reaped(process_id);
+
+        assert!(server.shutdown().is_none(), "second shutdown");
+        server.on_termination({
+            let terminated = terminated.clone();
+            move |_| terminated.store(true, SeqCst)
+        });
+        cx.run_until_parked();
+        assert!(
+            !terminated.load(SeqCst),
+            "termination fired after a requested shutdown"
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_shutdown_kills_and_reaps_server_that_ignores_exit(cx: &mut TestAppContext) {
+        let server = start_shell_server(
+            r#"head -c 1 >/dev/null; printf '%s' "$RESPONSE"; exec sleep 30"#,
+            cx,
+        );
+        let process_id = server.process_id().expect("server has a process");
+
+        let started = Instant::now();
+        // Awaited in a task because async-io wakes the test body's waker on every poll, so the
+        // test scheduler would never park and its clock, and so the exit timer, would not advance.
+        cx.background_spawn(server.shutdown().expect("first shutdown"))
+            .await;
+        assert!(started.elapsed() >= SERVER_EXIT_TIMEOUT);
+        // The child would sleep for 30 s, so being reaped now means it was killed.
+        assert_reaped(process_id);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_on_termination_fires_when_server_exits_unexpectedly(cx: &mut TestAppContext) {
+        let server = start_shell_server("exit 3", cx);
+        let (exit_status_tx, exit_status_rx) = oneshot::channel();
+        server.on_termination(move |exit_status| {
+            exit_status_tx.send(exit_status).ok();
+        });
+        let exit_status = exit_status_rx.await.expect("termination handler called");
+        assert_eq!(exit_status.and_then(|status| status.code()), Some(3));
+
+        let (late_tx, late_rx) = oneshot::channel();
+        server.on_termination(move |exit_status| {
+            late_tx.send(exit_status).ok();
+        });
+        assert_eq!(
+            late_rx
+                .await
+                .expect("late handler called")
+                .and_then(|status| status.code()),
+            Some(3)
+        );
     }
 
     #[gpui::test]
