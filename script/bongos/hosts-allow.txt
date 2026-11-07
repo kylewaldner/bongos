@@ -63,7 +63,6 @@ assets/settings/initial_server_settings.json zed.dev
 assets/settings/initial_tasks.json zed.dev
 assets/settings/initial_user_settings.json zed.dev
 crates/agent_ui/src/ui/mention_crease.rs zed.dev
-crates/cli/src/main.rs zed.dev
 crates/cloud_api_client/src/cloud_api_client.rs cloud.zed.dev
 crates/debugger_ui/src/debugger_panel.rs zed.dev
 crates/editor/src/hover_links.rs zed.dev

@@ -40,7 +40,6 @@ crates/bongos/src/zed/quick_action_bar/repl_menu.rs 1
 crates/bongos/src/zed/windows_only_instance.rs 2
 crates/bongos_app/src/bongos_app.rs 13
 crates/bongos_version/src/bongos_version.rs 4
-crates/cli/src/main.rs 13
 crates/context_server/src/context_server.rs 1
 crates/context_server/src/oauth.rs 2
 crates/copilot_chat/src/copilot_chat.rs 1
