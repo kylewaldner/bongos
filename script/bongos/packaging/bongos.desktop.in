@@ -1,0 +1,18 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=@APP_NAME@
+GenericName=Text Editor
+Comment=An Emacs-shaped Kotlin IDE.
+TryExec=bongos
+StartupNotify=true
+Exec=bongos %U
+Icon=bongos
+Categories=Utility;TextEditor;Development;IDE;
+Keywords=bongos;kotlin;emacs;
+MimeType=text/plain;application/x-zerosize;
+Actions=NewWorkspace;
+
+[Desktop Action NewWorkspace]
+Exec=bongos --new %U
+Name=Open a new workspace
