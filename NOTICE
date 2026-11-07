@@ -9,6 +9,7 @@ crates/http_client: modified by bongos; see git log
 crates/cloud_api_client: modified by bongos; see git log
 crates/cloud_api_types: modified by bongos; see git log
 crates/cloud_llm_client: modified by bongos; see git log
+crates/util: modified by bongos; see git log
 
 Third-party license options taken:
 self_cell: Apache-2.0, taken under Apache-2.0
