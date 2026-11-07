@@ -184,6 +184,8 @@ frame_has_ui keymap-error
 act atomic_write "$SETTINGS_FILE" '{ "theme": }'
 shot settings-error
 frame_has_ui settings-error
+# The previous settings stay active: settings.json held One Light before the invalid write.
+brightness_is light || { echo "bongos: the theme changed after invalid settings; the previous settings did not stay active" >&2; exit 1; }
 assert_file "$HOME/$BONGOS_LOG_PATH" 'Failed to load user settings'
 say "smoke: errors on screen: $RUN/keymap-error.png $RUN/settings-error.png (the keymap error is a toast only, not in the log)"
 expect_quit_by_binding
