@@ -19,11 +19,21 @@ for tool in strace jq compare identify; do
   command -v "$tool" >/dev/null || { echo "bongos: $tool is not installed; the scenario needs it" >&2; exit 1; }
 done
 
-# Write a file in one rename, so a watcher never sees a half-written one.
+# Write in place: a rename over the file would end the app's watch on it after the first write.
 atomic_write() {
-  printf '%s\n' "$2" >"$1.tmp"
-  mv "$1.tmp" "$1"
+  printf '%s\n' "$2" >"$1"
 }
+
+# Kill the stock app if a failure leaves it running, then run smoke's own cleanup with the original
+# exit status (set +e, so a nonzero status does not end the trap early).
+stock_kill() {
+  if [ -n "$STOCK_PID" ]; then kill "$STOCK_PID" 2>/dev/null || true; fi
+}
+if declare -F cleanup >/dev/null; then
+  trap '_scn_rc=$?; set +e; stock_kill; (exit "$_scn_rc"); cleanup' EXIT
+else
+  trap 'stock_kill' EXIT
+fi
 
 write_theme() { atomic_write "$SETTINGS_FILE" "{ \"theme\": \"$1\" }"; }
 
@@ -44,20 +54,29 @@ launch_traced() {
   APP_PID=$!
 }
 
-# One try at the user binding. The key is sent until the binding has loaded and the app is gone.
+# One try at the user binding. The key is sent until the binding has loaded and the app is gone;
+# the app's exit status is kept in QUIT_RC.
+QUIT_RC=""
 quit_with_binding() {
-  kill -0 "$APP_PID" 2>/dev/null || return 0
-  keys ctrl+alt+q || true
-  sleep 1
-  ! kill -0 "$APP_PID" 2>/dev/null
+  if kill -0 "$APP_PID" 2>/dev/null; then
+    keys ctrl+alt+q || true
+    sleep 1
+  fi
+  if kill -0 "$APP_PID" 2>/dev/null; then return 1; fi
+  wait "$APP_PID" && QUIT_RC=0 || QUIT_RC=$?
+  return 0
 }
 
+# The app must leave with status 0: a crash is not a quit by binding.
 expect_quit_by_binding() {
-  local pid=$APP_PID rc=0
+  QUIT_RC=""
   poll 30 "ctrl-alt-q to quit the app" quit_with_binding
   APP_PID=""
-  wait "$pid" || rc=$?
-  say "smoke: ctrl-alt-q quit the app (exit status $rc)"
+  if [ "$QUIT_RC" != 0 ]; then
+    echo "bongos: the app exited with status ${QUIT_RC:-unknown} after ctrl-alt-q, not a clean quit" >&2
+    exit 1
+  fi
+  say "smoke: ctrl-alt-q quit the app (exit status 0)"
 }
 
 # 0 when the screenshot's mean brightness is above (light) or below (dark) one half.
@@ -212,18 +231,20 @@ say "smoke: $connects connect calls traced; every IP one is loopback"
 assert_no_zed_hosts
 assert_no_marketplace_host
 say "smoke: no Zed host in proxy.log, no blocked request in the log"
-# Req 9: nothing in the log asks to sign in.
-if grep -qiE 'sign[ _-]?in' "$HOME/$BONGOS_LOG_PATH"; then
-  echo "bongos: the log mentions signing in:" >&2
-  grep -iE 'sign[ _-]?in' "$HOME/$BONGOS_LOG_PATH" | head -n 10 >&2
+# Req 9: nothing in the log asks for a Zed account. (Provider lines such as "Sign in with your
+# ChatGPT subscription" are expected; reading the panel shot stays with the orchestrator.)
+if grep -qiE 'sign in to Zed|sign-in to Zed' "$HOME/$BONGOS_LOG_PATH"; then
+  echo "bongos: the log asks for a Zed account:" >&2
+  grep -iE 'sign[ -]in to Zed' "$HOME/$BONGOS_LOG_PATH" | head -n 10 >&2
   exit 1
 fi
-say "smoke: no sign-in text in the log"
+say "smoke: no Zed account sign-in text in the log"
 
 # ---------------------------------------------------------------------------------------------
 step "Req 3: bongos and the stock binary together"
 if [ ! -x "$STOCK_BIN" ]; then
-  say "smoke: SKIP Req 3: no stock binary at $STOCK_BIN (run script/bongos/stock-build)"
+  echo "bongos: Req 3 needs the stock binary, and there is none at $STOCK_BIN; run script/bongos/stock-build" >&2
+  exit 1
 else
   mkdir -p "$HOME/.config/zed"
   printf '{ "ui_font_size": 17 }\n' >"$HOME/.config/zed/settings.json"
