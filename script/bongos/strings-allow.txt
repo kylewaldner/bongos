@@ -58,7 +58,6 @@ crates/gpui/src/text_system.rs 4
 crates/gpui_windows/src/platform.rs 1
 crates/gpui_windows/src/window.rs 1
 crates/inspector_ui/src/inspector.rs 1
-crates/install_cli/src/install_cli_binary.rs 3
 crates/keymap_editor/src/keymap_editor.rs 4
 crates/language_models/src/provider/anthropic.rs 2
 crates/language_models/src/provider/api_compatible.rs 2

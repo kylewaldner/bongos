@@ -71,7 +71,6 @@ crates/extension_api/src/extension_api.rs zed.dev
 crates/git/src/repository.rs zed.dev
 crates/gpui/Cargo.toml zed.dev
 crates/gpui/README.md zed.dev
-crates/install_cli/src/install_cli_binary.rs zed.dev
 crates/language_models/src/provider/open_ai.rs zed.dev
 crates/language_onboarding/src/python.rs zed.dev
 crates/language_tools/src/key_context_view.rs zed.dev

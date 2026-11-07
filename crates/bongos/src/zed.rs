@@ -1602,7 +1602,7 @@ fn open_about_window(cx: &mut App) {
 #[cfg(not(target_os = "windows"))]
 fn install_cli(
     _: &mut Workspace,
-    _: &install_cli::InstallCliBinary,
+    _: &bongos_app::InstallCli,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {

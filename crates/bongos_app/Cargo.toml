@@ -13,8 +13,10 @@ path = "src/bongos_app.rs"
 doctest = false
 
 [dependencies]
+gpui.workspace = true
 paths.workspace = true
 settings.workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

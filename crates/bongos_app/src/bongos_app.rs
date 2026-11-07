@@ -1,6 +1,15 @@
 //! Bongos application behavior that sits on top of the inherited editor.
 
+use gpui::actions;
 use std::{fs, io, io::Write as _, path::Path};
+
+actions!(
+    bongos,
+    [
+        /// Installs the bongos command line tool so it can be run from a terminal as `bongos`.
+        InstallCli,
+    ]
+);
 
 /// Writes `settings.json` and `keymap.json` into the config directory when they do not exist yet.
 ///
@@ -48,6 +57,14 @@ pub fn write_if_absent(path: &Path, content: &str) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn install_cli_action_dispatches_by_name(cx: &mut gpui::TestAppContext) {
+        let action = cx.update(|cx| cx.build_action("bongos::InstallCli", None).unwrap());
+
+        assert!(action.as_any().is::<InstallCli>());
+        assert_eq!(action.name(), "bongos::InstallCli");
+    }
 
     #[test]
     fn creates_absent_file_and_parent_directory() {
