@@ -2385,11 +2385,12 @@ mod tests {
 
     /// `kill -0` succeeds for a running process and for a zombie, so failing means reaped.
     #[cfg(unix)]
-    fn assert_reaped(process_id: u32) {
-        let status = std::process::Command::new("kill")
+    async fn assert_reaped(process_id: u32) {
+        let status = util::command::new_command("kill")
             .args(["-0", &process_id.to_string()])
-            .stderr(std::process::Stdio::null())
+            .stderr(Stdio::null())
             .status()
+            .await
             .expect("kill should run");
         assert!(
             !status.success(),
@@ -2422,7 +2423,7 @@ mod tests {
             started.elapsed() < SERVER_EXIT_TIMEOUT,
             "the server was killed instead of exiting on its own"
         );
-        assert_reaped(process_id);
+        assert_reaped(process_id).await;
 
         assert!(server.shutdown().is_none(), "second shutdown");
         server.on_termination({
@@ -2452,7 +2453,7 @@ mod tests {
             .await;
         assert!(started.elapsed() >= SERVER_EXIT_TIMEOUT);
         // The child would sleep for 30 s, so being reaped now means it was killed.
-        assert_reaped(process_id);
+        assert_reaped(process_id).await;
     }
 
     #[cfg(unix)]
