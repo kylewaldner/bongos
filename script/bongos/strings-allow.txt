@@ -13,7 +13,6 @@ crates/context_server/src/oauth.rs 2  # permanent: OAuth client_name registered 
 crates/copilot_chat/src/copilot_chat.rs 1  # permanent: the Editor-Version header GitHub Copilot validates
 crates/dap/src/client.rs 1  # permanent: DAP clientName next to clientID "zed" (test mirror of dap_command.rs)
 crates/project/src/debugger/dap_command.rs 1  # permanent: DAP clientName next to clientID "zed"
-crates/open_router/src/open_router.rs 2  # permanent: X-Title app attribution paired with the HTTP-Referer header
 crates/etw_tracing/etw_tracing.rs 2  # permanent: Windows ETW session instance name, and the Zed Industries author credit (provenance); Windows only, not testable here
 crates/explorer_command_injector/src/explorer_command_injector.rs 1  # permanent: the Windows installer (zed.iss) and AppxManifest still name the binary Zed.exe
 crates/git/src/repository.rs 2  # permanent: .git/info/exclude block markers are stored in user repos and must match to be removed
