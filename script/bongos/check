@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate 1: format, clippy on changed crates, hosts, licenses, no .github, no webrtc (from step 22).
+# Gate 1: format, clippy on changed crates, hosts, licenses, no .github, no webrtc.
 # One line per check; the failing part of the output only for a check that fails. Full output is in
 # the log (script/bongos/tail-log check).
 set -euo pipefail
@@ -10,8 +10,9 @@ cd "$BONGOS_ROOT"
 log_init check
 LOG_NO_EXCERPT=1  # run_check prints the failing part of the check that failed
 
-# Set to 1 in step 22, when webrtc and livekit leave the build. Until then the tree rule below is off.
-BONGOS_CHECK_NO_WEBRTC=${BONGOS_CHECK_NO_WEBRTC:-0}
+# The tree rule below is on by default since step 22, when webrtc and livekit left the build.
+# BONGOS_CHECK_NO_WEBRTC=0 turns it off.
+BONGOS_CHECK_NO_WEBRTC=${BONGOS_CHECK_NO_WEBRTC:-1}
 
 run_check fmt cargo fmt --all -- --check
 

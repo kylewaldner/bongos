@@ -41,7 +41,7 @@ export CARGO_BUILD_JOBS
 # No nice by default. BONGOS_NICE=<n> runs cargo under nice -n <n>.
 export PATH="$BONGOS_WORKSPACE/bin:$CARGO_HOME/bin:$HOME/.cargo/bin:$PATH"
 
-# Compiler: g++ 11 cannot build webrtc-sys (port_interface.h: "declaration changes meaning"); clang 14 can.
+# Compiler: clang, as upstream builds with it (g++ 11 failed on C++ dependencies that have since left the build).
 export CC=clang CXX=clang++
 
 # Tuning with no manifest diff. Never set RUSTFLAGS: it replaces .cargo/config.toml's flags.

@@ -86,7 +86,6 @@ crates/language_models/src/provider.rs 1
 crates/language_models/src/provider/vercel_ai_gateway.rs 3
 crates/language_models/src/provider/x_ai.rs 2
 crates/language_tools/src/key_context_view.rs 1
-crates/livekit_client/examples/test_app.rs 1
 crates/markdown/examples/markdown_as_child.rs 3
 crates/markdown/src/mermaid.rs 1
 crates/markdown/src/parser.rs 3

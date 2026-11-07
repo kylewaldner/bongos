@@ -26,7 +26,7 @@ crates/telemetry/src/telemetry.rs zed.dev
 # onboarding and feedback: step 19
 crates/ai_onboarding/src/young_account_banner.rs zed.dev
 
-# collab, calls and rpc: the server crate is not built; the UI goes in steps 21 (collab) and 22 (calls)
+# collab and rpc: the server crate is not built; the collab UI and calls are gone
 crates/proto/Cargo.toml zed.dev
 crates/rpc/Cargo.toml zed.dev
 crates/ui/src/components/collab/collab_notification.rs zed.dev
