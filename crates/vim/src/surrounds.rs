@@ -510,14 +510,14 @@ impl Vim {
             // below could be done.
             //
             // ```
-            // (< name:ˇ'Zed' >)
+            // (< name:ˇ'Ada' >)
             // <[ name:ˇ'DeltaDB' ]>
             // ```
             //
             // After using `csb{`:
             //
             // ```
-            // (ˇ{ name:'Zed' })
+            // (ˇ{ name:'Ada' })
             // <ˇ{ name:'DeltaDB' }>
             // ```
             if let Some(selection) = selections.first() {
@@ -1404,13 +1404,13 @@ mod test {
         cx.simulate_keystrokes("c s b [");
         cx.assert_state(indoc! {"ˇ[ bracketed ]"}, Mode::Normal);
 
-        cx.set_state(indoc! {"(<ˇZed>)"}, Mode::Normal);
+        cx.set_state(indoc! {"(<ˇAda>)"}, Mode::Normal);
         cx.simulate_keystrokes("c s b )");
         cx.assert_state(indoc! {"(ˇ(Ada))"}, Mode::Normal);
 
         cx.set_state(
             indoc! {"
-                (<ˇZed>)
+                (<ˇAda>)
                 (<ˇDeltaDB>)
             "},
             Mode::Normal,
