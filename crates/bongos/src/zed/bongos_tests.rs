@@ -18,6 +18,11 @@ const REMOVED_NAMESPACES: &[&str] = &[
     "ai_onboarding",
     "cloud",
     "account",
+    "onboarding",
+    "zeta",
+    "channel_modal",
+    "client",
+    "welcome",
 ];
 
 /// Exact names of actions that were deleted.
@@ -31,6 +36,16 @@ const REMOVED_ACTIONS: &[&str] = &[
     "client::SignIn",
     "client::SignOut",
     "feedback::EmailZed",
+    // Guard entries: these names were removed and catch any future additions of them.
+    "agent::ResetOnboarding",
+    "edit_prediction::RatePredictions",
+    "edit_prediction::ResetOnboarding",
+    "workspace::RestoreBanner",
+    "zed::OpenZedRepo",
+    "zed::ShowWelcome",
+    "zed::ToggleBaseKeymapSelector",
+    "zed::CopySystemSpecsIntoClipboard",
+    "zed::CopyInstalledExtensionsIntoClipboard",
 ];
 
 /// Fragments that must not appear in any action name (lowercased, underscores removed, so they
@@ -58,7 +73,8 @@ const REMOVED_WORDS: &[&str] = &[
     "releasenotes",
 ];
 
-// `zed::Extensions` stays on purpose (installed and dev extensions); the gallery is gone.
+// `zed::Extensions` and `zed::ReloadExtensions` stay on purpose: local extensions (installed and
+// dev) remain usable, and nothing is fetched from the gallery, which is gone.
 /// Actions that must survive: the core editor and workspace surface.
 const KEPT_ACTIONS: &[&str] = &[
     "editor::Copy",
@@ -70,6 +86,8 @@ const KEPT_ACTIONS: &[&str] = &[
     "command_palette::Toggle",
     "file_finder::Toggle",
     "zed::OpenSettings",
+    "zed::Extensions",
+    "zed::ReloadExtensions",
 ];
 
 #[gpui::test]
