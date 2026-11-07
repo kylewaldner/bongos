@@ -1522,8 +1522,8 @@ impl ProtoClient for Client {
     }
 }
 
-/// prefix for the zed:// url scheme
-pub const ZED_URL_SCHEME: &str = "zed";
+/// prefix for the bongos:// url scheme
+pub const BONGOS_URL_SCHEME: &str = "bongos";
 
 #[cfg(test)]
 mod tests {

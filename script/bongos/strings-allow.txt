@@ -34,7 +34,6 @@ crates/bongos/src/main.rs 4
 crates/bongos/src/visual_test_runner.rs 1
 crates/bongos/src/zed.rs 3
 crates/bongos/src/zed/app_menus.rs 1
-crates/bongos/src/zed/mac_only_instance.rs 4
 crates/bongos/src/zed/move_to_applications.rs 6
 crates/bongos/src/zed/quick_action_bar/repl_menu.rs 1
 crates/bongos/src/zed/windows_only_instance.rs 2
