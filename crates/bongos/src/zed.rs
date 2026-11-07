@@ -533,7 +533,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let edit_prediction_ui = cx.new(|cx| {
             edit_prediction_ui::EditPredictionButton::new(
                 app_state.fs.clone(),
-                app_state.user_store.clone(),
                 edit_prediction_menu_handle.clone(),
                 workspace.project().clone(),
                 cx,
@@ -5351,8 +5350,6 @@ mod tests {
                 "worktree_picker",
                 "zed",
                 "zed_actions",
-                "zed_predict_onboarding",
-                "zeta",
             ];
             assert_eq!(
                 all_namespaces,
@@ -5576,11 +5573,6 @@ mod tests {
             );
             image_viewer::init(cx);
             language_model::init(cx);
-            client::RefreshLlmTokenListener::register(
-                app_state.client.clone(),
-                app_state.user_store.clone(),
-                cx,
-            );
             language_models::init(app_state.client.clone(), cx);
             let prompt_builder = PromptBuilder::load(app_state.fs.clone(), false, cx);
             project::AgentRegistryStore::init_global(

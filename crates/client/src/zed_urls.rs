@@ -1,55 +1,24 @@
-//! Contains helper functions for constructing URLs to various Zed-related pages.
+//! Contains helper functions for constructing URLs to Zed's public docs and blog.
 //!
-//! These URLs will adapt to the configured server URL in order to construct
-//! links appropriate for the environment (e.g., by linking to a local copy of
-//! zed.dev in development).
+//! None of these read the configured server URL, so no link can open the
+//! placeholder host.
 
 use gpui::App;
 use release_channel::ReleaseChannel;
-use settings::Settings;
-
-use crate::ClientSettings;
-
-fn server_url(cx: &App) -> &str {
-    &ClientSettings::get_global(cx).server_url
-}
 
 fn docs_url(cx: &App) -> String {
-    let server_url = "https://zed.dev";
+    let site = "https://zed.dev";
     match ReleaseChannel::try_global(cx).unwrap_or_default() {
         ReleaseChannel::Stable => {
-            format!("{server_url}/docs")
+            format!("{site}/docs")
         }
         ReleaseChannel::Preview => {
-            format!("{server_url}/docs/preview")
+            format!("{site}/docs/preview")
         }
         ReleaseChannel::Dev | ReleaseChannel::Nightly => {
-            format!("{server_url}/docs/nightly")
+            format!("{site}/docs/nightly")
         }
     }
-}
-
-/// Returns the URL to the account page on zed.dev.
-pub fn account_url(cx: &App) -> String {
-    format!("{server_url}/account", server_url = server_url(cx))
-}
-
-/// Returns the URL to the start trial page on zed.dev.
-pub fn start_trial_url(cx: &App) -> String {
-    format!(
-        "{server_url}/account/start-trial",
-        server_url = server_url(cx)
-    )
-}
-
-/// Returns the URL to the upgrade page on zed.dev.
-pub fn upgrade_to_zed_pro_url(cx: &App) -> String {
-    format!("{server_url}/account/upgrade", server_url = server_url(cx))
-}
-
-/// Returns the URL to Zed's edit prediction documentation.
-pub fn edit_prediction_docs(cx: &App) -> String {
-    format!("{docs_url}/ai/edit-prediction", docs_url = docs_url(cx))
 }
 
 pub fn skills_docs(cx: &App) -> String {
@@ -65,22 +34,11 @@ pub fn acp_registry_blog(_cx: &App) -> String {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
-    use settings::SettingsStore;
 
     #[gpui::test]
-    fn test_doc_links_ignore_server_url(cx: &mut TestAppContext) {
+    fn test_doc_links_point_at_the_public_site(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let mut store = SettingsStore::test(cx);
-            store.update_user_settings(cx, |content| {
-                content.server_url = Some("https://bongos.invalid".to_string());
-            });
-            cx.set_global(store);
-
-            for url in [
-                edit_prediction_docs(cx),
-                skills_docs(cx),
-                acp_registry_blog(cx),
-            ] {
+            for url in [skills_docs(cx), acp_registry_blog(cx)] {
                 assert!(url.starts_with("https://zed.dev/"), "{url}");
             }
         });

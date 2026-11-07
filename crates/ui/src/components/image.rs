@@ -13,12 +13,7 @@ use crate::traits::transformable::Transformable;
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum VectorName {
-    BusinessStamp,
-    VipStamp,
     Grid,
-    ProTrialStamp,
-    ProUserStamp,
-    StudentStamp,
     BongosLogo,
 }
 

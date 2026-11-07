@@ -5,7 +5,6 @@
 # RPC, api and cloud hosts: step 16 (guard), step 20 (sign-in), step 23 (cloud AI)
 crates/client/src/zed_urls.rs zed.dev
 crates/http_client/src/http_client.rs cloud.zed.dev
-crates/http_client/src/http_client.rs llm-staging.zed.dev
 crates/http_client/src/http_client.rs staging.zed.dev
 crates/http_client/src/http_client.rs zed.dev
 
@@ -21,7 +20,6 @@ crates/telemetry_events/src/telemetry_events.rs zed.dev
 crates/telemetry/src/telemetry.rs zed.dev
 
 # onboarding and feedback: step 19
-crates/ai_onboarding/src/young_account_banner.rs zed.dev
 
 # collab and rpc: the server crate is not built; the collab UI and calls are gone
 crates/proto/Cargo.toml zed.dev
@@ -30,8 +28,6 @@ crates/ui/src/components/collab/collab_notification.rs zed.dev
 
 # cloud AI (step 23), web search and edit prediction (step 24) provider ids
 crates/editor/src/edit_prediction.rs zed.dev
-crates/edit_prediction/src/zeta.rs zed.dev
-crates/edit_prediction_ui/src/edit_prediction_button.rs zed.dev
 
 # feedback (step 19), marketplace (step 19a) and settings page entries (step 24)
 crates/settings_ui/src/page_data.rs zed.dev

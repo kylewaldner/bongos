@@ -5,13 +5,10 @@ mod role;
 pub mod tool_schema;
 pub mod util;
 
-use anyhow::{Result, anyhow};
-use cloud_llm_client::CompletionRequestStatus;
 use http_client::{StatusCode, http};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, Sub};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
@@ -57,32 +54,6 @@ pub enum LanguageModelCompletionEvent {
     ReasoningDetails(serde_json::Value),
     UsageUpdate(TokenUsage),
     Compaction(CompactionContent),
-}
-
-impl LanguageModelCompletionEvent {
-    pub fn from_completion_request_status(
-        status: CompletionRequestStatus,
-        upstream_provider: LanguageModelProviderName,
-    ) -> Result<Option<Self>, LanguageModelCompletionError> {
-        match status {
-            CompletionRequestStatus::Queued { position } => {
-                Ok(Some(LanguageModelCompletionEvent::Queued { position }))
-            }
-            CompletionRequestStatus::Started => Ok(Some(LanguageModelCompletionEvent::Started)),
-            CompletionRequestStatus::Unknown | CompletionRequestStatus::StreamEnded => Ok(None),
-            CompletionRequestStatus::Failed {
-                code,
-                message,
-                request_id: _,
-                retry_after,
-            } => Err(LanguageModelCompletionError::from_cloud_failure(
-                upstream_provider,
-                code,
-                message,
-                retry_after.map(Duration::from_secs_f64),
-            )),
-        }
-    }
 }
 
 #[derive(Error, Debug)]
@@ -180,58 +151,6 @@ pub enum LanguageModelCompletionError {
 }
 
 impl LanguageModelCompletionError {
-    fn parse_upstream_error_json(message: &str) -> Option<(StatusCode, String)> {
-        let error_json = serde_json::from_str::<serde_json::Value>(message).ok()?;
-        let upstream_status = error_json
-            .get("upstream_status")
-            .and_then(|v| v.as_u64())
-            .and_then(|status| u16::try_from(status).ok())
-            .and_then(|status| StatusCode::from_u16(status).ok())?;
-        let inner_message = error_json
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or(message)
-            .to_string();
-        Some((upstream_status, inner_message))
-    }
-
-    pub fn from_cloud_failure(
-        upstream_provider: LanguageModelProviderName,
-        code: String,
-        message: String,
-        retry_after: Option<Duration>,
-    ) -> Self {
-        if let Some(tokens) = parse_prompt_too_long(&message) {
-            Self::PromptTooLarge {
-                tokens: Some(tokens),
-            }
-        } else if code == "upstream_http_error" {
-            if let Some((upstream_status, inner_message)) =
-                Self::parse_upstream_error_json(&message)
-            {
-                return Self::from_http_status(
-                    upstream_provider,
-                    upstream_status,
-                    inner_message,
-                    retry_after,
-                );
-            }
-            anyhow!("completion request failed, code: {code}, message: {message}").into()
-        } else if let Some(status_code) = code
-            .strip_prefix("upstream_http_")
-            .and_then(|code| StatusCode::from_str(code).ok())
-        {
-            Self::from_http_status(upstream_provider, status_code, message, retry_after)
-        } else if let Some(status_code) = code
-            .strip_prefix("http_")
-            .and_then(|code| StatusCode::from_str(code).ok())
-        {
-            Self::from_http_status(upstream_provider, status_code, message, retry_after)
-        } else {
-            anyhow!("completion request failed, code: {code}, message: {message}").into()
-        }
-    }
-
     pub fn from_http_status(
         provider: LanguageModelProviderName,
         status_code: StatusCode,
@@ -513,102 +432,6 @@ impl ReasoningEffort {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_from_cloud_failure_with_upstream_http_error() {
-        let error = LanguageModelCompletionError::from_cloud_failure(
-            String::from("anthropic").into(),
-            "upstream_http_error".to_string(),
-            r#"{"code":"upstream_http_error","message":"Received an error from the Anthropic API: upstream connect error or disconnect/reset before headers. reset reason: connection timeout","upstream_status":503}"#.to_string(),
-            None,
-        );
-
-        match error {
-            LanguageModelCompletionError::ServerOverloaded { provider, .. } => {
-                assert_eq!(provider.0, "anthropic");
-            }
-            _ => panic!(
-                "Expected ServerOverloaded error for 503 status, got: {:?}",
-                error
-            ),
-        }
-
-        let error = LanguageModelCompletionError::from_cloud_failure(
-            String::from("anthropic").into(),
-            "upstream_http_error".to_string(),
-            r#"{"code":"upstream_http_error","message":"Internal server error","upstream_status":500}"#.to_string(),
-            None,
-        );
-
-        match error {
-            LanguageModelCompletionError::ApiInternalServerError { provider, message } => {
-                assert_eq!(provider.0, "anthropic");
-                assert_eq!(message, "Internal server error");
-            }
-            _ => panic!(
-                "Expected ApiInternalServerError for 500 status, got: {:?}",
-                error
-            ),
-        }
-    }
-
-    #[test]
-    fn test_from_cloud_failure_with_standard_format() {
-        let error = LanguageModelCompletionError::from_cloud_failure(
-            String::from("anthropic").into(),
-            "upstream_http_503".to_string(),
-            "Service unavailable".to_string(),
-            None,
-        );
-
-        match error {
-            LanguageModelCompletionError::ServerOverloaded { provider, .. } => {
-                assert_eq!(provider.0, "anthropic");
-            }
-            _ => panic!("Expected ServerOverloaded error for upstream_http_503"),
-        }
-    }
-
-    #[test]
-    fn test_upstream_http_error_connection_timeout() {
-        let error = LanguageModelCompletionError::from_cloud_failure(
-            String::from("anthropic").into(),
-            "upstream_http_error".to_string(),
-            r#"{"code":"upstream_http_error","message":"Received an error from the Anthropic API: upstream connect error or disconnect/reset before headers. reset reason: connection timeout","upstream_status":503}"#.to_string(),
-            None,
-        );
-
-        match error {
-            LanguageModelCompletionError::ServerOverloaded { provider, .. } => {
-                assert_eq!(provider.0, "anthropic");
-            }
-            _ => panic!(
-                "Expected ServerOverloaded error for connection timeout with 503 status, got: {:?}",
-                error
-            ),
-        }
-
-        let error = LanguageModelCompletionError::from_cloud_failure(
-            String::from("anthropic").into(),
-            "upstream_http_error".to_string(),
-            r#"{"code":"upstream_http_error","message":"Received an error from the Anthropic API: upstream connect error or disconnect/reset before headers. reset reason: connection timeout","upstream_status":500}"#.to_string(),
-            None,
-        );
-
-        match error {
-            LanguageModelCompletionError::ApiInternalServerError { provider, message } => {
-                assert_eq!(provider.0, "anthropic");
-                assert_eq!(
-                    message,
-                    "Received an error from the Anthropic API: upstream connect error or disconnect/reset before headers. reset reason: connection timeout"
-                );
-            }
-            _ => panic!(
-                "Expected ApiInternalServerError for connection timeout with 500 status, got: {:?}",
-                error
-            ),
-        }
-    }
 
     #[test]
     fn test_language_model_tool_use_serializes_with_signature() {
