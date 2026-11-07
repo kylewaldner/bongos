@@ -275,7 +275,7 @@ async fn verify_created_by_zed(root: &RootPlan, cx: &mut AsyncApp) -> Result<()>
         .map_err(|_| anyhow!("worktree creation time check was canceled"))?
         .with_context(|| {
             format!(
-                "refusing to delete worktree at {}: failed to verify that Zed created it",
+                "refusing to delete worktree at {}: failed to verify that bongos created it",
                 root.root_path.display()
             )
         })?;
@@ -294,8 +294,8 @@ async fn verify_created_by_zed(root: &RootPlan, cx: &mut AsyncApp) -> Result<()>
             .await
             .log_err();
             Err(anyhow!(
-                "refusing to delete worktree at {}: it is not the worktree Zed created \
-                 (it was likely removed and recreated outside Zed)",
+                "refusing to delete worktree at {}: it is not the worktree bongos created \
+                 (it was likely removed and recreated outside bongos)",
                 root.root_path.display()
             ))
         }
@@ -1175,7 +1175,7 @@ mod tests {
             assert!(
                 plan.is_none(),
                 "build_root_plan should return None for a linked worktree \
-                 outside the Zed-managed worktrees directory",
+                 outside the bongos-managed worktrees directory",
             );
         });
     }
@@ -1243,8 +1243,8 @@ mod tests {
             );
             assert!(
                 plan.is_none(),
-                "build_root_plan should return None for a linked worktree Zed didn't create, \
-                 even when it lives inside the Zed-managed worktrees directory",
+                "build_root_plan should return None for a linked worktree bongos didn't create, \
+                 even when it lives inside the bongos-managed worktrees directory",
             );
         });
     }
@@ -1620,7 +1620,9 @@ mod tests {
             .await
             .expect_err("remove_root should refuse to delete a recreated worktree");
         assert!(
-            error.to_string().contains("not the worktree Zed created"),
+            error
+                .to_string()
+                .contains("not the worktree bongos created"),
             "unexpected error: {error:#}"
         );
 
