@@ -386,13 +386,14 @@ zed_hosts() {
   awk '{print $2}' "$RUN/proxy.log" | grep -E '(^|\.)(zed\.dev|zed\.industries)$' | sort -u
 }
 
-# Warns until step 25, when it starts to fail.
+# Fails when bongos reached a Zed host or made a blocked request. Not for stock, which does.
 assert_no_zed_hosts() {
   local hosts blocked
   hosts=$(zed_hosts | xargs || true)
   blocked=$(grep -c 'bongos_net: blocked' "$HOME/$BONGOS_LOG_PATH" || true)
   if [ -n "$hosts" ] || [ "$blocked" != 0 ]; then
-    say "smoke: WARNING Zed hosts: ${hosts:-none}; blocked requests: $blocked"
+    say "smoke: FAIL Zed hosts: ${hosts:-none}; blocked requests: $blocked"
+    exit 1
   fi
 }
 

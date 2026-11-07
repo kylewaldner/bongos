@@ -1,4 +1,6 @@
 mod app_menus;
+#[cfg(test)]
+mod bongos_tests;
 pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
@@ -4996,7 +4998,7 @@ mod tests {
         }
     }
 
-    fn init_keymap_test(cx: &mut TestAppContext) -> Arc<AppState> {
+    pub(super) fn init_keymap_test(cx: &mut TestAppContext) -> Arc<AppState> {
         cx.update(|cx| {
             let app_state = AppState::test(cx);
 

@@ -148,8 +148,8 @@ shot final
 quit_app
 
 step "9 hosts"
-assert_no_zed_hosts
 if [ -z "$stock" ]; then
+  assert_no_zed_hosts
   assert_no_marketplace_host
 fi
 proxy_hosts=$(awk '{print $2}' "$RUN/proxy.log" | sort -u | xargs)
