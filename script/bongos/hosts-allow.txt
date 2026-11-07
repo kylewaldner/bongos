@@ -9,8 +9,6 @@ crates/http_client/src/http_client.rs llm-staging.zed.dev
 crates/http_client/src/http_client.rs staging.zed.dev
 crates/http_client/src/http_client.rs zed.dev
 
-# server_url default is .invalid; the file keeps zed.dev in docs and comment strings
-
 # the host guard names the hosts it blocks
 crates/bongos_net/src/bongos_net.rs cdn.agentclientprotocol.com
 crates/bongos_net/src/bongos_net.rs notzed.dev

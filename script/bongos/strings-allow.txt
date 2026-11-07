@@ -12,7 +12,7 @@ assets/keymaps/macos/atom.json 1
 assets/keymaps/macos/cursor.json 2
 assets/keymaps/macos/emacs.json 5
 assets/keymaps/vim.json 5
-assets/settings/default.json 56
+assets/settings/default.json 52
 assets/settings/default_semantic_token_rules.json 1
 assets/settings/initial_user_settings.json 1
 crates/acp_thread/src/acp_thread.rs 3
@@ -25,11 +25,10 @@ crates/agent_ui/src/agent_configuration.rs 2
 crates/agent_ui/src/agent_panel.rs 1
 crates/agent_ui/src/agent_ui.rs 1
 crates/agent_ui/src/conversation_view.rs 1
-crates/agent_ui/src/conversation_view/thread_view.rs 3
+crates/agent_ui/src/conversation_view/thread_view.rs 1
 crates/agent_ui/src/message_editor.rs 1
 crates/agent_ui/src/model_selector.rs 2
 crates/agent_ui/src/thread_worktree_archive.rs 2
-crates/agent_ui/src/ui/end_trial_upsell.rs 2
 crates/ai_onboarding/src/ai_onboarding.rs 10
 crates/ai_onboarding/src/plan_definitions.rs 5
 crates/auto_update/src/auto_update.rs 7
@@ -68,7 +67,6 @@ crates/gpui_windows/src/window.rs 1
 crates/inspector_ui/src/inspector.rs 1
 crates/install_cli/src/install_cli_binary.rs 3
 crates/keymap_editor/src/keymap_editor.rs 4
-crates/language_model_core/src/provider.rs 1
 crates/language_models/src/provider/anthropic.rs 2
 crates/language_models/src/provider/api_compatible.rs 2
 crates/language_models/src/provider/bedrock.rs 2
