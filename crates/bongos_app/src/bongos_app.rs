@@ -128,10 +128,13 @@ impl ImportOutcome {
 /// Copies `settings.json` and `keymap.json` from `zed_dir` over the ones in `bongos_dir`.
 ///
 /// `confirm` is awaited before anything is read or written; when it resolves to `false` nothing changes. When neither
-/// source exists nothing changes either and `NotFound` is returned. Every source is read and checked before the first
-/// write, so a failure (an unreadable file, settings that cannot be parsed) leaves `bongos_dir` as it was. An existing
-/// destination file is copied to `<name>.bak` before it is replaced. `server_url` is removed from the settings, with
-/// comments and formatting kept. This never touches the network.
+/// source exists nothing changes either and `NotFound` is returned. Every source is read and parsed as JSON with
+/// comments, and every destination is checked, before the first write, so a failure (an unreadable or invalid file, a
+/// destination that is a link to the Zed file) leaves `bongos_dir` as it was. An existing destination file is copied to
+/// the first free name of `<name>.bak`, `<name>.bak.1`, `<name>.bak.2` and so on before it is replaced, so an earlier
+/// backup is never overwritten. Each file is written to a temporary file and renamed into place. If a later write
+/// fails, the error names the files that were already replaced. `server_url` is removed from the settings at any depth
+/// inside objects, with comments and formatting kept. This never touches the network.
 pub async fn import_zed_settings(
     zed_dir: &Path,
     bongos_dir: &Path,
@@ -159,8 +162,20 @@ pub async fn import_zed_settings(
         let (content, removed_server_url) = if name == "settings.json" {
             remove_server_url(&content).with_context(|| format!("reading {}", source.display()))?
         } else {
+            settings_json::parse_json_with_comments::<Value>(&content)
+                .with_context(|| format!("{} is not valid JSON", source.display()))?;
             (content, false)
         };
+        let destination = bongos_dir.join(name);
+        if let (Ok(source), Ok(destination)) =
+            (fs::canonicalize(&source), fs::canonicalize(&destination))
+            && source == destination
+        {
+            bail!(
+                "{} is the Zed file; refusing to rewrite it",
+                destination.display()
+            );
+        }
         pending.push((name, content, removed_server_url));
     }
     if pending.is_empty() {
@@ -172,15 +187,21 @@ pub async fn import_zed_settings(
     fs::create_dir_all(bongos_dir).with_context(|| format!("creating {}", bongos_dir.display()))?;
     let mut imported = Vec::new();
     for (name, content, removed_server_url) in pending {
-        let destination = bongos_dir.join(name);
-        let backed_up = destination.exists();
-        if backed_up {
-            let backup = bongos_dir.join(format!("{name}.bak"));
-            fs::copy(&destination, &backup)
-                .with_context(|| format!("backing up {}", destination.display()))?;
-        }
-        fs::write(&destination, content)
-            .with_context(|| format!("writing {}", destination.display()))?;
+        let written: Vec<_> = imported
+            .iter()
+            .map(|file: &ImportedFile| file.name)
+            .collect();
+        let result = replace_file(bongos_dir, name, &content);
+        let backed_up = match result {
+            Ok(backed_up) => backed_up,
+            Err(error) if written.is_empty() => return Err(error),
+            Err(error) => {
+                return Err(error.context(format!(
+                    "{} was already replaced and the rest was not imported",
+                    written.join(" and ")
+                )));
+            }
+        };
         imported.push(ImportedFile {
             name,
             backed_up,
@@ -188,6 +209,29 @@ pub async fn import_zed_settings(
         });
     }
     Ok(ImportOutcome::Imported(imported))
+}
+
+/// Replaces `dir/name` with `content`, first copying an existing file to the first free backup name. Returns whether a
+/// backup was made.
+fn replace_file(dir: &Path, name: &str, content: &str) -> Result<bool> {
+    let destination = dir.join(name);
+    let backed_up = destination.exists();
+    if backed_up {
+        let backup = (0..)
+            .map(|n| match n {
+                0 => dir.join(format!("{name}.bak")),
+                n => dir.join(format!("{name}.bak.{n}")),
+            })
+            .find(|path| fs::symlink_metadata(path).is_err())
+            .expect("an unbounded range always yields a free name");
+        fs::copy(&destination, &backup)
+            .with_context(|| format!("backing up {}", destination.display()))?;
+    }
+    let temporary = dir.join(format!(".{name}.import"));
+    fs::write(&temporary, content).with_context(|| format!("writing {}", temporary.display()))?;
+    fs::rename(&temporary, &destination)
+        .with_context(|| format!("writing {}", destination.display()))?;
+    Ok(backed_up)
 }
 
 /// Removes every `server_url` key from settings text, keeping comments and formatting. Returns the new text and whether
@@ -497,5 +541,88 @@ mod tests {
         fs::write(zed.join("settings.json"), "{}").unwrap();
 
         assert!(block_on(import_zed_settings(&zed, &zed, async { true })).is_err());
+    }
+
+    #[test]
+    fn second_import_keeps_the_original_in_the_first_bak() {
+        let (_root, zed, ours) = dirs();
+        fs::write(zed.join("settings.json"), "{\"theme\": \"Zed\"}").unwrap();
+        fs::write(ours.join("settings.json"), "// original\n{}").unwrap();
+
+        import(&zed, &ours, true);
+        import(&zed, &ours, true);
+        fs::write(zed.join("settings.json"), "{\"theme\": \"Zed 2\"}").unwrap();
+        import(&zed, &ours, true);
+
+        assert_eq!(
+            fs::read_to_string(ours.join("settings.json.bak")).unwrap(),
+            "// original\n{}"
+        );
+        assert_eq!(
+            fs::read_to_string(ours.join("settings.json.bak.1")).unwrap(),
+            "{\"theme\": \"Zed\"}"
+        );
+        assert_eq!(
+            fs::read_to_string(ours.join("settings.json.bak.2")).unwrap(),
+            "{\"theme\": \"Zed\"}"
+        );
+        assert_eq!(
+            fs::read_to_string(ours.join("settings.json")).unwrap(),
+            "{\"theme\": \"Zed 2\"}"
+        );
+    }
+
+    #[test]
+    fn invalid_keymap_is_refused_and_nothing_is_written() {
+        let (_root, zed, ours) = dirs();
+        fs::write(zed.join("settings.json"), "{\"a\": 1}").unwrap();
+        fs::write(zed.join("keymap.json"), "[{ nope").unwrap();
+        fs::write(ours.join("settings.json"), "{}").unwrap();
+
+        assert!(block_on(import_zed_settings(&zed, &ours, async { true })).is_err());
+
+        assert_eq!(
+            fs::read_to_string(ours.join("settings.json")).unwrap(),
+            "{}"
+        );
+        assert!(!ours.join("settings.json.bak").exists());
+        assert!(!ours.join("keymap.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_linked_to_the_zed_file_is_refused() {
+        let (_root, zed, ours) = dirs();
+        fs::write(zed.join("settings.json"), "{\"theme\": \"Zed\"}").unwrap();
+        fs::write(zed.join("keymap.json"), "[]").unwrap();
+        std::os::unix::fs::symlink(zed.join("keymap.json"), ours.join("keymap.json")).unwrap();
+
+        let result = block_on(import_zed_settings(&zed, &ours, async { true }));
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(zed.join("keymap.json")).unwrap(), "[]");
+        assert!(!ours.join("settings.json").exists());
+        assert!(!ours.join("keymap.json.bak").exists());
+    }
+
+    #[test]
+    fn failure_after_the_first_write_names_the_replaced_file() {
+        let (_root, zed, ours) = dirs();
+        fs::write(zed.join("settings.json"), "{}").unwrap();
+        fs::write(zed.join("keymap.json"), "[]").unwrap();
+        // A directory where the keymap should go makes the second write fail.
+        fs::create_dir(ours.join("keymap.json")).unwrap();
+
+        let error = block_on(import_zed_settings(&zed, &ours, async { true })).unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("settings.json was already replaced"),
+            "{message}"
+        );
+        assert_eq!(
+            fs::read_to_string(ours.join("settings.json")).unwrap(),
+            "{}"
+        );
     }
 }
