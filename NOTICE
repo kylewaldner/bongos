@@ -22,3 +22,5 @@ md-5: MIT or Apache-2.0, taken under MIT
 
 Bundled third-party material:
 crates/bongos_languages/src/kotlin/*.scm: Kotlin highlight and outline queries from zed-extensions/kotlin, MIT, copyright 2024 Evren Sen; see crates/bongos_languages/LICENSE-KOTLIN-EXTENSION
+crates/bongos_languages/src/java/*.scm and config.toml: Java queries and config from zed-extensions/java, Apache-2.0, copyright Java Extension Contributors; see crates/bongos_languages/LICENSE-JAVA-EXTENSION
+crates/bongos_languages/src/toml/*.scm and config.toml: TOML queries and config from zed-extensions/toml, Apache-2.0, copyright 2022-2025 Zed Industries, Inc.; see crates/bongos_languages/LICENSE-TOML-EXTENSION

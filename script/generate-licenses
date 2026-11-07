@@ -28,6 +28,12 @@ echo -n "" >"$OUTPUT_FILE"
     echo -e "The Kotlin highlight and outline queries in crates/bongos_languages/src/kotlin are from zed-extensions/kotlin (Evren Sen).\n"
     cat crates/bongos_languages/LICENSE-KOTLIN-EXTENSION
 
+    echo -e "\n# ###### JAVA AND TOML QUERY LICENSES ######\n"
+    echo -e "The Java highlight, outline, brackets, indents, injections and overrides queries in crates/bongos_languages/src/java are from zed-extensions/java (Java Extension Contributors), licensed Apache-2.0.\n"
+    cat crates/bongos_languages/LICENSE-JAVA-EXTENSION
+    echo -e "\nThe TOML queries in crates/bongos_languages/src/toml are from zed-extensions/toml (Zed Industries, Inc.), licensed Apache-2.0.\n"
+    cat crates/bongos_languages/LICENSE-TOML-EXTENSION
+
     echo -e "\n# ###### CODE LICENSES ######\n"
 } >>"$OUTPUT_FILE"
 
