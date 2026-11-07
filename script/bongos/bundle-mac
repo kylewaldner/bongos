@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the macOS app bundle bongos[ <Channel>].app and a disk image that shows the GPL-3.0-or-later
-# licence before it can be mounted. Nothing here publishes anything or talks to a network: there is no
+# license before it can be mounted. Nothing here publishes anything or talks to a network: there is no
 # upload, no notarization submission, no crash-symbol upload and no download of any tool or binary.
 # All output goes under the output directory; cargo writes to its usual target directory.
 #   bundle-mac [--out DIR] [--target TRIPLE] [--debug]
@@ -207,7 +207,7 @@ if $debug; then
   exit 0
 fi
 
-# The disk image, with the GPL-3.0-or-later licence as its agreement. The RTF is made from LICENSE-GPL,
+# The disk image, with the GPL-3.0-or-later license as its agreement. The RTF is made from LICENSE-GPL,
 # so the two cannot drift: backslashes and braces are escaped and every non-ASCII character becomes \uN?.
 command -v dmg-license >/dev/null || die "dmg-license is not on PATH; install it yourself with: npm install --global dmg-license"
 license_dir="$out/dmg-license"
