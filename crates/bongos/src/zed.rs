@@ -5323,6 +5323,7 @@ mod tests {
                 "assistant2",
                 "branch_picker",
                 "bedrock",
+                "bongos",
                 "branches",
                 "buffer_search",
                 "cli",
