@@ -124,13 +124,8 @@ if [ -n "$stock" ]; then
 fi
 quit_app
 if [ -z "$stock" ]; then
-  # TEMPORARY: bongos_app creates these on first launch in step 26, which removes this switch.
-  if [ -z "${BONGOS_SKIP_FIRST_LAUNCH_CONFIG:-}" ]; then
-    assert_file "$HOME/$BONGOS_CONFIG_PATH/settings.json"
-    assert_file "$HOME/$BONGOS_CONFIG_PATH/keymap.json"
-  else
-    say "smoke: SKIPPING settings.json and keymap.json check (BONGOS_SKIP_FIRST_LAUNCH_CONFIG)"
-  fi
+  assert_file "$HOME/$BONGOS_CONFIG_PATH/settings.json"
+  assert_file "$HOME/$BONGOS_CONFIG_PATH/keymap.json"
   zed_paths=$(cd "$HOME" && find . -ipath '*zed*')
   if [ -n "$zed_paths" ]; then
     echo "bongos: zed paths in the throwaway home: $zed_paths" >&2

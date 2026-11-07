@@ -2045,6 +2045,7 @@ dependencies = [
  "askpass",
  "assets",
  "audio",
+ "bongos_app",
  "bongos_net",
  "bongos_version",
  "breadcrumbs",
@@ -2188,6 +2189,15 @@ dependencies = [
  "zlog",
  "zlog_settings",
  "ztracing",
+]
+
+[[package]]
+name = "bongos_app"
+version = "0.1.0"
+dependencies = [
+ "paths",
+ "settings",
+ "tempfile",
 ]
 
 [[package]]

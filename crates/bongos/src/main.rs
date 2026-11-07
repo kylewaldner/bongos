@@ -275,6 +275,8 @@ fn main() {
         return;
     }
 
+    bongos_app::ensure_config_files();
+
     zlog::init();
 
     if stdout_is_a_pty() {
