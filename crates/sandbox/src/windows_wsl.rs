@@ -1157,7 +1157,7 @@ mod tests {
     #[test]
     fn bwrap_binds_explicit_writable_file_paths() {
         let args = build_bwrap_args(
-            &["/mnt/c/Users/me/AppData/Roaming/Zed/AGENTS.md".to_string()],
+            &["/mnt/c/Users/me/AppData/Roaming/bongos/AGENTS.md".to_string()],
             SandboxPermissions::default(),
             None,
             true,
@@ -1166,8 +1166,8 @@ mod tests {
         assert!(args.windows(3).any(|window| window
             == [
                 "--bind",
-                "/mnt/c/Users/me/AppData/Roaming/Zed/AGENTS.md",
-                "/mnt/c/Users/me/AppData/Roaming/Zed/AGENTS.md"
+                "/mnt/c/Users/me/AppData/Roaming/bongos/AGENTS.md",
+                "/mnt/c/Users/me/AppData/Roaming/bongos/AGENTS.md"
             ]));
     }
 
