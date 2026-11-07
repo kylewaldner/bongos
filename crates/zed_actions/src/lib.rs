@@ -67,8 +67,6 @@ actions!(
         OpenLicenses,
         /// Opens the performance profiler.
         OpenPerformanceProfiler,
-        /// Shows the auto-update notification for testing.
-        ShowUpdateNotification,
     ]
 );
 

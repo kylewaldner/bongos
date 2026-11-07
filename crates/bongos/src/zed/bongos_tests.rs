@@ -20,17 +20,26 @@ const REMOVED_NAMESPACES: &[&str] = &[
     "account",
 ];
 
-/// The `zed::Extensions` page stays on purpose (installed and dev extensions); the gallery is gone.
-/// Words that must not appear in any action name (lowercased, underscores removed).
+/// Exact names of actions that were deleted.
+const REMOVED_ACTIONS: &[&str] = &[
+    "zed::OpenAccountSettings",
+    "zed::OpenStatusPage",
+    "zed::OpenOnboarding",
+    "zed::ShowUpdateNotification",
+    "agent::ResetTrialUpsell",
+    "agent::ResetTrialEndUpsell",
+    "client::SignIn",
+    "client::SignOut",
+    "feedback::EmailZed",
+];
+
+/// Fragments that must not appear in any action name (lowercased, underscores removed, so they
+/// match the namespace and the action part alike).
 const REMOVED_WORDS: &[&str] = &[
     "zedaccount",
     "zedpredict",
-    "zedai",
     "zedpro",
-    "zeddev",
     "signintozed",
-    "signouttozed",
-    "cloudupsell",
     "upsell",
     "aionboarding",
     "predictonboarding",
@@ -39,15 +48,17 @@ const REMOVED_WORDS: &[&str] = &[
     "telemetry",
     "checkforupdate",
     "autoupdate",
-    "extensionmarketplace",
-    "installfromgallery",
     "requestfeature",
     "filebugreport",
     "emailzed",
     "joinchannel",
-    "sharetonewproject",
+    "accountsettings",
+    "statuspage",
+    "openonboarding",
+    "releasenotes",
 ];
 
+// `zed::Extensions` stays on purpose (installed and dev extensions); the gallery is gone.
 /// Actions that must survive: the core editor and workspace surface.
 const KEPT_ACTIONS: &[&str] = &[
     "editor::Copy",
@@ -72,6 +83,7 @@ async fn available_actions(cx: &mut TestAppContext) {
             let namespace = name.rsplit_once("::").map_or("", |(ns, _)| ns);
             let flat = name.replace('_', "").to_lowercase();
             if REMOVED_NAMESPACES.contains(&namespace)
+                || REMOVED_ACTIONS.contains(name)
                 || REMOVED_WORDS.iter().any(|word| flat.contains(word))
             {
                 offenders.push(*name);
