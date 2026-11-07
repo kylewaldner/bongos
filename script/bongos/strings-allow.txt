@@ -3,6 +3,7 @@
 # Every line below is permanent; its "# permanent:" comment says why. Anything else says bongos.
 assets/settings/default.json 2  # permanent: "Zed (Default)" is the stored default icon theme id, and the glob matches Zed's own config dirs
 crates/agent/src/agent.rs 1  # permanent: "Zed Agent" is the stored native agent id in saved threads
+crates/agent_ui/src/agent_panel.rs 1  # permanent: a doc comment naming the native "Zed Agent" by its stored id
 crates/bongos_app/src/bongos_app.rs 13  # permanent: the import-from-Zed feature names the Zed files it reads (and its test fixtures)
 crates/bongos/src/zed/app_menus.rs 1  # permanent: the "Import Zed Settings" menu item (import from Zed)
 crates/bongos/src/zed.rs 3  # permanent: the import-from-Zed confirmation and error text

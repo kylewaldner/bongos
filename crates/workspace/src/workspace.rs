@@ -8731,9 +8731,9 @@ pub async fn apply_restored_multiworkspace_state(
 actions!(
     zed,
     [
-        /// Opens the Zed log file.
+        /// Opens the bongos log file.
         OpenLog,
-        /// Reveals the Zed log file in the system file manager.
+        /// Reveals the bongos log file in the system file manager.
         RevealLogInFileManager
     ]
 );

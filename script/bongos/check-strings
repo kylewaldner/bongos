@@ -5,7 +5,8 @@
 # Counted lines:
 #   crates/**/*.rs      lines with "Zed" inside a "..." literal; lines starting with // are skipped;
 #                       tests dirs and test files are excluded, as in check-hosts
-#   crates/settings_content/src   also /// doc comment lines (they become schema descriptions)
+#   crates/settings_content/src, zed_actions/src, workspace/src, agent_ui/src   also /// doc comment lines
+#                       (they become schema descriptions and action descriptions in the command palette)
 #   assets/settings/*.json, assets/keymaps/*.json   any line
 #   the literal .zed/ in any of those files
 #   check-strings --list   print every '<path> <count>' found, for building the allow list
@@ -32,7 +33,7 @@ found() {
       if (path ~ /^assets\//) { print path; next }
       trimmed = text; sub(/^[ \t]+/, "", trimmed)
       if (trimmed ~ /^\/\/\//) {
-        if (path ~ /^crates\/settings_content\/src\//) print path
+        if (path ~ /^crates\/(settings_content|zed_actions|workspace|agent_ui)\/src\//) print path
         next
       }
       if (trimmed ~ /^\/\//) next

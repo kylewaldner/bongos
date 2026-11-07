@@ -54,9 +54,9 @@ pub struct RootPlan {
     /// loaded in any open workspace.
     pub remote_connection: Option<RemoteConnectionOptions>,
     /// The creation time of the worktree's git metadata directory that was
-    /// recorded when Zed created the worktree. [`remove_root`] re-stats the
+    /// recorded when bongos created the worktree. [`remove_root`] re-stats the
     /// directory and refuses to delete anything if the time has changed,
-    /// which means the worktree was recreated outside Zed.
+    /// which means the worktree was recreated outside bongos.
     pub recorded_created_at: SystemTime,
 }
 
@@ -78,10 +78,10 @@ fn archived_worktree_ref_name(id: i64) -> String {
     format!("refs/archived-worktrees/{}", id)
 }
 
-/// Resolves the Zed-managed worktrees base directory for a given repo.
+/// Resolves the bongos-managed worktrees base directory for a given repo.
 ///
 /// This intentionally reads the *global* `git.worktree_directory` setting
-/// rather than any project-local override, because Zed always uses the
+/// rather than any project-local override, because bongos always uses the
 /// global value when creating worktrees and the archive check must match.
 fn worktrees_base_for_repo(
     main_repo_path: &Path,
@@ -252,16 +252,16 @@ pub async fn remove_root(root: RootPlan, cx: &mut AsyncApp) -> Result<()> {
     Ok(())
 }
 
-/// Confirms that the worktree on disk is still the one Zed created, by
+/// Confirms that the worktree on disk is still the one bongos created, by
 /// comparing the creation time of its git metadata directory against the
-/// time recorded when Zed created it.
+/// time recorded when bongos created it.
 ///
 /// Outcomes:
 /// - Creation time matches the recorded one: proceed.
 /// - Worktree directory no longer exists: proceed — there is nothing on
 ///   disk to protect, and removal will only clean up git metadata.
 /// - Creation time differs: the worktree was removed and recreated outside
-///   Zed. The registry record is removed (so subsequent archival attempts
+///   bongos. The registry record is removed (so subsequent archival attempts
 ///   skip the worktree entirely) and an error is returned so the caller
 ///   leaves the directory untouched.
 /// - Creation time cannot be read: return an error but keep the record,
