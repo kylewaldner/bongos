@@ -90,6 +90,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Extensions", zed_actions::Extensions::default()),
                 #[cfg(not(target_os = "windows"))]
                 MenuItem::action("Install CLI", bongos_app::InstallCli),
+                MenuItem::action("Import Zed Settings", bongos_app::ImportZedSettings),
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Hide bongos", super::Hide),

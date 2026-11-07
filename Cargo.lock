@@ -2196,9 +2196,14 @@ dependencies = [
 name = "bongos_app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "dirs",
+ "futures 0.3.32",
  "gpui",
  "paths",
+ "serde_json",
  "settings",
+ "settings_json",
  "tempfile",
 ]
 

@@ -32,10 +32,13 @@ crates/agent_ui/src/thread_worktree_archive.rs 2
 crates/auto_update/src/auto_update.rs 7
 crates/bongos/src/main.rs 4
 crates/bongos/src/visual_test_runner.rs 1
+crates/bongos/src/zed.rs 3
+crates/bongos/src/zed/app_menus.rs 1
 crates/bongos/src/zed/mac_only_instance.rs 4
 crates/bongos/src/zed/move_to_applications.rs 6
 crates/bongos/src/zed/quick_action_bar/repl_menu.rs 1
 crates/bongos/src/zed/windows_only_instance.rs 2
+crates/bongos_app/src/bongos_app.rs 6
 crates/bongos_version/src/bongos_version.rs 4
 crates/cli/src/main.rs 13
 crates/context_server/src/context_server.rs 1

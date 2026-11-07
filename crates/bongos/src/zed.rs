@@ -1250,6 +1250,7 @@ fn register_actions(
 
     #[cfg(not(target_os = "windows"))]
     workspace.register_action(install_cli);
+    workspace.register_action(import_zed_settings);
 
     if workspace.project().read(cx).is_via_remote_server() {
         workspace.register_action({
@@ -1607,6 +1608,49 @@ fn install_cli(
     cx: &mut Context<Workspace>,
 ) {
     install_cli::install_cli_binary(window, cx)
+}
+
+fn import_zed_settings(
+    _: &mut Workspace,
+    _: &bongos_app::ImportZedSettings,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    struct ImportZedSettings;
+
+    let answer = window.prompt(
+        PromptLevel::Warning,
+        "Import Zed settings?",
+        Some(
+            "This replaces your bongos settings.json and keymap.json with your Zed ones. \
+            Your current files are kept as .bak copies, and server_url is not imported.",
+        ),
+        &["Import", "Cancel"],
+        cx,
+    );
+    cx.spawn_in(window, async move |workspace, cx| {
+        let confirm = async move { answer.await.ok() == Some(0) };
+        let result = match bongos_app::zed_config_dir() {
+            Some(zed_dir) => {
+                bongos_app::import_zed_settings(&zed_dir, paths::config_dir(), confirm).await
+            }
+            None => Err(anyhow::anyhow!("could not find the Zed config directory")),
+        };
+        let message = match result {
+            Ok(outcome) => outcome.message(),
+            Err(error) => Some(format!("Could not import Zed settings: {error:#}")),
+        };
+        if let Some(message) = message {
+            workspace.update_in(cx, |workspace, _, cx| {
+                workspace.show_toast(
+                    Toast::new(NotificationId::unique::<ImportZedSettings>(), message),
+                    cx,
+                )
+            })?;
+        }
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
 }
 
 static WAITING_QUIT_CONFIRMATION: AtomicBool = AtomicBool::new(false);
