@@ -24,6 +24,10 @@ echo -n "" >"$OUTPUT_FILE"
     echo -e "\n# ###### ICON LICENSES ######\n"
     cat assets/icons/LICENSES
 
+    echo -e "\n# ###### KOTLIN QUERY LICENSES ######\n"
+    echo -e "The Kotlin highlight and outline queries in crates/bongos_languages/src/kotlin are from zed-extensions/kotlin (Evren Sen).\n"
+    cat crates/bongos_languages/LICENSE-KOTLIN-EXTENSION
+
     echo -e "\n# ###### CODE LICENSES ######\n"
 } >>"$OUTPUT_FILE"
 
@@ -43,6 +47,17 @@ $WRAPPER cargo about generate \
     -c script/licenses/zed-licenses.toml \
     "$TEMPLATE_FILE" >>"$OUTPUT_FILE"
 set +x
+
+# cargo-about 0.8.2 (krates 0.20) drops md-5 because its lib target is named md5, so it never matches
+# oo7's `dep:md-5` feature. Its license is appended by hand; the guard fails when the locked version moves.
+if ! grep -A1 '^name = "md-5"$' Cargo.lock | grep -q '^version = "0.10.6"$'; then
+    echo "md-5 changed version in Cargo.lock; update script/licenses/md-5-supplement.md" >&2
+    exit 1
+fi
+{
+    echo
+    cat script/licenses/md-5-supplement.md
+} >>"$OUTPUT_FILE"
 
 sed -i.bak 's/&quot;/"/g' "$OUTPUT_FILE"
 sed -i.bak 's/&#x27;/'\''/g' "$OUTPUT_FILE" # The ` '\'' ` thing ends the string, appends a single quote, and re-opens the string

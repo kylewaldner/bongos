@@ -13,3 +13,7 @@ crates/cloud_llm_client: modified by bongos; see git log
 Third-party license options taken:
 self_cell: Apache-2.0, taken under Apache-2.0
 r-efi: MIT or Apache-2.0, taken under MIT
+md-5: MIT or Apache-2.0, taken under MIT
+
+Bundled third-party material:
+crates/bongos_languages/src/kotlin/*.scm: Kotlin highlight and outline queries from zed-extensions/kotlin, MIT, copyright 2024 Evren Sen; see crates/bongos_languages/LICENSE-KOTLIN-EXTENSION
