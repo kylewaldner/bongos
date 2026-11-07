@@ -8,6 +8,7 @@ Bongos is an Emacs-shaped Kotlin IDE and a hard fork of Zed, licensed GPL-3.0-or
 - Commit messages are lowercase plain English with no prefix, no trailing period, and no `Co-Authored-By` or AI trailer.
 - Stage specific files, never `git add -A`.
 - Delegate work to subagents through the `model-routing` skill instead of doing it inline, and invoke it before the first delegation of a session.
+- Never pick a Claude model ID from memory. Defaults and examples use the newest Claude family (Claude 5: `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`). If a task needs another ID, ask; do not guess an older one.
 
 # Rust coding guidelines
 
