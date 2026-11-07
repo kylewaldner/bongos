@@ -129,7 +129,7 @@ mod tests {
         }
         assert!(
             registry
-                .language_for_file_path(Path::new("notes.txt"))
+                .language_for_file_path(Path::new("Main.xyz"))
                 .is_none()
         );
 
