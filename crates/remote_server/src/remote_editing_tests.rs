@@ -519,6 +519,7 @@ async fn test_remote_project_search_inclusion(
 }
 
 #[gpui::test]
+#[ignore = "remote and SSH are unsupported in bongos"]
 async fn test_remote_settings(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());
     fs.insert_tree(
@@ -647,6 +648,7 @@ async fn test_remote_settings(cx: &mut TestAppContext, server_cx: &mut TestAppCo
 }
 
 #[gpui::test]
+#[ignore = "remote and SSH are unsupported in bongos"]
 async fn test_remote_lsp(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());
     fs.insert_tree(
