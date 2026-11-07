@@ -1,8 +1,8 @@
 use gpui::{Action as _, App};
 use itertools::Itertools as _;
 use settings::{
-    AudioInputDeviceName, AudioOutputDeviceName, EditPredictionDataCollectionChoice,
-    LanguageSettingsContent, SemanticTokens, SettingsContent,
+    AudioInputDeviceName, AudioOutputDeviceName, LanguageSettingsContent, SemanticTokens,
+    SettingsContent,
 };
 use std::sync::{Arc, OnceLock};
 use strum::{EnumMessage, IntoDiscriminant as _, VariantArray};
@@ -284,7 +284,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("Security"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Trust All Projects By Default",
-                description: "When opening Zed, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
+                description: "When opening bongos, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("session.trust_all_projects"),
@@ -334,7 +334,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Restore On Startup",
-                description: "What to restore from the previous session when opening Zed.",
+                description: "What to restore from the previous session when opening bongos.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("restore_on_startup"),
@@ -355,7 +355,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SettingItem(SettingItem {
                 files: USER,
                 title: "Preview Channel",
-                description: "Which settings should be activated only in Preview build of Zed.",
+                description: "Which settings should be activated only in Preview build of bongos.",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -385,50 +385,9 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn privacy_section() -> [SettingsPageItem; 4] {
+    fn privacy_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SectionHeader("Privacy"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Telemetry Diagnostics",
-                description: "Send debug information like crash reports.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("telemetry.diagnostics"),
-                    pick: |settings_content| {
-                        settings_content
-                            .telemetry
-                            .as_ref()
-                            .and_then(|telemetry| telemetry.diagnostics.as_ref())
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .telemetry
-                            .get_or_insert_default()
-                            .diagnostics = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Telemetry Metrics",
-                description: "Send anonymized usage data like what languages you're using Zed with.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("telemetry.metrics"),
-                    pick: |settings_content| {
-                        settings_content
-                            .telemetry
-                            .as_ref()
-                            .and_then(|telemetry| telemetry.metrics.as_ref())
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content.telemetry.get_or_insert_default().metrics = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Anthropic Data Retention",
                 description: "Allow sending requests to Anthropic models that cannot be offered with Zero Data Retention.",
@@ -454,26 +413,6 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn auto_update_section() -> [SettingsPageItem; 2] {
-        [
-            SettingsPageItem::SectionHeader("Auto Update"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Auto Update",
-                description: "Whether or not to automatically check for updates.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("auto_update"),
-                    pick: |settings_content| settings_content.auto_update.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.auto_update = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
     SettingsPage {
         title: "General",
         items: concat_sections!(
@@ -483,7 +422,6 @@ fn general_page(cx: &App) -> SettingsPage {
             workspace_restoration_section(),
             scoped_settings_section(),
             privacy_section(),
-            auto_update_section(),
         )
         .into(),
     }
@@ -676,7 +614,7 @@ fn appearance_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Icon Theme",
-                    description: "The custom set of icons Zed will associate with files and directories.",
+                    description: "The custom set of icons bongos will associate with files and directories.",
                     field: Box::new(SettingField {
                         organization_override: None,
                         json_path: Some("icon_theme$"),
@@ -3593,7 +3531,7 @@ fn search_and_files_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("File Scan"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Exclusions",
-                description: "Files or globs of files that will be excluded by Zed entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
+                description: "Files or globs of files that will be excluded by bongos entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -3616,7 +3554,7 @@ fn search_and_files_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Inclusions",
-                description: "Files or globs of files that will be included by Zed, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Zed's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
+                description: "Files or globs of files that will be included by bongos, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down bongos's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -3897,7 +3835,7 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn title_bar_section() -> [SettingsPageItem; 10] {
+    fn title_bar_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Title Bar"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3964,90 +3902,6 @@ fn window_and_layout_page() -> SettingsPage {
                             .title_bar
                             .get_or_insert_default()
                             .show_project_items = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Onboarding Banner",
-                description: "Show banners announcing new features in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_onboarding_banner"),
-                    pick: |settings_content| {
-                        settings_content
-                            .title_bar
-                            .as_ref()?
-                            .show_onboarding_banner
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_onboarding_banner = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Sign In",
-                description: "Show the sign in button in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_sign_in"),
-                    pick: |settings_content| {
-                        settings_content.title_bar.as_ref()?.show_sign_in.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_sign_in = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show User Menu",
-                description: "Show the user menu button in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_user_menu"),
-                    pick: |settings_content| {
-                        settings_content.title_bar.as_ref()?.show_user_menu.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_user_menu = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show User Picture",
-                description: "Show user picture in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_user_picture"),
-                    pick: |settings_content| {
-                        settings_content
-                            .title_bar
-                            .as_ref()?
-                            .show_user_picture
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_user_picture = value;
                     },
                 }),
                 metadata: None,
@@ -4711,7 +4565,7 @@ fn window_and_layout_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Window Decorations",
-                description: "(Linux only) whether Zed or your compositor should draw window decorations.",
+                description: "(Linux only) whether bongos or your compositor should draw window decorations.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("window_decorations"),
@@ -6113,77 +5967,6 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn collaboration_panel_section() -> [SettingsPageItem; 4] {
-        [
-            SettingsPageItem::SectionHeader("Collaboration Panel"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Collaboration Panel Button",
-                description: "Show the collaboration panel button in the status bar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("collaboration_panel.button"),
-                    pick: |settings_content| {
-                        settings_content
-                            .collaboration_panel
-                            .as_ref()?
-                            .button
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .collaboration_panel
-                            .get_or_insert_default()
-                            .button = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Collaboration Panel Dock",
-                description: "Where to dock the collaboration panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("collaboration_panel.dock"),
-                    pick: |settings_content| {
-                        settings_content.collaboration_panel.as_ref()?.dock.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .collaboration_panel
-                            .get_or_insert_default()
-                            .dock = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Collaboration Panel Default Width",
-                description: "Default width of the collaboration panel in pixels.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("collaboration_panel.dock"),
-                    pick: |settings_content| {
-                        settings_content
-                            .collaboration_panel
-                            .as_ref()?
-                            .default_width
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .collaboration_panel
-                            .get_or_insert_default()
-                            .default_width = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
     fn agent_panel_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Agent Panel"),
@@ -6330,7 +6113,6 @@ fn panels_page() -> SettingsPage {
             outline_panel_section(),
             git_panel_section(),
             debugger_panel_section(),
-            collaboration_panel_section(),
             agent_panel_section(),
         ],
     }
@@ -6365,7 +6147,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Save Breakpoints",
-                description: "Whether breakpoints should be reused across Zed sessions.",
+                description: "Whether breakpoints should be reused across bongos sessions.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("debugger.save_breakpoints"),
@@ -6402,7 +6184,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Log DAP Communications",
-                description: "Whether to log messages between active debug adapters and Zed.",
+                description: "Whether to log messages between active debug adapters and bongos.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("debugger.log_dap_communications"),
@@ -7319,7 +7101,7 @@ fn version_control_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Disable Git Integration",
-                    description: "Disable all Git integration features in Zed.",
+                    description: "Disable all Git integration features in bongos.",
                     field: Box::new(SettingField::<bool> {
                         organization_override: None,
                         json_path: Some("git.disable_git"),
@@ -7731,42 +7513,6 @@ fn version_control_page() -> SettingsPage {
 }
 
 fn collaboration_page() -> SettingsPage {
-    fn calls_section() -> [SettingsPageItem; 3] {
-        [
-            SettingsPageItem::SectionHeader("Calls"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Mute On Join",
-                description: "Whether the microphone should be muted when joining a channel or a call.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("calls.mute_on_join"),
-                    pick: |settings_content| settings_content.calls.as_ref()?.mute_on_join.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.calls.get_or_insert_default().mute_on_join = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Share On Join",
-                description: "Whether your current project should be shared when joining an empty channel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("calls.share_on_join"),
-                    pick: |settings_content| {
-                        settings_content.calls.as_ref()?.share_on_join.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content.calls.get_or_insert_default().share_on_join = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
     fn audio_settings() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::ActionLink(ActionLink {
@@ -7830,8 +7576,8 @@ fn collaboration_page() -> SettingsPage {
     }
 
     SettingsPage {
-        title: "Collaboration",
-        items: concat_sections![calls_section(), audio_settings()],
+        title: "Audio",
+        items: concat_sections![audio_settings()],
     }
 }
 
@@ -7841,7 +7587,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("General"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Disable AI",
-                description: "Whether to disable all AI features in Zed.",
+                description: "Whether to disable all AI features in bongos.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("disable_ai"),
@@ -8083,7 +7829,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Terminal Thread Init Command",
-                description: "Command to automatically run when Zed creates a Terminal Thread shell in the agent panel. Runs in your configured shell.",
+                description: "Command to automatically run when bongos creates a Terminal Thread shell in the agent panel. Runs in your configured shell.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("agent.terminal_init_command"),
@@ -8393,7 +8139,7 @@ fn network_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Server URL",
-                description: "The URL of the Zed server to connect to.",
+                description: "The URL of the bongos server to connect to.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("server_url"),
@@ -8953,7 +8699,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             SettingsPageItem::SectionHeader("Autoclose"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Autoclose",
-                description: "Whether to automatically type closing characters for you. For example, when you type '(', Zed will automatically add a closing ')' at the correct position.",
+                description: "Whether to automatically type closing characters for you. For example, when you type '(', bongos will automatically add a closing ')' at the correct position.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).use_autoclose"),
@@ -8973,7 +8719,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Auto Surround",
-                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Zed will automatically surround text with ().",
+                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', bongos will automatically surround text with ().",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).use_auto_surround"),
@@ -9521,7 +9267,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Prefer LSP",
-                description: "Use LSP tasks over Zed language extension tasks.",
+                description: "Use LSP tasks over bongos language extension tasks.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).tasks.prefer_lsp"),
@@ -10246,52 +9992,17 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
     )
 }
 
-fn edit_prediction_language_settings_section() -> [SettingsPageItem; 5] {
+fn edit_prediction_language_settings_section() -> [SettingsPageItem; 4] {
     [
         SettingsPageItem::SectionHeader("Edit Predictions"),
         SettingsPageItem::SubPageLink(SubPageLink {
             title: "Configure Providers".into(),
             r#type: Default::default(),
             json_path: Some("edit_predictions.providers"),
-            description: Some("Set up different edit prediction providers in complement to Zed's built-in Zeta model.".into()),
+            description: Some("Set up edit prediction providers.".into()),
             in_json: false,
             files: USER,
-            render: render_edit_prediction_setup_page
-        }),
-        SettingsPageItem::SettingItem(SettingItem {
-            title: "Data Collection",
-            description: "Controls whether Zed may collect training data when using Zed's Edit Predictions. Data is only collected for files in projects detected as open source. The default value uses the preference previously set via the status-bar toggle, or false if no preference has been stored.",
-            field: Box::new(SettingField {
-                organization_override: Some(|org_settings| {
-                    const DATA_COLLECTION_DISABLED: EditPredictionDataCollectionChoice = EditPredictionDataCollectionChoice::No;
-
-                    if !org_settings.edit_prediction.is_feedback_enabled {
-                        Some(&DATA_COLLECTION_DISABLED)
-                    } else {
-                        None
-                    }
-                }),
-                json_path: Some("edit_predictions.allow_data_collection"),
-                pick: |settings_content| {
-                    settings_content
-                        .project
-                        .all_languages
-                        .edit_predictions
-                        .as_ref()?
-                        .allow_data_collection
-                        .as_ref()
-                },
-                write: |settings_content, value, _app| {
-                    settings_content
-                        .project
-                        .all_languages
-                        .edit_predictions
-                        .get_or_insert_default()
-                        .allow_data_collection = value;
-                },
-            }),
-            metadata: None,
-            files: USER,
+            render: render_edit_prediction_setup_page,
         }),
         SettingsPageItem::SettingItem(SettingItem {
             title: "Show Edit Predictions",

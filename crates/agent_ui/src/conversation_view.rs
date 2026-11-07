@@ -6,9 +6,7 @@ use acp_thread::{
 };
 use acp_thread::{AgentConnection, Plan};
 use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
-use agent::{
-    NativeAgentServer, NativeAgentSessionList, NoModelConfiguredError, SharedThread, ThreadStore,
-};
+use agent::{NativeAgentServer, NoModelConfiguredError, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 #[cfg(test)]
 use agent_servers::AgentServerDelegate;
@@ -18,13 +16,11 @@ use anyhow::{Result, anyhow};
 #[cfg(feature = "audio")]
 use audio::{Audio, Sound};
 use buffer_diff::BufferDiff;
-use client::zed_urls;
 use collections::{HashMap, HashSet, IndexMap};
 use editor::scroll::Autoscroll;
 use editor::{
     Editor, EditorEvent, EditorMode, MultiBuffer, PathKey, SelectionEffects, SizingBehavior,
 };
-use feature_flags::{AgentSharingFeatureFlag, FeatureFlagAppExt as _};
 use file_icons::FileIcons;
 use fs::Fs;
 use futures::FutureExt as _;
@@ -70,8 +66,7 @@ use util::{
     time::duration_alt_display,
 };
 use workspace::{
-    CollaboratorId, MultiWorkspace, NewTerminal, PathList, Toast, Workspace,
-    path_link::sanitize_path_text,
+    CollaboratorId, MultiWorkspace, NewTerminal, PathList, Workspace, path_link::sanitize_path_text,
 };
 use zed_actions::agent::{Chat, ToggleModelSelector};
 
@@ -123,7 +118,6 @@ enum ThreadFeedback {
 
 #[derive(Debug)]
 pub(crate) enum ThreadError {
-    PaymentRequired,
     DataRetentionConsentRequired,
     Refusal,
     AuthenticationRequired(SharedString),
@@ -181,7 +175,6 @@ impl From<anyhow::Error> for ThreadError {
                     }
                 }
                 PromptTooLarge { .. } => Self::PromptTooLarge,
-                PaymentRequired => Self::PaymentRequired,
                 NoApiKey { provider } => Self::NoCredentials {
                     provider: provider.to_string().into(),
                 },
@@ -2356,7 +2349,7 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (heading_label, description_label) = (
-            format!("Upgrade {} to work with Zed", self.agent.agent_id()),
+            format!("Upgrade {} to work with bongos", self.agent.agent_id()),
             if version.is_empty() {
                 format!(
                     "Currently using {}, which does not report a valid --version",
@@ -3451,6 +3444,7 @@ pub(crate) mod tests {
     use crate::thread_metadata_store::ThreadMetadataStore;
 
     use super::*;
+    use feature_flags::FeatureFlagAppExt as _;
 
     #[test]
     fn test_data_retention_error_maps_from_provider_error() {

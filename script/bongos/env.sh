@@ -19,7 +19,8 @@ fi
 
 export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup"
 export CARGO_HOME="$BONGOS_WORKSPACE/cargo"
-export CARGO_TARGET_DIR="$BONGOS_WORKSPACE/target"
+# A CARGO_TARGET_DIR already set in the environment wins over the workspace default.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BONGOS_WORKSPACE/target}"
 export TMPDIR="$BONGOS_WORKSPACE/scratch/tmp"
 export GH_CONFIG_DIR="${GH_CONFIG_DIR:-$HOME/.config/gh}"
 mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" "$CARGO_TARGET_DIR" "$TMPDIR"
@@ -40,7 +41,7 @@ export CARGO_BUILD_JOBS
 # No nice by default. BONGOS_NICE=<n> runs cargo under nice -n <n>.
 export PATH="$BONGOS_WORKSPACE/bin:$CARGO_HOME/bin:$HOME/.cargo/bin:$PATH"
 
-# Compiler: g++ 11 cannot build webrtc-sys (port_interface.h: "declaration changes meaning"); clang 14 can.
+# Compiler: clang, as upstream builds with it (g++ 11 failed on C++ dependencies that have since left the build).
 export CC=clang CXX=clang++
 
 # Tuning with no manifest diff. Never set RUSTFLAGS: it replaces .cargo/config.toml's flags.

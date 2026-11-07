@@ -4714,7 +4714,7 @@ mod tests {
             .unwrap();
 
         thread
-            .update(cx, |thread, cx| thread.send_raw("Hello from Zed!", cx))
+            .update(cx, |thread, cx| thread.send_raw("Hello from bongos!", cx))
             .await
             .unwrap();
 
@@ -4724,7 +4724,7 @@ mod tests {
             indoc! {r#"
             ## User
 
-            Hello from Zed!
+            Hello from bongos!
 
             ## Assistant
 
@@ -4848,12 +4848,12 @@ mod tests {
             .unwrap();
 
         thread
-            .update(cx, |thread, cx| thread.send_raw("Hello from Zed!", cx))
+            .update(cx, |thread, cx| thread.send_raw("Hello from bongos!", cx))
             .await
             .unwrap();
 
         let output = thread.read_with(cx, |thread, cx| thread.to_markdown(cx));
-        assert_eq!(output.matches("Hello from Zed!").count(), 1);
+        assert_eq!(output.matches("Hello from bongos!").count(), 1);
     }
 
     #[gpui::test]

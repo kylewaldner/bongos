@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Builds the Linux release tarball: bongos[-<channel>].app/ with bin/bongos (the CLI), libexec/bongos-editor
+# (the editor), lib/, share/ (hicolor icons and the .desktop file), and LICENSE, NOTICE, ORIGIN.md and
+# a freshly generated licenses.md. The editor's Install CLI looks for ../bin/bongos next to libexec.
+# It never publishes anything and never talks to a network. Everything is written under the output
+# directory, so running it again only replaces its own earlier output.
+#   bundle-linux [--out DIR]       default DIR: $CARGO_TARGET_DIR/bundle-linux
+#   BONGOS_BUNDLE_BIN_DIR=DIR      use the already built `bongos` and `cli` in DIR instead of building
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+
+out=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help) sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --out) [ $# -ge 2 ] || { echo "bundle-linux: --out needs a directory" >&2; exit 1; }; out=$2; shift 2 ;;
+    *) echo "bundle-linux: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+log_init bundle-linux
+
+out="${out:-$CARGO_TARGET_DIR/bundle-linux}"
+mkdir -p "$out"
+out="$(cd "$out" && pwd -P)"
+case "$out" in
+  /|"$HOME"|"$BONGOS_ROOT") echo "bongos: refusing to use $out as the output directory"; exit 1 ;;
+esac
+
+channel=$(<crates/bongos/RELEASE_CHANNEL)
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/bongos/Cargo.toml | head -n1)
+[ -n "$version" ] || { echo "bongos: no version in crates/bongos/Cargo.toml"; exit 1; }
+
+suffix=""
+app_name="bongos"
+app_id="dev.bongos.Bongos"
+if [ "$channel" != "stable" ]; then
+  suffix="-$channel"
+fi
+case "$channel" in
+  stable) ;;
+  preview) app_name="bongos Preview"; app_id="dev.bongos.Bongos-Preview" ;;
+  nightly) app_name="bongos Nightly"; app_id="dev.bongos.Bongos-Nightly" ;;
+  dev) app_name="bongos Dev"; app_id="dev.bongos.Bongos-Dev" ;;
+  *) echo "bongos: unknown release channel: $channel"; exit 1 ;;
+esac
+
+if [ -n "${BONGOS_BUNDLE_BIN_DIR:-}" ]; then
+  bin_dir="$(cd "$BONGOS_BUNDLE_BIN_DIR" && pwd -P)"
+else
+  # RUSTFLAGS replaces the config.toml rustflags, so the rpath is the only flag set here. The editor sits in
+  # libexec and finds the bundled libraries in ../lib.
+  target_triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+  export ZED_BUNDLE=true
+  export RELEASE_VERSION="$version"
+  export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
+  require_space
+  cargo_limited build --release --locked --target "$target_triple" --package bongos --package cli --color never
+  bin_dir="$CARGO_TARGET_DIR/$target_triple/release"
+fi
+for binary in bongos cli; do
+  [ -x "$bin_dir/$binary" ] || { echo "bongos: $bin_dir/$binary is missing or not executable"; exit 1; }
+done
+
+stage_root="$out/stage"
+app_dir="$stage_root/bongos$suffix.app"
+rm -rf "$stage_root"
+mkdir -p "$app_dir/bin" "$app_dir/libexec" "$app_dir/lib" "$app_dir/share/applications"
+
+cp "$bin_dir/bongos" "$app_dir/libexec/bongos-editor"
+cp "$bin_dir/cli" "$app_dir/bin/bongos"
+# llvm-objcopy, because GNU objcopy on older distributions does not understand the CREL sections newer LLVM writes.
+# The copies are stripped; the built binaries stay as they are.
+llvm-objcopy --strip-debug "$app_dir/libexec/bongos-editor"
+llvm-objcopy --strip-debug "$app_dir/bin/bongos"
+
+# Bundle libstdc++ and the other non-system libraries, so older systems can run what this toolchain built.
+libs=$(ldd "$app_dir/libexec/bongos-editor" | cut -d' ' -f3 | grep '^/' | grep -v '/\(ld-linux[^/]*\.so\|libc\.so\|libgcc_s\.so\|libm\.so\|libpthread\.so\|libdl\.so\|libasound\.so\)' || true)
+if [ -n "$libs" ]; then
+  # shellcheck disable=SC2086
+  cp -L $libs "$app_dir/lib"
+fi
+
+# The same hicolor set that script/bongos/check-icons checks.
+mkdir -p "$app_dir/share/icons"
+cp -r crates/bongos/resources/icons/hicolor "$app_dir/share/icons/hicolor"
+for size in 16 24 32 48 64 128 256 512; do
+  [ -f "$app_dir/share/icons/hicolor/${size}x${size}/apps/bongos.png" ] || { echo "bongos: icon ${size}x${size} is missing from the bundle"; exit 1; }
+done
+[ -f "$app_dir/share/icons/hicolor/scalable/apps/bongos.svg" ] || { echo "bongos: the scalable icon is missing from the bundle"; exit 1; }
+
+sed "s/@APP_NAME@/$app_name/" script/bongos/packaging/bongos.desktop.in > "$app_dir/share/applications/$app_id.desktop"
+chmod +x "$app_dir/share/applications/$app_id.desktop"
+
+for notice in LICENSE LICENSE-GPL LICENSE-APACHE NOTICE ORIGIN.md; do
+  cp "$notice" "$app_dir/$notice"
+done
+script/generate-licenses "$app_dir/licenses.md"
+if ! cmp -s "$app_dir/licenses.md" assets/licenses.md; then
+  echo "bongos: assets/licenses.md differs from the regenerated licenses; the editor embeds assets/licenses.md"
+fi
+
+archive="$out/bongos-linux-$(uname -m).tar.gz"
+rm -f "$archive.tmp"
+tar --owner=0 --group=0 -czf "$archive.tmp" -C "$stage_root" "bongos$suffix.app"
+mv -f "$archive.tmp" "$archive"
+rm -rf "$stage_root"
+
+listing=$(tar -tzf "$archive")
+for member in bin/bongos libexec/bongos-editor LICENSE NOTICE ORIGIN.md licenses.md "share/applications/$app_id.desktop"; do
+  grep -qx "bongos$suffix.app/$member" <<<"$listing" || { echo "bongos: $archive lacks $member"; exit 1; }
+done
+SUMMARY="$archive ($(du -h "$archive" | cut -f1))"

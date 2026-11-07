@@ -1,0 +1,26 @@
+[package]
+name = "bongos_net"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_net.rs"
+doctest = false
+
+[features]
+test-support = ["http_client/test-support"]
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+http_client.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+http_client = { workspace = true, features = ["test-support"] }
+smol.workspace = true

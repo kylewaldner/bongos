@@ -6,7 +6,6 @@ pub mod anthropic;
 pub mod anthropic_compatible;
 pub mod api_compatible;
 pub mod bedrock;
-pub mod cloud;
 pub mod copilot_chat;
 pub mod deepseek;
 pub mod google;
@@ -41,7 +40,7 @@ pub(crate) fn resolve_custom_headers(
                 .any(|reserved| reserved.eq_ignore_ascii_case(name))
             {
                 log::warn!(
-                    "ignoring custom {provider_name} header `{name}`: managed by Zed and cannot be overridden"
+                    "ignoring custom {provider_name} header `{name}`: managed by bongos and cannot be overridden"
                 );
                 return None;
             }

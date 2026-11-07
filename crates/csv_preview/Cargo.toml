@@ -3,6 +3,7 @@ name = "csv_preview"
 version = "0.1.0"
 publish.workspace = true
 edition.workspace = true
+license = "GPL-3.0-or-later"
 
 [lib]
 path = "src/csv_preview.rs"

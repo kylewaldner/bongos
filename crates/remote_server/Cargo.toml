@@ -26,6 +26,7 @@ acp_thread.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
 askpass.workspace = true
+bongos_net.workspace = true
 clap.workspace = true
 client.workspace = true
 collections.workspace = true

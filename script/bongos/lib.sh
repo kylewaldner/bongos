@@ -17,6 +17,121 @@ BONGOS_CONFIG_PATH=${BONGOS_CONFIG_PATH:-.config/bongos}
 BONGOS_DISPLAY=${BONGOS_DISPLAY:-:99}
 BONGOS_PROXY_PORT=${BONGOS_PROXY_PORT:-18080}
 
+# Output contract, for every script: the full output goes to a log file under
+# $BONGOS_WORKSPACE/scratch/logs/, and the terminal gets a summary: at most 30 lines on success, at
+# most 80 on failure, and a last line "<name>: pass|FAIL <secs>s <details> log: <path>".
+# log_init <name> sends stdout and stderr to the log and keeps fd 3 as the terminal. A script then
+# prints with `say`, sets SUMMARY (and optionally defines summary_hook), and just exits: the EXIT
+# trap prints the failing part of the log on a nonzero exit, then the last line. When a script
+# runs inside another logged script (check calls check-hosts), it adds nothing to the terminal.
+# script/bongos/tail-log shows the failing part of a log again.
+BONGOS_LOG_DIR="$BONGOS_WORKSPACE/scratch/logs"
+LOG_NO_EXCERPT=""
+
+log_init() {
+  LOG_NAME=$1
+  LOG_T0=$SECONDS
+  SUMMARY=""
+  if [ -n "${BONGOS_LOG_ACTIVE:-}" ]; then
+    LOG_NESTED=1
+    LOG=${BONGOS_LOG_FILE:-/dev/null}
+  else
+    LOG_NESTED=""
+    mkdir -p "$BONGOS_LOG_DIR"
+    LOG="$BONGOS_LOG_DIR/$1-$(date +%Y%m%d-%H%M%S).log"
+    : >"$LOG"
+    ln -sfn "$LOG" "$BONGOS_LOG_DIR/$1-latest.log"
+    # Keep the 15 newest logs of each script.
+    # shellcheck disable=SC2012
+    ls -1t "$BONGOS_LOG_DIR"/"$1"-2*.log 2>/dev/null | tail -n +16 | xargs -r rm -f
+    export BONGOS_LOG_ACTIVE=1 BONGOS_LOG_FILE=$LOG
+    exec 3>&1 >>"$LOG" 2>&1
+  fi
+  trap 'finish_report $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+# Print to the terminal and the log.
+say() {
+  echo "$*"
+  if [ -z "${LOG_NESTED:-}" ] && [ -n "${LOG:-}" ]; then echo "$*" >&3; fi
+}
+
+# The failing part of a log, at most <max> lines: test failures, else compiler errors, else
+# formatting diffs, else the "bongos:" error lines and the end of the log.
+failure_excerpt() {
+  local f=$1 max=${2:-60}
+  {
+    if grep -qE '^---- .* stdout ----$' "$f"; then
+      awk '/^---- .* stdout ----$/ {on = 1; n = 0} /^failures:$/ {on = 0}
+           on && NF && n < 14 {print; n++}' "$f"
+    elif grep -qE '^error(\[[A-Z0-9]+\])?:' "$f"; then
+      awk '/^error(\[[A-Z0-9]+\])?:/ {
+             if ($0 ~ /^error: (aborting|could not compile|test failed|build failed)/) {print; on = 0; next}
+             on = 1; n = 0
+           }
+           /^$/ {on = 0}
+           on && n < 14 {print; n++}' "$f"
+    elif grep -q '^Diff in ' "$f"; then
+      grep '^Diff in ' "$f"
+    else
+      if [ "$(wc -l <"$f")" -le 40 ]; then
+        grep -v '^smoke: ' "$f" || true
+      else
+        { grep '^bongos:' "$f" || true; tail -n 12 "$f"; } | awk '!seen[$0]++'
+      fi
+    fi
+  } | cut -c1-240 | head -n "$max" || true
+}
+
+finish_report() {
+  local rc=$1 secs=$((SECONDS - LOG_T0)) line
+  trap - EXIT
+  set +e
+  rm -f "${TMPDIR:-/nonexistent}/meta.$$.json"
+  if declare -F summary_hook >/dev/null; then summary_hook "$rc"; fi
+  if [ -n "${LOG_NESTED:-}" ]; then
+    [ "$rc" = 0 ] && echo "$LOG_NAME: ${SUMMARY:-ok}"
+    exit "$rc"
+  fi
+  if [ "$rc" = 0 ]; then
+    line="$LOG_NAME: pass ${secs}s${SUMMARY:+ $SUMMARY} log: $LOG"
+  else
+    [ -z "$LOG_NO_EXCERPT" ] && failure_excerpt "$LOG" 60 >&3
+    line="$LOG_NAME: FAIL ${secs}s exit=$rc${SUMMARY:+ $SUMMARY} log: $LOG"
+  fi
+  echo "$line"
+  echo "$line" >&3
+  exit "$rc"
+}
+
+# run_check <label> <command...>: run one check of the check script. Its output goes to the log; the
+# terminal gets one line, and the failing part of the output when it fails.
+run_check() {
+  local label=$1 start=$SECONDS section rc=0
+  shift
+  section=$(mktemp "$TMPDIR/check.XXXXXX")
+  echo "=== $label: $*"
+  "$@" >"$section" 2>&1 || rc=$?
+  cat "$section"
+  if [ "$rc" = 0 ]; then
+    say "check: $label ok ($((SECONDS - start))s)"
+  else
+    say "check: $label FAIL ($((SECONDS - start))s)"
+    failure_excerpt "$section" 40 | sed 's/^/  /' >&3
+  fi
+  rm -f "$section"
+  return "$rc"
+}
+
+# Cached cargo metadata for this run; the file is removed by finish_report.
+cargo_meta_file() {
+  local f="$TMPDIR/meta.$$.json"
+  [ -s "$f" ] || (cd "$BONGOS_ROOT" && cargo metadata --no-deps --format-version 1 --locked >"$f")
+  echo "$f"
+}
+
 # Stop under 30 GB free on the target drive; drop incremental output under 40 GB.
 require_space() {
   local avail_kb avail_gb
@@ -70,33 +185,47 @@ find_lvp_icd() {
   return 1
 }
 
-# The upstream commit we are based on: commit= from UPSTREAM, else the upstream tag.
-upstream_commit() {
-  local f="$BONGOS_ROOT/UPSTREAM" c=""
-  if [ -f "$f" ]; then
-    c=$(sed -n 's/^commit=//p' "$f" | head -n1)
-  fi
-  echo "${c:-upstream/v1.9.0}"
+# The Zed commit bongos was forked from: the "Zed commit:" line of ORIGIN.md.
+origin_commit() {
+  sed -n 's/^Zed commit: *//p' "$BONGOS_ROOT/ORIGIN.md" 2>/dev/null | head -n1
 }
 
-# Package names of crates changed since the upstream commit.
+# The Zed tag bongos was forked from: the "Zed tag:" line of ORIGIN.md.
+origin_tag() {
+  sed -n 's/^Zed tag: *//p' "$BONGOS_ROOT/ORIGIN.md" 2>/dev/null | head -n1
+}
+
+# 0 when the ORIGIN.md commit is an object of this clone. Zed's history is not part of bongos (its first
+# commit is a squash), so a clean clone does not have it until `stock-build` fetches the Zed tag.
+origin_commit_present() {
+  local c
+  c=$(origin_commit)
+  [ -n "$c" ] && git -C "$BONGOS_ROOT" cat-file -e "$c^{commit}" 2>/dev/null
+}
+
+# Where this branch left main: merge-base of HEAD and origin/main, else the fork commit.
+branch_base() {
+  local b
+  b=$(git -C "$BONGOS_ROOT" merge-base HEAD origin/main 2>/dev/null) || b=""
+  echo "${b:-$(origin_commit)}"
+}
+
+# Package names of crates changed on this branch since it left origin/main.
 changed_crates() {
   local base dirs meta
-  base=$(upstream_commit)
+  base=$(branch_base)
   dirs=$(git -C "$BONGOS_ROOT" diff --name-only "$base" HEAD -- crates \
     | awk -F/ 'NF>=2 {print $1"/"$2}' | sort -u)
   [ -n "$dirs" ] || return 0
-  meta=$(cd "$BONGOS_ROOT" && cargo metadata --no-deps --format-version 1 --locked)
-  printf '%s\n' "$dirs" | while read -r d; do
-    printf '%s' "$meta" | python3 -I -c '
+  meta=$(cargo_meta_file)
+  printf '%s\n' "$dirs" | python3 -I -c '
 import json, sys, os
-root = sys.argv[1]; d = sys.argv[2]
-m = json.load(sys.stdin)
-for p in m["packages"]:
-    if os.path.dirname(p["manifest_path"]) == os.path.join(root, d):
+root = sys.argv[1]
+dirs = {os.path.join(root, d.strip()) for d in sys.stdin if d.strip()}
+for p in json.load(open(sys.argv[2]))["packages"]:
+    if os.path.dirname(p["manifest_path"]) in dirs:
         print(p["name"])
-' "$BONGOS_ROOT" "$d"
-  done
+' "$BONGOS_ROOT" "$meta"
 }
 
 # The rest is for script/bongos/smoke and its scenarios, which set RUN and run in bwrap.
@@ -265,18 +394,27 @@ zed_hosts() {
   awk '{print $2}' "$RUN/proxy.log" | grep -E '(^|\.)(zed\.dev|zed\.industries)$' | sort -u
 }
 
-# Warns until step 17, when it starts to fail.
+# Fails when bongos reached a Zed host or made a blocked request. Not for stock, which does.
 assert_no_zed_hosts() {
   local hosts blocked
   hosts=$(zed_hosts | xargs || true)
   blocked=$(grep -c 'bongos_net: blocked' "$HOME/$BONGOS_LOG_PATH" || true)
   if [ -n "$hosts" ] || [ "$blocked" != 0 ]; then
-    echo "bongos: warning: Zed hosts: ${hosts:-none}; blocked requests: $blocked" >&2
+    say "smoke: FAIL Zed hosts: ${hosts:-none}; blocked requests: $blocked"
+    exit 1
+  fi
+}
+
+# The marketplace is off: bongos must never reach api.zed.dev. Not for stock, which does.
+assert_no_marketplace_host() {
+  if awk '{print $2}' "$RUN/proxy.log" | grep -qE '(^|\.)api\.zed\.dev$'; then
+    say "smoke: FAIL api.zed.dev in proxy.log: the marketplace is off"
+    exit 1
   fi
 }
 
 # Negative control: stock must reach Zed's hosts, or the detector proves nothing.
 assert_zed_hosts() {
   poll 120 "a Zed host in proxy.log" zed_hosts >/dev/null
-  echo "bongos: Zed hosts seen: $(zed_hosts | xargs)"
+  say "smoke: Zed hosts seen: $(zed_hosts | xargs)"
 }

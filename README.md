@@ -8,8 +8,11 @@ native diagram canvas for reviewing and sketching systems.
 Status: early development. The Zed v1.9.0 tree is imported; bongos-specific changes land feature by
 feature.
 
-bongos is derived from Zed (https://github.com/zed-industries/zed), and Zed's licences are
-retained: see `LICENSE-GPL`, `LICENSE-APACHE` and `legal/`.
+## License
+
+bongos is licensed under GPL-3.0-or-later. The crates that declare `Apache-2.0` in their
+`Cargo.toml`, including `gpui`, remain Apache-2.0. See [LICENSE](LICENSE) for the notice and
+full GPL text, and [ORIGIN.md](ORIGIN.md) for the Zed fork it is derived from.
 
 ## Why
 
@@ -32,7 +35,7 @@ retained: see `LICENSE-GPL`, `LICENSE-APACHE` and `legal/`.
 
 ## References
 
-- Upstream: https://github.com/zed-industries/zed
+- Origin (Zed tag and commit this fork is based on): see [ORIGIN.md](ORIGIN.md)
 - Kyle's Emacs config: https://github.com/kylewaldner02/emacs.d (mirror of
   https://github.com/kylewaldner/emacs.d)
 - Kyle's emacsJ fork: https://github.com/kylewaldner02/emacsj (mirror of

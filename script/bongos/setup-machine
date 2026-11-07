@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # Check this machine can build and test bongos, and do the safe repository setup. Never uses sudo:
-# for missing packages it prints one install command. Exits non-zero if any check fails.
+# for missing packages it prints one install command. Passing checks go to the log; the terminal gets
+# warnings, failures and one summary line. Exits non-zero if any check fails.
 set -uo pipefail
 here="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh" || exit 1
 . "$here/lib.sh"
 cd "$BONGOS_ROOT" || exit 1
+log_init setup-machine
+LOG_NO_EXCERPT=1
 
 fails=0
-ok() { echo "OK   $1"; }
-warn() { echo "WARN $1"; }
-fail() { echo "FAIL $1"; fails=$((fails + 1)); }
+# Passing checks go to the log only; warnings and failures also go to the terminal.
+oks=0 warns=0
+ok() { echo "OK   $1"; oks=$((oks + 1)); }
+warn() { say "WARN $1"; warns=$((warns + 1)); }
+fail() { say "FAIL $1"; fails=$((fails + 1)); }
+summary_hook() { SUMMARY="ok=$oks warn=$warns fail=$fails"; }
 
 # Distro family from /etc/os-release.
 fam=""
@@ -52,7 +58,7 @@ if [ -n "$fam" ]; then
     ok "packages ($fam, ${#pkgs[@]} checked)"
   else
     fail "packages: ${#missing[@]} missing: ${missing[*]}"
-    echo "     $(install_cmd "${missing[@]}")"
+    say "     $(install_cmd "${missing[@]}")"
   fi
 fi
 
@@ -128,28 +134,7 @@ else
 fi
 
 # Repository setup: safe and idempotent.
-if git remote get-url upstream >/dev/null 2>&1; then
-  ok "remote upstream ($(git remote get-url upstream))"
-elif git remote add upstream https://github.com/zed-industries/zed.git; then
-  ok "remote upstream added"
-else
-  fail "could not add remote upstream"
-fi
-
-utag=$(sed -n 's/^tag=//p' UPSTREAM)
-ucommit=$(sed -n 's/^commit=//p' UPSTREAM)
-ref="upstream/$utag"
-if ! git cat-file -e "$ucommit^{commit}" 2>/dev/null; then
-  fail "tag $ref: commit $ucommit from UPSTREAM is not in this clone's history"
-elif have=$(git rev-parse -q --verify "refs/tags/$ref^{commit}"); then
-  if [ "$have" = "$ucommit" ]; then ok "tag $ref at $ucommit"; else fail "tag $ref points at $have, not $ucommit; leaving it alone"; fi
-elif git tag "$ref" "$ucommit"; then
-  ok "tag $ref created at $ucommit"
-else
-  fail "could not create tag $ref"
-fi
-
-# gh picks the default repository from the remotes; with upstream added it can pick Zed. Pin it to origin's repo.
+# gh picks the default repository from the remotes; a clone could pick another repository. Pin it to origin's repo.
 gh_repo=kylewaldner/bongos
 origin_url=$(git remote get-url origin 2>/dev/null)
 case "$origin_url" in
@@ -171,8 +156,4 @@ case "$origin_url" in
 esac
 
 echo "jobs: CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS, memory cap $(( $(mem_total_kb) * 9 / 10 / 1024 / 1024 )) GB"
-if [ "$fails" -gt 0 ]; then
-  echo "setup-machine: $fails check(s) failed"
-  exit 1
-fi
-echo "setup-machine: all checks passed"
+[ "$fails" -eq 0 ] || exit 1

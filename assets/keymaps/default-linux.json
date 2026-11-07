@@ -41,7 +41,6 @@
       "ctrl-f11": "debugger::StepInto",
       "shift-f11": "debugger::StepOut",
       "f11": "zed::ToggleFullScreen",
-      "ctrl-alt-z": "edit_prediction::RatePredictions",
       "ctrl-alt-shift-i": "edit_prediction::ToggleMenu",
       "ctrl-alt-l": "lsp_tool::ToggleMenu",
       "ctrl-alt-shift-s": "workspace::ToggleWorktreeSecurity",
@@ -650,7 +649,7 @@
       "shift-new": "workspace::NewWindow",
       "ctrl-shift-n": "workspace::NewWindow",
       "ctrl-`": "terminal_panel::Toggle",
-      "f10": ["app_menu::OpenApplicationMenu", "Zed"],
+      "f10": ["app_menu::OpenApplicationMenu", "bongos"],
       "alt-1": ["workspace::ActivatePane", 0],
       "alt-2": ["workspace::ActivatePane", 1],
       "alt-3": ["workspace::ActivatePane", 2],
@@ -882,15 +881,8 @@
   // Custom bindings
   {
     "bindings": {
-      "ctrl-alt-shift-f": "workspace::FollowNextCollaborator",
       // Only available in debug builds: opens an element inspector for development.
       "ctrl-alt-i": "dev::ToggleInspector",
-    },
-  },
-  {
-    "context": "!Terminal",
-    "bindings": {
-      "ctrl-shift-c": "collab_panel::ToggleFocus",
     },
   },
   {
@@ -1124,34 +1116,6 @@
     },
   },
   {
-    "context": "CollabPanel && not_editing",
-    "bindings": {
-      "ctrl-backspace": "collab_panel::Remove",
-      "space": "menu::Confirm",
-    },
-  },
-  {
-    "context": "CollabPanel",
-    "bindings": {
-      "alt-up": "collab_panel::MoveChannelUp",
-      "alt-down": "collab_panel::MoveChannelDown",
-      "alt-enter": "collab_panel::OpenSelectedChannelNotes",
-      "shift-enter": "collab_panel::ToggleSelectedChannelFavorite",
-    },
-  },
-  {
-    "context": "(CollabPanel && editing) > Editor",
-    "bindings": {
-      "space": "collab_panel::InsertSpace",
-    },
-  },
-  {
-    "context": "ChannelModal",
-    "bindings": {
-      "tab": "channel_modal::ToggleMode",
-    },
-  },
-  {
     "context": "Picker > Editor",
     "bindings": {
       "escape": "menu::Cancel",
@@ -1163,12 +1127,6 @@
       // ToggleActionsMenu) live in keymaps/specific-overrides.json, which is
       // loaded after the base keymap so they win over conflicting base-keymap
       // Editor bindings.
-    },
-  },
-  {
-    "context": "ChannelModal > Picker > Editor",
-    "bindings": {
-      "tab": "channel_modal::ToggleMode",
     },
   },
   {
@@ -1262,12 +1220,6 @@
     "context": "AgentPanel > Terminal",
     "bindings": {
       "ctrl-n": "agent::NewThread",
-    },
-  },
-  {
-    "context": "ZedPredictModal",
-    "bindings": {
-      "escape": "menu::Cancel",
     },
   },
   {
@@ -1369,35 +1321,6 @@
     "bindings": {
       "up": "menu::SelectPrevious",
       "down": "menu::SelectNext",
-    },
-  },
-  {
-    "context": "Onboarding",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-=": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "ctrl-+": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "ctrl--": ["zed::DecreaseUiFontSize", { "persist": false }],
-      "ctrl-0": ["zed::ResetUiFontSize", { "persist": false }],
-      "ctrl-enter": "onboarding::Finish",
-      "alt-shift-l": "onboarding::SignIn",
-      "alt-shift-a": "onboarding::OpenAccount",
-    },
-  },
-  {
-    "context": "Welcome",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-n": "workspace::NewFile",
-      "ctrl-=": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "ctrl-+": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "ctrl--": ["zed::DecreaseUiFontSize", { "persist": false }],
-      "ctrl-0": ["zed::ResetUiFontSize", { "persist": false }],
-      "ctrl-1": ["welcome::OpenRecentProject", 0],
-      "ctrl-2": ["welcome::OpenRecentProject", 1],
-      "ctrl-3": ["welcome::OpenRecentProject", 2],
-      "ctrl-4": ["welcome::OpenRecentProject", 3],
-      "ctrl-5": ["welcome::OpenRecentProject", 4],
     },
   },
   {

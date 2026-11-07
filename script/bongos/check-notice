@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Skips with a warning when the ORIGIN.md commit is not in this clone.
+# Fails when a workspace package licensed Apache-2.0 differs from the fork commit and NOTICE does not name its path.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+log_init check-notice
+
+origin=$(origin_commit)
+if ! origin_commit_present; then
+  echo "bongos: WARNING skipping the NOTICE check: the Zed commit ${origin:-from ORIGIN.md} is not in this clone."
+  echo "bongos: bongos does not carry Zed's history. To run this check, fetch Zed's tag $(origin_tag) once:"
+  echo "bongos:   git fetch --depth 1 --no-tags https://github.com/zed-industries/zed.git tag $(origin_tag)"
+  echo "bongos: (script/bongos/stock-build does the same). Then run check-notice again."
+  SUMMARY="skipped: the Zed commit is not in this clone (see log)"
+  exit 0
+fi
+missing=$(python3 -I -c '
+import json, os, subprocess, sys
+root, meta, origin = sys.argv[1:4]
+notice = open(os.path.join(root, "NOTICE")).read().splitlines()
+for p in json.load(open(meta))["packages"]:
+    if "Apache-2.0" not in (p.get("license") or ""):
+        continue
+    d = os.path.relpath(os.path.dirname(p["manifest_path"]), root)
+    out = subprocess.run(["git", "-C", root, "diff", "--name-only", origin, "--", d],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    if out and not any(l.startswith(d + ":") for l in notice):
+        print(d)
+' "$BONGOS_ROOT" "$(cargo_meta_file)" "$origin" | sort)
+if [ -n "$missing" ]; then
+  echo "bongos: NOTICE does not name these modified Apache-2.0 crates:"
+  printf '%s\n' "$missing"
+  exit 1
+fi
+SUMMARY="NOTICE names every modified Apache-2.0 crate"

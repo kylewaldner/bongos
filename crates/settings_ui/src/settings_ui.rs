@@ -571,7 +571,6 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::TerminalBlink>(render_dropdown)
         .add_basic_renderer::<settings::CursorShapeContent>(render_dropdown)
         .add_basic_renderer::<settings::EditPredictionPromptFormatContent>(render_dropdown)
-        .add_basic_renderer::<settings::EditPredictionDataCollectionChoice>(render_dropdown)
         .add_basic_renderer::<f32>(render_editable_number_field)
         .add_basic_renderer::<settings::AutoCompactThreshold>(render_text_field)
         .add_basic_renderer::<u32>(render_editable_number_field)
@@ -807,7 +806,7 @@ fn open_settings_editor_with(
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Zed — Settings".into()),
+                    title: Some("bongos — Settings".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(12.0), px(12.0))),
                 }),
@@ -1482,7 +1481,7 @@ fn render_settings_item_link(
                 .tooltip(Tooltip::text("Copy Link"))
                 .when_some(json_path, |this, path| {
                     this.on_click(cx.listener(move |this, _, _, cx| {
-                        let link = format!("zed://settings/{}", path);
+                        let link = format!("bongos://settings/{}", path);
                         cx.write_to_clipboard(ClipboardItem::new_string(link));
                         this.last_copied_link_path = Some(path);
                         cx.notify();

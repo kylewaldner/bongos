@@ -1,47 +1,65 @@
 #!/usr/bin/env bash
-# Gate 1: format, clippy on changed crates, hosts, patch list, no .github, no webrtc (from step 15).
+# Gate 1: format, clippy on changed crates, hosts, licenses, no .github, no webrtc.
+# One line per check; the failing part of the output only for a check that fails. Full output is in
+# the log (script/bongos/tail-log check).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
+log_init check
+LOG_NO_EXCERPT=1  # run_check prints the failing part of the check that failed
 
-# Set to 1 in step 15, when webrtc and livekit leave the build. Until then the tree rule below is off.
-BONGOS_CHECK_NO_WEBRTC=${BONGOS_CHECK_NO_WEBRTC:-0}
+# The tree rule below is on by default since step 22, when webrtc and livekit left the build.
+# BONGOS_CHECK_NO_WEBRTC=0 turns it off.
+BONGOS_CHECK_NO_WEBRTC=${BONGOS_CHECK_NO_WEBRTC:-1}
 
-echo "check: cargo fmt"
-cargo fmt --all -- --check
+run_check fmt cargo fmt --all -- --check
 
 crates=()
 while IFS= read -r c; do
   [ -n "$c" ] && crates+=(-p "$c")
 done < <(changed_crates)
 if [ "${#crates[@]}" -gt 0 ]; then
-  echo "check: clippy ${crates[*]}"
   require_space
-  cargo_limited clippy "${crates[@]}" --all-targets --locked -- --deny warnings
+  run_check "clippy ${crates[*]}" cargo_limited clippy "${crates[@]}" --all-targets --locked --color never -- --deny warnings
 else
-  echo "check: no changed crates, skipping clippy"
+  say "check: clippy skipped, no changed crates"
 fi
 
-echo "check: hosts"
-"$here/check-hosts"
+run_check hosts "$here/check-hosts"
 
-echo "check: patch list"
-"$here/check-patches"
+run_check strings "$here/check-strings"
 
-echo "check: no .github"
-if [ -e .github ] || [ -n "$(git ls-files .github)" ]; then
-  echo "bongos: .github must not exist; upstream workflows must not run here" >&2
-  exit 1
-fi
+run_check licenses "$BONGOS_ROOT/script/check-licenses"
 
-if [ "$BONGOS_CHECK_NO_WEBRTC" = 1 ]; then
-  echo "check: no webrtc or livekit"
-  if cargo tree -p zed --edges normal,build --locked | grep -E 'webrtc|livekit'; then
-    echo "bongos: webrtc or livekit is still in the zed build" >&2
-    exit 1
+run_check license-fields "$here/check-license-fields"
+
+run_check notice "$here/check-notice"
+
+run_check icons "$here/check-icons"
+
+no_github() {
+  if [ -e .github ] || [ -n "$(git ls-files .github)" ]; then
+    echo "bongos: .github must not exist; upstream workflows must not run here"
+    return 1
   fi
+}
+run_check "no .github" no_github
+
+no_webrtc() {
+  local tree
+  tree=$(cargo tree -p bongos --target all -e normal,build --locked) || {
+    echo "bongos: cargo tree failed"
+    return 1
+  }
+  if grep -E 'webrtc|livekit|zed-scap|screencapturekit' <<<"$tree"; then
+    echo "bongos: webrtc, livekit or screen capture is still in the bongos build"
+    return 1
+  fi
+}
+if [ "$BONGOS_CHECK_NO_WEBRTC" = 1 ]; then
+  run_check "no webrtc or livekit" no_webrtc
 fi
 
-echo "check: ok"
+SUMMARY="all checks ok"

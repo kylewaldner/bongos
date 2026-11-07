@@ -12,7 +12,6 @@ use dev_container::{
     start_dev_container_with_config,
 };
 use editor::Editor;
-use extension_host::ExtensionStore;
 use filter::{FilterData, FilteredServer};
 use futures::{FutureExt, StreamExt as _, channel::oneshot, future::Shared};
 use gpui::{
@@ -2274,15 +2273,11 @@ impl RemoteServerProjects {
                         return;
                     }
                 };
-            cx.update(|_, cx| {
-                ExtensionStore::global(cx).update(cx, |this, cx| {
-                    for extension in &dev_container_connection.extension_ids {
-                        log::info!("Installing extension {extension} from devcontainer");
-                        this.install_latest_extension(Arc::from(extension.clone()), cx);
-                    }
-                })
-            })
-            .log_err();
+            for extension in &dev_container_connection.extension_ids {
+                log::info!(
+                    "Skipping extension {extension} from devcontainer: the marketplace is off"
+                );
+            }
 
             entity
                 .update(cx, |this, cx| {
@@ -2370,7 +2365,7 @@ impl RemoteServerProjects {
                                                 .color(Color::Muted)
                                                 .size(IconSize::Small),
                                         )
-                                        .child(Label::new("Open Zed Log"))
+                                        .child(Label::new("Open bongos Log"))
                                         .on_click(cx.listener(|_, _, window, cx| {
                                             window.dispatch_action(Box::new(OpenLog), cx);
                                             cx.emit(DismissEvent);

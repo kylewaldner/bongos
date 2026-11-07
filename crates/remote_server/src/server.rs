@@ -687,18 +687,18 @@ pub fn execute_run(
 
             let http_client = {
                 let _guard = Tokio::handle(cx).enter();
-                Arc::new(
+                Arc::new(bongos_net::GuardedHttpClient::new(Arc::new(
                     ReqwestClient::proxy_and_user_agent(
                         proxy_url,
                         &format!(
-                            "Zed-Server/{} ({}; {})",
+                            "bongos-server/{} ({}; {})",
                             env!("CARGO_PKG_VERSION"),
                             std::env::consts::OS,
                             std::env::consts::ARCH
                         ),
                     )
                     .expect("Could not start HTTP client"),
-                )
+                )))
             };
 
             let node_runtime =

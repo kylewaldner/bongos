@@ -1,0 +1,27 @@
+# Visible "Zed" strings allowed per file, as "<path> <max>". Measured by script/bongos/check-strings --list.
+# A count above its max, or a counted file not listed, fails gate 1. Lower a max when its count drops; delete the line at zero.
+# Every line below is permanent; its "# permanent:" comment says why. Anything else says bongos.
+assets/settings/default.json 2  # permanent: "Zed (Default)" is the stored default icon theme id, and the glob matches Zed's own config dirs
+crates/agent/src/agent.rs 1  # permanent: "Zed Agent" is the stored native agent id in saved threads
+crates/agent_ui/src/agent_panel.rs 1  # permanent: a doc comment naming the native "Zed Agent" by its stored id
+crates/bongos_app/src/bongos_app.rs 13  # permanent: the import-from-Zed feature names the Zed files it reads (and its test fixtures)
+crates/bongos/src/zed/app_menus.rs 1  # permanent: the "Import Zed Settings" menu item (import from Zed)
+crates/bongos/src/zed.rs 3  # permanent: the import-from-Zed confirmation and error text
+crates/bongos_version/src/bongos_version.rs 4  # permanent: provenance, "forked from Zed" version text and its test
+crates/context_server/src/context_server.rs 1  # permanent: MCP clientInfo name sent to servers, which may key on it
+crates/context_server/src/oauth.rs 2  # permanent: OAuth client_name registered with the hosted client metadata (CIMD) identity, and its test
+crates/copilot_chat/src/copilot_chat.rs 1  # permanent: the Editor-Version header GitHub Copilot validates
+crates/dap/src/client.rs 1  # permanent: DAP clientName next to clientID "zed" (test mirror of dap_command.rs)
+crates/project/src/debugger/dap_command.rs 1  # permanent: DAP clientName next to clientID "zed"
+crates/etw_tracing/etw_tracing.rs 2  # permanent: Windows ETW session instance name, and the Zed Industries author credit (provenance); Windows only, not testable here
+crates/explorer_command_injector/src/explorer_command_injector.rs 1  # permanent: the Windows installer (zed.iss) and AppxManifest still name the binary Zed.exe
+crates/git/src/repository.rs 2  # permanent: .git/info/exclude block markers are stored in user repos and must match to be removed
+crates/gpui/src/text_system.rs 4  # permanent: legacy ".ZedSans", ".ZedMono", "Zed Plex Sans", "Zed Plex Mono" font aliases that saved settings may name
+crates/keymap_editor/src/keymap_editor.rs 4  # permanent: "Zed Keybind Context" is the grammar's language name (crates/grammars/src/zed-keybind-context)
+crates/markdown/src/mermaid.rs 1  # permanent: test of the legacy "Zed Plex Sans" font alias
+crates/release_channel/src/lib.rs 4  # permanent: Zed-Editor-<channel> Windows app ids shared with the installer and AppxManifest
+crates/settings_content/src/language.rs 1  # permanent: "zed" is accepted for settings written for Zed (declared permanent)
+crates/settings_ui/src/settings_ui.rs 4  # permanent: "Zed Keybind Context" language name and .zed/settings.json test paths (declared permanent)
+crates/theme/src/fallback_themes.rs 1  # permanent: "Zed Default" is the fallback theme family name that stored themes may reference
+crates/theme/src/icon_theme.rs 1  # permanent: "Zed (Default)" default icon theme id, matching default.json
+crates/windows_resources/src/windows_resources.rs 2  # permanent: CompanyName and LegalCopyright credit Zed Industries (provenance and license)

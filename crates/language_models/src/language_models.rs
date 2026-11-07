@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
 use ::settings::{Settings, SettingsStore};
-use client::{Client, UserStore};
+use client::Client;
 use collections::{HashMap, HashSet};
 use credentials_provider::CredentialsProvider;
-use gpui::{App, Context, Entity};
-use language_model::{
-    ConfiguredModel, LanguageModelProviderId, LanguageModelRegistry, ZED_CLOUD_PROVIDER_ID,
-};
+use gpui::{App, Context};
+use language_model::{ConfiguredModel, LanguageModelProviderId, LanguageModelRegistry};
 use provider::deepseek::DeepSeekLanguageModelProvider;
 
 mod api_key_editor;
@@ -21,7 +19,6 @@ pub use crate::extension::init_proxy as init_extension_proxy;
 use crate::provider::anthropic::AnthropicLanguageModelProvider;
 use crate::provider::anthropic_compatible::AnthropicCompatibleLanguageModelProvider;
 use crate::provider::bedrock::BedrockLanguageModelProvider;
-use crate::provider::cloud::CloudLanguageModelProvider;
 use crate::provider::copilot_chat::CopilotChatLanguageModelProvider;
 use crate::provider::google::GoogleLanguageModelProvider;
 use crate::provider::lmstudio::LmStudioLanguageModelProvider;
@@ -36,13 +33,12 @@ use crate::provider::vercel_ai_gateway::VercelAiGatewayLanguageModelProvider;
 use crate::provider::x_ai::XAiLanguageModelProvider;
 pub use crate::settings::*;
 
-pub fn init(user_store: Entity<UserStore>, client: Arc<Client>, cx: &mut App) {
+pub fn init(client: Arc<Client>, cx: &mut App) {
     let credentials_provider = client.credentials_provider();
     let registry = LanguageModelRegistry::global(cx);
     registry.update(cx, |registry, cx| {
         register_language_model_providers(
             registry,
-            user_store,
             client.clone(),
             credentials_provider.clone(),
             cx,
@@ -143,43 +139,22 @@ pub fn init(user_store: Entity<UserStore>, client: Arc<Client>, cx: &mut App) {
 
 /// Recomputes and sets the [`LanguageModelRegistry`]'s environment fallback
 /// model based on currently authenticated providers.
-///
-/// Prefers the Zed cloud provider so that, once the user is signed in, we
-/// always pick a Zed-hosted model over models from other authenticated
-/// providers in the environment. If the Zed cloud provider is authenticated
-/// but hasn't finished loading its models yet, we don't fall back to another
-/// provider to avoid flickering between providers during sign in.
 pub fn update_environment_fallback_model(cx: &mut App) {
     let registry = LanguageModelRegistry::global(cx);
-    let fallback_model = {
-        let registry = registry.read(cx);
-        let cloud_provider = registry.provider(&ZED_CLOUD_PROVIDER_ID);
-        if cloud_provider
-            .as_ref()
-            .is_some_and(|provider| provider.is_authenticated(cx))
-        {
-            cloud_provider.and_then(|provider| {
-                let model = provider
-                    .default_model(cx)
-                    .or_else(|| provider.recommended_models(cx).first().cloned())?;
-                Some(ConfiguredModel { provider, model })
+    let fallback_model = registry
+        .read(cx)
+        .providers()
+        .iter()
+        .filter(|provider| provider.is_authenticated(cx))
+        .find_map(|provider| {
+            let model = provider
+                .default_model(cx)
+                .or_else(|| provider.recommended_models(cx).first().cloned())?;
+            Some(ConfiguredModel {
+                provider: provider.clone(),
+                model,
             })
-        } else {
-            registry
-                .providers()
-                .iter()
-                .filter(|provider| provider.is_authenticated(cx))
-                .find_map(|provider| {
-                    let model = provider
-                        .default_model(cx)
-                        .or_else(|| provider.recommended_models(cx).first().cloned())?;
-                    Some(ConfiguredModel {
-                        provider: provider.clone(),
-                        model,
-                    })
-                })
-        }
-    };
+        });
     registry.update(cx, |registry, cx| {
         registry.set_environment_fallback_model(fallback_model, cx);
     });
@@ -262,19 +237,10 @@ fn register_compatible_providers(
 
 fn register_language_model_providers(
     registry: &mut LanguageModelRegistry,
-    user_store: Entity<UserStore>,
     client: Arc<Client>,
     credentials_provider: Arc<dyn CredentialsProvider>,
     cx: &mut Context<LanguageModelRegistry>,
 ) {
-    registry.register_provider(
-        Arc::new(CloudLanguageModelProvider::new(
-            user_store,
-            client.clone(),
-            cx,
-        )),
-        cx,
-    );
     registry.register_provider(
         Arc::new(AnthropicLanguageModelProvider::new(
             client.http_client(),

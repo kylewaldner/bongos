@@ -75,19 +75,6 @@ pub struct AcceptTermsOfServiceResponse {
     pub user: AuthenticatedUser,
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct LlmToken(pub String);
-
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct CreateLlmTokenBody {
-    pub organization_id: OrganizationId,
-}
-
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct CreateLlmTokenResponse {
-    pub token: LlmToken,
-}
-
 #[derive(Debug, Default, PartialEq, Clone, Serialize, Deserialize)]
 pub struct UpdateSystemSettingsBody {
     pub selected_organization_id: Option<OrganizationId>,

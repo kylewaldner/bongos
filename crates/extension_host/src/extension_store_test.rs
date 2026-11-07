@@ -1046,6 +1046,47 @@ async fn test_extension_store_with_test_extension(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+async fn test_extension_store_makes_no_requests(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/the-extension-dir", json!({ "installed": {} }))
+        .await;
+
+    let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let http_client = FakeHttpClient::create({
+        let request_count = request_count.clone();
+        move |_| {
+            let request_count = request_count.clone();
+            async move {
+                request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Response::new("{}".into()))
+            }
+        }
+    });
+
+    let proxy = Arc::new(ExtensionHostProxy::new());
+    let _store = cx.new(|cx| {
+        ExtensionStore::new(
+            PathBuf::from("/the-extension-dir"),
+            None,
+            proxy.clone(),
+            fs.clone(),
+            http_client.clone(),
+            http_client.clone(),
+            None,
+            NodeRuntime::unavailable(),
+            cx,
+        )
+    });
+
+    cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+    cx.run_until_parked();
+
+    assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
 fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let store = SettingsStore::test(cx);

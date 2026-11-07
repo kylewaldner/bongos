@@ -1,6 +1,6 @@
 {
-  "$schema": "zed://schemas/settings",
-  // The name of the Zed theme to use for the UI.
+  "$schema": "bongos://schemas/settings",
+  // The name of the bongos theme to use for the UI.
   //
   // `mode` is one of:
   // - "system": Use the theme that corresponds to the system's appearance
@@ -139,9 +139,9 @@
   // after the mouse moves away from the hover target.
   // Only applies when `hover_popover_sticky` is enabled.
   "hover_popover_hiding_delay": 300,
-  // Whether to confirm before quitting Zed.
+  // Whether to confirm before quitting bongos.
   "confirm_quit": false,
-  // Whether to restore last closed project when fresh Zed instance is opened
+  // Whether to restore last closed project when fresh bongos instance is opened
   // May take 3 values:
   //  1. All workspaces open during last session
   //         "restore_on_startup": "last_session"
@@ -154,7 +154,7 @@
   // an explicit `-e` (existing window) or `-n` (new window) flag.
   //
   // May take 2 values:
-  //  1. Open directories as a new workspace in the current Zed window's sidebar
+  //  1. Open directories as a new workspace in the current bongos window's sidebar
   //         "cli_default_open_behavior": "existing_window"
   //  2. Open directories in a new window (reuse existing windows for files
   //     that are already part of an open project)
@@ -163,7 +163,7 @@
   // The default behavior when opening projects from the UI.
   //
   // May take 2 values:
-  //  1. Open projects as a new workspace in the current Zed window's sidebar
+  //  1. Open projects as a new workspace in the current bongos window's sidebar
   //         "default_open_behavior": "existing_window"
   //  2. Open projects in a new window
   //         "default_open_behavior": "new_window"
@@ -218,23 +218,23 @@
   //
   // Default: true
   "zoomed_padding": true,
-  // What draws Zed's window decorations (titlebar):
-  // 1. Client application (Zed) draws its own window decorations
+  // What draws bongos's window decorations (titlebar):
+  // 1. Client application (bongos) draws its own window decorations
   //    "client"
   // 2. Display server draws the window decorations. Not supported by GNOME Wayland.
   //    "server"
   //
-  // This requires restarting Zed for changes to take effect.
+  // This requires restarting bongos for changes to take effect.
   //
   // Default: "client"
   "window_decorations": "client",
   // Whether to use the system provided dialogs for Open and Save As.
-  // When set to false, Zed will use the built-in keyboard-first pickers.
+  // When set to false, bongos will use the built-in keyboard-first pickers.
   "use_system_path_prompts": true,
   // Whether to use the system provided dialogs for prompts, such as confirmation
   // prompts.
-  // When set to false, Zed will use its built-in prompts. Note that on Linux,
-  // this option is ignored and Zed will always use the built-in prompts.
+  // When set to false, bongos will use its built-in prompts. Note that on Linux,
+  // this option is ignored and bongos will always use the built-in prompts.
   "use_system_prompts": true,
   // Whether the cursor blinks in the editor.
   "cursor_blink": true,
@@ -430,11 +430,11 @@
   "use_on_type_format": true,
   // Whether to automatically add matching closing characters when typing
   // opening parenthesis, bracket, brace, single or double quote characters.
-  // For example, when you type '(', Zed will add a closing ) at the correct position.
+  // For example, when you type '(', bongos will add a closing ) at the correct position.
   "use_autoclose": true,
   // Whether to automatically surround selected text when typing opening parenthesis,
   // bracket, brace, single or double quote characters.
-  // For example, when you select text and type '(', Zed will surround the text with ().
+  // For example, when you select text and type '(', bongos will surround the text with ().
   "use_auto_surround": true,
   // Controls automatic indentation behavior when typing.
   // - "syntax_aware": Adjusts indentation based on syntax context (default)
@@ -495,11 +495,11 @@
     "space": "•",
     "tab": "→",
   },
-  // Settings related to calls in Zed
+  // Settings related to calls in bongos
   "calls": {
-    // Join calls with the microphone live by default
+    // Inert in bongos, which has no calls.
     "mute_on_join": false,
-    // Share your project when you are the first to join a channel
+    // Inert in bongos, which has no calls.
     "share_on_join": false,
   },
   // Toolbar related settings
@@ -525,13 +525,13 @@
     "show_branch_name": true,
     // Whether to show the project host and name in the titlebar.
     "show_project_items": true,
-    // Whether to show onboarding banners in the titlebar.
+    // Inert in bongos, which has no onboarding banners.
     "show_onboarding_banner": true,
-    // Whether to show user picture in the titlebar.
+    // Inert in bongos, which has no signed-in user.
     "show_user_picture": true,
-    // Whether to show the user menu in the titlebar.
+    // Inert in bongos, which has no user menu.
     "show_user_menu": true,
-    // Whether to show the sign in button in the titlebar.
+    // Inert in bongos, which has no sign in.
     "show_sign_in": true,
     // Whether to show the menus in the titlebar.
     "show_menus": false,
@@ -943,12 +943,9 @@
     "expand_outlines_with_depth": 100,
   },
   "collaboration_panel": {
-    // Whether to show the collaboration panel button in the status bar.
-    "button": true,
-    // Where to dock the collaboration panel. Can be 'left' or 'right'.
+    // There is no collaboration panel. The agent and editor layout presets
+    // still read and write this dock position.
     "dock": "right",
-    // Default width of the collaboration panel.
-    "default_width": 240,
   },
   "git_panel": {
     // Whether to show the git panel button in the status bar.
@@ -1054,9 +1051,9 @@
     // The default model to use when creating new threads.
     "default_model": {
       // The provider to use.
-      "provider": "zed.dev",
+      "provider": "anthropic",
       // The model to use.
-      "model": "claude-sonnet-4",
+      "model": "claude-sonnet-5-5",
       // Whether thinking is enabled.
       "enable_thinking": false,
     },
@@ -1077,8 +1074,8 @@
       //
       // To set parameters for a specific provider and model:
       // {
-      //   "provider": "zed.dev",
-      //   "model": "claude-sonnet-4",
+      //   "provider": "anthropic",
+      //   "model": "claude-sonnet-5-5",
       //   "temperature": 1.0
       // }
     ],
@@ -1087,7 +1084,7 @@
     // The "default" setting applies when no tool-specific rules match.
     // For external agents that define their own permission modes,
     // "deny" and "confirm" still take precedence — the external agent's
-    // permission system is only used when Zed would allow the action.
+    // permission system is only used when bongos would allow the action.
     //
     // Per-tool regex patterns ("tools" below) match against tool input text
     // (commands, paths, URLs, etc.). For `copy_path` and `move_path`,
@@ -1171,7 +1168,6 @@
           "skill": true,
           "spawn_agent": true,
           "terminal": true,
-          "search_web": true,
         },
       },
       "ask": {
@@ -1192,7 +1188,6 @@
           "grep": true,
           "skill": true,
           "spawn_agent": true,
-          "search_web": true,
         },
       },
       "minimal": {
@@ -1224,7 +1219,7 @@
     //
     // Default: true
     "expand_terminal_card": true,
-    // Command to automatically run when Zed creates a Terminal Thread shell in the agent panel.
+    // Command to automatically run when bongos creates a Terminal Thread shell in the agent panel.
     // The command is sent to the shell as if typed, so it is interpreted by your
     // configured shell (including on Windows and remote/WSL projects).
     // Set to "" to disable.
@@ -1299,7 +1294,7 @@
   //
   // 1. Never automatically save:
   //     "autosave": "off",
-  // 2. Save when changing focus away from the Zed window:
+  // 2. Save when changing focus away from the bongos window:
   //     "autosave": "on_window_change",
   // 3. Save when changing focus away from a specific buffer:
   //     "autosave": "on_focus_change",
@@ -1415,14 +1410,14 @@
     // Default: true
     "skip_focus_for_active_in_search": true,
     // Whether to use gitignored files when searching.
-    // Only the file Zed had indexed will be used, not necessary all the gitignored files.
+    // Only the file bongos had indexed will be used, not necessary all the gitignored files.
     //
     // Can accept 3 values:
     //   * "all": Use all gitignored files
-    //   * "indexed": Use only the files Zed had indexed
+    //   * "indexed": Use only the files bongos had indexed
     //   * "smart": Be smart and search for ignored when called from a gitignored worktree
     "include_ignored": "smart",
-    // Whether to include text channels in file finder results.
+    // Inert in bongos, which has no channels.
     "include_channels": false,
   },
   // Whether or not to remove any trailing whitespace from lines of a buffer
@@ -1460,7 +1455,7 @@
   "format_on_save": "on",
   // How to perform a buffer format. This setting can take multiple values:
   //
-  // 1. Default. Format files using Zed's Prettier integration (if applicable),
+  // 1. Default. Format files using bongos's Prettier integration (if applicable),
   //    or falling back to formatting via language server:
   //     "formatter": "auto"
   // 2. Format code using the current language server:
@@ -1474,7 +1469,7 @@
   //         "arguments": ["--stdin-filepath", "{buffer_path}"]
   //       }
   //     }
-  // 5. Format code using Zed's Prettier integration:
+  // 5. Format code using bongos's Prettier integration:
   //     "formatter": "prettier"
   // 6. Format code using a code action
   //     "formatter": {"code_action": "source.fixAll.eslint"}
@@ -1515,22 +1510,19 @@
   //
   // Default: true
   "word_diff_enabled": true,
-  // Control what info is collected by Zed.
+  // Bongos sends no telemetry or crash reports. `diagnostics` and `metrics` are inert.
   "telemetry": {
-    // Send debug info like crash reports.
     "diagnostics": true,
-    // Send anonymized usage data like what languages you're using Zed with.
     "metrics": true,
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention
     "anthropic_retention": false,
   },
-  // Whether to disable all AI features in Zed.
+  // Whether to disable all AI features in bongos.
   //
   // Default: false
   "disable_ai": false,
-  // Automatically update Zed. This setting may be ignored on Linux if
-  // installed through a package manager.
+  // Inert in bongos, which never checks for updates.
   "auto_update": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
@@ -1557,7 +1549,7 @@
     //
     // Default: true
     "include_warnings": true,
-    // Settings for using LSP pull diagnostics mechanism in Zed.
+    // Settings for using LSP pull diagnostics mechanism in bongos.
     "lsp_pull_diagnostics": {
       // Whether to pull for diagnostics or not.
       "enabled": true,
@@ -1584,7 +1576,7 @@
       "max_severity": null,
     },
   },
-  // Files or globs of files that will be excluded by Zed entirely. They will be skipped during file
+  // Files or globs of files that will be excluded by bongos entirely. They will be skipped during file
   // scans, file searches, and not be displayed in the project file tree. Takes precedence over `file_scan_inclusions`.
   "file_scan_exclusions": [
     "**/.git",
@@ -1599,9 +1591,9 @@
     "**/.classpath",
     "**/.settings",
   ],
-  // Files or globs of files that will be included by Zed, even when ignored by git. This is useful
+  // Files or globs of files that will be included by bongos, even when ignored by git. This is useful
   // for files that are not tracked by git, but are still important to your project. Note that globs
-  // that are overly broad can slow down Zed's file scanning. `file_scan_exclusions` takes
+  // that are overly broad can slow down bongos's file scanning. `file_scan_exclusions` takes
   // precedence over these inclusions.
   "file_scan_inclusions": [".env*"],
   // When to scan content of linked directories.
@@ -1710,7 +1702,8 @@
   "load_direnv": "direct",
   "edit_predictions": {
     // Which edit prediction provider to use.
-    "provider": "zed",
+    // One of "none", "copilot", "codestral", "ollama", "open_ai_compatible_api" or "mercury".
+    "provider": "none",
     // A list of globs representing files that edit predictions should be disabled for.
     // There's a sensible default list of globs already included.
     // Any addition to this list will be merged with the default list.
@@ -1765,14 +1758,6 @@
       "prompt_format": "infer",
       "max_output_tokens": 64,
     },
-    // Controls whether Zed may collect training data when using Zed's Edit Predictions.
-    // Data is only captured when the project is detected as open source.
-    // Possible values:
-    //   - "default": use the preference previously set via the status-bar toggle,
-    //     or false if no preference has been stored.
-    //   - "yes": allow data collection for files in open-source projects.
-    //   - "no": never allow data collection.
-    "allow_data_collection": "default",
   },
   // Settings specific to journaling
   "journal": {
@@ -2044,13 +2029,13 @@
   "tasks": {
     "variables": {},
     "enabled": true,
-    // Use LSP tasks over Zed language extension ones.
+    // Use LSP tasks over bongos language extension ones.
     // If no LSP tasks are returned due to error/timeout or regular execution,
-    // Zed language extension tasks will be used instead.
+    // bongos language extension tasks will be used instead.
     //
-    // Other Zed tasks will still be shown:
-    // * Zed task from either of the task config file
-    // * Zed task from history (e.g. one-off task was spawned before)
+    // Other bongos tasks will still be shown:
+    // * bongos task from either of the task config file
+    // * bongos task from history (e.g. one-off task was spawned before)
     //
     // Default: true
     "prefer_lsp": true,
@@ -2080,26 +2065,21 @@
   // Settings for which version of Node.js and NPM to use when installing
   // language servers and Copilot.
   //
-  // Note: changing this setting currently requires restarting Zed.
+  // Note: changing this setting currently requires restarting bongos.
   "node": {
-    // By default, Zed will look for `node` and `npm` on your `$PATH`, and use the
+    // By default, bongos will look for `node` and `npm` on your `$PATH`, and use the
     // existing executables if their version is recent enough. Set this to `true`
-    // to prevent this, and force Zed to always download and install its own
+    // to prevent this, and force bongos to always download and install its own
     // version of Node.
     "ignore_system_version": false,
     // You can also specify alternative paths to Node and NPM. If you specify
-    // `path`, but not `npm_path`, Zed will assume that `npm` is located at
+    // `path`, but not `npm_path`, bongos will assume that `npm` is located at
     // `${path}/../npm`.
     "path": null,
     "npm_path": null,
   },
-  // The extensions that Zed should automatically install on startup.
-  //
-  // If you don't want any of these extensions, add this field to your settings
-  // and change the value to `false`.
-  "auto_install_extensions": {
-    "html": true,
-  },
+  // Bongos has no extension marketplace, so nothing is installed automatically.
+  "auto_install_extensions": {},
   // The capabilities granted to extensions.
   //
   // This list can be customized to restrict what extensions are able to do.
@@ -2143,7 +2123,7 @@
     // When LSP servers give an `InsertReplaceEdit` completion, they provides two ranges: `insert` and `replace`. Usually, `insert`
     // contains the word prefix before your cursor and `replace` contains the whole word.
     //
-    // Effectively, this setting just changes whether Zed will use the received range for `insert` or `replace`, so the results may
+    // Effectively, this setting just changes whether bongos will use the received range for `insert` or `replace`, so the results may
     // differ depending on the underlying LSP server.
     //
     // Possible values:
@@ -2436,7 +2416,6 @@
     "x_ai": {
       "api_url": "https://api.x.ai/v1",
     },
-    "zed.dev": {},
   },
   "session": {
     // Whether or not to restore unsaved buffers on restart.
@@ -2453,7 +2432,7 @@
     // Default: false
     "trust_all_worktrees": false,
   },
-  // Zed's Prettier integration settings.
+  // bongos's Prettier integration settings.
   // Allows to enable/disable formatting with Prettier
   // and configure default Prettier, used when no project-level Prettier installation is found.
   "prettier": {
@@ -2481,7 +2460,7 @@
     // "rust-analyzer": {
     //     // A special flag for rust-analyzer integration, to use server-provided tasks
     //     enable_lsp_tasks": true,
-    //     // These initialization options are merged into Zed's defaults
+    //     // These initialization options are merged into bongos's defaults
     //     "initialization_options": {
     //         "check": {
     //             "command": "clippy" // rust-analyzer.check.command (default: "check")
@@ -2600,14 +2579,14 @@
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
-  "server_url": "https://zed.dev",
-  // Settings overrides to use when using Zed Preview.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  "server_url": "https://bongos.invalid",
+  // Settings overrides to use when using bongos Preview.
+  // Mostly useful for developers who are managing multiple instances of bongos.
   "preview": {
     // "theme": "Andromeda"
   },
-  // Settings overrides to use when using Zed Nightly.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  // Settings overrides to use when using bongos Nightly.
+  // Mostly useful for developers who are managing multiple instances of bongos.
   "nightly": {
     // "theme": "Andromeda"
     "instrumentation": {
@@ -2616,13 +2595,13 @@
       },
     },
   },
-  // Settings overrides to use when using Zed Stable.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  // Settings overrides to use when using bongos Stable.
+  // Mostly useful for developers who are managing multiple instances of bongos.
   "stable": {
     // "theme": "Andromeda"
   },
-  // Settings overrides to use when using Zed Dev.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  // Settings overrides to use when using bongos Dev.
+  // Mostly useful for developers who are managing multiple instances of bongos.
   "dev": {
     // "theme": "Andromeda"
     "instrumentation": {
@@ -2655,7 +2634,7 @@
   // Supported URI scheme: `http`, `https`, `socks4`, `socks4a`, `socks5`,
   // `socks5h`. `http` will be used when no scheme is specified.
   //
-  // By default no proxy will be used, or Zed will try get proxy settings from
+  // By default no proxy will be used, or bongos will try get proxy settings from
   // environment variables. If certain hosts should not be proxied,
   // set the `no_proxy` environment variable and provide a comma-separated list.
   //
@@ -2673,7 +2652,7 @@
   "command_aliases": {},
   // ssh_connections is an array of ssh connections.
   // You can configure these from `project: Open Remote` in the command palette.
-  // Zed's ssh support will pull configuration from your ~/.ssh too.
+  // bongos's ssh support will pull configuration from your ~/.ssh too.
   // Examples:
   // [
   //   {
@@ -2719,7 +2698,7 @@
   // Each profile has an optional `base` ("user" or "default") and a `settings`
   // object. When `base` is "user" (the default), the profile applies on top of
   // your user settings. When `base` is "default", user settings are ignored and
-  // the profile applies on top of Zed's defaults.
+  // the profile applies on top of bongos's defaults.
   //
   // Examples:
   // "profiles": {

@@ -1,4 +1,3 @@
-mod llm_token;
 mod websocket;
 
 use std::sync::Arc;
@@ -19,8 +18,6 @@ use thiserror::Error;
 use yawc::WebSocket;
 
 use crate::websocket::Connection;
-
-pub use llm_token::LlmApiToken;
 
 struct Credentials {
     user_id: u32,
@@ -152,30 +149,6 @@ impl CloudApiClient {
 
             Ok(Connection::new(ws))
         }))
-    }
-
-    async fn create_llm_token(
-        &self,
-        system_id: Option<String>,
-        organization_id: OrganizationId,
-    ) -> Result<CreateLlmTokenResponse, ClientApiError> {
-        let request_builder = Request::builder()
-            .method(Method::POST)
-            .uri(
-                self.http_client
-                    .build_zed_cloud_url("/client/llm_tokens")
-                    .map_err(ClientApiError::RequestBuildFailed)?
-                    .as_ref(),
-            )
-            .when_some(system_id, |builder, system_id| {
-                builder.header(ZED_SYSTEM_ID_HEADER_NAME, system_id)
-            });
-
-        let request = self.build_request(
-            request_builder,
-            Json(CreateLlmTokenBody { organization_id }),
-        )?;
-        self.send_authenticated_json_request(request).await
     }
 
     pub async fn update_system_settings(

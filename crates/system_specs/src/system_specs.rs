@@ -1,19 +1,11 @@
 pub use gpui::GpuSpecs;
-use gpui::{App, AppContext as _, Task, Window, actions};
+use gpui::{App, AppContext as _, Task, Window};
 use human_bytes::human_bytes;
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use semver::Version;
 use serde::Serialize;
 use std::{env, fmt::Display};
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
-
-actions!(
-    zed,
-    [
-        /// Copies system specifications to the clipboard for bug reports.
-        CopySystemSpecsIntoClipboard,
-    ]
-);
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SystemSpecs {
@@ -108,7 +100,7 @@ impl Display for SystemSpecs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let os_information = format!("OS: {} {}", self.os_name, self.os_version);
         let app_version_information = format!(
-            "Zed: v{} ({}) {}{}",
+            "bongos: v{} ({}) {}{}",
             self.app_version,
             match &self.commit_sha {
                 Some(commit_sha) => format!("{} {}", self.release_channel, commit_sha),

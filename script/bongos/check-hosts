@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fails when a Zed or ACP host, or an endpoint constant, appears in a file that script/bongos/hosts-allow.txt
-# does not list. Scans crates, assets/settings and script/bundle-linux. A merge that adds a host fails gate 1.
+# does not list. Scans crates, assets/settings, and every file in script/bongos
+# except hosts-allow.txt. Also fails on a stale allow entry that matches nothing. A merge that adds a host fails gate 1.
 #   check-hosts          check against the allow list
 #   check-hosts --list   print every "<path> <token>" pair found, for building the allow list
 set -euo pipefail
@@ -8,16 +9,21 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
+[ "${1:-}" = "--list" ] || log_init check-hosts
 
 allow="$here/hosts-allow.txt"
-pattern='[A-Za-z0-9._-]*(zed\.dev|zed\.industries|agentclientprotocol\.com)|MINIDUMP_ENDPOINT|CIMD_URL'
+pattern='[A-Za-z0-9._-]*(zed\\?\.dev|zed\\?\.industries|agentclientprotocol\\?\.com)|MINIDUMP_ENDPOINT|CIMD_URL'
 
 found() {
   grep -rnoE --binary-files=without-match \
       --include='*.rs' --include='*.toml' --include='*.json' --include='*.sh' --include='*.md' \
       --exclude-dir=target --exclude-dir=tests --exclude-dir=test_data --exclude-dir=fixtures \
       --exclude-dir=benches --exclude='*_tests.rs' --exclude='*_test.rs' --exclude='tests.rs' \
-      -e "$pattern" crates assets/settings script/bundle-linux 2>/dev/null \
+      -e "$pattern" crates assets/settings 2>/dev/null \
+    | awk -F: '{print $1" "$3}' | sort -u
+  # the harness itself: every tracked or untracked-but-not-ignored file by name, no extension filter
+  git ls-files -co --exclude-standard -z script/bongos | grep -zv '^script/bongos/hosts-allow\.txt$' \
+    | xargs -0 -r grep -noEI -e "$pattern" 2>/dev/null \
     | awk -F: '{print $1" "$3}' | sort -u
 }
 
@@ -27,11 +33,19 @@ if [ "${1:-}" = "--list" ]; then
 fi
 
 allowed=$(grep -vE '^[[:space:]]*(#|$)' "$allow" | sed 's/[[:space:]]*#.*$//' | sort -u)
-new=$(comm -23 <(found) <(printf '%s\n' "$allowed")) || true
+hits=$(found | sort -u)
+new=$(comm -23 <(printf '%s\n' "$hits") <(printf '%s\n' "$allowed")) || true
+stale=$(comm -13 <(printf '%s\n' "$hits") <(printf '%s\n' "$allowed")) || true
+if [ -n "$stale" ]; then
+  echo "bongos: stale entries in script/bongos/hosts-allow.txt (they match nothing):"
+  printf '  %s\n' "$stale"
+  echo "bongos: delete them"
+  [ -n "$new" ] || exit 1
+fi
 if [ -n "$new" ]; then
-  echo "bongos: hosts not in script/bongos/hosts-allow.txt:" >&2
-  printf '  %s\n' "$new" >&2
-  echo "bongos: remove the call, or add '<path> <host>' with a comment saying why it is allowed" >&2
+  echo "bongos: hosts not in script/bongos/hosts-allow.txt:"
+  printf '  %s\n' "$new"
+  echo "bongos: remove the call, or add '<path> <host>' with a comment saying why it is allowed"
   exit 1
 fi
-echo "check-hosts: ok"
+SUMMARY="ok"

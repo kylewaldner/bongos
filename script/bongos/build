@@ -1,30 +1,39 @@
 #!/usr/bin/env bash
 # Gate 2: build the app and cli. Appends time and sizes to $BONGOS_WORKSPACE/scratch/build-times.log.
+# Full cargo output goes to the log; the terminal gets one summary line, or on failure the compiler
+# errors (script/bongos/tail-log build shows them again).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
+log_init build
+
+summary_hook() {
+  local warnings errors
+  warnings=$(grep -c '^warning' "$out" 2>/dev/null || true)
+  errors=$(grep -cE '^error(\[|:)' "$out" 2>/dev/null || true)
+  if [ "$1" = 0 ]; then SUMMARY="${SUMMARY:+$SUMMARY }warnings=${warnings:-0}"; else SUMMARY="errors=${errors:-0}"; fi
+}
 
 require_space
 
-log="$BONGOS_WORKSPACE/scratch/build-times.log"
-out="$TMPDIR/build.out"
-mkdir -p "$(dirname "$log")"
+times="$BONGOS_WORKSPACE/scratch/build-times.log"
+out="$TMPDIR/build.$$.out"
 start=$(date +%s)
 
+# Cargo's output is kept in $out so the memory-kill check reads only this attempt.
 run_build() {
-  set +e
-  cargo_limited build -p zed -p cli --locked 2>&1 | tee "$out"
-  local rc=${PIPESTATUS[0]}
-  set -e
+  local rc=0
+  cargo_limited build -p bongos -p cli --locked --color never >"$out" 2>&1 || rc=$?
+  cat "$out"
   return "$rc"
 }
 
 jobs_used=$CARGO_BUILD_JOBS
 if ! run_build; then
   if grep -qE 'SIGKILL|signal: 9|Killed|out of memory' "$out"; then
-    echo "bongos: build killed, probably by memory; retrying once at 3 jobs" >&2
+    echo "bongos: build killed, probably by memory; retrying once at 3 jobs"
     export CARGO_BUILD_JOBS=3
     jobs_used=3
     run_build
@@ -35,6 +44,9 @@ fi
 
 secs=$(( $(date +%s) - start ))
 size() { [ -e "$1" ] && du -b "$1" | cut -f1 || echo 0; }
+zed_bytes=$(size "$CARGO_TARGET_DIR/debug/bongos")
+cli_bytes=$(size "$CARGO_TARGET_DIR/debug/cli")
 target_kb=$(du -sk "$CARGO_TARGET_DIR" | cut -f1)
-echo "$(date -Is) commit=$(git rev-parse --short HEAD) jobs=$jobs_used secs=$secs zed_bytes=$(size "$CARGO_TARGET_DIR/debug/bongos") cli_bytes=$(size "$CARGO_TARGET_DIR/debug/cli") target_kb=$target_kb" >> "$log"
-tail -n1 "$log"
+echo "$(date -Is) commit=$(git rev-parse --short HEAD) jobs=$jobs_used secs=$secs zed_bytes=$zed_bytes cli_bytes=$cli_bytes target_kb=$target_kb" >> "$times"
+SUMMARY="jobs=$jobs_used bongos=$((zed_bytes / 1048576))MB cli=$((cli_bytes / 1048576))MB target=$((target_kb / 1048576))GB"
+rm -f "$out"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Fails when a workspace package declares no license field (null or empty), and lists the offenders.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+log_init check-license-fields
+
+bad=$(python3 -c '
+import json, sys
+meta = json.load(open(sys.argv[1]))
+for p in meta["packages"]:
+    if not (p.get("license") or "").strip():
+        print(p["name"], p["manifest_path"])
+' "$(cargo_meta_file)" | sort)
+if [ -n "$bad" ]; then
+  echo "bongos: these workspace packages declare no license:"
+  printf '%s\n' "$bad"
+  exit 1
+fi
+SUMMARY="every workspace package declares a license"

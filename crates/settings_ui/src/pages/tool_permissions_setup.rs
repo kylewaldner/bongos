@@ -16,7 +16,7 @@ use crate::{SettingsWindow, components::SettingsInputField};
 
 const HARDCODED_RULES_DESCRIPTION: &str =
     "`rm -rf` commands are always blocked when run on `$HOME`, `~`, `.`, `..`, or `/`";
-const SETTINGS_DISCLAIMER: &str = "Note: custom tool permissions only apply to the Zed native agent and don’t extend to external agents connected through the Agent Client Protocol (ACP).";
+const SETTINGS_DISCLAIMER: &str = "Note: custom tool permissions only apply to the bongos native agent and don’t extend to external agents connected through the Agent Client Protocol (ACP).";
 
 /// Tools that support permission rules
 const TOOLS: &[ToolInfo] = &[
@@ -67,12 +67,6 @@ const TOOLS: &[ToolInfo] = &[
         name: "Fetch",
         description: "HTTP requests to URLs",
         regex_explanation: "Patterns are matched against the URL being fetched.",
-    },
-    ToolInfo {
-        id: "search_web",
-        name: "Web Search",
-        description: "Web search queries",
-        regex_explanation: "Patterns are matched against the search query.",
     },
     ToolInfo {
         id: "skill",
@@ -310,7 +304,6 @@ fn get_tool_render_fn(
         "move_path" => render_move_path_tool_config,
         "create_directory" => render_create_directory_tool_config,
         "fetch" => render_fetch_tool_config,
-        "search_web" => render_web_search_tool_config,
         "skill" => render_skill_tool_config,
         _ => render_terminal_tool_config, // fallback
     }
@@ -1388,7 +1381,6 @@ tool_config_page_fn!(render_copy_path_tool_config, "copy_path");
 tool_config_page_fn!(render_move_path_tool_config, "move_path");
 tool_config_page_fn!(render_create_directory_tool_config, "create_directory");
 tool_config_page_fn!(render_fetch_tool_config, "fetch");
-tool_config_page_fn!(render_web_search_tool_config, "search_web");
 tool_config_page_fn!(render_skill_tool_config, "skill");
 
 #[cfg(test)]

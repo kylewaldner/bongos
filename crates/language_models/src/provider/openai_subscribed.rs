@@ -1081,7 +1081,7 @@ impl Render for ConfigurationView {
         v_flex()
             .gap_2()
             .child(Label::new(
-                "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in Zed's agent.",
+                "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in bongos's agent.",
             ))
             .child(
                 Button::new("sign-in", button_label)

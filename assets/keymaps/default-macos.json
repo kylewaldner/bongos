@@ -46,7 +46,6 @@
       "cmd-m": "zed::Minimize",
       "fn-f": "zed::ToggleFullScreen",
       "ctrl-cmd-f": "zed::ToggleFullScreen",
-      "ctrl-cmd-z": "edit_prediction::RatePredictions",
       "ctrl-cmd-i": "edit_prediction::ToggleMenu",
       "ctrl-cmd-l": "lsp_tool::ToggleMenu",
       "ctrl-cmd-c": "editor::DisplayCursorNames",
@@ -603,7 +602,7 @@
       "cmd-f2": "editor::SelectAllMatches", // Select all occurrences of current word
       "cmd-k cmd-d": ["editor::SelectNext", { "replace_newest": true }], // editor.action.moveSelectionToNextFindMatch / find_under_expand_skip
       // macOS binds `ctrl-cmd-d` to Show Dictionary which breaks these two binds
-      // To use `ctrl-cmd-d` or `ctrl-k ctrl-cmd-d` in Zed you must execute this command and then restart:
+      // To use `ctrl-cmd-d` or `ctrl-k ctrl-cmd-d` in bongos you must execute this command and then restart:
       //   defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 70 '<dict><key>enabled</key><false/></dict>'
       "ctrl-cmd-d": ["editor::SelectPrevious", { "replace_newest": false }], // editor.action.addSelectionToPreviousFindMatch
       "cmd-k ctrl-cmd-d": ["editor::SelectPrevious", { "replace_newest": true }], // editor.action.moveSelectionToPreviousFindMatch
@@ -639,7 +638,7 @@
       "cmd-k cmd-9": "editor::FoldAtLevel_9",
       "cmd-k cmd-0": "editor::FoldAll",
       "cmd-k cmd-j": "editor::UnfoldAll",
-      // Using `ctrl-space` / `ctrl-shift-space` in Zed requires disabling the macOS global shortcut.
+      // Using `ctrl-space` / `ctrl-shift-space` in bongos requires disabling the macOS global shortcut.
       // System Preferences->Keyboard->Keyboard Shortcuts->Input Sources->Select the previous input source (uncheck)
       "ctrl-space": "editor::ShowCompletions",
       "ctrl-shift-space": "editor::ShowWordCompletions",
@@ -944,9 +943,6 @@
   {
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-alt-cmd-f": "workspace::FollowNextCollaborator",
-      // TODO: Move this to a dock open action
-      "cmd-shift-c": "collab_panel::ToggleFocus",
       // Only available in debug builds: opens an element inspector for development.
       "cmd-alt-i": "dev::ToggleInspector",
     },
@@ -1178,38 +1174,6 @@
     },
   },
   {
-    "context": "CollabPanel && not_editing",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-backspace": "collab_panel::Remove",
-      "space": "menu::Confirm",
-    },
-  },
-  {
-    "context": "CollabPanel",
-    "use_key_equivalents": true,
-    "bindings": {
-      "alt-up": "collab_panel::MoveChannelUp",
-      "alt-down": "collab_panel::MoveChannelDown",
-      "alt-enter": "collab_panel::OpenSelectedChannelNotes",
-      "shift-enter": "collab_panel::ToggleSelectedChannelFavorite",
-    },
-  },
-  {
-    "context": "(CollabPanel && editing) > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "space": "collab_panel::InsertSpace",
-    },
-  },
-  {
-    "context": "ChannelModal",
-    "use_key_equivalents": true,
-    "bindings": {
-      "tab": "channel_modal::ToggleMode",
-    },
-  },
-  {
     "context": "Picker > Editor",
     "use_key_equivalents": true,
     "bindings": {
@@ -1223,13 +1187,6 @@
       // ToggleActionsMenu) live in keymaps/specific-overrides-macos.json, which
       // is loaded after the base keymap so they win over conflicting base-keymap
       // Editor bindings.
-    },
-  },
-  {
-    "context": "ChannelModal > Picker > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "tab": "channel_modal::ToggleMode",
     },
   },
   {
@@ -1321,7 +1278,7 @@
       "cmd-home": "terminal::ScrollToTop",
       "shift-end": "terminal::ScrollToBottom",
       "cmd-end": "terminal::ScrollToBottom",
-      // Using `ctrl-shift-space` in Zed requires disabling the macOS global shortcut.
+      // Using `ctrl-shift-space` in bongos requires disabling the macOS global shortcut.
       // System Preferences->Keyboard->Keyboard Shortcuts->Input Sources->Select the previous input source (uncheck)
       "ctrl-shift-space": "terminal::ToggleViMode",
       "ctrl-alt-up": "pane::SplitUp",
@@ -1338,33 +1295,6 @@
     "use_key_equivalents": true,
     "bindings": {
       "cmd-n": "agent::NewThread",
-    },
-  },
-  {
-    "context": "RatePredictionsModal",
-    "use_key_equivalents": true,
-    "bindings": {
-      "cmd-shift-enter": "zeta::ThumbsUpActivePrediction",
-      "cmd-shift-backspace": "zeta::ThumbsDownActivePrediction",
-      "shift-down": "zeta::NextEdit",
-      "shift-up": "zeta::PreviousEdit",
-      "right": "zeta::PreviewPrediction",
-    },
-  },
-  {
-    "context": "RatePredictionsModal > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "escape": "zeta::FocusPredictions",
-      "cmd-shift-enter": "zeta::ThumbsUpActivePrediction",
-      "cmd-shift-backspace": "zeta::ThumbsDownActivePrediction",
-    },
-  },
-  {
-    "context": "ZedPredictModal",
-    "use_key_equivalents": true,
-    "bindings": {
-      "escape": "menu::Cancel",
     },
   },
   {
@@ -1466,35 +1396,6 @@
     "bindings": {
       "up": "menu::SelectPrevious",
       "down": "menu::SelectNext",
-    },
-  },
-  {
-    "context": "Onboarding",
-    "use_key_equivalents": true,
-    "bindings": {
-      "cmd-=": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "cmd-+": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "cmd--": ["zed::DecreaseUiFontSize", { "persist": false }],
-      "cmd-0": ["zed::ResetUiFontSize", { "persist": false }],
-      "cmd-enter": "onboarding::Finish",
-      "alt-tab": "onboarding::SignIn",
-      "alt-shift-a": "onboarding::OpenAccount",
-    },
-  },
-  {
-    "context": "Welcome",
-    "use_key_equivalents": true,
-    "bindings": {
-      "cmd-n": "workspace::NewFile",
-      "cmd-=": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "cmd-+": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "cmd--": ["zed::DecreaseUiFontSize", { "persist": false }],
-      "cmd-0": ["zed::ResetUiFontSize", { "persist": false }],
-      "cmd-1": ["welcome::OpenRecentProject", 0],
-      "cmd-2": ["welcome::OpenRecentProject", 1],
-      "cmd-3": ["welcome::OpenRecentProject", 2],
-      "cmd-4": ["welcome::OpenRecentProject", 3],
-      "cmd-5": ["welcome::OpenRecentProject", 4],
     },
   },
   {

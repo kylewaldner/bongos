@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Builds the macOS app bundle bongos[ <Channel>].app and a disk image that shows the GPL-3.0-or-later
+# license before it can be mounted. Nothing here publishes anything or talks to a network: there is no
+# upload, no notarization submission, no crash-symbol upload and no download of any tool or binary.
+# All output goes under the output directory; cargo writes to its usual target directory.
+#   bundle-mac [--out DIR] [--target TRIPLE] [--debug]
+#     --out DIR         default DIR: ${CARGO_TARGET_DIR:-<repo>/target}/bundle-mac
+#     --target TRIPLE   x86_64-apple-darwin or aarch64-apple-darwin; default: the host
+#     --debug           debug build, ad-hoc signed, and no disk image
+#   BONGOS_BUNDLE_BIN_DIR=DIR     use the already built `bongos` and `cli` in DIR instead of building
+#   BONGOS_MAC_SIGN_IDENTITY=ID   sign with this local codesign identity (default: ad-hoc, "-"). The
+#                                 signature has no secure timestamp (that needs Apple's server) and the
+#                                 bundle is never notarized, so Gatekeeper still asks on first open.
+#   BONGOS_MAC_GIT=FILE           copy this git binary into the bundle (Contents/MacOS/git); without it
+#                                 the editor uses the git on PATH
+# Needs macOS with Xcode command line tools, Rust, and `dmg-license` on PATH (install it yourself:
+# npm install --global dmg-license). Nothing in this script installs software.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/../.." && pwd -P)"
+cd "$root"
+
+die() { echo "bundle-mac: $*" >&2; exit 1; }
+
+out=""
+target_triple=""
+debug=false
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --out) [ $# -ge 2 ] || die "--out needs a directory"; out=$2; shift 2 ;;
+    --target) [ $# -ge 2 ] || die "--target needs a target triple"; target_triple=$2; shift 2 ;;
+    --debug) debug=true; shift ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+[ "$(uname -s)" = "Darwin" ] || die "this script only runs on macOS"
+
+if [ -z "$target_triple" ]; then
+  target_triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+fi
+case "$target_triple" in
+  x86_64-apple-darwin) arch_suffix=x86_64 ;;
+  aarch64-apple-darwin) arch_suffix=aarch64 ;;
+  *) die "unsupported target $target_triple" ;;
+esac
+
+target_root="${CARGO_TARGET_DIR:-$root/target}"
+out="${out:-$target_root/bundle-mac}"
+mkdir -p "$out"
+out="$(cd "$out" && pwd -P)"
+case "$out" in
+  /|"$HOME"|"$root") die "refusing to use $out as the output directory" ;;
+esac
+[ -n "$out" ] || die "no output directory"
+
+channel=$(<crates/bongos/RELEASE_CHANNEL)
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/bongos/Cargo.toml | head -n1)
+[ -n "$version" ] || die "no version in crates/bongos/Cargo.toml"
+
+app_name="bongos"
+app_id="dev.bongos.Bongos"
+icon_stem="app-icon"
+case "$channel" in
+  stable) ;;
+  preview) app_name="bongos Preview"; app_id="dev.bongos.Bongos-Preview"; icon_stem="app-icon-preview" ;;
+  nightly) app_name="bongos Nightly"; app_id="dev.bongos.Bongos-Nightly"; icon_stem="app-icon-nightly" ;;
+  dev) app_name="bongos Dev"; app_id="dev.bongos.Bongos-Dev"; icon_stem="app-icon-dev" ;;
+  *) die "unknown release channel: $channel" ;;
+esac
+url_scheme="bongos"   # must match BONGOS_URL_SCHEME in crates/client/src/client.rs
+minimum_macos="10.15.7"
+
+if [ -n "${BONGOS_BUNDLE_BIN_DIR:-}" ]; then
+  bin_dir="$(cd "$BONGOS_BUNDLE_BIN_DIR" && pwd -P)"
+else
+  if [ ! -d "$(rustc --print sysroot)/lib/rustlib/$target_triple" ]; then
+    die "the Rust target $target_triple is not installed; add it yourself with: rustup target add $target_triple"
+  fi
+  export ZED_BUNDLE=true
+  export RELEASE_VERSION="$version"
+  # Deal with versions of macOS that don't include libstdc++ headers.
+  export CXXFLAGS="-stdlib=libc++"
+  if $debug; then
+    profile_dir="debug"
+    cargo build --locked --target "$target_triple" --package bongos --package cli --color never
+  else
+    profile_dir="release"
+    cargo build --release --locked --target "$target_triple" --package bongos --package cli --color never
+  fi
+  bin_dir="$target_root/$target_triple/$profile_dir"
+fi
+for binary in bongos cli; do
+  [ -x "$bin_dir/$binary" ] || die "$bin_dir/$binary is missing or not executable"
+done
+
+stage_root="$out/stage"
+app_dir="$stage_root/$app_name.app"
+rm -rf "${stage_root:?}"
+mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
+
+cp "$bin_dir/bongos" "$app_dir/Contents/MacOS/bongos"
+cp "$bin_dir/cli" "$app_dir/Contents/MacOS/cli"
+if [ -n "${BONGOS_MAC_GIT:-}" ]; then
+  [ -x "$BONGOS_MAC_GIT" ] || die "BONGOS_MAC_GIT=$BONGOS_MAC_GIT is not an executable file"
+  cp "$BONGOS_MAC_GIT" "$app_dir/Contents/MacOS/git"
+fi
+
+# The app icon: an .icns made from the channel's 1024 pixel PNG with the sips and iconutil that ship with macOS.
+iconset="$out/AppIcon.iconset"
+rm -rf "${iconset:?}"
+mkdir -p "$iconset"
+icon_source="crates/bongos/resources/$icon_stem@2x.png"
+[ -f "$icon_source" ] || die "$icon_source is missing"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$icon_source" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  sips -z "$((size * 2))" "$((size * 2))" "$icon_source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app_dir/Contents/Resources/AppIcon.icns"
+rm -rf "${iconset:?}"
+
+# DocumentTypes.plist names the document icon "Document".
+cp crates/bongos/resources/Document.icns "$app_dir/Contents/Resources/Document.icns"
+
+# Info.plist: the identity keys here, then the fragments in resources/info (document types, usage
+# descriptions, supported platforms), which are bare key/value pairs.
+{
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<key>CFBundleDevelopmentRegion</key>
+<string>en</string>
+<key>CFBundleDisplayName</key>
+<string>$app_name</string>
+<key>CFBundleExecutable</key>
+<string>bongos</string>
+<key>CFBundleIconFile</key>
+<string>AppIcon</string>
+<key>CFBundleIdentifier</key>
+<string>$app_id</string>
+<key>CFBundleInfoDictionaryVersion</key>
+<string>6.0</string>
+<key>CFBundleName</key>
+<string>$app_name</string>
+<key>CFBundlePackageType</key>
+<string>APPL</string>
+<key>CFBundleShortVersionString</key>
+<string>$version</string>
+<key>CFBundleVersion</key>
+<string>$version</string>
+<key>CFBundleURLTypes</key>
+<array>
+<dict>
+<key>CFBundleURLName</key>
+<string>$app_id</string>
+<key>CFBundleURLSchemes</key>
+<array>
+<string>$url_scheme</string>
+</array>
+</dict>
+</array>
+<key>LSApplicationCategoryType</key>
+<string>public.app-category.developer-tools</string>
+<key>LSMinimumSystemVersion</key>
+<string>$minimum_macos</string>
+<key>NSHighResolutionCapable</key>
+<true/>
+<key>NSSupportsAutomaticGraphicsSwitching</key>
+<true/>
+PLIST
+  cat crates/bongos/resources/info/*.plist
+  printf '</dict>\n</plist>\n'
+} > "$app_dir/Contents/Info.plist"
+plutil -lint "$app_dir/Contents/Info.plist" >/dev/null
+
+for notice in LICENSE LICENSE-GPL LICENSE-APACHE NOTICE ORIGIN.md; do
+  cp "$notice" "$app_dir/Contents/Resources/$notice"
+done
+# The editor embeds assets/licenses.md, so that file is the one shipped.
+cp assets/licenses.md "$app_dir/Contents/Resources/licenses.md"
+
+# Signing is local only. Without BONGOS_MAC_SIGN_IDENTITY the bundle is ad-hoc signed ("-"), which is
+# enough to run it on the machine that built it. --timestamp=none keeps codesign from calling Apple's
+# timestamp server; there is no notarization step.
+sign_identity="${BONGOS_MAC_SIGN_IDENTITY:--}"
+sign_flags=(--force --timestamp=none)
+if [ "$sign_identity" != "-" ]; then
+  sign_flags+=(--options runtime)
+fi
+entitlements="crates/bongos/resources/bongos.entitlements"
+if [ -f "$app_dir/Contents/MacOS/git" ]; then
+  /usr/bin/codesign "${sign_flags[@]}" --sign "$sign_identity" "$app_dir/Contents/MacOS/git"
+fi
+/usr/bin/codesign "${sign_flags[@]}" --sign "$sign_identity" "$app_dir/Contents/MacOS/cli"
+/usr/bin/codesign "${sign_flags[@]}" --entitlements "$entitlements" --sign "$sign_identity" "$app_dir/Contents/MacOS/bongos"
+/usr/bin/codesign "${sign_flags[@]}" --entitlements "$entitlements" --sign "$sign_identity" "$app_dir"
+/usr/bin/codesign --verify --strict "$app_dir"
+
+if $debug; then
+  rm -rf "${out:?}/${app_name:?}.app"
+  mv "$app_dir" "$out/$app_name.app"
+  rm -rf "${stage_root:?}"
+  echo "bundle-mac: debug build, no disk image. Created $out/$app_name.app"
+  exit 0
+fi
+
+# The disk image, with the GPL-3.0-or-later license as its agreement. The RTF is made from LICENSE-GPL,
+# so the two cannot drift: backslashes and braces are escaped and every non-ASCII character becomes \uN?.
+command -v dmg-license >/dev/null || die "dmg-license is not on PATH; install it yourself with: npm install --global dmg-license"
+license_dir="$out/dmg-license"
+rm -rf "${license_dir:?}"
+mkdir -p "$license_dir"
+cp "$here/packaging/dmg-license.json" "$license_dir/dmg-license.json"
+{
+  printf '%s\n' '{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fmodern Courier;}}\f0\fs20'
+  printf '%s\n' '{\b bongos is licensed under the GNU General Public License, version 3 or (at your option) any later version.}\par\par'
+  perl -CSDA -pe 's/([\\{}])/\\$1/g; s/([^\x00-\x7F])/"\\u" . (ord($1) > 32767 ? ord($1) - 65536 : ord($1)) . "?"/ge; s/\r?\n$/\\line\n/' LICENSE-GPL
+  printf '%s\n' '}'
+} > "$license_dir/license.rtf"
+
+dmg_root="$out/dmg"
+dmg_file="$out/bongos-$arch_suffix.dmg"
+rm -rf "${dmg_root:?}" "${dmg_file:?}"
+mkdir -p "$dmg_root"
+mv "$app_dir" "$dmg_root/"
+ln -s /Applications "$dmg_root/Applications"
+hdiutil create -volname "$app_name" -srcfolder "$dmg_root" -ov -format UDZO "$dmg_file"
+dmg-license "$license_dir/dmg-license.json" "$dmg_file"
+
+rm -rf "${stage_root:?}" "${dmg_root:?}" "${license_dir:?}"
+echo "bundle-mac: created $dmg_file"

@@ -2307,7 +2307,7 @@ mod tests {
 
     #[test]
     fn test_validate_slash_commands_accepts_scope_qualified_skill() {
-        let agent_id = AgentId::from("Zed");
+        let agent_id = AgentId::from("bongos");
         let make_skill = |name: &str, source: &str| AvailableSkill {
             name: name.into(),
             description: "desc".into(),

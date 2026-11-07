@@ -1,0 +1,26 @@
+bongos
+This product includes software developed at Zed Industries, Inc. (https://zed.dev), copyright 2022 - 2025 Zed Industries, Inc.
+
+Apache-2.0 crates modified by bongos since the fork point (section 4(b) notice of change):
+crates/gpui_util: modified by bongos; see git log
+crates/gpui_shared_string: modified by bongos; see git log
+crates/reqwest_client: modified by bongos; see git log
+crates/http_client: modified by bongos; see git log
+crates/cloud_api_client: modified by bongos; see git log
+crates/cloud_api_types: modified by bongos; see git log
+crates/cloud_llm_client: modified by bongos; see git log
+crates/util: modified by bongos; see git log
+crates/gpui: modified by bongos; see git log
+crates/gpui_macos: modified by bongos; see git log
+crates/gpui_windows: modified by bongos; see git log
+crates/oauth_callback_server: modified by bongos; see git log
+
+Third-party license options taken:
+self_cell: Apache-2.0, taken under Apache-2.0
+r-efi: MIT or Apache-2.0, taken under MIT
+md-5: MIT or Apache-2.0, taken under MIT
+
+Bundled third-party material:
+crates/bongos_languages/src/kotlin/*.scm: Kotlin highlight and outline queries from zed-extensions/kotlin, MIT, copyright 2024 Evren Sen; see crates/bongos_languages/LICENSE-KOTLIN-EXTENSION
+crates/bongos_languages/src/java/*.scm and config.toml: Java queries and config from zed-extensions/java, Apache-2.0, copyright Java Extension Contributors; see crates/bongos_languages/LICENSE-JAVA-EXTENSION
+crates/bongos_languages/src/toml/*.scm and config.toml: TOML queries and config from zed-extensions/toml, Apache-2.0, copyright 2022-2025 Zed Industries, Inc.; see crates/bongos_languages/LICENSE-TOML-EXTENSION
