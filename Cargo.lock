@@ -7770,6 +7770,7 @@ dependencies = [
  "log",
  "release_channel",
  "smol",
+ "tempfile",
  "util",
  "workspace",
 ]

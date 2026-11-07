@@ -69,8 +69,33 @@ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
     anyhow::bail!("error running osascript: {}", stderr.trim());
 }
 
+/// Where the bundled CLI sits relative to the directory of the running editor binary, in the order they are tried.
+///
+/// `../bin/bongos` is the installed layout (CLI in `bin`, editor in `libexec`), and `./cli` is a development build, where
+/// both binaries share the target directory.
+const LINUX_CLI_LOCATIONS: [&str; 3] = ["../bin/bongos", "../bin/cli", "./cli"];
+
+/// Finds the bundled CLI next to the running editor binary `editor_exe`.
+///
+/// gpui does not implement `path_for_auxiliary_executable` on Linux, so the path is derived from the editor binary's own
+/// location. Returns `None` when no CLI exists at a known location, or when the only match is the editor itself.
+fn find_linux_cli(editor_exe: &Path) -> Option<PathBuf> {
+    let directory = editor_exe.parent()?;
+    let editor_exe = editor_exe.canonicalize().ok()?;
+    LINUX_CLI_LOCATIONS.iter().find_map(|location| {
+        directory
+            .join(location)
+            .canonicalize()
+            .ok()
+            .filter(|path| path.is_file() && *path != editor_exe)
+    })
+}
+
 /// Builds the Linux prompt text that tells the user where the bundled CLI is and how to put it on their PATH.
-fn linux_prompt_detail(cli_path: &Path) -> String {
+fn linux_prompt_detail(cli_path: Option<&Path>) -> String {
+    let Some(cli_path) = cli_path else {
+        return "The bongos CLI ships with the bongos bundle, but its location could not be determined.\n\nAdd the bundle's bin directory to your PATH, or symlink the CLI as `bongos`.".to_string();
+    };
     let directory = cli_path.parent().unwrap_or(cli_path);
     format!(
         "The bongos CLI is bundled at {path}.\n\nAdd {directory} to your PATH, or symlink it as `bongos`, for example:\n\nln -s {path} ~/.local/bin/bongos",
@@ -86,11 +111,13 @@ fn linux_prompt_detail(cli_path: &Path) -> String {
 pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
     cx.spawn_in(window, async move |workspace, cx| {
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            let cli_path = cx.update(|_, cx| cx.path_for_auxiliary_executable("cli"))??;
-            let detail = linux_prompt_detail(&cli_path);
+            let cli_path = std::env::current_exe()
+                .ok()
+                .and_then(|editor_exe| find_linux_cli(&editor_exe));
+            let detail = linux_prompt_detail(cli_path.as_deref());
             let prompt = cx.prompt(
                 PromptLevel::Warning,
-                "The bongos CLI is already installed",
+                "The bongos CLI is bundled with the app",
                 Some(&detail),
                 &["OK"],
             );
@@ -148,14 +175,68 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn linux_prompt_detail_reports_the_cli_path() {
-        let detail = linux_prompt_detail(Path::new("/opt/bongos/libexec/cli"));
+        let detail = linux_prompt_detail(Some(Path::new("/opt/bongos/bin/bongos")));
 
-        assert!(detail.contains("/opt/bongos/libexec/cli"));
-        assert!(detail.contains("/opt/bongos/libexec"));
+        assert!(detail.contains("/opt/bongos/bin/bongos"));
+        assert!(detail.contains("/opt/bongos/bin"));
         assert!(detail.contains("`bongos`"));
         assert!(!detail.to_lowercase().contains("zed"));
+    }
+
+    #[test]
+    fn linux_prompt_detail_without_a_path_is_a_fixed_message() {
+        let detail = linux_prompt_detail(None);
+
+        assert!(detail.contains("PATH"));
+        assert!(!detail.to_lowercase().contains("zed"));
+    }
+
+    fn touch(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn finds_the_cli_in_an_installed_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let editor = root.join("libexec/bongos-editor");
+        touch(&editor);
+        touch(&root.join("bin/bongos"));
+
+        assert_eq!(find_linux_cli(&editor), Some(root.join("bin/bongos")));
+    }
+
+    #[test]
+    fn finds_the_cli_next_to_a_development_build() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let editor = root.join("target/debug/bongos");
+        touch(&editor);
+        touch(&root.join("target/debug/cli"));
+
+        assert_eq!(find_linux_cli(&editor), Some(root.join("target/debug/cli")));
+    }
+
+    #[test]
+    fn does_not_mistake_the_editor_for_the_cli() {
+        let root = tempfile::tempdir().unwrap();
+        let editor = root.path().join("bin/bongos");
+        touch(&editor);
+
+        assert_eq!(find_linux_cli(&editor), None);
+    }
+
+    #[test]
+    fn finds_nothing_when_no_cli_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let editor = root.path().join("libexec/bongos-editor");
+        touch(&editor);
+
+        assert_eq!(find_linux_cli(&editor), None);
     }
 }
