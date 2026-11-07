@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build the stock upstream app (the negative control for smoke) from the ORIGIN.md commit in a separate worktree,
+# fetching only that Zed tag (shallow) first when this clone lacks the commit,
 # and save it to $BONGOS_WORKSPACE/scratch/stock-zed/zed. Skips if that binary exists.
 #   stock-build [--force]
 # Cargo output goes to the log; the terminal gets one summary line.
@@ -30,9 +31,21 @@ if [ -z "$commit" ]; then
   exit 1
 fi
 wt="$BONGOS_WORKSPACE/scratch/zed-ref"
-if ! git -C "$BONGOS_ROOT" cat-file -e "$commit^{commit}" 2>/dev/null; then
-  echo "bongos: commit $commit from ORIGIN.md is not in this clone's history"
-  exit 1
+if ! origin_commit_present; then
+  tag=$(origin_tag)
+  if [ -z "$tag" ]; then
+    echo "bongos: commit $commit is not in this clone and ORIGIN.md has no 'Zed tag:' line to fetch it by"
+    exit 1
+  fi
+  # bongos does not carry Zed's history, so a clean clone lacks the commit. Fetch only that tag, one commit deep.
+  say "stock-build: NOTICE commit $commit is not in this clone (bongos does not include Zed's history)."
+  say "stock-build: fetching only Zed's tag $tag from https://github.com/zed-industries/zed.git, shallow, no other refs"
+  git -C "$BONGOS_ROOT" fetch --depth 1 --no-tags https://github.com/zed-industries/zed.git tag "$tag" ||
+    { echo "bongos: the fetch failed; run it yourself: git fetch --depth 1 --no-tags https://github.com/zed-industries/zed.git tag $tag"; exit 1; }
+  if ! origin_commit_present; then
+    echo "bongos: tag $tag does not contain commit $commit; check ORIGIN.md"
+    exit 1
+  fi
 fi
 if [ ! -e "$wt/.git" ]; then
   mkdir -p "$(dirname "$wt")"

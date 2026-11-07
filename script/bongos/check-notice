@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Skips with a warning when the ORIGIN.md commit is not in this clone.
 # Fails when a workspace package licensed Apache-2.0 differs from the fork commit and NOTICE does not name its path.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,6 +9,14 @@ cd "$BONGOS_ROOT"
 log_init check-notice
 
 origin=$(origin_commit)
+if ! origin_commit_present; then
+  echo "bongos: WARNING skipping the NOTICE check: the Zed commit ${origin:-from ORIGIN.md} is not in this clone."
+  echo "bongos: bongos does not carry Zed's history. To run this check, fetch Zed's tag $(origin_tag) once:"
+  echo "bongos:   git fetch --depth 1 --no-tags https://github.com/zed-industries/zed.git tag $(origin_tag)"
+  echo "bongos: (script/bongos/stock-build does the same). Then run check-notice again."
+  SUMMARY="skipped: the Zed commit is not in this clone (see log)"
+  exit 0
+fi
 missing=$(python3 -I -c '
 import json, os, subprocess, sys
 root, meta, origin = sys.argv[1:4]

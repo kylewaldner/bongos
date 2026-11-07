@@ -195,6 +195,14 @@ origin_tag() {
   sed -n 's/^Zed tag: *//p' "$BONGOS_ROOT/ORIGIN.md" 2>/dev/null | head -n1
 }
 
+# 0 when the ORIGIN.md commit is an object of this clone. Zed's history is not part of bongos (its first
+# commit is a squash), so a clean clone does not have it until `stock-build` fetches the Zed tag.
+origin_commit_present() {
+  local c
+  c=$(origin_commit)
+  [ -n "$c" ] && git -C "$BONGOS_ROOT" cat-file -e "$c^{commit}" 2>/dev/null
+}
+
 # Where this branch left main: merge-base of HEAD and origin/main, else the fork commit.
 branch_base() {
   local b
