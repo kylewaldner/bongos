@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerates every app icon from the two master SVGs in crates/bongos/resources
 # (app-icon.svg for release, app-icon-dev.svg for dev, nightly and preview).
-# Needs rsvg-convert and ImageMagick (convert or magick). Document.icns is rebuilt only when png2icns exists.
+# Needs rsvg-convert and ImageMagick (convert or magick). Document.icns is written by script/bongos/make-icns.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
@@ -33,12 +33,9 @@ done
 mkdir -p "$res/icons/hicolor/scalable/apps"
 cp "$res/app-icon.svg" "$res/icons/hicolor/scalable/apps/bongos.svg"
 
-if command -v png2icns >/dev/null; then
-  tmp=$(mktemp -d)
-  for s in 16 32 48 128 256 512; do raster "$res/app-icon.svg" $s "$tmp/$s.png"; done
-  png2icns "$res/Document.icns" "$tmp"/16.png "$tmp"/32.png "$tmp"/48.png "$tmp"/128.png "$tmp"/256.png "$tmp"/512.png
-  rm -rf "$tmp"
-else
-  echo "make-icons: png2icns not found, Document.icns left as is (rebuild it with iconutil on macOS)"
-fi
+tmp=$(mktemp -d)
+icns_args=()
+for s in 32 64 128 256 512 1024; do raster "$res/app-icon.svg" $s "$tmp/$s.png"; icns_args+=("$s=$tmp/$s.png"); done
+python3 -I script/bongos/make-icns "$res/Document.icns" "${icns_args[@]}"
+rm -rf "$tmp"
 echo "make-icons: done"

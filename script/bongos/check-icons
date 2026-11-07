@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fails when an app icon is missing, has the wrong size, or is still the Zed art (byte-identical to the
+# Fails when an app icon (png, ico or icns) is missing, has the wrong size, or is still the Zed art (byte-identical to the
 # file at the fork commit), or when a generated icon differs from what the master SVGs render (size and tile
 # color of the release icon are checked, not bytes).
 set -euo pipefail
@@ -62,7 +62,33 @@ while IFS= read -r f; do
   if git cat-file -e "$origin:$f" 2>/dev/null && [ "$(git rev-parse "$origin:$f")" = "$(git hash-object "$f")" ]; then
     fail "$f is still the Zed icon"
   fi
-done < <(find "$res" -type f \( -name '*.png' -o -name '*.ico' \))
+done < <(find "$res" -type f \( -name '*.png' -o -name '*.ico' -o -name '*.icns' \))
+
+# Document.icns: not Zed's blob (checked by hash, so a clone without the fork commit still catches it),
+# and a real icns whose largest PNG is the vermilion tile
+zed_icns=5d0185c81a32c214f213f12243aeab01e32830e1
+[ -f "$res/Document.icns" ] || fail "missing $res/Document.icns"
+if [ -f "$res/Document.icns" ]; then
+  [ "$(git hash-object "$res/Document.icns")" != "$zed_icns" ] || fail "$res/Document.icns is still the Zed icon"
+  icns_tmp=$(mktemp -d)
+  python3 -I -c '
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+assert d[:4] == b"icns" and struct.unpack(">I", d[4:8])[0] == len(d), "not an icns file"
+o, found = 8, False
+while o < len(d):
+    t, l = d[o:o + 4], struct.unpack(">I", d[o + 4:o + 8])[0]
+    if t == b"ic10" and d[o + 8:o + 16] == b"\x89PNG\r\n\x1a\n":
+        open(sys.argv[2], "wb").write(d[o + 8:o + l]); found = True
+    o += l
+sys.exit(0 if found else "no PNG ic10 entry")
+' "$res/Document.icns" "$icns_tmp/ic10.png" || fail "$res/Document.icns is not a valid icns with a 1024 pixel PNG"
+  if [ -f "$icns_tmp/ic10.png" ]; then
+    expect_size "$icns_tmp/ic10.png" 1024x1024
+    [ "$(center_px "$icns_tmp/ic10.png")" = "E13A01" ] || fail "$res/Document.icns tile is not #e13a01"
+  fi
+  rm -rf "$icns_tmp"
+fi
 
 if [ "$bad" != 0 ]; then exit 1; fi
 SUMMARY="app icons present, sized right, not Zed"
