@@ -30,17 +30,6 @@ use util::{ResultExt, TryFutureExt as _};
 
 pub type LegacyUserId = u64;
 
-#[derive(
-    Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, serde::Serialize, serde::Deserialize,
-)]
-pub struct ChannelId(pub u64);
-
-impl std::fmt::Display for ChannelId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct ProjectId(pub u64);
 

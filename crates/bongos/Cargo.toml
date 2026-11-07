@@ -75,7 +75,6 @@ askpass.workspace = true
 assets.workspace = true
 audio.workspace = true
 breadcrumbs.workspace = true
-call.workspace = true
 chrono.workspace = true
 clap.workspace = true
 cli.workspace = true
@@ -108,7 +107,7 @@ fs.workspace = true
 futures.workspace = true
 git.workspace = true
 git_hosting_providers.workspace = true
-git_ui = { workspace = true, features = ["call"] }
+git_ui.workspace = true
 go_to_line.workspace = true
 system_specs.workspace = true
 gpui = { workspace = true, features = ["input-latency-histogram"] }
@@ -249,7 +248,6 @@ image.workspace = true
 pkg-config = "0.3.22"
 
 [dev-dependencies]
-call = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["input-latency-histogram", "test-support"] }
 image_viewer = { workspace = true, features = ["test-support"] }

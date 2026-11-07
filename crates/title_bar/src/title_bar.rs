@@ -16,13 +16,11 @@ use crate::application_menu::{
     ActivateDirection, ActivateMenuLeft, ActivateMenuRight, OpenApplicationMenu,
 };
 
-use call::ActiveCall;
-use client::UserStore;
 use command_palette_hooks::CommandPaletteFilter;
 
 use gpui::{
     AnyElement, App, Context, Entity, Focusable, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, Styled, Subscription, TaskExt, WeakEntity, Window, actions, div,
+    ParentElement, Render, Styled, Subscription, WeakEntity, Window, actions, div,
 };
 use project::{
     Project, git_store::GitStoreEvent, project_settings::ProjectSettings,
@@ -46,16 +44,6 @@ use zed_actions::OpenRemote;
 const MAX_PROJECT_NAME_LENGTH: usize = 40;
 const MAX_BRANCH_NAME_LENGTH: usize = 40;
 const MAX_SHORT_SHA_LENGTH: usize = 8;
-
-actions!(
-    collab,
-    [
-        /// Toggles the project menu dropdown.
-        ToggleProjectMenu,
-        /// Switches to a different git branch.
-        SwitchBranch
-    ]
-);
 
 actions!(
     workspace,
@@ -165,12 +153,10 @@ fn set_window_layout(layout: WindowLayout, cx: &App) {
 pub struct TitleBar {
     platform_titlebar: Entity<PlatformTitleBar>,
     project: Entity<Project>,
-    user_store: Entity<UserStore>,
     workspace: WeakEntity<Workspace>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     application_menu: Option<Entity<ApplicationMenu>>,
     _subscriptions: Vec<Subscription>,
-    _diagnostics_subscription: Option<gpui::Subscription>,
 }
 
 impl Render for TitleBar {
@@ -341,8 +327,6 @@ impl TitleBar {
     ) -> Self {
         let project = workspace.project().clone();
         let git_store = project.read(cx).git_store().clone();
-        let user_store = workspace.app_state().user_store.clone();
-        let active_call = ActiveCall::global(cx);
 
         let platform_style = PlatformStyle::platform();
         let application_menu = match platform_style {
@@ -365,8 +349,6 @@ impl TitleBar {
             }),
         );
 
-        subscriptions.push(cx.observe(&active_call, |this, _, cx| this.active_call_changed(cx)));
-        subscriptions.push(cx.observe_window_activation(window, Self::window_activation_changed));
         subscriptions.push(
             cx.subscribe(&git_store, move |_, _, event, cx| match event {
                 GitStoreEvent::ActiveRepositoryChanged(_)
@@ -376,7 +358,6 @@ impl TitleBar {
                 _ => {}
             }),
         );
-        subscriptions.push(cx.observe(&user_store, |_a, _, cx| cx.notify()));
         if let Some(workspace_entity) = workspace.weak_handle().upgrade() {
             subscriptions.push(cx.subscribe(
                 &workspace_entity,
@@ -402,20 +383,14 @@ impl TitleBar {
             titlebar
         });
 
-        let mut this = Self {
+        Self {
             platform_titlebar,
             application_menu,
             workspace: workspace.weak_handle(),
             multi_workspace,
             project,
-            user_store,
             _subscriptions: subscriptions,
-            _diagnostics_subscription: None,
-        };
-
-        this.observe_diagnostics(cx);
-
-        this
+        }
     }
 
     fn worktree_count(&self, cx: &App) -> usize {
@@ -620,48 +595,7 @@ impl TitleBar {
             return self.render_remote_project_connection(cx);
         }
 
-        if self.project.read(cx).is_disconnected(cx) {
-            return Some(
-                Button::new("disconnected", "Disconnected")
-                    .disabled(true)
-                    .color(Color::Disabled)
-                    .label_size(LabelSize::Small)
-                    .into_any_element(),
-            );
-        }
-
-        let host = self.project.read(cx).host()?;
-        let host_user = self.user_store.read(cx).get_cached_user(host.user_id)?;
-        let participant_index = self
-            .user_store
-            .read(cx)
-            .participant_indices()
-            .get(&host_user.legacy_id)?;
-
-        Some(
-            Button::new("project_owner_trigger", host_user.github_login.clone())
-                .color(Color::Player(participant_index.0))
-                .label_size(LabelSize::Small)
-                .tooltip(move |_, cx| {
-                    let tooltip_title = format!(
-                        "{} is sharing this project. Click to follow.",
-                        host_user.github_login
-                    );
-
-                    Tooltip::with_meta(tooltip_title, None, "Click to Follow", cx)
-                })
-                .on_click({
-                    let host_peer_id = host.peer_id;
-                    cx.listener(move |this, _, window, cx| {
-                        this.workspace
-                            .update(cx, |workspace, cx| {
-                                workspace.follow(host_peer_id, window, cx);
-                            })
-                            .log_err();
-                    })
-                })
-                .into_any_element(),
-        )
+        None
     }
 
     fn render_project_name(
@@ -972,40 +906,5 @@ impl TitleBar {
                 })
                 .into_any_element(),
         )
-    }
-
-    fn window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.is_window_active() {
-            ActiveCall::global(cx)
-                .update(cx, |call, cx| call.set_location(Some(&self.project), cx))
-                .detach_and_log_err(cx);
-        } else if cx.active_window().is_none() {
-            ActiveCall::global(cx)
-                .update(cx, |call, cx| call.set_location(None, cx))
-                .detach_and_log_err(cx);
-        }
-        self.workspace
-            .update(cx, |workspace, cx| {
-                workspace.update_active_view_for_followers(window, cx);
-            })
-            .ok();
-    }
-
-    fn active_call_changed(&mut self, cx: &mut Context<Self>) {
-        self.observe_diagnostics(cx);
-        cx.notify();
-    }
-
-    fn observe_diagnostics(&mut self, cx: &mut Context<Self>) {
-        let diagnostics = ActiveCall::global(cx)
-            .read(cx)
-            .room()
-            .and_then(|room| room.read(cx).diagnostics().cloned());
-
-        if let Some(diagnostics) = diagnostics {
-            self._diagnostics_subscription = Some(cx.observe(&diagnostics, |_, _, cx| cx.notify()));
-        } else {
-            self._diagnostics_subscription = None;
-        }
     }
 }

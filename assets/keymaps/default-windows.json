@@ -879,7 +879,6 @@
   {
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-shift-alt-f": "workspace::FollowNextCollaborator",
       // Only available in debug builds: opens an element inspector for development.
       "shift-alt-i": "dev::ToggleInspector",
     },

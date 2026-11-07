@@ -497,9 +497,9 @@
   },
   // Settings related to calls in Zed
   "calls": {
-    // Join calls with the microphone live by default
+    // Inert in bongos, which has no calls.
     "mute_on_join": false,
-    // Share your project when you are the first to join a channel
+    // Inert in bongos, which has no calls.
     "share_on_join": false,
   },
   // Toolbar related settings
