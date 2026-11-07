@@ -203,6 +203,7 @@ members = [
     "crates/x_ai",
     "crates/bongos",
     "crates/bongos_app",
+    "crates/bongos_languages",
     "crates/bongos_net",
     "crates/bongos_version",
     "crates/zed_actions",
@@ -445,6 +446,7 @@ worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
 bongos = { path = "crates/bongos" }
 bongos_app = { path = "crates/bongos_app" }
+bongos_languages = { path = "crates/bongos_languages" }
 bongos_net = { path = "crates/bongos_net" }
 bongos_version = { path = "crates/bongos_version" }
 zed_actions = { path = "crates/zed_actions" }
@@ -765,6 +767,7 @@ tree-sitter-heex = { git = "https://github.com/zed-industries/tree-sitter-heex",
 tree-sitter-html = "0.23"
 tree-sitter-jsdoc = "0.23"
 tree-sitter-json = "0.24"
+tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin", rev = "1852ea17b7f60fb3f9d84e0b1555d56b46b39fb1" }
 tree-sitter-md = { git = "https://github.com/tree-sitter-grammars/tree-sitter-markdown", rev = "9a23c1a96c0513d8fc6520972beedd419a973539" }
 tree-sitter-python = "0.25"
 tree-sitter-regex = "0.24"

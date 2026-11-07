@@ -2046,6 +2046,7 @@ dependencies = [
  "assets",
  "audio",
  "bongos_app",
+ "bongos_languages",
  "bongos_net",
  "bongos_version",
  "breadcrumbs",
@@ -2198,6 +2199,19 @@ dependencies = [
  "paths",
  "settings",
  "tempfile",
+]
+
+[[package]]
+name = "bongos_languages"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "language",
+ "streaming-iterator",
+ "toml 0.8.23",
+ "tree-sitter",
+ "tree-sitter-kotlin",
 ]
 
 [[package]]
@@ -16391,6 +16405,15 @@ name = "tree-sitter-json"
 version = "0.24.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d727acca406c0020cffc6cf35516764f36c8e3dc4408e5ebe2cb35a947ec471"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-kotlin"
+version = "0.4.0"
+source = "git+https://github.com/fwcd/tree-sitter-kotlin?rev=1852ea17b7f60fb3f9d84e0b1555d56b46b39fb1#1852ea17b7f60fb3f9d84e0b1555d56b46b39fb1"
 dependencies = [
  "cc",
  "tree-sitter-language",
