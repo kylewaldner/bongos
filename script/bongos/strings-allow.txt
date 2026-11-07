@@ -72,7 +72,6 @@ crates/language_model_core/src/provider.rs 1
 crates/language_models/src/provider/anthropic.rs 2
 crates/language_models/src/provider/api_compatible.rs 2
 crates/language_models/src/provider/bedrock.rs 2
-crates/language_models/src/provider/cloud.rs 16
 crates/language_models/src/provider/deepseek.rs 2
 crates/language_models/src/provider/google.rs 2
 crates/language_models/src/provider/lmstudio.rs 1

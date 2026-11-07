@@ -101,8 +101,8 @@ impl WriteToolTest {
             let client = Client::production(cx);
             let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
             language_model::init(cx);
-            RefreshLlmTokenListener::register(client.clone(), user_store.clone(), cx);
-            language_models::init(user_store, client, cx);
+            RefreshLlmTokenListener::register(client.clone(), user_store, cx);
+            language_models::init(client, cx);
         });
 
         fs.insert_tree("/root", serde_json::json!({})).await;

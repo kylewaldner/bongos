@@ -36,11 +36,8 @@ crates/editor/src/edit_prediction.rs zed.dev
 crates/edit_prediction/src/zeta.rs zed.dev
 crates/edit_prediction_ui/src/edit_prediction_button.rs zed.dev
 crates/language_model_core/src/provider.rs zed.dev
-crates/language_models_cloud/src/language_models_cloud.rs zed.dev
-crates/language_model/src/registry.rs zed.dev
 crates/settings_content/src/agent.rs zed.dev
 crates/settings_content/src/language_model.rs zed.dev
-crates/web_search_providers/src/cloud.rs zed.dev
 
 # feedback (step 19), marketplace (step 19a) and settings page entries (step 24)
 crates/settings_ui/src/page_data.rs zed.dev

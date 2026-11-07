@@ -3761,8 +3761,8 @@ async fn test_agent_connection(cx: &mut TestAppContext) {
         let client = Client::new(clock, http_client, cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         language_model::init(cx);
-        RefreshLlmTokenListener::register(client.clone(), user_store.clone(), cx);
-        language_models::init(user_store, client.clone(), cx);
+        RefreshLlmTokenListener::register(client.clone(), user_store, cx);
+        language_models::init(client.clone(), cx);
         LanguageModelRegistry::test(cx);
     });
     cx.executor().forbid_parking();
@@ -4483,8 +4483,8 @@ async fn setup(cx: &mut TestAppContext, model: TestModel) -> ThreadTest {
                 let client = Client::production(cx);
                 let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
                 language_model::init(cx);
-                RefreshLlmTokenListener::register(client.clone(), user_store.clone(), cx);
-                language_models::init(user_store, client.clone(), cx);
+                RefreshLlmTokenListener::register(client.clone(), user_store, cx);
+                language_models::init(client.clone(), cx);
             }
         };
 
@@ -6806,49 +6806,6 @@ async fn test_copy_path_tool_deny_rule_blocks_copy(cx: &mut TestAppContext) {
         result.unwrap_err().contains("blocked"),
         "error should mention the copy was blocked"
     );
-}
-
-#[gpui::test]
-async fn test_web_search_tool_deny_rule_blocks_search(cx: &mut TestAppContext) {
-    init_test(cx);
-
-    cx.update(|cx| {
-        let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-        settings.tool_permissions.tools.insert(
-            WebSearchTool::NAME.into(),
-            agent_settings::ToolRules {
-                default: Some(settings::ToolPermissionMode::Allow),
-                always_allow: vec![],
-                always_deny: vec![
-                    agent_settings::CompiledRegex::new(r"internal\.company", false).unwrap(),
-                ],
-                always_confirm: vec![],
-                invalid_patterns: vec![],
-            },
-        );
-        agent_settings::AgentSettings::override_global(settings, cx);
-    });
-
-    #[allow(clippy::arc_with_non_send_sync)]
-    let tool = Arc::new(crate::WebSearchTool);
-    let (event_stream, _rx) = crate::ToolCallEventStream::test();
-
-    let input: crate::WebSearchToolInput =
-        serde_json::from_value(json!({"query": "internal.company.com secrets"})).unwrap();
-
-    let task = cx.update(|cx| tool.run(ToolInput::resolved(input), event_stream, cx));
-
-    let result = task.await;
-    assert!(result.is_err(), "expected search to be blocked");
-    match result.unwrap_err() {
-        crate::WebSearchToolOutput::Error { error } => {
-            assert!(
-                error.contains("blocked"),
-                "error should mention the search was blocked"
-            );
-        }
-        other => panic!("expected Error variant, got: {other:?}"),
-    }
 }
 
 #[gpui::test]

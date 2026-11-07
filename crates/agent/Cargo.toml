@@ -27,8 +27,6 @@ agent_skills.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 client.workspace = true
-cloud_api_types.workspace = true
-cloud_llm_client.workspace = true
 collections.workspace = true
 context_server.workspace = true
 db.workspace = true
@@ -75,7 +73,6 @@ url.workspace = true
 util.workspace = true
 uuid.workspace = true
 watch.workspace = true
-web_search.workspace = true
 zed_env_vars.workspace = true
 zstd.workspace = true
 
