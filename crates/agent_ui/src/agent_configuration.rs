@@ -8,7 +8,6 @@ use std::{ops::Range, rc::Rc, sync::Arc};
 
 use agent::ContextServerRegistry;
 use anyhow::Result;
-use cloud_api_types::Plan;
 use collections::HashMap;
 use context_server::ContextServerId;
 use editor::{Editor, MultiBufferOffset, SelectionEffects, scroll::Autoscroll};
@@ -23,7 +22,6 @@ use itertools::Itertools;
 use language::LanguageRegistry;
 use language_model::{
     IconOrSvg, LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry,
-    ZED_CLOUD_PROVIDER_ID,
 };
 use language_models::AllLanguageModelSettings;
 use notifications::status_toast::StatusToast;
@@ -33,7 +31,7 @@ use project::{
 };
 use settings::{Settings, SettingsContent, SettingsStore, update_settings_file};
 use ui::{
-    AiSettingItem, AiSettingItemSource, AiSettingItemStatus, ButtonStyle, Chip, ContextMenu,
+    AiSettingItem, AiSettingItemSource, AiSettingItemStatus, ButtonStyle, ContextMenu,
     ContextMenuEntry, Disclosure, Divider, DividerColor, ElevationIndex, LabelSize, PopoverMenu,
     Switch, Tooltip, WithScrollbar, prelude::*,
 };
@@ -217,22 +215,6 @@ impl AgentConfiguration {
             .copied()
             .unwrap_or(false);
 
-        let is_zed_provider = provider.id() == ZED_CLOUD_PROVIDER_ID;
-        let current_plan = if is_zed_provider {
-            self.workspace
-                .upgrade()
-                .and_then(|workspace| workspace.read(cx).user_store().read(cx).plan())
-        } else {
-            None
-        };
-
-        let is_signed_in = self
-            .workspace
-            .read_with(cx, |workspace, _| {
-                !workspace.client().status().borrow().is_signed_out()
-            })
-            .unwrap_or(false);
-
         v_flex()
             .min_w_0()
             .w_full()
@@ -279,24 +261,15 @@ impl AgentConfiguration {
                                             .w_full()
                                             .gap_1()
                                             .child(Label::new(provider_name.clone()))
-                                            .map(|this| {
-                                                if is_zed_provider && is_signed_in {
-                                                    this.child(
-                                                        self.render_zed_plan_info(current_plan, cx),
+                                            .when(
+                                                provider.is_authenticated(cx) && !is_expanded,
+                                                |parent| {
+                                                    parent.child(
+                                                        Icon::new(IconName::Check)
+                                                            .color(Color::Success),
                                                     )
-                                                } else {
-                                                    this.when(
-                                                        provider.is_authenticated(cx)
-                                                            && !is_expanded,
-                                                        |parent| {
-                                                            parent.child(
-                                                                Icon::new(IconName::Check)
-                                                                    .color(Color::Success),
-                                                            )
-                                                        },
-                                                    )
-                                                }
-                                            }),
+                                                },
+                                            ),
                                     ),
                             )
                             .child(
@@ -483,40 +456,6 @@ impl AgentConfiguration {
                         }),
                     ),
             )
-    }
-
-    fn render_zed_plan_info(&self, plan: Option<Plan>, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(plan) = plan {
-            let free_chip_bg = cx
-                .theme()
-                .colors()
-                .editor_background
-                .opacity(0.5)
-                .blend(cx.theme().colors().text_accent.opacity(0.05));
-
-            let pro_chip_bg = cx
-                .theme()
-                .colors()
-                .editor_background
-                .opacity(0.5)
-                .blend(cx.theme().colors().text_accent.opacity(0.2));
-
-            let (plan_name, label_color, bg_color) = match plan {
-                Plan::ZedFree => ("Free", Color::Default, free_chip_bg),
-                Plan::ZedProTrial => ("Pro Trial", Color::Accent, pro_chip_bg),
-                Plan::ZedPro => ("Pro", Color::Accent, pro_chip_bg),
-                Plan::ZedBusiness => ("Business", Color::Accent, pro_chip_bg),
-                Plan::ZedVip => ("VIP", Color::Accent, pro_chip_bg),
-                Plan::ZedStudent => ("Student", Color::Accent, pro_chip_bg),
-            };
-
-            Chip::new(plan_name.to_string())
-                .bg_color(bg_color)
-                .label_color(label_color)
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        }
     }
 
     fn render_context_servers_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

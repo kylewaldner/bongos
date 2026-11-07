@@ -47,14 +47,6 @@ pub fn upgrade_to_zed_pro_url(cx: &App) -> String {
     format!("{server_url}/account/upgrade", server_url = server_url(cx))
 }
 
-/// Returns the URL to Zed AI's privacy and security docs.
-pub fn ai_privacy_and_security(cx: &App) -> String {
-    format!(
-        "{docs_url}/ai/privacy-and-security",
-        docs_url = docs_url(cx)
-    )
-}
-
 /// Returns the URL to Zed's edit prediction documentation.
 pub fn edit_prediction_docs(cx: &App) -> String {
     format!("{docs_url}/ai/edit-prediction", docs_url = docs_url(cx))
@@ -85,7 +77,6 @@ mod tests {
             cx.set_global(store);
 
             for url in [
-                ai_privacy_and_security(cx),
                 edit_prediction_docs(cx),
                 skills_docs(cx),
                 acp_registry_blog(cx),

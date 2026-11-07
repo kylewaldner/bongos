@@ -10,7 +10,6 @@ crates/http_client/src/http_client.rs staging.zed.dev
 crates/http_client/src/http_client.rs zed.dev
 
 # server_url default is .invalid; the file keeps zed.dev in docs and comment strings
-assets/settings/default.json zed.dev
 
 # the host guard names the hosts it blocks
 crates/bongos_net/src/bongos_net.rs cdn.agentclientprotocol.com
@@ -35,9 +34,6 @@ crates/ui/src/components/collab/collab_notification.rs zed.dev
 crates/editor/src/edit_prediction.rs zed.dev
 crates/edit_prediction/src/zeta.rs zed.dev
 crates/edit_prediction_ui/src/edit_prediction_button.rs zed.dev
-crates/language_model_core/src/provider.rs zed.dev
-crates/settings_content/src/agent.rs zed.dev
-crates/settings_content/src/language_model.rs zed.dev
 
 # feedback (step 19), marketplace (step 19a) and settings page entries (step 24)
 crates/settings_ui/src/page_data.rs zed.dev

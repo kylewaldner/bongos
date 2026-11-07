@@ -16,7 +16,6 @@ use anyhow::{Result, anyhow};
 #[cfg(feature = "audio")]
 use audio::{Audio, Sound};
 use buffer_diff::BufferDiff;
-use client::zed_urls;
 use collections::{HashMap, HashSet, IndexMap};
 use editor::scroll::Autoscroll;
 use editor::{
@@ -119,7 +118,6 @@ enum ThreadFeedback {
 
 #[derive(Debug)]
 pub(crate) enum ThreadError {
-    PaymentRequired,
     DataRetentionConsentRequired,
     Refusal,
     AuthenticationRequired(SharedString),
@@ -177,7 +175,6 @@ impl From<anyhow::Error> for ThreadError {
                     }
                 }
                 PromptTooLarge { .. } => Self::PromptTooLarge,
-                PaymentRequired => Self::PaymentRequired,
                 NoApiKey { provider } => Self::NoCredentials {
                     provider: provider.to_string().into(),
                 },

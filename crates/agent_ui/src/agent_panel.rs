@@ -47,13 +47,13 @@ use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore, ThreadMetadata
 use crate::{
     AddContextServer, AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow,
     LoadThreadFromClipboard, NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown,
-    OpenAgentDiff, ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell,
-    ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
+    OpenAgentDiff, ResetFastModeWarnings, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
+    ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
     agent_configuration::{AgentConfiguration, AssistantConfigurationEvent},
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
-    ui::{AgentNotification, AgentNotificationEvent, EndTrialUpsell},
+    ui::{AgentNotification, AgentNotificationEvent},
 };
 use crate::{
     Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt, NewExternalAgentThread,
@@ -485,9 +485,6 @@ pub fn init(cx: &mut App) {
                         });
                     }
                     OnboardingUpsell::set_dismissed(false, cx);
-                })
-                .register_action(|_workspace, _: &ResetTrialEndUpsell, _window, cx| {
-                    TrialEndUpsell::set_dismissed(false, cx);
                 })
                 .register_action(|_workspace, _: &ResetFastModeWarnings, _window, cx| {
                     reset_fast_mode_warnings(cx);
@@ -6253,34 +6250,6 @@ impl AgentPanel {
             .child(toolbar_content)
     }
 
-    fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
-        if TrialEndUpsell::dismissed(cx) {
-            return false;
-        }
-
-        match &self.base_view {
-            BaseView::AgentThread { .. } => {
-                if LanguageModelRegistry::global(cx)
-                    .read(cx)
-                    .default_model()
-                    .is_some_and(|model| {
-                        model.provider.id() != language_model::ZED_CLOUD_PROVIDER_ID
-                    })
-                {
-                    return false;
-                }
-            }
-            BaseView::Terminal { .. } | BaseView::Uninitialized => {
-                return false;
-            }
-        }
-
-        let plan = self.user_store.read(cx).plan();
-        let has_previous_trial = self.user_store.read(cx).trial_started_at().is_some();
-
-        plan.is_some_and(|plan| plan == Plan::ZedFree) && has_previous_trial
-    }
-
     fn dismiss_ai_onboarding(&mut self, cx: &mut Context<Self>) {
         self.new_user_onboarding_upsell_dismissed
             .store(true, Ordering::Release);
@@ -6313,20 +6282,17 @@ impl AgentPanel {
             return false;
         }
 
-        let has_configured_non_zed_providers = LanguageModelRegistry::read_global(cx)
+        let has_configured_providers = LanguageModelRegistry::read_global(cx)
             .visible_providers()
             .iter()
-            .any(|provider| {
-                provider.is_authenticated(cx)
-                    && provider.id() != language_model::ZED_CLOUD_PROVIDER_ID
-            });
+            .any(|provider| provider.is_authenticated(cx));
 
         match &self.base_view {
             BaseView::Uninitialized | BaseView::Terminal { .. } => false,
             BaseView::AgentThread { conversation_view } => {
                 if conversation_view.read(cx).as_native_thread(cx).is_some() {
                     let history_is_empty = ThreadStore::global(cx).read(cx).is_empty();
-                    history_is_empty || !has_configured_non_zed_providers
+                    history_is_empty || !has_configured_providers
                 } else {
                     false
                 }
@@ -6347,35 +6313,6 @@ impl AgentPanel {
             div()
                 .bg(cx.theme().colors().editor_background)
                 .child(self.new_user_onboarding.clone()),
-        )
-    }
-
-    fn render_trial_end_upsell(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        if !self.should_render_trial_end_upsell(cx) {
-            return None;
-        }
-
-        Some(
-            v_flex()
-                .absolute()
-                .inset_0()
-                .size_full()
-                .bg(cx.theme().colors().panel_background)
-                .opacity(0.85)
-                .block_mouse_except_scroll()
-                .child(EndTrialUpsell::new(Arc::new({
-                    let this = cx.entity();
-                    move |_, cx| {
-                        this.update(cx, |_this, cx| {
-                            TrialEndUpsell::set_dismissed(true, cx);
-                            cx.notify();
-                        });
-                    }
-                }))),
         )
     }
 
@@ -6597,8 +6534,7 @@ impl Render for AgentPanel {
                 VisibleSurface::Configuration(configuration) => {
                     parent.children(configuration.cloned())
                 }
-            })
-            .children(self.render_trial_end_upsell(window, cx));
+            });
 
         match self.visible_font_size() {
             WhichFontSize::AgentFont => {
@@ -6616,12 +6552,6 @@ struct OnboardingUpsell;
 
 impl Dismissable for OnboardingUpsell {
     const KEY: &'static str = "dismissed-trial-upsell";
-}
-
-struct TrialEndUpsell;
-
-impl Dismissable for TrialEndUpsell {
-    const KEY: &'static str = "dismissed-trial-end-upsell";
 }
 
 /// Test-only helper methods

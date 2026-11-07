@@ -198,7 +198,6 @@ members = [
     "crates/vim",
     "crates/vim_mode_setting",
     "crates/watch",
-    "crates/web_search",
     "crates/which_key",
     "crates/workspace",
     "crates/worktree",
@@ -442,7 +441,6 @@ vim_mode_setting = { path = "crates/vim_mode_setting" }
 which_key = { path = "crates/which_key" }
 
 watch = { path = "crates/watch" }
-web_search = { path = "crates/web_search" }
 workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }

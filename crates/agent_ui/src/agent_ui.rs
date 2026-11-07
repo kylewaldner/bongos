@@ -246,8 +246,6 @@ actions!(
         Follow,
         /// Resets the trial upsell notification.
         ResetTrialUpsell,
-        /// Resets the trial end upsell notification.
-        ResetTrialEndUpsell,
         /// Re-enables the fast mode warning for every provider and model.
         ResetFastModeWarnings,
         /// Opens the "Add Context" menu in the message editor.
