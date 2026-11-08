@@ -4,7 +4,7 @@ use super::{Change, Context, Outcome, Write, edit_task, kind_name, single, writa
 use crate::activity::to_utc;
 use crate::derive::{self, Shape, State};
 use crate::layout;
-use crate::rules::{self, Refusal};
+use crate::rules::{self, Place, Refusal};
 use crate::slug::{oneoff_dir_name, slugify, unique_slug};
 use crate::store::WorkTree;
 use crate::types::{Extra, Kind, Status, TaskFile, TaskId, Todo, TodoRole, TodoState};
@@ -71,7 +71,7 @@ pub fn default_todos(kind: Kind) -> Vec<Todo> {
     }
 }
 
-fn check_goal(goal: &str) -> Result<&str, Refusal> {
+pub(super) fn check_goal(goal: &str) -> Result<&str, Refusal> {
     let goal = goal.trim();
     if goal.is_empty() {
         Err("a task needs a goal".to_string())
@@ -109,7 +109,7 @@ pub fn new_child(tree: &WorkTree, ctx: &Context, parent: &str, new: NewTask) -> 
         .iter()
         .map(|child| child.slug.as_str())
         .collect();
-    let slug = unique_slug(&slugify(goal), &siblings);
+    let slug = free_slug(&slugify(goal), &siblings);
     let dir = layout::child_dir(&place.task.dir, &slug);
 
     let mut file = new_file(ctx, goal, new.kind.unwrap_or(Kind::PrShip), new.repository);
@@ -120,26 +120,53 @@ pub fn new_child(tree: &WorkTree, ctx: &Context, parent: &str, new: NewTask) -> 
         file,
     }];
 
-    if derive::shape(place.task, tree) == Shape::Leaf && !parent_file.todos.is_empty() {
-        let names: Vec<&str> = parent_file
-            .todos
-            .iter()
-            .map(|todo| todo.name.as_str())
-            .collect();
-        let detail = format!(
-            "{slug}; became a group, todos removed: {}",
-            names.join(", ")
-        );
-        parent_file.todos.clear();
-        parent_file
-            .history
-            .push(ctx.entry("child added", Some(detail)));
+    if give_up_todos(ctx, &place, tree, &mut parent_file, &slug) {
         writes.push(Write::Task {
             dir: place.task.dir.clone(),
             file: parent_file,
         });
     }
-    Ok(Change { dir, writes, entry })
+    Ok(Change {
+        dir,
+        writes,
+        entry,
+        moves: Vec::new(),
+    })
+}
+
+/// A slug for a new directory among `siblings`, never one of the reserved names (such as `runs`),
+/// which the loader would not read as a task.
+pub(super) fn free_slug(base: &str, siblings: &[&str]) -> String {
+    let mut taken: Vec<String> = siblings.iter().map(|slug| slug.to_string()).collect();
+    loop {
+        let slug = unique_slug(base, &taken);
+        if !layout::is_reserved(&slug) {
+            return slug;
+        }
+        taken.push(slug);
+    }
+}
+
+/// When the plain leaf at `place` gains the child `child_slug` and so becomes a group, removes the
+/// todos from its `file` and records them in its history. Whether `file` changed.
+pub(super) fn give_up_todos(
+    ctx: &Context,
+    place: &Place,
+    tree: &WorkTree,
+    file: &mut TaskFile,
+    child_slug: &str,
+) -> bool {
+    if derive::shape(place.task, tree) == Shape::Group || file.todos.is_empty() {
+        return false;
+    }
+    let names: Vec<&str> = file.todos.iter().map(|todo| todo.name.as_str()).collect();
+    let detail = format!(
+        "{child_slug}; became a group, todos removed: {}",
+        names.join(", ")
+    );
+    file.todos.clear();
+    file.history.push(ctx.entry("child added", Some(detail)));
+    true
 }
 
 /// `task: new one off`: a new task with no parent, in
@@ -173,6 +200,7 @@ pub fn new_oneoff(tree: &WorkTree, ctx: &Context, activity: &str, new: NewTask) 
         dir: dir.clone(),
         writes: vec![Write::Task { dir, file }],
         entry,
+        moves: Vec::new(),
     })
 }
 
