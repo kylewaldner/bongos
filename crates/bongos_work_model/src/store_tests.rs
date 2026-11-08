@@ -400,7 +400,11 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         for entry in fs::read_dir(dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            if entry.file_type().unwrap().is_dir() {
+            let kind = entry.file_type().unwrap();
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
                 walk(root, &path, files);
             } else if entry.file_name() != OP_FILE {
                 let relative = path.strip_prefix(root).unwrap().to_path_buf();
@@ -525,6 +529,12 @@ fn malformed_journal_is_left_untouched_and_reported() {
             "schema = 1\noperation = \"move\"\n\n[[step]]\naction = \"delete-everything\"\n"
                 .to_string(),
         ),
+        (
+            // `link` is a symbolic link to a directory outside the root; see below.
+            "symlink",
+            "schema = 1\noperation = \"move\"\n\n[[step]]\naction = \"write-file\"\npath = \"projects/invoicing/link/evil.txt\"\ncontent = \"x\"\n"
+                .to_string(),
+        ),
     ];
     for (name, text) in cases {
         let temp = TempDir::new().unwrap();
@@ -532,6 +542,10 @@ fn malformed_journal_is_left_untouched_and_reported() {
         journal_fixture(&root);
         let before = snapshot(&root);
         let invoicing = layout::project_dir(&root, "invoicing");
+        let elsewhere = temp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, invoicing.join("link")).unwrap();
         let journal_path = layout::op_file(&invoicing);
         write(&journal_path, &text);
 
@@ -539,6 +553,7 @@ fn malformed_journal_is_left_untouched_and_reported() {
         assert_eq!(fs::read_to_string(&journal_path).unwrap(), text, "{name}");
         assert_eq!(snapshot(&root), before, "{name}");
         assert!(!temp.path().join("outside").exists(), "{name}");
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{name}");
         expect_ids(&tree, &["g1", "g2", "l1", "l2"]);
         assert_eq!(tree.errors.len(), 1, "{name}");
         assert_eq!(tree.errors[0].path, journal_path, "{name}");
@@ -571,4 +586,38 @@ fn journal_that_cannot_finish_is_left_and_reported() {
     let tree = reload(root, &tree);
     assert!(path.exists());
     assert_eq!(tree.errors.len(), 1);
+}
+
+#[test]
+fn rename_with_source_and_target_both_present_fails_the_journal() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    journal_fixture(root);
+    let journal = Journal::new(
+        "move",
+        vec!["l1".into()],
+        vec![Step::Rename {
+            from: "projects/invoicing/tasks/backfill".into(),
+            to: "projects/invoicing/tasks/schema".into(),
+        }],
+    );
+    let before = snapshot(root);
+    let invoicing = layout::project_dir(root, "invoicing");
+    let path = write_journal(root, &invoicing, &journal).unwrap();
+    let tree = load(root);
+    assert!(path.exists());
+    assert_eq!(snapshot(root), before);
+    expect_ids(&tree, &["g1", "g2", "l1", "l2"]);
+    assert_eq!(tree.errors.len(), 1);
+    assert!(
+        tree.errors[0].reason.contains("both exist"),
+        "{:?}",
+        tree.errors
+    );
+    assert!(
+        tree.task_by_dir(&invoicing)
+            .unwrap()
+            .check_writable()
+            .is_err()
+    );
 }
