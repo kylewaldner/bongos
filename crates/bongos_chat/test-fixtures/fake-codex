@@ -1,6 +1,7 @@
 #!/bin/sh
-# A stand-in for the `codex` CLI, for the health probe tests. It answers `--version`, `--help`
-# (a synthetic flag and command list, not the real help text) and `login status`, and nothing else.
+# A stand-in for the `codex` CLI, for the tests. It answers `--version`, `--help`
+# (a synthetic flag and command list, not the real help text) and `login status`, and runs the
+# interactive session of `fake-session.sh` for any other arguments.
 #
 # Knobs (environment variables):
 #   FAKE_CLI_LOG        append one line per call (the arguments only) to this file
@@ -58,7 +59,7 @@ HELP
     fi
     ;;
   *)
-    echo "fake-codex: unsupported arguments" >&2
-    exit 2
+    . "$(dirname "$0")/fake-session.sh"
+    fake_session codex "$@"
     ;;
 esac
