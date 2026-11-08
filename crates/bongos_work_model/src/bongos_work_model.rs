@@ -6,8 +6,10 @@
 mod error;
 pub mod files;
 pub mod io;
+pub mod journal;
 pub mod layout;
 pub mod slug;
+pub mod store;
 mod types;
 
 pub use error::{Error, ErrorKind, Result};
@@ -17,6 +19,9 @@ pub use io::{
     serialize_task,
 };
 pub use types::*;
+
+#[cfg(test)]
+mod store_tests;
 
 #[cfg(test)]
 mod tests;
