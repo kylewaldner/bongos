@@ -27,6 +27,38 @@ full GPL text, and [ORIGIN.md](ORIGIN.md) for the Zed fork it is derived from.
 - Diagrams: clickable code-bound diagrams for review, and a freeform canvas for describing
   systems to agents.
 
+## Projects and tasks
+
+The Work view keeps projects and tasks as plain files under `~/.bongos`, so an agent, an editor and
+the Work panel all work on the same tree. It is on by default; set `work.enabled` to `false` to
+turn it off (bongos then neither reads nor watches `~/.bongos`, and the Work panel and commands
+are hidden).
+
+```text
+~/.bongos/projects/<slug>/                 project.toml, task.toml, plan.md, prompts.txt, artifacts.toml, tasks/<slug>/...
+~/.bongos/oneoffs/<activity>/<date>-<slug>/ task.toml, prompts.txt, artifacts.toml, tasks/<slug>/...
+```
+
+A project holds groups and tasks, nested through `tasks/<slug>/` directories; a one-off is a task
+that belongs to no project. Every task directory has a `task.toml` (goal, kind, todos, worktree).
+Any other file in a task directory is an artifact, described and made visible or human-only in
+`artifacts.toml`.
+
+- **Shared set.** What chat sessions learn about a task (its goal, paths and artifacts) is
+  computed fresh from the files on every call, never from a cache, so the agent, the panel and the
+  terminal see one set. Human-only artifacts are left out: their path and description are never
+  told to a session. Locking is not file protection; if the manifest cannot be read, nothing is
+  listed.
+- **Reread, then rename.** bongos writes only after rereading each file it replaces and comparing
+  it with what it loaded; if another writer changed it, the tree is reloaded and the command runs
+  again on the fresh state. An agent that moves or renames task files should do the same: reread
+  `task.toml` first, and never write from a stale copy.
+- **Keys (Emacs keymap only).** `C-c w w` toggles the panel, `C-c w n` makes a task, `C-c w s`
+  starts one, `C-c w a` advances, `C-c w c` closes, `C-c w g` opens the graph, and the `C-c w d ...`,
+  `C-c w p ...` and artifact keys cover todos, projects and artifacts; the rest are in the command
+  palette (`assets/keymaps/linux/emacs.json`). In the panel, `tab` expands a row inline and `^`
+  goes up one level.
+
 ## Privacy
 
 bongos's own code, and the telemetry and update checks of the language servers it runs, contact
