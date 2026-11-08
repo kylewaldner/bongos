@@ -1,12 +1,18 @@
 # Builds the release files for Linux and macOS and, for a version tag, publishes them as a GitHub
 # Release. Runs on a tag like v0.1.1 and by hand (workflow_dispatch builds both files and does not
-# publish). It never runs on a branch push.
+# publish; with package_only it skips the Rust build and packages stand-in binaries). It never runs on
+# a branch push.
 name: release
 
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
+    inputs:
+      package_only:
+        description: Skip the Rust build and package tiny stand-in binaries, to test the packaging steps in minutes
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -51,6 +57,15 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.verify.outputs.version }}
+      # The root disk has too little room for a release build; /mnt has about 60 GB more. env.sh
+      # keeps these values, and setting them here lets the cache action see the same directories.
+      BONGOS_WORKSPACE: /mnt/bongos-workspace
+      RUSTUP_HOME: /mnt/bongos-workspace/rustup
+      CARGO_HOME: /mnt/bongos-workspace/cargo
+      CARGO_TARGET_DIR: /mnt/bongos-workspace/target
+      # Save the cache even when a later step fails, so a retry reuses the compile.
+      CACHE_ON_FAILURE: 'true'
+      BONGOS_BUNDLE_BIN_DIR: ${{ inputs.package_only && format('{0}/stub', runner.temp) || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,15 +82,29 @@ jobs:
           if ! command -v llvm-objcopy >/dev/null; then
             sudo ln -s "$(ls /usr/bin/llvm-objcopy-* | sort -V | tail -n1)" /usr/local/bin/llvm-objcopy
           fi
+      - name: Install the Rust toolchain
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /mnt/bongos-workspace
+          sudo chown "$USER" /mnt/bongos-workspace
+          mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
+          rustup toolchain install
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          # The target directory is outside the checkout; rust-cache joins it onto the workspace
+          # path, so it is written relative to the checkout (/home/runner/work/bongos/bongos).
+          workspaces: ". -> ../../../../../mnt/bongos-workspace/target"
+          shared-key: release
+          # A packaging-only run builds nothing, so it must not save a cache that a real build would then hit.
+          save-if: ${{ !inputs.package_only }}
+      - name: Make the stand-in binaries
+        if: ${{ inputs.package_only }}
+        run: script/bongos/make-stub-binaries "$BONGOS_BUNDLE_BIN_DIR"
       - name: Build the tarball
         run: |
           set -euo pipefail
-          # The root disk has too little room for a release build; /mnt has about 60 GB more.
-          sudo mkdir -p /mnt/bongos-workspace
-          sudo chown "$USER" /mnt/bongos-workspace
-          export BONGOS_WORKSPACE=/mnt/bongos-workspace
           . script/bongos/env.sh
-          rustup toolchain install
           script/bongos/bundle-linux --out "$RUNNER_TEMP/dist"
           mkdir -p dist
           cp "$RUNNER_TEMP/dist/bongos-linux-$(uname -m).tar.gz" "dist/bongos-$VERSION-linux-x86_64.tar.gz"
@@ -92,6 +121,9 @@ jobs:
       VERSION: ${{ needs.verify.outputs.version }}
       # The secrets context is not available in step conditions, so the switch is made here.
       SIGNED: ${{ secrets.MACOS_CERTIFICATE != '' }}
+      # Save the cache even when a later step fails, so a retry reuses the compile.
+      CACHE_ON_FAILURE: 'true'
+      BONGOS_BUNDLE_BIN_DIR: ${{ inputs.package_only && format('{0}/stub', runner.temp) || '' }}
     outputs:
       signed: ${{ env.SIGNED }}
     steps:
@@ -100,19 +132,25 @@ jobs:
           persist-credentials: false
       - name: Install tools
         run: |
-          # dmg-license requires minimist without declaring it, so install both
-          # into their own prefix and check that it loads before the long build starts.
-          npm install --prefix "$RUNNER_TEMP/dmg-tools" dmg-license minimist
-          echo "$RUNNER_TEMP/dmg-tools/node_modules/.bin" >> "$GITHUB_PATH"
-          out="$(node "$RUNNER_TEMP/dmg-tools/node_modules/dmg-license/bin/dmg-license.js" 2>&1 || true)"
-          echo "$out"
-          if grep -q 'Cannot find module' <<<"$out"; then
-            echo "dmg-license does not load" >&2
-            ls "$RUNNER_TEMP/dmg-tools/node_modules" >&2
-            exit 1
-          fi
+          set -euo pipefail
+          # dmg-license requires minimist without declaring it, so install both, pinned, into their
+          # own prefix, and check that they load before anything long runs.
+          tools="$RUNNER_TEMP/dmg-tools"
+          npm install --prefix "$tools" --no-audit --no-fund dmg-license@1.0.11 minimist@1.2.8
+          echo "$tools/node_modules/.bin" >> "$GITHUB_PATH"
+          node -e "require(process.argv[1] + '/node_modules/minimist'); require(process.argv[1] + '/node_modules/dmg-license')" "$tools"
+          test -x "$tools/node_modules/.bin/dmg-license"
           rustup toolchain install
           rustup target add aarch64-apple-darwin
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          shared-key: release-aarch64-apple-darwin
+          # A packaging-only run builds nothing, so it must not save a cache that a real build would then hit.
+          save-if: ${{ !inputs.package_only }}
+      - name: Make the stand-in binaries
+        if: ${{ inputs.package_only }}
+        run: script/bongos/make-stub-binaries "$BONGOS_BUNDLE_BIN_DIR"
       - name: Import the Developer ID certificate
         if: ${{ env.SIGNED == 'true' }}
         env:

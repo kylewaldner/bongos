@@ -8,6 +8,7 @@
 #     --target TRIPLE   x86_64-apple-darwin or aarch64-apple-darwin; default: the host
 #     --debug           debug build, ad-hoc signed, and no disk image
 #   BONGOS_BUNDLE_BIN_DIR=DIR     use the already built `bongos` and `cli` in DIR instead of building
+#                                 (script/bongos/make-stub-binaries makes tiny stand-ins for testing the packaging)
 #   BONGOS_MAC_SIGN_IDENTITY=ID   sign with this local codesign identity (default: ad-hoc, "-"). The
 #                                 signature has no secure timestamp (that needs Apple's server) and the
 #                                 bundle is never notarized, so Gatekeeper still asks on first open.
@@ -24,12 +25,32 @@ cd "$root"
 
 die() { echo "bundle-mac: $*" >&2; exit 1; }
 
+# hdiutil_retry <hdiutil args...>: hdiutil sometimes fails with "Resource busy" on a freshly started
+# machine. Run it up to three times, with a short sleep, when that is the error; any other failure is final.
+hdiutil_retry() {
+  local attempt log status
+  log="$(mktemp)"
+  for attempt in 1 2 3; do
+    status=0
+    "$@" >"$log" 2>&1 || status=$?
+    cat "$log"
+    if [ "$status" -eq 0 ]; then rm -f "$log"; return 0; fi
+    if [ "$attempt" -lt 3 ] && grep -q 'Resource busy' "$log"; then
+      echo "bundle-mac: hdiutil $2 failed with Resource busy (attempt $attempt of 3); retrying" >&2
+      sleep 10
+      continue
+    fi
+    rm -f "$log"
+    die "hdiutil $2 failed"
+  done
+}
+
 out=""
 target_triple=""
 debug=false
 while [ $# -gt 0 ]; do
   case $1 in
-    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --out) [ $# -ge 2 ] || die "--out needs a directory"; out=$2; shift 2 ;;
     --target) [ $# -ge 2 ] || die "--target needs a target triple"; target_triple=$2; shift 2 ;;
     --debug) debug=true; shift ;;
@@ -232,16 +253,7 @@ rm -rf "${dmg_root:?}" "${dmg_file:?}"
 mkdir -p "$dmg_root"
 mv "$app_dir" "$dmg_root/"
 ln -s /Applications "$dmg_root/Applications"
-# hdiutil sometimes fails with "Resource busy" on a freshly started machine; a short wait and another try fixes it.
-for attempt in 1 2 3 4 5; do
-  if hdiutil create -volname "$app_name" -srcfolder "$dmg_root" -ov -format UDZO "$dmg_file"; then
-    break
-  fi
-  [ "$attempt" -lt 5 ] || die "hdiutil create failed five times"
-  echo "bundle-mac: hdiutil create failed (attempt $attempt); retrying" >&2
-  rm -f "${dmg_file:?}"
-  sleep 15
-done
+hdiutil_retry hdiutil create -volname "$app_name" -srcfolder "$dmg_root" -ov -format UDZO "$dmg_file"
 dmg-license "$license_dir/dmg-license.json" "$dmg_file"
 
 rm -rf "${stage_root:?}" "${dmg_root:?}" "${license_dir:?}"
