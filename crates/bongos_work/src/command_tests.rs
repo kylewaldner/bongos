@@ -590,7 +590,7 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
 }
 
 /// Every action these commands register.
-const NAMES: [&str; 36] = [
+const NAMES: [&str; 42] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -622,10 +622,16 @@ const NAMES: [&str; 36] = [
     "task::MoveToProject",
     "task::MakeOneOff",
     "task::Start",
+    "task::Focus",
+    "task::Unfocus",
+    "task::OpenWorktree",
+    "task::OpenPr",
+    "task::CopyPath",
     "project::New",
     "project::Archive",
     "project::Unarchive",
     "project::OpenFolder",
+    "project::Focus",
     "work::AddRepository",
 ];
 

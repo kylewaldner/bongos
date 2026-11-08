@@ -5,12 +5,15 @@
 
 pub mod actions;
 mod commands;
+mod focus;
 mod links;
 mod modals;
+mod open;
 mod projects;
 mod rebase;
 mod repositories;
 mod settings;
+mod status;
 mod store;
 mod structure;
 mod worktrees;
@@ -25,9 +28,11 @@ use gpui::{App, AppContext as _, Entity, Global};
 
 pub use actions::{project, task, todo, work};
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
+pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE};
 pub use rebase::{CHECK_INTERVAL, RebaseState};
 pub use repositories::{default_kind, find_repository, resolve_repository};
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
+pub use status::{FocusStatus, breadcrumb};
 pub use store::{
     ECHO_TTL, MAX_RETRIES, Stats, WATCH_LATENCY, WorkCommand, WorkStore, WorkStoreEvent, WriteError,
 };
@@ -52,12 +57,13 @@ struct GlobalWorkStore(Entity<WorkStore>);
 
 impl Global for GlobalWorkStore {}
 
-/// Registers the `work` settings and creates the global [`WorkStore`]. The store reads nothing
-/// until `work.enabled` is true.
+/// Registers the `work` settings and creates the global [`WorkStore`] and [`Focus`]. The store
+/// reads nothing until `work.enabled` is true.
 pub fn init(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut App) {
     WorkSettings::register(cx);
     let store = cx.new(|cx| WorkStore::new(fs, dirs, cx));
     cx.set_global(GlobalWorkStore(store));
+    focus::init(cx);
     rebase::observe_focus(cx);
 }
 
@@ -73,6 +79,8 @@ impl WorkStore {
 mod command_tests;
 #[cfg(test)]
 mod command_tests_more;
+#[cfg(test)]
+mod focus_tests;
 #[cfg(test)]
 mod rebase_tests;
 #[cfg(test)]
