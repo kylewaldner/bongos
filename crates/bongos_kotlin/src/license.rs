@@ -39,6 +39,7 @@ use crate::{
     install::{ProgressFn, spawn_ensure_installed},
     installed::{check_installed, not_installed, server_name, version_dir},
     intellij::{EULA_FILE, LICENSE_TIMEOUT, LicenseOutcome, accept_eula, eula_accepted, eula_hash},
+    manager::FallbackReason,
     manifest::{Manifest, ManifestEntry, current_platform},
 };
 
@@ -282,6 +283,50 @@ pub(crate) fn status_gate(
 /// Whether the status after a license command means the worktree should run IntelliJ now.
 pub(crate) fn restarts_after(outcome: LicenseOutcome) -> bool {
     outcome == LicenseOutcome::Licensed
+}
+
+/// The fallback a pre-start `license status` answer causes (decision D10); `None` when licensed.
+pub(crate) fn fallback_for(outcome: LicenseOutcome) -> Option<FallbackReason> {
+    match outcome {
+        LicenseOutcome::Licensed => None,
+        LicenseOutcome::Unlicensed => Some(FallbackReason::Unlicensed),
+        LicenseOutcome::Offline | LicenseOutcome::TimedOut => {
+            Some(FallbackReason::LicenseCheckFailed)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// License signals during a session (decision D10)
+// ---------------------------------------------------------------------------------------------
+
+/// Text that means the running IntelliJ server lost its license, matched against
+/// `window/showMessage`, `window/logMessage` and stderr lines. Pinned from the unlicensed output
+/// recorded in step 1 (`No valid license found` / `License: not licensed, feature requests are
+/// parked (NoLicenseDiscovered)`); the licensed session's messages are manual check M3, and a
+/// correction is an edit of this list.
+pub const LICENSE_LOST_SIGNALS: &[&str] = &[
+    "No valid license found",
+    "NoLicenseDiscovered",
+    "License: not licensed",
+    "feature requests are parked",
+];
+
+/// Exit codes that mean the IntelliJ server stopped for its license. The JetBrains VS Code
+/// extension treats 7 and 11 as license failures; 7 is the expiry row of the fallback table, so
+/// only 11 is a lost license here.
+pub const LICENSE_LOST_EXIT_CODES: &[i32] = &[11];
+
+/// Whether a message or a stderr line from the IntelliJ server says its license is gone.
+pub fn is_license_lost_signal(text: &str) -> bool {
+    LICENSE_LOST_SIGNALS
+        .iter()
+        .any(|signal| text.contains(signal))
+}
+
+/// Whether the IntelliJ server's exit code says its license is gone.
+pub fn is_license_lost_exit(code: Option<i32>) -> bool {
+    code.is_some_and(|code| LICENSE_LOST_EXIT_CODES.contains(&code))
 }
 
 /// The result of `license status`, with the text for the buffer.

@@ -3228,7 +3228,8 @@ impl Project {
             LspStoreEvent::LanguageServerLog(server_id, log_type, string) => cx.emit(
                 Event::LanguageServerLog(*server_id, log_type.clone(), string.clone()),
             ),
-            LspStoreEvent::LanguageServerStartupStderr { .. } => {}
+            LspStoreEvent::LanguageServerStartupStderr { .. }
+            | LspStoreEvent::LanguageServerStartFailed { .. } => {}
             LspStoreEvent::LanguageDetected {
                 buffer,
                 new_language,

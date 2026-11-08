@@ -17,7 +17,7 @@ use std::{path::PathBuf, sync::Arc};
 
 pub use adapter::{INTELLIJ_DOWNLOAD_HINT, KotlinAdapter, server_command};
 pub use commands::{reimport_project, restart_server, switch_server};
-pub use glue::attach_managers;
+pub use glue::{attach_managers, attach_notices, fallback_notice_id};
 use gpui::{App, Global, actions};
 pub use install::{
     InstallCancelled, InstalledServer, PROGRESS_STEP, ProgressFn, ensure_installed, install,
@@ -34,13 +34,15 @@ pub use jdk::{
 };
 use language::{LanguageName, LanguageRegistry};
 pub use license::{
-    EULA_TITLE, LICENSE_STATUS_TITLE, ShowText, license_activate, license_status, license_trial,
+    EULA_TITLE, LICENSE_LOST_EXIT_CODES, LICENSE_LOST_SIGNALS, LICENSE_STATUS_TITLE, ShowText,
+    is_license_lost_exit, is_license_lost_signal, license_activate, license_status, license_trial,
     review_intellij_eula,
 };
 pub use log::{KotlinLog, MAX_LOG_BYTES, StderrMirror};
 pub use manager::{
-    ADAPTER_NAME, EXPIRED_REASON, Fallback, KotlinHost, KotlinProjectManager, KotlinRegistry,
-    KotlinWorktreeState, ServerStatus,
+    ADAPTER_NAME, CRASH_LOOP_REASON, CRASH_WINDOW, EXPIRED_REASON, Fallback, FallbackReason,
+    KotlinEvent, KotlinHost, KotlinProjectManager, KotlinRegistry, KotlinWorktreeState,
+    ServerStatus, fallback_message,
 };
 pub use manifest::{ArchiveKind, Manifest, ManifestEntry, OVERRIDE_VAR, current_platform};
 pub use resolve::{
@@ -185,6 +187,7 @@ pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
         Arc::new(KotlinAdapter::new(dirs.clone(), manifest)),
     );
     attach_managers(dirs, cx);
+    attach_notices(cx);
 }
 
 #[cfg(test)]

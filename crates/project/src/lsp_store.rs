@@ -667,6 +667,15 @@ impl LocalLspStore {
                                 })
                                 .ok();
                         }
+                        lsp_store
+                            .update(cx, |_, cx| {
+                                cx.emit(LspStoreEvent::LanguageServerStartFailed {
+                                    name: adapter.name(),
+                                    worktree_id,
+                                    error: format!("{err:#}"),
+                                });
+                            })
+                            .ok();
                         delegate.update_status(
                             adapter.name(),
                             BinaryStatus::Failed {
@@ -4171,6 +4180,13 @@ pub enum LspStoreEvent {
         name: LanguageServerName,
         worktree_id: WorktreeId,
         text: String,
+    },
+    /// A language server's start failed: its binary could not be found or spawned, or it did not
+    /// answer `initialize` in time.
+    LanguageServerStartFailed {
+        name: LanguageServerName,
+        worktree_id: WorktreeId,
+        error: String,
     },
     LanguageServerPrompt(LanguageServerPromptRequest),
     LanguageDetected {
@@ -11591,6 +11607,45 @@ impl LspStore {
         );
         let only_register: HashSet<LanguageServerSelector> =
             name.map(LanguageServerSelector::Name).into_iter().collect();
+        cx.spawn(async move |lsp_store, cx| {
+            stop_task.await;
+            lsp_store
+                .update(cx, |lsp_store, cx| {
+                    for buffer in buffers {
+                        lsp_store.register_buffer_with_language_servers(
+                            &buffer,
+                            only_register.clone(),
+                            true,
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Restarts the local servers named `name` of one worktree, whether running, still starting
+    /// or left behind by a failed start, and no server of another worktree. `buffers` start the
+    /// replacement; with none, the servers just stop. The name is not recorded as manually stopped.
+    pub fn restart_language_server_for_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        name: LanguageServerName,
+        buffers: Vec<Entity<Buffer>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(local) = self.as_local() else {
+            return;
+        };
+        let to_stop: HashSet<LanguageServerSelector> = local
+            .language_server_ids
+            .iter()
+            .filter(|(seed, _)| seed.worktree_id == worktree_id && seed.name == name)
+            .map(|(_, state)| LanguageServerSelector::Id(state.id))
+            .collect();
+        let (_, stop_task) = self.stop_local_language_servers_for_buffers(&[], to_stop, cx);
+        let only_register = HashSet::from_iter([LanguageServerSelector::Name(name)]);
         cx.spawn(async move |lsp_store, cx| {
             stop_task.await;
             lsp_store

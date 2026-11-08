@@ -7,7 +7,7 @@ use ui::Color;
 use crate::{
     intellij::EULA_NOT_ACCEPTED_REASON,
     jdk::{NO_JDK_REASON, SET_JDK_HOME_LABEL},
-    manager::{EXPIRED_REASON, Fallback, KotlinWorktreeState, ServerStatus},
+    manager::{EXPIRED_REASON, Fallback, FallbackReason, KotlinWorktreeState, ServerStatus},
 };
 
 /// The longest status text drawn in the status bar; the tooltip has all of it.
@@ -168,12 +168,13 @@ pub fn menu_items(snapshot: &Snapshot) -> Vec<MenuItem> {
         ServerStatus::Failed { reason } => Some(reason.as_str()),
         _ => None,
     };
-    let eula = snapshot.effective == KotlinServerKind::Intellij
-        && (failure == Some(EULA_NOT_ACCEPTED_REASON)
-            || snapshot
-                .fallback
-                .as_ref()
-                .is_some_and(|fallback| fallback.reason == EULA_NOT_ACCEPTED_REASON));
+    // A fallback runs kotlin-lsp, but the EULA is still why IntelliJ is not running.
+    let eula = (snapshot.effective == KotlinServerKind::Intellij
+        && failure == Some(EULA_NOT_ACCEPTED_REASON))
+        || snapshot
+            .fallback
+            .as_ref()
+            .is_some_and(|fallback| fallback.kind == FallbackReason::EulaNotAccepted);
     let no_jdk = failure.is_some_and(|reason| reason.starts_with(NO_JDK_REASON));
     let has_gradle_error = failure.is_some() && snapshot.gradle_error.is_some();
     if eula || no_jdk || has_gradle_error {
@@ -357,9 +358,7 @@ mod tests {
     #[test]
     fn test_a_fallback_is_named_and_warns() {
         let mut snapshot = lsp(ServerStatus::Ready);
-        snapshot.fallback = Some(Fallback {
-            reason: "IntelliJ unlicensed".into(),
-        });
+        snapshot.fallback = Some(Fallback::new(FallbackReason::Unlicensed));
         assert_eq!(
             line(&snapshot),
             (
@@ -436,13 +435,11 @@ mod tests {
         assert!(labels(&menu_items(&intellij(eula.clone()))).contains(&"Review IntelliJ EULA"));
         assert!(!labels(&menu_items(&lsp(eula))).contains(&"Review IntelliJ EULA"));
         let mut fallback = lsp(ServerStatus::Ready);
-        fallback.fallback = Some(Fallback {
-            reason: EULA_NOT_ACCEPTED_REASON.into(),
-        });
+        fallback.fallback = Some(Fallback::new(FallbackReason::EulaNotAccepted));
         // The effective server is kotlin-lsp, but the EULA is why IntelliJ is not running.
-        assert!(!labels(&menu_items(&fallback)).contains(&"Review IntelliJ EULA"));
-        fallback.effective = KotlinServerKind::Intellij;
         assert!(labels(&menu_items(&fallback)).contains(&"Review IntelliJ EULA"));
+        fallback.fallback = Some(Fallback::new(FallbackReason::Unlicensed));
+        assert!(!labels(&menu_items(&fallback)).contains(&"Review IntelliJ EULA"));
     }
 
     #[test]

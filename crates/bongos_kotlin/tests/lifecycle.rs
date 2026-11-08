@@ -15,13 +15,15 @@ use std::{
 };
 
 use bongos_kotlin::{
-    KotlinAdapter, KotlinDirs, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSettings,
-    ServerStatus, attach_managers,
+    FallbackReason, KotlinAdapter, KotlinDirs, KotlinLog, KotlinProjectManager, KotlinRegistry,
+    KotlinSettings, ServerStatus, attach_managers, attach_notices, fallback_notice_id,
 };
+use editor::Editor;
 use gpui::{BorrowAppContext as _, Entity, TestAppContext};
 use language::{Language, LanguageConfig, LanguageMatcher, LanguageName};
 use project::{LspStoreEvent, Project};
 use settings::{KotlinServerKind, Settings as _, SettingsStore, WorktreeId};
+use workspace::Workspace;
 
 const FAKE_SERVER: &str = env!("CARGO_BIN_EXE_bongos-fake-kotlin-server");
 
@@ -368,5 +370,123 @@ async fn test_switching_one_worktree_leaves_the_others_server_alone(cx: &mut Tes
     assert!(
         setup.pid_files().contains(&untouched),
         "the other worktree's server was stopped"
+    );
+}
+
+/// A license lost mid-session (the fake server's pinned `window/showMessage` signal): the project
+/// falls back to kotlin-lsp once, shows one notice, and the open Kotlin file stays open, highlighted
+/// by the same language and editable throughout. Both servers are the fake here, so the mode that
+/// sends the signal runs again after the fallback; kotlin-lsp's signal is not matched.
+#[gpui::test]
+async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppContext) {
+    let setup = start(cx, Path::new(FAKE_SERVER), "license-lost-after=200").await;
+    cx.update(|cx| {
+        workspace::AppState::test(cx);
+        editor::init(cx);
+        attach_notices(cx);
+    });
+    let project = setup.project.clone();
+    let (workspace, cx) =
+        cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+    let editor = workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.open_path(
+                (setup.worktree_id, util::rel_path::rel_path("Main.kt")),
+                None,
+                true,
+                window,
+                cx,
+            )
+        })
+        .await
+        .unwrap()
+        .downcast::<Editor>()
+        .unwrap();
+    wait_until(cx, "kotlin-lsp to be ready", |cx| {
+        setup.status(cx) == Some(ServerStatus::Ready)
+    });
+
+    setup
+        .manager
+        .update(cx, |manager, cx| {
+            manager.switch_server(setup.worktree_id, Some(KotlinServerKind::Intellij), cx)
+        })
+        .unwrap();
+    let fallback = |cx: &mut TestAppContext| {
+        setup.manager.read_with(cx, |manager, _| {
+            manager
+                .worktree(setup.worktree_id)
+                .and_then(|state| state.fallback.as_ref())
+                .map(|fallback| fallback.kind)
+        })
+    };
+    wait_until(cx, "the fallback to kotlin-lsp to be ready", |cx| {
+        fallback(cx) == Some(FallbackReason::LicenseLost)
+            && setup.status(cx) == Some(ServerStatus::Ready)
+            && setup.pid_files().len() == 1
+    });
+    // kotlin-lsp sends the same text again later; nothing retries IntelliJ.
+    let settle = Instant::now();
+    wait_until(cx, "a while on kotlin-lsp", |_| {
+        settle.elapsed() > Duration::from_millis(800)
+    });
+    let log = setup.log();
+    assert_eq!(
+        log.matches(" fallback ").count(),
+        1,
+        "one fallback line: {log}"
+    );
+    assert_eq!(log.matches("kotlin-lsp -> intellij").count(), 1, "{log}");
+    assert_eq!(fallback(cx), Some(FallbackReason::LicenseLost));
+
+    // One notice for the fallback.
+    let notice = fallback_notice_id(setup.worktree_id);
+    workspace.read_with(cx, |workspace, _| {
+        let ids = workspace.notification_ids();
+        assert_eq!(ids.iter().filter(|id| **id == notice).count(), 1, "{ids:?}");
+    });
+
+    // The file is still the open item, still Kotlin, and takes edits.
+    workspace.read_with(cx, |workspace, cx| {
+        let active = workspace.active_item_as::<Editor>(cx).expect("an editor");
+        assert_eq!(active.entity_id(), editor.entity_id());
+    });
+    editor.update_in(cx, |editor, window, cx| {
+        editor.insert("// still editable\n", window, cx)
+    });
+    editor.read_with(cx, |editor, cx| {
+        let buffer = editor.buffer().read(cx).as_singleton().expect("one buffer");
+        let buffer = buffer.read(cx);
+        assert_eq!(buffer.text(), "// still editable\nfun main() {}\n");
+        assert_eq!(
+            buffer
+                .language()
+                .map(|language| language.name().to_string()),
+            Some("Kotlin".to_string())
+        );
+    });
+}
+
+/// A real process that crashes: the first exit restarts it, the second within a minute leaves
+/// kotlin-lsp failed, with no third start.
+#[gpui::test]
+async fn test_a_crashing_server_restarts_once_then_fails(cx: &mut TestAppContext) {
+    let setup = start(cx, Path::new(FAKE_SERVER), "crash-after=300").await;
+    let crash_loop = Some(ServerStatus::Failed {
+        reason: bongos_kotlin::CRASH_LOOP_REASON.into(),
+    });
+    wait_until(cx, "the crash loop", |cx| setup.status(cx) == crash_loop);
+    let settle = Instant::now();
+    wait_until(cx, "a while after the crash loop", |_| {
+        settle.elapsed() > Duration::from_millis(800)
+    });
+    assert_eq!(setup.status(cx), crash_loop);
+    let log = setup.log();
+    assert_eq!(log.matches("crash: restarting once").count(), 1, "{log}");
+    assert_eq!(log.matches("crash loop: ").count(), 1, "{log}");
+    assert_eq!(
+        log.matches("exit status: 1").count(),
+        2,
+        "no third start: {log}"
     );
 }

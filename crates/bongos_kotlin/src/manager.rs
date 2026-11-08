@@ -11,20 +11,20 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use gpui::{App, Context, Entity, EntityId, Global, Subscription, WeakEntity};
+use gpui::{App, Context, Entity, EntityId, EventEmitter, Global, Subscription, WeakEntity};
 use lsp::{IoKind, LanguageServerId, LanguageServerName};
-use project::{LspStore, LspStoreEvent};
+use project::{LspStore, LspStoreEvent, lsp_store::LanguageServerLogType};
 use rpc::proto;
 use settings::{KotlinServerKind, SettingsStore, WorktreeId};
 
 use crate::{
     KotlinDirs,
     installed::server_name,
-    intellij::LicenseOutcome,
-    license::restarts_after,
+    intellij::{EULA_NOT_ACCEPTED_REASON, LicenseOutcome},
+    license::{is_license_lost_exit, is_license_lost_signal, restarts_after},
     log::{KotlinLog, StderrMirror},
     resolve::{Resolved, clear_project_override, project_key, resolve, set_project_override},
 };
@@ -41,6 +41,60 @@ pub const INTERRUPTED_REASON: &str = "install interrupted";
 /// What an expired early-access build prints before it exits with `EXPIRED_EXIT_CODE`.
 const EXPIRED_MESSAGE: &str = "This build of kotlin-server has expired.";
 const EXPIRED_EXIT_CODE: i32 = 7;
+
+/// Unexpected exits closer together than this are a crash loop: the first restarts the server, the
+/// second ends it (a fallback for IntelliJ, `Failed` for kotlin-lsp).
+pub const CRASH_WINDOW: Duration = Duration::from_secs(60);
+
+/// The status text of a kotlin-lsp that crashed twice within `CRASH_WINDOW`.
+pub const CRASH_LOOP_REASON: &str = "crashed twice within a minute";
+
+/// Why the IntelliJ server the user asked for is not the one running (the fallback table).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FallbackReason {
+    EulaNotAccepted,
+    Unlicensed,
+    LicenseCheckFailed,
+    InstallFailed,
+    StartFailed,
+    CrashLoop,
+    LicenseLost,
+    Expired,
+}
+
+impl FallbackReason {
+    /// The reason as the status item and the notice show it, after "fallback: ".
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::EulaNotAccepted => EULA_NOT_ACCEPTED_REASON,
+            Self::Unlicensed => "IntelliJ unlicensed",
+            Self::LicenseCheckFailed => "license check failed (offline?)",
+            Self::InstallFailed => "IntelliJ install failed",
+            Self::StartFailed => "IntelliJ failed to start",
+            Self::CrashLoop => "IntelliJ crashed twice within a minute",
+            Self::LicenseLost => "IntelliJ license lost",
+            Self::Expired => "IntelliJ server expired",
+        }
+    }
+}
+
+/// What a manager tells the workspace that shows its project.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KotlinEvent {
+    /// A worktree fell back to kotlin-lsp: one notice line, once per fallback.
+    FellBack {
+        worktree_id: WorktreeId,
+        message: String,
+    },
+}
+
+/// The one-line notice of a fallback.
+pub fn fallback_message(reason: FallbackReason) -> String {
+    format!(
+        "Kotlin: using kotlin-lsp, the IntelliJ server is not available ({})",
+        reason.text()
+    )
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServerStatus {
@@ -85,8 +139,10 @@ impl ServerStatus {
 
 /// How the manager asks for a Kotlin server restart.
 pub trait KotlinHost: 'static {
-    /// Stops the worktree's Kotlin server `server_id` (only that one: other worktrees' servers run
-    /// on), waits until its process is gone, then starts it again for the open Kotlin buffers. The new start asks the manager which server to run
+    /// Stops the worktree's Kotlin server (only that one: other worktrees' servers run on),
+    /// whether running, still starting or left by a failed start, waits until its process is gone,
+    /// then starts it again for the open Kotlin buffers. `server_id` is the running server, when
+    /// one was added. The new start asks the manager which server to run
     /// (`KotlinProjectManager::begin_start`), so the manager changes the effective server before
     /// calling this.
     fn restart(&self, worktree_id: WorktreeId, server_id: Option<LanguageServerId>, cx: &mut App);
@@ -114,15 +170,28 @@ pub struct KotlinWorktreeState {
     pub fallback: Option<Fallback>,
     /// The last line the server wrote to stderr that looks like a Gradle failure.
     pub gradle_error: Option<String>,
-    /// When the server exited unexpectedly in this run. `kotlin: restart server` forgets them.
+    /// When the running server exited unexpectedly, within the last `CRASH_WINDOW`. `kotlin:
+    /// restart server` and a fallback forget them.
     crashes: Vec<Instant>,
 }
 
-/// A server that runs because the one the user asked for could not.
+/// A server that runs because the one the user asked for could not. Sticky for the session
+/// (decision D14): it ends with `kotlin: restart server`, `kotlin: switch server`, a successful
+/// license command, or a change of the resolved server; an app restart starts without one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fallback {
+    pub kind: FallbackReason,
     /// Why the requested server is not running, such as "IntelliJ unlicensed".
     pub reason: String,
+}
+
+impl Fallback {
+    pub fn new(kind: FallbackReason) -> Self {
+        Self {
+            kind,
+            reason: kind.text().to_string(),
+        }
+    }
 }
 
 /// Maps canonical worktree roots to their managers, so the adapter finds the manager of the project
@@ -130,6 +199,8 @@ pub struct Fallback {
 #[derive(Default)]
 pub struct KotlinRegistry {
     managers: HashMap<String, WeakEntity<KotlinProjectManager>>,
+    /// The manager of each project, by the project's entity id.
+    projects: HashMap<EntityId, WeakEntity<KotlinProjectManager>>,
 }
 
 impl Global for KotlinRegistry {}
@@ -137,6 +208,21 @@ impl Global for KotlinRegistry {}
 impl KotlinRegistry {
     pub fn manager(&self, worktree_root: &Path) -> Option<Entity<KotlinProjectManager>> {
         self.managers.get(&project_key(worktree_root))?.upgrade()
+    }
+
+    /// The manager of a project, once it has one.
+    pub fn manager_of_project(&self, project: EntityId) -> Option<Entity<KotlinProjectManager>> {
+        self.projects.get(&project)?.upgrade()
+    }
+
+    pub fn register_project(
+        &mut self,
+        project: EntityId,
+        manager: WeakEntity<KotlinProjectManager>,
+    ) {
+        self.projects
+            .retain(|_, manager| manager.upgrade().is_some());
+        self.projects.insert(project, manager);
     }
 
     fn register(&mut self, worktree_root: &Path, manager: WeakEntity<KotlinProjectManager>) {
@@ -162,6 +248,8 @@ pub struct KotlinProjectManager {
     worktrees: BTreeMap<WorktreeId, KotlinWorktreeState>,
     _settings_subscription: Subscription,
 }
+
+impl EventEmitter<KotlinEvent> for KotlinProjectManager {}
 
 impl KotlinProjectManager {
     pub fn new(host: Rc<dyn KotlinHost>, dirs: KotlinDirs, cx: &mut Context<Self>) -> Self {
@@ -239,23 +327,127 @@ impl KotlinProjectManager {
         let state = self.worktrees.get_mut(&worktree_id)?;
         let requested = resolve(&self.dirs.state_dir, &state.root, worktree_id, cx);
         state.requested = requested;
-        state.effective = requested.server;
+        // A fallback only stands in for IntelliJ; once kotlin-lsp is asked for there is none.
+        if requested.server != KotlinServerKind::Intellij {
+            state.fallback = None;
+        }
+        state.effective = effective_server(requested.server, state.fallback.as_ref());
+        let effective = state.effective;
         self.log.line(&format!(
             "start {} {}",
             state.root.display(),
-            server_name(requested.server)
+            server_name(effective)
         ));
         self.set_status(worktree_id, Some(ServerStatus::Starting), cx);
-        Some(requested.server)
+        Some(effective)
     }
 
+    /// The start of the worktree's server failed for `reason`. While a fallback runs kotlin-lsp,
+    /// that leaves no server at all: `BothFailed`.
     pub fn start_failed(
         &mut self,
         worktree_id: WorktreeId,
         reason: String,
         cx: &mut Context<Self>,
     ) {
-        self.set_status(worktree_id, Some(ServerStatus::Failed { reason }), cx);
+        self.fail(worktree_id, reason, cx);
+    }
+
+    /// `Failed{reason}`, or `BothFailed` when kotlin-lsp fails while a fallback is active.
+    fn fail(&mut self, worktree_id: WorktreeId, reason: String, cx: &mut Context<Self>) {
+        let Some(state) = self.worktrees.get(&worktree_id) else {
+            return;
+        };
+        let status = match &state.fallback {
+            Some(fallback) if state.effective == KotlinServerKind::KotlinLsp => {
+                ServerStatus::BothFailed {
+                    intellij: fallback.reason.clone(),
+                    kotlin_lsp: reason,
+                }
+            }
+            _ => ServerStatus::Failed { reason },
+        };
+        self.set_status(worktree_id, Some(status), cx);
+    }
+
+    /// The IntelliJ start of the worktree could not go on for `reason`: fall back to kotlin-lsp,
+    /// which the same start then runs. `detail` goes to `kotlin.log`. Returns false when there is
+    /// nothing to fall back from (the worktree is unknown or does not run IntelliJ).
+    pub fn intellij_unavailable(
+        &mut self,
+        worktree_id: WorktreeId,
+        reason: FallbackReason,
+        detail: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let runs_intellij = self
+            .worktree(worktree_id)
+            .is_some_and(|state| state.effective == KotlinServerKind::Intellij);
+        if !runs_intellij {
+            return false;
+        }
+        if reason == FallbackReason::Expired
+            && let Some(state) = self.worktrees.get_mut(&worktree_id)
+            && !state.expired.contains(&KotlinServerKind::Intellij)
+        {
+            state.expired.push(KotlinServerKind::Intellij);
+        }
+        self.fall_back(worktree_id, reason, detail, cx);
+        self.set_status(worktree_id, Some(ServerStatus::Starting), cx);
+        true
+    }
+
+    /// Moves the worktree from IntelliJ to kotlin-lsp for `reason`: the fallback state, one
+    /// `kotlin.log` line and one notice. Does not restart; the caller does when a server runs.
+    /// Returns false when a fallback is already active or IntelliJ is not the effective server.
+    fn fall_back(
+        &mut self,
+        worktree_id: WorktreeId,
+        reason: FallbackReason,
+        detail: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return false;
+        };
+        if state.fallback.is_some() || state.effective != KotlinServerKind::Intellij {
+            return false;
+        }
+        state.fallback = Some(Fallback::new(reason));
+        state.effective = KotlinServerKind::KotlinLsp;
+        state.crashes.clear();
+        state.pending.clear();
+        let detail = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" ({detail})")
+        };
+        self.log.line(&format!(
+            "fallback {} intellij -> kotlin-lsp: {}{detail}",
+            state.root.display(),
+            reason.text()
+        ));
+        cx.emit(KotlinEvent::FellBack {
+            worktree_id,
+            message: fallback_message(reason),
+        });
+        cx.notify();
+        true
+    }
+
+    /// A fallback while a server runs: kotlin-lsp replaces it now.
+    fn fall_back_and_restart(
+        &mut self,
+        worktree_id: WorktreeId,
+        reason: FallbackReason,
+        detail: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.fall_back(worktree_id, reason, detail, cx) {
+            return false;
+        }
+        self.restart(worktree_id, cx);
+        true
     }
 
     /// Whether `server` expired for the worktree in this run.
@@ -277,13 +469,7 @@ impl KotlinProjectManager {
         if !state.expired.contains(&server) {
             state.expired.push(server);
         }
-        self.set_status(
-            worktree_id,
-            Some(ServerStatus::Failed {
-                reason: EXPIRED_REASON.into(),
-            }),
-            cx,
-        );
+        self.fail(worktree_id, EXPIRED_REASON.into(), cx);
     }
 
     /// An install begins: status `Installing` with nothing downloaded. Returns the flag that
@@ -344,11 +530,10 @@ impl KotlinProjectManager {
         if let Some(state) = self.worktrees.get_mut(&worktree_id) {
             state.install_cancel = None;
         }
-        let status = match outcome {
-            Ok(()) => ServerStatus::Starting,
-            Err(reason) => ServerStatus::Failed { reason },
-        };
-        self.set_status(worktree_id, Some(status), cx);
+        match outcome {
+            Ok(()) => self.set_status(worktree_id, Some(ServerStatus::Starting), cx),
+            Err(reason) => self.fail(worktree_id, reason, cx),
+        }
     }
 
     /// The start that began the install with `cancel` was dropped before the install ended (Zed
@@ -401,7 +586,8 @@ impl KotlinProjectManager {
             Some(server) => set_project_override(&self.dirs.state_dir, &state.root, server)?,
             None => clear_project_override(&self.dirs.state_dir, &state.root)?,
         }
-        self.refresh_worktree(worktree_id, cx);
+        // A switch ends a fallback (D14).
+        self.refresh_worktree(worktree_id, true, cx);
         Ok(())
     }
 
@@ -411,12 +597,18 @@ impl KotlinProjectManager {
         let Some(state) = self.worktrees.get_mut(&worktree_id) else {
             return;
         };
-        if state.expired.contains(&state.effective) {
+        // The server asked for, not the fallback: a manual restart tries it again (D14).
+        let target = state.requested.server;
+        if state.expired.contains(&target) {
             self.log.line("restart skipped: server expired");
             return;
         }
-        state.fallback = None;
+        if state.fallback.take().is_some() {
+            self.log
+                .line(&format!("fallback ended {}", state.root.display()));
+        }
         state.crashes.clear();
+        state.effective = target;
         self.log.line("restart requested");
         self.restart(worktree_id, cx);
     }
@@ -459,10 +651,6 @@ impl KotlinProjectManager {
                 .line(&format!("cannot switch to IntelliJ: {error:#}"));
             return false;
         }
-        if let Some(state) = self.worktrees.get_mut(&worktree_id) {
-            state.fallback = None;
-            state.crashes.clear();
-        }
         true
     }
 
@@ -475,29 +663,49 @@ impl KotlinProjectManager {
     fn refresh_all(&mut self, cx: &mut Context<Self>) {
         let ids: Vec<WorktreeId> = self.worktrees.keys().copied().collect();
         for worktree_id in ids {
-            self.refresh_worktree(worktree_id, cx);
+            self.refresh_worktree(worktree_id, false, cx);
         }
     }
 
-    /// Re-resolves the worktree's server. A restart happens only when the server changed and one
-    /// is running or starting; a settings change that resolves to the same server does nothing.
-    fn refresh_worktree(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
+    /// Re-resolves the worktree's server. A change of the resolved server, or `end_fallback`
+    /// (`kotlin: switch server`), ends a fallback and the crash history. A restart happens only
+    /// when the server to run changed and one is running or starting; a settings change that
+    /// resolves to the same server does nothing, and a fallback stays (D14).
+    fn refresh_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        end_fallback: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.worktrees.get_mut(&worktree_id) else {
             return;
         };
         let resolved = resolve(&self.dirs.state_dir, &state.root, worktree_id, cx);
-        let changed = resolved.server != state.effective;
-        let previous = state.effective;
+        let requested_changed = resolved.server != state.requested.server;
         state.requested = resolved;
-        if !changed {
+        if (requested_changed || end_fallback) && state.fallback.take().is_some() {
+            state.crashes.clear();
+            self.log
+                .line(&format!("fallback ended {}", state.root.display()));
+            // With no fallback left, a server that is not running is no longer "both failed".
+            if let Some(ServerStatus::BothFailed { kotlin_lsp, .. }) = &state.status {
+                state.status = Some(ServerStatus::Failed {
+                    reason: kotlin_lsp.clone(),
+                });
+            }
+            cx.notify();
+        }
+        let target = effective_server(resolved.server, state.fallback.as_ref());
+        let previous = state.effective;
+        if target == previous {
             return;
         }
-        state.effective = resolved.server;
+        state.effective = target;
         self.log.line(&format!(
             "switch {} {} -> {}",
             state.root.display(),
             server_name(previous),
-            server_name(resolved.server)
+            server_name(target)
         ));
         if state.status.is_some() {
             self.restart(worktree_id, cx);
@@ -588,32 +796,116 @@ impl KotlinProjectManager {
         exit_status: Option<ExitStatus>,
         cx: &mut Context<Self>,
     ) {
+        self.server_terminated_at(server_id, exit_status, Instant::now(), cx);
+    }
+
+    /// The crash policy, with the time of the exit given. An expired build (exit 7) and a lost
+    /// license (a pinned exit code) are never restarted: IntelliJ falls back, kotlin-lsp fails.
+    /// Any other exit restarts the same server once; a second exit within `CRASH_WINDOW` of the
+    /// first is a crash loop.
+    pub fn server_terminated_at(
+        &mut self,
+        server_id: LanguageServerId,
+        exit_status: Option<ExitStatus>,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worktree_id) = self.worktree_of_server(server_id) else {
             return;
         };
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return;
+        };
+        let effective = state.effective;
+        // The process is gone: nothing more comes from it.
+        state.server_id = None;
+        state.pending.clear();
+        state.io_subscription = None;
+        state.stderr_mirror = None;
         let detail =
             exit_status.map_or_else(|| "unknown status".into(), |status| status.to_string());
+        let code = exit_status.and_then(|status| status.code());
         self.log.line(&format!("exit {detail}"));
-        if exit_status.and_then(|status| status.code()) == Some(EXPIRED_EXIT_CODE) {
-            let effective = self
-                .worktrees
-                .get(&worktree_id)
-                .map(|state| state.effective);
-            if let Some(effective) = effective {
-                self.mark_expired(worktree_id, effective, cx);
-                return;
+
+        if code == Some(EXPIRED_EXIT_CODE) {
+            if let Some(state) = self.worktrees.get_mut(&worktree_id)
+                && !state.expired.contains(&effective)
+            {
+                state.expired.push(effective);
             }
+            if effective == KotlinServerKind::Intellij {
+                self.fall_back_and_restart(worktree_id, FallbackReason::Expired, &detail, cx);
+            } else {
+                self.mark_expired(worktree_id, effective, cx);
+            }
+            return;
         }
-        if let Some(state) = self.worktrees.get_mut(&worktree_id) {
-            state.crashes.push(Instant::now());
+        if effective == KotlinServerKind::Intellij && is_license_lost_exit(code) {
+            self.fall_back_and_restart(worktree_id, FallbackReason::LicenseLost, &detail, cx);
+            return;
         }
-        self.set_status(
-            worktree_id,
-            Some(ServerStatus::Failed {
-                reason: format!("server exited unexpectedly ({detail})"),
-            }),
-            cx,
-        );
+
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return;
+        };
+        state
+            .crashes
+            .retain(|crash| now.saturating_duration_since(*crash) < CRASH_WINDOW);
+        state.crashes.push(now);
+        if state.crashes.len() < 2 {
+            self.log.line("crash: restarting once");
+            self.restart(worktree_id, cx);
+            return;
+        }
+        self.log.line(&format!("crash loop: {CRASH_LOOP_REASON}"));
+        if effective == KotlinServerKind::Intellij {
+            self.fall_back_and_restart(worktree_id, FallbackReason::CrashLoop, &detail, cx);
+        } else {
+            self.fail(worktree_id, CRASH_LOOP_REASON.into(), cx);
+        }
+    }
+
+    /// A message or stderr text of the worktree's running server. A pinned license signal from
+    /// the IntelliJ server falls back once (D10); the fallback runs kotlin-lsp, whose messages are
+    /// never matched, so nothing retries IntelliJ on its own.
+    pub fn server_text(&mut self, worktree_id: WorktreeId, text: &str, cx: &mut Context<Self>) {
+        let runs_intellij = self.worktree(worktree_id).is_some_and(|state| {
+            state.effective == KotlinServerKind::Intellij && state.fallback.is_none()
+        });
+        if runs_intellij && is_license_lost_signal(text) {
+            let line = text
+                .lines()
+                .find(|line| is_license_lost_signal(line))
+                .unwrap_or(text)
+                .trim()
+                .to_string();
+            self.fall_back_and_restart(worktree_id, FallbackReason::LicenseLost, &line, cx);
+        }
+    }
+
+    /// The start of the worktree's server failed after the adapter handed over a binary: the
+    /// process did not spawn, or it did not answer `initialize` in time. A start the adapter itself
+    /// refused already has its status and is left alone.
+    pub fn server_start_failed(
+        &mut self,
+        worktree_id: WorktreeId,
+        error: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.worktrees.get(&worktree_id) else {
+            return;
+        };
+        if !matches!(state.status, None | Some(ServerStatus::Starting)) {
+            return;
+        }
+        let effective = state.effective;
+        let error = error.lines().next().unwrap_or(error).trim().to_string();
+        self.log.line(&format!("start failed: {error}"));
+        if effective == KotlinServerKind::Intellij {
+            self.fall_back_and_restart(worktree_id, FallbackReason::StartFailed, &error, cx);
+        } else {
+            self.fail(worktree_id, format!("failed to start: {error}"), cx);
+        }
     }
 
     pub fn work_started(
@@ -727,6 +1019,29 @@ impl KotlinProjectManager {
             } if is_kotlin(name) && self.worktrees.contains_key(worktree_id) => {
                 self.startup_stderr(*worktree_id, text, cx);
             }
+            LspStoreEvent::LanguageServerStartFailed {
+                name,
+                worktree_id,
+                error,
+            } if is_kotlin(name) => self.server_start_failed(*worktree_id, error, cx),
+            LspStoreEvent::LanguageServerLog(server_id, LanguageServerLogType::Log(_), text) => {
+                if let Some(worktree_id) = self.worktree_of_server(*server_id) {
+                    self.server_text(worktree_id, text, cx);
+                }
+            }
+            // `window/showMessage` carries the server's name only; it applies to every worktree
+            // whose running Kotlin server is IntelliJ.
+            LspStoreEvent::LanguageServerPrompt(request) if request.lsp_name == ADAPTER_NAME => {
+                let running: Vec<WorktreeId> = self
+                    .worktrees
+                    .iter()
+                    .filter(|(_, state)| state.server_id.is_some())
+                    .map(|(worktree_id, _)| *worktree_id)
+                    .collect();
+                for worktree_id in running {
+                    self.server_text(worktree_id, &request.message, cx);
+                }
+            }
             LspStoreEvent::LanguageServerUpdate {
                 language_server_id,
                 message,
@@ -780,8 +1095,24 @@ impl KotlinProjectManager {
                 .get(&worktree_id)
                 .map(|state| state.effective)
         {
-            self.mark_expired(worktree_id, effective, cx);
+            if effective == KotlinServerKind::Intellij {
+                if let Some(state) = self.worktrees.get_mut(&worktree_id)
+                    && !state.expired.contains(&effective)
+                {
+                    state.expired.push(effective);
+                }
+                self.fall_back_and_restart(
+                    worktree_id,
+                    FallbackReason::Expired,
+                    EXPIRED_MESSAGE,
+                    cx,
+                );
+            } else {
+                self.mark_expired(worktree_id, effective, cx);
+            }
+            return;
         }
+        self.server_text(worktree_id, text, cx);
     }
 
     /// Starts mirroring the server's stderr for the worktree. The startup text, if the server wrote
@@ -814,11 +1145,30 @@ impl KotlinProjectManager {
         let Some(mirror) = self.begin_stderr_mirror(worktree_id, cx) else {
             return;
         };
+        // Stderr arrives off the main thread: a line with a license signal is sent over.
+        let (signal_sender, mut signals) = futures::channel::mpsc::unbounded::<String>();
         let subscription = server.on_io(move |kind, text| {
             if matches!(kind, IoKind::StdErr) {
                 mirror.live(text);
+                if is_license_lost_signal(text) {
+                    signal_sender.unbounded_send(text.to_string()).ok();
+                }
             }
         });
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(text) = signals.next().await {
+                let delivered = this.update(cx, |this, cx| {
+                    if this.worktree_of_server(server_id) == Some(worktree_id) {
+                        this.server_text(worktree_id, &text, cx);
+                    }
+                });
+                if delivered.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         if let Some(state) = self.worktrees.get_mut(&worktree_id) {
             state.io_subscription = Some(subscription);
         }
@@ -835,6 +1185,16 @@ impl KotlinProjectManager {
             }
         })
         .detach();
+    }
+}
+
+/// The server a worktree runs: the requested one, or kotlin-lsp while a fallback stands in for
+/// IntelliJ.
+fn effective_server(requested: KotlinServerKind, fallback: Option<&Fallback>) -> KotlinServerKind {
+    if fallback.is_some() {
+        KotlinServerKind::KotlinLsp
+    } else {
+        requested
     }
 }
 
@@ -866,7 +1226,7 @@ mod tests {
     use settings::{ActiveSettingsProfileName, Settings as _, SettingsStore};
 
     use super::*;
-    use crate::{KotlinSettings, resolve::project_override};
+    use crate::{KotlinSettings, license::LICENSE_LOST_SIGNALS, resolve::project_override};
 
     struct FakeInner {
         events: RefCell<Vec<String>>,
@@ -896,7 +1256,8 @@ mod tests {
         fn restart(&self, worktree_id: WorktreeId, _: Option<LanguageServerId>, cx: &mut App) {
             let inner = self.0.clone();
             inner.events.borrow_mut().push("stop".into());
-            inner.live.set(inner.live.get() - 1);
+            // A server whose start failed, or that crashed, is not live any more.
+            inner.live.set(inner.live.get().saturating_sub(1));
             cx.spawn(async move |cx| {
                 let manager = inner.manager.borrow().clone().unwrap();
                 let server = manager
@@ -979,6 +1340,12 @@ mod tests {
         fn expired(&self, cx: &mut TestAppContext) -> bool {
             self.manager.read_with(cx, |manager, _| {
                 manager.is_expired(worktree(), KotlinServerKind::KotlinLsp)
+            })
+        }
+
+        fn expired_intellij(&self, cx: &mut TestAppContext) -> bool {
+            self.manager.read_with(cx, |manager, _| {
+                manager.is_expired(worktree(), KotlinServerKind::Intellij)
             })
         }
 
@@ -1225,14 +1592,18 @@ mod tests {
         );
         assert!(harness.log().contains(" stopped"));
 
+        // An unexpected exit restarts the server once.
         harness.manager.update(cx, |manager, cx| {
             manager.server_added(server_id, worktree(), cx);
             manager.server_terminated(server_id, None, cx);
         });
-        assert!(matches!(
-            harness.status(cx),
-            Some(ServerStatus::Failed { reason }) if reason.contains("exited unexpectedly")
-        ));
+        assert_eq!(harness.status(cx), Some(ServerStatus::Starting));
+        cx.run_until_parked();
+        assert_eq!(
+            harness.events(),
+            ["start kotlin-lsp", "stop", "start kotlin-lsp"]
+        );
+        assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
     }
 
     #[gpui::test]
@@ -1264,20 +1635,16 @@ mod tests {
     fn test_an_expired_exit_fails_without_a_restart(cx: &mut TestAppContext) {
         let harness = setup(cx);
         harness.first_start(cx);
-        let server_id = LanguageServerId(1);
 
-        // Another exit code is an ordinary crash.
+        // Another exit code is an ordinary crash, which restarts.
         harness.manager.update(cx, |manager, cx| {
-            manager.server_terminated(server_id, exited_with(1), cx)
+            manager.server_terminated(LanguageServerId(1), exited_with(1), cx)
         });
-        assert_eq!(
-            harness.status(cx),
-            Some(ServerStatus::Failed {
-                reason: "server exited unexpectedly (exit status: 1)".into()
-            })
-        );
+        cx.run_until_parked();
+        assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
         assert!(!harness.expired(cx));
 
+        let server_id = harness.server_id(cx);
         harness.manager.update(cx, |manager, cx| {
             manager.server_terminated(server_id, exited_with(7), cx)
         });
@@ -1294,7 +1661,10 @@ mod tests {
             .manager
             .update(cx, |manager, cx| manager.restart_server(worktree(), cx));
         cx.run_until_parked();
-        assert_eq!(harness.events(), ["start kotlin-lsp"]);
+        assert_eq!(
+            harness.events(),
+            ["start kotlin-lsp", "stop", "start kotlin-lsp"]
+        );
         assert_eq!(
             harness.status(cx),
             Some(ServerStatus::Failed {
@@ -1536,10 +1906,10 @@ mod tests {
         harness.manager.update(cx, |manager, cx| {
             manager.server_terminated(LanguageServerId(1), exited_with(1), cx)
         });
+        cx.run_until_parked();
         harness.manager.update(cx, |manager, _| {
-            manager.worktrees.get_mut(&worktree()).unwrap().fallback = Some(Fallback {
-                reason: "IntelliJ unlicensed".into(),
-            });
+            manager.worktrees.get_mut(&worktree()).unwrap().fallback =
+                Some(Fallback::new(FallbackReason::Unlicensed));
             assert_eq!(manager.crash_count(worktree()), 1);
         });
 
@@ -1553,7 +1923,13 @@ mod tests {
         });
         assert_eq!(
             harness.events(),
-            ["start kotlin-lsp", "stop", "start kotlin-lsp"]
+            [
+                "start kotlin-lsp",
+                "stop",
+                "start kotlin-lsp",
+                "stop",
+                "start kotlin-lsp"
+            ]
         );
         assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
     }
@@ -1573,5 +1949,525 @@ mod tests {
             ["start kotlin-lsp", "stop", "start kotlin-lsp"]
         );
         assert!(harness.log().contains("reimport requested"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The fallback and crash policy (the fallback table, D10, D14)
+    // -----------------------------------------------------------------------------------------
+
+    impl Harness {
+        fn server_id(&self, cx: &mut TestAppContext) -> LanguageServerId {
+            self.manager.read_with(cx, |manager, _| {
+                manager
+                    .worktree(worktree())
+                    .and_then(|state| state.server_id)
+                    .expect("a running server")
+            })
+        }
+
+        fn fallback(&self, cx: &mut TestAppContext) -> Option<FallbackReason> {
+            self.manager.read_with(cx, |manager, _| {
+                manager
+                    .worktree(worktree())
+                    .and_then(|state| state.fallback.as_ref())
+                    .map(|fallback| fallback.kind)
+            })
+        }
+
+        fn effective(&self, cx: &mut TestAppContext) -> KotlinServerKind {
+            self.manager.read_with(cx, |manager, _| {
+                manager.worktree(worktree()).unwrap().effective
+            })
+        }
+
+        /// Counts the notices the manager asks the workspace to show.
+        fn count_notices(&self, cx: &mut TestAppContext) -> Rc<RefCell<Vec<String>>> {
+            let notices = Rc::new(RefCell::new(Vec::new()));
+            cx.update(|cx| {
+                let notices = notices.clone();
+                cx.subscribe(&self.manager, move |_, event: &KotlinEvent, _| {
+                    let KotlinEvent::FellBack { message, .. } = event;
+                    notices.borrow_mut().push(message.clone());
+                })
+                .detach();
+            });
+            notices
+        }
+
+        fn crash(&self, cx: &mut TestAppContext, code: i32, at: Instant) {
+            let server_id = self.server_id(cx);
+            self.manager.update(cx, |manager, cx| {
+                manager.server_terminated_at(server_id, exited_with(code), at, cx)
+            });
+            cx.run_until_parked();
+        }
+
+        fn fallback_lines(&self) -> usize {
+            self.log()
+                .lines()
+                .filter(|line| line.contains(" fallback ") && line.contains(" -> kotlin-lsp: "))
+                .count()
+        }
+    }
+
+    const INTELLIJ: &str = r#"{ "kotlin": { "server": "intellij" } }"#;
+
+    /// A worktree whose setting asks for IntelliJ, running it.
+    fn intellij_running(cx: &mut TestAppContext) -> Harness {
+        let harness = setup(cx);
+        set_user(cx, INTELLIJ);
+        harness.first_start(cx);
+        assert_eq!(harness.events(), ["start intellij"]);
+        harness
+    }
+
+    /// The rows that end an IntelliJ start before a process runs: the adapter reports them, the
+    /// fallback is recorded, and the same start goes on with kotlin-lsp.
+    #[gpui::test]
+    fn test_pre_start_rows_fall_back_to_kotlin_lsp(cx: &mut TestAppContext) {
+        for (reason, text) in [
+            (
+                FallbackReason::EulaNotAccepted,
+                "IntelliJ EULA not accepted",
+            ),
+            (FallbackReason::Unlicensed, "IntelliJ unlicensed"),
+            (
+                FallbackReason::LicenseCheckFailed,
+                "license check failed (offline?)",
+            ),
+            (FallbackReason::InstallFailed, "IntelliJ install failed"),
+            (FallbackReason::Expired, "IntelliJ server expired"),
+        ] {
+            let harness = setup(cx);
+            set_user(cx, INTELLIJ);
+            let notices = harness.count_notices(cx);
+            let server = harness
+                .manager
+                .update(cx, |manager, cx| manager.begin_start(worktree(), cx));
+            assert_eq!(server, Some(KotlinServerKind::Intellij));
+            let fell_back = harness.manager.update(cx, |manager, cx| {
+                manager.intellij_unavailable(worktree(), reason, "detail", cx)
+            });
+            assert!(fell_back, "{reason:?}");
+            assert_eq!(harness.fallback(cx), Some(reason));
+            assert_eq!(harness.effective(cx), KotlinServerKind::KotlinLsp);
+            assert_eq!(harness.status(cx), Some(ServerStatus::Starting));
+            assert_eq!(*notices.borrow(), [fallback_message(reason)]);
+            assert!(notices.borrow()[0].contains(text), "{:?}", notices.borrow());
+            assert_eq!(harness.fallback_lines(), 1, "{}", harness.log());
+            assert!(harness.log().contains(text), "{}", harness.log());
+            // Sticky: the next start runs kotlin-lsp without trying IntelliJ.
+            let server = harness
+                .manager
+                .update(cx, |manager, cx| manager.begin_start(worktree(), cx));
+            assert_eq!(server, Some(KotlinServerKind::KotlinLsp), "{reason:?}");
+            assert_eq!(
+                harness.expired_intellij(cx),
+                reason == FallbackReason::Expired
+            );
+            set_user(cx, "{}");
+        }
+    }
+
+    #[gpui::test]
+    fn test_kotlin_lsp_has_nothing_to_fall_back_from(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.begin_start(worktree(), cx));
+        let fell_back = harness.manager.update(cx, |manager, cx| {
+            manager.intellij_unavailable(worktree(), FallbackReason::InstallFailed, "", cx)
+        });
+        assert!(!fell_back);
+        assert_eq!(harness.fallback(cx), None);
+    }
+
+    /// Spawn error or no `initialize` reply in 120 s: IntelliJ falls back and kotlin-lsp starts;
+    /// kotlin-lsp is `Failed`.
+    #[gpui::test]
+    fn test_a_failed_start_falls_back_or_fails(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        set_user(cx, INTELLIJ);
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.begin_start(worktree(), cx));
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_start_failed(worktree(), "oneshot canceled\nmore", cx)
+        });
+        assert_eq!(harness.fallback(cx), Some(FallbackReason::StartFailed));
+        cx.run_until_parked();
+        assert_eq!(harness.events(), ["stop", "start kotlin-lsp"]);
+        assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
+
+        let harness = setup(cx);
+        set_user(cx, "{}");
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.begin_start(worktree(), cx));
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_start_failed(worktree(), "No such file or directory (os error 2)", cx)
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: "failed to start: No such file or directory (os error 2)".into()
+            })
+        );
+        assert_eq!(harness.fallback(cx), None);
+        cx.run_until_parked();
+        assert!(harness.events().is_empty(), "{:?}", harness.events());
+
+        // A start the adapter refused already has its status: the event changes nothing.
+        harness.manager.update(cx, |manager, cx| {
+            manager.start_failed(worktree(), "no JDK".into(), cx)
+        });
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_start_failed(worktree(), "no JDK", cx)
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: "no JDK".into()
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn test_intellij_crashes_restart_once_then_fall_back(cx: &mut TestAppContext) {
+        let harness = intellij_running(cx);
+        let notices = harness.count_notices(cx);
+        let start = Instant::now();
+
+        harness.crash(cx, 1, start);
+        assert_eq!(
+            harness.events(),
+            ["start intellij", "stop", "start intellij"]
+        );
+        assert_eq!(harness.fallback(cx), None);
+        assert!(harness.log().contains("crash: restarting once"));
+
+        harness.crash(cx, 1, start + Duration::from_secs(30));
+        assert_eq!(harness.fallback(cx), Some(FallbackReason::CrashLoop));
+        assert_eq!(
+            harness.events(),
+            [
+                "start intellij",
+                "stop",
+                "start intellij",
+                "stop",
+                "start kotlin-lsp"
+            ]
+        );
+        assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
+        assert_eq!(notices.borrow().len(), 1);
+        assert_eq!(harness.host.0.max_live.get(), 1);
+    }
+
+    #[gpui::test]
+    fn test_kotlin_lsp_crashes_restart_once_then_fail(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.first_start(cx);
+        let start = Instant::now();
+        harness.crash(cx, 1, start);
+        assert_eq!(
+            harness.events(),
+            ["start kotlin-lsp", "stop", "start kotlin-lsp"]
+        );
+        harness.crash(cx, 1, start + Duration::from_secs(59));
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: CRASH_LOOP_REASON.into()
+            })
+        );
+        // Failed stays failed: no restart, no fallback.
+        cx.run_until_parked();
+        assert_eq!(harness.events().len(), 3);
+        assert_eq!(harness.fallback(cx), None);
+        // A manual restart always works.
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.restart_server(worktree(), cx));
+        cx.run_until_parked();
+        assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
+        assert_eq!(harness.events().len(), 5);
+    }
+
+    #[gpui::test]
+    fn test_a_second_crash_after_61_seconds_restarts_again(cx: &mut TestAppContext) {
+        for intellij in [false, true] {
+            let harness = setup(cx);
+            set_user(cx, if intellij { INTELLIJ } else { "{}" });
+            harness.first_start(cx);
+            let server = if intellij {
+                "start intellij"
+            } else {
+                "start kotlin-lsp"
+            };
+            let start = Instant::now();
+            harness.crash(cx, 1, start);
+            harness.crash(cx, 1, start + Duration::from_secs(61));
+            harness.crash(cx, 1, start + Duration::from_secs(122));
+            assert_eq!(
+                harness.events(),
+                [server, "stop", server, "stop", server, "stop", server],
+                "intellij: {intellij}"
+            );
+            assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
+            assert_eq!(harness.fallback(cx), None);
+            assert_eq!(
+                harness
+                    .manager
+                    .read_with(cx, |manager, _| manager.crash_count(worktree())),
+                1,
+                "older crashes are forgotten"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn test_a_license_signal_falls_back_once_and_never_retries(cx: &mut TestAppContext) {
+        let harness = intellij_running(cx);
+        let notices = harness.count_notices(cx);
+        // Ordinary messages are not signals.
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_text(worktree(), "Indexing 3/5 modules", cx)
+        });
+        assert_eq!(harness.fallback(cx), None);
+
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_text(worktree(), "No valid license found", cx)
+        });
+        assert_eq!(harness.fallback(cx), Some(FallbackReason::LicenseLost));
+        cx.run_until_parked();
+        assert_eq!(
+            harness.events(),
+            ["start intellij", "stop", "start kotlin-lsp"]
+        );
+
+        // The same text again, from kotlin-lsp, a crash of kotlin-lsp, and a long wait: IntelliJ is
+        // never started on its own and there is no second notice.
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_text(worktree(), "No valid license found", cx)
+        });
+        harness.crash(cx, 1, Instant::now());
+        cx.executor().advance_clock(Duration::from_secs(3600));
+        cx.run_until_parked();
+        assert_eq!(
+            harness.events(),
+            [
+                "start intellij",
+                "stop",
+                "start kotlin-lsp",
+                "stop",
+                "start kotlin-lsp"
+            ]
+        );
+        assert_eq!(harness.fallback(cx), Some(FallbackReason::LicenseLost));
+        assert_eq!(notices.borrow().len(), 1);
+        assert_eq!(harness.fallback_lines(), 1);
+    }
+
+    #[gpui::test]
+    fn test_every_license_signal_source_falls_back(cx: &mut TestAppContext) {
+        let lost = |harness: &Harness, cx: &mut TestAppContext| {
+            assert_eq!(harness.fallback(cx), Some(FallbackReason::LicenseLost));
+            cx.run_until_parked();
+            assert_eq!(harness.events().last().unwrap(), "start kotlin-lsp");
+        };
+        // A pinned exit code.
+        let harness = intellij_running(cx);
+        harness.crash(cx, 11, Instant::now());
+        lost(&harness, cx);
+        // Stderr written while starting.
+        let harness = intellij_running(cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.startup_stderr(
+                worktree(),
+                "booting\nLicense: not licensed, feature requests are parked (NoLicenseDiscovered)\n",
+                cx,
+            )
+        });
+        lost(&harness, cx);
+        assert!(harness.log().contains("NoLicenseDiscovered"));
+        // `window/logMessage` and `window/showMessage` arrive as text of the running server.
+        for pinned in LICENSE_LOST_SIGNALS {
+            let harness = intellij_running(cx);
+            harness.manager.update(cx, |manager, cx| {
+                manager.server_text(worktree(), &format!("server: {pinned}."), cx)
+            });
+            lost(&harness, cx);
+        }
+    }
+
+    #[gpui::test]
+    fn test_an_expired_build_falls_back_or_fails_without_a_restart(cx: &mut TestAppContext) {
+        let harness = intellij_running(cx);
+        harness.crash(cx, 7, Instant::now());
+        assert_eq!(harness.fallback(cx), Some(FallbackReason::Expired));
+        assert_eq!(
+            harness.events(),
+            ["start intellij", "stop", "start kotlin-lsp"]
+        );
+        assert!(harness.expired_intellij(cx));
+
+        // kotlin-lsp expired while it stands in: no server at all, and no restart.
+        harness.crash(cx, 7, Instant::now());
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::BothFailed {
+                intellij: "IntelliJ server expired".into(),
+                kotlin_lsp: EXPIRED_REASON.into(),
+            })
+        );
+        assert_eq!(harness.events().len(), 3);
+    }
+
+    #[gpui::test]
+    fn test_kotlin_lsp_failing_during_a_fallback_is_both_failed(cx: &mut TestAppContext) {
+        // Its start fails.
+        let harness = intellij_running(cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_text(worktree(), "No valid license found", cx)
+        });
+        cx.run_until_parked();
+        harness.manager.update(cx, |manager, cx| {
+            manager.end_install(
+                worktree(),
+                Err("install failed: network is down".into()),
+                cx,
+            )
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::BothFailed {
+                intellij: "IntelliJ license lost".into(),
+                kotlin_lsp: "install failed: network is down".into(),
+            })
+        );
+
+        // It crash-loops.
+        let harness = intellij_running(cx);
+        harness.crash(cx, 1, Instant::now());
+        harness.crash(cx, 1, Instant::now());
+        assert_eq!(harness.fallback(cx), Some(FallbackReason::CrashLoop));
+        harness.crash(cx, 1, Instant::now());
+        harness.crash(cx, 1, Instant::now());
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::BothFailed {
+                intellij: "IntelliJ crashed twice within a minute".into(),
+                kotlin_lsp: CRASH_LOOP_REASON.into(),
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn test_one_notice_per_fallback(cx: &mut TestAppContext) {
+        let harness = intellij_running(cx);
+        let notices = harness.count_notices(cx);
+        for _ in 0..3 {
+            harness.manager.update(cx, |manager, cx| {
+                manager.server_text(worktree(), "No valid license found", cx);
+                manager.intellij_unavailable(worktree(), FallbackReason::Unlicensed, "", cx);
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(notices.borrow().len(), 1);
+
+        // A manual restart tries IntelliJ again; failing again is a new fallback with its notice.
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.restart_server(worktree(), cx));
+        cx.run_until_parked();
+        assert_eq!(harness.events().last().unwrap(), "start intellij");
+        harness.crash(cx, 1, Instant::now());
+        harness.crash(cx, 1, Instant::now());
+        assert_eq!(
+            *notices.borrow(),
+            [
+                fallback_message(FallbackReason::LicenseLost),
+                fallback_message(FallbackReason::CrashLoop)
+            ]
+        );
+        assert_eq!(harness.fallback_lines(), 2);
+    }
+
+    /// D14: the fallback stays until restart, switch, a successful license command, or a change
+    /// of the resolved server; nothing else brings IntelliJ back.
+    #[gpui::test]
+    fn test_the_fallback_is_sticky(cx: &mut TestAppContext) {
+        let lose = |harness: &Harness, cx: &mut TestAppContext| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.server_text(worktree(), "No valid license found", cx)
+            });
+            cx.run_until_parked();
+            assert_eq!(harness.effective(cx), KotlinServerKind::KotlinLsp);
+        };
+        let harness = intellij_running(cx);
+        lose(&harness, cx);
+        let before = harness.events().len();
+
+        // A settings change that resolves to the same server keeps it.
+        set_user(
+            cx,
+            r#"{ "buffer_font_size": 15, "kotlin": { "server": "intellij" } }"#,
+        );
+        cx.run_until_parked();
+        assert_eq!(harness.events().len(), before);
+        assert_eq!(harness.fallback(cx), Some(FallbackReason::LicenseLost));
+
+        // `kotlin: switch server` to IntelliJ, already the requested server, ends it.
+        harness
+            .manager
+            .update(cx, |manager, cx| {
+                manager.switch_server(worktree(), Some(KotlinServerKind::Intellij), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(harness.fallback(cx), None);
+        assert_eq!(harness.events().last().unwrap(), "start intellij");
+
+        // A successful license command ends it.
+        lose(&harness, cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.license_checked(worktree(), LicenseOutcome::Unlicensed, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(harness.fallback(cx), Some(FallbackReason::LicenseLost));
+        harness.manager.update(cx, |manager, cx| {
+            manager.license_checked(worktree(), LicenseOutcome::Licensed, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(harness.fallback(cx), None);
+        assert_eq!(harness.events().last().unwrap(), "start intellij");
+
+        // A change of the resolved server ends it: kotlin-lsp, already running, is not restarted.
+        harness
+            .manager
+            .update(cx, |manager, cx| {
+                manager.switch_server(worktree(), None, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        lose(&harness, cx);
+        let before = harness.events().len();
+        set_user(cx, "{}");
+        cx.run_until_parked();
+        assert_eq!(harness.fallback(cx), None);
+        assert_eq!(harness.events().len(), before);
+        assert_eq!(harness.effective(cx), KotlinServerKind::KotlinLsp);
+
+        // An app restart (a new manager) asks for IntelliJ again.
+        set_user(cx, INTELLIJ);
+        lose(&harness, cx);
+        let fresh = cx.new(|cx| {
+            KotlinProjectManager::new(Rc::new(harness.host.clone()), harness.dirs.clone(), cx)
+        });
+        let server = fresh.update(cx, |manager, cx| {
+            manager.add_worktree(worktree(), harness.root.clone(), cx);
+            manager.begin_start(worktree(), cx)
+        });
+        assert_eq!(server, Some(KotlinServerKind::Intellij));
     }
 }

@@ -27,12 +27,10 @@ use crate::{
     KotlinDirs, KotlinSettings,
     install::{InstallCancelled, ProgressFn, spawn_ensure_installed},
     installed::{check_installed, not_installed, server_name, version_dir},
-    intellij::{
-        EULA_NOT_ACCEPTED_REASON, LICENSE_TIMEOUT, LicenseOutcome, bundle_eula_hash, eula_accepted,
-        eula_argument, license_check,
-    },
+    intellij::{LICENSE_TIMEOUT, bundle_eula_hash, eula_accepted, eula_argument, license_check},
     jdk,
-    manager::{ADAPTER_NAME, EXPIRED_REASON, KotlinProjectManager, KotlinRegistry},
+    license::fallback_for,
+    manager::{ADAPTER_NAME, EXPIRED_REASON, FallbackReason, KotlinProjectManager, KotlinRegistry},
     manifest::{Manifest, ManifestEntry, current_platform},
     resolve::resolve,
 };
@@ -128,6 +126,34 @@ fn manager_of(
 /// The message of an IntelliJ server that is not installed and may not be downloaded (D16).
 pub const INTELLIJ_DOWNLOAD_HINT: &str = "intellij is not installed: set kotlin.intellij.download to true to let bongos download it, or point lsp.kotlin.binary.path at a server you installed by hand";
 
+/// Why a start of the IntelliJ server did not happen, when kotlin-lsp can run instead.
+struct Refusal {
+    reason: FallbackReason,
+    /// For `kotlin.log`.
+    detail: String,
+    error: anyhow::Error,
+}
+
+/// A start that failed: with a `Refusal` the IntelliJ server falls back to kotlin-lsp.
+enum StartError {
+    Refused(Refusal),
+    Failed(anyhow::Error),
+}
+
+impl From<anyhow::Error> for StartError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+fn refused(reason: FallbackReason, detail: String) -> StartError {
+    StartError::Refused(Refusal {
+        reason,
+        detail,
+        error: anyhow::anyhow!(reason.text()),
+    })
+}
+
 /// The command that starts the effective server for a worktree, or why it cannot start.
 ///
 /// An expired pin (decision D18) is neither installed nor started. An installed pin starts without
@@ -135,9 +161,12 @@ pub const INTELLIJ_DOWNLOAD_HINT: &str = "intellij is not installed: set kotlin.
 /// manager's cancel flag. A missing IntelliJ server is installed the same way only when
 /// `kotlin.intellij.download` is true (D16); otherwise it is "intellij is not installed" and
 /// nothing is requested. An installed IntelliJ server then needs the user's EULA acceptance
-/// (D9) and a passing `license status` (D10), and starts with `--eula=<hash>`; with no fallback
-/// yet, either failing is a `Failed` status. `today` is the date the pin's `expires` is compared
-/// with.
+/// (D9) and a passing `license status` (D10), and starts with `--eula=<hash>`.
+///
+/// An IntelliJ start that fails its install, its EULA or its license check, or whose build
+/// expired, falls back to kotlin-lsp (the fallback table): the manager records the fallback and
+/// this same start returns kotlin-lsp. Without a manager the failure is the error. `today` is the
+/// date the pin's `expires` is compared with.
 pub async fn server_command(
     dirs: &KotlinDirs,
     manifest: &Manifest,
@@ -148,6 +177,66 @@ pub async fn server_command(
     cx: &mut AsyncApp,
 ) -> Result<LanguageServerBinary> {
     let server = cx.update(|cx| begin_start(dirs, worktree_root, worktree_id, cx));
+    let refusal = match start_command(
+        dirs,
+        manifest,
+        http.clone(),
+        worktree_root,
+        worktree_id,
+        today,
+        server,
+        cx,
+    )
+    .await
+    {
+        Ok(binary) => return Ok(binary),
+        Err(StartError::Failed(error)) => return Err(error),
+        Err(StartError::Refused(refusal)) => refusal,
+    };
+    let fell_back = cx.update(|cx| {
+        manager_of(worktree_root, cx).is_some_and(|manager| {
+            manager.update(cx, |manager, cx| {
+                manager.intellij_unavailable(worktree_id, refusal.reason, &refusal.detail, cx)
+            })
+        })
+    });
+    if !fell_back {
+        cx.update(|cx| {
+            log_line(worktree_root, &refusal.detail, cx);
+            start_failed(worktree_root, worktree_id, refusal.reason.text().into(), cx)
+        });
+        return Err(refusal.error);
+    }
+    match start_command(
+        dirs,
+        manifest,
+        http,
+        worktree_root,
+        worktree_id,
+        today,
+        KotlinServerKind::KotlinLsp,
+        cx,
+    )
+    .await
+    {
+        Ok(binary) => Ok(binary),
+        Err(StartError::Failed(error)) => Err(error),
+        Err(StartError::Refused(refusal)) => Err(refusal.error),
+    }
+}
+
+/// The command for `server`, which the start has already chosen.
+#[allow(clippy::too_many_arguments)]
+async fn start_command(
+    dirs: &KotlinDirs,
+    manifest: &Manifest,
+    http: Arc<dyn HttpClient>,
+    worktree_root: &Path,
+    worktree_id: WorktreeId,
+    today: NaiveDate,
+    server: KotlinServerKind,
+    cx: &mut AsyncApp,
+) -> Result<LanguageServerBinary, StartError> {
     let entry = match current_platform()
         .ok_or_else(|| anyhow::anyhow!("no {} build for this platform", server_name(server)))
         .and_then(|platform| manifest.entry(server, platform))
@@ -156,7 +245,7 @@ pub async fn server_command(
         Err(error) => {
             let reason = error.to_string();
             cx.update(|cx| start_failed(worktree_root, worktree_id, reason, cx));
-            return Err(error);
+            return Err(error.into());
         }
     };
 
@@ -165,6 +254,12 @@ pub async fn server_command(
             .is_some_and(|manager| manager.read(cx).is_expired(worktree_id, server));
         known || entry.is_expired(today)
     });
+    if expired && server == KotlinServerKind::Intellij {
+        return Err(refused(
+            FallbackReason::Expired,
+            format!("intellij {} expired", entry.version),
+        ));
+    }
     if expired {
         cx.update(|cx| {
             if let Some(manager) = manager_of(worktree_root, cx) {
@@ -173,7 +268,7 @@ pub async fn server_command(
                 });
             }
         });
-        bail!("{EXPIRED_REASON}");
+        return Err(anyhow::anyhow!("{EXPIRED_REASON}").into());
     }
 
     // The import JDK (D11). A Gradle toolchain no JDK satisfies fails the start before anything is
@@ -187,7 +282,7 @@ pub async fn server_command(
             log_line(worktree_root, &format!("jdk: {reason}"), cx);
             start_failed(worktree_root, worktree_id, reason.clone(), cx)
         });
-        bail!(reason);
+        return Err(anyhow::anyhow!(reason).into());
     }
     cx.update(|cx| {
         let text = match detection.jdk() {
@@ -214,9 +309,9 @@ pub async fn server_command(
                     );
                     start_failed(worktree_root, worktree_id, reason, cx)
                 });
-                bail!(INTELLIJ_DOWNLOAD_HINT);
+                return Err(anyhow::anyhow!(INTELLIJ_DOWNLOAD_HINT).into());
             }
-            install_server(
+            let installed = install_server(
                 dirs,
                 server,
                 entry.clone(),
@@ -225,17 +320,27 @@ pub async fn server_command(
                 worktree_id,
                 cx,
             )
-            .await?;
-            check_installed(&dirs.install_root, server, &entry)
-                .ok_or_else(|| not_installed(server))?
+            .await
+            .and_then(|()| {
+                check_installed(&dirs.install_root, server, &entry)
+                    .ok_or_else(|| not_installed(server))
+            });
+            match installed {
+                Ok(binary) => binary,
+                Err(error) if server == KotlinServerKind::Intellij => {
+                    return Err(refused(
+                        FallbackReason::InstallFailed,
+                        format!("install error: {error:#}"),
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     };
     let binary = with_java_home(binary, &detection);
     match server {
         KotlinServerKind::KotlinLsp => Ok(binary),
-        KotlinServerKind::Intellij => {
-            intellij_gates(dirs, &entry, binary, worktree_root, worktree_id, cx).await
-        }
+        KotlinServerKind::Intellij => intellij_gates(dirs, &entry, binary, worktree_root, cx).await,
     }
 }
 
@@ -274,23 +379,14 @@ fn log_line(worktree_root: &Path, text: &str, cx: &App) {
 
 /// The checks an installed IntelliJ server passes before it starts (D9, then D10): the user has
 /// accepted this bundle's EULA, and `license status` says licensed. Returns the binary with
-/// `--eula=<hash>` added. A failure is the `Failed` status; the error carries the same reason.
+/// `--eula=<hash>` added; a failure is the fallback it causes.
 async fn intellij_gates(
     dirs: &KotlinDirs,
     entry: &ManifestEntry,
     mut binary: LanguageServerBinary,
     worktree_root: &Path,
-    worktree_id: WorktreeId,
     cx: &mut AsyncApp,
-) -> Result<LanguageServerBinary> {
-    let fail = |reason: String, detail: String, cx: &mut AsyncApp| {
-        cx.update(|cx| {
-            log_line(worktree_root, &detail, cx);
-            start_failed(worktree_root, worktree_id, reason.clone(), cx)
-        });
-        anyhow::anyhow!(reason)
-    };
-
+) -> Result<LanguageServerBinary, StartError> {
     let bundle = version_dir(
         &dirs.install_root,
         KotlinServerKind::Intellij,
@@ -301,11 +397,11 @@ async fn intellij_gates(
         .await
     {
         Ok(hash) => hash,
+        // A bundle without its agreement is a broken install.
         Err(error) => {
-            return Err(fail(
-                "IntelliJ EULA not found".into(),
+            return Err(refused(
+                FallbackReason::InstallFailed,
                 format!("eula error: {error:#}"),
-                cx,
             ));
         }
     };
@@ -316,10 +412,9 @@ async fn intellij_gates(
             .await
     };
     if !accepted {
-        return Err(fail(
-            EULA_NOT_ACCEPTED_REASON.into(),
+        return Err(refused(
+            FallbackReason::EulaNotAccepted,
             format!("eula {hash} is not accepted"),
-            cx,
         ));
     }
 
@@ -327,18 +422,14 @@ async fn intellij_gates(
     let outcome = match license_check(&binary, timeout).await {
         Ok(outcome) => outcome,
         Err(error) => {
-            return Err(fail(
-                LicenseOutcome::Offline
-                    .failure_reason()
-                    .unwrap_or_default()
-                    .into(),
+            return Err(refused(
+                FallbackReason::LicenseCheckFailed,
                 format!("license check error: {error:#}"),
-                cx,
             ));
         }
     };
-    if let Some(reason) = outcome.failure_reason() {
-        return Err(fail(reason.into(), format!("license {outcome:?}"), cx));
+    if let Some(reason) = fallback_for(outcome) {
+        return Err(refused(reason, format!("license {outcome:?}")));
     }
     cx.update(|cx| log_line(worktree_root, "license licensed", cx));
     binary.arguments.push(eula_argument(&hash));
@@ -1063,6 +1154,18 @@ launcher = "bin/launcher"
         ]);
         fixture.manifest = Manifest::parse(&format!(
             r#"
+[kotlin-lsp]
+version = "1.2.3"
+expires = "2026-11-12"
+args = {args:?}
+
+[kotlin-lsp.platform.{platform}]
+url = "http://127.0.0.1:1/kotlin-server.tar.gz"
+sha256 = "{lsp_sha}"
+archive = "tar.gz"
+strip_components = 1
+launcher = "bin/launcher"
+
 [intellij]
 version = "1.2.3"
 args = {args:?}
@@ -1080,6 +1183,7 @@ launcher = "bin/launcher"
             args = PINNED_ARGS,
             platform = current_platform().unwrap(),
             sha = crate::install::tests::sha256(&fixture.archive),
+            lsp_sha = "0".repeat(64),
         ))
         .unwrap();
         fixture.entry = fixture
@@ -1110,6 +1214,26 @@ launcher = "bin/launcher"
         fn intellij_dir(&self) -> PathBuf {
             self.dirs.install_root.join("intellij")
         }
+
+        /// kotlin-lsp, installed, for the start that falls back to it.
+        fn preinstall_kotlin_lsp(&self) -> PathBuf {
+            install(&self.dirs, &self.manifest, KotlinServerKind::KotlinLsp)
+        }
+
+        fn fallback(&self, cx: &mut TestAppContext) -> Option<FallbackReason> {
+            self.manager.read_with(cx, |manager, _| {
+                manager
+                    .worktree(worktree())
+                    .and_then(|state| state.fallback.as_ref())
+                    .map(|fallback| fallback.kind)
+            })
+        }
+
+        /// `kotlin: restart server`: the fallback ends and the next start tries IntelliJ again.
+        fn end_fallback(&self, cx: &mut TestAppContext) {
+            self.manager
+                .update(cx, |manager, cx| manager.restart_server(worktree(), cx));
+        }
     }
 
     #[gpui::test]
@@ -1138,10 +1262,16 @@ launcher = "bin/launcher"
         );
         assert!(!fixture.intellij_dir().exists());
 
-        // On: the download starts, the bundle is installed, then the EULA gate stops the start.
+        // Not installed with the download off is no fallback: there is nothing to fall back from.
+        assert_eq!(fixture.fallback(cx), None);
+
+        // On: the download starts, the bundle is installed, then the EULA gate stops IntelliJ and
+        // the same start runs kotlin-lsp.
+        let kotlin_lsp = fixture.preinstall_kotlin_lsp();
         set_user_settings(cx, INTELLIJ_ON);
-        let error = fixture.command(cx, &net, today()).await.unwrap_err();
-        assert_eq!(error.to_string(), "IntelliJ EULA not accepted");
+        let binary = fixture.command(cx, &net, today()).await.unwrap();
+        assert_eq!(binary.path, kotlin_lsp);
+        assert_eq!(fixture.fallback(cx), Some(FallbackReason::EulaNotAccepted));
         assert_eq!(net.requests(), 1);
         assert!(fixture.intellij_dir().join("1.2.3/EULA.txt").is_file());
     }
@@ -1151,6 +1281,7 @@ launcher = "bin/launcher"
         cx.executor().allow_parking();
         let fixture = intellij_fixture(cx);
         let net = net_serving(fixture.archive.clone());
+        fixture.preinstall_kotlin_lsp();
         // Off for the user, on in the project's own settings.
         cx.update(|cx| {
             cx.update_global::<SettingsStore, _>(|store, cx| {
@@ -1165,8 +1296,24 @@ launcher = "bin/launcher"
                     .unwrap();
             });
         });
-        fixture.command(cx, &net, today()).await.unwrap_err();
+        fixture.command(cx, &net, today()).await.unwrap();
         assert_eq!(net.requests(), 1);
+    }
+
+    /// A start that the IntelliJ gates refuse for `reason`: it falls back and returns kotlin-lsp.
+    /// Ends the fallback afterwards, as `kotlin: restart server` does.
+    async fn falls_back(
+        fixture: &Fixture,
+        net: &Net,
+        kotlin_lsp: &Path,
+        reason: FallbackReason,
+        cx: &mut TestAppContext,
+    ) {
+        let binary = fixture.command(cx, net, today()).await.unwrap();
+        assert_eq!(binary.path, kotlin_lsp, "{reason:?}");
+        assert_eq!(fixture.fallback(cx), Some(reason));
+        assert_eq!(fixture.status(cx), Some(ServerStatus::Starting));
+        fixture.end_fallback(cx);
     }
 
     #[gpui::test]
@@ -1177,39 +1324,50 @@ launcher = "bin/launcher"
         let fixture = intellij_fixture(cx);
         set_user_settings(cx, INTELLIJ_ON);
         let net = net_serving(fixture.archive.clone());
-        let failed = |reason: &str| {
-            Some(ServerStatus::Failed {
-                reason: reason.into(),
-            })
-        };
-
-        // Installed, not accepted: no start, and `license status` was not run.
-        let error = fixture.command(cx, &net, today()).await.unwrap_err();
-        assert_eq!(error.to_string(), "IntelliJ EULA not accepted");
-        assert_eq!(fixture.status(cx), failed("IntelliJ EULA not accepted"));
+        let kotlin_lsp = fixture.preinstall_kotlin_lsp();
+        // Installed, not accepted: no IntelliJ start, and `license status` was not run.
+        falls_back(
+            &fixture,
+            &net,
+            &kotlin_lsp,
+            FallbackReason::EulaNotAccepted,
+            cx,
+        )
+        .await;
         assert_eq!(fixture.license_runs(), 0);
 
         // Accepting another agreement's hash does not count.
         crate::accept_eula(&fixture.dirs.state_dir, &crate::eula_hash(b"another text")).unwrap();
-        let error = fixture.command(cx, &net, today()).await.unwrap_err();
-        assert_eq!(error.to_string(), "IntelliJ EULA not accepted");
+        falls_back(
+            &fixture,
+            &net,
+            &kotlin_lsp,
+            FallbackReason::EulaNotAccepted,
+            cx,
+        )
+        .await;
         assert_eq!(fixture.license_runs(), 0);
 
-        // Accepted but unlicensed, then offline: the status names the reason.
+        // Accepted but unlicensed, then offline: the fallback names the reason.
         let hash = crate::eula_hash(EULA.as_bytes());
         crate::accept_eula(&fixture.dirs.state_dir, &hash).unwrap();
         fixture.set_license_exit(2);
-        let error = fixture.command(cx, &net, today()).await.unwrap_err();
-        assert_eq!(error.to_string(), "IntelliJ unlicensed");
-        assert_eq!(fixture.status(cx), failed("IntelliJ unlicensed"));
+        falls_back(&fixture, &net, &kotlin_lsp, FallbackReason::Unlicensed, cx).await;
         fixture.set_license_exit(3);
-        let error = fixture.command(cx, &net, today()).await.unwrap_err();
-        assert_eq!(error.to_string(), "license check failed (offline?)");
-        assert_eq!(
-            fixture.status(cx),
-            failed("license check failed (offline?)")
-        );
+        falls_back(
+            &fixture,
+            &net,
+            &kotlin_lsp,
+            FallbackReason::LicenseCheckFailed,
+            cx,
+        )
+        .await;
         assert_eq!(fixture.license_runs(), 2);
+        let log = fs::read_to_string(fixture.dirs.logs_dir.join("kotlin.log")).unwrap();
+        assert!(
+            log.contains("intellij -> kotlin-lsp: IntelliJ unlicensed (license Unlicensed)"),
+            "{log}"
+        );
 
         // Licensed: the pinned arguments and the accepted hash. The installed server needs no
         // download, so the setting can be off again.
@@ -1225,26 +1383,53 @@ launcher = "bin/launcher"
             fixture.intellij_dir().join("1.2.3/bin/launcher")
         );
         assert_eq!(fixture.status(cx), Some(ServerStatus::Starting));
+        assert_eq!(fixture.fallback(cx), None);
         assert_eq!(fixture.license_runs(), 3);
         assert_eq!(net.requests(), 1, "only the first start downloaded");
         let log = fs::read_to_string(fixture.dirs.logs_dir.join("kotlin.log")).unwrap();
-        assert!(log.contains("license Unlicensed"), "{log}");
         assert!(log.contains("license licensed"), "{log}");
     }
 
     #[gpui::test]
-    async fn test_a_failed_intellij_install_is_failed_without_a_fallback(cx: &mut TestAppContext) {
+    async fn test_a_failed_intellij_install_falls_back(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = intellij_fixture(cx);
+        let kotlin_lsp = fixture.preinstall_kotlin_lsp();
+        set_user_settings(cx, INTELLIJ_ON);
+        let down = net_down();
+        let binary = fixture.command(cx, &down, today()).await.unwrap();
+        assert_eq!(binary.path, kotlin_lsp);
+        assert_eq!(fixture.fallback(cx), Some(FallbackReason::InstallFailed));
+        assert_eq!(fixture.status(cx), Some(ServerStatus::Starting));
+        assert_eq!(down.requests(), 1);
+        let log = fs::read_to_string(fixture.dirs.logs_dir.join("kotlin.log")).unwrap();
+        assert!(
+            log.contains("IntelliJ install failed (install error: "),
+            "{log}"
+        );
+    }
+
+    /// kotlin-lsp fails while it stands in for IntelliJ: no server at all, and the status says why
+    /// for both.
+    #[gpui::test]
+    async fn test_kotlin_lsp_failing_after_a_fallback_is_both_failed(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let fixture = intellij_fixture(cx);
         set_user_settings(cx, INTELLIJ_ON);
-        let down = net_down();
-        let error = fixture.command(cx, &down, today()).await.unwrap_err();
-        assert!(error.to_string().contains("downloading"), "{error:#}");
-        let Some(ServerStatus::Failed { reason }) = fixture.status(cx) else {
-            panic!("expected Failed, got {:?}", fixture.status(cx));
+        // The IntelliJ bundle downloads; kotlin-lsp gets the same bytes, which fail its digest.
+        let net = net_serving(fixture.archive.clone());
+        fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(fixture.fallback(cx), Some(FallbackReason::EulaNotAccepted));
+        let Some(ServerStatus::BothFailed {
+            intellij,
+            kotlin_lsp,
+        }) = fixture.status(cx)
+        else {
+            panic!("expected BothFailed, got {:?}", fixture.status(cx));
         };
-        assert!(reason.starts_with("install failed: "), "{reason}");
-        assert_eq!(down.requests(), 1);
+        assert_eq!(intellij, "IntelliJ EULA not accepted");
+        assert!(kotlin_lsp.starts_with("install failed: "), "{kotlin_lsp}");
+        assert_eq!(net.requests(), 2);
     }
 
     /// Starts an install that never ends, drops the start, and returns the status afterwards.
