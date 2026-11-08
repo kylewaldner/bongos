@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::hash::{DefaultHasher, Hasher};
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -39,4 +40,12 @@ pub(crate) fn write_atomic_with(
     }
     temp.persist(path).map_err(|error| error.error)?;
     File::open(directory)?.sync_all()
+}
+
+/// A hash of a file's bytes, to tell whether a file changed since it was read. Stable within one
+/// process, which is all the store needs; never written to disk.
+pub fn content_hash(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(bytes);
+    hasher.finish()
 }
