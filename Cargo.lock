@@ -2212,7 +2212,11 @@ dependencies = [
 name = "bongos_kotlin"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
  "gpui",
+ "log",
+ "serde",
  "serde_json",
  "settings",
  "tempfile",

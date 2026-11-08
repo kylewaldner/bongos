@@ -1,6 +1,12 @@
+mod resolve;
+
 use std::path::PathBuf;
 
 use gpui::App;
+pub use resolve::{
+    Layer, LayerReport, Resolved, ResolvedSource, clear_project_override, layer_report,
+    project_override, resolve, set_project_override,
+};
 use settings::{KotlinServerKind, RegisterSetting, Settings, SettingsContent};
 
 /// The merged `kotlin` settings. Read them with a `SettingsLocation` so a project's
