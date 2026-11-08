@@ -14,6 +14,7 @@ use bongos_work_model::layout;
 use collections::HashMap;
 use editor::Editor;
 use fs::{CreateOptions, Fs};
+use project::Project;
 use gpui::{
     Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Styled as _,
@@ -37,6 +38,9 @@ pub(crate) const NO_CHAT: &str = "No chat is shown";
 /// The panel. One per workspace; every one shows the same global runtime and records.
 pub struct ChatPanel {
     workspace: WeakEntity<Workspace>,
+    /// The workspace's project, kept so a chat can be shown while the workspace is being updated
+    /// (by a command).
+    project: Entity<Project>,
     fs: Arc<dyn Fs>,
     focus_handle: FocusHandle,
     sessions: HashMap<String, Entity<SessionView>>,
@@ -47,7 +51,12 @@ pub struct ChatPanel {
 impl EventEmitter<PanelEvent> for ChatPanel {}
 
 impl ChatPanel {
-    pub fn new(workspace: WeakEntity<Workspace>, fs: Arc<dyn Fs>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut subscriptions = Vec::new();
         if let Some(runtime) = ChatRuntime::global(cx) {
             let store = runtime.read(cx).store().clone();
@@ -57,6 +66,7 @@ impl ChatPanel {
         }
         Self {
             workspace,
+            project,
             fs,
             focus_handle: cx.focus_handle(),
             sessions: HashMap::default(),
@@ -96,14 +106,10 @@ impl ChatPanel {
         }
         let known = ChatRuntime::global(cx)
             .is_some_and(|runtime| runtime.read(cx).store().read(cx).find(chat_id).is_some());
-        let Some(project) = self
-            .workspace
-            .read_with(cx, |workspace, _| workspace.project().clone())
-            .ok()
-            .filter(|_| known)
-        else {
+        if !known {
             return false;
-        };
+        }
+        let project = self.project.clone();
         if !self.sessions.contains_key(chat_id) {
             let workspace = self.workspace.clone();
             let fs = self.fs.clone();
@@ -234,7 +240,8 @@ fn sync_panel(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         (true, None) => {
             let weak = cx.entity().downgrade();
             let fs = workspace.app_state().fs.clone();
-            let panel = cx.new(|cx| ChatPanel::new(weak, fs, cx));
+            let project = workspace.project().clone();
+            let panel = cx.new(|cx| ChatPanel::new(weak, project, fs, cx));
             workspace.add_panel(panel, window, cx);
         }
         (false, Some(panel)) => workspace.remove_panel(&panel, window, cx),

@@ -433,7 +433,11 @@ async fn answer(workspace: &Entity<Workspace>, text: &str, cx: &mut VisualTestCo
         }
         cx.executor().timer(Duration::from_millis(25)).await;
     }
-    assert!(has_modal(workspace, cx), "no picker came for `{text}`");
+    assert!(
+        has_modal(workspace, cx),
+        "no picker came for `{text}` (a toast is shown: {})",
+        toast_shown(workspace, cx)
+    );
     if !text.is_empty() {
         cx.simulate_input(text);
     }
@@ -545,6 +549,7 @@ async fn test_new_chats_run_in_the_worktree_the_repository_and_the_group(
     cx: &mut TestAppContext,
 ) {
     let h = harness(cx, true, 60, &[]).await;
+    cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
     add_tasks(&h, cx).await;
     let extra = h.base.join("extra");
     let projects = vec![h.project.clone()];
