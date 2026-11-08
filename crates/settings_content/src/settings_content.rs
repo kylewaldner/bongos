@@ -1357,7 +1357,7 @@ pub struct WorkSettingsContent {
     /// Whether the Work view is on. While it is off, bongos neither reads nor watches
     /// `~/.bongos`.
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
     /// Days without activity after which an open project or one-off fades.
     ///
