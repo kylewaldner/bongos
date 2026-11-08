@@ -227,10 +227,12 @@ pub fn shell_quote(path: &Path) -> Result<String> {
     Ok(format!("'{text}'"))
 }
 
-/// `claude-settings.json`: one `SessionStart` hook that prints `context.md`.
+/// `claude-settings.json`: one `SessionStart` hook that prints `context.md`, and the terminal bell
+/// notification channel so "waiting for input" rings (see `claude.rs` for what is verified).
 pub fn render_settings(context_path: &Path) -> Result<String> {
     let command = format!("cat {}", shell_quote(context_path)?);
     let settings = json!({
+        crate::claude::BELL_KEY: crate::claude::BELL_VALUE,
         "hooks": {
             "SessionStart": [
                 { "hooks": [ { "type": "command", "command": command } ] }

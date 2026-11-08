@@ -567,3 +567,11 @@ fn facts_carry_no_artifact() {
         pr_links: _,
     } = TaskFacts::default();
 }
+
+#[test]
+fn the_settings_turn_on_the_terminal_bell() {
+    let settings = render_settings(Path::new("/tmp/context.md")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(value[BELL_KEY], BELL_VALUE);
+    assert_eq!(value["preferredNotifChannel"], "terminal_bell");
+}
