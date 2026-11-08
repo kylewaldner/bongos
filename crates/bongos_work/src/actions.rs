@@ -57,6 +57,10 @@ pub mod task {
             MoveToProject,
             /// Picks a task and an activity and files it as a one-off. Asks first.
             MakeOneOff,
+            /// Picks an open leaf (pr-ship, pr-merge, spike or babysit) and creates its branch and
+            /// worktree in its repository, then runs the repository's setup command there. A
+            /// babysit task asks which of its PRs to check out.
+            Start,
         ]
     );
 }

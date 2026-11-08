@@ -12,6 +12,7 @@ mod repositories;
 mod settings;
 mod store;
 mod structure;
+mod worktrees;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -73,3 +74,5 @@ mod command_tests_more;
 mod repository_tests;
 #[cfg(test)]
 mod store_tests;
+#[cfg(test)]
+mod worktree_tests;

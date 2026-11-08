@@ -2284,11 +2284,13 @@ version = "0.1.0"
 name = "bongos_work"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bongos_work_model",
  "command_palette_hooks",
  "editor",
  "fs",
  "futures 0.3.32",
+ "git",
  "gpui",
  "log",
  "menu",
@@ -2296,9 +2298,11 @@ dependencies = [
  "picker",
  "project",
  "settings",
+ "task",
  "tempfile",
  "ui",
  "util",
+ "which 6.0.3",
  "workspace",
 ]
 
