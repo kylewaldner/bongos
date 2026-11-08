@@ -182,3 +182,25 @@ async fn without_a_focused_task_the_mode_asks_which(cx: &mut TestAppContext) {
     })
     .await;
 }
+
+#[gpui::test]
+async fn a_mode_on_an_unfocused_task_focuses_it_first(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    // A focus with no task, so the picker asks which task, and chat focuses the pick first.
+    cx.update(|_, cx| {
+        cx.set_global(AppDatabase::test_new());
+        focus::init(cx);
+    });
+    let calls = Arc::new(Calls::default());
+    handle_fakes(&harness, &calls, cx);
+
+    dispatch(cx, "task::Mode");
+    harness.answer(cx, &Input::Pick("Backfill")).await;
+    harness.answer(cx, &Input::Pick("Chat:")).await;
+    wait_until(cx, "the focus", |cx| {
+        cx.update(|_, cx| Focus::global(cx).unwrap().read(cx).task_id() == Some("l1"))
+    })
+    .await;
+    assert!(harness.picker(cx).is_none());
+    assert!(!harness.has_toast(cx));
+}

@@ -819,8 +819,15 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
+            initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
+
+        // The Work panel follows `work.enabled`: it is added while on and removed when off.
+        workspace_handle
+            .update_in(&mut cx.clone(), |workspace, window, cx| {
+                bongos_work::init_panel(workspace, window, cx)
+            })
+            .log_err();
 
         anyhow::Ok(())
     })
@@ -5411,6 +5418,7 @@ mod tests {
                 "agent",
                 "agents_sidebar",
                 "app_menu",
+                "artifact",
                 "assistant",
                 "assistant2",
                 "branch_picker",

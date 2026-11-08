@@ -589,8 +589,9 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
     wait_until(cx, "the refusal toast", |cx| harness.has_toast(cx)).await;
 }
 
-/// Every action these commands register, but the debug-only `work::DumpSessionContext`.
-const NAMES: [&str; 50] = [
+/// Every action these commands register, but the debug-only `work::DumpSessionContext` and
+/// `work::DumpView`.
+const NAMES: [&str; 53] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -641,6 +642,9 @@ const NAMES: [&str; 50] = [
     "artifact::HideAll",
     "artifact::ShareAll",
     "artifact::Link",
+    "work::TogglePanel",
+    "work::Up",
+    "work::ToggleRow",
 ];
 
 /// [`NAMES`], and in a debug build the debug-only actions.
@@ -648,6 +652,7 @@ fn names() -> Vec<&'static str> {
     let mut names = NAMES.to_vec();
     if cfg!(debug_assertions) {
         names.push("work::DumpSessionContext");
+        names.push("work::DumpView");
     }
     names
 }

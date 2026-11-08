@@ -24,7 +24,7 @@ use crate::{WorkStore, WorkStoreEvent};
 
 /// A needs-you source whose answer the test sets.
 #[derive(Default)]
-struct FakeGates(RefCell<Vec<NeedsYou>>);
+pub(crate) struct FakeGates(pub(crate) RefCell<Vec<NeedsYou>>);
 
 impl NeedsYouSource for FakeGates {
     fn needs_you(&self, _: &App) -> Vec<NeedsYou> {
@@ -51,7 +51,7 @@ impl LiveModesSource for FakeRuns {
     }
 }
 
-fn gate(task_id: &str, reason: &str) -> NeedsYou {
+pub(crate) fn gate(task_id: &str, reason: &str) -> NeedsYou {
     NeedsYou {
         task_id: task_id.to_string(),
         reason: reason.to_string(),
@@ -69,7 +69,7 @@ fn run(workflow: &str) -> ActiveRun {
 
 /// Adds the group `deep` (`g4`) under `phase`, holding the leaf `gate` (`l4`): from the project
 /// (`g1`) that is `phase` (`g2`), `deep` and `gate`, three levels down.
-async fn with_deep_leaf(harness: &Harness, cx: &mut VisualTestContext) {
+pub(crate) async fn with_deep_leaf(harness: &Harness, cx: &mut VisualTestContext) {
     let deep = harness.task_dir(&["phase", "deep"]);
     write(&layout::task_file(&deep), &group_toml("g4", "Deep"));
     write(

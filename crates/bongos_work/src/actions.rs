@@ -151,6 +151,13 @@ pub mod work {
             /// Picks a folder, asks for a name and a setup command, and adds the repository to
             /// `work.repositories` in the user settings.
             AddRepository,
+            /// Opens the Work panel, or closes it when it already has focus.
+            TogglePanel,
+            /// In the Work panel, goes up one level (to the group the shown tasks are in).
+            Up,
+            /// In the Work panel, expands the selected row to show its todos and artifacts, or
+            /// folds it again.
+            ToggleRow,
         ]
     );
 
@@ -161,6 +168,9 @@ pub mod work {
             /// Debug builds only: writes what a chat session on the focused task would be told
             /// to `work-session-context.json` in the logs directory.
             DumpSessionContext,
+            /// Debug builds only: writes the rows of the level the Work panel shows to
+            /// `work-view.txt` in the logs directory.
+            DumpView,
         ]
     );
 }
