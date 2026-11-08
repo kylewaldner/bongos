@@ -7,7 +7,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use bongos_work_model::{Kind, TaskFile, serialize_task};
+use bongos_work_model::{Kind, TaskFile, layout, serialize_task};
 use git::status::FileStatus;
 use gpui::{App, Entity, TestAppContext, VisualTestContext};
 use serde_json::json;
@@ -71,9 +71,9 @@ fn run(workflow: &str) -> ActiveRun {
 /// (`g1`) that is `phase` (`g2`), `deep` and `gate`, three levels down.
 async fn with_deep_leaf(harness: &Harness, cx: &mut VisualTestContext) {
     let deep = harness.task_dir(&["phase", "deep"]);
-    write(&deep.join("task.toml"), &group_toml("g4", "Deep"));
+    write(&layout::task_file(&deep), &group_toml("g4", "Deep"));
     write(
-        &deep.join("gate").join("task.toml"),
+        &layout::task_file(&layout::child_dir(&deep, "gate")),
         &leaf_toml("l4", "Gate", Kind::PrShip),
     );
     wait_until(cx, "the store to see the deep leaf", |cx| {
@@ -213,7 +213,7 @@ async fn give_backfill_a_worktree(harness: &Harness, worktree: &Path, cx: &mut V
     file.id = "l1".to_string();
     file.worktree = Some(worktree.to_string_lossy().into_owned());
     write(
-        &harness.task_dir(&["backfill"]).join("task.toml"),
+        &layout::task_file(&harness.task_dir(&["backfill"])),
         &serialize_task(&file).unwrap(),
     );
     wait_until(cx, "the worktree to load", |cx| {
