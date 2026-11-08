@@ -128,6 +128,14 @@ async fn chat_and_run_dispatch_by_name_when_handled(cx: &mut TestAppContext) {
     assert!(harness.has_toast(cx));
 }
 
+/// Whether the window's file system, where `task: think` creates documents, has `path`.
+fn has_file(harness: &Harness, path: &std::path::Path, cx: &mut VisualTestContext) -> bool {
+    let fs = harness
+        .workspace
+        .read_with(cx, |workspace, _| workspace.app_state().fs.as_fake());
+    fs.paths(false).iter().any(|existing| existing == path)
+}
+
 fn focus_on_group(harness: &Harness, cx: &mut VisualTestContext) {
     cx.update(|_, cx| {
         let focus = Focus::global(cx).unwrap();
@@ -148,7 +156,10 @@ async fn thinking_opens_a_new_document_and_nothing_else(cx: &mut TestAppContext)
         .run(cx, "task::Mode", &[Input::Pick("Thinking:")])
         .await;
     let document = harness.task_dir(&["backfill"]).join("untitled-1.md");
-    wait_until(cx, "the new document", |_| document.is_file()).await;
+    wait_until(cx, "the new document", |cx| {
+        has_file(&harness, &document, cx)
+    })
+    .await;
     assert!(!harness.has_toast(cx));
     assert_eq!(calls.chats.load(Ordering::SeqCst), 0);
     assert_eq!(calls.runs.load(Ordering::SeqCst), 0);
@@ -166,5 +177,8 @@ async fn without_a_focused_task_the_mode_asks_which(cx: &mut TestAppContext) {
     harness.answer(cx, &Input::Pick("Backfill")).await;
     harness.answer(cx, &Input::Pick("Thinking:")).await;
     let document = harness.task_dir(&["backfill"]).join("untitled-1.md");
-    wait_until(cx, "the new document", |_| document.is_file()).await;
+    wait_until(cx, "the new document", |cx| {
+        has_file(&harness, &document, cx)
+    })
+    .await;
 }
