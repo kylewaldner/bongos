@@ -178,7 +178,24 @@ impl ChatStore {
         change: impl FnOnce(&mut ChatRecord) -> bongos_chat_model::Result<()> + Send + 'static,
         cx: &mut gpui::Context<Self>,
     ) -> Task<Result<ChatRecord, ChatWriteError>> {
-        self.queue(move || update_now(&path, change), cx)
+        self.queue(
+            move || {
+                update_now(&path, |record| {
+                    let id = record.id.clone();
+                    change(record)?;
+                    if record.id != id {
+                        // The id names the file; a record that changed it would be written
+                        // under the old name with a new id.
+                        return Err(model_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "a chat's id cannot be changed",
+                        )));
+                    }
+                    Ok(())
+                })
+            },
+            cx,
+        )
     }
 
     /// Queues the creation of `record` in `<scope_dir>/chats/`. Refused when the file exists.
@@ -190,6 +207,12 @@ impl ChatStore {
     ) -> Task<Result<PathBuf, ChatWriteError>> {
         self.queue(
             move || {
+                if !is_valid_id(&record.id) {
+                    return Err(ChatWriteError::Failed(format!(
+                        "`{}` is not a usable chat id",
+                        record.id
+                    )));
+                }
                 create_record(&scope_dir, &record)
                     .map_err(|error| ChatWriteError::Failed(error.to_string()))
             },
@@ -372,6 +395,23 @@ fn build_index(
     (index, parses)
 }
 
+/// Whether `id` is one path component that makes a record file name: it is never a path that
+/// leaves the `chats` directory.
+fn is_valid_id(id: &str) -> bool {
+    let one_component =
+        !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\', '\0']);
+    one_component && is_record_file_name(&format!("{id}.toml"))
+}
+
+fn model_error(error: std::io::Error) -> bongos_chat_model::Error {
+    bongos_chat_model::Error {
+        path: None,
+        line: None,
+        column: None,
+        kind: ErrorKind::Io(error),
+    }
+}
+
 /// The update of a record, run on the writer queue.
 fn update_now(
     path: &Path,
@@ -389,7 +429,7 @@ fn update_now(
 }
 
 /// `~` or `~/...` under the home directory; any other path as written.
-fn expand_home(dir: &str) -> PathBuf {
+pub(crate) fn expand_home(dir: &str) -> PathBuf {
     if dir == "~" {
         return util::paths::home_dir().clone();
     }
