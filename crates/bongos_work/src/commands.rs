@@ -23,10 +23,11 @@ use settings::{Settings as _, SettingsStore};
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
 
-use crate::actions::{project, task, todo};
+use crate::actions::{project, task, todo, work};
 use crate::modals::{self, Then};
+use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
-use crate::{links, projects, structure};
+use crate::{links, projects, repositories, structure};
 
 /// The activity a task made with `task: new` goes under: it names no parent, and the Work view
 /// that would supply "the group at point" does not exist yet.
@@ -71,6 +72,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::Archive>(),
         TypeId::of::<project::Unarchive>(),
         TypeId::of::<project::OpenFolder>(),
+        TypeId::of::<work::AddRepository>(),
     ]
 }
 
@@ -115,6 +117,7 @@ pub fn register(workspace: &mut Workspace) {
     links::register(workspace);
     structure::register(workspace);
     projects::register(workspace);
+    repositories::register(workspace);
 }
 
 pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
@@ -382,6 +385,21 @@ pub(crate) fn has_status(task: &Task, keep: impl Fn(Status) -> bool) -> bool {
 
 // Tasks.
 
+/// The request for a new task with `goal` at `placement`. Its kind is the model's default,
+/// except `pr-merge` in a repository without deployments (see
+/// [`default_kind`](crate::repositories::default_kind)).
+pub(crate) fn new_task_with_default_kind(placement: &Placement, goal: String, cx: &App) -> NewTask {
+    let mut new = NewTask {
+        goal,
+        ..NewTask::default()
+    };
+    if let Some(tree) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()) {
+        let repositories = &WorkSettings::get_global(cx).repositories;
+        new.kind = default_kind(&tree, placement, &new, repositories);
+    }
+    new
+}
+
 fn new_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if ready(workspace, cx).is_none() {
         return;
@@ -392,18 +410,12 @@ fn new_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         "",
         false,
         Box::new(|goal, workspace, _, cx| {
+            let placement = Placement::OneOff {
+                activity: DEFAULT_ACTIVITY.to_string(),
+            };
+            let new = new_task_with_default_kind(&placement, goal, cx);
             submit(workspace, cx, move |tree, ctx| {
-                model::new_task(
-                    tree,
-                    ctx,
-                    Placement::OneOff {
-                        activity: DEFAULT_ACTIVITY.to_string(),
-                    },
-                    NewTask {
-                        goal: goal.clone(),
-                        ..NewTask::default()
-                    },
-                )
+                model::new_task(tree, ctx, placement.clone(), new.clone())
             })
         }),
         window,
@@ -426,16 +438,10 @@ fn new_child(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 "",
                 false,
                 Box::new(move |goal, workspace, _, cx| {
+                    let new =
+                        new_task_with_default_kind(&Placement::Under(parent.clone()), goal, cx);
                     submit(workspace, cx, move |tree, ctx| {
-                        model::new_child(
-                            tree,
-                            ctx,
-                            &parent,
-                            NewTask {
-                                goal: goal.clone(),
-                                ..NewTask::default()
-                            },
-                        )
+                        model::new_child(tree, ctx, &parent, new.clone())
                     })
                 }),
                 window,
