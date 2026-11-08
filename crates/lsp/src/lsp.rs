@@ -1199,7 +1199,17 @@ impl LanguageServer {
             response_handlers.lock().take();
             Self::notify_internal::<notification::Exit>(&notification_serializers, ()).ok();
             notification_serializers.close();
-            output_done.recv().await;
+            // A server that stopped reading stdin leaves the writer blocked, so this wait is
+            // bounded; the child is killed below either way.
+            let mut output_timer = executor.timer(SERVER_EXIT_TIMEOUT).fuse();
+            select! {
+                _ = output_done.recv().fuse() => {}
+                _ = output_timer => {
+                    log::warn!(
+                        "language server {name} (id {server_id}) did not finish reading input within {SERVER_EXIT_TIMEOUT:?}"
+                    );
+                }
+            }
             let child = server.lock().take();
             let exit_status = match child {
                 Some(child) => Self::wait_for_exit(child, &executor, &name, server_id).await,
@@ -1237,9 +1247,9 @@ impl LanguageServer {
         }
     }
 
-    /// Register a handler called once when the server's stdout closes without a shutdown having
-    /// been requested, with the process's exit status if it exited. If that already happened, the
-    /// handler is called immediately. Registering a handler replaces the previous one.
+    /// Register a handler called once when the stdout reader ends (EOF or a read or parse error)
+    /// without a shutdown having been requested. The status is `None` when the process is still
+    /// running. If that already happened, the handler is called immediately. Registering a handler replaces the previous one.
     pub fn on_termination<F>(&self, handler: F)
     where
         F: 'static + Send + FnOnce(Option<ExitStatus>),
@@ -2453,6 +2463,27 @@ mod tests {
             .await;
         assert!(started.elapsed() >= SERVER_EXIT_TIMEOUT);
         // The child would sleep for 30 s, so being reaped now means it was killed.
+        assert_reaped(process_id).await;
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_shutdown_kills_server_that_stopped_reading_stdin(cx: &mut TestAppContext) {
+        let server = start_shell_server("exec sleep 30", cx);
+        let process_id = server.process_id().expect("server has a process");
+        // Far more than a pipe buffer holds, so the writer blocks on a child that never reads.
+        server
+            .notify::<notification::ShowMessage>(ShowMessageParams {
+                typ: MessageType::INFO,
+                message: "x".repeat(4 * 1024 * 1024),
+            })
+            .expect("notification queued");
+
+        let started = Instant::now();
+        cx.background_spawn(server.shutdown().expect("first shutdown"))
+            .await;
+        // Shutdown request timeout, then the bounded writer wait, then the exit wait before the kill.
+        assert!(started.elapsed() < SERVER_SHUTDOWN_TIMEOUT + SERVER_EXIT_TIMEOUT * 3);
         assert_reaped(process_id).await;
     }
 
