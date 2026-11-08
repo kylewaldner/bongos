@@ -1,7 +1,8 @@
 //! The file model of bongos chat sessions: the record of one chat (`chats/<chat id>.toml` in a task
 //! or project directory), reading and writing it without losing keys this version does not know,
 //! the open and archived lists with their order, fork lookup, chat names, and the digest of the
-//! artifact list a chat was given. It has no UI dependency and never touches the real home
+//! artifact list a chat was given, and the session types (directories of plain files, with their
+//! shipped defaults, seeding and resolution). It has no UI dependency and never touches the real home
 //! directory: every path function takes the directory it works under.
 
 mod digest;
@@ -9,6 +10,8 @@ mod error;
 mod list;
 mod naming;
 mod record;
+mod shipped;
+mod types;
 
 pub use digest::{DIGEST_PREFIX, context_digest};
 pub use error::{Error, ErrorKind, Result};
@@ -18,6 +21,11 @@ pub use record::{
     Agent, ChatRecord, Extra, Fork, Layout, NamedBy, SCHEMA, Timestamp, chats_dir, create_record,
     is_record_file_name, parse_record, read_record, record_path, serialize_record, timestamp_utc,
     update_record, write_record,
+};
+pub use shipped::{SHIPPED_TYPES, ShippedType};
+pub use types::{
+    AgentOverrides, ResolvedSkill, ResolvedType, SKILLS_DIR, TypeConfig, parse_type_config,
+    resolve, seed,
 };
 
 #[cfg(test)]
@@ -31,3 +39,6 @@ mod naming_tests;
 
 #[cfg(test)]
 mod record_tests;
+
+#[cfg(test)]
+mod types_tests;

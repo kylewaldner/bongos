@@ -183,7 +183,8 @@ struct SchemaProbe {
     schema: Option<toml::Value>,
 }
 
-fn parse(text: &str, path: Option<&Path>) -> Result<ChatRecord> {
+/// Parses a TOML file that must carry `schema = 1`, naming `path` in any error.
+pub(crate) fn parse<T: serde::de::DeserializeOwned>(text: &str, path: Option<&Path>) -> Result<T> {
     let probe: SchemaProbe =
         toml::from_str(text).map_err(|error| Error::syntax(text, &error).with_path(path))?;
     match probe.schema {

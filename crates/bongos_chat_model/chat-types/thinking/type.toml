@@ -1,0 +1,8 @@
+schema = 1
+description = "Think about a task: no skills, the shared artifacts, told the task is in thinking mode"
+layout = "dual"            # dual | chat-only
+skills = []                # skill names, looked up in ../skills/<name>/ then ~/.claude/skills/<name>/
+task_context = false       # task file, notes directory, worktree, dependencies
+review_context = false     # PR links from the task's [result]
+thinking = true            # tells the session the task is in thinking mode
+artifacts = true           # the shared artifact list
