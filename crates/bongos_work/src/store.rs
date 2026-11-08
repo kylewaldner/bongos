@@ -23,6 +23,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bongos_work_model::commands::{self, Change, Context, Outcome};
@@ -118,7 +119,15 @@ pub struct WorkStore {
 /// An enabled period: the queue of writes and the task doing all disk work.
 struct Session {
     requests: mpsc::UnboundedSender<WriteRequest>,
+    /// Cleared when the session ends, so a write that has not started yet never starts.
+    alive: Arc<AtomicBool>,
     _run: Task<()>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
 }
 
 struct WriteRequest {
@@ -146,6 +155,8 @@ impl WorkStore {
         this
     }
 
+    /// The root as configured. Snapshot paths are under its canonical form (symbolic links
+    /// resolved), which is also the path that is watched.
     pub fn root(&self) -> &Path {
         &self.dirs.root
     }
@@ -209,9 +220,14 @@ impl WorkStore {
         let fs = self.fs.clone();
         let root = self.dirs.root.clone();
         let lock = self.disk_lock.clone();
-        let run = cx.spawn(async move |this, cx| run(this, fs, root, lock, receiver, cx).await);
+        let alive = Arc::new(AtomicBool::new(true));
+        let run = cx.spawn({
+            let alive = alive.clone();
+            async move |this, cx| run(this, fs, root, lock, alive, receiver, cx).await
+        });
         self.session = Some(Session {
             requests,
+            alive,
             _run: run,
         });
     }
@@ -226,7 +242,7 @@ impl WorkStore {
                 if done
                     .reply
                     .as_ref()
-                    .is_some_and(|(_, result)| result.is_ok())
+                    .is_some_and(|reply| matches!(reply.result, Some(Ok(_))))
                 {
                     self.stats.writes += 1;
                 }
@@ -243,8 +259,8 @@ impl WorkStore {
             cx.notify();
         }
         // After the snapshot, so a caller that awaits the write sees its change.
-        if let Some((reply, result)) = done.reply {
-            reply.send(result).ok();
+        if let Some(reply) = done.reply {
+            reply.send();
         }
     }
 }
@@ -256,18 +272,20 @@ async fn run(
     fs: Arc<dyn Fs>,
     root: PathBuf,
     lock: Arc<Mutex<()>>,
+    alive: Arc<AtomicBool>,
     mut requests: mpsc::UnboundedReceiver<WriteRequest>,
     cx: &mut AsyncApp,
 ) {
     let background = cx.background_executor().clone();
-    let (events, watcher) = background
-        .spawn({
-            let root = root.clone();
-            async move {
-                // The root must exist to be watched.
-                fs.create_dir(&root).await.log_err();
-                fs.watch(&root, WATCH_LATENCY).await
-            }
+    let (root, events, watcher) = background
+        .spawn(async move {
+            // The root must exist to be watched. It is resolved once, so that a root reached
+            // through a symbolic link is watched, loaded and compared with event paths under the
+            // same spelling.
+            fs.create_dir(&root).await.log_err();
+            let root = fs.canonicalize(&root).await.unwrap_or(root);
+            let (events, watcher) = fs.watch(&root, WATCH_LATENCY).await;
+            (root, events, watcher)
         })
         .await;
     let mut events = events.fuse();
@@ -275,6 +293,7 @@ async fn run(
         root,
         watcher,
         lock,
+        alive,
         tree: None,
         echoes: Echoes::default(),
         watched: BTreeSet::new(),
@@ -324,10 +343,33 @@ struct Done {
     kind: DoneKind,
     /// The tree after the job, when it read one.
     tree: Option<Arc<WorkTree>>,
-    reply: Option<(
-        oneshot::Sender<Result<Change, WriteError>>,
-        Result<Change, WriteError>,
-    )>,
+    reply: Option<Reply>,
+}
+
+/// The answer to a write that ran. The store sends it after publishing the snapshot; if the
+/// session ended first (the store was disabled while the write ran), dropping it still sends the
+/// real result, so a write that landed never reports `Off`.
+struct Reply {
+    sender: Option<oneshot::Sender<Result<Change, WriteError>>>,
+    result: Option<Result<Change, WriteError>>,
+}
+
+impl Reply {
+    fn send(mut self) {
+        self.deliver();
+    }
+
+    fn deliver(&mut self) {
+        if let (Some(sender), Some(result)) = (self.sender.take(), self.result.take()) {
+            sender.send(result).ok();
+        }
+    }
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        self.deliver();
+    }
 }
 
 /// The session's disk state, moved into each background job and back.
@@ -335,6 +377,7 @@ struct Disk {
     root: PathBuf,
     watcher: Arc<dyn Watcher>,
     lock: Arc<Mutex<()>>,
+    alive: Arc<AtomicBool>,
     tree: Option<Arc<WorkTree>>,
     echoes: Echoes,
     /// The directories added to the watcher, apart from the root.
@@ -356,6 +399,9 @@ impl Disk {
             }
             Job::Events(events) => {
                 if self.needs_reload(&events) {
+                    // Someone else changed the tree: what the store wrote before is no longer
+                    // what is there, so nothing more is an echo of it.
+                    self.echoes.clear();
                     self.reload();
                     Done {
                         kind: DoneKind::Reloaded,
@@ -379,7 +425,10 @@ impl Disk {
                 Done {
                     kind: DoneKind::Wrote { retries },
                     tree: self.tree.clone(),
-                    reply: Some((reply, result)),
+                    reply: Some(Reply {
+                        sender: Some(reply),
+                        result: Some(result),
+                    }),
                 }
             }
         }
@@ -420,7 +469,7 @@ impl Disk {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| is_temp_file(name) || name == OP_FILE);
-            !ignored_name && !self.echoes.matches(&event.path)
+            !ignored_name && !self.echoes.matches(&event.path, self.tree.as_deref())
         })
     }
 
@@ -465,6 +514,9 @@ impl Disk {
             };
             match unchanged_since_read(&tree, &change) {
                 Ok(true) => {
+                    if !self.alive.load(Ordering::SeqCst) {
+                        return (Err(WriteError::Off), attempt);
+                    }
                     let result = commands::apply(&self.root, &change);
                     // Even a failed write may have replaced files; remember what is there now.
                     self.echoes.record(&self.root, &change);
@@ -593,18 +645,39 @@ fn path_state(path: &Path) -> Option<PathState> {
     }
 }
 
-/// The state the store's own writes left each path in. An event on a path still in that state
-/// is the echo of the store's write; one on a path that differs (someone wrote after the store)
-/// is not.
+/// What the store's own writes left behind, for the self-echo filter.
+///
+/// A model file (`task.toml`, `project.toml`, `artifacts.toml`) the store wrote is an echo while
+/// its content is still what the current tree read: the tree is reloaded after every write, so
+/// that is the store's own content, and any other content (an edit after the write, or a later
+/// edit back) is not. Other paths (`history.old.toml`, directories created or moved) are an echo
+/// while they are still in the state the write left them in. Entries last [`ECHO_TTL`] and are
+/// cleared whenever watcher events reload the tree.
 #[derive(Default)]
 struct Echoes {
-    entries: HashMap<PathBuf, (PathState, Instant)>,
+    entries: HashMap<PathBuf, (Echo, Instant)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Echo {
+    /// Compared with the hash the current tree read.
+    ModelFile,
+    Other(PathState),
+}
+
+fn is_model_file(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        name == layout::TASK_FILE || name == layout::PROJECT_FILE || name == layout::ARTIFACTS_FILE
+    })
 }
 
 impl Echoes {
-    /// Records the current state of every path `change` touched: the files it replaced (and
-    /// `history.old.toml` beside each `task.toml`), the directories it created or moved, and
-    /// their parents up to the root.
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Records every path `change` touched: the files it replaced (and `history.old.toml` beside
+    /// each), the directories it created or moved, and their parents up to the root.
     fn record(&mut self, root: &Path, change: &Change) {
         let now = Instant::now();
         self.entries
@@ -630,15 +703,48 @@ impl Echoes {
             with_parents(&moved.to, &mut paths);
         }
         for path in paths {
-            if let Some(state) = path_state(&path) {
-                self.entries.insert(path, (state, now));
+            let echo = if is_model_file(&path) {
+                Some(Echo::ModelFile)
+            } else {
+                path_state(&path).map(Echo::Other)
+            };
+            if let Some(echo) = echo {
+                self.entries.insert(path, (echo, now));
             }
         }
     }
 
-    fn matches(&self, path: &Path) -> bool {
-        self.entries.get(path).is_some_and(|(state, at)| {
-            at.elapsed() < ECHO_TTL && path_state(path).as_ref() == Some(state)
-        })
+    fn matches(&self, path: &Path, tree: Option<&WorkTree>) -> bool {
+        let Some((echo, at)) = self.entries.get(path) else {
+            return false;
+        };
+        if at.elapsed() >= ECHO_TTL {
+            return false;
+        }
+        match echo {
+            Echo::ModelFile => {
+                let (Some(tree), Some(dir), Some(name)) = (
+                    tree,
+                    path.parent(),
+                    path.file_name().and_then(|name| name.to_str()),
+                ) else {
+                    return false;
+                };
+                let read = tree.task_by_dir(dir).and_then(|task| task.read_hash(name));
+                disk_hash(path).is_ok_and(|on_disk| on_disk.is_some() && on_disk == read)
+            }
+            Echo::Other(state) => path_state(path).as_ref() == Some(state),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reply_for_test(
+    sender: oneshot::Sender<Result<Change, WriteError>>,
+    result: Result<Change, WriteError>,
+) -> impl Drop {
+    Reply {
+        sender: Some(sender),
+        result: Some(result),
     }
 }

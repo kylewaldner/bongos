@@ -34,6 +34,12 @@ fn project_toml(title: &str) -> String {
     format!("schema = 1\ntitle = \"{title}\"\nrepositories = [\"invoicing\"]\n")
 }
 
+/// The temporary directory with symbolic links resolved: snapshot paths are under the canonical
+/// root, and the temporary directory may sit behind a link.
+fn canonical(temp: &TempDir) -> PathBuf {
+    std::fs::canonicalize(temp.path()).unwrap()
+}
+
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
@@ -153,9 +159,9 @@ fn add_todo(name: &str) -> impl Fn(&WorkTree, &Context) -> commands::Outcome + S
 #[gpui::test]
 async fn nothing_loads_or_watches_while_disabled(cx: &mut TestAppContext) {
     let temp = TempDir::new().unwrap();
-    let root = temp.path().join("work");
+    let root = canonical(&temp).join("work");
     let backfill = seed(&root);
-    let missing_root = temp.path().join("never");
+    let missing_root = canonical(&temp).join("never");
 
     let store = new_store(cx, &root, false);
     let other = {
@@ -213,7 +219,7 @@ async fn nothing_loads_or_watches_while_disabled(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn external_edits_to_model_files_reach_the_snapshot(cx: &mut TestAppContext) {
     let temp = TempDir::new().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = canonical(&temp);
     let backfill = seed(&root);
     let project = layout::project_dir(&root, "invoicing");
     let store = new_store(cx, &root, true);
@@ -266,7 +272,7 @@ async fn edit_between_snapshot_and_write_is_kept_and_the_command_reapplied(
     cx: &mut TestAppContext,
 ) {
     let temp = TempDir::new().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = canonical(&temp);
     let backfill = seed(&root);
     let store = new_store(cx, &root, true);
     wait_loaded(cx, &store).await;
@@ -310,7 +316,7 @@ async fn edit_between_snapshot_and_write_is_kept_and_the_command_reapplied(
 #[gpui::test]
 async fn a_file_that_keeps_changing_is_never_overwritten(cx: &mut TestAppContext) {
     let temp = TempDir::new().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = canonical(&temp);
     let backfill = seed(&root);
     let store = new_store(cx, &root, true);
     wait_loaded(cx, &store).await;
@@ -339,7 +345,7 @@ async fn a_file_that_keeps_changing_is_never_overwritten(cx: &mut TestAppContext
 #[gpui::test]
 async fn own_write_does_not_reload(cx: &mut TestAppContext) {
     let temp = TempDir::new().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = canonical(&temp);
     let backfill = seed(&root);
     let store = new_store(cx, &root, true);
     wait_loaded(cx, &store).await;
@@ -383,7 +389,7 @@ async fn own_write_does_not_reload(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn temp_file_events_are_ignored(cx: &mut TestAppContext) {
     let temp = TempDir::new().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = canonical(&temp);
     let backfill = seed(&root);
     let store = new_store(cx, &root, true);
     wait_loaded(cx, &store).await;
@@ -402,7 +408,7 @@ async fn temp_file_events_are_ignored(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn chats_and_runs_reach_activity_time_only(cx: &mut TestAppContext) {
     let temp = TempDir::new().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = canonical(&temp);
     let backfill = seed(&root);
     let store = new_store(cx, &root, true);
     wait_loaded(cx, &store).await;
@@ -436,7 +442,7 @@ async fn chats_and_runs_reach_activity_time_only(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn notes_and_docs_reach_artifacts_and_activity_time(cx: &mut TestAppContext) {
     let temp = TempDir::new().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = canonical(&temp);
     let backfill = seed(&root);
     let store = new_store(cx, &root, true);
     wait_loaded(cx, &store).await;
@@ -459,4 +465,114 @@ async fn notes_and_docs_reach_artifacts_and_activity_time(cx: &mut TestAppContex
     );
     assert_eq!(after.file, before.file);
     assert!(activity_time(&after) > activity_time(&before));
+}
+
+#[gpui::test]
+async fn external_edit_right_after_own_write_reaches_the_snapshot(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp);
+    let backfill = seed(&root);
+    let store = new_store(cx, &root, true);
+    wait_loaded(cx, &store).await;
+
+    store
+        .update(cx, |store, cx| {
+            store.write(Context::kyle(), add_todo("Write the migration"), cx)
+        })
+        .await
+        .unwrap();
+    // Inside the echo window of the write, before its events arrive.
+    write(
+        &layout::task_file(&backfill),
+        &task_toml("l1", "Edited right after"),
+    );
+    wait_until(cx, &store, "the edit after the write", |store| {
+        snapshot_task(store, &backfill).is_some_and(|task| task.goal() == "Edited right after")
+    })
+    .await;
+}
+
+#[gpui::test]
+async fn external_edit_and_back_within_the_echo_window_reach_the_snapshot(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp);
+    let backfill = seed(&root);
+    let task_path = layout::task_file(&backfill);
+    let store = new_store(cx, &root, true);
+    wait_loaded(cx, &store).await;
+
+    store
+        .update(cx, |store, cx| {
+            store.write(Context::kyle(), add_todo("Write the migration"), cx)
+        })
+        .await
+        .unwrap();
+    settle(cx).await;
+    let ours = std::fs::read_to_string(&task_path).unwrap();
+
+    write(&task_path, &task_toml("l1", "Changed"));
+    wait_until(cx, &store, "the edit", |store| {
+        snapshot_task(store, &backfill).is_some_and(|task| task.goal() == "Changed")
+    })
+    .await;
+    // Back to exactly what bongos wrote, still within the echo window.
+    write(&task_path, &ours);
+    wait_until(cx, &store, "the edit back", |store| {
+        snapshot_task(store, &backfill).is_some_and(|task| {
+            task.goal() == "Backfill" && task.file.as_ref().unwrap().todos.len() == 1
+        })
+    })
+    .await;
+}
+
+#[gpui::test]
+async fn disabling_before_a_queued_write_runs_writes_nothing(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp);
+    let backfill = seed(&root);
+    let task_path = layout::task_file(&backfill);
+    let store = new_store(cx, &root, true);
+    wait_loaded(cx, &store).await;
+    let before = std::fs::read_to_string(&task_path).unwrap();
+
+    let write_task = store.update(cx, |store, cx| {
+        store.write(Context::kyle(), add_todo("Never written"), cx)
+    });
+    set_enabled(cx, false);
+    assert_eq!(write_task.await, Err(WriteError::Off));
+    settle(cx).await;
+    assert_eq!(std::fs::read_to_string(&task_path).unwrap(), before);
+}
+
+#[gpui::test]
+async fn a_write_that_ran_reports_its_result_even_if_the_session_ended() {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    // The session ended: the finished job's reply is dropped instead of sent by the store.
+    drop(crate::store::reply_for_test(
+        sender,
+        Err(WriteError::Contended),
+    ));
+    assert_eq!(receiver.await, Ok(Err(WriteError::Contended)));
+}
+
+#[cfg(unix)]
+#[gpui::test]
+async fn a_root_reached_through_a_symbolic_link_is_watched(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let real = temp.path().join("real");
+    let backfill = seed(&real);
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let store = new_store(cx, &link, true);
+    wait_loaded(cx, &store).await;
+
+    let canonical = std::fs::canonicalize(&backfill).unwrap();
+    write(
+        &layout::task_file(&backfill),
+        &task_toml("l1", "Through the link"),
+    );
+    wait_until(cx, &store, "the edit under a linked root", |store| {
+        snapshot_task(store, &canonical).is_some_and(|task| task.goal() == "Through the link")
+    })
+    .await;
 }
