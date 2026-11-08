@@ -63,8 +63,6 @@ jobs:
       RUSTUP_HOME: /mnt/bongos-workspace/rustup
       CARGO_HOME: /mnt/bongos-workspace/cargo
       CARGO_TARGET_DIR: /mnt/bongos-workspace/target
-      # Save the cache even when a later step fails, so a retry reuses the compile.
-      CACHE_ON_FAILURE: 'true'
       BONGOS_BUNDLE_BIN_DIR: ${{ inputs.package_only && '/tmp/bongos-stub' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,13 +87,18 @@ jobs:
           sudo chown "$USER" /mnt/bongos-workspace
           mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
           rustup toolchain install
+      - name: Find the target directory relative to the checkout
+        id: target
+        run: echo "rel=$(realpath -m --relative-to="$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR")" >> "$GITHUB_OUTPUT"
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
         with:
           # The target directory is outside the checkout; rust-cache joins it onto the workspace
-          # path, so it is written relative to the checkout (/home/runner/work/bongos/bongos).
-          workspaces: ". -> ../../../../../mnt/bongos-workspace/target"
+          # path, so it is given relative to the checkout.
+          workspaces: ". -> ${{ steps.target.outputs.rel }}"
           shared-key: release
+          # Save even when a later step fails, so a packaging retry reuses the compile.
+          cache-on-failure: true
           # A packaging-only run builds nothing, so it must not save a cache that a real build would then hit.
           save-if: ${{ !inputs.package_only }}
       - name: Make the stand-in binaries
@@ -121,8 +124,6 @@ jobs:
       VERSION: ${{ needs.verify.outputs.version }}
       # The secrets context is not available in step conditions, so the switch is made here.
       SIGNED: ${{ secrets.MACOS_CERTIFICATE != '' }}
-      # Save the cache even when a later step fails, so a retry reuses the compile.
-      CACHE_ON_FAILURE: 'true'
       BONGOS_BUNDLE_BIN_DIR: ${{ inputs.package_only && '/tmp/bongos-stub' || '' }}
     outputs:
       signed: ${{ env.SIGNED }}
@@ -146,6 +147,7 @@ jobs:
         uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
         with:
           shared-key: release-aarch64-apple-darwin
+          cache-on-failure: true
           # A packaging-only run builds nothing, so it must not save a cache that a real build would then hit.
           save-if: ${{ !inputs.package_only }}
       - name: Make the stand-in binaries
