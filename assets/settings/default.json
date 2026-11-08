@@ -2702,7 +2702,7 @@
     "button": true,
   },
   // Configures any number of settings profiles that are temporarily applied
-  // when selected from `settings profile selector: toggle`.
+  // when selected from `settings: switch profile`.
   //
   // Each profile has an optional `base` ("user" or "default") and a `settings`
   // object. When `base` is "user" (the default), the profile applies on top of

@@ -239,7 +239,12 @@ impl SettingsProfileSelectorDelegate {
         self.selected_index = self
             .matches
             .iter()
-            .position(|mat| mat.string == profile_name)
+            .position(|mat| {
+                self.profile_names
+                    .get(mat.candidate_id)
+                    .and_then(|name| name.as_deref())
+                    == Some(profile_name)
+            })
             .unwrap_or(self.selected_index);
     }
 
