@@ -127,7 +127,10 @@ async fn start_worktrees(
     languages.add(kotlin_language());
     languages.register_lsp_adapter(
         LanguageName::new_static("Kotlin"),
-        Arc::new(KotlinAdapter::new(dirs.clone())),
+        Arc::new(KotlinAdapter::new(
+            dirs.clone(),
+            Arc::new(bongos_kotlin::Manifest::embedded()),
+        )),
     );
 
     let worktree_ids: Vec<WorktreeId> = project.read_with(cx, |project, cx| {

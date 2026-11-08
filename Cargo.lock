@@ -2213,7 +2213,11 @@ name = "bongos_kotlin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
+ "async-fs",
+ "async-tar",
  "async-trait",
+ "async_zip",
  "chrono",
  "collections",
  "fs",
@@ -2224,13 +2228,15 @@ dependencies = [
  "log",
  "lsp",
  "project",
- "rpc",
  "release_channel",
+ "rpc",
  "semver",
  "serde",
  "serde_json",
  "settings",
+ "sha2",
  "tempfile",
+ "toml 0.8.23",
  "util",
  "worktree",
 ]

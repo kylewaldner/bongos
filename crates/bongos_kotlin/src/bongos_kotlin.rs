@@ -1,8 +1,10 @@
 mod adapter;
 mod glue;
+mod install;
 mod installed;
 mod log;
 mod manager;
+mod manifest;
 mod resolve;
 
 use std::{path::PathBuf, sync::Arc};
@@ -10,13 +12,17 @@ use std::{path::PathBuf, sync::Arc};
 pub use adapter::{KotlinAdapter, server_command};
 pub use glue::attach_managers;
 use gpui::App;
-pub use installed::{MARKER as INSTALLED_MARKER, find_installed, server_name};
+pub use install::{
+    InstallCancelled, InstalledServer, PROGRESS_STEP, ProgressFn, install, spawn_install,
+};
+pub use installed::{MARKER as INSTALLED_MARKER, check_installed, server_name};
 use language::{LanguageName, LanguageRegistry};
 pub use log::KotlinLog;
 pub use manager::{
     ADAPTER_NAME, KotlinHost, KotlinProjectManager, KotlinRegistry, KotlinWorktreeState,
     ServerStatus,
 };
+pub use manifest::{ArchiveKind, Manifest, ManifestEntry, OVERRIDE_VAR, current_platform};
 pub use resolve::{
     Layer, LayerReport, Resolved, ResolvedSource, clear_project_override, layer_report,
     project_override, resolve, set_project_override,
@@ -59,9 +65,13 @@ pub struct KotlinDirs {
 
 pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
     KotlinSettings::register(cx);
+    let manifest = Manifest::load(cfg!(debug_assertions)).unwrap_or_else(|error| {
+        ::log::error!("{error:#}; using the built-in Kotlin server manifest");
+        Manifest::embedded()
+    });
     languages.register_lsp_adapter(
         LanguageName::new_static("Kotlin"),
-        Arc::new(KotlinAdapter::new(dirs.clone())),
+        Arc::new(KotlinAdapter::new(dirs.clone(), Arc::new(manifest))),
     );
     attach_managers(dirs, cx);
 }

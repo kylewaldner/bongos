@@ -19,18 +19,20 @@ use settings::{KotlinServerKind, WorktreeId};
 
 use crate::{
     KotlinDirs,
-    installed::{find_installed, not_installed},
+    installed::{check_installed, not_installed, server_name},
     manager::{ADAPTER_NAME, KotlinRegistry},
+    manifest::{Manifest, current_platform},
     resolve::resolve,
 };
 
 pub struct KotlinAdapter {
     dirs: KotlinDirs,
+    manifest: Arc<Manifest>,
 }
 
 impl KotlinAdapter {
-    pub fn new(dirs: KotlinDirs) -> Self {
-        Self { dirs }
+    pub fn new(dirs: KotlinDirs, manifest: Arc<Manifest>) -> Self {
+        Self { dirs, manifest }
     }
 }
 
@@ -63,7 +65,14 @@ impl DynLspInstaller for KotlinAdapter {
     ) -> LanguageServerBinaryLocations {
         async move {
             let root = delegate.worktree_root_path().to_path_buf();
-            let result = server_command(&self.dirs, &root, delegate.worktree_id(), &mut cx).await;
+            let result = server_command(
+                &self.dirs,
+                &self.manifest,
+                &root,
+                delegate.worktree_id(),
+                &mut cx,
+            )
+            .await;
             (result, None)
         }
         .boxed_local()
@@ -100,18 +109,31 @@ fn start_failed(worktree_root: &Path, worktree_id: WorktreeId, reason: String, c
     }
 }
 
-/// The command that starts the effective server for a worktree, or why it cannot start.
+/// The command that starts the effective server for a worktree, or why it cannot start. Only the
+/// pinned build counts as installed; installing a missing one is a later step.
 pub async fn server_command(
     dirs: &KotlinDirs,
+    manifest: &Manifest,
     worktree_root: &Path,
     worktree_id: WorktreeId,
     cx: &mut AsyncApp,
 ) -> Result<LanguageServerBinary> {
     let server = cx.update(|cx| begin_start(dirs, worktree_root, worktree_id, cx));
     let install_root = dirs.install_root.clone();
-    let binary = cx
-        .background_spawn(async move { find_installed(&install_root, server) })
-        .await;
+    let entry = current_platform()
+        .ok_or_else(|| anyhow::anyhow!("no {} build for this platform", server_name(server)))
+        .and_then(|platform| manifest.entry(server, platform));
+    let binary = match entry {
+        Ok(entry) => {
+            cx.background_spawn(async move { check_installed(&install_root, server, &entry) })
+                .await
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            cx.update(|cx| start_failed(worktree_root, worktree_id, reason, cx));
+            return Err(error);
+        }
+    };
     match binary {
         Some(binary) => Ok(binary),
         None => {
@@ -125,14 +147,15 @@ pub async fn server_command(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, rc::Rc};
+    use std::{fs, path::PathBuf, rc::Rc};
 
     use gpui::TestAppContext;
     use settings::{Settings as _, SettingsStore};
 
     use super::*;
     use crate::{
-        INSTALLED_MARKER, KotlinProjectManager, KotlinSettings, ServerStatus, manager::KotlinHost,
+        INSTALLED_MARKER, KotlinProjectManager, KotlinSettings, ServerStatus, installed::Marker,
+        manager::KotlinHost,
     };
 
     struct NoHost;
@@ -164,11 +187,17 @@ mod tests {
         manager.update(cx, |manager, cx| {
             manager.add_worktree(worktree(), root.clone(), cx)
         });
+        let manifest = Manifest::embedded();
+        let entry = manifest
+            .entry(KotlinServerKind::KotlinLsp, current_platform().unwrap())
+            .unwrap();
 
         let command = |cx: &mut TestAppContext| {
-            let (dirs, root) = (dirs.clone(), root.clone());
+            let (dirs, manifest, root) = (dirs.clone(), manifest.clone(), root.clone());
             cx.update(|cx| {
-                cx.spawn(async move |cx| server_command(&dirs, &root, worktree(), cx).await)
+                cx.spawn(async move |cx| {
+                    server_command(&dirs, &manifest, &root, worktree(), cx).await
+                })
             })
         };
 
@@ -182,18 +211,39 @@ mod tests {
             })
         );
 
-        // Once the server's marker and launcher exist, the same call returns its command, and the
-        // worktree is starting.
-        let version_dir = dirs.install_root.join("kotlin-lsp").join("1.0");
-        fs::create_dir_all(version_dir.join("bin")).unwrap();
-        fs::write(version_dir.join("bin/kotlin-lsp"), "#!/bin/sh\n").unwrap();
-        fs::write(
-            version_dir.join(INSTALLED_MARKER),
-            r#"{ "launcher": "bin/kotlin-lsp", "args": ["--stdio"] }"#,
-        )
-        .unwrap();
+        // A marker for another digest of the pinned version does not count as installed.
+        let version_dir = dirs.install_root.join("kotlin-lsp").join(&entry.version);
+        let launcher = version_dir.join(&entry.launcher);
+        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let marker = |sha256: &str| {
+            serde_json::to_string(&Marker {
+                version: entry.version.clone(),
+                sha256: sha256.into(),
+            })
+            .unwrap()
+        };
+        fs::write(version_dir.join(INSTALLED_MARKER), marker(&"0".repeat(64))).unwrap();
+        let error = command(cx).await.unwrap_err();
+        assert_eq!(error.to_string(), "kotlin-lsp is not installed");
+
+        // Once the marker names the pinned version and digest, the same call returns the pinned
+        // command, and the worktree is starting.
+        fs::write(version_dir.join(INSTALLED_MARKER), marker(&entry.sha256)).unwrap();
         let binary = command(cx).await.unwrap();
-        assert_eq!(binary.path, version_dir.join("bin/kotlin-lsp"));
+        assert_eq!(binary.path, launcher);
+        assert_eq!(
+            binary.arguments,
+            entry
+                .args
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
         let status = manager.read_with(cx, |manager, _| manager.status(worktree()).cloned());
         assert_eq!(status, Some(ServerStatus::Starting));
     }
@@ -212,8 +262,9 @@ mod tests {
             install_root: temp.path().join("languages"),
         };
         let root = temp.path().to_path_buf();
+        let manifest = Manifest::embedded();
         let task = cx.update(|cx| {
-            cx.spawn(async move |cx| server_command(&dirs, &root, worktree(), cx).await)
+            cx.spawn(async move |cx| server_command(&dirs, &manifest, &root, worktree(), cx).await)
         });
         let error = task.await.unwrap_err();
         assert_eq!(error.to_string(), "kotlin-lsp is not installed");
@@ -265,16 +316,28 @@ mod tests {
         }
     }
 
-    fn install(dirs: &KotlinDirs, server: &str) -> std::path::PathBuf {
-        let dir = dirs.install_root.join(server).join("1.0");
-        fs::create_dir_all(dir.join("bin")).unwrap();
-        fs::write(dir.join("bin/launcher"), "#!/bin/sh\n").unwrap();
+    /// Lays out the pinned build of `server` the way the installer leaves it; returns its launcher.
+    fn install(dirs: &KotlinDirs, manifest: &Manifest, server: KotlinServerKind) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let entry = manifest.entry(server, current_platform().unwrap()).unwrap();
+        let dir = dirs
+            .install_root
+            .join(server_name(server))
+            .join(&entry.version);
+        let launcher = dir.join(&entry.launcher);
+        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        let marker = Marker {
+            version: entry.version,
+            sha256: entry.sha256,
+        };
         fs::write(
             dir.join(INSTALLED_MARKER),
-            r#"{ "launcher": "bin/launcher" }"#,
+            serde_json::to_string(&marker).unwrap(),
         )
         .unwrap();
-        dir.join("bin/launcher")
+        launcher
     }
 
     /// The blanket installer would cache the first binary and start it again after a switch.
@@ -293,14 +356,15 @@ mod tests {
             logs_dir: temp.path().join("logs"),
             install_root: temp.path().join("languages"),
         };
-        let kotlin_lsp = install(&dirs, "kotlin-lsp");
-        let intellij = install(&dirs, "intellij");
+        let manifest = Manifest::embedded();
+        let kotlin_lsp = install(&dirs, &manifest, KotlinServerKind::KotlinLsp);
+        let intellij = install(&dirs, &manifest, KotlinServerKind::Intellij);
         let manager = cx.new(|cx| KotlinProjectManager::new(Rc::new(NoHost), dirs.clone(), cx));
         manager.update(cx, |manager, cx| {
             manager.add_worktree(worktree(), root.clone(), cx)
         });
 
-        let adapter = Arc::new(KotlinAdapter::new(dirs));
+        let adapter = Arc::new(KotlinAdapter::new(dirs, Arc::new(manifest)));
         let cached = Arc::new(futures::lock::Mutex::new(None));
         let start = |cx: &mut TestAppContext| {
             let (adapter, cached, root) = (adapter.clone(), cached.clone(), root.clone());

@@ -18,11 +18,15 @@ path = "src/bin/fake_kotlin_server.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-compression.workspace = true
+async-fs.workspace = true
+async-tar.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 collections.workspace = true
 futures.workspace = true
 gpui.workspace = true
+http_client.workspace = true
 language.workspace = true
 log.workspace = true
 lsp.workspace = true
@@ -31,11 +35,14 @@ rpc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
+sha2.workspace = true
+toml.workspace = true
 util.workspace = true
 
 [dev-dependencies]
 fs.workspace = true
-http_client.workspace = true
+async_zip.workspace = true
+http_client = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
 lsp = { workspace = true, features = ["test-support"] }
