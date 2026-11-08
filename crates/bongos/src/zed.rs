@@ -5481,6 +5481,7 @@ mod tests {
                 "theme",
                 "theme_selector",
                 "toast",
+                "todo",
                 "toolchain",
                 "variable_list",
                 "vim",
