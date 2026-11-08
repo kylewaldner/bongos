@@ -100,9 +100,9 @@ jobs:
           persist-credentials: false
       - name: Install tools
         run: |
-          # A global install left dmg-license without its minimist dependency on the runner, so install
-          # it into its own prefix and check that it loads before the long build starts.
-          npm install --prefix "$RUNNER_TEMP/dmg-tools" dmg-license
+          # dmg-license requires minimist without declaring it, so install both
+          # into their own prefix and check that it loads before the long build starts.
+          npm install --prefix "$RUNNER_TEMP/dmg-tools" dmg-license minimist
           echo "$RUNNER_TEMP/dmg-tools/node_modules/.bin" >> "$GITHUB_PATH"
           out="$(node "$RUNNER_TEMP/dmg-tools/node_modules/dmg-license/bin/dmg-license.js" 2>&1 || true)"
           echo "$out"
