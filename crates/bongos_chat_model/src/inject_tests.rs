@@ -107,22 +107,6 @@ impl Fixture {
             handoff: self.handoff.as_ref(),
         }
     }
-
-    /// Everything a launch generates, as one list of strings.
-    fn everything(&self) -> Vec<String> {
-        let input = self.input();
-        let mut all = vec![
-            render_context(&input),
-            render_system(&input),
-            render_codex_instructions(&input),
-            render_settings(input.context_path).unwrap(),
-        ];
-        all.extend(render_env(&input).into_values());
-        if let Some(parent) = &self.handoff {
-            all.push(handoff_note(parent));
-        }
-        all
-    }
 }
 
 #[test]
