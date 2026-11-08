@@ -670,6 +670,14 @@ async fn test_resume_uses_the_stored_id_and_cwd(cx: &mut TestAppContext) {
     // Elsewhere now: the resume still runs in the recorded directory.
     let starts = |h: &Harness| h.log_lines("claude").iter().filter(|line| *line == "start").count();
     assert_eq!(starts(&h), 1);
+    wait_for(cx, "the chat in the index", STARTUP, |cx| {
+        h.store.read_with(cx, |store, _| store.find(&id).is_some())
+    })
+    .await;
+    let focused = cx.update(|_, cx| {
+        bongos_work::Focus::global(cx).and_then(|focus| focus.read(cx).task_id().map(str::to_string))
+    });
+    eprintln!("DEBUG focused={focused:?} record={:?}", read_record(&record_path(&h.scope, &id)));
 
     dispatch(cx, "chat::Open");
     answer(&workspace, "implement", cx).await;
