@@ -232,7 +232,16 @@ rm -rf "${dmg_root:?}" "${dmg_file:?}"
 mkdir -p "$dmg_root"
 mv "$app_dir" "$dmg_root/"
 ln -s /Applications "$dmg_root/Applications"
-hdiutil create -volname "$app_name" -srcfolder "$dmg_root" -ov -format UDZO "$dmg_file"
+# hdiutil sometimes fails with "Resource busy" on a freshly started machine; a short wait and another try fixes it.
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname "$app_name" -srcfolder "$dmg_root" -ov -format UDZO "$dmg_file"; then
+    break
+  fi
+  [ "$attempt" -lt 5 ] || die "hdiutil create failed five times"
+  echo "bundle-mac: hdiutil create failed (attempt $attempt); retrying" >&2
+  rm -f "${dmg_file:?}"
+  sleep 15
+done
 dmg-license "$license_dir/dmg-license.json" "$dmg_file"
 
 rm -rf "${stage_root:?}" "${dmg_root:?}" "${license_dir:?}"
