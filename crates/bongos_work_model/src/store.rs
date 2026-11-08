@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::error::Error;
+use crate::files::content_hash;
 use crate::io::{parse_artifacts_at, parse_project_at, parse_task_at};
 use crate::journal::finish_journal;
 use crate::layout::{self, OP_FILE, TASKS_DIR, is_temp_file};
@@ -94,6 +95,11 @@ pub struct Task {
     /// `chats/`, `runs/` and any other subdirectory, but not `tasks/`, `.git/`, temporary files or
     /// a journal.
     pub files: BTreeMap<PathBuf, SystemTime>,
+    /// The [`content_hash`] of each model file (`task.toml`, `artifacts.toml`, and for a
+    /// project's top group `project.toml`) exactly as the loader read it, by file name, whether or
+    /// not it parsed. A file that was missing has no entry. A writer compares these with the files
+    /// on disk to tell whether someone changed them since this parse.
+    pub hashes: BTreeMap<String, u64>,
     pub children: Vec<Task>,
 }
 
@@ -117,6 +123,12 @@ impl Task {
                 errors: self.errors.clone(),
             })
         }
+    }
+
+    /// The hash of the model file `name` (such as `task.toml`) as last read, `None` when it was
+    /// missing.
+    pub fn read_hash(&self, name: &str) -> Option<u64> {
+        self.hashes.get(name).copied()
     }
 
     /// The newest mtime among the task's own files.
@@ -397,7 +409,9 @@ fn load_project(
 ) -> Project {
     let mut task = load_task(slug.clone(), dir, previous, errors);
     let project_path = layout::project_file(&task.dir);
-    let file = match read_text(&project_path) {
+    let text = read_text(&project_path);
+    record_hash(&mut task.hashes, layout::PROJECT_FILE, &text);
+    let file = match text {
         Ok(Some(text)) => match parse_project_at(&text, &project_path) {
             Ok(file) => Some(file),
             Err(error) => {
@@ -438,11 +452,25 @@ fn read_text(path: &Path) -> Result<Option<String>, FileError> {
     }
 }
 
+/// Records the hash of a model file's text, when it was read.
+fn record_hash(
+    hashes: &mut BTreeMap<String, u64>,
+    name: &str,
+    text: &Result<Option<String>, FileError>,
+) {
+    if let Ok(Some(text)) = text {
+        hashes.insert(name.to_string(), content_hash(text.as_bytes()));
+    }
+}
+
 fn load_task(slug: String, dir: PathBuf, previous: &Previous, errors: &mut Vec<FileError>) -> Task {
     let mut badges = Vec::new();
+    let mut hashes = BTreeMap::new();
 
     let task_path = layout::task_file(&dir);
-    let file = match read_text(&task_path) {
+    let text = read_text(&task_path);
+    record_hash(&mut hashes, layout::TASK_FILE, &text);
+    let file = match text {
         Ok(Some(text)) => match parse_task_at(&text, &task_path) {
             Ok(file) => Some(file),
             Err(error) => {
@@ -461,7 +489,9 @@ fn load_task(slug: String, dir: PathBuf, previous: &Previous, errors: &mut Vec<F
     };
 
     let artifacts_path = layout::artifacts_file(&dir);
-    let artifacts = match read_text(&artifacts_path) {
+    let text = read_text(&artifacts_path);
+    record_hash(&mut hashes, layout::ARTIFACTS_FILE, &text);
+    let artifacts = match text {
         Ok(Some(text)) => match parse_artifacts_at(&text, &artifacts_path) {
             Ok(file) => Some(file),
             Err(error) => {
@@ -493,6 +523,7 @@ fn load_task(slug: String, dir: PathBuf, previous: &Previous, errors: &mut Vec<F
         errors: badges,
         broken_edges: Vec::new(),
         files,
+        hashes,
         children,
     }
 }

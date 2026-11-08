@@ -166,6 +166,7 @@ bongos_kotlin.workspace = true
 bongos_languages.workspace = true
 bongos_net.workspace = true
 bongos_version.workspace = true
+bongos_work.workspace = true
 release_channel.workspace = true
 remote.workspace = true
 repl.workspace = true

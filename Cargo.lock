@@ -2050,6 +2050,7 @@ dependencies = [
  "bongos_languages",
  "bongos_net",
  "bongos_version",
+ "bongos_work",
  "breadcrumbs",
  "chrono",
  "clap",
@@ -2278,6 +2279,21 @@ dependencies = [
 [[package]]
 name = "bongos_version"
 version = "0.1.0"
+
+[[package]]
+name = "bongos_work"
+version = "0.1.0"
+dependencies = [
+ "bongos_work_model",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "parking_lot",
+ "settings",
+ "tempfile",
+ "util",
+]
 
 [[package]]
 name = "bongos_work_model"

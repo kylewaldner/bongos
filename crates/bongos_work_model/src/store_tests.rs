@@ -621,3 +621,41 @@ fn rename_with_source_and_target_both_present_fails_the_journal() {
             .is_err()
     );
 }
+
+#[test]
+fn load_records_the_hash_of_each_model_file_as_read() {
+    use crate::files::content_hash;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let project = layout::project_dir(root, "invoicing");
+    let project_text = project_toml("Invoicing");
+    let task_text = task_toml("g1", "Invoicing", "");
+    write(&layout::project_file(&project), &project_text);
+    write(&layout::task_file(&project), &task_text);
+    let child = layout::child_dir(&project, "backfill");
+    // A file that does not parse still has its hash recorded.
+    write(&layout::task_file(&child), "not toml [");
+    write(&layout::artifacts_file(&child), "schema = 1\n");
+
+    let tree = load(root);
+    let top = &tree.projects[0].task;
+    assert_eq!(
+        top.read_hash(layout::TASK_FILE),
+        Some(content_hash(task_text.as_bytes()))
+    );
+    assert_eq!(
+        top.read_hash(layout::PROJECT_FILE),
+        Some(content_hash(project_text.as_bytes()))
+    );
+    assert_eq!(top.read_hash(layout::ARTIFACTS_FILE), None);
+    let child = tree.task_by_dir(&child).unwrap();
+    assert_eq!(
+        child.read_hash(layout::TASK_FILE),
+        Some(content_hash(b"not toml ["))
+    );
+    assert_eq!(
+        child.read_hash(layout::ARTIFACTS_FILE),
+        Some(content_hash(b"schema = 1\n"))
+    );
+}

@@ -49,6 +49,7 @@ pub fn task(slug: &str, file: TaskFile) -> Task {
         errors: Vec::new(),
         broken_edges: Vec::new(),
         files: BTreeMap::new(),
+        hashes: BTreeMap::new(),
         children: Vec::new(),
     }
 }

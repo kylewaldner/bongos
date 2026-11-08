@@ -250,6 +250,9 @@ pub struct SettingsContent {
     /// Settings for the which-key popup.
     pub which_key: Option<WhichKeySettingsContent>,
 
+    /// Settings for the Work view: projects and tasks kept as files under `~/.bongos`.
+    pub work: Option<WorkSettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -1346,6 +1349,24 @@ pub struct WhichKeySettingsContent {
     ///
     /// Default: 700
     pub delay_ms: Option<u64>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkSettingsContent {
+    /// Whether the Work view is on. While it is off, bongos neither reads nor watches
+    /// `~/.bongos`.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// Days without activity after which an open project or one-off fades.
+    ///
+    /// Default: 1.5
+    pub fade_after_days: Option<f64>,
+    /// Days without activity after which an open project or one-off is stale.
+    ///
+    /// Default: 3.0
+    pub stale_after_days: Option<f64>,
 }
 
 // An ExtendingVec in the settings can only accumulate new values.
