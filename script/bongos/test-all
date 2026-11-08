@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # The full test suite with cargo-nextest: every library, binary and integration test of the
-# workspace, in one build, one process per test. A hung test is killed after 5 minutes and reported
+# workspace, in one build, one process per test. A hung test is killed after 10 minutes and reported
 # as TIMEOUT (.config/nextest.toml). Doctests are not run (nextest does not run them).
 #   test-all [crate...]   named crates only, replacing --workspace; for a cheap trial of the script
+#   BONGOS_TEST_FILTER=s  only tests whose name contains s (a positional nextest filter)
 #   BONGOS_TEST_NO_NET=1  cargo runs offline (CARGO_NET_OFFLINE=true)
+# The extension_host dev-extension test (test_extension_store_with_test_extension) downloads a wasi-sdk
+# into the repository's target/wasi-sdk the first time and needs the network for that.
 # Prints the nextest totals; the full output is in the log.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,4 +52,7 @@ if [ "${BONGOS_TEST_NO_NET:-}" = 1 ]; then
   export CARGO_NET_OFFLINE=true
 fi
 
-cargo_limited nextest run "${scope[@]}" --lib --bins --tests --locked --no-fail-fast --color never
+filter=()
+[ -n "${BONGOS_TEST_FILTER:-}" ] && filter=("$BONGOS_TEST_FILTER")
+
+cargo_limited nextest run "${scope[@]}" "${filter[@]}" --lib --bins --tests --locked --no-fail-fast --color never
