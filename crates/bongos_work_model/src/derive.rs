@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+pub use crate::graph::{child_order, level_graph};
 use crate::store::{Task, WorkTree};
 use crate::types::{
     Edge, Kind, ResultKind, ResultState, Status, TaskFile, Todo, TodoRole, TodoState, UnblockPoint,
@@ -328,19 +329,44 @@ fn reached(target: &Task, point: UnblockPoint) -> bool {
 }
 
 fn own_edges_block(task: &Task, siblings: &[Task]) -> bool {
+    !unreached_targets(task, siblings).is_empty()
+}
+
+/// The siblings the task's own edges point at that have not reached their unblock point, `after`
+/// targets first and the `stacked_on` target last (a Cancelled stacked-on target always counts).
+fn unreached_targets<'a>(task: &Task, siblings: &'a [Task]) -> Vec<&'a Task> {
     let Some(file) = &task.file else {
-        return false;
+        return Vec::new();
     };
-    let after_blocks = file.after.iter().any(|edge: &Edge| {
-        sibling(siblings, &edge.task)
-            .is_some_and(|target| target.dir != task.dir && !reached(target, edge.unblock))
-    });
-    let stacked_blocks = file.stacked_on.as_ref().is_some_and(|edge| {
-        sibling(siblings, &edge.task).is_some_and(|target| {
-            target.dir != task.dir && (is_cancelled(target) || !reached(target, edge.unblock))
+    let mut targets: Vec<&Task> = file
+        .after
+        .iter()
+        .filter_map(|edge: &Edge| {
+            sibling(siblings, &edge.task)
+                .filter(|target| target.dir != task.dir && !reached(target, edge.unblock))
         })
-    });
-    after_blocks || stacked_blocks
+        .collect();
+    if let Some(edge) = &file.stacked_on
+        && let Some(target) = sibling(siblings, &edge.task)
+        && target.dir != task.dir
+        && (is_cancelled(target) || !reached(target, edge.unblock))
+    {
+        targets.push(target);
+    }
+    targets
+}
+
+/// The tasks holding `task` back: the unreached targets of its own edges and of its ancestors',
+/// since blocking inherits downward. Empty when the task is not blocked by an edge.
+pub fn blocking_targets<'a>(task: &Task, tree: &'a WorkTree) -> Vec<&'a Task> {
+    let Some(context) = context(tree, task) else {
+        return Vec::new();
+    };
+    let mut targets = unreached_targets(task, context.siblings);
+    if let Some(parent) = context.parent {
+        targets.extend(blocking_targets(parent, tree));
+    }
+    targets
 }
 
 fn sibling<'a>(siblings: &'a [Task], slug: &str) -> Option<&'a Task> {

@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 /// string, so the files stay as the design shows them.
 pub type Timestamp = toml::value::Datetime;
 
+/// The `id` of a task (`task.toml`).
+pub type TaskId = String;
+
 /// The only schema version this crate reads and writes.
 pub const SCHEMA: u32 = 1;
 

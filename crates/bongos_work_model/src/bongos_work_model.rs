@@ -3,12 +3,15 @@
 //! layout, and atomic file writes. It has no UI dependency and never touches the real home
 //! directory: every path function takes the root it works under.
 
+pub mod activity;
 pub mod derive;
 mod error;
 pub mod files;
+pub mod graph;
 pub mod io;
 pub mod journal;
 pub mod layout;
+pub mod rollup;
 pub mod slug;
 pub mod store;
 mod types;
@@ -22,7 +25,19 @@ pub use io::{
 pub use types::*;
 
 #[cfg(test)]
+mod activity_tests;
+
+#[cfg(test)]
 mod derive_tests;
+
+#[cfg(test)]
+mod fixtures;
+
+#[cfg(test)]
+mod graph_tests;
+
+#[cfg(test)]
+mod rollup_tests;
 
 #[cfg(test)]
 mod store_tests;
