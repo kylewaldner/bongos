@@ -674,10 +674,6 @@ async fn test_resume_uses_the_stored_id_and_cwd(cx: &mut TestAppContext) {
         h.store.read_with(cx, |store, _| store.find(&id).is_some())
     })
     .await;
-    let focused = cx.update(|_, cx| {
-        bongos_work::Focus::global(cx).and_then(|focus| focus.read(cx).task_id().map(str::to_string))
-    });
-    eprintln!("DEBUG focused={focused:?} record={:?}", read_record(&record_path(&h.scope, &id)));
 
     dispatch(cx, "chat::Open");
     answer(&workspace, "implement", cx).await;
