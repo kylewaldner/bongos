@@ -3,6 +3,7 @@ mod glue;
 mod install;
 mod installed;
 mod intellij;
+mod jdk;
 mod log;
 mod manager;
 mod manifest;
@@ -12,7 +13,7 @@ use std::{path::PathBuf, sync::Arc};
 
 pub use adapter::{INTELLIJ_DOWNLOAD_HINT, KotlinAdapter, server_command};
 pub use glue::attach_managers;
-use gpui::App;
+use gpui::{App, Global, actions};
 pub use install::{
     InstallCancelled, InstalledServer, PROGRESS_STEP, ProgressFn, ensure_installed, install,
     spawn_ensure_installed,
@@ -21,6 +22,10 @@ pub use installed::{MARKER as INSTALLED_MARKER, check_installed, server_name};
 pub use intellij::{
     EULA_FILE, LICENSE_TIMEOUT, LicenseOutcome, UNLICENSED_EXIT_CODE, accept_eula,
     bundle_eula_hash, eula_accepted, eula_argument, eula_hash, license_check,
+};
+pub use jdk::{
+    Detection, Jdk, JdkChoice, JdkInputs, JdkQuery, MenuEntry, SET_JDK_HOME_LABEL, Toolchain,
+    default_candidate_patterns, detect, find_toolchain, set_jdk_home_entry,
 };
 use language::{LanguageName, LanguageRegistry};
 pub use log::KotlinLog;
@@ -34,6 +39,61 @@ pub use resolve::{
     project_override, resolve, set_project_override,
 };
 use settings::{KotlinServerKind, RegisterSetting, Settings, SettingsContent};
+
+actions!(
+    kotlin,
+    [
+        /// Shows the JDK that imports Gradle projects, why it was chosen, and the server's own
+        /// runtime.
+        ShowJdk,
+    ]
+);
+
+/// What the Kotlin actions need from startup: where things live and the pinned servers.
+struct KotlinSetup {
+    dirs: KotlinDirs,
+    manifest: Arc<Manifest>,
+}
+
+impl Global for KotlinSetup {}
+
+/// Everything `kotlin: show jdk` reads on the main thread. `text` does the file reads and can run
+/// on any thread.
+pub struct ShowJdkRequest {
+    queries: Vec<JdkQuery>,
+    manifest: Option<Arc<Manifest>>,
+}
+
+impl ShowJdkRequest {
+    pub fn new(project: &project::Project, cx: &App) -> Self {
+        let setup = cx.try_global::<KotlinSetup>();
+        let queries = setup
+            .map(|setup| {
+                project
+                    .visible_worktrees(cx)
+                    .filter_map(|worktree| {
+                        let worktree = worktree.read(cx);
+                        worktree.is_local().then(|| {
+                            jdk::query(&worktree.abs_path(), worktree.id(), &setup.dirs, cx)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            queries,
+            manifest: setup.map(|setup| setup.manifest.clone()),
+        }
+    }
+
+    /// The contents of the "Kotlin JDK" buffer.
+    pub fn text(&self) -> String {
+        jdk::report(&self.queries, self.manifest.as_deref())
+    }
+}
+
+/// The title of the buffer `ShowJdk` opens.
+pub const SHOW_JDK_TITLE: &str = "Kotlin JDK";
 
 /// The merged `kotlin` settings. Read them with a `SettingsLocation` so a project's
 /// `.bongos/settings.json` applies over the active profile and the user settings.
@@ -82,9 +142,14 @@ pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
         ::log::error!("{error:#}; using the built-in Kotlin server manifest");
         Manifest::embedded()
     });
+    let manifest = Arc::new(manifest);
+    cx.set_global(KotlinSetup {
+        dirs: dirs.clone(),
+        manifest: manifest.clone(),
+    });
     languages.register_lsp_adapter(
         LanguageName::new_static("Kotlin"),
-        Arc::new(KotlinAdapter::new(dirs.clone(), Arc::new(manifest))),
+        Arc::new(KotlinAdapter::new(dirs.clone(), manifest)),
     );
     attach_managers(dirs, cx);
 }

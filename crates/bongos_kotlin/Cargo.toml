@@ -39,6 +39,7 @@ settings.workspace = true
 sha2.workspace = true
 toml.workspace = true
 util.workspace = true
+zed_actions.workspace = true
 
 [dev-dependencies]
 fs.workspace = true

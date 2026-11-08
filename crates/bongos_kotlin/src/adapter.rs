@@ -31,6 +31,7 @@ use crate::{
         LICENSE_TIMEOUT, LicenseOutcome, bundle_eula_hash, eula_accepted, eula_argument,
         license_check,
     },
+    jdk,
     manager::{ADAPTER_NAME, EXPIRED_REASON, KotlinProjectManager, KotlinRegistry},
     manifest::{Manifest, ManifestEntry, current_platform},
     resolve::resolve,
@@ -175,6 +176,27 @@ pub async fn server_command(
         bail!("{EXPIRED_REASON}");
     }
 
+    // The import JDK (D11). A Gradle toolchain no JDK satisfies fails the start before anything is
+    // downloaded.
+    let inputs = cx.update(|cx| jdk::inputs(worktree_root, worktree_id, cx));
+    let detection = cx
+        .background_spawn(async move { jdk::detect(&inputs) })
+        .await;
+    if let Some(reason) = detection.failure_reason() {
+        cx.update(|cx| {
+            log_line(worktree_root, &format!("jdk: {reason}"), cx);
+            start_failed(worktree_root, worktree_id, reason.clone(), cx)
+        });
+        bail!(reason);
+    }
+    cx.update(|cx| {
+        let text = match detection.jdk() {
+            Some(jdk) => format!("jdk {} ({})", jdk.home.display(), jdk.reason),
+            None => "jdk: none, the server's bundled runtime imports".to_string(),
+        };
+        log_line(worktree_root, &text, cx);
+    });
+
     let check = {
         let (install_root, entry) = (dirs.install_root.clone(), entry.clone());
         move || check_installed(&install_root, server, &entry)
@@ -208,12 +230,27 @@ pub async fn server_command(
                 .ok_or_else(|| not_installed(server))?
         }
     };
+    let binary = with_java_home(binary, &detection);
     match server {
         KotlinServerKind::KotlinLsp => Ok(binary),
         KotlinServerKind::Intellij => {
             intellij_gates(dirs, &entry, binary, worktree_root, worktree_id, cx).await
         }
     }
+}
+
+/// The binary with the import JDK as `JAVA_HOME`; unchanged when the bundled runtime imports.
+fn with_java_home(
+    mut binary: LanguageServerBinary,
+    detection: &jdk::Detection,
+) -> LanguageServerBinary {
+    if let Some(jdk) = detection.jdk() {
+        binary
+            .env
+            .get_or_insert_default()
+            .insert("JAVA_HOME".into(), jdk.home.to_string_lossy().into_owned());
+    }
+    binary
 }
 
 fn intellij_download_allowed(worktree_id: WorktreeId, cx: &mut AsyncApp) -> bool {
@@ -686,6 +723,64 @@ launcher = "bin/launcher"
         let again = fixture.command(cx, &down, today()).await.unwrap();
         assert_eq!(again.path, binary.path);
         assert_eq!(down.requests(), 0);
+    }
+
+    #[gpui::test]
+    async fn test_the_import_jdk_becomes_java_home(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let net = net_serving(fixture.archive.clone());
+        fs::create_dir_all(fixture.root.join("tools/jdk")).unwrap();
+        fs::write(
+            fixture.root.join("tools/jdk/release"),
+            "JAVA_VERSION=\"21.0.2\"\n",
+        )
+        .unwrap();
+        // A relative `jdk_home` resolves against the worktree root.
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store
+                    .set_user_settings(r#"{ "kotlin": { "jdk_home": "tools/jdk" } }"#, cx)
+                    .unwrap();
+            });
+        });
+
+        let binary = fixture.command(cx, &net, today()).await.unwrap();
+        let env = binary.env.as_ref().unwrap();
+        assert_eq!(
+            env.get("JAVA_HOME").map(String::as_str),
+            Some(fixture.root.join("tools/jdk").to_str().unwrap())
+        );
+        // The pin's own variables stay.
+        assert_eq!(
+            env.get("INTELLIJ_UPDATES_ENABLED").map(String::as_str),
+            Some("false")
+        );
+        let log = fs::read_to_string(fixture.dirs.logs_dir.join("kotlin.log")).unwrap();
+        assert!(log.contains("kotlin.jdk_home in settings"), "{log}");
+    }
+
+    #[gpui::test]
+    async fn test_an_unmet_toolchain_fails_before_any_download(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let net = net_serving(fixture.archive.clone());
+        // No machine has a JDK 99.
+        fs::write(
+            fixture.root.join("build.gradle.kts"),
+            "kotlin { jvmToolchain(99) }",
+        )
+        .unwrap();
+
+        let error = fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), "no JDK for Gradle import (toolchain 99)");
+        assert_eq!(net.requests(), 0);
+        assert_eq!(
+            fixture.status(cx),
+            Some(ServerStatus::Failed {
+                reason: "no JDK for Gradle import (toolchain 99)".into()
+            })
+        );
     }
 
     /// The manager's host starts whatever `server_command` returns, as Zed does after `restart`.

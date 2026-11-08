@@ -133,3 +133,18 @@ async fn switch_profile_dispatches_by_name(cx: &mut TestAppContext) {
         assert!(old_name.partial_eq(&zed_actions::settings::SwitchProfile));
     });
 }
+
+#[gpui::test]
+async fn kotlin_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let show_jdk = cx
+            .build_action("kotlin::ShowJdk", None)
+            .expect("kotlin::ShowJdk is registered");
+        assert!(show_jdk.partial_eq(&bongos_kotlin::ShowJdk));
+        assert_eq!(
+            command_palette::humanize_action_name("kotlin::ShowJdk"),
+            "kotlin: show jdk"
+        );
+    });
+}

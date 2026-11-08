@@ -265,6 +265,25 @@ pub fn init(cx: &mut App) {
             );
         });
     })
+    .on_action(|_: &bongos_kotlin::ShowJdk, cx| {
+        with_active_or_new_workspace(cx, |workspace, window, cx| {
+            let request = bongos_kotlin::ShowJdkRequest::new(workspace.project().read(cx), cx);
+            cx.spawn_in(window, async move |workspace, cx| {
+                let text = cx.background_spawn(async move { request.text() }).await;
+                workspace.update_in(cx, |workspace, window, cx| {
+                    open_bundled_file(
+                        workspace,
+                        text.into(),
+                        bongos_kotlin::SHOW_JDK_TITLE,
+                        "Plain Text",
+                        window,
+                        cx,
+                    );
+                })
+            })
+            .detach_and_log_err(cx);
+        });
+    })
     .on_action(|_: &OpenDefaultSettings, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
             open_bundled_file(
@@ -2441,6 +2460,17 @@ fn open_bundled_file(
         })
     });
     if let Some(existing) = existing {
+        // A report buffer is open from an earlier call: show the new text.
+        let buffer = existing.read(cx).buffer().read(cx).as_singleton();
+        if let Some(buffer) = buffer {
+            buffer.update(cx, |buffer, cx| {
+                if buffer.text() != text {
+                    buffer.set_capability(Capability::ReadWrite, cx);
+                    buffer.set_text(text.into_owned(), cx);
+                    buffer.set_capability(Capability::ReadOnly, cx);
+                }
+            });
+        }
         workspace.activate_item(&existing, true, true, window, cx);
         return;
     }

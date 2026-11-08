@@ -2241,6 +2241,7 @@ dependencies = [
  "toml 0.8.23",
  "util",
  "worktree",
+ "zed_actions",
 ]
 
 [[package]]
