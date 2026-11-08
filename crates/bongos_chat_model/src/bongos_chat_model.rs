@@ -1,12 +1,15 @@
 //! The file model of bongos chat sessions: the record of one chat (`chats/<chat id>.toml` in a task
 //! or project directory), reading and writing it without losing keys this version does not know,
 //! the open and archived lists with their order, fork lookup, chat names, and the digest of the
-//! artifact list a chat was given, and the session types (directories of plain files, with their
+//! artifact list a chat was given, the pure renderer of what a launch injects (`context.md`, the
+//! system prompt, the hook settings and the environment), and the session types (directories of plain files, with their
 //! shipped defaults, seeding and resolution). It has no UI dependency and never touches the real home
 //! directory: every path function takes the directory it works under.
 
 mod digest;
 mod error;
+mod facts;
+mod inject;
 mod list;
 mod naming;
 mod record;
@@ -15,6 +18,11 @@ mod types;
 
 pub use digest::{DIGEST_PREFIX, context_digest};
 pub use error::{Error, ErrorKind, Result};
+pub use facts::TaskFacts;
+pub use inject::{
+    HandoffParent, RenderInput, handoff_note, render_codex_instructions, render_context,
+    render_env, render_settings, render_system, shell_quote,
+};
 pub use list::{ChatEntry, ChatLists, chat_lists, forks_of, read_chats_dir, read_scope_chats};
 pub use naming::{MAX_NAME_CHARS, default_name, from_prompt, from_title};
 pub use record::{
@@ -30,6 +38,9 @@ pub use types::{
 
 #[cfg(test)]
 mod digest_tests;
+
+#[cfg(test)]
+mod inject_tests;
 
 #[cfg(test)]
 mod list_tests;
