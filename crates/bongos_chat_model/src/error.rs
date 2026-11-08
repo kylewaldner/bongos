@@ -25,6 +25,8 @@ pub enum ErrorKind {
     InvalidName(String),
     #[error("no session type `{0}`")]
     NoSuchType(String),
+    #[error("`{0}` cannot be put in a shell command safely")]
+    Unquotable(String),
 }
 
 fn unsupported_schema_message(found: &Option<String>) -> String {
