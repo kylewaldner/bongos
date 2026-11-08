@@ -23,24 +23,24 @@ use crate::{Stats, WorkDirs, WorkSettings, WorkStore, WriteError};
 /// Long enough for the watcher latency, a reload and slack on a loaded machine.
 const SETTLE: Duration = Duration::from_millis(1000);
 
-fn task_toml(id: &str, goal: &str) -> String {
+pub(crate) fn task_toml(id: &str, goal: &str) -> String {
     format!(
         "schema = 1\nid = \"{id}\"\ngoal = \"{goal}\"\nkind = \"pr-ship\"\nstatus = \"open\"\n\
          created = 2020-01-01T10:00:00Z\n"
     )
 }
 
-fn project_toml(title: &str) -> String {
+pub(crate) fn project_toml(title: &str) -> String {
     format!("schema = 1\ntitle = \"{title}\"\nrepositories = [\"invoicing\"]\n")
 }
 
 /// The temporary directory with symbolic links resolved: snapshot paths are under the canonical
 /// root, and the temporary directory may sit behind a link.
-fn canonical(temp: &TempDir) -> PathBuf {
+pub(crate) fn canonical(temp: &TempDir) -> PathBuf {
     std::fs::canonicalize(temp.path()).unwrap()
 }
 
-fn write(path: &Path, text: &str) {
+pub(crate) fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
 }
@@ -55,7 +55,7 @@ fn seed(root: &Path) -> PathBuf {
     backfill
 }
 
-fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
+pub(crate) fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
     cx.update(|cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {

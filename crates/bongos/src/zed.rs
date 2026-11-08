@@ -639,6 +639,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             bongos_kotlin::cancel_installs(&project, cx);
         });
 
+        bongos_work::register(workspace);
+
         let cursor_position =
             cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
         let line_ending_indicator =
@@ -5479,6 +5481,7 @@ mod tests {
                 "theme",
                 "theme_selector",
                 "toast",
+                "todo",
                 "toolchain",
                 "variable_list",
                 "vim",

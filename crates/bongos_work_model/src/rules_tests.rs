@@ -312,6 +312,31 @@ fn ship_before_parent_done_is_refused_and_the_override_marks_it() {
 }
 
 #[test]
+fn skipping_the_ships_todo_before_the_parent_is_done_is_refused() {
+    let mut a = done(pr_ship("a"), &[0]);
+    file_mut(&mut a).todos[1].started = Some(at("2026-11-08T11:00:00Z"));
+    let b = done(stacked_on(pr_ship("b"), "a", UnblockPoint::Review), &[0, 1]);
+    let t = tree(vec![a, b]);
+    let b = id_of(&t, "b");
+    assert_eq!(
+        refusal(todo_skip(&t, &ctx(), &b, Some(2))),
+        "b cannot ship before a is Done (it is Review); use task: advance override"
+    );
+
+    // Other todos skip as before, and so does the ships todo once the parent is Done.
+    let t = tree(vec![
+        pr_ship("a"),
+        stacked_on(pr_ship("b"), "a", UnblockPoint::Review),
+    ]);
+    assert!(todo_skip(&t, &ctx(), &id_of(&t, "b"), Some(1)).is_ok());
+    let t = tree(vec![
+        leaf("a", Status::Done),
+        done(stacked_on(pr_ship("b"), "a", UnblockPoint::Review), &[0, 1]),
+    ]);
+    assert!(todo_skip(&t, &ctx(), &id_of(&t, "b"), Some(2)).is_ok());
+}
+
+#[test]
 fn parent_with_two_stacked_children_each_with_a_child_is_accepted() {
     let mut t = tree(vec![
         pr_ship("a"),

@@ -216,3 +216,74 @@ async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
         assert!(cx.build_action("dev::OpenLanguageServerLogs", None).is_ok());
     });
 }
+
+/// The `task` and `todo` actions that name a task or todo, with the palette text of each.
+const WORK_ACTIONS: [(&str, &str); 16] = [
+    ("task::New", "task: new"),
+    ("task::NewChild", "task: new child"),
+    ("task::Advance", "task: advance"),
+    ("task::AdvanceOverride", "task: advance override"),
+    ("task::Close", "task: close"),
+    ("task::Drop", "task: drop"),
+    ("task::Reopen", "task: reopen"),
+    ("task::Edit", "task: edit"),
+    ("todo::Add", "todo: add"),
+    ("todo::Remove", "todo: remove"),
+    ("todo::Skip", "todo: skip"),
+    ("todo::Reopen", "todo: reopen"),
+    ("todo::Move", "todo: move"),
+    ("todo::SetWorkflow", "todo: set workflow"),
+    ("todo::SetRole", "todo: set role"),
+    ("todo::Start", "todo: start"),
+];
+
+#[gpui::test]
+async fn work_task_and_todo_actions_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in WORK_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        assert!(
+            cx.build_action("task::Drop", None)
+                .unwrap()
+                .partial_eq(&bongos_work::task::DropTask)
+        );
+        assert!(
+            cx.build_action("todo::SetWorkflow", None)
+                .unwrap()
+                .partial_eq(&bongos_work::todo::SetWorkflow)
+        );
+    });
+}
+
+/// `task` is shared with Zed's task runner: the work actions add names and take none of its, and
+/// `todo` holds only the work actions.
+#[gpui::test]
+async fn work_actions_share_the_task_namespace_without_colliding(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let names: Vec<&str> = cx.all_action_names().iter().copied().collect();
+        let ours: Vec<&str> = WORK_ACTIONS.iter().map(|(name, _)| *name).collect();
+        for kept in ["task::Spawn", "task::Rerun"] {
+            assert!(names.contains(&kept), "{kept} is gone");
+            assert!(!ours.contains(&kept), "{kept} is taken");
+        }
+        for name in &names {
+            if name.starts_with("todo::") {
+                assert!(ours.contains(name), "unexpected action in todo: {name}");
+            }
+        }
+        for name in ours {
+            assert_eq!(
+                names.iter().filter(|existing| **existing == name).count(),
+                1,
+                "{name}"
+            );
+        }
+    });
+}
