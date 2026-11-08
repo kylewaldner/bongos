@@ -162,6 +162,7 @@ prompt_store.workspace = true
 proto.workspace = true
 recent_projects.workspace = true
 bongos_app.workspace = true
+bongos_chat.workspace = true
 bongos_kotlin.workspace = true
 bongos_languages.workspace = true
 bongos_net.workspace = true

@@ -253,6 +253,10 @@ pub struct SettingsContent {
     /// Settings for the Work view: projects and tasks kept as files under `~/.bongos`.
     pub work: Option<WorkSettingsContent>,
 
+    /// Settings for chat sessions: agent CLIs run in terminals and recorded under a task's
+    /// `chats/` directory.
+    pub chats: Option<ChatsSettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -1380,6 +1384,65 @@ pub struct WorkSettingsContent {
     ///
     /// Default: []
     pub repositories: Option<Vec<WorkRepositoryContent>>,
+}
+
+/// Settings for chat sessions.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ChatsSettingsContent {
+    /// Whether chat sessions are on. While they are off, bongos neither indexes chat records nor
+    /// seeds the session types, and the chat commands are hidden.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// Where the chat panel docks.
+    ///
+    /// Default: right
+    pub dock: Option<DockPosition>,
+    /// Default width of the chat panel, in pixels.
+    ///
+    /// Default: 720
+    pub default_width: Option<f32>,
+    /// Whether a dual-layout chat shows the prompts pane beside its terminal.
+    ///
+    /// Default: true
+    pub prompt_pane: Option<bool>,
+    /// Seconds without output after which a running chat counts as idle.
+    ///
+    /// Default: 60
+    pub idle_after_secs: Option<u64>,
+    /// Milliseconds between pasting a prompt into a chat and submitting it.
+    ///
+    /// Default: 100
+    pub submit_delay_ms: Option<u64>,
+    /// The directory of session types. Null means `~/.bongos/chat-types`.
+    ///
+    /// Default: null
+    pub types_dir: Option<String>,
+    /// The agent command lines.
+    pub agents: Option<ChatAgentsContent>,
+}
+
+/// The agent CLIs chats can run.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ChatAgentsContent {
+    /// Claude Code.
+    pub claude: Option<ChatAgentContent>,
+    /// Codex.
+    pub codex: Option<ChatAgentContent>,
+}
+
+/// How to run one agent CLI.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ChatAgentContent {
+    /// The program to run, looked up on `PATH` unless it is a path.
+    pub command: Option<String>,
+    /// Arguments added to every launch of the agent.
+    ///
+    /// Default: []
+    pub extra_args: Option<Vec<String>>,
 }
 
 /// A repository a Work task can belong to.

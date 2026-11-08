@@ -1,0 +1,30 @@
+[package]
+name = "bongos_chat"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_chat.rs"
+doctest = false
+
+[dependencies]
+bongos_chat_model.workspace = true
+bongos_work.workspace = true
+bongos_work_model.workspace = true
+command_palette_hooks.workspace = true
+futures.workspace = true
+gpui.workspace = true
+log.workspace = true
+settings.workspace = true
+util.workspace = true
+
+[dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

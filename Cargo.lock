@@ -2046,6 +2046,7 @@ dependencies = [
  "assets",
  "audio",
  "bongos_app",
+ "bongos_chat",
  "bongos_kotlin",
  "bongos_languages",
  "bongos_net",
@@ -2207,6 +2208,23 @@ dependencies = [
  "settings",
  "settings_json",
  "tempfile",
+]
+
+[[package]]
+name = "bongos_chat"
+version = "0.1.0"
+dependencies = [
+ "bongos_chat_model",
+ "bongos_work",
+ "bongos_work_model",
+ "command_palette_hooks",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "settings",
+ "tempfile",
+ "util",
 ]
 
 [[package]]
