@@ -3,6 +3,10 @@
 # Prints pass and fail counts, and the name and failure text of each failing test; the full output
 # is in the log.
 #   test [crate...]       BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
+# Prefer running it with no crate names, which tests the crates changed on this branch, and narrow
+# the run with BONGOS_TEST_FILTER. Every distinct set of -p flags makes cargo unify features
+# differently and build another full set of dependency artifacts, so name crates only when the
+# branch's set is wrong. The whole suite is script/bongos/test-all.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
