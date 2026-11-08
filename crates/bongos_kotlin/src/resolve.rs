@@ -109,7 +109,7 @@ fn load(state_dir: &Path) -> Result<OverrideFile> {
 }
 
 /// Writes the new contents next to the target; `commit_staged` renames it into place.
-fn stage(path: &Path, contents: &[u8]) -> Result<PathBuf> {
+pub(crate) fn stage(path: &Path, contents: &[u8]) -> Result<PathBuf> {
     let staged = path.with_extension("json.tmp");
     let mut file =
         fs::File::create(&staged).with_context(|| format!("creating {}", staged.display()))?;
@@ -118,7 +118,7 @@ fn stage(path: &Path, contents: &[u8]) -> Result<PathBuf> {
     Ok(staged)
 }
 
-fn commit_staged(staged: &Path, path: &Path) -> Result<()> {
+pub(crate) fn commit_staged(staged: &Path, path: &Path) -> Result<()> {
     fs::rename(staged, path).with_context(|| format!("replacing {}", path.display()))
 }
 

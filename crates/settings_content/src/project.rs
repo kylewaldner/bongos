@@ -103,6 +103,21 @@ pub struct KotlinSettingsContent {
     ///
     /// Default: null (detected from the project's toolchain, JAVA_HOME and common locations)
     pub jdk_home: Option<String>,
+
+    /// Settings for the IntelliJ language server.
+    pub intellij: Option<KotlinIntellijSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Debug, PartialEq, Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct KotlinIntellijSettingsContent {
+    /// Whether bongos may download the IntelliJ language server, which is proprietary software
+    /// under the JetBrains user agreement. When false and the server is not installed, it is
+    /// reported as not installed; set this to true, or point `lsp.kotlin.binary.path` at a server
+    /// you installed by hand. kotlin-lsp always installs automatically.
+    ///
+    /// Default: false
+    pub download: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom)]

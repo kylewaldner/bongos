@@ -32,6 +32,9 @@ pub const ADAPTER_NAME: &str = "kotlin";
 /// The status text of a server whose build has expired (decision D18).
 pub const EXPIRED_REASON: &str = "server expired, update bongos";
 
+/// The status text of an install whose start was dropped before it ended.
+pub const INTERRUPTED_REASON: &str = "install interrupted";
+
 /// What an expired early-access build prints before it exits with `EXPIRED_EXIT_CODE`.
 const EXPIRED_MESSAGE: &str = "This build of kotlin-server has expired.";
 const EXPIRED_EXIT_CODE: i32 = 7;
@@ -319,6 +322,27 @@ impl KotlinProjectManager {
             Err(reason) => ServerStatus::Failed { reason },
         };
         self.set_status(worktree_id, Some(status), cx);
+    }
+
+    /// The start that began the install with `cancel` was dropped before the install ended (Zed
+    /// abandoned the start): the status must not stay `Installing`. Does nothing when another
+    /// install has begun since.
+    pub fn abandon_install(
+        &mut self,
+        worktree_id: WorktreeId,
+        cancel: &Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .worktree(worktree_id)
+            .and_then(|state| state.install_cancel.as_ref())
+            .is_some_and(|current| Arc::ptr_eq(current, cancel));
+        if !current {
+            return;
+        }
+        cancel.store(true, Ordering::Relaxed);
+        self.log.line("install interrupted");
+        self.end_install(worktree_id, Err(INTERRUPTED_REASON.into()), cx);
     }
 
     /// `kotlin: cancel install`. Returns whether an install was running. The installer stops at its

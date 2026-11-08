@@ -14,19 +14,24 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use futures::{FutureExt as _, StreamExt as _, lock::OwnedMutexGuard};
-use gpui::{App, AppContext as _, AsyncApp};
+use gpui::{App, AppContext as _, AsyncApp, WeakEntity};
 use http_client::HttpClient;
 use language::{
     DynLspInstaller, LanguageServerBinaryLocations, LspAdapter, LspAdapterDelegate, Toolchain,
 };
 use lsp::{LanguageServerBinary, LanguageServerBinaryOptions, LanguageServerName};
-use settings::{KotlinServerKind, WorktreeId};
+use settings::{KotlinServerKind, Settings as _, WorktreeId};
+use util::rel_path::RelPath;
 
 use crate::{
-    KotlinDirs,
+    KotlinDirs, KotlinSettings,
     install::{InstallCancelled, ProgressFn, spawn_ensure_installed},
-    installed::{check_installed, not_installed, server_name},
-    manager::{ADAPTER_NAME, EXPIRED_REASON, KotlinRegistry},
+    installed::{check_installed, not_installed, server_name, version_dir},
+    intellij::{
+        LICENSE_TIMEOUT, LicenseOutcome, bundle_eula_hash, eula_accepted, eula_argument,
+        license_check,
+    },
+    manager::{ADAPTER_NAME, EXPIRED_REASON, KotlinProjectManager, KotlinRegistry},
     manifest::{Manifest, ManifestEntry, current_platform},
     resolve::resolve,
 };
@@ -119,12 +124,19 @@ fn manager_of(
         .and_then(|registry| registry.manager(worktree_root))
 }
 
+/// The message of an IntelliJ server that is not installed and may not be downloaded (D16).
+pub const INTELLIJ_DOWNLOAD_HINT: &str = "intellij is not installed: set kotlin.intellij.download to true to let bongos download it, or point lsp.kotlin.binary.path at a server you installed by hand";
+
 /// The command that starts the effective server for a worktree, or why it cannot start.
 ///
 /// An expired pin (decision D18) is neither installed nor started. An installed pin starts without
 /// touching `http`. A missing kotlin-lsp is installed first, with `Installing` progress and the
-/// manager's cancel flag; the IntelliJ server has no installer yet (step 9), so a missing one is
-/// "not installed". `today` is the date the pin's `expires` is compared with.
+/// manager's cancel flag. A missing IntelliJ server is installed the same way only when
+/// `kotlin.intellij.download` is true (D16); otherwise it is "intellij is not installed" and
+/// nothing is requested. An installed IntelliJ server then needs the user's EULA acceptance
+/// (D9) and a passing `license status` (D10), and starts with `--eula=<hash>`; with no fallback
+/// yet, either failing is a `Failed` status. `today` is the date the pin's `expires` is compared
+/// with.
 pub async fn server_command(
     dirs: &KotlinDirs,
     manifest: &Manifest,
@@ -167,27 +179,163 @@ pub async fn server_command(
         let (install_root, entry) = (dirs.install_root.clone(), entry.clone());
         move || check_installed(&install_root, server, &entry)
     };
-    if let Some(binary) = cx.background_spawn(async move { check() }).await {
-        return Ok(binary);
+    let binary = match cx.background_spawn(async move { check() }).await {
+        Some(binary) => binary,
+        None => {
+            if server == KotlinServerKind::Intellij && !intellij_download_allowed(worktree_id, cx) {
+                let reason = not_installed(server).to_string();
+                cx.update(|cx| {
+                    log_line(
+                        worktree_root,
+                        "intellij download is off (kotlin.intellij.download)",
+                        cx,
+                    );
+                    start_failed(worktree_root, worktree_id, reason, cx)
+                });
+                bail!(INTELLIJ_DOWNLOAD_HINT);
+            }
+            install_server(
+                dirs,
+                server,
+                entry.clone(),
+                http,
+                worktree_root,
+                worktree_id,
+                cx,
+            )
+            .await?;
+            check_installed(&dirs.install_root, server, &entry)
+                .ok_or_else(|| not_installed(server))?
+        }
+    };
+    match server {
+        KotlinServerKind::KotlinLsp => Ok(binary),
+        KotlinServerKind::Intellij => {
+            intellij_gates(dirs, &entry, binary, worktree_root, worktree_id, cx).await
+        }
     }
-    if server != KotlinServerKind::KotlinLsp {
-        let error = not_installed(server);
-        let reason = error.to_string();
-        cx.update(|cx| start_failed(worktree_root, worktree_id, reason, cx));
-        return Err(error);
+}
+
+fn intellij_download_allowed(worktree_id: WorktreeId, cx: &mut AsyncApp) -> bool {
+    cx.update(|cx| {
+        KotlinSettings::get(
+            Some(settings::SettingsLocation {
+                worktree_id,
+                path: RelPath::empty(),
+            }),
+            cx,
+        )
+        .intellij_download
+    })
+}
+
+fn log_line(worktree_root: &Path, text: &str, cx: &App) {
+    if let Some(manager) = manager_of(worktree_root, cx) {
+        manager.read(cx).log().line(text);
+    }
+}
+
+/// The checks an installed IntelliJ server passes before it starts (D9, then D10): the user has
+/// accepted this bundle's EULA, and `license status` says licensed. Returns the binary with
+/// `--eula=<hash>` added. A failure is the `Failed` status; the error carries the same reason.
+async fn intellij_gates(
+    dirs: &KotlinDirs,
+    entry: &ManifestEntry,
+    mut binary: LanguageServerBinary,
+    worktree_root: &Path,
+    worktree_id: WorktreeId,
+    cx: &mut AsyncApp,
+) -> Result<LanguageServerBinary> {
+    let fail = |reason: String, detail: String, cx: &mut AsyncApp| {
+        cx.update(|cx| {
+            log_line(worktree_root, &detail, cx);
+            start_failed(worktree_root, worktree_id, reason.clone(), cx)
+        });
+        anyhow::anyhow!(reason)
+    };
+
+    let bundle = version_dir(
+        &dirs.install_root,
+        KotlinServerKind::Intellij,
+        &entry.version,
+    );
+    let hash = match cx
+        .background_spawn(async move { bundle_eula_hash(&bundle) })
+        .await
+    {
+        Ok(hash) => hash,
+        Err(error) => {
+            return Err(fail(
+                "IntelliJ EULA not found".into(),
+                format!("eula error: {error:#}"),
+                cx,
+            ));
+        }
+    };
+    let state_dir = dirs.state_dir.clone();
+    let accepted = {
+        let hash = hash.clone();
+        cx.background_spawn(async move { eula_accepted(&state_dir, &hash) })
+            .await
+    };
+    if !accepted {
+        return Err(fail(
+            "IntelliJ EULA not accepted".into(),
+            format!("eula {hash} is not accepted"),
+            cx,
+        ));
     }
 
-    install_server(
-        dirs,
-        server,
-        entry.clone(),
-        http,
-        worktree_root,
-        worktree_id,
-        cx,
-    )
-    .await?;
-    check_installed(&dirs.install_root, server, &entry).ok_or_else(|| not_installed(server))
+    let timeout = cx.background_executor().timer(LICENSE_TIMEOUT);
+    let outcome = match license_check(&binary, timeout).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(fail(
+                LicenseOutcome::Offline
+                    .failure_reason()
+                    .unwrap_or_default()
+                    .into(),
+                format!("license check error: {error:#}"),
+                cx,
+            ));
+        }
+    };
+    if let Some(reason) = outcome.failure_reason() {
+        return Err(fail(reason.into(), format!("license {outcome:?}"), cx));
+    }
+    cx.update(|cx| log_line(worktree_root, "license licensed", cx));
+    binary.arguments.push(eula_argument(&hash));
+    Ok(binary)
+}
+
+/// Ends the install in the manager if the start future is dropped before it finished, so the
+/// status does not stay `Installing` until the next start.
+struct InstallGuard {
+    manager: WeakEntity<KotlinProjectManager>,
+    worktree_id: WorktreeId,
+    cancel: Arc<AtomicBool>,
+    cx: AsyncApp,
+    armed: bool,
+}
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let (manager, worktree_id, cancel) =
+            (self.manager.clone(), self.worktree_id, self.cancel.clone());
+        // Not inline: the drop may happen inside an update of the app.
+        self.cx
+            .spawn(async move |cx| {
+                manager
+                    .update(cx, |manager, cx| {
+                        manager.abandon_install(worktree_id, &cancel, cx)
+                    })
+                    .ok();
+            })
+            .detach();
+    }
 }
 
 /// Installs `server` with progress in the manager's status. The outcome is also the status: on an
@@ -208,6 +356,13 @@ async fn install_server(
         }
         None => Arc::new(AtomicBool::new(false)),
     };
+    let mut guard = manager.as_ref().map(|manager| InstallGuard {
+        manager: manager.downgrade(),
+        worktree_id,
+        cancel: cancel.clone(),
+        cx: cx.clone(),
+        armed: true,
+    });
     let (sender, mut updates) = futures::channel::mpsc::unbounded();
     let progress: Arc<ProgressFn> = Arc::new(move |done, total| {
         sender.unbounded_send((done, total)).ok();
@@ -232,6 +387,9 @@ async fn install_server(
         }
     };
 
+    if let Some(guard) = &mut guard {
+        guard.armed = false;
+    }
     let outcome = match &result {
         Ok(_) => Ok(()),
         Err(error) if error.downcast_ref::<InstallCancelled>().is_some() => Err(error.to_string()),
@@ -773,34 +931,295 @@ launcher = "bin/launcher"
         assert_eq!(down.requests(), 0);
     }
 
+    fn set_user_settings(cx: &mut TestAppContext, json: &str) {
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.set_user_settings(json, cx).unwrap();
+            });
+        });
+    }
+
+    const INTELLIJ_OFF: &str = r#"{ "kotlin": { "server": "intellij" } }"#;
+    const INTELLIJ_ON: &str =
+        r#"{ "kotlin": { "server": "intellij", "intellij": { "download": true } } }"#;
+    const EULA: &str = "FAKE JETBRAINS USER AGREEMENT\nVersion 2.0\n";
+
+    /// An IntelliJ pin for a small archive: a `EULA.txt` and a launcher that records that it ran
+    /// and exits with the code in the `license-exit` file next to the state directory.
+    fn intellij_fixture(cx: &mut TestAppContext) -> Fixture {
+        let mut fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let scratch = fixture.dirs.state_dir.parent().unwrap().to_path_buf();
+        let launcher = format!(
+            "#!/bin/sh\necho ran >> '{ran}'\nexit $(cat '{exit}')\n",
+            ran = scratch.join("license-ran").display(),
+            exit = scratch.join("license-exit").display(),
+        );
+        fixture.archive = crate::install::tests::tar_gz(&[
+            (
+                "server-1.2.3/EULA.txt".to_string(),
+                0o644,
+                EULA.as_bytes().to_vec(),
+            ),
+            (
+                "server-1.2.3/bin/launcher".to_string(),
+                0o644,
+                launcher.into_bytes(),
+            ),
+        ]);
+        fixture.manifest = Manifest::parse(&format!(
+            r#"
+[intellij]
+version = "1.2.3"
+args = {args:?}
+
+[intellij.env]
+INTELLIJ_UPDATES_ENABLED = "false"
+
+[intellij.platform.{platform}]
+url = "http://127.0.0.1:1/intellij-server.tar.gz"
+sha256 = "{sha}"
+archive = "tar.gz"
+strip_components = 1
+launcher = "bin/launcher"
+"#,
+            args = PINNED_ARGS,
+            platform = current_platform().unwrap(),
+            sha = crate::install::tests::sha256(&fixture.archive),
+        ))
+        .unwrap();
+        fixture.entry = fixture
+            .manifest
+            .entry(KotlinServerKind::Intellij, current_platform().unwrap())
+            .unwrap();
+        fixture.set_license_exit(0);
+        set_user_settings(cx, INTELLIJ_OFF);
+        fixture
+    }
+
+    impl Fixture {
+        fn scratch(&self) -> PathBuf {
+            self.dirs.state_dir.parent().unwrap().to_path_buf()
+        }
+
+        fn set_license_exit(&self, code: i32) {
+            fs::write(self.scratch().join("license-exit"), code.to_string()).unwrap();
+        }
+
+        /// How many times the launcher ran (`license status` runs it).
+        fn license_runs(&self) -> usize {
+            fs::read_to_string(self.scratch().join("license-ran"))
+                .map(|text| text.lines().count())
+                .unwrap_or(0)
+        }
+
+        fn intellij_dir(&self) -> PathBuf {
+            self.dirs.install_root.join("intellij")
+        }
+    }
+
     #[gpui::test]
-    async fn test_a_missing_intellij_server_is_not_installed_here(cx: &mut TestAppContext) {
+    async fn test_a_missing_intellij_server_is_not_downloaded_unless_the_setting_is_on(
+        cx: &mut TestAppContext,
+    ) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = intellij_fixture(cx);
+        let net = net_serving(fixture.archive.clone());
+
+        // Off (the default): "intellij is not installed", the way out in the message, no request.
+        let error = fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), INTELLIJ_DOWNLOAD_HINT);
+        assert!(error.to_string().contains("kotlin.intellij.download"));
+        assert!(error.to_string().contains("lsp.kotlin.binary.path"));
+        assert_eq!(
+            fixture.status(cx),
+            Some(ServerStatus::Failed {
+                reason: "intellij is not installed".into()
+            })
+        );
+        assert_eq!(
+            net.requests(),
+            0,
+            "the download started with the setting off"
+        );
+        assert!(!fixture.intellij_dir().exists());
+
+        // On: the download starts, the bundle is installed, then the EULA gate stops the start.
+        set_user_settings(cx, INTELLIJ_ON);
+        let error = fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), "IntelliJ EULA not accepted");
+        assert_eq!(net.requests(), 1);
+        assert!(fixture.intellij_dir().join("1.2.3/EULA.txt").is_file());
+    }
+
+    #[gpui::test]
+    async fn test_a_project_can_turn_the_intellij_download_on(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = intellij_fixture(cx);
+        let net = net_serving(fixture.archive.clone());
+        // Off for the user, on in the project's own settings.
         cx.update(|cx| {
             cx.update_global::<SettingsStore, _>(|store, cx| {
                 store
-                    .set_user_settings(r#"{ "kotlin": { "server": "intellij" } }"#, cx)
+                    .set_local_settings(
+                        worktree(),
+                        settings::LocalSettingsPath::InWorktree(RelPath::empty_arc()),
+                        settings::LocalSettingsKind::Settings,
+                        Some(r#"{ "kotlin": { "intellij": { "download": true } } }"#),
+                        cx,
+                    )
                     .unwrap();
             });
         });
-        let manifest = Manifest::embedded();
-        let net = net_down();
-        let (dirs, root, http) = (
-            fixture.dirs.clone(),
-            fixture.root.clone(),
-            net.client.clone(),
-        );
-        let error = cx
-            .update(|cx| {
-                cx.spawn(async move |cx| {
-                    server_command(&dirs, &manifest, http, &root, worktree(), today(), cx).await
-                })
+        fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(net.requests(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_intellij_starts_only_after_the_eula_and_the_license_check(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let fixture = intellij_fixture(cx);
+        set_user_settings(cx, INTELLIJ_ON);
+        let net = net_serving(fixture.archive.clone());
+        let failed = |reason: &str| {
+            Some(ServerStatus::Failed {
+                reason: reason.into(),
             })
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), "intellij is not installed");
-        assert_eq!(net.requests(), 0, "the IntelliJ installer is step 9");
+        };
+
+        // Installed, not accepted: no start, and `license status` was not run.
+        let error = fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), "IntelliJ EULA not accepted");
+        assert_eq!(fixture.status(cx), failed("IntelliJ EULA not accepted"));
+        assert_eq!(fixture.license_runs(), 0);
+
+        // Accepting another agreement's hash does not count.
+        crate::accept_eula(&fixture.dirs.state_dir, &crate::eula_hash(b"another text")).unwrap();
+        let error = fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), "IntelliJ EULA not accepted");
+        assert_eq!(fixture.license_runs(), 0);
+
+        // Accepted but unlicensed, then offline: the status names the reason.
+        let hash = crate::eula_hash(EULA.as_bytes());
+        crate::accept_eula(&fixture.dirs.state_dir, &hash).unwrap();
+        fixture.set_license_exit(2);
+        let error = fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), "IntelliJ unlicensed");
+        assert_eq!(fixture.status(cx), failed("IntelliJ unlicensed"));
+        fixture.set_license_exit(3);
+        let error = fixture.command(cx, &net, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), "license check failed (offline?)");
+        assert_eq!(
+            fixture.status(cx),
+            failed("license check failed (offline?)")
+        );
+        assert_eq!(fixture.license_runs(), 2);
+
+        // Licensed: the pinned arguments and the accepted hash. The installed server needs no
+        // download, so the setting can be off again.
+        fixture.set_license_exit(0);
+        set_user_settings(cx, INTELLIJ_OFF);
+        let binary = fixture.command(cx, &net, today()).await.unwrap();
+        let mut expected: Vec<std::ffi::OsString> =
+            PINNED_ARGS.map(std::ffi::OsString::from).to_vec();
+        expected.push(format!("--eula={hash}").into());
+        assert_eq!(binary.arguments, expected);
+        assert_eq!(
+            binary.path,
+            fixture.intellij_dir().join("1.2.3/bin/launcher")
+        );
+        assert_eq!(fixture.status(cx), Some(ServerStatus::Starting));
+        assert_eq!(fixture.license_runs(), 3);
+        assert_eq!(net.requests(), 1, "only the first start downloaded");
+        let log = fs::read_to_string(fixture.dirs.logs_dir.join("kotlin.log")).unwrap();
+        assert!(log.contains("license Unlicensed"), "{log}");
+        assert!(log.contains("license licensed"), "{log}");
+    }
+
+    #[gpui::test]
+    async fn test_a_failed_intellij_install_is_failed_without_a_fallback(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = intellij_fixture(cx);
+        set_user_settings(cx, INTELLIJ_ON);
+        let down = net_down();
+        let error = fixture.command(cx, &down, today()).await.unwrap_err();
+        assert!(error.to_string().contains("downloading"), "{error:#}");
+        let Some(ServerStatus::Failed { reason }) = fixture.status(cx) else {
+            panic!("expected Failed, got {:?}", fixture.status(cx));
+        };
+        assert!(reason.starts_with("install failed: "), "{reason}");
+        assert_eq!(down.requests(), 1);
+    }
+
+    /// Starts an install that never ends, drops the start, and returns the status afterwards.
+    async fn status_after_dropping_a_start_mid_install(
+        cx: &mut TestAppContext,
+        fixture: &Fixture,
+    ) -> Option<ServerStatus> {
+        let endless = net_endless();
+        let task = fixture.command(cx, &endless, today());
+        wait_until(cx, "download progress", |cx| {
+            matches!(fixture.status(cx), Some(ServerStatus::Installing { .. }))
+        });
+        drop(task);
+        cx.run_until_parked();
+        fixture.status(cx)
+    }
+
+    #[gpui::test]
+    async fn test_dropping_a_kotlin_lsp_start_mid_install_ends_the_install(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let status = status_after_dropping_a_start_mid_install(cx, &fixture).await;
+        assert_eq!(
+            status,
+            Some(ServerStatus::Failed {
+                reason: "install interrupted".into()
+            })
+        );
+        // The next start installs from zero.
+        let good = net_serving(fixture.archive.clone());
+        fixture.command(cx, &good, today()).await.unwrap();
+        assert_eq!(fixture.status(cx), Some(ServerStatus::Starting));
+    }
+
+    #[gpui::test]
+    async fn test_dropping_an_intellij_start_mid_install_ends_the_install(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = intellij_fixture(cx);
+        set_user_settings(cx, INTELLIJ_ON);
+        let status = status_after_dropping_a_start_mid_install(cx, &fixture).await;
+        assert_eq!(
+            status,
+            Some(ServerStatus::Failed {
+                reason: "install interrupted".into()
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn test_a_dropped_start_does_not_end_a_newer_install(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let endless = net_endless();
+        let first = fixture.command(cx, &endless, today());
+        wait_until(cx, "the first download", |cx| {
+            matches!(fixture.status(cx), Some(ServerStatus::Installing { .. }))
+        });
+        // The manager moves to a second install; the first start's guard must leave it alone.
+        let second_cancel = fixture
+            .manager
+            .update(cx, |manager, cx| manager.begin_install(worktree(), cx));
+        drop(first);
+        cx.run_until_parked();
+        assert!(matches!(
+            fixture.status(cx),
+            Some(ServerStatus::Installing { .. })
+        ));
+        assert!(!second_cancel.load(Ordering::SeqCst));
     }
 
     #[gpui::test]

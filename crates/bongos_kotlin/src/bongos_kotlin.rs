@@ -2,6 +2,7 @@ mod adapter;
 mod glue;
 mod install;
 mod installed;
+mod intellij;
 mod log;
 mod manager;
 mod manifest;
@@ -9,7 +10,7 @@ mod resolve;
 
 use std::{path::PathBuf, sync::Arc};
 
-pub use adapter::{KotlinAdapter, server_command};
+pub use adapter::{INTELLIJ_DOWNLOAD_HINT, KotlinAdapter, server_command};
 pub use glue::attach_managers;
 use gpui::App;
 pub use install::{
@@ -17,6 +18,10 @@ pub use install::{
     spawn_ensure_installed,
 };
 pub use installed::{MARKER as INSTALLED_MARKER, check_installed, server_name};
+pub use intellij::{
+    EULA_FILE, LICENSE_TIMEOUT, LicenseOutcome, UNLICENSED_EXIT_CODE, accept_eula,
+    bundle_eula_hash, eula_accepted, eula_argument, eula_hash, license_check,
+};
 use language::{LanguageName, LanguageRegistry};
 pub use log::KotlinLog;
 pub use manager::{
@@ -36,6 +41,8 @@ use settings::{KotlinServerKind, RegisterSetting, Settings, SettingsContent};
 pub struct KotlinSettings {
     pub server: KotlinServerKind,
     pub jdk_home: Option<PathBuf>,
+    /// Whether bongos may download the IntelliJ server (decision D16).
+    pub intellij_download: bool,
 }
 
 impl Settings for KotlinSettings {
@@ -48,6 +55,11 @@ impl Settings for KotlinSettings {
         Self {
             server: kotlin.server.expect("default.json defines `kotlin.server`"),
             jdk_home: kotlin.jdk_home.map(PathBuf::from),
+            intellij_download: kotlin
+                .intellij
+                .expect("default.json defines `kotlin.intellij`")
+                .download
+                .expect("default.json defines `kotlin.intellij.download`"),
         }
     }
 }
@@ -161,6 +173,47 @@ mod tests {
         let settings = cx.update(|cx| KotlinSettings::get_global(cx).clone());
         assert_eq!(settings.server, KotlinServerKind::KotlinLsp);
         assert_eq!(settings.jdk_home, None);
+    }
+
+    fn project_intellij_download(cx: &mut TestAppContext) -> bool {
+        cx.update(|cx| {
+            KotlinSettings::get(
+                Some(SettingsLocation {
+                    worktree_id: worktree(),
+                    path: RelPath::empty(),
+                }),
+                cx,
+            )
+            .intellij_download
+        })
+    }
+
+    #[gpui::test]
+    fn test_intellij_download_is_off_by_default_and_follows_the_layers(cx: &mut TestAppContext) {
+        setup(cx);
+        assert!(!cx.update(|cx| KotlinSettings::get_global(cx).intellij_download));
+
+        set_user(cx, r#"{ "kotlin": { "intellij": { "download": true } } }"#);
+        assert!(cx.update(|cx| KotlinSettings::get_global(cx).intellij_download));
+        // Setting only `server` leaves the download choice alone.
+        set_user(cx, r#"{ "kotlin": { "server": "intellij" } }"#);
+        assert!(!cx.update(|cx| KotlinSettings::get_global(cx).intellij_download));
+
+        set_user(
+            cx,
+            r#"{
+                "kotlin": { "intellij": { "download": true } },
+                "profiles": { "locked": { "settings": { "kotlin": { "intellij": { "download": false } } } } }
+            }"#,
+        );
+        assert!(project_intellij_download(cx));
+        set_profile(cx, "locked");
+        assert!(!project_intellij_download(cx));
+        set_project(
+            cx,
+            Some(r#"{ "kotlin": { "intellij": { "download": true } } }"#),
+        );
+        assert!(project_intellij_download(cx));
     }
 
     #[gpui::test]

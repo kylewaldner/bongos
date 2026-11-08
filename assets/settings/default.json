@@ -1529,7 +1529,16 @@
     "server": "kotlin-lsp",
     // The JDK used for the Gradle import. Null detects one from the project's
     // toolchain, JAVA_HOME and common locations.
-    "jdk_home": null
+    "jdk_home": null,
+    // Settings for the IntelliJ language server.
+    "intellij": {
+      // Whether bongos may download the IntelliJ language server, which is proprietary
+      // software under the JetBrains user agreement. When false and the server is not
+      // installed, it is reported as not installed; set this to true, or point
+      // `lsp.kotlin.binary.path` at a server you installed by hand. kotlin-lsp always
+      // installs automatically.
+      "download": false
+    }
   },
   // Inert in bongos, which never checks for updates.
   "auto_update": true,
