@@ -100,7 +100,14 @@ jobs:
           persist-credentials: false
       - name: Install tools
         run: |
-          npm i -g dmg-license
+          # A global install left dmg-license without its minimist dependency on the runner, so install
+          # it into its own prefix and check that it loads before the long build starts.
+          npm install --prefix "$RUNNER_TEMP/dmg-tools" dmg-license
+          echo "$RUNNER_TEMP/dmg-tools/node_modules/.bin" >> "$GITHUB_PATH"
+          if node "$RUNNER_TEMP/dmg-tools/node_modules/dmg-license/bin/dmg-license.js" 2>&1 | grep -q 'Cannot find module'; then
+            echo "dmg-license does not load" >&2
+            exit 1
+          fi
           rustup toolchain install
           rustup target add aarch64-apple-darwin
       - name: Import the Developer ID certificate
