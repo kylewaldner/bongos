@@ -1,10 +1,13 @@
 //! The app side of bongos chat sessions: the `chats` settings, [`ChatStore`] (the global index of
 //! chat records, built from the work store's snapshot, and their serial writer), seeding of the
-//! session types, the health of the agent CLIs, and the `chat` actions. Everything is off while `chats.enabled` is false. The
-//! file formats and pure rules live in `bongos_chat_model`.
+//! session types, the health of the agent CLIs, [`ChatRuntime`] (the running chats and their live
+//! state), and the `chat` actions. Everything is off while `chats.enabled` is false. The file
+//! formats and pure rules live in `bongos_chat_model`.
 
 mod actions;
 mod health;
+mod launch;
+mod runtime;
 mod settings;
 mod store;
 
@@ -20,6 +23,14 @@ pub use health::{
     ChatHealth, ChatHealthEvent, Health, HealthState, HealthStats, MIN_REFRESH_INTERVAL,
     PROBE_TIMEOUT, find_program, fix_logged_out, fix_login_unchecked, fix_not_found,
     fix_not_probed,
+};
+pub use launch::{
+    CLAUDE_SETTINGS_FILE, CODEX_INSTRUCTIONS_FILE, CONTEXT_FILE, LaunchError, LaunchRequest,
+    PLUGIN_DIR, SYSTEM_FILE,
+};
+pub use runtime::{
+    ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChatRuntime, ChatRuntimeEvent, ChatState,
+    LiveChat, RuntimeStats,
 };
 pub use settings::{AgentCommand, ChatsSettings};
 pub use store::{ChatStats, ChatStore, ChatStoreEvent, ChatWriteError, IndexedChat};
@@ -48,8 +59,9 @@ struct GlobalChatStore(Entity<ChatStore>);
 
 impl Global for GlobalChatStore {}
 
-/// Registers the `chats` settings and creates the global [`ChatHealth`] and [`ChatStore`]. Call after
-/// `bongos_work::init`. The store reads and writes nothing until `chats.enabled` is true.
+/// Registers the `chats` settings and creates the global [`ChatHealth`], [`ChatStore`] and
+/// [`ChatRuntime`]. Call after `bongos_work::init`. The store reads and writes nothing, and the
+/// runtime starts nothing, until `chats.enabled` is true.
 pub fn init(dirs: ChatDirs, cx: &mut App) {
     ChatsSettings::register(cx);
     let health = cx.new(|cx| ChatHealth::new(Default::default(), cx));
@@ -59,7 +71,9 @@ pub fn init(dirs: ChatDirs, cx: &mut App) {
         return;
     };
     let store = cx.new(|cx| ChatStore::new(work, dirs, cx));
-    cx.set_global(GlobalChatStore(store));
+    cx.set_global(GlobalChatStore(store.clone()));
+    let runtime = cx.new(|_| ChatRuntime::new(store, util::paths::home_dir().clone()));
+    ChatRuntime::set_global(runtime, cx);
 }
 
 impl ChatStore {
@@ -72,6 +86,9 @@ impl ChatStore {
 
 #[cfg(test)]
 mod health_tests;
+
+#[cfg(test)]
+mod runtime_tests;
 
 #[cfg(test)]
 mod store_tests;

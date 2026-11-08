@@ -405,6 +405,12 @@ impl ChatHealth {
         }
     }
 
+    /// The terminal environment the probes add to theirs; a launch adds it too, so the CLI runs
+    /// with the `PATH` it was found on.
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
     /// Whether a probe round is running.
     pub fn is_probing(&self) -> bool {
         self.probing.is_some()
