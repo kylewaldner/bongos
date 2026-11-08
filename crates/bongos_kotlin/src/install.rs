@@ -7,19 +7,23 @@
 //! `<version>`. Every other entry of `dir` is deleted afterwards, so one version stays. Failure,
 //! cancellation and dropping the future all remove `.download` and `.staging`.
 //!
-//! Callers must not run two installs of one server at the same time; they share `dir`.
+//! Installs of one `dir` take turns: a process-wide lock per directory keeps two of them (two
+//! projects starting Kotlin at once) from sharing `.download` and `.staging`. `ensure_installed`
+//! checks for the pinned build once it holds the lock, so the second caller finds the first one's
+//! result instead of downloading again.
 
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 
 use anyhow::{Context as _, Result, bail, ensure};
 use async_compression::futures::bufread::GzipDecoder;
+use collections::HashMap;
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, StreamExt as _, io::BufReader};
 use gpui::{App, AppContext as _, Task};
 use http_client::HttpClient;
@@ -115,9 +119,9 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-/// Starts `install` on the background executor. Dropping the task cancels the install and removes
-/// its partial files; setting `cancel` stops it at the next chunk.
-pub fn spawn_install(
+/// Starts `ensure_installed` on the background executor. Dropping the task cancels the install
+/// and removes its partial files; setting `cancel` stops it at the next chunk.
+pub fn spawn_ensure_installed(
     server: KotlinServerKind,
     entry: ManifestEntry,
     dir: PathBuf,
@@ -127,7 +131,7 @@ pub fn spawn_install(
     cx: &App,
 ) -> Task<Result<InstalledServer>> {
     cx.background_spawn(async move {
-        install(
+        ensure_installed(
             server,
             &entry,
             &dir,
@@ -139,8 +143,69 @@ pub fn spawn_install(
     })
 }
 
-/// Installs the pinned build `entry` of `server` under `dir`.
+type DirLock = Arc<futures::lock::Mutex<()>>;
+
+/// The lock every install of `dir` holds. Never freed: there is one per installed server.
+fn dir_lock(dir: &Path) -> DirLock {
+    static LOCKS: LazyLock<std::sync::Mutex<HashMap<PathBuf, DirLock>>> =
+        LazyLock::new(Default::default);
+    LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(dir.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// The pinned build of `server` under `dir`, installing it first when it is missing. An installed
+/// build costs no network: this is what a start calls.
+pub async fn ensure_installed(
+    server: KotlinServerKind,
+    entry: &ManifestEntry,
+    dir: &Path,
+    http: &dyn HttpClient,
+    progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    cancel: &AtomicBool,
+) -> Result<InstalledServer> {
+    let lock = dir_lock(dir);
+    let _turn = lock.lock().await;
+    check_cancel(cancel)?;
+    let final_dir = dir.join(&entry.version);
+    if check_dir(&final_dir, entry).is_some() {
+        return Ok(installed_server(server, entry, final_dir));
+    }
+    install_locked(server, entry, dir, http, progress, cancel).await
+}
+
+/// Installs the pinned build `entry` of `server` under `dir`, replacing any copy already there.
 pub async fn install(
+    server: KotlinServerKind,
+    entry: &ManifestEntry,
+    dir: &Path,
+    http: &dyn HttpClient,
+    progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    cancel: &AtomicBool,
+) -> Result<InstalledServer> {
+    let lock = dir_lock(dir);
+    let _turn = lock.lock().await;
+    install_locked(server, entry, dir, http, progress, cancel).await
+}
+
+fn installed_server(
+    server: KotlinServerKind,
+    entry: &ManifestEntry,
+    final_dir: PathBuf,
+) -> InstalledServer {
+    InstalledServer {
+        server,
+        version: entry.version.clone(),
+        launcher: final_dir.join(&entry.launcher),
+        dir: final_dir,
+    }
+}
+
+/// `install` for a caller that holds the lock of `dir`.
+async fn install_locked(
     server: KotlinServerKind,
     entry: &ManifestEntry,
     dir: &Path,
@@ -194,12 +259,7 @@ pub async fn install(
         "{} did not install correctly",
         server_name(server)
     );
-    Ok(InstalledServer {
-        server,
-        version: entry.version.clone(),
-        launcher: final_dir.join(&entry.launcher),
-        dir: final_dir,
-    })
+    Ok(installed_server(server, entry, final_dir))
 }
 
 /// Streams the archive to `path`, hashing as it goes, and returns it only when the digest matches.
@@ -342,7 +402,7 @@ fn remove_other_versions(dir: &Path, keep: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         collections::BTreeMap,
         pin::Pin,
@@ -361,12 +421,12 @@ mod tests {
     const VERSION: &str = "1.2.3";
     const LAUNCHER_BODY: &[u8] = b"#!/bin/sh\nexit 0\n";
 
-    fn sha256(bytes: &[u8]) -> String {
+    pub(crate) fn sha256(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
     }
 
     /// Bytes that do not compress, so the archive is about as large as the payload.
-    fn noise(length: usize) -> Vec<u8> {
+    pub(crate) fn noise(length: usize) -> Vec<u8> {
         let mut state = 0x2545_f491_4f6c_dd1du64;
         (0..length)
             .map(|_| {
@@ -378,7 +438,7 @@ mod tests {
             .collect()
     }
 
-    fn files(noise_length: usize, with_launcher: bool) -> Vec<(String, u32, Vec<u8>)> {
+    pub(crate) fn files(noise_length: usize, with_launcher: bool) -> Vec<(String, u32, Vec<u8>)> {
         let mut files = vec![("server-1.2.3/README".to_string(), 0o644, b"hello".to_vec())];
         if with_launcher {
             // Stored without the execute bit: the installer must set it.
@@ -394,7 +454,7 @@ mod tests {
         files
     }
 
-    fn tar_gz(files: &[(String, u32, Vec<u8>)]) -> Vec<u8> {
+    pub(crate) fn tar_gz(files: &[(String, u32, Vec<u8>)]) -> Vec<u8> {
         block_on(async {
             let mut builder = async_tar::Builder::new(Vec::new());
             for (path, mode, data) in files {
@@ -415,7 +475,7 @@ mod tests {
         })
     }
 
-    fn zip(files: &[(String, u32, Vec<u8>)]) -> Vec<u8> {
+    pub(crate) fn zip(files: &[(String, u32, Vec<u8>)]) -> Vec<u8> {
         use async_zip::{Compression, ZipEntryBuilder, base::write::ZipFileWriter};
         block_on(async {
             let mut writer = ZipFileWriter::new(Vec::new());
@@ -428,7 +488,7 @@ mod tests {
         })
     }
 
-    fn entry_for(archive: &[u8], kind: ArchiveKind) -> ManifestEntry {
+    pub(crate) fn entry_for(archive: &[u8], kind: ArchiveKind) -> ManifestEntry {
         ManifestEntry {
             version: VERSION.into(),
             url: "http://127.0.0.1:1/server".into(),
@@ -840,7 +900,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_spawn_install_runs_in_the_background(cx: &mut TestAppContext) {
+    async fn test_spawn_ensure_installed_runs_in_the_background(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let root = tempfile::tempdir().unwrap();
         let dir = server_dir(root.path());
@@ -849,7 +909,7 @@ mod tests {
         let client: Arc<dyn HttpClient> = serving(archive, None);
         let installed = cx
             .update(|cx| {
-                spawn_install(
+                spawn_ensure_installed(
                     SERVER,
                     entry.clone(),
                     dir.clone(),
@@ -862,5 +922,330 @@ mod tests {
             .await
             .unwrap();
         assert_installed(&dir, &installed, &entry);
+    }
+
+    /// A response whose body counts as in flight until it is dropped.
+    struct Tracked {
+        inner: Trickle,
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AsyncRead for Tracked {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffer: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_read(cx, buffer)
+        }
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Serves `bytes`, counting the requests and how many bodies are open at once.
+    struct Counting {
+        client: Client,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        most_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    fn counting(bytes: Vec<u8>) -> Counting {
+        use std::sync::atomic::AtomicUsize;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let most_in_flight = Arc::new(AtomicUsize::new(0));
+        let bytes = Arc::new(bytes);
+        let client = FakeHttpClient::create({
+            let (requests, most_in_flight) = (requests.clone(), most_in_flight.clone());
+            move |_| {
+                requests.fetch_add(1, Ordering::SeqCst);
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                most_in_flight.fetch_max(now, Ordering::SeqCst);
+                let body = Tracked {
+                    inner: Trickle {
+                        data: Cursor::new(bytes.to_vec()),
+                        sent: 0,
+                        cancel: None,
+                    },
+                    in_flight: in_flight.clone(),
+                };
+                let length = bytes.len();
+                async move {
+                    Ok(Response::builder()
+                        .status(200)
+                        .header("Content-Length", length)
+                        .body(AsyncBody::from_reader(body))
+                        .unwrap())
+                }
+            }
+        });
+        Counting {
+            client,
+            requests,
+            most_in_flight,
+        }
+    }
+
+    #[test]
+    fn test_installs_of_one_directory_take_turns() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = tar_gz(&files(512 * 1024, true));
+        let entry = entry_for(&archive, ArchiveKind::TarGz);
+        let served = counting(archive);
+        let cancel = AtomicBool::new(false);
+        let (first, second) = block_on(async {
+            futures::join!(
+                install(
+                    SERVER,
+                    &entry,
+                    &dir,
+                    served.client.as_ref(),
+                    &|_, _| {},
+                    &cancel
+                ),
+                install(
+                    SERVER,
+                    &entry,
+                    &dir,
+                    served.client.as_ref(),
+                    &|_, _| {},
+                    &cancel
+                ),
+            )
+        });
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(served.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            served.most_in_flight.load(Ordering::SeqCst),
+            1,
+            "two installs shared .download and .staging"
+        );
+        assert_eq!(names(&dir), [VERSION]);
+    }
+
+    #[test]
+    fn test_concurrent_ensure_downloads_once_and_a_later_one_not_at_all() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = tar_gz(&files(512 * 1024, true));
+        let entry = entry_for(&archive, ArchiveKind::TarGz);
+        let served = counting(archive);
+        let cancel = AtomicBool::new(false);
+        let ensure = || {
+            ensure_installed(
+                SERVER,
+                &entry,
+                &dir,
+                served.client.as_ref(),
+                &|_, _| {},
+                &cancel,
+            )
+        };
+        let (first, second) = block_on(async { futures::join!(ensure(), ensure()) });
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(first.dir, second.dir);
+        assert_installed(&dir, &first, &entry);
+        assert_eq!(served.requests.load(Ordering::SeqCst), 1);
+
+        block_on(ensure()).unwrap();
+        assert_eq!(
+            served.requests.load(Ordering::SeqCst),
+            1,
+            "installed: no network"
+        );
+    }
+
+    #[test]
+    fn test_ensure_installs_over_a_marker_for_another_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = tar_gz(&files(0, true));
+        let entry = entry_for(&archive, ArchiveKind::TarGz);
+        let served = counting(archive);
+        let mut stale = entry.clone();
+        stale.sha256 = "0".repeat(64);
+        // A version directory whose marker names another digest does not count as installed.
+        let version_dir = dir.join(VERSION);
+        fs::create_dir_all(version_dir.join("bin")).unwrap();
+        fs::write(version_dir.join("bin/launcher"), LAUNCHER_BODY).unwrap();
+        fs::write(
+            version_dir.join(MARKER),
+            serde_json::to_string(&Marker {
+                version: VERSION.into(),
+                sha256: stale.sha256.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let installed = block_on(ensure_installed(
+            SERVER,
+            &entry,
+            &dir,
+            served.client.as_ref(),
+            &|_, _| {},
+            &AtomicBool::new(false),
+        ))
+        .unwrap();
+        assert_installed(&dir, &installed, &entry);
+        assert_eq!(served.requests.load(Ordering::SeqCst), 1);
+    }
+
+    /// An archive entry named `../escape`, which a careless extractor writes next to the install.
+    fn hostile_tar_gz() -> Vec<u8> {
+        block_on(async {
+            let mut builder = async_tar::Builder::new(Vec::new());
+            let mut header = async_tar::Header::new_gnu();
+            let data = b"pwned";
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            let name = b"server-1.2.3/../../escape";
+            header.as_old_mut().name[..name.len()].copy_from_slice(name);
+            header.set_cksum();
+            builder.append(&header, &data[..]).await.unwrap();
+            let mut header = async_tar::Header::new_gnu();
+            header.set_path("server-1.2.3/bin/launcher").unwrap();
+            header.set_size(LAUNCHER_BODY.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, LAUNCHER_BODY).await.unwrap();
+            let tar = builder.into_inner().await.unwrap();
+            let mut encoder = async_compression::futures::bufread::GzipEncoder::new(
+                BufReader::new(Cursor::new(tar)),
+            );
+            let mut gzipped = Vec::new();
+            encoder.read_to_end(&mut gzipped).await.unwrap();
+            gzipped
+        })
+    }
+
+    #[test]
+    fn test_a_tar_with_a_path_traversal_entry_writes_nothing_outside() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = hostile_tar_gz();
+        let entry = entry_for(&archive, ArchiveKind::TarGz);
+        let run = run_install(
+            &serving(archive, None),
+            &entry,
+            &dir,
+            &AtomicBool::new(false),
+        );
+        run.result.unwrap();
+        for escaped in [
+            dir.join("escape"),
+            root.path().join("escape"),
+            dir.join(VERSION).join("escape"),
+        ] {
+            assert!(!escaped.exists(), "{} was written", escaped.display());
+        }
+        assert!(
+            fs::read_dir(root.path()).unwrap().count() == 1,
+            "only the server directory"
+        );
+    }
+
+    #[test]
+    fn test_a_zip_with_a_path_traversal_entry_writes_nothing_outside() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = zip(&[
+            ("server-1.2.3/../../escape".into(), 0o644, b"pwned".to_vec()),
+            (
+                "server-1.2.3/bin/launcher".into(),
+                0o644,
+                LAUNCHER_BODY.to_vec(),
+            ),
+        ]);
+        let entry = entry_for(&archive, ArchiveKind::Zip);
+        let run = run_install(
+            &serving(archive, None),
+            &entry,
+            &dir,
+            &AtomicBool::new(false),
+        );
+        run.result.unwrap();
+        for escaped in [
+            dir.join("escape"),
+            root.path().join("escape"),
+            dir.join(VERSION).join("escape"),
+        ] {
+            assert!(!escaped.exists(), "{} was written", escaped.display());
+        }
+        assert!(
+            fs::read_dir(root.path()).unwrap().count() == 1,
+            "only the server directory"
+        );
+    }
+
+    /// The real client against a loopback server: a redirect is followed, `Content-Length` gives
+    /// the total, and a body labeled `Content-Encoding: gzip` arrives as sent (the digest is of the
+    /// archive on the wire, which is itself gzip).
+    #[test]
+    fn test_real_client_follows_a_redirect_and_keeps_the_bytes() {
+        let archive = tar_gz(&files(2 * 1024 * 1024, true));
+        let entry_template = entry_for(&archive, ArchiveKind::TarGz);
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let served = archive.clone();
+        let paths = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..2 {
+                let request = server.recv().unwrap();
+                paths.push(request.url().to_string());
+                let header = |name: &str, value: &str| {
+                    tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
+                };
+                if request.url() == "/download" {
+                    let location = format!("http://127.0.0.1:{port}/kotlin-server.tar.gz");
+                    request
+                        .respond(
+                            tiny_http::Response::empty(302)
+                                .with_header(header("Location", &location)),
+                        )
+                        .unwrap();
+                } else {
+                    request
+                        .respond(
+                            tiny_http::Response::from_data(served.clone())
+                                // A body over 32 KB is chunked by default, which has no length.
+                                .with_chunked_threshold(usize::MAX)
+                                .with_header(header("Content-Encoding", "gzip")),
+                        )
+                        .unwrap();
+                }
+            }
+            paths
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let mut entry = entry_template;
+        entry.url = format!("http://127.0.0.1:{port}/download");
+        let client = reqwest_client::ReqwestClient::new();
+        let events = Mutex::new(Vec::new());
+        let installed = block_on(install(
+            SERVER,
+            &entry,
+            &dir,
+            &client,
+            &|done, total| events.lock().unwrap().push((done, total)),
+            &AtomicBool::new(false),
+        ))
+        .unwrap();
+        assert_installed(&dir, &installed, &entry);
+        assert_eq!(
+            paths.join().unwrap(),
+            ["/download", "/kotlin-server.tar.gz"]
+        );
+        let events = events.into_inner().unwrap();
+        let length = archive.len() as u64;
+        assert_eq!(events.first(), Some(&(0, Some(length))));
+        assert_eq!(events.last(), Some(&(length, Some(length))));
     }
 }

@@ -13,14 +13,15 @@ pub use adapter::{KotlinAdapter, server_command};
 pub use glue::attach_managers;
 use gpui::App;
 pub use install::{
-    InstallCancelled, InstalledServer, PROGRESS_STEP, ProgressFn, install, spawn_install,
+    InstallCancelled, InstalledServer, PROGRESS_STEP, ProgressFn, ensure_installed, install,
+    spawn_ensure_installed,
 };
 pub use installed::{MARKER as INSTALLED_MARKER, check_installed, server_name};
 use language::{LanguageName, LanguageRegistry};
 pub use log::KotlinLog;
 pub use manager::{
-    ADAPTER_NAME, KotlinHost, KotlinProjectManager, KotlinRegistry, KotlinWorktreeState,
-    ServerStatus,
+    ADAPTER_NAME, EXPIRED_REASON, KotlinHost, KotlinProjectManager, KotlinRegistry,
+    KotlinWorktreeState, ServerStatus,
 };
 pub use manifest::{ArchiveKind, Manifest, ManifestEntry, OVERRIDE_VAR, current_platform};
 pub use resolve::{

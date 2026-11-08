@@ -7,6 +7,10 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use gpui::{App, Context, Entity, EntityId, Global, Subscription, WeakEntity};
@@ -24,6 +28,13 @@ use crate::{
 
 /// The name of the language server Kotlin buffers use, whichever server runs behind it.
 pub const ADAPTER_NAME: &str = "kotlin";
+
+/// The status text of a server whose build has expired (decision D18).
+pub const EXPIRED_REASON: &str = "server expired, update bongos";
+
+/// What an expired early-access build prints before it exits with `EXPIRED_EXIT_CODE`.
+const EXPIRED_MESSAGE: &str = "This build of kotlin-server has expired.";
+const EXPIRED_EXIT_CODE: i32 = 7;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServerStatus {
@@ -82,6 +93,11 @@ pub struct KotlinWorktreeState {
     /// `None` until a server has started for the worktree, and again after it is stopped.
     pub status: Option<ServerStatus>,
     pub server_id: Option<LanguageServerId>,
+    /// Servers whose build expired in this run. An expired server is never started or restarted
+    /// again: a new pin comes with a new bongos.
+    expired: Vec<KotlinServerKind>,
+    /// The cancel flag of the install in progress.
+    install_cancel: Option<Arc<AtomicBool>>,
     /// Open work-done progress, oldest first: token and the label to show.
     pending: Vec<(String, String)>,
     /// Keeps the stderr forwarder alive while the server runs.
@@ -165,6 +181,8 @@ impl KotlinProjectManager {
                 effective: requested.server,
                 status: None,
                 server_id: None,
+                expired: Vec::new(),
+                install_cancel: None,
                 pending: Vec::new(),
                 io_subscription: None,
             },
@@ -210,6 +228,113 @@ impl KotlinProjectManager {
         self.set_status(worktree_id, Some(ServerStatus::Failed { reason }), cx);
     }
 
+    /// Whether `server` expired for the worktree in this run.
+    pub fn is_expired(&self, worktree_id: WorktreeId, server: KotlinServerKind) -> bool {
+        self.worktree(worktree_id)
+            .is_some_and(|state| state.expired.contains(&server))
+    }
+
+    /// Marks `server` expired for the worktree: status `Failed`, and no restart from here on.
+    pub fn mark_expired(
+        &mut self,
+        worktree_id: WorktreeId,
+        server: KotlinServerKind,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return;
+        };
+        if !state.expired.contains(&server) {
+            state.expired.push(server);
+        }
+        self.set_status(
+            worktree_id,
+            Some(ServerStatus::Failed {
+                reason: EXPIRED_REASON.into(),
+            }),
+            cx,
+        );
+    }
+
+    /// An install begins: status `Installing` with nothing downloaded. Returns the flag that
+    /// `cancel_install` sets and the installer polls.
+    pub fn begin_install(
+        &mut self,
+        worktree_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) -> Arc<AtomicBool> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Some(state) = self.worktrees.get_mut(&worktree_id) {
+            state.install_cancel = Some(cancel.clone());
+            self.log.line(&format!(
+                "install {} {}",
+                state.root.display(),
+                server_name(state.effective)
+            ));
+            self.set_status(
+                worktree_id,
+                Some(ServerStatus::Installing {
+                    done: 0,
+                    total: None,
+                }),
+                cx,
+            );
+        }
+        cancel
+    }
+
+    /// Bytes downloaded so far, of `total` when the server said.
+    pub fn install_progress(
+        &mut self,
+        worktree_id: WorktreeId,
+        done: u64,
+        total: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .worktree(worktree_id)
+            .is_some_and(|state| state.install_cancel.is_some())
+        {
+            self.set_status(
+                worktree_id,
+                Some(ServerStatus::Installing { done, total }),
+                cx,
+            );
+        }
+    }
+
+    /// The install ended. Success goes on to start the server; an error is the status, and the
+    /// next start tries again from zero.
+    pub fn end_install(
+        &mut self,
+        worktree_id: WorktreeId,
+        outcome: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.worktrees.get_mut(&worktree_id) {
+            state.install_cancel = None;
+        }
+        let status = match outcome {
+            Ok(()) => ServerStatus::Starting,
+            Err(reason) => ServerStatus::Failed { reason },
+        };
+        self.set_status(worktree_id, Some(status), cx);
+    }
+
+    /// `kotlin: cancel install`. Returns whether an install was running. The installer stops at its
+    /// next chunk and removes its partial files; the status becomes `Failed("install cancelled")`.
+    pub fn cancel_install(&mut self, worktree_id: WorktreeId) -> bool {
+        let Some(cancel) = self
+            .worktree(worktree_id)
+            .and_then(|state| state.install_cancel.as_ref())
+        else {
+            return false;
+        };
+        cancel.store(true, Ordering::Relaxed);
+        self.log.line("install cancel requested");
+        true
+    }
+
     /// "Use setting" is `None`; a server writes the per-project override. Restarts only when the
     /// server that resolves for the worktree changed.
     pub fn switch_server(
@@ -230,10 +355,16 @@ impl KotlinProjectManager {
     }
 
     /// `kotlin: restart server`: the same server again.
+    /// An expired server stays failed.
     pub fn restart_server(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
-        if self.worktrees.contains_key(&worktree_id) {
-            self.restart(worktree_id, cx);
+        let Some(state) = self.worktrees.get(&worktree_id) else {
+            return;
+        };
+        if state.expired.contains(&state.effective) {
+            self.log.line("restart skipped: server expired");
+            return;
         }
+        self.restart(worktree_id, cx);
     }
 
     fn refresh_all(&mut self, cx: &mut Context<Self>) {
@@ -357,6 +488,16 @@ impl KotlinProjectManager {
         let detail =
             exit_status.map_or_else(|| "unknown status".into(), |status| status.to_string());
         self.log.line(&format!("exit {detail}"));
+        if exit_status.and_then(|status| status.code()) == Some(EXPIRED_EXIT_CODE) {
+            let effective = self
+                .worktrees
+                .get(&worktree_id)
+                .map(|state| state.effective);
+            if let Some(effective) = effective {
+                self.mark_expired(worktree_id, effective, cx);
+                return;
+            }
+        }
         self.set_status(
             worktree_id,
             Some(ServerStatus::Failed {
@@ -475,7 +616,7 @@ impl KotlinProjectManager {
                 worktree_id,
                 text,
             } if is_kotlin(name) && self.worktrees.contains_key(worktree_id) => {
-                self.log.stderr(text);
+                self.startup_stderr(*worktree_id, text, cx);
             }
             LspStoreEvent::LanguageServerUpdate {
                 language_server_id,
@@ -505,6 +646,20 @@ impl KotlinProjectManager {
                 _ => {}
             },
             _ => {}
+        }
+    }
+
+    /// A line the server wrote to stderr while starting. An expired build says so here before it
+    /// exits, and that is what ends its start for good.
+    pub fn startup_stderr(&mut self, worktree_id: WorktreeId, text: &str, cx: &mut Context<Self>) {
+        self.log.stderr(text);
+        if text.contains(EXPIRED_MESSAGE)
+            && let Some(effective) = self
+                .worktrees
+                .get(&worktree_id)
+                .map(|state| state.effective)
+        {
+            self.mark_expired(worktree_id, effective, cx);
         }
     }
 
@@ -674,6 +829,12 @@ mod tests {
             self.manager.update(cx, |manager, cx| {
                 manager.server_added(server_id, worktree(), cx)
             });
+        }
+
+        fn expired(&self, cx: &mut TestAppContext) -> bool {
+            self.manager.read_with(cx, |manager, _| {
+                manager.is_expired(worktree(), KotlinServerKind::KotlinLsp)
+            })
         }
 
         fn events(&self) -> Vec<String> {
@@ -946,5 +1107,139 @@ mod tests {
             .update(cx, |manager, cx| manager.remove_worktree(worktree(), cx));
         let found = cx.update(|cx| cx.global::<KotlinRegistry>().manager(&harness.root));
         assert!(found.is_none());
+    }
+
+    fn exited_with(code: i32) -> Option<ExitStatus> {
+        use std::os::unix::process::ExitStatusExt as _;
+        Some(ExitStatus::from_raw(code << 8))
+    }
+
+    /// Exit code 7 is an expired build: failed, never restarted, never crash-looping.
+    #[gpui::test]
+    fn test_an_expired_exit_fails_without_a_restart(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.first_start(cx);
+        let server_id = LanguageServerId(1);
+
+        // Another exit code is an ordinary crash.
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_terminated(server_id, exited_with(1), cx)
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: "server exited unexpectedly (exit status: 1)".into()
+            })
+        );
+        assert!(!harness.expired(cx));
+
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_terminated(server_id, exited_with(7), cx)
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: EXPIRED_REASON.into()
+            })
+        );
+        assert!(harness.expired(cx));
+
+        // The explicit restart is refused too: only a new bongos build has a new pin.
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.restart_server(worktree(), cx));
+        cx.run_until_parked();
+        assert_eq!(harness.events(), ["start kotlin-lsp"]);
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: EXPIRED_REASON.into()
+            })
+        );
+        assert!(harness.log().contains("restart skipped: server expired"));
+    }
+
+    #[gpui::test]
+    fn test_the_expiry_message_on_startup_stderr_fails_the_server(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.begin_start(worktree(), cx));
+        harness.manager.update(cx, |manager, cx| {
+            manager.startup_stderr(worktree(), "loading\n", cx)
+        });
+        assert_eq!(harness.status(cx), Some(ServerStatus::Starting));
+        harness.manager.update(cx, |manager, cx| {
+            manager.startup_stderr(worktree(), "This build of kotlin-server has expired.\n", cx)
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: EXPIRED_REASON.into()
+            })
+        );
+        assert!(harness.expired(cx));
+        // The other server is not affected.
+        let intellij = harness.manager.read_with(cx, |manager, _| {
+            manager.is_expired(worktree(), KotlinServerKind::Intellij)
+        });
+        assert!(!intellij);
+    }
+
+    #[gpui::test]
+    fn test_install_status_and_cancel(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        assert!(
+            !harness
+                .manager
+                .update(cx, |manager, _| manager.cancel_install(worktree())),
+            "nothing to cancel"
+        );
+        let cancel = harness
+            .manager
+            .update(cx, |manager, cx| manager.begin_install(worktree(), cx));
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Installing {
+                done: 0,
+                total: None
+            })
+        );
+        harness.manager.update(cx, |manager, cx| {
+            manager.install_progress(worktree(), 52, Some(137), cx)
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Installing {
+                done: 52,
+                total: Some(137)
+            })
+        );
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert!(
+            harness
+                .manager
+                .update(cx, |manager, _| manager.cancel_install(worktree()))
+        );
+        assert!(cancel.load(Ordering::Relaxed));
+        harness.manager.update(cx, |manager, cx| {
+            manager.end_install(worktree(), Err("install cancelled".into()), cx)
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: "install cancelled".into()
+            })
+        );
+        // Progress that arrives after the end does not bring the status back.
+        harness.manager.update(cx, |manager, cx| {
+            manager.install_progress(worktree(), 60, Some(137), cx)
+        });
+        assert_eq!(
+            harness.status(cx),
+            Some(ServerStatus::Failed {
+                reason: "install cancelled".into()
+            })
+        );
     }
 }

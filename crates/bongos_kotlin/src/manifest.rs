@@ -82,6 +82,13 @@ pub struct ManifestEntry {
     pub expires: Option<NaiveDate>,
 }
 
+impl ManifestEntry {
+    /// Whether the build no longer runs on `today`: `expires` is the last day it does.
+    pub fn is_expired(&self, today: NaiveDate) -> bool {
+        self.expires.is_some_and(|expires| today > expires)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Manifest {
     servers: BTreeMap<String, ServerPin>,
