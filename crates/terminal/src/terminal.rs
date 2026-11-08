@@ -2031,7 +2031,7 @@ impl Terminal {
         std::mem::take(&mut self.input_log)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    /// Whether anything was ever written to the terminal through [`Terminal::input`].
     pub fn keyboard_input_sent(&self) -> bool {
         self.keyboard_input_sent
     }
