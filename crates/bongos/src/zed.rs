@@ -5657,6 +5657,9 @@ mod tests {
     ) -> Arc<AppState> {
         cx.update(move |cx| {
             env_logger::builder().is_test(true).try_init().ok();
+            // Without its own database a test shares one static database with every other test in
+            // the process, and tests that restore sessions read each other's window state.
+            cx.set_global(db::AppDatabase::test_new());
 
             let state = Arc::get_mut(&mut app_state).unwrap();
             state.build_window_options = build_window_options;
