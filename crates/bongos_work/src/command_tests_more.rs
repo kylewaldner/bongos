@@ -6,7 +6,6 @@ use bongos_work_model::activity::to_utc;
 use bongos_work_model::layout;
 use bongos_work_model::slug::oneoff_dir_name;
 use bongos_work_model::{ResultKind, ResultState, Status, UnblockPoint};
-use fs::Fs as _;
 use gpui::TestAppContext;
 
 use crate::command_tests::{Input, dispatch, harness, wait_until};
