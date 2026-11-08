@@ -85,6 +85,48 @@ pub struct ProjectSettingsContent {
     ///
     /// Default: false
     pub disable_ai: Option<SaturatingBool>,
+
+    /// Settings for the Kotlin language server.
+    pub kotlin: Option<KotlinSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Debug, PartialEq, Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct KotlinSettingsContent {
+    /// Which Kotlin language server to run: "kotlin-lsp" (open source) or "intellij"
+    /// (IntelliJ IDEA Ultimate license required).
+    ///
+    /// Default: "kotlin-lsp"
+    pub server: Option<KotlinServerKind>,
+
+    /// The JDK used for the Gradle import. A relative path resolves against the worktree root.
+    ///
+    /// Default: null (detected from the project's toolchain, JAVA_HOME and common locations)
+    pub jdk_home: Option<String>,
+
+    /// Settings for the IntelliJ language server.
+    pub intellij: Option<KotlinIntellijSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Debug, PartialEq, Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct KotlinIntellijSettingsContent {
+    /// Whether bongos may download the IntelliJ language server, which is proprietary software
+    /// under the JetBrains user agreement. When false and the server is not installed, it is
+    /// reported as not installed; set this to true, or point `lsp.kotlin.binary.path` at a server
+    /// you installed by hand. kotlin-lsp always installs automatically.
+    ///
+    /// Default: false
+    pub download: Option<bool>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "kebab-case")]
+pub enum KotlinServerKind {
+    /// The open source kotlin-lsp server
+    KotlinLsp,
+    /// The IntelliJ IDEA Ultimate language server (license required)
+    Intellij,
 }
 
 /// When to scan content of linked directories.

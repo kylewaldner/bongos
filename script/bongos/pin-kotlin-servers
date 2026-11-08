@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Refreshes crates/bongos_kotlin/servers.toml: the newest kotlin-lsp build and the current IntelliJ
+# server, with the SHA-256 of every platform's archive. A developer runs this with network access
+# before a release (kotlin-lsp builds expire about 29 days after they are built); no gate runs it.
+#   pin-kotlin-servers            rewrite crates/bongos_kotlin/servers.toml
+#   pin-kotlin-servers --print    print the new file instead
+#   --built YYYY-MM-DD            the kotlin-lsp build date, when the pin changes: take it from
+#                                 `bin/intellij-server license status` of the new build ("valid
+#                                 through" is the expiry). Without it the release date is used and
+#                                 the script says so. An unchanged version keeps its dates.
+# kotlin-lsp: the newest Kotlin/kotlin-lsp GitHub release (RELEASES.md on main lags behind it) and
+# the .sha256 file beside each archive. IntelliJ: the newest Open VSX JetBrains.intellij-server
+# vsix per target; its extension/server-bundle.json holds the archive URL and SHA-256.
+# Downloads (about 2 MB each) go under $BONGOS_WORKSPACE/scratch.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+
+print_only=0 built=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print) print_only=1 ;;
+    --built) shift; built=${1:?--built needs a date} ;;
+    *) echo "usage: pin-kotlin-servers [--print] [--built YYYY-MM-DD]" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+manifest=crates/bongos_kotlin/servers.toml
+mkdir -p "$BONGOS_WORKSPACE/scratch"
+work=$(mktemp -d "$BONGOS_WORKSPACE/scratch/pin-kotlin-servers.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+latest_tag=$(gh api repos/Kotlin/kotlin-lsp/releases --jq '[.[] | select(.prerelease | not)][0] | [.tag_name, .published_at] | @tsv')
+tag=${latest_tag%%$'\t'*}
+released=${latest_tag#*$'\t'}
+lsp_version=${tag##*/v}
+base="https://download.jetbrains.com/language-server/kotlin-server/$lsp_version"
+for file in "kotlin-server-$lsp_version.tar.gz" "kotlin-server-$lsp_version-aarch64.tar.gz" \
+    "kotlin-server-$lsp_version.sit" "kotlin-server-$lsp_version-aarch64.sit"; do
+  curl -fsSL "$base/$file.sha256" -o "$work/$file.sha256"
+done
+
+# One vsix per target is the only place that lists the IntelliJ archive digests.
+for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+  version=$(curl -fsS "https://open-vsx.org/api/JetBrains/intellij-server/$target/latest" \
+    | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["version"])')
+  curl -fsSL -o "$work/$target.vsix" \
+    "https://open-vsx.org/api/JetBrains/intellij-server/$target/$version/file/JetBrains.intellij-server-$version@$target.vsix"
+  unzip -p "$work/$target.vsix" extension/server-bundle.json >"$work/$target.json"
+done
+
+PIN_WORK=$work PIN_MANIFEST=$manifest PIN_LSP_VERSION=$lsp_version PIN_RELEASED=$released PIN_BUILT=$built \
+  python3 -I - >"$work/servers.toml" <<'PY'
+import datetime, json, os, re, sys, tomllib
+
+work = os.environ["PIN_WORK"]
+lsp_version = os.environ["PIN_LSP_VERSION"]
+released = os.environ["PIN_RELEASED"][:10]
+built = os.environ["PIN_BUILT"]
+
+with open(os.environ["PIN_MANIFEST"], "rb") as handle:
+    old = tomllib.load(handle)
+
+def day(text):
+    return datetime.date.fromisoformat(text)
+
+old_lsp = old.get("kotlin-lsp", {})
+if old_lsp.get("version") == lsp_version and not built:
+    built = str(old_lsp["built"])
+elif not built:
+    built = released
+    print(f"pin-kotlin-servers: kotlin-lsp {lsp_version}: built date unknown, using the release date "
+          f"{released}; the real expiry is probably earlier. Check `license status` and rerun with --built.",
+          file=sys.stderr)
+expires = day(built) + datetime.timedelta(days=29)
+
+def sha(path):
+    digest = open(path).read().split()[0].lower()
+    assert re.fullmatch(r"[0-9a-f]{64}", digest), (path, digest)
+    return digest
+
+base = f"https://download.jetbrains.com/language-server/kotlin-server/{lsp_version}"
+lsp_platforms = {
+    "linux-x64": (f"kotlin-server-{lsp_version}.tar.gz", "tar.gz", "jbr/bin/java"),
+    "linux-arm64": (f"kotlin-server-{lsp_version}-aarch64.tar.gz", "tar.gz", "jbr/bin/java"),
+    "macos-arm64": (f"kotlin-server-{lsp_version}-aarch64.sit", "zip", "jbr/Contents/Home/bin/java"),
+    "macos-x64": (f"kotlin-server-{lsp_version}.sit", "zip", "jbr/Contents/Home/bin/java"),
+}
+targets = {"linux-x64": "linux-x64", "linux-arm64": "linux-arm64", "macos-arm64": "darwin-arm64", "macos-x64": "darwin-x64"}
+runtimes = {name: spec[2] for name, spec in lsp_platforms.items()}
+
+out = []
+out.append(f"""# Pinned Kotlin language servers, embedded in the binary. Refresh with script/bongos/pin-kotlin-servers
+# (needs the network; never run by a gate). Every download is checked against `sha256` before it is
+# extracted, and bongos never asks a server what the newest version is.
+#
+# kotlin-lsp builds are early access and expire about 29 days after `built`; `expires` is the last
+# day the build runs (`license status` prints it). Pin a newer build before then.
+
+[kotlin-lsp]
+version = "{lsp_version}"
+built = "{built}"
+expires = "{expires}"
+args = ["--stdio", "--data-sharing=none", "--region=americas"]
+
+[kotlin-lsp.env]
+INTELLIJ_UPDATES_ENABLED = "false"
+""")
+for platform, (file, archive, runtime) in lsp_platforms.items():
+    out.append(f"""[kotlin-lsp.platform.{platform}]
+url = "{base}/{file}"
+sha256 = "{sha(f'{work}/{file}.sha256')}"
+archive = "{archive}"
+strip_components = 1
+launcher = "bin/intellij-server"
+runtime = "{runtime}"
+""")
+
+bundles = {}
+for platform, target in targets.items():
+    with open(f"{work}/{target}.json") as handle:
+        bundles[platform] = json.load(handle)
+versions = {bundle["version"] for bundle in bundles.values()}
+assert len(versions) == 1, f"the IntelliJ targets disagree on the version: {versions}"
+intellij_version = versions.pop()
+out.append("""# The IntelliJ server is a stable build (no expiry). Its start also needs `--eula=<hash>`, added at
+# run time once the user has accepted the EULA.
+[intellij]
+version = "%s"
+args = ["--stdio", "--data-sharing=none", "--region=americas"]
+
+[intellij.env]
+INTELLIJ_UPDATES_ENABLED = "false"
+""" % intellij_version)
+for platform, bundle in bundles.items():
+    archive = "zip" if bundle["archiveName"].endswith(".sit") else "tar.gz"
+    assert re.fullmatch(r"[0-9a-f]{64}", bundle["sha256"]), bundle
+    out.append(f"""[intellij.platform.{platform}]
+url = "{bundle['url']}"
+sha256 = "{bundle['sha256']}"
+archive = "{archive}"
+strip_components = 1
+launcher = "bin/intellij-server"
+runtime = "{runtimes[platform]}"
+""")
+print("\n".join(out), end="")
+PY
+
+if [ "$print_only" = 1 ]; then
+  cat "$work/servers.toml"
+elif cmp -s "$work/servers.toml" "$manifest"; then
+  echo "pin-kotlin-servers: $manifest is already current (kotlin-lsp $lsp_version)"
+else
+  cp "$work/servers.toml" "$manifest"
+  echo "pin-kotlin-servers: updated $manifest; review the diff, then run script/bongos/test bongos_kotlin"
+fi

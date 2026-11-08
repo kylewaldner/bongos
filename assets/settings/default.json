@@ -1522,6 +1522,24 @@
   //
   // Default: false
   "disable_ai": false,
+  // Settings for the Kotlin language server.
+  "kotlin": {
+    // Which Kotlin language server to run: "kotlin-lsp" (open source) or "intellij"
+    // (IntelliJ IDEA Ultimate license required).
+    "server": "kotlin-lsp",
+    // The JDK used for the Gradle import. Null detects one from the project's
+    // toolchain, JAVA_HOME and common locations.
+    "jdk_home": null,
+    // Settings for the IntelliJ language server.
+    "intellij": {
+      // Whether bongos may download the IntelliJ language server, which is proprietary
+      // software under the JetBrains user agreement. When false and the server is not
+      // installed, it is reported as not installed; set this to true, or point
+      // `lsp.kotlin.binary.path` at a server you installed by hand. kotlin-lsp always
+      // installs automatically.
+      "download": false
+    }
+  },
   // Inert in bongos, which never checks for updates.
   "auto_update": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.
@@ -2249,7 +2267,7 @@
       "language_servers": ["!ruby-lsp", "..."],
     },
     "Kotlin": {
-      "language_servers": ["!kotlin-language-server", "kotlin-lsp", "..."],
+      "language_servers": ["kotlin", "!kotlin-lsp", "!kotlin-language-server", "..."],
     },
     "LaTeX": {
       "formatter": "language_server",
@@ -2693,7 +2711,7 @@
     "button": true,
   },
   // Configures any number of settings profiles that are temporarily applied
-  // when selected from `settings profile selector: toggle`.
+  // when selected from `settings: switch profile`.
   //
   // Each profile has an optional `base` ("user" or "default") and a `settings`
   // object. When `base` is "user" (the default), the profile applies on top of

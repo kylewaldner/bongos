@@ -477,14 +477,17 @@ pub mod buffer_search {
         ]
     );
 }
-pub mod settings_profile_selector {
-    use gpui::Action;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
+pub mod settings {
+    use gpui::actions;
 
-    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-    #[action(namespace = settings_profile_selector)]
-    pub struct Toggle;
+    actions!(
+        settings,
+        [
+            /// Opens the settings profile picker.
+            #[action(deprecated_aliases = ["settings_profile_selector::Toggle"])]
+            SwitchProfile
+        ]
+    );
 }
 
 pub mod agent {

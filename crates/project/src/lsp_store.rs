@@ -625,6 +625,7 @@ impl LocalLspStore {
 
                 match result {
                     Ok(server) => {
+                        let name = adapter.name();
                         lsp_store
                             .update(cx, |lsp_store, cx| {
                                 lsp_store.insert_newly_running_language_server(
@@ -638,12 +639,43 @@ impl LocalLspStore {
                                 );
                             })
                             .ok();
-                        stderr_capture.lock().take();
+                        let startup_stderr = stderr_capture.lock().take().unwrap_or_default();
+                        if !startup_stderr.is_empty() {
+                            lsp_store
+                                .update(cx, |_, cx| {
+                                    cx.emit(LspStoreEvent::LanguageServerStartupStderr {
+                                        name,
+                                        worktree_id,
+                                        text: startup_stderr,
+                                    });
+                                })
+                                .ok();
+                        }
                         Some(server)
                     }
 
                     Err(err) => {
                         let log = stderr_capture.lock().take().unwrap_or_default();
+                        if !log.is_empty() {
+                            lsp_store
+                                .update(cx, |_, cx| {
+                                    cx.emit(LspStoreEvent::LanguageServerStartupStderr {
+                                        name: adapter.name(),
+                                        worktree_id,
+                                        text: log.clone(),
+                                    });
+                                })
+                                .ok();
+                        }
+                        lsp_store
+                            .update(cx, |_, cx| {
+                                cx.emit(LspStoreEvent::LanguageServerStartFailed {
+                                    name: adapter.name(),
+                                    worktree_id,
+                                    error: format!("{err:#}"),
+                                });
+                            })
+                            .ok();
                         delegate.update_status(
                             adapter.name(),
                             BinaryStatus::Failed {
@@ -4142,6 +4174,20 @@ pub enum LspStoreEvent {
         message: proto::update_language_server::Variant,
     },
     LanguageServerLog(LanguageServerId, LanguageServerLogType, String),
+    /// What a language server wrote to stderr while it was starting, whether the start succeeded
+    /// or not. Stderr after the start reaches `lsp::LanguageServer::on_io`.
+    LanguageServerStartupStderr {
+        name: LanguageServerName,
+        worktree_id: WorktreeId,
+        text: String,
+    },
+    /// A language server's start failed: its binary could not be found or spawned, or it did not
+    /// answer `initialize` in time.
+    LanguageServerStartFailed {
+        name: LanguageServerName,
+        worktree_id: WorktreeId,
+        error: String,
+    },
     LanguageServerPrompt(LanguageServerPromptRequest),
     LanguageDetected {
         buffer: Entity<Buffer>,
@@ -11532,6 +11578,90 @@ impl LspStore {
             })
             .detach();
         }
+    }
+
+    /// Restarts one running local server and no other server of the same name, which
+    /// `restart_language_servers_for_buffers` cannot do: its name selector stops that name in every
+    /// worktree. `buffers` are the buffers that start the replacement; the stopped name is not
+    /// recorded as manually stopped, so servers of other worktrees keep registering normally.
+    pub fn restart_language_server_by_id(
+        &mut self,
+        server_id: LanguageServerId,
+        buffers: Vec<Entity<Buffer>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.as_local().is_none() {
+            return;
+        }
+        let name = self.as_local().and_then(|local| {
+            local
+                .language_server_ids
+                .iter()
+                .find(|(_, state)| state.id == server_id)
+                .map(|(seed, _)| seed.name.clone())
+        });
+        let (_, stop_task) = self.stop_local_language_servers_for_buffers(
+            &[],
+            HashSet::from_iter([LanguageServerSelector::Id(server_id)]),
+            cx,
+        );
+        let only_register: HashSet<LanguageServerSelector> =
+            name.map(LanguageServerSelector::Name).into_iter().collect();
+        cx.spawn(async move |lsp_store, cx| {
+            stop_task.await;
+            lsp_store
+                .update(cx, |lsp_store, cx| {
+                    for buffer in buffers {
+                        lsp_store.register_buffer_with_language_servers(
+                            &buffer,
+                            only_register.clone(),
+                            true,
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Restarts the local servers named `name` of one worktree, whether running, still starting
+    /// or left behind by a failed start, and no server of another worktree. `buffers` start the
+    /// replacement; with none, the servers just stop. The name is not recorded as manually stopped.
+    pub fn restart_language_server_for_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        name: LanguageServerName,
+        buffers: Vec<Entity<Buffer>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(local) = self.as_local() else {
+            return;
+        };
+        let to_stop: HashSet<LanguageServerSelector> = local
+            .language_server_ids
+            .iter()
+            .filter(|(seed, _)| seed.worktree_id == worktree_id && seed.name == name)
+            .map(|(_, state)| LanguageServerSelector::Id(state.id))
+            .collect();
+        let (_, stop_task) = self.stop_local_language_servers_for_buffers(&[], to_stop, cx);
+        let only_register = HashSet::from_iter([LanguageServerSelector::Name(name)]);
+        cx.spawn(async move |lsp_store, cx| {
+            stop_task.await;
+            lsp_store
+                .update(cx, |lsp_store, cx| {
+                    for buffer in buffers {
+                        lsp_store.register_buffer_with_language_servers(
+                            &buffer,
+                            only_register.clone(),
+                            true,
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+        })
+        .detach();
     }
 
     pub fn stop_language_servers_for_buffers(

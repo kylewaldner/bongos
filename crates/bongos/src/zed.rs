@@ -265,6 +265,25 @@ pub fn init(cx: &mut App) {
             );
         });
     })
+    .on_action(|_: &bongos_kotlin::ShowJdk, cx| {
+        with_active_or_new_workspace(cx, |workspace, window, cx| {
+            let request = bongos_kotlin::ShowJdkRequest::new(workspace.project().read(cx), cx);
+            cx.spawn_in(window, async move |workspace, cx| {
+                let text = cx.background_spawn(async move { request.text() }).await;
+                workspace.update_in(cx, |workspace, window, cx| {
+                    open_bundled_file(
+                        workspace,
+                        text.into(),
+                        bongos_kotlin::SHOW_JDK_TITLE,
+                        "Plain Text",
+                        window,
+                        cx,
+                    );
+                })
+            })
+            .detach_and_log_err(cx);
+        });
+    })
     .on_action(|_: &OpenDefaultSettings, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
             open_bundled_file(
@@ -574,6 +593,52 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             }
         });
 
+        let kotlin_menu_handle = PopoverMenuHandle::default();
+        let kotlin_status = cx.new(|cx| {
+            bongos_kotlin::KotlinStatusItem::new(
+                workspace.project().clone(),
+                kotlin_menu_handle.clone(),
+                cx,
+            )
+        });
+        workspace.register_action({
+            move |_, _: &bongos_kotlin::ShowStatusMenu, window, cx| {
+                kotlin_menu_handle.toggle(window, cx);
+            }
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::ShowLogs, window, cx| {
+            bongos_kotlin::show_logs(workspace, window, cx);
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::SwitchServer, window, cx| {
+            bongos_kotlin::switch_server(workspace, window, cx);
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::RestartServer, _, cx| {
+            bongos_kotlin::restart_server(workspace, cx);
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::ReimportProject, _, cx| {
+            bongos_kotlin::reimport_project(workspace, cx);
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::LicenseStatus, window, cx| {
+            bongos_kotlin::license_status(workspace, show_kotlin_text, window, cx);
+        });
+        workspace.register_action(
+            |workspace, _: &bongos_kotlin::LicenseActivate, window, cx| {
+                bongos_kotlin::license_activate(workspace, window, cx);
+            },
+        );
+        workspace.register_action(|workspace, _: &bongos_kotlin::LicenseTrial, window, cx| {
+            bongos_kotlin::license_trial(workspace, window, cx);
+        });
+        workspace.register_action(
+            |workspace, _: &bongos_kotlin::ReviewIntellijEula, window, cx| {
+                bongos_kotlin::review_intellij_eula(workspace, show_kotlin_text, window, cx);
+            },
+        );
+        workspace.register_action(|workspace, _: &bongos_kotlin::CancelInstall, _, cx| {
+            let project = workspace.project().clone();
+            bongos_kotlin::cancel_installs(&project, cx);
+        });
+
         let cursor_position =
             cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
         let line_ending_indicator =
@@ -583,6 +648,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         workspace.status_bar().update(cx, |status_bar, cx| {
             status_bar.add_left_item(search_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
+            status_bar.add_left_item(kotlin_status, window, cx);
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);
@@ -2421,6 +2487,17 @@ fn open_local_file(
     }
 }
 
+/// Opens text a Kotlin command produced (license status, the IntelliJ EULA) in a read-only buffer.
+fn show_kotlin_text(
+    workspace: &mut Workspace,
+    text: String,
+    title: &'static str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    open_bundled_file(workspace, text.into(), title, "Plain Text", window, cx);
+}
+
 fn open_bundled_file(
     workspace: &mut Workspace,
     text: Cow<'static, str>,
@@ -2441,6 +2518,17 @@ fn open_bundled_file(
         })
     });
     if let Some(existing) = existing {
+        // A report buffer is open from an earlier call: show the new text.
+        let buffer = existing.read(cx).buffer().read(cx).as_singleton();
+        if let Some(buffer) = buffer {
+            buffer.update(cx, |buffer, cx| {
+                if buffer.text() != text {
+                    buffer.set_capability(Capability::ReadWrite, cx);
+                    buffer.set_text(text.into_owned(), cx);
+                    buffer.set_capability(Capability::ReadOnly, cx);
+                }
+            });
+        }
         workspace.activate_item(&existing, true, true, window, cx);
         return;
     }
@@ -5353,6 +5441,7 @@ mod tests {
                 "journal",
                 "keymap_editor",
                 "keystroke_input",
+                "kotlin",
                 "language_selector",
                 "line_ending_selector",
                 "lsp_tool",
@@ -5374,6 +5463,7 @@ mod tests {
                 "remote_debug",
                 "repl",
                 "search",
+                "settings",
                 "settings_editor",
                 "settings_profile_selector",
                 "skill_creator",
@@ -5526,6 +5616,47 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_kotlin_eula_and_license_text_open_read_only(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        cx.update(init);
+
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+
+        for (title, text) in [
+            (bongos_kotlin::EULA_TITLE, "JETBRAINS USER AGREEMENT"),
+            (bongos_kotlin::LICENSE_STATUS_TITLE, "License: licensed"),
+        ] {
+            window
+                .update(cx, |_, window, cx| {
+                    workspace.update(cx, |workspace, cx| {
+                        show_kotlin_text(workspace, text.to_string(), title, window, cx)
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+
+            let editor = window
+                .update(cx, |_, _, cx| {
+                    workspace.update(cx, |workspace, cx| workspace.active_item_as::<Editor>(cx))
+                })
+                .unwrap()
+                .expect("the text opens in an editor");
+            editor.read_with(cx, |editor, cx| {
+                assert!(editor.read_only(cx), "{title} must be read-only");
+                assert!(editor.buffer().read(cx).read_only(), "{title} buffer");
+                assert_eq!(editor.title(cx).as_ref(), title);
+                assert_eq!(editor.text(cx), text);
+            });
+        }
+    }
+
+    #[gpui::test]
     async fn test_bundled_languages(cx: &mut TestAppContext) {
         let fs = fs::FakeFs::new(cx.background_executor.clone());
         env_logger::builder().is_test(true).try_init().ok();
@@ -5594,6 +5725,9 @@ mod tests {
     ) -> Arc<AppState> {
         cx.update(move |cx| {
             env_logger::builder().is_test(true).try_init().ok();
+            // Without its own database a test shares one static database with every other test in
+            // the process, and tests that restore sessions read each other's window state.
+            cx.set_global(db::AppDatabase::test_new());
 
             let state = Arc::get_mut(&mut app_state).unwrap();
             state.build_window_options = build_window_options;

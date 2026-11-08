@@ -117,3 +117,102 @@ async fn available_actions(cx: &mut TestAppContext) {
         }
     });
 }
+
+#[gpui::test]
+async fn switch_profile_dispatches_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let switch_profile = cx
+            .build_action("settings::SwitchProfile", None)
+            .expect("settings::SwitchProfile is registered");
+        assert!(switch_profile.partial_eq(&zed_actions::settings::SwitchProfile));
+
+        let old_name = cx
+            .build_action("settings_profile_selector::Toggle", None)
+            .expect("the old name still resolves as an alias");
+        assert!(old_name.partial_eq(&zed_actions::settings::SwitchProfile));
+    });
+}
+
+#[gpui::test]
+async fn kotlin_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let show_jdk = cx
+            .build_action("kotlin::ShowJdk", None)
+            .expect("kotlin::ShowJdk is registered");
+        assert!(show_jdk.partial_eq(&bongos_kotlin::ShowJdk));
+        assert_eq!(
+            command_palette::humanize_action_name("kotlin::ShowJdk"),
+            "kotlin: show jdk"
+        );
+    });
+}
+
+#[gpui::test]
+async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let cases: [(&str, Box<dyn gpui::Action>, &str); 10] = [
+            (
+                "kotlin::SwitchServer",
+                Box::new(bongos_kotlin::SwitchServer),
+                "kotlin: switch server",
+            ),
+            (
+                "kotlin::RestartServer",
+                Box::new(bongos_kotlin::RestartServer),
+                "kotlin: restart server",
+            ),
+            (
+                "kotlin::ReimportProject",
+                Box::new(bongos_kotlin::ReimportProject),
+                "kotlin: reimport project",
+            ),
+            (
+                "kotlin::ShowLogs",
+                Box::new(bongos_kotlin::ShowLogs),
+                "kotlin: show logs",
+            ),
+            (
+                "kotlin::ShowStatusMenu",
+                Box::new(bongos_kotlin::ShowStatusMenu),
+                "kotlin: show status menu",
+            ),
+            (
+                "kotlin::CancelInstall",
+                Box::new(bongos_kotlin::CancelInstall),
+                "kotlin: cancel install",
+            ),
+            (
+                "kotlin::LicenseStatus",
+                Box::new(bongos_kotlin::LicenseStatus),
+                "kotlin: license status",
+            ),
+            (
+                "kotlin::LicenseActivate",
+                Box::new(bongos_kotlin::LicenseActivate),
+                "kotlin: license activate",
+            ),
+            (
+                "kotlin::LicenseTrial",
+                Box::new(bongos_kotlin::LicenseTrial),
+                "kotlin: license trial",
+            ),
+            (
+                "kotlin::ReviewIntellijEula",
+                Box::new(bongos_kotlin::ReviewIntellijEula),
+                "kotlin: review intellij eula",
+            ),
+        ];
+        for (name, expected, humanized) in cases {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert!(action.partial_eq(expected.as_ref()), "{name}");
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        // The menu's "Open protocol log" entry builds this action by name.
+        assert!(cx.build_action("dev::OpenLanguageServerLogs", None).is_ok());
+    });
+}

@@ -175,10 +175,12 @@ mem_total_kb() { awk '/^MemTotal:/ {print $2}' /proc/meminfo; }
 
 # Run cargo in a memory-limited systemd scope, so an OOM ends cargo and not the desktop: the cap is
 # 90% of total RAM and swap is 0. Falls back to plain cargo if the scope cannot start.
-# BONGOS_NICE=<n> runs cargo under nice -n <n>.
+# BONGOS_NICE=<n> runs cargo under nice -n <n>. BONGOS_CARGO_NO_NET=1 runs it in a network namespace
+# with loopback only (bwrap brings loopback up), with the real filesystem still writable.
 cargo_limited() {
   local cmd=(cargo)
-  [ -n "${BONGOS_NICE:-}" ] && cmd=(nice -n "$BONGOS_NICE" cargo)
+  [ -n "${BONGOS_CARGO_NO_NET:-}" ] && cmd=(env CARGO_NET_OFFLINE=true bwrap --unshare-net --dev-bind / / cargo)
+  [ -n "${BONGOS_NICE:-}" ] && cmd=(nice -n "$BONGOS_NICE" "${cmd[@]}")
   local cap=$(( $(mem_total_kb) * 9 / 10 ))K
   if systemd-run --user --scope -q -p "MemoryMax=$cap" -p MemorySwapMax=0 true >/dev/null 2>&1; then
     systemd-run --user --scope -q -p "MemoryMax=$cap" -p MemorySwapMax=0 "${cmd[@]}" "$@"
@@ -186,6 +188,16 @@ cargo_limited() {
     echo "bongos: systemd scope unavailable; running cargo without a memory limit" >&2
     "${cmd[@]}" "$@"
   fi
+}
+
+# start_fixture_http <dir>: serve a directory on 127.0.0.1 on a free port. Sets FIXTURE_HTTP_PORT and
+# FIXTURE_HTTP_PID; requests are logged to $RUN/fixture-http.log. The caller's cleanup trap kills it.
+start_fixture_http() {
+  local dir=$1 log="${RUN:-$TMPDIR}/fixture-http.log"
+  python3 -I -u -m http.server --bind 127.0.0.1 0 --directory "$dir" >"$log" 2>&1 &
+  FIXTURE_HTTP_PID=$!
+  poll 15 "fixture http server" grep -q 'Serving HTTP' "$log"
+  FIXTURE_HTTP_PORT=$(sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' "$log" | head -n1)
 }
 
 # Print the software (lavapipe) Vulkan driver file. Names differ by distro: lvp_icd.x86_64.json on
@@ -318,14 +330,17 @@ sandbox_env() {
 
 # The "Unrecognized Project" modal takes all keys, and a blinking cursor would hide when the UI has
 # settled. global_settings.json fixes both, and leaves settings.json and keymap.json for the app
-# to create.
+# to create. It also points the Kotlin language server at the fake server, so opening a .kt file
+# starts the fake and never downloads anything.
+BONGOS_FAKE_KOTLIN_SERVER=${BONGOS_FAKE_KOTLIN_SERVER:-$CARGO_TARGET_DIR/debug/bongos-fake-kotlin-server}
 seed_settings() {
   mkdir -p "$HOME/$BONGOS_CONFIG_PATH"
-  cat >"$HOME/$BONGOS_CONFIG_PATH/global_settings.json" <<'JSON'
+  cat >"$HOME/$BONGOS_CONFIG_PATH/global_settings.json" <<JSON
 {
   "session": { "trust_all_worktrees": true },
   "cursor_blink": false,
-  "terminal": { "blinking": "off" }
+  "terminal": { "blinking": "off" },
+  "lsp": { "kotlin": { "binary": { "path": "$BONGOS_FAKE_KOTLIN_SERVER" } } }
 }
 JSON
 }

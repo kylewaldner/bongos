@@ -2046,6 +2046,7 @@ dependencies = [
  "assets",
  "audio",
  "bongos_app",
+ "bongos_kotlin",
  "bongos_languages",
  "bongos_net",
  "bongos_version",
@@ -2205,6 +2206,47 @@ dependencies = [
  "settings",
  "settings_json",
  "tempfile",
+]
+
+[[package]]
+name = "bongos_kotlin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-fs",
+ "async-tar",
+ "async-trait",
+ "async_zip",
+ "chrono",
+ "collections",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "language",
+ "log",
+ "lsp",
+ "picker",
+ "project",
+ "release_channel",
+ "reqwest_client",
+ "rpc",
+ "semver",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "task",
+ "tempfile",
+ "tiny_http",
+ "toml 0.8.23",
+ "ui",
+ "util",
+ "workspace",
+ "worktree",
+ "zed_actions",
 ]
 
 [[package]]
@@ -14165,17 +14207,22 @@ dependencies = [
 name = "settings_profile_selector"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "editor",
  "fuzzy",
  "gpui",
+ "log",
  "menu",
  "picker",
  "project",
+ "serde",
  "serde_json",
  "settings",
+ "tempfile",
  "theme",
  "theme_settings",
  "ui",
+ "util",
  "workspace",
  "zed_actions",
 ]
