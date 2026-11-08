@@ -17,7 +17,7 @@ pub struct ChatsSettings {
     /// Milliseconds between pasting a prompt and submitting it.
     pub submit_delay_ms: u64,
     /// The directory of session types as written (it may start with `~`); `None` means the
-    /// default under the work root.
+    /// default, `<home>/.bongos/chat-types`.
     pub types_dir: Option<String>,
     pub claude: AgentCommand,
     pub codex: AgentCommand,

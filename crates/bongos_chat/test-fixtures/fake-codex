@@ -1,0 +1,64 @@
+#!/bin/sh
+# A stand-in for the `codex` CLI, for the health probe tests. It answers `--version`, `--help`
+# (a synthetic flag and command list, not the real help text) and `login status`, and nothing else.
+#
+# Knobs (environment variables):
+#   FAKE_CLI_LOG        append one line per call (the arguments only) to this file
+#   FAKE_CLI_VERSION    the version to report (default 0.46.0)
+#   FAKE_CLI_LOGGED_OUT set to anything: `login status` reports a logged-out account
+#   FAKE_CLI_NO_AUTH    set to anything: `--help` lists no `login` command, so no login probe exists
+#   FAKE_CLI_HANG       version, help, login or all: that call never answers (it sleeps 30 s)
+
+if [ -n "${FAKE_CLI_LOG:-}" ]; then
+  printf 'codex %s\n' "$*" >> "$FAKE_CLI_LOG"
+fi
+
+hang() {
+  case "${FAKE_CLI_HANG:-}" in
+    all | "$1") exec sleep 30 ;;
+  esac
+}
+
+case "${1:-}" in
+  --version)
+    hang version
+    echo "codex-cli ${FAKE_CLI_VERSION:-0.46.0}"
+    ;;
+  --help | -h)
+    hang help
+    cat <<'HELP'
+Usage: codex [options] [command]
+
+Options:
+  -m, --model <model>               Model the agent should use
+  -c, --config <key=value>          Override a configuration value
+  -h, --help                        Print help
+  -V, --version                     Print version
+
+Commands:
+  exec                              Run Codex non-interactively
+  resume                            Resume a previous session
+  fork                              Fork a previous session
+HELP
+    if [ -z "${FAKE_CLI_NO_AUTH:-}" ]; then
+      echo "  login                             Manage login"
+    fi
+    ;;
+  login)
+    hang login
+    if [ "${2:-}" = status ]; then
+      if [ -n "${FAKE_CLI_LOGGED_OUT:-}" ]; then
+        echo "Not logged in"
+        exit 1
+      fi
+      echo "Logged in"
+    else
+      echo "fake-codex: unsupported login command" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "fake-codex: unsupported arguments" >&2
+    exit 2
+    ;;
+esac

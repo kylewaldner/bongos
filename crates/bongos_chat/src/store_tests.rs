@@ -217,6 +217,65 @@ async fn a_record_in_a_moved_task_is_still_indexed(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn a_record_id_is_one_path_component_and_never_changes(cx: &mut TestAppContext) {
+    let setup = setup(cx, true);
+    let (backfill, _) = seed_tree(&setup.root);
+    wait_work_loaded(cx, &setup.work).await;
+
+    for bad in ["../escape", "a/b", "..", ".", "", "a\\b"] {
+        let mut record = ChatRecord::new(Agent::Claude, "free", backfill.clone());
+        record.id = bad.to_string();
+        let result = setup
+            .chats
+            .update(cx, |store, cx| {
+                store.create(backfill.clone(), record.clone(), cx)
+            })
+            .await;
+        assert!(
+            matches!(result, Err(ChatWriteError::Failed(_))),
+            "{bad:?}: {result:?}"
+        );
+    }
+    assert!(!backfill.join("escape.toml").exists());
+    assert!(
+        !layout::project_dir(&setup.root, "invoicing")
+            .join("escape.toml")
+            .exists()
+    );
+
+    let record = ChatRecord::new(Agent::Claude, "free", backfill.clone());
+    let path = setup
+        .chats
+        .update(cx, |store, cx| {
+            store.create(backfill.clone(), record.clone(), cx)
+        })
+        .await
+        .unwrap();
+    let result = setup
+        .chats
+        .update(cx, |store, cx| {
+            store.update(
+                path.clone(),
+                |record| {
+                    record.id = "another".to_string();
+                    record.prompted = true;
+                    Ok(())
+                },
+                cx,
+            )
+        })
+        .await;
+    assert!(
+        matches!(result, Err(ChatWriteError::Failed(_))),
+        "{result:?}"
+    );
+    // Nothing was written: not even the other change.
+    let on_disk = read_record(&path).unwrap();
+    assert_eq!(on_disk.id, record.id);
+    assert!(!on_disk.prompted);
+}
+
+#[gpui::test]
 async fn a_write_after_an_external_edit_keeps_the_edit(cx: &mut TestAppContext) {
     let setup = setup(cx, true);
     let (backfill, _) = seed_tree(&setup.root);
