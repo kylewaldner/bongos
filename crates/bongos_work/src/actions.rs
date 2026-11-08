@@ -106,3 +106,17 @@ pub mod project {
         ]
     );
 }
+
+/// Actions in the `work` namespace.
+pub mod work {
+    use gpui::actions;
+
+    actions!(
+        work,
+        [
+            /// Picks a folder, asks for a name and a setup command, and adds the repository to
+            /// `work.repositories` in the user settings.
+            AddRepository,
+        ]
+    );
+}

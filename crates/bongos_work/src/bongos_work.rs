@@ -8,6 +8,7 @@ mod commands;
 mod links;
 mod modals;
 mod projects;
+mod repositories;
 mod settings;
 mod store;
 mod structure;
@@ -20,9 +21,10 @@ pub use bongos_work_model as model;
 use fs::Fs;
 use gpui::{App, AppContext as _, Entity, Global};
 
-pub use actions::{project, task, todo};
+pub use actions::{project, task, todo, work};
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
-pub use settings::WorkSettings;
+pub use repositories::{default_kind, find_repository, resolve_repository};
+pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
 pub use store::{
     ECHO_TTL, MAX_RETRIES, Stats, WATCH_LATENCY, WorkCommand, WorkStore, WorkStoreEvent, WriteError,
 };
@@ -67,5 +69,7 @@ impl WorkStore {
 mod command_tests;
 #[cfg(test)]
 mod command_tests_more;
+#[cfg(test)]
+mod repository_tests;
 #[cfg(test)]
 mod store_tests;

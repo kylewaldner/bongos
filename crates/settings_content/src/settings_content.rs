@@ -1367,6 +1367,47 @@ pub struct WorkSettingsContent {
     ///
     /// Default: 3.0
     pub stale_after_days: Option<f64>,
+    /// Where the Work panel docks.
+    ///
+    /// Default: left
+    pub dock: Option<DockPosition>,
+    /// Default width of the Work panel, in pixels.
+    ///
+    /// Default: 320
+    pub default_width: Option<f32>,
+    /// The repositories tasks can name. A task finds its repository from its own `repository`
+    /// field, then its ancestors', then its project's.
+    ///
+    /// Default: []
+    pub repositories: Option<Vec<WorkRepositoryContent>>,
+}
+
+/// A repository a Work task can belong to.
+#[with_fallible_options]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct WorkRepositoryContent {
+    /// The name tasks and projects use to refer to the repository.
+    pub name: String,
+    /// The path of the repository's primary checkout, such as `~/src/invoicing`.
+    pub path: String,
+    /// A command that prepares a fresh worktree of the repository (installing dependencies, for
+    /// example).
+    ///
+    /// Default: null
+    pub setup_command: Option<String>,
+    /// Whether merging a task's PR completes its ships todo.
+    ///
+    /// Default: true
+    pub merge_is_ship: Option<bool>,
+    /// Whether the repository has deployments. When false, a new task defaults to the `pr-merge`
+    /// kind instead of `pr-ship`.
+    ///
+    /// Default: true
+    pub deployments: Option<bool>,
+    /// The template of branch names. `{slug}` stands for the task's slug.
+    ///
+    /// Default: "{slug}"
+    pub branch_template: Option<String>,
 }
 
 // An ExtendingVec in the settings can only accumulate new values.

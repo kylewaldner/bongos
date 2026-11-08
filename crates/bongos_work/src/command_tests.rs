@@ -590,7 +590,7 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
 }
 
 /// Every action these commands register.
-const NAMES: [&str; 33] = [
+const NAMES: [&str; 34] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -624,6 +624,7 @@ const NAMES: [&str; 33] = [
     "project::Archive",
     "project::Unarchive",
     "project::OpenFolder",
+    "work::AddRepository",
 ];
 
 #[gpui::test]

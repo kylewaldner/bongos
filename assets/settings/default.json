@@ -2600,10 +2600,19 @@
     // Whether the Work view is on. While it is off, bongos neither reads nor
     // watches ~/.bongos.
     "enabled": false,
+    // Where the Work panel docks: "left", "bottom" or "right".
+    "dock": "left",
+    // Default width of the Work panel, in pixels.
+    "default_width": 320,
     // Days without activity after which an open project or one-off fades.
     "fade_after_days": 1.5,
     // Days without activity after which an open project or one-off is stale.
     "stale_after_days": 3.0,
+    // The repositories tasks can name. Each entry looks like:
+    //   { "name": "invoicing", "path": "~/src/invoicing", "setup_command": null,
+    //     "merge_is_ship": true, "deployments": true, "branch_template": "{slug}" }
+    // Only "name" and "path" are required. `work: add repository` appends an entry.
+    "repositories": [],
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.

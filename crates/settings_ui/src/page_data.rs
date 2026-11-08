@@ -78,9 +78,151 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         collaboration_page(),
         ai_page(cx),
         network_page(),
+        work_page(),
         developer_page(cx),
     ]
 }
+
+fn work_page() -> SettingsPage {
+    fn work_section() -> [SettingsPageItem; 5] {
+        [
+            SettingsPageItem::SectionHeader("Work"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Work",
+                description: "Whether the Work view is on. While it is off, bongos neither reads nor watches ~/.bongos.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("work.enabled"),
+                    pick: |settings_content| settings_content.work.as_ref()?.enabled.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.work.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Work Panel Dock",
+                description: "Where to dock the Work panel.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("work.dock"),
+                    pick: |settings_content| settings_content.work.as_ref()?.dock.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.work.get_or_insert_default().dock = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Work Panel Default Width",
+                description: "Default width of the Work panel in pixels.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("work.default_width"),
+                    pick: |settings_content| settings_content.work.as_ref()?.default_width.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.work.get_or_insert_default().default_width = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Fade After Days",
+                description: "Days without activity after which an open project or one-off fades.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("work.fade_after_days"),
+                    pick: |settings_content| {
+                        settings_content.work.as_ref()?.fade_after_days.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .work
+                            .get_or_insert_default()
+                            .fade_after_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn thresholds_and_repositories_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Stale After Days",
+                description: "Days without activity after which an open project or one-off is stale.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("work.stale_after_days"),
+                    pick: |settings_content| {
+                        settings_content.work.as_ref()?.stale_after_days.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .work
+                            .get_or_insert_default()
+                            .stale_after_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Repositories",
+                description: "The repositories tasks can name: a name, a path, a setup command, whether a merged PR ships, whether it deploys and a branch template.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("work.repositories"),
+                        pick: |settings_content| {
+                            settings_content.work.as_ref()?.repositories.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.work.get_or_insert_default().repositories = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "Add Repository".into(),
+                description: Some("Pick a folder and add it to the repositories.".into()),
+                button_text: "Add Repository".into(),
+                on_click: Arc::new(|settings_window, window, cx| {
+                    let Some(original_window) = settings_window.original_window else {
+                        return;
+                    };
+                    original_window
+                        .update(cx, |_workspace, original_window, cx| {
+                            if let Ok(action) = cx.build_action(WORK_ADD_REPOSITORY, None) {
+                                original_window.dispatch_action(action, cx);
+                            }
+                            original_window.activate_window();
+                        })
+                        .ok();
+                    window.remove_window();
+                }),
+                files: USER,
+            }),
+        ]
+    }
+
+    SettingsPage {
+        title: "Work",
+        items: concat_sections![work_section(), thresholds_and_repositories_section()],
+    }
+}
+
+/// The name of the `work: add repository` action. The page runs it by name, so the settings UI
+/// does not depend on the crate that defines it.
+const WORK_ADD_REPOSITORY: &str = "work::AddRepository";
 
 fn developer_page(cx: &App) -> SettingsPage {
     use feature_flags::FeatureFlagAppExt as _;
@@ -10138,5 +10280,50 @@ mod tests {
         write_vim_mode_inner(&mut settings, Some(true));
         assert_eq!(settings.vim_mode, Some(true));
         assert_eq!(settings.helix_mode, Some(false));
+    }
+
+    /// Every key of the `work` block of `default.json` has an item on the Work page.
+    #[test]
+    fn test_work_page_covers_the_work_settings() {
+        let (content, _) = settings::parse_json::<SettingsContent>(&settings::default_settings());
+        let default = serde_json::to_value(content.expect("default.json parses")).unwrap();
+        let keys: Vec<&String> = default["work"].as_object().unwrap().keys().collect();
+        let page = work_page();
+        let paths: Vec<&str> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                _ => None,
+            })
+            .collect();
+        for key in &keys {
+            let path = format!("work.{key}");
+            assert!(paths.contains(&path.as_str()), "no Work item for {path}");
+        }
+        assert_eq!(paths.len(), keys.len(), "{paths:?} against {keys:?}");
+    }
+
+    #[test]
+    fn test_work_page_lists_repositories_and_add_repository() {
+        let page = work_page();
+        assert_eq!(page.title, "Work");
+        let titles: Vec<String> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::SettingItem(item) => Some(item.title.to_string()),
+                SettingsPageItem::ActionLink(link) => Some(link.title.to_string()),
+                _ => None,
+            })
+            .collect();
+        for expected in [
+            "Work Panel Dock",
+            "Work Panel Default Width",
+            "Repositories",
+            "Add Repository",
+        ] {
+            assert!(titles.iter().any(|title| title == expected), "{titles:?}");
+        }
     }
 }

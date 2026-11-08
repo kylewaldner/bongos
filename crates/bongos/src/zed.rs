@@ -5487,6 +5487,7 @@ mod tests {
                 "variable_list",
                 "vim",
                 "window",
+                "work",
                 "workspace",
                 "worktree_picker",
                 "zed",
