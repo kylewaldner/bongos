@@ -57,16 +57,17 @@ fn seed(root: &Path) {
     }
 }
 
-struct Harness {
-    store: Entity<WorkStore>,
-    workspace: Entity<Workspace>,
-    root: PathBuf,
+pub(crate) struct Harness {
+    pub(crate) store: Entity<WorkStore>,
+    pub(crate) workspace: Entity<Workspace>,
+    pub(crate) project: Entity<Project>,
+    pub(crate) root: PathBuf,
     _temp: TempDir,
 }
 
 /// A store over a temporary tree (seeded when `seeded`) and a workspace with the commands
 /// registered.
-async fn harness(
+pub(crate) async fn harness(
     cx: &mut TestAppContext,
     enabled: bool,
     seeded: bool,
@@ -115,6 +116,7 @@ async fn harness(
         Harness {
             store,
             workspace,
+            project,
             root,
             _temp: temp,
         },
@@ -122,7 +124,7 @@ async fn harness(
     )
 }
 
-async fn wait_until(
+pub(crate) async fn wait_until(
     cx: &mut VisualTestContext,
     what: &str,
     check: impl Fn(&mut VisualTestContext) -> bool,
@@ -138,13 +140,13 @@ async fn wait_until(
 }
 
 impl Harness {
-    fn tree(&self, cx: &mut VisualTestContext) -> Arc<WorkTree> {
+    pub(crate) fn tree(&self, cx: &mut VisualTestContext) -> Arc<WorkTree> {
         self.store
             .read_with(cx, |store, _| store.snapshot())
             .expect("the store has loaded")
     }
 
-    fn task_dir(&self, path: &[&str]) -> PathBuf {
+    pub(crate) fn task_dir(&self, path: &[&str]) -> PathBuf {
         let mut dir = layout::project_dir(&self.root, "invoicing");
         for slug in path {
             dir = layout::child_dir(&dir, slug);
@@ -152,11 +154,11 @@ impl Harness {
         dir
     }
 
-    fn writes(&self, cx: &mut VisualTestContext) -> usize {
+    pub(crate) fn writes(&self, cx: &mut VisualTestContext) -> usize {
         self.store.read_with(cx, |store, _| store.stats().writes)
     }
 
-    fn file(&self, cx: &mut VisualTestContext, path: &[&str]) -> TaskFile {
+    pub(crate) fn file(&self, cx: &mut VisualTestContext, path: &[&str]) -> TaskFile {
         let dir = self.task_dir(path);
         let tree = self.tree(cx);
         tree.task_by_dir(&dir)
@@ -164,7 +166,7 @@ impl Harness {
             .unwrap_or_else(|| panic!("no task at {}", dir.display()))
     }
 
-    fn has_toast(&self, cx: &mut VisualTestContext) -> bool {
+    pub(crate) fn has_toast(&self, cx: &mut VisualTestContext) -> bool {
         self.workspace.read_with(cx, |workspace, _| {
             workspace
                 .notification_ids()
@@ -172,24 +174,24 @@ impl Harness {
         })
     }
 
-    fn clear_toasts(&self, cx: &mut VisualTestContext) {
+    pub(crate) fn clear_toasts(&self, cx: &mut VisualTestContext) {
         self.workspace
             .update(cx, |workspace, cx| workspace.clear_all_notifications(cx));
     }
 
-    fn picker(&self, cx: &mut VisualTestContext) -> Option<Entity<ChoicePicker>> {
+    pub(crate) fn picker(&self, cx: &mut VisualTestContext) -> Option<Entity<ChoicePicker>> {
         self.workspace.read_with(cx, |workspace, cx| {
             workspace.active_modal::<ChoicePicker>(cx)
         })
     }
 
-    fn prompt(&self, cx: &mut VisualTestContext) -> Option<Entity<TextPrompt>> {
+    pub(crate) fn prompt(&self, cx: &mut VisualTestContext) -> Option<Entity<TextPrompt>> {
         self.workspace
             .read_with(cx, |workspace, cx| workspace.active_modal::<TextPrompt>(cx))
     }
 
     /// The rows of the open picker, as labels.
-    fn choices(&self, cx: &mut VisualTestContext) -> Vec<String> {
+    pub(crate) fn choices(&self, cx: &mut VisualTestContext) -> Vec<String> {
         let picker = self.picker(cx).expect("a picker is open");
         picker.read_with(cx, |picker, cx| {
             picker.picker.read(cx).delegate.choices.clone()
@@ -198,7 +200,7 @@ impl Harness {
 }
 
 /// Dispatches the action `name`, as the command palette does.
-fn dispatch(cx: &mut VisualTestContext, name: &str) {
+pub(crate) fn dispatch(cx: &mut VisualTestContext, name: &str) {
     let action = cx.update(|_, cx| {
         cx.build_action(name, None)
             .unwrap_or_else(|_| panic!("{name} is registered"))
@@ -207,7 +209,7 @@ fn dispatch(cx: &mut VisualTestContext, name: &str) {
     cx.run_until_parked();
 }
 
-enum Input {
+pub(crate) enum Input {
     /// Types `query` in the open picker and confirms the first match.
     Pick(&'static str),
     /// Replaces the text of the open prompt and confirms it.
@@ -216,14 +218,14 @@ enum Input {
 
 impl Harness {
     /// Dispatches `name` and answers each modal it opens with the next of `inputs`.
-    async fn run(&self, cx: &mut VisualTestContext, name: &str, inputs: &[Input]) {
+    pub(crate) async fn run(&self, cx: &mut VisualTestContext, name: &str, inputs: &[Input]) {
         dispatch(cx, name);
         for input in inputs {
             self.answer(cx, input).await;
         }
     }
 
-    async fn answer(&self, cx: &mut VisualTestContext, input: &Input) {
+    pub(crate) async fn answer(&self, cx: &mut VisualTestContext, input: &Input) {
         match input {
             Input::Pick(query) => {
                 wait_until(cx, "a picker", |cx| self.picker(cx).is_some()).await;
@@ -250,7 +252,12 @@ impl Harness {
     }
 
     /// Runs the flow and waits for the write it ends in.
-    async fn run_and_wait(&self, cx: &mut VisualTestContext, name: &str, inputs: &[Input]) {
+    pub(crate) async fn run_and_wait(
+        &self,
+        cx: &mut VisualTestContext,
+        name: &str,
+        inputs: &[Input],
+    ) {
         let before = self.writes(cx);
         self.run(cx, name, inputs).await;
         wait_until(cx, &format!("{name} to be written"), |cx| {
@@ -260,7 +267,7 @@ impl Harness {
     }
 }
 
-fn find<'a>(tree: &'a WorkTree, goal: &str) -> &'a WorkTask {
+pub(crate) fn find<'a>(tree: &'a WorkTree, goal: &str) -> &'a WorkTask {
     tree.tasks()
         .into_iter()
         .find(|task| task.goal() == goal)
@@ -583,7 +590,7 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
 }
 
 /// Every action these commands register.
-const NAMES: [&str; 16] = [
+const NAMES: [&str; 33] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -600,6 +607,23 @@ const NAMES: [&str; 16] = [
     "todo::SetWorkflow",
     "todo::SetRole",
     "todo::Start",
+    "task::NewOneOff",
+    "task::AddEdge",
+    "task::RemoveEdge",
+    "task::ShowBlockers",
+    "task::SetUnblockPoint",
+    "task::SetMergeShip",
+    "task::Retarget",
+    "task::SetResult",
+    "task::ClearResult",
+    "task::Split",
+    "task::Move",
+    "task::MoveToProject",
+    "task::MakeOneOff",
+    "project::New",
+    "project::Archive",
+    "project::Unarchive",
+    "project::OpenFolder",
 ];
 
 #[gpui::test]
