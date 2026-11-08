@@ -441,3 +441,20 @@ assert_zed_hosts() {
   poll 120 "a Zed host in proxy.log" zed_hosts >/dev/null
   say "smoke: Zed hosts seen: $(zed_hosts | xargs)"
 }
+
+# The extension_host dev-extension test reads <repo>/target/wasi-sdk. Point it at the workspace copy
+# (fetching that once), so the test never downloads. Only a missing path or a symlink is replaced.
+ensure_wasi_sdk() {
+  local version dest link="$BONGOS_ROOT/target/wasi-sdk"
+  version=$(sed -n 's#^const WASI_SDK_URL: &str = ".*/download/wasi-sdk-\([0-9]*\)/.*";#\1#p' \
+    "$BONGOS_ROOT/crates/extension/src/extension_builder.rs")
+  dest="$BONGOS_WORKSPACE/wasi-sdk/$version"
+  if [ -z "$version" ]; then echo "bongos: cannot read the wasi-sdk version" >&2; return 1; fi
+  if [ ! -x "$dest/bin/clang" ]; then "$here/fetch-wasi-sdk" || return 1; fi
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    echo "bongos: $link is a real directory; leaving it"
+    return 0
+  fi
+  mkdir -p "$BONGOS_ROOT/target"
+  ln -sfn "$dest" "$link"
+}
