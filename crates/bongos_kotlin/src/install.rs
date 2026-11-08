@@ -356,8 +356,69 @@ async fn extract(
             }
             Ok(())
         }
-        ArchiveKind::Zip => util::archive::extract_seekable_zip(staging, file).await,
+        ArchiveKind::Zip => extract_zip(staging, file, cancel).await,
     }
+}
+
+/// Extracts a zip like `util::archive::extract_seekable_zip`, but checks `cancel` before each
+/// entry, so cancelling a 390 MB bundle does not wait for the whole extraction.
+async fn extract_zip(staging: &Path, file: async_fs::File, cancel: &AtomicBool) -> Result<()> {
+    let mut reader = async_zip::base::read::seek::ZipFileReader::new(BufReader::new(file))
+        .await
+        .context("reading the zip archive")?;
+    let staging = staging
+        .canonicalize()
+        .unwrap_or_else(|_| staging.to_path_buf());
+    for (index, entry) in reader.file().entries().to_vec().into_iter().enumerate() {
+        check_cancel(cancel)?;
+        let name = entry
+            .filename()
+            .as_str()
+            .context("reading zip entry file name")?;
+        let normal = Path::new(name).components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+        if !normal {
+            log::warn!("skipped a zip entry with an unsafe path: {name}");
+            continue;
+        }
+        let path = staging.join(name);
+        if entry
+            .dir()
+            .with_context(|| format!("reading zip entry metadata for {}", path.display()))?
+        {
+            fs::create_dir_all(&path)
+                .with_context(|| format!("creating directory {}", path.display()))?;
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+        let mut output = async_fs::File::create(&path)
+            .await
+            .with_context(|| format!("creating {}", path.display()))?;
+        let mut entry_reader = reader
+            .reader_with_entry(index)
+            .await
+            .with_context(|| format!("reading zip entry {name}"))?;
+        futures::io::copy(&mut entry_reader, &mut output)
+            .await
+            .with_context(|| format!("extracting {}", path.display()))?;
+        output.flush().await?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_permissions().filter(|mode| *mode != 0) {
+            use std::os::unix::fs::PermissionsExt as _;
+            output
+                .set_permissions(fs::Permissions::from_mode(u32::from(mode)))
+                .await
+                .with_context(|| format!("setting permissions of {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Descends `count` single-directory levels below `staging` and returns the directory reached.
@@ -651,6 +712,41 @@ pub(crate) mod tests {
         .result
         .unwrap();
         assert_installed(&dir, &installed, &entry);
+    }
+
+    #[test]
+    fn test_zip_extraction_checks_cancel_at_entry_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let archive_path = root.path().join("bundle.zip");
+        fs::write(&archive_path, zip(&files(1024, true))).unwrap();
+        let extract_into = |name: &str, cancel: &AtomicBool| {
+            let staging = root.path().join(name);
+            fs::create_dir_all(&staging).unwrap();
+            let result = block_on(async {
+                let file = async_fs::File::open(&archive_path).await.unwrap();
+                extract_zip(&staging, file, cancel).await
+            });
+            (staging, result)
+        };
+
+        let (staging, result) = extract_into("cancelled", &AtomicBool::new(true));
+        let error = result.unwrap_err();
+        assert!(
+            error.downcast_ref::<InstallCancelled>().is_some(),
+            "{error:#}"
+        );
+        assert!(
+            fs::read_dir(&staging).unwrap().next().is_none(),
+            "an entry was extracted after the cancel"
+        );
+
+        let (staging, result) = extract_into("whole", &AtomicBool::new(false));
+        result.unwrap();
+        assert_eq!(
+            fs::read(staging.join("server-1.2.3/README")).unwrap(),
+            b"hello"
+        );
+        assert!(staging.join("server-1.2.3/lib/blob").is_file());
     }
 
     #[test]
