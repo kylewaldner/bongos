@@ -11564,6 +11564,51 @@ impl LspStore {
         }
     }
 
+    /// Restarts one running local server and no other server of the same name, which
+    /// `restart_language_servers_for_buffers` cannot do: its name selector stops that name in every
+    /// worktree. `buffers` are the buffers that start the replacement; the stopped name is not
+    /// recorded as manually stopped, so servers of other worktrees keep registering normally.
+    pub fn restart_language_server_by_id(
+        &mut self,
+        server_id: LanguageServerId,
+        buffers: Vec<Entity<Buffer>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.as_local().is_none() {
+            return;
+        }
+        let name = self.as_local().and_then(|local| {
+            local
+                .language_server_ids
+                .iter()
+                .find(|(_, state)| state.id == server_id)
+                .map(|(seed, _)| seed.name.clone())
+        });
+        let (_, stop_task) = self.stop_local_language_servers_for_buffers(
+            &[],
+            HashSet::from_iter([LanguageServerSelector::Id(server_id)]),
+            cx,
+        );
+        let only_register: HashSet<LanguageServerSelector> =
+            name.map(LanguageServerSelector::Name).into_iter().collect();
+        cx.spawn(async move |lsp_store, cx| {
+            stop_task.await;
+            lsp_store
+                .update(cx, |lsp_store, cx| {
+                    for buffer in buffers {
+                        lsp_store.register_buffer_with_language_servers(
+                            &buffer,
+                            only_register.clone(),
+                            true,
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     pub fn stop_language_servers_for_buffers(
         &mut self,
         buffers: Vec<Entity<Buffer>>,

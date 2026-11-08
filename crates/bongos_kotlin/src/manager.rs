@@ -68,11 +68,11 @@ impl ServerStatus {
 
 /// How the manager asks for a Kotlin server restart.
 pub trait KotlinHost: 'static {
-    /// Stops the worktree's Kotlin server, waits until its process is gone, then starts it again for
-    /// the open Kotlin buffers. The new start asks the manager which server to run
+    /// Stops the worktree's Kotlin server `server_id` (only that one: other worktrees' servers run
+    /// on), waits until its process is gone, then starts it again for the open Kotlin buffers. The new start asks the manager which server to run
     /// (`KotlinProjectManager::begin_start`), so the manager changes the effective server before
     /// calling this.
-    fn restart(&self, worktree_id: WorktreeId, cx: &mut App);
+    fn restart(&self, worktree_id: WorktreeId, server_id: Option<LanguageServerId>, cx: &mut App);
 }
 
 pub struct KotlinWorktreeState {
@@ -271,8 +271,12 @@ impl KotlinProjectManager {
 
     fn restart(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
         self.set_status(worktree_id, Some(ServerStatus::Starting), cx);
+        let server_id = self
+            .worktrees
+            .get(&worktree_id)
+            .and_then(|state| state.server_id);
         let host = self.host.clone();
-        host.restart(worktree_id, cx);
+        host.restart(worktree_id, server_id, cx);
     }
 
     fn set_status(
@@ -589,7 +593,7 @@ mod tests {
     }
 
     impl KotlinHost for FakeHost {
-        fn restart(&self, worktree_id: WorktreeId, cx: &mut App) {
+        fn restart(&self, worktree_id: WorktreeId, _: Option<LanguageServerId>, cx: &mut App) {
             let inner = self.0.clone();
             inner.events.borrow_mut().push("stop".into());
             inner.live.set(inner.live.get() - 1);

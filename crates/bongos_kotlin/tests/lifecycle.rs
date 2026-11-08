@@ -28,12 +28,14 @@ const FAKE_SERVER: &str = env!("CARGO_BIN_EXE_bongos-fake-kotlin-server");
 struct Setup {
     project: Entity<Project>,
     manager: Entity<KotlinProjectManager>,
+    /// The first worktree.
     worktree_id: WorktreeId,
+    worktree_ids: Vec<WorktreeId>,
     dirs: KotlinDirs,
     pids: PathBuf,
     _temp: tempfile::TempDir,
-    _buffer: Entity<language::Buffer>,
-    _handle: project::lsp_store::OpenLspBufferHandle,
+    _buffers: Vec<Entity<language::Buffer>>,
+    _handles: Vec<project::lsp_store::OpenLspBufferHandle>,
 }
 
 impl Setup {
@@ -75,12 +77,26 @@ fn kotlin_language() -> Arc<Language> {
 
 /// Opens `Main.kt` in a project whose Kotlin server is `binary` run with `mode`.
 async fn start(cx: &mut TestAppContext, binary: &Path, mode: &str) -> Setup {
+    start_worktrees(cx, binary, mode, 1).await
+}
+
+/// The same with `count` worktrees in one project, each with an open `Main.kt`.
+async fn start_worktrees(
+    cx: &mut TestAppContext,
+    binary: &Path,
+    mode: &str,
+    count: usize,
+) -> Setup {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("project");
     let pids = temp.path().join("pids");
-    fs::create_dir_all(&root).unwrap();
     fs::create_dir_all(&pids).unwrap();
-    fs::write(root.join("Main.kt"), "fun main() {}\n").unwrap();
+    let roots: Vec<PathBuf> = (0..count)
+        .map(|index| temp.path().join(format!("project{index}")))
+        .collect();
+    for root in &roots {
+        fs::create_dir_all(root).unwrap();
+        fs::write(root.join("Main.kt"), "fun main() {}\n").unwrap();
+    }
     let dirs = KotlinDirs {
         state_dir: temp.path().join("state"),
         logs_dir: temp.path().join("logs"),
@@ -106,7 +122,7 @@ async fn start(cx: &mut TestAppContext, binary: &Path, mode: &str) -> Setup {
     });
 
     let fs = Arc::new(::fs::RealFs::new(None, cx.executor()));
-    let project = Project::test(fs, [root.as_path()], cx).await;
+    let project = Project::test(fs, roots.iter().map(PathBuf::as_path), cx).await;
     let languages = project.read_with(cx, |project, _| project.languages().clone());
     languages.add(kotlin_language());
     languages.register_lsp_adapter(
@@ -114,29 +130,39 @@ async fn start(cx: &mut TestAppContext, binary: &Path, mode: &str) -> Setup {
         Arc::new(KotlinAdapter::new(dirs.clone())),
     );
 
-    let worktree_id = project.read_with(cx, |project, cx| {
-        project.worktrees(cx).next().unwrap().read(cx).id()
+    let worktree_ids: Vec<WorktreeId> = project.read_with(cx, |project, cx| {
+        project
+            .worktrees(cx)
+            .map(|worktree| worktree.read(cx).id())
+            .collect()
     });
     let manager = cx.update(|cx| {
         cx.global::<KotlinRegistry>()
-            .manager(&root)
+            .manager(&roots[0])
             .expect("the project's worktree has a manager")
     });
-    let (buffer, handle) = project
-        .update(cx, |project, cx| {
-            project.open_local_buffer_with_lsp(root.join("Main.kt"), cx)
-        })
-        .await
-        .unwrap();
+    let mut buffers = Vec::new();
+    let mut handles = Vec::new();
+    for root in &roots {
+        let (buffer, handle) = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer_with_lsp(root.join("Main.kt"), cx)
+            })
+            .await
+            .unwrap();
+        buffers.push(buffer);
+        handles.push(handle);
+    }
     Setup {
         project,
         manager,
-        worktree_id,
+        worktree_id: worktree_ids[0],
+        worktree_ids,
         dirs,
         pids,
         _temp: temp,
-        _buffer: buffer,
-        _handle: handle,
+        _buffers: buffers,
+        _handles: handles,
     }
 }
 
@@ -294,4 +320,50 @@ async fn test_failed_start_reports_its_stderr(cx: &mut TestAppContext) {
     wait_until(cx, "kotlin.log to hold the failed start's stderr", |_| {
         setup.log().contains("stderr boom")
     });
+}
+
+#[gpui::test]
+async fn test_switching_one_worktree_leaves_the_others_server_alone(cx: &mut TestAppContext) {
+    let setup = start_worktrees(cx, Path::new(FAKE_SERVER), "", 2).await;
+    let (first, second) = (setup.worktree_ids[0], setup.worktree_ids[1]);
+    let process_of = |cx: &mut TestAppContext, worktree_id: WorktreeId| -> Option<u32> {
+        setup.project.read_with(cx, |project, cx| {
+            project
+                .lsp_store()
+                .read(cx)
+                .language_server_statuses()
+                .find(|(_, status)| status.worktree == Some(worktree_id))
+                .and_then(|(_, status)| status.process_id)
+        })
+    };
+    wait_until(cx, "both servers to be ready", |cx| {
+        setup.pid_files().len() == 2
+            && process_of(cx, first).is_some()
+            && process_of(cx, second).is_some()
+            && setup.status(cx) == Some(ServerStatus::Ready)
+    });
+    let (old_first, untouched) = (
+        process_of(cx, first).unwrap(),
+        process_of(cx, second).unwrap(),
+    );
+    assert_ne!(old_first, untouched);
+
+    setup
+        .manager
+        .update(cx, |manager, cx| {
+            manager.switch_server(first, Some(KotlinServerKind::Intellij), cx)
+        })
+        .unwrap();
+    wait_until(cx, "the first worktree's server to be replaced", |cx| {
+        process_of(cx, first).is_some_and(|pid| pid != old_first) && setup.pid_files().len() == 2
+    });
+    assert!(
+        is_gone(old_first),
+        "the old server {old_first} was not reaped"
+    );
+    assert_eq!(process_of(cx, second), Some(untouched));
+    assert!(
+        setup.pid_files().contains(&untouched),
+        "the other worktree's server was stopped"
+    );
 }

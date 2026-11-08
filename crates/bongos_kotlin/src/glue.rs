@@ -3,15 +3,14 @@
 
 use std::rc::Rc;
 
-use collections::HashSet;
 use gpui::{App, AppContext as _, Entity, WeakEntity};
-use lsp::{LanguageServerName, LanguageServerSelector};
+use lsp::LanguageServerId;
 use project::{Project, worktree_store::WorktreeStoreEvent};
 use settings::WorktreeId;
 
 use crate::{
     KotlinDirs,
-    manager::{ADAPTER_NAME, KotlinHost, KotlinProjectManager},
+    manager::{KotlinHost, KotlinProjectManager},
 };
 
 const KOTLIN_LANGUAGE: &str = "Kotlin";
@@ -21,8 +20,13 @@ struct ProjectHost {
 }
 
 impl KotlinHost for ProjectHost {
-    fn restart(&self, worktree_id: WorktreeId, cx: &mut App) {
+    fn restart(&self, worktree_id: WorktreeId, server_id: Option<LanguageServerId>, cx: &mut App) {
         let Some(project) = self.project.upgrade() else {
+            return;
+        };
+        // No id means the server has not been added yet: its start already reads the effective
+        // server, so there is nothing to stop.
+        let Some(server_id) = server_id else {
             return;
         };
         let buffers: Vec<_> = project
@@ -40,17 +44,9 @@ impl KotlinHost for ProjectHost {
                         .is_some_and(|file| file.worktree_id(cx) == worktree_id)
             })
             .collect();
-        // With no Kotlin buffer open there is no server to restart: the next buffer starts the
-        // effective server.
-        if buffers.is_empty() {
-            return;
-        }
-        let only: HashSet<LanguageServerSelector> =
-            HashSet::from_iter([LanguageServerSelector::Name(
-                LanguageServerName::new_static(ADAPTER_NAME),
-            )]);
+        // With no Kotlin buffer open the server just stops: the next buffer starts the effective one.
         project.read(cx).lsp_store().update(cx, |lsp_store, cx| {
-            lsp_store.restart_language_servers_for_buffers(buffers, only, true, cx);
+            lsp_store.restart_language_server_by_id(server_id, buffers, cx);
         });
     }
 }
