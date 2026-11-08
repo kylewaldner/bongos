@@ -112,7 +112,10 @@ fn test_facts_of_a_leaf_in_a_group_in_a_project() {
     assert_eq!(facts.project_dir, Some(t.root.join("projects/invoicing")));
     assert_eq!(
         facts.notes_dir,
-        Some(t.root.join("projects/invoicing/tasks/billing/tasks/backfill/notes"))
+        Some(
+            t.root
+                .join("projects/invoicing/tasks/billing/tasks/backfill/notes")
+        )
     );
     // Each dependency once, in file order, with the state label the Work view shows.
     assert_eq!(
@@ -179,7 +182,12 @@ fn test_facts_hold_no_artifact_path() {
     for id in ["leaf", "grp", "top", "schema", "review", "oneoff"] {
         let facts = task_facts(&t.tree, id).unwrap();
         let text = format!("{facts:?}");
-        for secret in [SECRET_FILE, SECRET_NOTE, SECRET_DESCRIPTION, "artifacts.toml"] {
+        for secret in [
+            SECRET_FILE,
+            SECRET_NOTE,
+            SECRET_DESCRIPTION,
+            "artifacts.toml",
+        ] {
             assert!(!text.contains(secret), "{id}: {secret} in {text}");
         }
         if let Some(notes) = &facts.notes_dir {

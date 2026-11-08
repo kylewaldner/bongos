@@ -926,7 +926,10 @@ async fn test_the_work_store_reports_the_open_chat_until_it_ends(cx: &mut TestAp
     let id = h.start(Agent::Claude, cx).await;
     // The record is in the chat index once the work store has seen its file.
     wait_for(cx, "one open chat on t1", STARTUP, |cx| open_chats(cx) == 1).await;
-    assert_eq!(cx.update(|cx| LiveModesRegistry::live_modes("top", cx).open_chats), 0);
+    assert_eq!(
+        cx.update(|cx| LiveModesRegistry::live_modes("top", cx).open_chats),
+        0
+    );
     let after_start = changes.get();
     assert!(after_start >= 1, "the registry was told the chat started");
 
@@ -938,7 +941,10 @@ async fn test_the_work_store_reports_the_open_chat_until_it_ends(cx: &mut TestAp
     h.wait_state(&id, ChatState::Exited { code: Some(0) }, cx)
         .await;
     wait_for(cx, "no open chat on t1", WITHIN, |cx| open_chats(cx) == 0).await;
-    assert!(changes.get() > after_start, "the registry was told the chat ended");
+    assert!(
+        changes.get() > after_start,
+        "the registry was told the chat ended"
+    );
 }
 
 #[gpui::test]
@@ -1052,7 +1058,10 @@ fn test_runtime_root_is_created_private_and_checked() {
     let link = base.join("link");
     symlink(&target, &link).unwrap();
     let error = write_runtime_dir(&link, &link.join("c1"), &files).unwrap_err();
-    assert!(error.to_string().contains("not a real directory"), "{error}");
+    assert!(
+        error.to_string().contains("not a real directory"),
+        "{error}"
+    );
     assert!(!target.join("c1").exists());
 
     // So is a file in its place.

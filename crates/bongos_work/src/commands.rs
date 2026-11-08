@@ -169,10 +169,7 @@ pub fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<W
 }
 
 /// The tree, when the store is on and has loaded it; otherwise a toast says why.
-pub fn ready(
-    workspace: &mut Workspace,
-    cx: &mut Context<Workspace>,
-) -> Option<Arc<WorkTree>> {
+pub fn ready(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Arc<WorkTree>> {
     let state = WorkStore::global(cx).map(|store| {
         let store = store.read(cx);
         (store.is_enabled(), store.snapshot())

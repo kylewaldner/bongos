@@ -5,8 +5,8 @@
 //! formats and pure rules live in `bongos_chat_model`.
 
 mod actions;
-mod health;
 mod facts;
+mod health;
 mod launch;
 mod live_modes;
 mod runtime;
@@ -21,17 +21,17 @@ use bongos_work::WorkStore;
 use gpui::{App, AppContext as _, Entity, Global};
 
 pub use actions::{action_types, chat, init_palette};
+pub use facts::task_facts;
 pub use health::{
     ChatHealth, ChatHealthEvent, Health, HealthState, HealthStats, MIN_REFRESH_INTERVAL,
     PROBE_TIMEOUT, find_program, fix_logged_out, fix_login_unchecked, fix_not_found,
     fix_not_probed,
 };
-pub use facts::task_facts;
-pub use live_modes::{SOURCE_NAME, start_current_todo};
 pub use launch::{
     CLAUDE_SETTINGS_FILE, CODEX_INSTRUCTIONS_FILE, CONTEXT_FILE, LaunchError, LaunchRequest,
     PLUGIN_DIR, SYSTEM_FILE,
 };
+pub use live_modes::{SOURCE_NAME, start_current_todo};
 pub use runtime::{
     ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChatRuntime, ChatRuntimeEvent, ChatState,
     LiveChat, RuntimeStats,
