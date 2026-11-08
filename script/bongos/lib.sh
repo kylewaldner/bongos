@@ -66,6 +66,19 @@ failure_excerpt() {
     if grep -qE '^---- .* stdout ----$' "$f"; then
       awk '/^---- .* stdout ----$/ {on = 1; n = 0} /^failures:$/ {on = 0}
            on && NF && n < 14 {print; n++}' "$f"
+    elif grep -qE '^[[:space:]]*(FAIL|TIMEOUT) \[' "$f"; then
+      # cargo-nextest: the Summary line, then each distinct failed test with the start of its
+      # stderr block (only the first occurrence has the blocks; the final list repeats the line).
+      grep -E '^[[:space:]]*Summary \[' "$f" | tail -n1 | sed 's/^[[:space:]]*//'
+      awk '/^[[:space:]]*(FAIL|TIMEOUT) \[/ {
+             key = $0; sub(/^[^]]*\][[:space:]]*/, "", key); sub(/^\([0-9]+\/[0-9]+\)[[:space:]]*/, "", key)
+             if (key in seen) {on = 0; next}
+             seen[key] = 1; on = 1; err = 0; n = 0
+             sub(/^[[:space:]]*/, ""); print; next
+           }
+           /^[[:space:]]*(SLOW|PASS|Summary|Starting|Cancelling) / {on = 0}
+           on && /^[[:space:]]*stderr ───/ {err = 1; next}
+           on && err && NF && n < 14 {sub(/^[[:space:]]+/, "  "); print; n++}' "$f"
     elif grep -qE '^error(\[[A-Z0-9]+\])?:' "$f"; then
       awk '/^error(\[[A-Z0-9]+\])?:/ {
              if ($0 ~ /^error: (aborting|could not compile|test failed|build failed)/) {print; on = 0; next}
