@@ -117,3 +117,19 @@ async fn available_actions(cx: &mut TestAppContext) {
         }
     });
 }
+
+#[gpui::test]
+async fn switch_profile_dispatches_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let switch_profile = cx
+            .build_action("settings::SwitchProfile", None)
+            .expect("settings::SwitchProfile is registered");
+        assert!(switch_profile.partial_eq(&zed_actions::settings::SwitchProfile));
+
+        let old_name = cx
+            .build_action("settings_profile_selector::Toggle", None)
+            .expect("the old name still resolves as an alias");
+        assert!(old_name.partial_eq(&zed_actions::settings::SwitchProfile));
+    });
+}

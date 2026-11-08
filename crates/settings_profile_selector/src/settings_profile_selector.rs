@@ -8,7 +8,7 @@ use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
 use workspace::{ModalView, Workspace};
 
 pub fn init(cx: &mut App) {
-    cx.on_action(|_: &zed_actions::settings_profile_selector::Toggle, cx| {
+    cx.on_action(|_: &zed_actions::settings::SwitchProfile, cx| {
         workspace::with_active_or_new_workspace(cx, |workspace, window, cx| {
             toggle_settings_profile_selector(workspace, window, cx);
         });
@@ -293,8 +293,7 @@ mod tests {
     use settings::Settings;
     use theme_settings::ThemeSettings;
     use workspace::{self, AppState, MultiWorkspace};
-    use zed_actions::settings_profile_selector;
-
+    
     async fn init_test(
         user_settings_json: serde_json::Value,
         cx: &mut TestAppContext,
@@ -370,7 +369,7 @@ mod tests {
         });
         let (workspace, cx) = init_test(user_settings_json, cx).await;
 
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
 
         picker.read_with(cx, |picker, cx| {
@@ -396,7 +395,7 @@ mod tests {
             assert_eq!(cx.try_global::<ActiveSettingsProfileName>(), None);
         });
 
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
         cx.dispatch_action(SelectNext);
 
@@ -423,7 +422,7 @@ mod tests {
             assert_eq!(ThemeSettings::get_global(cx).buffer_font_size(cx), px(10.0));
         });
 
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
 
         cx.dispatch_action(SelectNext);
@@ -473,7 +472,7 @@ mod tests {
             assert_eq!(ThemeSettings::get_global(cx).buffer_font_size(cx), px(15.0));
         });
 
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
 
         picker.read_with(cx, |picker, cx| {
@@ -521,7 +520,7 @@ mod tests {
             assert_eq!(ThemeSettings::get_global(cx).buffer_font_size(cx), px(15.0));
         });
 
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
 
         picker.read_with(cx, |picker, cx| {
@@ -602,7 +601,7 @@ mod tests {
         let (workspace, cx) = init_test(user_settings_json, cx).await;
 
         // Select "Explicit User" (index 1) — profile applies on top of user settings.
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
         cx.dispatch_action(SelectNext);
 
@@ -617,7 +616,7 @@ mod tests {
         cx.dispatch_action(Confirm);
 
         // Select "Implicit User" (index 2) — no base specified, same behavior.
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
         cx.dispatch_action(SelectNext);
 
@@ -657,7 +656,7 @@ mod tests {
 
         // "Clean Slate" has base: "default" with no settings overrides,
         // so we get the factory default (15), not the user's value (10).
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
         cx.dispatch_action(SelectNext);
 
@@ -710,7 +709,7 @@ mod tests {
         });
         let (workspace, cx) = init_test(user_settings_json, cx).await;
 
-        cx.dispatch_action(settings_profile_selector::Toggle);
+        cx.dispatch_action(zed_actions::settings::SwitchProfile);
         let picker = active_settings_profile_picker(&workspace, cx);
 
         picker.read_with(cx, |picker, _| {

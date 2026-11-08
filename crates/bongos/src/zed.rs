@@ -5374,6 +5374,7 @@ mod tests {
                 "remote_debug",
                 "repl",
                 "search",
+                "settings",
                 "settings_editor",
                 "settings_profile_selector",
                 "skill_creator",
