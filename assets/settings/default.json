@@ -2595,6 +2595,16 @@
     // Delay in milliseconds before showing the which-key popup.
     "delay_ms": 1000,
   },
+  // Settings for the Work view: projects and tasks kept as files under ~/.bongos.
+  "work": {
+    // Whether the Work view is on. While it is off, bongos neither reads nor
+    // watches ~/.bongos.
+    "enabled": false,
+    // Days without activity after which an open project or one-off fades.
+    "fade_after_days": 1.5,
+    // Days without activity after which an open project or one-off is stale.
+    "stale_after_days": 3.0,
+  },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
   "server_url": "https://bongos.invalid",
