@@ -29,16 +29,13 @@ async fn panel_window<'a>(
     });
     let fs = Arc::new(RealFs::new(None, cx.executor()));
     let project = Project::test(fs, [h.scope.as_path()], cx).await;
-    let (multi_workspace, cx) = cx.add_window_view({
-        let project = project.clone();
-        move |window, cx| {
-            let multi_workspace = MultiWorkspace::test_new(project, window, cx);
-            multi_workspace.workspace().update(cx, |workspace, cx| {
-                crate::register(workspace);
-                init_panel(workspace, window, cx);
-            });
-            multi_workspace
-        }
+    let (multi_workspace, cx) = cx.add_window_view(move |window, cx| {
+        let multi_workspace = MultiWorkspace::test_new(project, window, cx);
+        multi_workspace.workspace().update(cx, |workspace, cx| {
+            crate::register(workspace);
+            init_panel(workspace, window, cx);
+        });
+        multi_workspace
     });
     let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
     cx.run_until_parked();
