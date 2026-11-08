@@ -1329,6 +1329,8 @@ launcher = "bin/launcher"
     /// The blanket installer would cache the first binary and start it again after a switch.
     #[gpui::test]
     async fn test_every_start_resolves_the_server_again(cx: &mut TestAppContext) {
+        // The license check runs a real process under a timer of the test clock.
+        cx.executor().allow_parking();
         cx.update(|cx| {
             let store = SettingsStore::new(cx, &settings::default_settings());
             cx.set_global(store);
