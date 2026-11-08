@@ -2222,10 +2222,12 @@ dependencies = [
  "futures 0.3.32",
  "gpui",
  "log",
+ "project",
  "settings",
  "tempfile",
  "util",
  "which 6.0.3",
+ "workspace",
 ]
 
 [[package]]

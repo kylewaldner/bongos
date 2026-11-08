@@ -27,5 +27,10 @@ which.workspace = true
 [dev-dependencies]
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+# Like bongos_work: `project` and `workspace` are only lint-clean together under test-support
+# (`project` builds its `Collab` state there, `workspace` matches the mock remote), so linting this
+# crate alone fails without these.
+project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
