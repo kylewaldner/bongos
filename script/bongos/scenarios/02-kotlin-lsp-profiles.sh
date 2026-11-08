@@ -66,9 +66,9 @@ preinstall() {
 
 # Nothing may have reached JetBrains or any other host, and no install may have run.
 assert_no_download() {
-  if [ -s "$RUN/proxy.log" ] && grep -qi 'jetbrains' "$RUN/proxy.log"; then
-    echo "bongos: a request reached a JetBrains host:" >&2
-    grep -i 'jetbrains' "$RUN/proxy.log" >&2
+  if [ -s "$RUN/proxy.log" ]; then
+    echo "bongos: a request reached the download proxy:" >&2
+    cat "$RUN/proxy.log" >&2
     exit 1
   fi
   if grep -qE ' install |install error' "$KOTLIN_LOG"; then

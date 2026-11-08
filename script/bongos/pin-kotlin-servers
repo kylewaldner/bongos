@@ -29,6 +29,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 manifest=crates/bongos_kotlin/servers.toml
+mkdir -p "$BONGOS_WORKSPACE/scratch"
 work=$(mktemp -d "$BONGOS_WORKSPACE/scratch/pin-kotlin-servers.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
@@ -77,7 +78,9 @@ elif not built:
 expires = day(built) + datetime.timedelta(days=29)
 
 def sha(path):
-    return open(path).read().split()[0].lower()
+    digest = open(path).read().split()[0].lower()
+    assert re.fullmatch(r"[0-9a-f]{64}", digest), (path, digest)
+    return digest
 
 base = f"https://download.jetbrains.com/language-server/kotlin-server/{lsp_version}"
 lsp_platforms = {
