@@ -10,6 +10,7 @@
 //! Tasks are named by id; edge targets that may name no sibling are named by slug. Todos are
 //! named by their index in the task's list, and matched by role, never by name.
 
+mod artifacts;
 mod links;
 mod projects;
 mod structure;
@@ -19,6 +20,7 @@ mod todos;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+pub use artifacts::*;
 pub use links::*;
 pub use projects::*;
 pub use structure::*;
@@ -29,15 +31,17 @@ use crate::derive::{self, Shape};
 use crate::error::{Error, ErrorKind, Result};
 use crate::files::write_atomic;
 use crate::io::serialize_history;
-use crate::io::{parse_history_at, serialize_project, serialize_task};
+use crate::io::{
+    parse_history_at, serialize_artifacts, serialize_link, serialize_project, serialize_task,
+};
 use crate::journal::{self, Journal, Step};
 use crate::layout;
 use crate::rules::{Place, Refusal};
 use crate::store::WorkTree;
 use crate::types::TaskId;
 use crate::types::{
-    Extra, HISTORY_LIMIT, HistoryEntry, HistoryFile, Kind, ProjectFile, Status, TaskFile,
-    Timestamp, now,
+    ArtifactsFile, Extra, HISTORY_LIMIT, HistoryEntry, HistoryFile, Kind, LinkFile, ProjectFile,
+    Status, TaskFile, Timestamp, now,
 };
 
 /// Who runs a command and when: `by` is `kyle`, `workflow:<name>`, `agent` or `tree-run`.
@@ -75,6 +79,10 @@ pub enum Write {
     Task { dir: PathBuf, file: TaskFile },
     /// `project.toml` in `dir`.
     Project { dir: PathBuf, file: ProjectFile },
+    /// `artifacts.toml` in `dir`.
+    Artifacts { dir: PathBuf, file: ArtifactsFile },
+    /// A link file (`<name>.link.toml`) at `path`.
+    Link { path: PathBuf, file: LinkFile },
 }
 
 impl Write {
@@ -82,6 +90,8 @@ impl Write {
         match self {
             Write::Task { dir, .. } => layout::task_file(dir),
             Write::Project { dir, .. } => layout::project_file(dir),
+            Write::Artifacts { dir, .. } => layout::artifacts_file(dir),
+            Write::Link { path, .. } => path.clone(),
         }
     }
 
@@ -89,6 +99,8 @@ impl Write {
         match self {
             Write::Task { file, .. } => serialize_task(file),
             Write::Project { file, .. } => serialize_project(file),
+            Write::Artifacts { file, .. } => serialize_artifacts(file),
+            Write::Link { file, .. } => serialize_link(file),
         }
     }
 }
@@ -109,7 +121,8 @@ pub struct Change {
     /// The files to replace, the task's own first. A file in a moved directory is named by its
     /// path after the move.
     pub writes: Vec<Write>,
-    /// The history entry recorded on that task, also present in its written `task.toml`.
+    /// The history entry recorded on that task, also present in its written `task.toml`. A
+    /// change that writes no `task.toml` (the artifact commands) records it nowhere.
     pub entry: HistoryEntry,
     /// The renames of a multi-file operation (`split`, `move`, `move to project`, `make one
     /// off`), done before the writes. A source that is gone is skipped.
@@ -129,7 +142,7 @@ impl Change {
     pub fn project_file(&self) -> Option<&ProjectFile> {
         self.writes.iter().find_map(|write| match write {
             Write::Project { file, .. } => Some(file),
-            Write::Task { .. } => None,
+            _ => None,
         })
     }
 
@@ -232,20 +245,55 @@ pub fn kind_name(kind: Kind) -> &'static str {
 /// more than [`HISTORY_LIMIT`] history entries has its oldest moved to `history.old.toml` in the
 /// same step.
 ///
+/// Every task the change creates (a `task.toml` that did not exist) gets an empty `prompts.txt`
+/// once the change is written (D22).
+///
 /// The write guard is the command's job; this only writes. Every path must be under `root`, no
 /// move may land on a path that exists, and no unfinished journal may sit where the new one goes.
 pub fn apply(root: &Path, change: &Change) -> Result<()> {
+    let created: Vec<PathBuf> = change
+        .writes
+        .iter()
+        .filter_map(|write| match write {
+            Write::Task { dir, .. } => Some(dir),
+            _ => None,
+        })
+        .filter(|dir| {
+            layout::task_file(&before_moves(change, dir))
+                .symlink_metadata()
+                .is_err()
+        })
+        .cloned()
+        .collect();
     match plan(root, change)? {
         Plan::One { path, content } => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
             }
-            write_atomic(&path, content.as_bytes()).map_err(|error| Error::io(&path, error))
+            write_atomic(&path, content.as_bytes()).map_err(|error| Error::io(&path, error))?;
         }
         Plan::Journal { dir, journal } => {
             std::fs::create_dir_all(&dir).map_err(|error| Error::io(&dir, error))?;
-            journal::run_operation(root, &dir, &journal)
+            journal::run_operation(root, &dir, &journal)?;
         }
+    }
+    for dir in created {
+        create_prompts(&dir)?;
+    }
+    Ok(())
+}
+
+/// Creates an empty `prompts.txt` in `dir` unless one is there.
+pub fn create_prompts(dir: &Path) -> Result<()> {
+    let path = layout::prompts_file(dir);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(Error::io(&path, error)),
     }
 }
 
@@ -310,7 +358,7 @@ pub(crate) fn plan(root: &Path, change: &Change) -> Result<Plan> {
         .iter()
         .filter_map(|write| match write {
             Write::Task { file, .. } => Some(file.id.clone()),
-            Write::Project { .. } => None,
+            _ => None,
         })
         .collect();
     // The journal of a move goes in the source parent, which no move of this change renames

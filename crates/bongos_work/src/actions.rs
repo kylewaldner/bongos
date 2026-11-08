@@ -1,4 +1,4 @@
-//! The `task` and `todo` actions that take a task or todo chosen by name. The namespace `task` is
+//! The `task`, `todo`, `project`, `artifact` and `work` actions that take a task or todo chosen by name. The namespace `task` is
 //! shared with Zed's task runner (`task::Spawn`, `task::Rerun`); no name collides. Each action
 //! opens the pickers and prompts it needs, so none carries data.
 
@@ -78,6 +78,12 @@ pub mod task {
             /// Picks a task and copies the path of its worktree, or of its directory when it has
             /// no worktree.
             CopyPath,
+            /// Picks a task and sets the visibility its new files get: shared, or human-only
+            /// (left out of what chat sessions are told).
+            SetDefaultVisibility,
+            /// Opens a new `untitled-<n>.md` document in the directory of the focused task, or of
+            /// a task picked by name when none is focused. Starts nothing else.
+            Think,
         ]
     );
 }
@@ -140,6 +146,40 @@ pub mod work {
             /// Picks a folder, asks for a name and a setup command, and adds the repository to
             /// `work.repositories` in the user settings.
             AddRepository,
+        ]
+    );
+
+    #[cfg(debug_assertions)]
+    actions!(
+        work,
+        [
+            /// Debug builds only: writes what a chat session on the focused task would be told
+            /// to `work-session-context.json` in the logs directory.
+            DumpSessionContext,
+        ]
+    );
+}
+
+/// Actions in the `artifact` namespace: the files of a task and whether chat sessions are told
+/// about them.
+pub mod artifact {
+    use gpui::actions;
+
+    actions!(
+        artifact,
+        [
+            /// Picks a task and one of its shared artifacts and makes it human-only: chat
+            /// sessions are no longer told about it.
+            Hide,
+            /// Picks a task and one of its human-only artifacts and shares it.
+            Share,
+            /// Picks a task and makes every artifact of it human-only.
+            HideAll,
+            /// Picks a task and shares every artifact of it.
+            ShareAll,
+            /// Picks a task and asks for a URL and a title, and adds a link to that document
+            /// (such as a Notion page) to the task's artifacts.
+            Link,
         ]
     );
 }
