@@ -113,8 +113,7 @@ pub fn status_line(snapshot: &Snapshot) -> StatusLine {
     StatusLine { text, color, busy }
 }
 
-/// What a menu entry does. The view maps each to an action; [`Command::implemented`] says which
-/// have one yet.
+/// What a menu entry does. The view maps each to an action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     SwitchServer,
@@ -123,18 +122,12 @@ pub enum Command {
     ShowLogs,
     OpenProtocolLog,
     LicenseStatus,
+    LicenseActivate,
+    LicenseTrial,
     CancelInstall,
     ReviewEula,
     /// Opens the settings file, where `kotlin.jdk_home` is set.
     SetJdkHome,
-}
-
-impl Command {
-    /// Whether the command's action exists. License status and the EULA review come with the
-    /// license step; until then their entries are drawn disabled.
-    pub fn implemented(&self) -> bool {
-        !matches!(self, Self::LicenseStatus | Self::ReviewEula)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +161,8 @@ pub fn menu_items(snapshot: &Snapshot) -> Vec<MenuItem> {
     items.push(entry("Show logs", Command::ShowLogs));
     items.push(entry("Open protocol log", Command::OpenProtocolLog));
     items.push(entry("License status", Command::LicenseStatus));
+    items.push(entry("Activate license...", Command::LicenseActivate));
+    items.push(entry("Start license trial", Command::LicenseTrial));
 
     let failure = match &snapshot.status {
         ServerStatus::Failed { reason } => Some(reason.as_str()),
@@ -243,13 +238,15 @@ mod tests {
             .collect()
     }
 
-    const BASE: [&str; 6] = [
+    const BASE: [&str; 8] = [
         "Switch server...",
         "Restart server",
         "Reimport project",
         "Show logs",
         "Open protocol log",
         "License status",
+        "Activate license...",
+        "Start license trial",
     ];
 
     #[test]
@@ -383,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_the_base_menu_has_the_six_entries_in_order() {
+    fn test_the_base_menu_has_the_eight_entries_in_order() {
         for status in [
             ServerStatus::Starting,
             ServerStatus::Ready,
@@ -431,7 +428,6 @@ mod tests {
                     }
                 ))
         );
-        assert!(Command::SetJdkHome.implemented());
     }
 
     #[test]
@@ -465,23 +461,5 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item, MenuItem::Note(_)))
         );
-    }
-
-    #[test]
-    fn test_only_commands_with_actions_are_implemented() {
-        for command in [
-            Command::ShowLogs,
-            Command::OpenProtocolLog,
-            Command::CancelInstall,
-            Command::SetJdkHome,
-            Command::SwitchServer,
-            Command::RestartServer,
-            Command::ReimportProject,
-        ] {
-            assert!(command.implemented(), "{command:?}");
-        }
-        for command in [Command::LicenseStatus, Command::ReviewEula] {
-            assert!(!command.implemented(), "{command:?}");
-        }
     }
 }

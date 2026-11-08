@@ -23,6 +23,8 @@ use settings::{KotlinServerKind, SettingsStore, WorktreeId};
 use crate::{
     KotlinDirs,
     installed::server_name,
+    intellij::LicenseOutcome,
+    license::restarts_after,
     log::{KotlinLog, StderrMirror},
     resolve::{Resolved, clear_project_override, project_key, resolve, set_project_override},
 };
@@ -424,6 +426,44 @@ impl KotlinProjectManager {
     pub fn reimport_project(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
         self.log.line("reimport requested");
         self.restart_server(worktree_id, cx);
+    }
+
+    /// A license command ended and `license status` answered `outcome`. A licensed answer restarts
+    /// the worktree with the IntelliJ server (D14: a successful activation ends a fallback, and
+    /// the crash history starts over); anything else changes nothing. Returns whether it restarted.
+    pub fn license_checked(
+        &mut self,
+        worktree_id: WorktreeId,
+        outcome: LicenseOutcome,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !restarts_after(outcome) {
+            self.log
+                .line(&format!("license check after command: {outcome:?}"));
+            return false;
+        }
+        let Some(requested) = self
+            .worktree(worktree_id)
+            .map(|state| state.requested.server)
+        else {
+            return false;
+        };
+        self.log
+            .line("license licensed: restarting with the IntelliJ server");
+        if requested == KotlinServerKind::Intellij {
+            self.restart_server(worktree_id, cx);
+            return true;
+        }
+        if let Err(error) = self.switch_server(worktree_id, Some(KotlinServerKind::Intellij), cx) {
+            self.log
+                .line(&format!("cannot switch to IntelliJ: {error:#}"));
+            return false;
+        }
+        if let Some(state) = self.worktrees.get_mut(&worktree_id) {
+            state.fallback = None;
+            state.crashes.clear();
+        }
+        true
     }
 
     /// How many times the worktree's server exited unexpectedly since the last restart request.

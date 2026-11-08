@@ -30,7 +30,10 @@ fn switch_choices(setting: KotlinServerKind) -> Vec<(String, Option<KotlinServer
 }
 
 /// The worktree a command acts on, with its manager.
-fn target(workspace: &Workspace, cx: &App) -> Option<(Entity<KotlinProjectManager>, WorktreeId)> {
+pub(crate) fn target(
+    workspace: &Workspace,
+    cx: &App,
+) -> Option<(Entity<KotlinProjectManager>, WorktreeId)> {
     let active = workspace
         .active_item(cx)
         .and_then(|item| item.project_path(cx))

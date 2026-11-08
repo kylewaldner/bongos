@@ -5,6 +5,7 @@ mod install;
 mod installed;
 mod intellij;
 mod jdk;
+mod license;
 mod log;
 mod manager;
 mod manifest;
@@ -32,6 +33,10 @@ pub use jdk::{
     default_candidate_patterns, detect, find_toolchain, set_jdk_home_entry,
 };
 use language::{LanguageName, LanguageRegistry};
+pub use license::{
+    EULA_TITLE, LICENSE_STATUS_TITLE, ShowText, license_activate, license_status, license_trial,
+    review_intellij_eula,
+};
 pub use log::{KotlinLog, MAX_LOG_BYTES, StderrMirror};
 pub use manager::{
     ADAPTER_NAME, EXPIRED_REASON, Fallback, KotlinHost, KotlinProjectManager, KotlinRegistry,
@@ -65,6 +70,15 @@ actions!(
         ShowStatusMenu,
         /// Cancels the Kotlin server download in progress.
         CancelInstall,
+        /// Shows the IntelliJ server's license status.
+        LicenseStatus,
+        /// Activates an IntelliJ server license in a terminal tab: JetBrains account, activation
+        /// code or key, key file, or license server.
+        LicenseActivate,
+        /// Starts an IntelliJ server trial in a terminal tab.
+        LicenseTrial,
+        /// Shows the IntelliJ server's license agreement, with a toast to accept it.
+        ReviewIntellijEula,
     ]
 );
 

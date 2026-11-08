@@ -15,8 +15,9 @@ use util::truncate_and_trailoff;
 use workspace::{OpenOptions, StatusItemView, Workspace};
 
 use crate::{
-    CancelInstall, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSetup, ReimportProject,
-    RestartServer, ShowLogs, SwitchServer,
+    CancelInstall, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSetup, LicenseActivate,
+    LicenseStatus, LicenseTrial, ReimportProject, RestartServer, ReviewIntellijEula, ShowLogs,
+    SwitchServer,
     status::{self, Command, MAX_TEXT_CHARS, MenuItem, Snapshot},
 };
 
@@ -174,7 +175,7 @@ impl Render for KotlinStatusItem {
     }
 }
 
-/// The action a menu command runs, `None` while the command has no action yet.
+/// The action a menu command runs; `None` when it cannot be built.
 fn action_for(command: &Command, cx: &App) -> Option<Box<dyn Action>> {
     match command {
         Command::ShowLogs => Some(ShowLogs.boxed_clone()),
@@ -184,7 +185,10 @@ fn action_for(command: &Command, cx: &App) -> Option<Box<dyn Action>> {
         Command::SwitchServer => Some(SwitchServer.boxed_clone()),
         Command::RestartServer => Some(RestartServer.boxed_clone()),
         Command::ReimportProject => Some(ReimportProject.boxed_clone()),
-        Command::LicenseStatus | Command::ReviewEula => None,
+        Command::LicenseStatus => Some(LicenseStatus.boxed_clone()),
+        Command::LicenseActivate => Some(LicenseActivate.boxed_clone()),
+        Command::LicenseTrial => Some(LicenseTrial.boxed_clone()),
+        Command::ReviewEula => Some(ReviewIntellijEula.boxed_clone()),
     }
 }
 

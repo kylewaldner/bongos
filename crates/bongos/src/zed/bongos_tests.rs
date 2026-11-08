@@ -153,7 +153,7 @@ async fn kotlin_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
 async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     cx.update(|cx| {
-        let cases: [(&str, Box<dyn gpui::Action>, &str); 6] = [
+        let cases: [(&str, Box<dyn gpui::Action>, &str); 10] = [
             (
                 "kotlin::SwitchServer",
                 Box::new(bongos_kotlin::SwitchServer),
@@ -183,6 +183,26 @@ async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
                 "kotlin::CancelInstall",
                 Box::new(bongos_kotlin::CancelInstall),
                 "kotlin: cancel install",
+            ),
+            (
+                "kotlin::LicenseStatus",
+                Box::new(bongos_kotlin::LicenseStatus),
+                "kotlin: license status",
+            ),
+            (
+                "kotlin::LicenseActivate",
+                Box::new(bongos_kotlin::LicenseActivate),
+                "kotlin: license activate",
+            ),
+            (
+                "kotlin::LicenseTrial",
+                Box::new(bongos_kotlin::LicenseTrial),
+                "kotlin: license trial",
+            ),
+            (
+                "kotlin::ReviewIntellijEula",
+                Box::new(bongos_kotlin::ReviewIntellijEula),
+                "kotlin: review intellij eula",
             ),
         ];
         for (name, expected, humanized) in cases {

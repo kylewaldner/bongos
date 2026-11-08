@@ -115,6 +115,15 @@ pub enum LicenseOutcome {
 }
 
 impl LicenseOutcome {
+    /// What an exit code of `license status` means; `None` is a process the system killed.
+    pub fn from_exit_code(code: Option<i32>) -> Self {
+        match code {
+            Some(0) => Self::Licensed,
+            Some(UNLICENSED_EXIT_CODE) => Self::Unlicensed,
+            _ => Self::Offline,
+        }
+    }
+
     /// The status text of a check that does not allow the start; `None` when licensed.
     pub fn failure_reason(self) -> Option<&'static str> {
         match self {
@@ -152,11 +161,7 @@ pub async fn license_check(
     futures::select_biased! {
         status = status => {
             let status = status.context("waiting for license status")?;
-            Ok(match status.code() {
-                Some(0) => LicenseOutcome::Licensed,
-                Some(UNLICENSED_EXIT_CODE) => LicenseOutcome::Unlicensed,
-                _ => LicenseOutcome::Offline,
-            })
+            Ok(LicenseOutcome::from_exit_code(status.code()))
         }
         () = timeout => Ok(LicenseOutcome::TimedOut),
     }

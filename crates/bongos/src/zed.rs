@@ -618,6 +618,22 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         workspace.register_action(|workspace, _: &bongos_kotlin::ReimportProject, _, cx| {
             bongos_kotlin::reimport_project(workspace, cx);
         });
+        workspace.register_action(|workspace, _: &bongos_kotlin::LicenseStatus, window, cx| {
+            bongos_kotlin::license_status(workspace, show_kotlin_text, window, cx);
+        });
+        workspace.register_action(
+            |workspace, _: &bongos_kotlin::LicenseActivate, window, cx| {
+                bongos_kotlin::license_activate(workspace, window, cx);
+            },
+        );
+        workspace.register_action(|workspace, _: &bongos_kotlin::LicenseTrial, window, cx| {
+            bongos_kotlin::license_trial(workspace, window, cx);
+        });
+        workspace.register_action(
+            |workspace, _: &bongos_kotlin::ReviewIntellijEula, window, cx| {
+                bongos_kotlin::review_intellij_eula(workspace, show_kotlin_text, window, cx);
+            },
+        );
         workspace.register_action(|workspace, _: &bongos_kotlin::CancelInstall, _, cx| {
             let project = workspace.project().clone();
             bongos_kotlin::cancel_installs(&project, cx);
@@ -2469,6 +2485,17 @@ fn open_local_file(
             cx.new(|cx| MessageNotification::new("This project has no folders open.", cx))
         })
     }
+}
+
+/// Opens text a Kotlin command produced (license status, the IntelliJ EULA) in a read-only buffer.
+fn show_kotlin_text(
+    workspace: &mut Workspace,
+    text: String,
+    title: &'static str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    open_bundled_file(workspace, text.into(), title, "Plain Text", window, cx);
 }
 
 fn open_bundled_file(
@@ -5586,6 +5613,47 @@ mod tests {
 
         assert_eq!(first_item_id, second_item_id);
         assert_eq!(item_count, 1);
+    }
+
+    #[gpui::test]
+    async fn test_kotlin_eula_and_license_text_open_read_only(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        cx.update(init);
+
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+
+        for (title, text) in [
+            (bongos_kotlin::EULA_TITLE, "JETBRAINS USER AGREEMENT"),
+            (bongos_kotlin::LICENSE_STATUS_TITLE, "License: licensed"),
+        ] {
+            window
+                .update(cx, |_, window, cx| {
+                    workspace.update(cx, |workspace, cx| {
+                        show_kotlin_text(workspace, text.to_string(), title, window, cx)
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+
+            let editor = window
+                .update(cx, |_, _, cx| {
+                    workspace.update(cx, |workspace, cx| workspace.active_item_as::<Editor>(cx))
+                })
+                .unwrap()
+                .expect("the text opens in an editor");
+            editor.read_with(cx, |editor, cx| {
+                assert!(editor.read_only(cx), "{title} must be read-only");
+                assert!(editor.buffer().read(cx).read_only(), "{title} buffer");
+                assert_eq!(editor.title(cx).as_ref(), title);
+                assert_eq!(editor.text(cx), text);
+            });
+        }
     }
 
     #[gpui::test]
