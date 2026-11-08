@@ -1313,6 +1313,7 @@ launcher = "bin/launcher"
         fs::create_dir_all(launcher.parent().unwrap()).unwrap();
         fs::write(&launcher, "#!/bin/sh\n").unwrap();
         fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join(crate::EULA_FILE), EULA).unwrap();
         let marker = Marker {
             version: entry.version,
             sha256: entry.sha256,
@@ -1344,6 +1345,8 @@ launcher = "bin/launcher"
         let manifest = Manifest::embedded();
         let kotlin_lsp = install(&dirs, &manifest, KotlinServerKind::KotlinLsp);
         let intellij = install(&dirs, &manifest, KotlinServerKind::Intellij);
+        // The user accepted the bundle's agreement; the launcher exits 0 for `license status`.
+        crate::accept_eula(&dirs.state_dir, &crate::eula_hash(EULA.as_bytes())).unwrap();
         let manager = cx.new(|cx| KotlinProjectManager::new(Rc::new(NoHost), dirs.clone(), cx));
         manager.update(cx, |manager, cx| {
             manager.add_worktree(worktree(), root.clone(), cx)
