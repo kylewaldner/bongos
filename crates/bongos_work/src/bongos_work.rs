@@ -12,6 +12,7 @@ mod links;
 mod modals;
 mod modes;
 mod open;
+mod panel;
 mod projects;
 mod rebase;
 mod registry;
@@ -20,6 +21,7 @@ mod settings;
 mod status;
 mod store;
 mod structure;
+mod view;
 mod worktrees;
 
 use std::path::{Path, PathBuf};
@@ -34,6 +36,7 @@ pub use actions::{artifact, project, task, todo, work};
 pub use changes::CHANGES_INTERVAL;
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE};
+pub use panel::{WorkPanel, init_panel};
 pub use rebase::{CHECK_INTERVAL, RebaseState};
 pub use registry::{
     ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
@@ -94,6 +97,8 @@ mod command_tests_more;
 mod focus_tests;
 #[cfg(test)]
 mod mode_tests;
+#[cfg(test)]
+mod panel_tests;
 #[cfg(test)]
 mod rebase_tests;
 #[cfg(test)]

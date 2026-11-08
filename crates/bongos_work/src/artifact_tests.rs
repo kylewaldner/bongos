@@ -25,7 +25,7 @@ fn shared(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Writes two artifacts into `backfill` and waits for the store to see them.
-async fn with_artifacts(harness: &Harness, cx: &mut VisualTestContext) -> PathBuf {
+pub(crate) async fn with_artifacts(harness: &Harness, cx: &mut VisualTestContext) -> PathBuf {
     let backfill = harness.task_dir(&["backfill"]);
     write(&backfill.join(SECRET), "numbers\n");
     write(&backfill.join(DESIGN), "design\n");
