@@ -5418,6 +5418,7 @@ mod tests {
                 "agent",
                 "agents_sidebar",
                 "app_menu",
+                "artifact",
                 "assistant",
                 "assistant2",
                 "branch_picker",
