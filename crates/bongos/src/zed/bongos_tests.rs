@@ -288,8 +288,8 @@ async fn work_actions_share_the_task_namespace_without_colliding(cx: &mut TestAp
     });
 }
 
-/// The `chat` commands of chat sessions part 1, with the palette text of each.
-const CHAT_ACTIONS: [(&str, &str); 12] = [
+/// The `chat` commands of chat sessions parts 1 and 2, with the palette text of each.
+const CHAT_ACTIONS: [(&str, &str); 17] = [
     ("chat::New", "chat: new"),
     ("chat::NewWithOptions", "chat: new with options"),
     ("chat::NewPlan", "chat: new plan"),
@@ -302,6 +302,11 @@ const CHAT_ACTIONS: [(&str, &str); 12] = [
     ("chat::Next", "chat: next"),
     ("chat::Previous", "chat: previous"),
     ("chat::Close", "chat: close"),
+    ("chat::Archive", "chat: archive"),
+    ("chat::Restore", "chat: restore"),
+    ("chat::ShowArchive", "chat: show archive"),
+    ("chat::Rename", "chat: rename"),
+    ("chat::Delete", "chat: delete"),
 ];
 
 #[gpui::test]

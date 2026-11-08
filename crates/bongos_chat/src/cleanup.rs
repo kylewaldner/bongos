@@ -8,12 +8,19 @@
 //!   under `~/.claude/projects/`; for Codex, no session id was captured and none can be found now.
 //!
 //! When any of these is unknown (an unknown agent, a Claude chat without a session id, a CLI
-//! storage directory that is not there or cannot be read) the record is kept: when unsure, keep.
+//! storage directory that is not there or cannot be read, a CLI whose storage the environment
+//! moved with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`) the record is kept: when unsure, keep.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use bongos_chat_model::{Agent, ChatRecord, project_slug};
+
+/// The variable that moves Claude Code's storage away from `~/.claude`.
+const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
+/// The variable that moves Codex's storage away from `~/.codex`.
+const CODEX_HOME: &str = "CODEX_HOME";
 
 /// What the cleanup does with a chat that ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,12 +50,14 @@ pub enum KeepReason {
 
 /// The verdict on `record`, which ended. `saw_input` is whether the runtime saw keyboard input or
 /// a send; `live_session` the session id the runtime knew; `home` where the CLIs keep their files;
+/// `env` the environment the CLIs run in (a CLI whose storage it moves cannot be checked);
 /// `find_codex_session` looks once more for a Codex session id in Codex's own files.
 pub fn cleanup_verdict(
     record: &ChatRecord,
     saw_input: bool,
     live_session: Option<&str>,
     home: &Path,
+    env: &BTreeMap<String, String>,
     find_codex_session: impl FnOnce() -> Option<String>,
 ) -> Cleanup {
     if record.prompted {
@@ -64,6 +73,9 @@ pub fn cleanup_verdict(
             let Some(session) = session else {
                 return Cleanup::Keep(KeepReason::SessionUnknown);
             };
+            if env.contains_key(CLAUDE_CONFIG_DIR) {
+                return Cleanup::Keep(KeepReason::CannotCheck);
+            }
             match claude_transcript_exists(home, &record.cwd, session) {
                 Some(false) => Cleanup::Delete,
                 Some(true) => Cleanup::Keep(KeepReason::ConversationStored),
@@ -74,7 +86,7 @@ pub fn cleanup_verdict(
             if session.is_some() {
                 return Cleanup::Keep(KeepReason::ConversationStored);
             }
-            if !home.join(".codex").join("sessions").is_dir() {
+            if env.contains_key(CODEX_HOME) || !home.join(".codex").join("sessions").is_dir() {
                 return Cleanup::Keep(KeepReason::CannotCheck);
             }
             match find_codex_session() {

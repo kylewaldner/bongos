@@ -1,5 +1,5 @@
-//! The chat commands of part 1 (design D6, D17 and D26): starting, opening, cycling and closing
-//! chats.
+//! The chat commands (design D6, D17 and D26): starting, opening, cycling, closing, archiving,
+//! restoring, renaming and deleting chats.
 //!
 //! - `chat: new` works on the focused task (a task picker asks when none is), asks for the agent
 //!   (only CLIs not known to be missing or logged out, the last one used first) and the session
@@ -15,6 +15,13 @@
 //!   middle of a turn it asks first. A never-prompted chat may be cleaned up (see
 //!   [`crate::cleanup`]).
 //!
+//! - `chat: archive` ends the shown chat's process if it runs and moves the record to the archive;
+//!   `chat: restore` and `chat: show archive` pick an archived chat of the focused task (else of
+//!   every task) and move it back to the open list. `chat: rename` sets a name that no later send
+//!   or title replaces. `chat: delete` asks, then removes the record and its launch files and
+//!   nothing else. None of these deletes anything but `chat: delete`; the CLI's own transcripts
+//!   are never touched. See [`crate::lifecycle`] for the offer to archive a closed task's chats.
+//!
 //! Showing a chat opens the Chats dock without moving focus: the terminal never takes focus by
 //! itself. While `chats.enabled` is false every command only says so.
 
@@ -28,20 +35,23 @@ use bongos_chat_model::{
 use bongos_work::{WorkSettings, WorkStore, ask, pick, ready, with_task};
 use bongos_work_model::session_context;
 use bongos_work_model::store::WorkTree;
-use gpui::{App, AppContext as _, AsyncWindowContext, Context, Entity, Task, WeakEntity, Window};
+use gpui::{
+    App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity, Task, WeakEntity, Window,
+};
 use project::Project;
 use settings::Settings as _;
 use workspace::{MultiWorkspace, Workspace};
 
 use crate::actions::chat;
+use crate::cleanup::{Cleanup, cleanup_verdict};
 use crate::health::agent_title;
 use crate::live_modes::is_open;
 use crate::panel::{NO_CHAT, enabled_panel};
 use crate::scope::{ChatScope, project_repositories, resolve_scope};
 use crate::send::show_toast;
 use crate::{
-    ChatHealth, ChatPanel, ChatRuntime, ChatsSettings, Health, HealthState, LaunchRequest,
-    PROBE_TIMEOUT, SendError, SendOptions, send, task_facts,
+    ChatHealth, ChatPanel, ChatRuntime, ChatStore, ChatsSettings, Health, HealthState,
+    LaunchRequest, PROBE_TIMEOUT, SendError, SendOptions, send, task_facts,
 };
 
 /// How long a new chat waits for the index to list its record before the panel shows it.
@@ -118,7 +128,14 @@ pub fn register(workspace: &mut Workspace) {
         .register_action(|w, _: &chat::OpenAny, window, cx| open(true, w, window, cx))
         .register_action(|w, _: &chat::Next, window, cx| cycle(1, w, window, cx))
         .register_action(|w, _: &chat::Previous, window, cx| cycle(-1, w, window, cx))
-        .register_action(|w, _: &chat::Close, window, cx| close(w, window, cx));
+        .register_action(|w, _: &chat::Close, window, cx| close(w, window, cx))
+        .register_action(|w, _: &chat::Archive, window, cx| archive(w, window, cx))
+        .register_action(|w, _: &chat::Restore, window, cx| restore(RESTORE_TITLE, w, window, cx))
+        .register_action(|w, _: &chat::ShowArchive, window, cx| {
+            restore(ARCHIVE_TITLE, w, window, cx)
+        })
+        .register_action(|w, _: &chat::Rename, window, cx| rename(w, window, cx))
+        .register_action(|w, _: &chat::Delete, window, cx| delete(w, window, cx));
 }
 
 /// Whether chats are on; otherwise a toast says they are off.
@@ -552,6 +569,11 @@ pub(crate) fn start_chat(
     let store = runtime.read(cx).store().clone();
     let types_root = store.read(cx).types_root(cx);
     let claude_home = runtime.read(cx).home().join(".claude");
+    let home = runtime.read(cx).home().clone();
+    let env = ChatHealth::global(cx)
+        .map(|health| health.read(cx).env().clone())
+        .unwrap_or_default();
+    let runtime_root = store.read(cx).dirs().runtime.clone();
     let facts = snapshot(cx)
         .ok()
         .and_then(|tree| task_facts(&tree, &plan.scope.task_id))
@@ -599,12 +621,26 @@ pub(crate) fn start_chat(
         };
         let launch = runtime.update(cx, |runtime, cx| runtime.launch(request, &projects, cx));
         if let Err(error) = launch.await {
-            // Nothing ran: the record of this attempt holds nothing worth keeping.
+            // Nothing was said in it: the record of this attempt goes, with its launch files, when
+            // the cleanup is sure of that (see [`crate::cleanup`]) and stays otherwise.
             let removed = store.update(cx, |store, cx| {
-                store.delete_if(record_path, |record| !record.prompted, cx)
+                store.delete_if(
+                    record_path,
+                    move |record| {
+                        cleanup_verdict(record, false, None, &home, &env, || None)
+                            == Cleanup::Delete
+                    },
+                    cx,
+                )
             });
-            if let Err(remove_error) = removed.await {
-                log::warn!("chats: could not remove the record of a chat that did not start: {remove_error}");
+            match removed.await {
+                Ok(true) => {
+                    remove_runtime_dir(&runtime_root, &chat_id, cx).await;
+                }
+                Ok(false) => {}
+                Err(remove_error) => log::warn!(
+                    "chats: could not remove the record of a chat that did not start: {remove_error}"
+                ),
             }
             return Err(error.to_string());
         }
@@ -803,8 +839,13 @@ struct Listed {
 }
 
 /// The open (not archived) chats of the task `task_id`, or of every task when `None`, in list
-/// order: most recently active first.
-fn open_chats(task_id: Option<&str>, tree: Option<&WorkTree>, cx: &App) -> Vec<Listed> {
+/// order: most recently active first. With `archived`, the archived ones instead.
+fn open_chats(
+    task_id: Option<&str>,
+    tree: Option<&WorkTree>,
+    archived: bool,
+    cx: &App,
+) -> Vec<Listed> {
     let Some(runtime) = ChatRuntime::global(cx) else {
         return Vec::new();
     };
@@ -815,7 +856,8 @@ fn open_chats(task_id: Option<&str>, tree: Option<&WorkTree>, cx: &App) -> Vec<L
         .values()
         .filter_map(|chat| Some((chat, chat.entry.record()?)))
         .filter(|(chat, record)| {
-            !record.archived && task_id.is_none_or(|id| chat.task_id.as_deref() == Some(id))
+            record.archived == archived
+                && task_id.is_none_or(|id| chat.task_id.as_deref() == Some(id))
         })
         .collect();
     chats.sort_by(|(_, a), (_, b)| {
@@ -863,7 +905,7 @@ fn open(any: bool, workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
     } else {
         bongos_work::focused(&tree, cx)
     };
-    let chats = open_chats(task_id.as_deref(), Some(&tree), cx);
+    let chats = open_chats(task_id.as_deref(), Some(&tree), false, cx);
     if chats.is_empty() {
         let message = if task_id.is_some() {
             "This task has no open chats; start one with chat: new"
@@ -918,7 +960,7 @@ fn cycle(step: isize, workspace: &mut Workspace, window: &mut Window, cx: &mut C
         let store = runtime.read(cx).store().read(cx);
         store.find(shown.as_deref()?)?.task_id.clone()
     });
-    let running: Vec<String> = open_chats(task_id.as_deref(), Some(&tree), cx)
+    let running: Vec<String> = open_chats(task_id.as_deref(), Some(&tree), false, cx)
         .into_iter()
         .filter(|chat| chat.live)
         .map(|chat| chat.id)
@@ -981,6 +1023,266 @@ fn close(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Worksp
             if index == 1 {
                 runtime.update(cx, |runtime, cx| runtime.close(&chat_id, cx));
             }
+        }),
+        window,
+        cx,
+    );
+}
+
+const RESTORE_TITLE: &str = "Restore which chat?";
+const ARCHIVE_TITLE: &str = "Archived chats: pick one to restore";
+
+/// The launch-files directory of `chat_id` under `runtime_root`; `None` when the id is not one
+/// plain path component, so nothing outside `runtime_root` can ever be named.
+fn runtime_dir_of(runtime_root: &Path, chat_id: &str) -> Option<PathBuf> {
+    let mut components = Path::new(chat_id).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) if name == chat_id => {
+            Some(runtime_root.join(name))
+        }
+        _ => None,
+    }
+}
+
+/// Removes `<runtime_root>/<chat_id>`, the launch files of a chat whose record is gone. Nothing
+/// else is touched; a directory that is not there is fine.
+pub(crate) async fn remove_runtime_dir(runtime_root: &Path, chat_id: &str, cx: &mut AsyncApp) {
+    let Some(dir) = runtime_dir_of(runtime_root, chat_id) else {
+        log::warn!("chats: not removing launch files for an unusable chat id");
+        return;
+    };
+    let removed = cx
+        .background_spawn(async move { std::fs::remove_dir_all(dir) })
+        .await;
+    if let Err(error) = removed
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("chats: could not remove the launch files of a deleted chat: {error}");
+    }
+}
+
+/// The runtime and store, and the record file of `chat_id`; why not when there is none.
+fn find_chat(
+    chat_id: &str,
+    cx: &App,
+) -> Result<(Entity<ChatRuntime>, Entity<ChatStore>, PathBuf), String> {
+    let runtime = ChatRuntime::global(cx).ok_or_else(|| SendError::Off.to_string())?;
+    let store = runtime.read(cx).store().clone();
+    let path = store
+        .read(cx)
+        .find(chat_id)
+        .map(|chat| chat.entry.path.clone())
+        .ok_or_else(|| format!("No chat has the id {chat_id}"))?;
+    Ok((runtime, store, path))
+}
+
+/// Archives `chat_id`: ends its process first if it runs, then sets `archived` and `archived_at`.
+/// Nothing is deleted and every other field of the record is kept; an archived chat stays as it
+/// is.
+pub(crate) fn archive_chat(chat_id: &str, cx: &mut App) -> Task<Result<(), String>> {
+    let (runtime, store, path) = match find_chat(chat_id, cx) {
+        Ok(found) => found,
+        Err(message) => return Task::ready(Err(message)),
+    };
+    // Kyle asked for the record to be kept: the never-prompted cleanup stays out of it.
+    runtime.update(cx, |runtime, cx| runtime.close_keeping_record(chat_id, cx));
+    let write = store.update(cx, |store, cx| {
+        store.update(
+            path,
+            |record| {
+                if !record.archived {
+                    record.archived = true;
+                    record.archived_at = Some(bongos_work_model::now());
+                }
+                Ok(())
+            },
+            cx,
+        )
+    });
+    cx.spawn(async move |_| write.await.map(|_| ()).map_err(|error| error.to_string()))
+}
+
+/// Restores `chat_id` from the archive: clears `archived` and `archived_at`, keeps the rest.
+pub(crate) fn restore_chat(chat_id: &str, cx: &mut App) -> Task<Result<(), String>> {
+    let (_, store, path) = match find_chat(chat_id, cx) {
+        Ok(found) => found,
+        Err(message) => return Task::ready(Err(message)),
+    };
+    let write = store.update(cx, |store, cx| {
+        store.update(
+            path,
+            |record| {
+                record.archived = false;
+                record.archived_at = None;
+                Ok(())
+            },
+            cx,
+        )
+    });
+    cx.spawn(async move |_| write.await.map(|_| ()).map_err(|error| error.to_string()))
+}
+
+/// Names `chat_id` `name` as Kyle's own: no send and no terminal title replaces it afterward.
+pub(crate) fn rename_chat(chat_id: &str, name: String, cx: &mut App) -> Task<Result<(), String>> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Task::ready(Err("A chat needs a name".to_string()));
+    }
+    let (_, store, path) = match find_chat(chat_id, cx) {
+        Ok(found) => found,
+        Err(message) => return Task::ready(Err(message)),
+    };
+    let write = store.update(cx, |store, cx| {
+        store.update(
+            path,
+            move |record| {
+                record.name = name;
+                record.named_by = NamedBy::Kyle;
+                Ok(())
+            },
+            cx,
+        )
+    });
+    cx.spawn(async move |_| write.await.map(|_| ()).map_err(|error| error.to_string()))
+}
+
+/// Deletes `chat_id`: ends its process if it runs, then removes its record file and its launch
+/// directory under the chats runtime directory, and nothing else. The CLI's own transcript is not
+/// touched. The caller has asked Kyle.
+pub(crate) fn delete_chat(chat_id: &str, cx: &mut App) -> Task<Result<(), String>> {
+    let (runtime, store, path) = match find_chat(chat_id, cx) {
+        Ok(found) => found,
+        Err(message) => return Task::ready(Err(message)),
+    };
+    let runtime_root = store.read(cx).dirs().runtime.clone();
+    runtime.update(cx, |runtime, cx| runtime.close_keeping_record(chat_id, cx));
+    let delete = store.update(cx, |store, cx| store.delete_if(path, |_| true, cx));
+    let chat_id = chat_id.to_string();
+    cx.spawn(async move |cx| match delete.await {
+        Ok(true) => {
+            remove_runtime_dir(&runtime_root, &chat_id, cx).await;
+            Ok(())
+        }
+        Ok(false) => Err("The chat's record could not be read, so it was left alone".to_string()),
+        Err(error) => Err(error.to_string()),
+    })
+}
+
+/// The chat the Chats panel shows; a toast says why not.
+fn shown_chat(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<String> {
+    if !chats_on(workspace, cx) {
+        return None;
+    }
+    let panel = enabled_panel(workspace, cx)?;
+    let shown = panel.read(cx).shown_chat().map(str::to_string);
+    if shown.is_none() {
+        show_toast(workspace, NO_CHAT.to_string(), cx);
+    }
+    shown
+}
+
+/// Says `done` in a toast when `task` succeeds, else why it did not.
+fn toast_on_result(task: Task<Result<(), String>>, done: String, cx: &mut Context<Workspace>) {
+    cx.spawn(async move |workspace, cx| {
+        let message = match task.await {
+            Ok(()) => done,
+            Err(message) => message,
+        };
+        workspace
+            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+            .ok();
+    })
+    .detach();
+}
+
+/// `chat: archive`: the shown chat.
+fn archive(workspace: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(chat_id) = shown_chat(workspace, cx) else {
+        return;
+    };
+    let name = chat_name(&chat_id, cx);
+    let archived = archive_chat(&chat_id, cx);
+    toast_on_result(archived, format!("Archived {name}"), cx);
+}
+
+/// `chat: rename`: asks for the shown chat's name.
+fn rename(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(chat_id) = shown_chat(workspace, cx) else {
+        return;
+    };
+    let name = chat_name(&chat_id, cx);
+    ask(
+        workspace,
+        format!("Rename {name} to"),
+        &name,
+        false,
+        Box::new(move |new_name, _, _, cx| {
+            let renamed = rename_chat(&chat_id, new_name.clone(), cx);
+            toast_on_result(renamed, format!("Renamed to {new_name}"), cx);
+        }),
+        window,
+        cx,
+    );
+}
+
+/// `chat: delete`: asks, and deletes the shown chat's record only on a yes.
+fn delete(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(chat_id) = shown_chat(workspace, cx) else {
+        return;
+    };
+    let name = chat_name(&chat_id, cx);
+    pick(
+        workspace,
+        format!("Delete {name}? The record is removed; the CLI's own transcript is not."),
+        vec![format!("Keep {name}"), format!("Delete {name}")],
+        0,
+        Box::new(move |index, _, _, cx| {
+            if index == 1 {
+                let deleted = delete_chat(&chat_id, cx);
+                toast_on_result(deleted, format!("Deleted {name}"), cx);
+            }
+        }),
+        window,
+        cx,
+    );
+}
+
+/// `chat: restore` and `chat: show archive`: the archived chats of the focused task (else of every
+/// task), one of which is moved back to the open list.
+fn restore(
+    title: &'static str,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !chats_on(workspace, cx) {
+        return;
+    }
+    let Some(tree) = ready(workspace, cx) else {
+        return;
+    };
+    let task_id = bongos_work::focused(&tree, cx);
+    let chats = open_chats(task_id.as_deref(), Some(&tree), true, cx);
+    if chats.is_empty() {
+        let message = if task_id.is_some() {
+            "This task has no archived chats"
+        } else {
+            "There are no archived chats"
+        };
+        show_toast(workspace, message.to_string(), cx);
+        return;
+    }
+    let (ids, labels): (Vec<String>, Vec<String>) =
+        chats.into_iter().map(|chat| (chat.id, chat.label)).unzip();
+    pick(
+        workspace,
+        title,
+        labels,
+        0,
+        Box::new(move |index, _, _, cx| {
+            let name = chat_name(&ids[index], cx);
+            let restored = restore_chat(&ids[index], cx);
+            toast_on_result(restored, format!("Restored {name}"), cx);
         }),
         window,
         cx,

@@ -5,6 +5,7 @@
 
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -248,6 +249,7 @@ fn test_cleanup_deletes_only_when_sure() {
     std::fs::create_dir_all(&cwd).unwrap();
     let never = || -> Option<String> { panic!("Claude chats never look for a Codex session") };
     let none = || None;
+    let env = BTreeMap::new();
 
     // Claude, its projects directory there, no transcript: the sure case.
     let mut claude = ended(Agent::Claude, &cwd);
@@ -255,36 +257,36 @@ fn test_cleanup_deletes_only_when_sure() {
     let projects = home.join(".claude/projects");
     // Unsure: Claude's storage is not where it is looked for.
     assert_eq!(
-        cleanup_verdict(&claude, false, None, &home, never),
+        cleanup_verdict(&claude, false, None, &home, &env, never),
         Cleanup::Keep(KeepReason::CannotCheck)
     );
     std::fs::create_dir_all(&projects).unwrap();
     assert_eq!(
-        cleanup_verdict(&claude, false, None, &home, never),
+        cleanup_verdict(&claude, false, None, &home, &env, never),
         Cleanup::Delete
     );
     // Unsure: the record says prompted.
     let mut prompted = claude.clone();
     prompted.prompted = true;
     assert_eq!(
-        cleanup_verdict(&prompted, false, None, &home, never),
+        cleanup_verdict(&prompted, false, None, &home, &env, never),
         Cleanup::Keep(KeepReason::Prompted)
     );
     // Unsure: the runtime saw input.
     assert_eq!(
-        cleanup_verdict(&claude, true, None, &home, never),
+        cleanup_verdict(&claude, true, None, &home, &env, never),
         Cleanup::Keep(KeepReason::InputSeen)
     );
     // Unsure: no session id to look up.
     let mut no_id = claude.clone();
     no_id.session_id = None;
     assert_eq!(
-        cleanup_verdict(&no_id, false, None, &home, never),
+        cleanup_verdict(&no_id, false, None, &home, &env, never),
         Cleanup::Keep(KeepReason::SessionUnknown)
     );
     // The live session id counts when the record has none yet.
     assert_eq!(
-        cleanup_verdict(&no_id, false, Some("abc"), &home, never),
+        cleanup_verdict(&no_id, false, Some("abc"), &home, &env, never),
         Cleanup::Delete
     );
     // Unsure: a transcript exists.
@@ -294,14 +296,14 @@ fn test_cleanup_deletes_only_when_sure() {
         "{}\n",
     );
     assert_eq!(
-        cleanup_verdict(&claude, false, None, &home, never),
+        cleanup_verdict(&claude, false, None, &home, &env, never),
         Cleanup::Keep(KeepReason::ConversationStored)
     );
     // Unsure: an agent this version does not know.
     let mut unknown = claude;
     unknown.agent = "gemini".to_string();
     assert_eq!(
-        cleanup_verdict(&unknown, false, None, &home, never),
+        cleanup_verdict(&unknown, false, None, &home, &env, never),
         Cleanup::Keep(KeepReason::UnknownAgent)
     );
 
@@ -309,28 +311,65 @@ fn test_cleanup_deletes_only_when_sure() {
     let mut codex = ended(Agent::Codex, &cwd);
     codex.session_id = Some("019a".to_string());
     assert_eq!(
-        cleanup_verdict(&codex, false, None, &home, none),
+        cleanup_verdict(&codex, false, None, &home, &env, none),
         Cleanup::Keep(KeepReason::ConversationStored)
     );
     codex.session_id = None;
     assert_eq!(
-        cleanup_verdict(&codex, false, Some("019a"), &home, none),
+        cleanup_verdict(&codex, false, Some("019a"), &home, &env, none),
         Cleanup::Keep(KeepReason::ConversationStored)
     );
     // Unsure: Codex's sessions directory is not there.
     assert_eq!(
-        cleanup_verdict(&codex, false, None, &home, none),
+        cleanup_verdict(&codex, false, None, &home, &env, none),
         Cleanup::Keep(KeepReason::CannotCheck)
     );
     std::fs::create_dir_all(home.join(".codex/sessions")).unwrap();
     // Unsure: a last look finds a session.
     assert_eq!(
-        cleanup_verdict(&codex, false, None, &home, || Some("019b".to_string())),
+        cleanup_verdict(&codex, false, None, &home, &env, || Some(
+            "019b".to_string()
+        )),
         Cleanup::Keep(KeepReason::ConversationStored)
     );
     // Sure: no id captured and none found.
     assert_eq!(
-        cleanup_verdict(&codex, false, None, &home, none),
+        cleanup_verdict(&codex, false, None, &home, &env, none),
+        Cleanup::Delete
+    );
+
+    // Unsure: the CLI's storage was moved by its environment, so `~/.claude` and `~/.codex` say
+    // nothing about it.
+    let moved = |name: &str| BTreeMap::from([(name.to_string(), "/elsewhere".to_string())]);
+    assert_eq!(
+        cleanup_verdict(&no_id, false, Some("abc"), &home, &env, never),
+        Cleanup::Delete
+    );
+    assert_eq!(
+        cleanup_verdict(
+            &no_id,
+            false,
+            Some("abc"),
+            &home,
+            &moved("CLAUDE_CONFIG_DIR"),
+            never
+        ),
+        Cleanup::Keep(KeepReason::CannotCheck)
+    );
+    assert_eq!(
+        cleanup_verdict(&codex, false, None, &home, &moved("CODEX_HOME"), none),
+        Cleanup::Keep(KeepReason::CannotCheck)
+    );
+    // The other CLI's variable changes nothing.
+    assert_eq!(
+        cleanup_verdict(
+            &codex,
+            false,
+            None,
+            &home,
+            &moved("CLAUDE_CONFIG_DIR"),
+            none
+        ),
         Cleanup::Delete
     );
 }
@@ -403,7 +442,7 @@ async fn test_a_missing_cli_is_not_offered(cx: &mut TestAppContext) {
 
 /// A workspace with the `chat` commands and the panel, the harness's runtime as the global one,
 /// and the extra tasks of [`seed_tree`] (beside the harness's own) in the work tree.
-async fn command_window<'a>(
+pub(super) async fn command_window<'a>(
     h: &Harness,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
@@ -429,7 +468,7 @@ async fn command_window<'a>(
     (workspace, cx)
 }
 
-fn dispatch(cx: &mut VisualTestContext, name: &str) {
+pub(super) fn dispatch(cx: &mut VisualTestContext, name: &str) {
     let action = cx.update(|_, cx| {
         cx.build_action(name, None)
             .unwrap_or_else(|_| panic!("{name} is registered"))
@@ -438,14 +477,14 @@ fn dispatch(cx: &mut VisualTestContext, name: &str) {
     cx.run_until_parked();
 }
 
-fn has_modal(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+pub(super) fn has_modal(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.has_active_modal(window, cx)
     })
 }
 
 /// Waits for a modal (a picker or a prompt), types `text` into it and confirms.
-async fn answer(workspace: &Entity<Workspace>, text: &str, cx: &mut VisualTestContext) {
+pub(super) async fn answer(workspace: &Entity<Workspace>, text: &str, cx: &mut VisualTestContext) {
     for _ in 0..400 {
         cx.run_until_parked();
         if has_modal(workspace, cx) {
@@ -465,7 +504,7 @@ async fn answer(workspace: &Entity<Workspace>, text: &str, cx: &mut VisualTestCo
     dispatch(cx, "menu::Confirm");
 }
 
-fn toast_shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+pub(super) fn toast_shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
     workspace.read_with(cx, |workspace, _| {
         workspace
             .notification_ids()
@@ -473,19 +512,22 @@ fn toast_shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> boo
     })
 }
 
-fn panel_of(workspace: &Entity<Workspace>, cx: &mut TestAppContext) -> Entity<ChatPanel> {
+pub(super) fn panel_of(
+    workspace: &Entity<Workspace>,
+    cx: &mut TestAppContext,
+) -> Entity<ChatPanel> {
     workspace.read_with(cx, |workspace, cx| {
         workspace.panel::<ChatPanel>(cx).expect("the chats panel")
     })
 }
 
-fn shown(workspace: &Entity<Workspace>, cx: &mut TestAppContext) -> Option<String> {
+pub(super) fn shown(workspace: &Entity<Workspace>, cx: &mut TestAppContext) -> Option<String> {
     let panel = panel_of(workspace, cx);
     panel.read_with(cx, |panel, _| panel.shown_chat().map(str::to_string))
 }
 
 /// The ids of the records in `scope`'s `chats/`.
-fn records_in(scope: &Path) -> Vec<ChatRecord> {
+pub(super) fn records_in(scope: &Path) -> Vec<ChatRecord> {
     bongos_chat_model::read_scope_chats(scope)
         .unwrap()
         .into_iter()
@@ -702,7 +744,7 @@ async fn test_resume_uses_the_stored_id_and_cwd(cx: &mut TestAppContext) {
         .session_id
         .unwrap();
     assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
-    // Elsewhere now: the resume still runs in the recorded directory.
+    // The chat is closed; the resume below runs in the recorded directory with the stored id.
     let starts = |h: &Harness| {
         h.log_lines("claude")
             .iter()

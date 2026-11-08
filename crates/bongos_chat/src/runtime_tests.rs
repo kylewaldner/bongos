@@ -412,7 +412,7 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// Whether the process `pid` exists (and is not a zombie). Linux only; elsewhere it says yes.
-fn process_alive(pid: u32) -> bool {
+pub(super) fn process_alive(pid: u32) -> bool {
     if !cfg!(target_os = "linux") {
         return true;
     }
