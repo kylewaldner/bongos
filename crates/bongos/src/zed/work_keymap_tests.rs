@@ -213,7 +213,9 @@ async fn emacs_keeps_ctrl_c_where_it_was_bound(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn picker_query_editor_keeps_ctrl_c_pending(cx: &mut TestAppContext) {
     init_keymap_test(cx);
-    for (default, emacs) in [LINUX, MACOS] {
+    // The exact match is what ctrl-c did before this change (Copy on Linux, where macOS copies
+    // with cmd-c and ctrl-c is the global cancel); the prefix still waits.
+    for ((default, emacs), exact) in [(LINUX, "editor::Copy"), (MACOS, "menu::Cancel")] {
         let (keymap, _) = load(&[default, emacs], cx);
         let (names, pending) = resolve(
             &keymap,
@@ -221,8 +223,7 @@ async fn picker_query_editor_keeps_ctrl_c_pending(cx: &mut TestAppContext) {
             &["Workspace", "Picker", "Editor mode=full"],
         );
         assert!(pending, "{emacs}");
-        // The exact match is the Editor's Copy, as before this change; the prefix still waits.
-        assert_eq!(names.first(), Some(&"editor::Copy"), "{emacs}");
+        assert_eq!(names.first(), Some(&exact), "{emacs}");
     }
 }
 
