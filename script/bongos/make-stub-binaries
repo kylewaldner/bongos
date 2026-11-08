@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Writes tiny stand-ins for the `bongos` and `cli` binaries into DIR, so the bundle scripts can be
+# run in seconds to test their packaging steps. The result is a real native executable that does nothing.
+#   make-stub-binaries DIR
+#   BONGOS_BUNDLE_BIN_DIR=DIR script/bongos/bundle-linux   (or bundle-mac)
+set -euo pipefail
+[ $# -eq 1 ] || { echo "usage: make-stub-binaries DIR" >&2; exit 1; }
+mkdir -p "$1"
+src="$(mktemp)"
+printf 'int main(void) { return 0; }\n' >"$src"
+for binary in bongos cli; do
+  cc -x c -o "$1/$binary" "$src"
+done
+rm -f "$src"
+echo "make-stub-binaries: wrote $1/bongos and $1/cli"
