@@ -12,6 +12,7 @@ mod manifest;
 mod resolve;
 mod status;
 mod status_item;
+mod unsupported;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -52,6 +53,10 @@ pub use resolve::{
 use settings::{KotlinServerKind, RegisterSetting, Settings, SettingsContent};
 pub use status::{Command, MenuItem, Snapshot, StatusLine, menu_items, status_line};
 pub use status_item::{KotlinStatusItem, cancel_installs, show_logs};
+pub use unsupported::{
+    Feature, attach_unsupported_notices, not_supported_message, not_supported_notice_id,
+    not_supported_text,
+};
 
 actions!(
     kotlin,
@@ -188,6 +193,7 @@ pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
     );
     attach_managers(dirs, cx);
     attach_notices(cx);
+    attach_unsupported_notices(cx);
 }
 
 #[cfg(test)]
