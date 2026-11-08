@@ -38,6 +38,7 @@ if [ "${#crates[@]}" -eq 0 ]; then
 fi
 
 require_space
+ensure_wasi_sdk
 filter=()
 [ -n "${BONGOS_TEST_FILTER:-}" ] && filter=("$BONGOS_TEST_FILTER")
 

@@ -82,6 +82,12 @@ for tool in nextest sweep; do
   fi
 done
 
+if compgen -G "$BONGOS_WORKSPACE/wasi-sdk/*/bin/clang" >/dev/null; then
+  ok "wasi-sdk in the workspace"
+else
+  warn "wasi-sdk is not fetched yet; script/bongos/fetch-wasi-sdk (test and test-all run it when needed)"
+fi
+
 for k in user.name user.email; do
   if [ -n "$(git config "$k")" ]; then ok "git config $k"; else fail "git config $k is empty; git config --global $k <value>"; fi
 done

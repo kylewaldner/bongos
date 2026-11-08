@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Downloads the wasi-sdk that crates/extension/src/extension_builder.rs uses into
+# $BONGOS_WORKSPACE/wasi-sdk/<version>, once. Safe to run again: it does nothing when clang is there.
+# The extension_host dev-extension test needs it; script/bongos/test and test-all link it into
+# <repo>/target/wasi-sdk. The version and URL are read from extension_builder.rs; the builder
+# checks no checksum, so neither does this.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+log_init fetch-wasi-sdk
+
+builder="$BONGOS_ROOT/crates/extension/src/extension_builder.rs"
+base=$(sed -n 's/^const WASI_SDK_URL: &str = "\(.*\)";/\1/p' "$builder")
+version=$(sed -n 's#.*/download/wasi-sdk-\([0-9]*\)/.*#\1#p' <<<"$base")
+if [ -z "$base" ] || [ -z "$version" ]; then
+  echo "bongos: cannot read WASI_SDK_URL from $builder" >&2
+  exit 1
+fi
+
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) platform=x86_64-linux ;;
+  Linux-aarch64 | Linux-arm64) platform=arm64-linux ;;
+  Darwin-x86_64) platform=x86_64-macos ;;
+  Darwin-arm64) platform=arm64-macos ;;
+  *) echo "bongos: no wasi-sdk for $(uname -s) $(uname -m)" >&2; exit 1 ;;
+esac
+asset="wasi-sdk-$version.0-$platform.tar.gz"
+dest="$BONGOS_WORKSPACE/wasi-sdk/$version"
+
+if [ -x "$dest/bin/clang" ]; then
+  SUMMARY="wasi-sdk-$version already at $dest"
+  exit 0
+fi
+
+work="$BONGOS_WORKSPACE/wasi-sdk/.tmp-$version"
+rm -rf "$work"
+mkdir -p "$work/out"
+echo "downloading $base$asset"
+curl -fsSL --retry 3 -o "$work/sdk.tar.gz" "$base$asset"
+tar -tzf "$work/sdk.tar.gz" >/dev/null
+tar -xzf "$work/sdk.tar.gz" -C "$work/out"
+inner=$(find "$work/out" -mindepth 1 -maxdepth 1 -type d | head -n1)
+if [ -z "$inner" ] || [ ! -x "$inner/bin/clang" ]; then
+  echo "bongos: extracted archive has no bin/clang" >&2
+  exit 1
+fi
+rm -rf "$dest"
+mv "$inner" "$dest"
+rm -rf "$work"
+SUMMARY="wasi-sdk-$version installed at $dest"
