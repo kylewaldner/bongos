@@ -269,7 +269,7 @@ fn parent_branch(parent: &Task) -> Option<String> {
     parent.file.as_ref()?.branch.clone()
 }
 
-fn pull_request_urls(file: &TaskFile) -> Vec<String> {
+pub(crate) fn pull_request_urls(file: &TaskFile) -> Vec<String> {
     let Some(result) = &file.result else {
         return Vec::new();
     };

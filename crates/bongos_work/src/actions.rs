@@ -64,6 +64,20 @@ pub mod task {
             /// worktree in its repository, then runs the repository's setup command there. A
             /// babysit task asks which of its PRs to check out.
             Start,
+            /// Picks a task and switches the window to its worktree, or to its directory for a
+            /// group or a leaf with no worktree. The workspace left behind stays open in the same
+            /// window with its unsaved buffers, neither saved nor closed.
+            Focus,
+            /// Clears the focused task and goes back to the workspace that was active before the
+            /// first focus, when focus left it.
+            Unfocus,
+            /// Picks a task with a worktree and adds the worktree as a folder of this workspace.
+            OpenWorktree,
+            /// Picks a task whose result is a PR and opens it in the browser.
+            OpenPr,
+            /// Picks a task and copies the path of its worktree, or of its directory when it has
+            /// no worktree.
+            CopyPath,
         ]
     );
 }
@@ -110,6 +124,8 @@ pub mod project {
             Unarchive,
             /// Picks a project and opens its directory as a folder in this workspace.
             OpenFolder,
+            /// Picks a project and focuses its top group, like `task: focus`.
+            Focus,
         ]
     );
 }
