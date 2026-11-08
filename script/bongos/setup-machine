@@ -74,6 +74,14 @@ else
   fail "gh is missing or not logged in; run gh auth login"
 fi
 
+for tool in nextest sweep; do
+  if cargo "$tool" --version >/dev/null 2>&1; then
+    ok "cargo $tool"
+  else
+    fail "cargo $tool is missing; install it: cargo install cargo-$tool --locked"
+  fi
+done
+
 for k in user.name user.email; do
   if [ -n "$(git config "$k")" ]; then ok "git config $k"; else fail "git config $k is empty; git config --global $k <value>"; fi
 done
