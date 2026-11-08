@@ -20,8 +20,12 @@ command_palette_hooks.workspace = true
 futures.workspace = true
 gpui.workspace = true
 log.workspace = true
+project.workspace = true
 settings.workspace = true
+task.workspace = true
+terminal.workspace = true
 util.workspace = true
+uuid.workspace = true
 which.workspace = true
 
 [dev-dependencies]
@@ -31,6 +35,11 @@ gpui = { workspace = true, features = ["test-support"] }
 # (`project` builds its `Collab` state there, `workspace` matches the mock remote), so linting this
 # crate alone fails without these.
 project = { workspace = true, features = ["test-support"] }
+release_channel.workspace = true
+remote = { workspace = true, features = ["test-support"] }
+rpc = { workspace = true, features = ["test-support"] }
+semver.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+terminal = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
