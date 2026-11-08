@@ -173,6 +173,9 @@ pub struct KotlinWorktreeState {
     /// When the running server exited unexpectedly, within the last `CRASH_WINDOW`. `kotlin:
     /// restart server` and a fallback forget them.
     crashes: Vec<Instant>,
+    /// A fallback was caused by the stderr of a start that had not finished: that start's own
+    /// failure, which `LspStore` reports right after the stderr, is not kotlin-lsp's.
+    stale_start: bool,
 }
 
 /// A server that runs because the one the user asked for could not. Sticky for the session
@@ -303,6 +306,7 @@ impl KotlinProjectManager {
                 fallback: None,
                 gradle_error: None,
                 crashes: Vec::new(),
+                stale_start: false,
             },
         );
         cx.notify();
@@ -327,6 +331,7 @@ impl KotlinProjectManager {
         let state = self.worktrees.get_mut(&worktree_id)?;
         let requested = resolve(&self.dirs.state_dir, &state.root, worktree_id, cx);
         state.requested = requested;
+        state.stale_start = false;
         // A fallback only stands in for IntelliJ; once kotlin-lsp is asked for there is none.
         if requested.server != KotlinServerKind::Intellij {
             state.fallback = None;
@@ -683,8 +688,11 @@ impl KotlinProjectManager {
         let resolved = resolve(&self.dirs.state_dir, &state.root, worktree_id, cx);
         let requested_changed = resolved.server != state.requested.server;
         state.requested = resolved;
-        if (requested_changed || end_fallback) && state.fallback.take().is_some() {
+        // A new choice of server starts its crash history over, with or without a fallback.
+        if requested_changed || end_fallback {
             state.crashes.clear();
+        }
+        if (requested_changed || end_fallback) && state.fallback.take().is_some() {
             self.log
                 .line(&format!("fallback ended {}", state.root.display()));
             // With no fallback left, a server that is not running is no longer "both failed".
@@ -766,6 +774,7 @@ impl KotlinProjectManager {
         };
         state.server_id = Some(server_id);
         state.pending.clear();
+        state.stale_start = false;
         self.set_status(worktree_id, Some(ServerStatus::Ready), cx);
     }
 
@@ -892,14 +901,20 @@ impl KotlinProjectManager {
         error: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.worktrees.get(&worktree_id) else {
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
             return;
         };
+        let error = error.lines().next().unwrap_or(error).trim().to_string();
+        // The IntelliJ start whose stderr already caused the fallback: kotlin-lsp is on its way.
+        if std::mem::take(&mut state.stale_start) {
+            self.log
+                .line(&format!("start failed after the fallback: {error}"));
+            return;
+        }
         if !matches!(state.status, None | Some(ServerStatus::Starting)) {
             return;
         }
         let effective = state.effective;
-        let error = error.lines().next().unwrap_or(error).trim().to_string();
         self.log.line(&format!("start failed: {error}"));
         if effective == KotlinServerKind::Intellij {
             self.fall_back_and_restart(worktree_id, FallbackReason::StartFailed, &error, cx);
@@ -1076,6 +1091,20 @@ impl KotlinProjectManager {
     /// A line the server wrote to stderr while starting. An expired build says so here before it
     /// exits, and that is what ends its start for good.
     pub fn startup_stderr(&mut self, worktree_id: WorktreeId, text: &str, cx: &mut Context<Self>) {
+        let had_fallback = self
+            .worktree(worktree_id)
+            .is_some_and(|state| state.fallback.is_some());
+        self.read_startup_stderr(worktree_id, text, cx);
+        if let Some(state) = self.worktrees.get_mut(&worktree_id)
+            && !had_fallback
+            && state.fallback.is_some()
+            && state.server_id.is_none()
+        {
+            state.stale_start = true;
+        }
+    }
+
+    fn read_startup_stderr(&mut self, worktree_id: WorktreeId, text: &str, cx: &mut Context<Self>) {
         let mirror = self
             .worktrees
             .get(&worktree_id)
@@ -2469,5 +2498,85 @@ mod tests {
             manager.begin_start(worktree(), cx)
         });
         assert_eq!(server, Some(KotlinServerKind::Intellij));
+    }
+
+    /// `LspStore` reports a failed start's stderr, then the failure. When the stderr already made
+    /// IntelliJ fall back, the failure is IntelliJ's, not kotlin-lsp's: no `BothFailed`.
+    #[gpui::test]
+    fn test_a_failed_start_after_a_stderr_fallback_is_not_both_failed(cx: &mut TestAppContext) {
+        for (stderr, reason) in [
+            (EXPIRED_MESSAGE, FallbackReason::Expired),
+            ("No valid license found", FallbackReason::LicenseLost),
+        ] {
+            let harness = setup(cx);
+            set_user(cx, INTELLIJ);
+            let notices = harness.count_notices(cx);
+            harness
+                .manager
+                .update(cx, |manager, cx| manager.begin_start(worktree(), cx));
+            harness.manager.update(cx, |manager, cx| {
+                manager.startup_stderr(worktree(), &format!("{stderr}\n"), cx);
+                manager.server_start_failed(worktree(), "server shut down", cx);
+            });
+            assert_eq!(harness.fallback(cx), Some(reason));
+            assert_eq!(harness.status(cx), Some(ServerStatus::Starting));
+            assert_eq!(notices.borrow().len(), 1);
+            assert_eq!(harness.fallback_lines(), 1, "{}", harness.log());
+            assert!(
+                !harness.log().contains("start failed: "),
+                "{}",
+                harness.log()
+            );
+            cx.run_until_parked();
+            assert_eq!(harness.events(), ["stop", "start kotlin-lsp"]);
+            assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
+
+            // kotlin-lsp's own failed start afterwards is a real one.
+            harness
+                .manager
+                .update(cx, |manager, cx| manager.begin_start(worktree(), cx));
+            harness.manager.update(cx, |manager, cx| {
+                manager.server_start_failed(worktree(), "spawn error", cx)
+            });
+            assert_eq!(
+                harness.status(cx),
+                Some(ServerStatus::BothFailed {
+                    intellij: reason.text().into(),
+                    kotlin_lsp: "failed to start: spawn error".into(),
+                })
+            );
+            set_user(cx, "{}");
+        }
+    }
+
+    /// A switch starts the crash history over even when it ends no fallback.
+    #[gpui::test]
+    fn test_a_switch_forgets_the_crash_history(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.first_start(cx);
+        let start = Instant::now();
+        harness.crash(cx, 1, start);
+        harness
+            .manager
+            .update(cx, |manager, cx| {
+                manager.switch_server(worktree(), Some(KotlinServerKind::Intellij), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        harness.crash(cx, 1, start + Duration::from_secs(20));
+        assert_eq!(harness.fallback(cx), None);
+        assert_eq!(
+            harness.events(),
+            [
+                "start kotlin-lsp",
+                "stop",
+                "start kotlin-lsp",
+                "stop",
+                "start intellij",
+                "stop",
+                "start intellij"
+            ]
+        );
+        assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
     }
 }

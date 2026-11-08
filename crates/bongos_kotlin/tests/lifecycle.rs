@@ -15,8 +15,9 @@ use std::{
 };
 
 use bongos_kotlin::{
-    FallbackReason, KotlinAdapter, KotlinDirs, KotlinLog, KotlinProjectManager, KotlinRegistry,
-    KotlinSettings, ServerStatus, attach_managers, attach_notices, fallback_notice_id,
+    FallbackReason, KotlinAdapter, KotlinDirs, KotlinEvent, KotlinLog, KotlinProjectManager,
+    KotlinRegistry, KotlinSettings, ServerStatus, attach_managers, attach_notices,
+    fallback_message, fallback_notice_id,
 };
 use editor::Editor;
 use gpui::{BorrowAppContext as _, Entity, TestAppContext};
@@ -406,6 +407,16 @@ async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppCon
         setup.status(cx) == Some(ServerStatus::Ready)
     });
 
+    // Every notice the manager asks the workspace to show.
+    let notices = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let notices = notices.clone();
+        cx.subscribe(&setup.manager, move |_, event: &KotlinEvent, _| {
+            let KotlinEvent::FellBack { message, .. } = event;
+            notices.borrow_mut().push(message.clone());
+        })
+        .detach();
+    });
     setup
         .manager
         .update(cx, |manager, cx| {
@@ -439,11 +450,14 @@ async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppCon
     assert_eq!(log.matches("kotlin-lsp -> intellij").count(), 1, "{log}");
     assert_eq!(fallback(cx), Some(FallbackReason::LicenseLost));
 
-    // One notice for the fallback.
+    // One notice for the fallback, and the workspace shows it.
+    assert_eq!(
+        *notices.borrow(),
+        [fallback_message(FallbackReason::LicenseLost)]
+    );
     let notice = fallback_notice_id(setup.worktree_id);
     workspace.read_with(cx, |workspace, _| {
-        let ids = workspace.notification_ids();
-        assert_eq!(ids.iter().filter(|id| **id == notice).count(), 1, "{ids:?}");
+        assert!(workspace.notification_ids().contains(&notice));
     });
 
     // The file is still the open item, still Kotlin, and takes edits.
@@ -489,4 +503,19 @@ async fn test_a_crashing_server_restarts_once_then_fails(cx: &mut TestAppContext
         2,
         "no third start: {log}"
     );
+}
+
+/// A server binary that cannot be spawned: `LspStore`'s start-failed event reaches the manager,
+/// which shows kotlin-lsp failed with the reason.
+#[gpui::test]
+async fn test_a_spawn_error_reaches_the_manager(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let setup = start(cx, &temp.path().join("no-such-server"), "").await;
+    wait_until(cx, "the failed start", |cx| {
+        matches!(
+            setup.status(cx),
+            Some(ServerStatus::Failed { reason }) if reason.starts_with("failed to start: ")
+        )
+    });
+    assert!(setup.log().contains("start failed: "), "{}", setup.log());
 }
