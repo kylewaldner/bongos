@@ -14175,17 +14175,22 @@ dependencies = [
 name = "settings_profile_selector"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "editor",
  "fuzzy",
  "gpui",
+ "log",
  "menu",
  "picker",
  "project",
+ "serde",
  "serde_json",
  "settings",
+ "tempfile",
  "theme",
  "theme_settings",
  "ui",
+ "util",
  "workspace",
  "zed_actions",
 ]
