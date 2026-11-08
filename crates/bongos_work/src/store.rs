@@ -161,6 +161,11 @@ impl WorkStore {
         &self.dirs.root
     }
 
+    /// The file system the store reads and writes through.
+    pub fn fs(&self) -> Arc<dyn Fs> {
+        self.fs.clone()
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }

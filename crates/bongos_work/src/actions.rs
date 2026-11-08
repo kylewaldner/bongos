@@ -27,6 +27,36 @@ pub mod task {
             Reopen,
             /// Picks a task and changes its goal and kind.
             Edit,
+            /// Asks for an activity and a goal and creates a one-off task under that activity.
+            NewOneOff,
+            /// Picks a task, a sibling and the kind of edge (after or stacked on) from the task
+            /// to it.
+            AddEdge,
+            /// Picks a task and one of its edges and removes it.
+            RemoveEdge,
+            /// Picks a blocked task and shows which tasks hold it back.
+            ShowBlockers,
+            /// Picks a task and one of its edges and sets how far the sibling must get before
+            /// the edge unblocks.
+            SetUnblockPoint,
+            /// Picks a leaf task and sets whether a merged PR completes its ships todo.
+            SetMergeShip,
+            /// Picks a stacked task and points it at another sibling, or at main.
+            Retarget,
+            /// Picks a leaf task and sets its result: a PR, document, link or other.
+            SetResult,
+            /// Picks a task with a result and clears it.
+            ClearResult,
+            /// Picks a leaf task and moves its work into a new child, making the task a group.
+            /// Asks first.
+            Split,
+            /// Picks a task and a task to move it under. Asks first.
+            Move,
+            /// Picks a task and a project and moves it to the top level of that project. Asks
+            /// first.
+            MoveToProject,
+            /// Picks a task and an activity and files it as a one-off. Asks first.
+            MakeOneOff,
         ]
     );
 }
@@ -54,6 +84,25 @@ pub mod todo {
             SetRole,
             /// Picks a task and an open todo and marks it as begun.
             Start,
+        ]
+    );
+}
+
+/// Actions in the `project` namespace. Zed's `projects` namespace is a different one.
+pub mod project {
+    use gpui::actions;
+
+    actions!(
+        project,
+        [
+            /// Asks for a name, creates the project and runs `git init` in its directory.
+            New,
+            /// Picks a project and archives it.
+            Archive,
+            /// Picks an archived project and brings it back.
+            Unarchive,
+            /// Picks a project and opens its directory as a folder in this workspace.
+            OpenFolder,
         ]
     );
 }

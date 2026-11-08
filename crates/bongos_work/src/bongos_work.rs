@@ -5,9 +5,12 @@
 
 pub mod actions;
 mod commands;
+mod links;
 mod modals;
+mod projects;
 mod settings;
 mod store;
+mod structure;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +20,7 @@ pub use bongos_work_model as model;
 use fs::Fs;
 use gpui::{App, AppContext as _, Entity, Global};
 
-pub use actions::{task, todo};
+pub use actions::{project, task, todo};
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
 pub use settings::WorkSettings;
 pub use store::{
@@ -62,5 +65,7 @@ impl WorkStore {
 
 #[cfg(test)]
 mod command_tests;
+#[cfg(test)]
+mod command_tests_more;
 #[cfg(test)]
 mod store_tests;

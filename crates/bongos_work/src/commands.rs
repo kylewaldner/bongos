@@ -23,9 +23,10 @@ use settings::{Settings as _, SettingsStore};
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
 
-use crate::actions::{task, todo};
+use crate::actions::{project, task, todo};
 use crate::modals::{self, Then};
 use crate::{WorkSettings, WorkStore, WriteError};
+use crate::{links, projects, structure};
 
 /// The activity a task made with `task: new` goes under: it names no parent, and the Work view
 /// that would supply "the group at point" does not exist yet.
@@ -53,6 +54,23 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<todo::SetWorkflow>(),
         TypeId::of::<todo::SetRole>(),
         TypeId::of::<todo::Start>(),
+        TypeId::of::<task::NewOneOff>(),
+        TypeId::of::<task::AddEdge>(),
+        TypeId::of::<task::RemoveEdge>(),
+        TypeId::of::<task::ShowBlockers>(),
+        TypeId::of::<task::SetUnblockPoint>(),
+        TypeId::of::<task::SetMergeShip>(),
+        TypeId::of::<task::Retarget>(),
+        TypeId::of::<task::SetResult>(),
+        TypeId::of::<task::ClearResult>(),
+        TypeId::of::<task::Split>(),
+        TypeId::of::<task::Move>(),
+        TypeId::of::<task::MoveToProject>(),
+        TypeId::of::<task::MakeOneOff>(),
+        TypeId::of::<project::New>(),
+        TypeId::of::<project::Archive>(),
+        TypeId::of::<project::Unarchive>(),
+        TypeId::of::<project::OpenFolder>(),
     ]
 }
 
@@ -94,9 +112,12 @@ pub fn register(workspace: &mut Workspace) {
         .register_action(|w, _: &todo::SetWorkflow, window, cx| todo_set_workflow(w, window, cx))
         .register_action(|w, _: &todo::SetRole, window, cx| todo_set_role(w, window, cx))
         .register_action(|w, _: &todo::Start, window, cx| todo_start(w, window, cx));
+    links::register(workspace);
+    structure::register(workspace);
+    projects::register(workspace);
 }
 
-fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
     workspace.show_toast(
         Toast::new(NotificationId::unique::<WorkToast>(), message),
         cx,
@@ -104,7 +125,10 @@ fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Works
 }
 
 /// The tree, when the store is on and has loaded it; otherwise a toast says why.
-fn ready(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Arc<WorkTree>> {
+pub(crate) fn ready(
+    workspace: &mut Workspace,
+    cx: &mut Context<Workspace>,
+) -> Option<Arc<WorkTree>> {
     let state = WorkStore::global(cx).map(|store| {
         let store = store.read(cx);
         (store.is_enabled(), store.snapshot())
@@ -126,19 +150,30 @@ fn ready(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Arc<W
     }
 }
 
+/// Queues `command` on the store's writer. `None`, after a toast, when there is no store.
+pub(crate) fn queue(
+    workspace: &mut Workspace,
+    cx: &mut Context<Workspace>,
+    command: impl Fn(&WorkTree, &WorkContext) -> model::Outcome + Send + 'static,
+) -> Option<gpui::Task<Result<model::Change, WriteError>>> {
+    let Some(store) = WorkStore::global(cx) else {
+        show_toast(workspace, WriteError::Off.to_string(), cx);
+        return None;
+    };
+    Some(store.update(cx, |store, cx| {
+        store.write(WorkContext::kyle(), command, cx)
+    }))
+}
+
 /// Queues `command` on the store's writer and shows why it did not happen, if it did not.
-fn submit(
+pub(crate) fn submit(
     workspace: &mut Workspace,
     cx: &mut Context<Workspace>,
     command: impl Fn(&WorkTree, &WorkContext) -> model::Outcome + Send + 'static,
 ) {
-    let Some(store) = WorkStore::global(cx) else {
-        show_toast(workspace, WriteError::Off.to_string(), cx);
+    let Some(write) = queue(workspace, cx, command) else {
         return;
     };
-    let write = store.update(cx, |store, cx| {
-        store.write(WorkContext::kyle(), command, cx)
-    });
     cx.spawn(async move |workspace, cx| {
         if let Err(error) = write.await {
             workspace
@@ -151,9 +186,61 @@ fn submit(
     .detach();
 }
 
+/// Asks which project, among those that pass `keep`, then calls `then` with its slug. With none,
+/// a toast says `none`.
+pub(crate) fn with_project(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    placeholder: &'static str,
+    none: &'static str,
+    keep: impl Fn(&bongos_work_model::store::Project) -> bool,
+    then: Then<String>,
+) {
+    let Some(tree) = ready(workspace, cx) else {
+        return;
+    };
+    let (slugs, labels): (Vec<String>, Vec<String>) = tree
+        .projects
+        .iter()
+        .filter(|project| keep(project))
+        .map(|project| {
+            let title = project
+                .file
+                .as_ref()
+                .map_or(project.slug.as_str(), |file| file.title.as_str());
+            let archived = project.file.as_ref().is_some_and(|file| file.archived);
+            let label = format!(
+                "{title} ({}){}",
+                project.slug,
+                if archived { ", archived" } else { "" }
+            );
+            (project.slug.clone(), label)
+        })
+        .unzip();
+    if slugs.is_empty() {
+        show_toast(workspace, none.to_string(), cx);
+        return;
+    }
+    modals::pick(
+        workspace,
+        placeholder,
+        labels,
+        0,
+        Box::new(move |index, workspace, window, cx| {
+            then(slugs[index].clone(), workspace, window, cx)
+        }),
+        window,
+        cx,
+    );
+}
+
 /// One line per task in the tree that passes `keep`: its goal under its groups' goals, and its
 /// state.
-fn task_choices(tree: &WorkTree, keep: impl Fn(&Task, &WorkTree) -> bool) -> Vec<(String, String)> {
+pub(crate) fn task_choices(
+    tree: &WorkTree,
+    keep: impl Fn(&Task, &WorkTree) -> bool,
+) -> Vec<(String, String)> {
     tree.tasks()
         .into_iter()
         .filter(|task| keep(task, tree))
@@ -182,7 +269,7 @@ fn task_choices(tree: &WorkTree, keep: impl Fn(&Task, &WorkTree) -> bool) -> Vec
 
 /// Asks which task, among those that pass `keep`, then calls `then` with its id. With none, a
 /// toast says `none`.
-fn with_task(
+pub(crate) fn with_task(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -270,7 +357,7 @@ fn todo_label(index: usize, todo: &bongos_work_model::Todo) -> String {
     format!("{}. {} ({state}{role}{workflow})", index + 1, todo.name)
 }
 
-fn is_open_leaf(task: &Task, tree: &WorkTree) -> bool {
+pub(crate) fn is_open_leaf(task: &Task, tree: &WorkTree) -> bool {
     task.file
         .as_ref()
         .is_some_and(|file| file.status == Status::Open)
@@ -289,7 +376,7 @@ fn is_leaf_with(
             .is_some_and(|file| file.todos.iter().any(keep))
 }
 
-fn has_status(task: &Task, keep: impl Fn(Status) -> bool) -> bool {
+pub(crate) fn has_status(task: &Task, keep: impl Fn(Status) -> bool) -> bool {
     task.file.as_ref().is_some_and(|file| keep(file.status))
 }
 
