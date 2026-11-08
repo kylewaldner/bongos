@@ -191,8 +191,17 @@ async fn a_mode_on_an_unfocused_task_focuses_it_first(cx: &mut TestAppContext) {
         cx.set_global(AppDatabase::test_new());
         focus::init(cx);
     });
+    // The window switches to another workspace, which has no handlers of its own, so the chat
+    // action is also handled app-wide to see it run there.
     let calls = Arc::new(Calls::default());
     handle_fakes(&harness, &calls, cx);
+    let chats = calls.clone();
+    cx.update(|_, cx| {
+        cx.on_action(move |_: &fake::New, _| {
+            chats.chats.fetch_add(1, Ordering::SeqCst);
+        });
+    });
+    cx.run_until_parked();
 
     dispatch(cx, "task::Mode");
     harness.answer(cx, &Input::Pick("Backfill")).await;
@@ -201,6 +210,7 @@ async fn a_mode_on_an_unfocused_task_focuses_it_first(cx: &mut TestAppContext) {
         cx.update(|_, cx| Focus::global(cx).unwrap().read(cx).task_id() == Some("l1"))
     })
     .await;
+    wait_until(cx, "chat: new", |_| calls.chats.load(Ordering::SeqCst) == 1).await;
     assert!(harness.picker(cx).is_none());
     assert!(!harness.has_toast(cx));
 }
