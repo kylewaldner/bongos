@@ -94,7 +94,7 @@ pub struct HealthStats {
 }
 
 /// The user-facing name of an agent's CLI.
-fn agent_title(agent: Agent) -> &'static str {
+pub(crate) fn agent_title(agent: Agent) -> &'static str {
     match agent {
         Agent::Claude => "Claude Code",
         Agent::Codex => "Codex",

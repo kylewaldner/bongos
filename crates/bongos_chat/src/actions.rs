@@ -69,7 +69,7 @@ pub mod chat {
             ShowArtifacts,
             /// Picks a session type and opens its files.
             EditSessionType,
-            /// Sends the selected text, or the prompt under the cursor, to the chat.
+            /// Sends the selection, or else the whole buffer, of a chat's prompts file to the chat.
             SendRegion,
             /// Filters the chat list.
             Filter,

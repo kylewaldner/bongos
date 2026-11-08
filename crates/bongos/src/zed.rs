@@ -642,6 +642,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         });
 
         bongos_work::register(workspace);
+        bongos_chat::register(workspace);
         let work_focus = cx.new(bongos_work::FocusStatus::new);
 
         let cursor_position =

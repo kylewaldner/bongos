@@ -2,8 +2,9 @@
 //! chats open on each task, and the start of the task's current todo when a chat starts on it.
 //!
 //! A chat is open from its launch until its process ends; an exited chat the panel still shows
-//! does not count. The runtime tells the registry when a chat starts or ends, through
-//! [`watch_runtime`], so the Work store recomputes its badges.
+//! does not count. The registry is told when a chat starts or ends, through [`watch_runtime`],
+//! and when the chat index changes (a record found, moved or removed changes the task a chat
+//! counts for), so the Work store recomputes its badges.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -15,13 +16,13 @@ use bongos_work_model::derive::{self, Shape, current_todo};
 use bongos_work_model::now;
 use gpui::{App, Entity, Task};
 
-use crate::{ChatRuntime, ChatRuntimeEvent, ChatState, ChatStore};
+use crate::{ChatRuntime, ChatRuntimeEvent, ChatState, ChatStore, ChatStoreEvent};
 
 /// The name of the source in the registry.
 pub const SOURCE_NAME: &str = "chats";
 
-/// Whether a chat in `state` counts as open.
-fn is_open(state: ChatState) -> bool {
+/// Whether a chat in `state` counts as open: its process runs.
+pub(crate) fn is_open(state: ChatState) -> bool {
     !matches!(state, ChatState::Exited { .. } | ChatState::Closed)
 }
 
@@ -59,6 +60,11 @@ pub(crate) fn init(runtime: &Entity<ChatRuntime>, store: &Entity<ChatStore>, cx:
     });
     LiveModesRegistry::add_source(SOURCE_NAME, source, cx);
     watch_runtime(runtime, cx);
+    cx.subscribe(store, |_, event, cx| {
+        let ChatStoreEvent::Changed = event;
+        LiveModesRegistry::changed(cx);
+    })
+    .detach();
 }
 
 /// Calls [`LiveModesRegistry::changed`] when a chat of `runtime` becomes open or stops being open.

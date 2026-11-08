@@ -1,7 +1,7 @@
 //! The app side of bongos chat sessions: the `chats` settings, [`ChatStore`] (the global index of
 //! chat records, built from the work store's snapshot, and their serial writer), seeding of the
 //! session types, the health of the agent CLIs, [`ChatRuntime`] (the running chats and their live
-//! state), and the `chat` actions. Everything is off while `chats.enabled` is false. The file
+//! state), the send path, and the `chat` actions. Everything is off while `chats.enabled` is false. The file
 //! formats and pure rules live in `bongos_chat_model`.
 
 mod actions;
@@ -10,6 +10,7 @@ mod health;
 mod launch;
 mod live_modes;
 mod runtime;
+mod send;
 mod settings;
 mod store;
 
@@ -35,6 +36,9 @@ pub use live_modes::{SOURCE_NAME, start_current_todo};
 pub use runtime::{
     ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChatRuntime, ChatRuntimeEvent, ChatState,
     LiveChat, RuntimeStats,
+};
+pub use send::{
+    BRACKETED_WAIT, ChatToast, SendError, SendOptions, Sent, chat_for_prompts_file, register, send,
 };
 pub use settings::{AgentCommand, ChatsSettings};
 pub use store::{ChatStats, ChatStore, ChatStoreEvent, ChatWriteError, IndexedChat};
@@ -97,6 +101,9 @@ mod health_tests;
 
 #[cfg(test)]
 mod runtime_tests;
+
+#[cfg(test)]
+mod send_tests;
 
 #[cfg(test)]
 mod store_tests;
