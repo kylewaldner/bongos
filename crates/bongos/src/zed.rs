@@ -5428,6 +5428,7 @@ mod tests {
                 "bongos",
                 "branches",
                 "buffer_search",
+                "chat",
                 "cli",
                 "command_palette",
                 "console",
