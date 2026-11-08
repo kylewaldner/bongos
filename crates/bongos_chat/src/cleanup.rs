@@ -1,0 +1,113 @@
+//! The never-prompted cleanup (design D17): the only time bongos deletes a chat record by itself.
+//!
+//! When a chat is closed or its CLI exits, its record is deleted only when bongos is sure nothing
+//! was said in it:
+//! - the record says `prompted = false` (read fresh, after every write queued before), and
+//! - the runtime saw no keyboard input and no send while it ran, and
+//! - the CLI stored no conversation for it: for Claude Code, no transcript file for its session id
+//!   under `~/.claude/projects/`; for Codex, no session id was captured and none can be found now.
+//!
+//! When any of these is unknown (an unknown agent, a Claude chat without a session id, a CLI
+//! storage directory that is not there or cannot be read) the record is kept: when unsure, keep.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use bongos_chat_model::{Agent, ChatRecord, project_slug};
+
+/// What the cleanup does with a chat that ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cleanup {
+    /// Nothing was said: the record goes.
+    Delete,
+    /// The record stays, for this reason.
+    Keep(KeepReason),
+}
+
+/// Why the cleanup kept a record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeepReason {
+    /// The record says the chat was prompted.
+    Prompted,
+    /// The runtime saw keyboard input or a send.
+    InputSeen,
+    /// The record names an agent this version does not know.
+    UnknownAgent,
+    /// A Claude chat with no session id: its transcript cannot be looked up.
+    SessionUnknown,
+    /// The CLI stored a conversation (a Claude transcript, a Codex session).
+    ConversationStored,
+    /// The CLI's storage directory is not there or could not be read.
+    CannotCheck,
+}
+
+/// The verdict on `record`, which ended. `saw_input` is whether the runtime saw keyboard input or
+/// a send; `live_session` the session id the runtime knew; `home` where the CLIs keep their files;
+/// `find_codex_session` looks once more for a Codex session id in Codex's own files.
+pub fn cleanup_verdict(
+    record: &ChatRecord,
+    saw_input: bool,
+    live_session: Option<&str>,
+    home: &Path,
+    find_codex_session: impl FnOnce() -> Option<String>,
+) -> Cleanup {
+    if record.prompted {
+        return Cleanup::Keep(KeepReason::Prompted);
+    }
+    if saw_input {
+        return Cleanup::Keep(KeepReason::InputSeen);
+    }
+    let session = live_session.or(record.session_id.as_deref());
+    match record.known_agent() {
+        None => Cleanup::Keep(KeepReason::UnknownAgent),
+        Some(Agent::Claude) => {
+            let Some(session) = session else {
+                return Cleanup::Keep(KeepReason::SessionUnknown);
+            };
+            match claude_transcript_exists(home, &record.cwd, session) {
+                Some(false) => Cleanup::Delete,
+                Some(true) => Cleanup::Keep(KeepReason::ConversationStored),
+                None => Cleanup::Keep(KeepReason::CannotCheck),
+            }
+        }
+        Some(Agent::Codex) => {
+            if session.is_some() {
+                return Cleanup::Keep(KeepReason::ConversationStored);
+            }
+            if !home.join(".codex").join("sessions").is_dir() {
+                return Cleanup::Keep(KeepReason::CannotCheck);
+            }
+            match find_codex_session() {
+                Some(_) => Cleanup::Keep(KeepReason::ConversationStored),
+                None => Cleanup::Delete,
+            }
+        }
+    }
+}
+
+/// Whether Claude Code keeps a transcript of `session` run in `cwd`: `None` when its projects
+/// directory is not there or a lookup failed. The directory is looked up for `cwd` as written and
+/// as resolved, since either can name it.
+fn claude_transcript_exists(home: &Path, cwd: &Path, session: &str) -> Option<bool> {
+    let projects = home.join(".claude").join("projects");
+    if !projects.is_dir() {
+        return None;
+    }
+    let mut cwds: Vec<PathBuf> = vec![cwd.to_path_buf()];
+    if let Ok(resolved) = std::fs::canonicalize(cwd)
+        && resolved != cwd
+    {
+        cwds.push(resolved);
+    }
+    for cwd in cwds {
+        let transcript = projects
+            .join(project_slug(&cwd))
+            .join(format!("{session}.jsonl"));
+        match std::fs::symlink_metadata(&transcript) {
+            Ok(_) => return Some(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    Some(false)
+}

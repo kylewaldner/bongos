@@ -36,6 +36,7 @@ use project::Project;
 use settings::Settings as _;
 use terminal::{Event as TerminalEvent, Terminal};
 
+use crate::cleanup::{Cleanup, cleanup_verdict};
 use crate::launch::{self, LaunchError, LaunchRequest, Prepared};
 use crate::{ChatHealth, ChatStore, ChatsSettings, find_program, fix_not_found, fix_not_probed};
 
@@ -48,6 +49,8 @@ pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(1);
 /// Output that arrives this soon after a bell belongs to the bell (the terminal reports the output
 /// of one read after its bell), so it does not end the waiting state.
 const BELL_GRACE: Duration = Duration::from_millis(500);
+/// A running chat with output this recent is mid-turn: `chat: close` asks first.
+pub const MID_TURN: Duration = Duration::from_secs(2);
 
 /// What a chat is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +95,8 @@ pub struct RuntimeStats {
     pub active_writes: usize,
     /// Session ids captured from the CLI's files.
     pub captures: usize,
+    /// Records the never-prompted cleanup deleted.
+    pub cleanups: usize,
 }
 
 /// One running (or exited, still shown) chat.
@@ -118,6 +123,8 @@ pub struct LiveChat {
     pending_active_write: Option<Task<()>>,
     /// The id is still to be read from the CLI's files when it exits.
     capture_on_exit: bool,
+    /// The never-prompted cleanup already looked at this run of the chat.
+    cleanup_checked: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -168,6 +175,11 @@ impl LiveChat {
         self.agent
     }
 
+    /// Whether the CLI is working on a turn: running, with output in the last [`MID_TURN`].
+    pub fn is_mid_turn(&self) -> bool {
+        self.state == ChatState::Running && self.last_output.elapsed() < MID_TURN
+    }
+
     pub(crate) fn record_path(&self) -> &PathBuf {
         &self.record_path
     }
@@ -211,6 +223,8 @@ pub struct ChatRuntime {
     /// written its Enter, so two pastes never interleave.
     send_queues: HashMap<String, (usize, Shared<oneshot::Receiver<()>>)>,
     next_send: usize,
+    /// The agent of the last chat `chat: new` started, offered first next time.
+    last_agent: Option<Agent>,
     stats: RuntimeStats,
 }
 
@@ -234,6 +248,7 @@ impl ChatRuntime {
             bracketed_wait: crate::send::BRACKETED_WAIT,
             send_queues: HashMap::new(),
             next_send: 0,
+            last_agent: None,
             stats: RuntimeStats::default(),
         }
     }
@@ -298,6 +313,20 @@ impl ChatRuntime {
 
     pub fn stats(&self) -> RuntimeStats {
         self.stats
+    }
+
+    /// Where `~/.bongos` and the agents' own files are.
+    pub fn home(&self) -> &PathBuf {
+        &self.home
+    }
+
+    /// The agent of the last chat `chat: new` started in this session.
+    pub fn last_agent(&self) -> Option<Agent> {
+        self.last_agent
+    }
+
+    pub(crate) fn set_last_agent(&mut self, agent: Agent) {
+        self.last_agent = Some(agent);
     }
 
     /// The live chat with `chat_id`, running or exited.
@@ -603,6 +632,7 @@ impl ChatRuntime {
             last_active_write: Some(Instant::now()),
             pending_active_write: None,
             capture_on_exit: false,
+            cleanup_checked: false,
             _tasks: tasks,
             _subscriptions: vec![subscription],
         };
@@ -770,6 +800,7 @@ impl ChatRuntime {
         chat.state = ChatState::Exited { code };
         let capture = std::mem::take(&mut chat.capture_on_exit);
         self.write_active_now(chat_id, cx);
+        self.clean_up(chat_id, cx);
         if capture {
             let chat_id = chat_id.to_string();
             cx.spawn(async move |this, cx| {
@@ -793,7 +824,8 @@ impl ChatRuntime {
     }
 
     /// Ends the chat's process and drops its terminal: the chat is closed. `last_active` is written
-    /// now. Returns whether it was live.
+    /// now, and the record stays unless the never-prompted cleanup is sure nothing was said in it
+    /// (see [`crate::cleanup`]). Returns whether it was live.
     pub fn close(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
         if !self.live.contains_key(chat_id) {
             return false;
@@ -801,6 +833,7 @@ impl ChatRuntime {
         self.poll_input(chat_id, cx);
         self.kill(chat_id, cx);
         self.write_active_now(chat_id, cx);
+        self.clean_up(chat_id, cx);
         // Dropping the terminal also ends the process if the kill did not.
         self.live.remove(chat_id);
         cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
@@ -861,6 +894,64 @@ impl ChatRuntime {
             if let Err(error) = write.await {
                 log::warn!("chats: could not write last_active: {error}");
             }
+        })
+        .detach();
+    }
+
+    /// The never-prompted cleanup of `chat_id`, which ended or is being closed (design D17), once
+    /// per run of the chat. It runs on the store's writer after the writes queued before it, so the
+    /// record it reads already has the `prompted` the runtime saw. A deleted record's runtime
+    /// directory goes too.
+    fn clean_up(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let capture = self.capture_query(chat_id, cx);
+        let runtime_dir = self.store.read(cx).dirs().runtime.join(chat_id);
+        let home = self.home.clone();
+        let Some(chat) = self.live.get_mut(chat_id) else {
+            return;
+        };
+        if std::mem::replace(&mut chat.cleanup_checked, true) {
+            return;
+        }
+        let saw_input = chat.prompted || chat.terminal.read(cx).keyboard_input_sent();
+        if saw_input {
+            return;
+        }
+        let live_session = chat.session_id.clone();
+        let path = chat.record_path.clone();
+        let delete = self.store.update(cx, |store, cx| {
+            store.delete_if(
+                path,
+                move |record| {
+                    let verdict =
+                        cleanup_verdict(record, saw_input, live_session.as_deref(), &home, || {
+                            capture.as_ref().and_then(CaptureInput::run)
+                        });
+                    log::info!("chats: cleanup of an unprompted chat: {verdict:?}");
+                    verdict == Cleanup::Delete
+                },
+                cx,
+            )
+        });
+        let chat_id = chat_id.to_string();
+        cx.spawn(async move |this, cx| match delete.await {
+            Ok(true) => {
+                let removed = cx
+                    .background_spawn(async move { std::fs::remove_dir_all(runtime_dir) })
+                    .await;
+                if let Err(error) = removed
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    log::warn!("chats: could not remove a deleted chat's launch files: {error}");
+                }
+                this.update(cx, |this, cx| {
+                    this.stats.cleanups += 1;
+                    cx.emit(ChatRuntimeEvent::Changed(chat_id));
+                    cx.notify();
+                })
+                .ok();
+            }
+            Ok(false) => {}
+            Err(error) => log::warn!("chats: the cleanup could not run: {error}"),
         })
         .detach();
     }
@@ -928,7 +1019,7 @@ impl ChatRuntime {
     }
 }
 
-struct CaptureInput {
+pub(crate) struct CaptureInput {
     agent: Agent,
     command: String,
     chat_id: String,
@@ -939,7 +1030,7 @@ struct CaptureInput {
 }
 
 impl CaptureInput {
-    fn run(&self) -> Option<String> {
+    pub(crate) fn run(&self) -> Option<String> {
         adapter_for(self.agent, &self.command).capture_session_id(&CaptureQuery {
             chat_id: &self.chat_id,
             cwd: &self.cwd,

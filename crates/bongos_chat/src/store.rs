@@ -9,7 +9,7 @@
 //! Writing: every write runs on one queue, one at a time. An update reads the record fresh from
 //! disk, applies the change and replaces the file atomically, so an edit made before the read is
 //! kept. A record that is gone (deleted by hand) is never recreated: the update is refused. Only
-//! [`ChatStore::create`] makes a new file.
+//! [`ChatStore::create`] makes a new file, and only [`ChatStore::delete_if`] removes one.
 //!
 //! While `chats.enabled` is false nothing is indexed, nothing is seeded and writes answer
 //! [`ChatWriteError::Off`].
@@ -220,6 +220,36 @@ impl ChatStore {
                 }
                 create_record(&scope_dir, &record)
                     .map_err(|error| ChatWriteError::Failed(error.to_string()))
+            },
+            cx,
+        )
+    }
+
+    /// Queues the removal of the record at `path`, done only when `delete` says yes to the record
+    /// read fresh from disk at that moment (after every write queued before it). Resolves to
+    /// whether the file was removed. A file that is gone or does not parse is left alone.
+    pub fn delete_if(
+        &mut self,
+        path: PathBuf,
+        delete: impl FnOnce(&ChatRecord) -> bool + Send + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) -> Task<Result<bool, ChatWriteError>> {
+        self.queue(
+            move || {
+                if !path.is_file() {
+                    return Ok(false);
+                }
+                let Ok(record) = read_record(&path) else {
+                    return Ok(false);
+                };
+                if !delete(&record) {
+                    return Ok(false);
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(error) => Err(ChatWriteError::Failed(error.to_string())),
+                }
             },
             cx,
         )

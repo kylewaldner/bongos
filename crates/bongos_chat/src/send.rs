@@ -13,7 +13,8 @@
 //!
 //! `chat: send region` sends the selection of the active editor, or its whole buffer, to the chat
 //! whose prompts file the editor shows (or, from the prompts pane of the Chats panel, to the chat
-//! the panel shows). Focus stays where it is.
+//! the panel shows). Focus stays where it is. To a chat that is not running it asks "Resume
+//! <name> and send?" and, on yes, resumes the chat and sends once it runs.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -63,8 +64,7 @@ pub enum SendError {
     Empty,
     /// No chat has this id.
     Unknown(String),
-    /// The chat has no running process. The command layer offers to resume it and send; the
-    /// "Resume <name> and send?" question arrives with open and resume (step 12 of the design).
+    /// The chat has no running process. `chat: send region` asks "Resume <name> and send?".
     NotRunning { name: String },
     /// The CLI did not ask for bracketed paste in time, so a paste would be split into lines.
     NotAcceptingPastes { agent: &'static str },
@@ -394,9 +394,19 @@ fn send_region(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         );
         return;
     };
-    let task = send(&chat_id, text, SendOptions { submit: true }, cx);
-    cx.spawn(async move |workspace, cx| {
-        if let Err(error) = task.await {
+    let task = send(&chat_id, text.clone(), SendOptions { submit: true }, cx);
+    cx.spawn_in(window, async move |workspace, cx| match task.await {
+        Ok(_) => {}
+        Err(SendError::NotRunning { name }) => {
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    crate::commands::offer_resume_and_send(
+                        chat_id, name, text, workspace, window, cx,
+                    )
+                })
+                .ok();
+        }
+        Err(error) => {
             workspace
                 .update(cx, |workspace, cx| {
                     show_toast(workspace, error.to_string(), cx)

@@ -47,7 +47,7 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn write(path: &Path, text: &str) {
+pub(super) fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
 }
@@ -93,6 +93,8 @@ fn codex_caps() -> Capabilities {
 
 pub(super) struct Harness {
     _temp: TempDir,
+    /// The work root.
+    pub(super) root: PathBuf,
     pub(super) base: PathBuf,
     /// The fake CLIs' log.
     pub(super) log: PathBuf,
@@ -189,8 +191,12 @@ async fn harness_with(
     });
     set_chat_settings(cx, enabled, idle_after_secs);
 
+    // The work store is the global one, as in the app, so the commands find it.
     let fs = Arc::new(RealFs::new(None, cx.executor()));
-    let work = cx.new(|cx| WorkStore::new(fs, WorkDirs { root }, cx));
+    let work = cx.update(|cx| {
+        bongos_work::init(fs, WorkDirs { root }, cx);
+        WorkStore::global(cx).unwrap()
+    });
     let work_store = work.clone();
     let dirs = ChatDirs {
         types_root: types_root.clone(),
@@ -210,6 +216,7 @@ async fn harness_with(
     let project = Project::test(app_state.fs.clone(), [], cx).await;
     Harness {
         _temp: temp,
+        root: base.join("work"),
         base,
         log,
         home,

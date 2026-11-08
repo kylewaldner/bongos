@@ -19,6 +19,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Styled as _,
     Subscription, WeakEntity, Window, px,
 };
+use project::Project;
 use settings::{Settings as _, SettingsStore};
 use ui::{IconName, Label, LabelCommon as _, prelude::*, v_flex};
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -27,16 +28,19 @@ use workspace::{OpenOptions, Workspace};
 use crate::actions::chat;
 use crate::send::show_toast;
 use crate::session_view::{SessionView, SessionViewEvent};
-use crate::{ChatRuntime, ChatsSettings, SendError};
+use crate::{ChatRuntime, ChatStore, ChatStoreEvent, ChatsSettings, SendError};
 
 const PANEL_KEY: &str = "ChatPanel";
 
 /// What the panel says while no chat is shown.
-const NO_CHAT: &str = "No chat is shown";
+pub(crate) const NO_CHAT: &str = "No chat is shown";
 
 /// The panel. One per workspace; every one shows the same global runtime and records.
 pub struct ChatPanel {
     workspace: WeakEntity<Workspace>,
+    /// The workspace's project, kept so a chat can be shown while the workspace is being updated
+    /// (by a command).
+    project: Entity<Project>,
     fs: Arc<dyn Fs>,
     focus_handle: FocusHandle,
     sessions: HashMap<String, Entity<SessionView>>,
@@ -47,15 +51,46 @@ pub struct ChatPanel {
 impl EventEmitter<PanelEvent> for ChatPanel {}
 
 impl ChatPanel {
-    pub fn new(workspace: WeakEntity<Workspace>, fs: Arc<dyn Fs>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut subscriptions = Vec::new();
+        if let Some(runtime) = ChatRuntime::global(cx) {
+            let store = runtime.read(cx).store().clone();
+            subscriptions.push(cx.subscribe(&store, |this, store, _: &ChatStoreEvent, cx| {
+                this.forget_deleted(&store, cx)
+            }));
+        }
         Self {
             workspace,
+            project,
             fs,
             focus_handle: cx.focus_handle(),
             sessions: HashMap::default(),
             shown: None,
-            _subscriptions: Vec::new(),
+            _subscriptions: subscriptions,
         }
+    }
+
+    /// Drops the session views of chats whose record is gone (deleted, or cleaned up after a chat
+    /// that was never prompted), and stops showing such a chat.
+    fn forget_deleted(&mut self, store: &Entity<ChatStore>, cx: &mut Context<Self>) {
+        let store = store.read(cx);
+        if !store.is_enabled() {
+            return;
+        }
+        self.sessions.retain(|id, _| store.find(id).is_some());
+        if self
+            .shown
+            .as_deref()
+            .is_some_and(|id| !self.sessions.contains_key(id))
+        {
+            self.shown = None;
+        }
+        cx.notify();
     }
 
     /// Shows the chat `chat_id`. Returns false, showing nothing new, while chats are off or when
@@ -71,14 +106,10 @@ impl ChatPanel {
         }
         let known = ChatRuntime::global(cx)
             .is_some_and(|runtime| runtime.read(cx).store().read(cx).find(chat_id).is_some());
-        let Some(project) = self
-            .workspace
-            .read_with(cx, |workspace, _| workspace.project().clone())
-            .ok()
-            .filter(|_| known)
-        else {
+        if !known {
             return false;
-        };
+        }
+        let project = self.project.clone();
         if !self.sessions.contains_key(chat_id) {
             let workspace = self.workspace.clone();
             let fs = self.fs.clone();
@@ -209,7 +240,8 @@ fn sync_panel(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         (true, None) => {
             let weak = cx.entity().downgrade();
             let fs = workspace.app_state().fs.clone();
-            let panel = cx.new(|cx| ChatPanel::new(weak, fs, cx));
+            let project = workspace.project().clone();
+            let panel = cx.new(|cx| ChatPanel::new(weak, project, fs, cx));
             workspace.add_panel(panel, window, cx);
         }
         (false, Some(panel)) => workspace.remove_panel(&panel, window, cx),
@@ -249,7 +281,7 @@ pub fn register(workspace: &mut Workspace) {
 }
 
 /// The panel, or a toast saying chats are off.
-fn enabled_panel(
+pub(crate) fn enabled_panel(
     workspace: &mut Workspace,
     cx: &mut Context<Workspace>,
 ) -> Option<Entity<ChatPanel>> {

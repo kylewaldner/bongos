@@ -1,10 +1,13 @@
 //! The app side of bongos chat sessions: the `chats` settings, [`ChatStore`] (the global index of
 //! chat records, built from the work store's snapshot, and their serial writer), seeding of the
 //! session types, the health of the agent CLIs, [`ChatRuntime`] (the running chats and their live
-//! state), the send path, and the `chat` actions. Everything is off while `chats.enabled` is false. The file
+//! state), the send path, the `chat` actions and their commands (new, open, next, previous, close,
+//! with the scope rules of [`scope`] and the never-prompted cleanup of [`cleanup`]). Everything is off while `chats.enabled` is false. The file
 //! formats and pure rules live in `bongos_chat_model`.
 
 mod actions;
+mod cleanup;
+mod commands;
 mod facts;
 mod health;
 mod launch;
@@ -12,6 +15,7 @@ mod layout;
 mod live_modes;
 mod panel;
 mod runtime;
+mod scope;
 mod send;
 mod session_view;
 mod settings;
@@ -25,6 +29,8 @@ use bongos_work::WorkStore;
 use gpui::{App, AppContext as _, Entity, Global};
 
 pub use actions::{action_types, chat, init_palette};
+pub use cleanup::{Cleanup, KeepReason, cleanup_verdict};
+pub use commands::{agent_choices, list_types};
 pub use facts::task_facts;
 pub use health::{
     ChatHealth, ChatHealthEvent, Health, HealthState, HealthStats, MIN_REFRESH_INTERVAL,
@@ -40,7 +46,10 @@ pub use live_modes::{SOURCE_NAME, start_current_todo};
 pub use panel::{ChatPanel, init_panel};
 pub use runtime::{
     ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChatRuntime, ChatRuntimeEvent, ChatState,
-    LiveChat, RuntimeStats,
+    LiveChat, MID_TURN, RuntimeStats,
+};
+pub use scope::{
+    ChatScope, CwdSource, IMPLEMENT_TYPE, START_FIRST, project_repositories, resolve_scope,
 };
 pub use send::{
     BRACKETED_WAIT, ChatToast, SendError, SendOptions, Sent, chat_for_prompts_file, send,
@@ -75,6 +84,7 @@ impl ChatDirs {
 pub fn register(workspace: &mut workspace::Workspace) {
     send::register(workspace);
     panel::register(workspace);
+    commands::register(workspace);
 }
 
 struct GlobalChatStore(Entity<ChatStore>);
@@ -106,6 +116,9 @@ impl ChatStore {
             .map(|global| global.0.clone())
     }
 }
+
+#[cfg(test)]
+mod commands_tests;
 
 #[cfg(test)]
 mod facts_tests;

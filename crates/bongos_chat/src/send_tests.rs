@@ -476,13 +476,29 @@ async fn test_send_region_refusals_keep_the_buffer(cx: &mut TestAppContext) {
     assert_eq!(editor_text(&editor, cx), PROMPT);
     assert!(editor_focused(&editor, cx));
 
-    // Closed: refused, the buffer as it was.
+    // Closed: "Resume <name> and send?" is asked; declining leaves the buffer as it was.
     workspace.update(cx, |workspace, cx| workspace.clear_all_notifications(cx));
     assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
     dispatch(cx, "chat::SendRegion");
-    wait_for(cx, "the refusal", STARTUP, |cx| toast_shown(&workspace, cx)).await;
+    let asked = |cx: &mut VisualTestContext| {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.has_active_modal(window, cx)
+        })
+    };
+    for _ in 0..200 {
+        if asked(cx) {
+            break;
+        }
+        cx.executor().timer(Duration::from_millis(25)).await;
+        cx.run_until_parked();
+    }
+    assert!(asked(cx), "the resume question");
+    assert!(!toast_shown(&workspace, cx));
+    dispatch(cx, "menu::Cancel");
+    assert!(!asked(cx));
     assert_eq!(editor_text(&editor, cx), PROMPT);
     assert_eq!(std::fs::read_to_string(&input).unwrap_or_default(), "");
+    assert_eq!(h.state(&id, cx), crate::ChatState::Closed);
 }
 
 #[gpui::test]

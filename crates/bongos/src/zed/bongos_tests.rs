@@ -287,3 +287,165 @@ async fn work_actions_share_the_task_namespace_without_colliding(cx: &mut TestAp
         }
     });
 }
+
+/// The `chat` commands of chat sessions part 1, with the palette text of each.
+const CHAT_ACTIONS: [(&str, &str); 12] = [
+    ("chat::New", "chat: new"),
+    ("chat::NewWithOptions", "chat: new with options"),
+    ("chat::NewPlan", "chat: new plan"),
+    ("chat::NewImplement", "chat: new implement"),
+    ("chat::NewReview", "chat: new review"),
+    ("chat::NewThinking", "chat: new thinking"),
+    ("chat::NewFree", "chat: new free"),
+    ("chat::Open", "chat: open"),
+    ("chat::OpenAny", "chat: open any"),
+    ("chat::Next", "chat: next"),
+    ("chat::Previous", "chat: previous"),
+    ("chat::Close", "chat: close"),
+];
+
+#[gpui::test]
+async fn chat_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in CHAT_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        assert!(
+            cx.build_action("chat::New", None)
+                .unwrap()
+                .partial_eq(&bongos_chat::chat::New)
+        );
+        assert!(
+            cx.build_action("chat::OpenAny", None)
+                .unwrap()
+                .partial_eq(&bongos_chat::chat::OpenAny)
+        );
+    });
+}
+
+/// `task: mode` -> Chat finds `chat::New` by name (the Work crate does not depend on chats) and
+/// dispatches it: in the app that is the real command, which answers in its own toast (here that
+/// chats are off), not the Work view's "arrives with feature 04".
+#[gpui::test]
+async fn task_mode_chat_reaches_the_real_chat_new(cx: &mut TestAppContext) {
+    use std::sync::Arc;
+
+    use gpui::{BorrowAppContext as _, VisualTestContext};
+    use project::Project;
+    use settings::SettingsStore;
+    use workspace::MultiWorkspace;
+    use workspace::notifications::NotificationId;
+
+    let app_state = super::tests::init_test(cx);
+    cx.executor().allow_parking();
+    let dir = std::env::temp_dir().join(format!(
+        "bongos-task-mode-chat-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let root = dir.join("work");
+    let project_dir = root.join("projects/invoicing");
+    let write = |path: std::path::PathBuf, text: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        project_dir.join("project.toml"),
+        "schema = 1\ntitle = \"Invoicing\"\n",
+    );
+    write(
+        project_dir.join("task.toml"),
+        "schema = 1\nid = \"top\"\ngoal = \"Invoicing\"\nkind = \"other\"\nstatus = \"open\"\n\
+         created = 2020-01-01T10:00:00Z\n",
+    );
+    write(
+        project_dir.join("tasks/backfill/task.toml"),
+        "schema = 1\nid = \"t1\"\ngoal = \"Backfill\"\nkind = \"pr-ship\"\nstatus = \"open\"\n\
+         created = 2020-01-01T10:00:00Z\n",
+    );
+
+    // The task is focused, as the Work view leaves it in the key value store.
+    let db = cx.update(|cx| db::kvp::KeyValueStore::global(cx));
+    db.scoped(bongos_work::KVP_NAMESPACE)
+        .write(bongos_work::FOCUS_KEY.to_string(), "\"t1\"".to_string())
+        .await
+        .unwrap();
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.work.get_or_insert_default().enabled = Some(true);
+            });
+        });
+        let fs = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+        bongos_work::init(fs, bongos_work::WorkDirs { root }, cx);
+        bongos_chat::init(
+            bongos_chat::ChatDirs {
+                types_root: dir.join("chat-types"),
+                runtime: dir.join("runtime"),
+            },
+            cx,
+        );
+    });
+    let loaded = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let tree =
+                bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot());
+            let focused = bongos_work::Focus::global(cx)
+                .and_then(|focus| focus.read(cx).task_id().map(str::to_string));
+            tree.is_some_and(|tree| tree.task_by_id("t1").is_some())
+                && focused.as_deref() == Some("t1")
+        })
+    };
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if loaded(cx) {
+            break;
+        }
+        cx.executor()
+            .timer(std::time::Duration::from_millis(50))
+            .await;
+    }
+    assert!(loaded(cx), "the work tree loaded with t1 focused");
+
+    let project = Project::test(app_state.fs.clone(), [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |multi, _| multi.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    workspace.update_in(cx, |workspace, window, cx| {
+        window.focus(&gpui::Focusable::focus_handle(workspace, cx), cx)
+    });
+    cx.run_until_parked();
+    let dispatch = |name: &str, cx: &mut VisualTestContext| {
+        let action = cx.update(|_, cx| cx.build_action(name, None).unwrap());
+        cx.update(|window, cx| window.dispatch_action(action, cx));
+        cx.run_until_parked();
+    };
+
+    dispatch("task::Mode", cx);
+    assert!(
+        workspace.update_in(cx, |workspace, window, cx| workspace
+            .has_active_modal(window, cx)),
+        "the mode picker is open"
+    );
+    cx.simulate_input("Chat:");
+    cx.run_until_parked();
+    dispatch("menu::Confirm", cx);
+
+    let toasts = workspace.read_with(cx, |workspace, _| workspace.notification_ids());
+    assert!(
+        toasts.contains(&NotificationId::unique::<bongos_chat::ChatToast>()),
+        "the real chat::New answered: {toasts:?}"
+    );
+    assert!(
+        !toasts.contains(&NotificationId::unique::<bongos_work::WorkToast>()),
+        "the Work view did not say chats are missing"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
