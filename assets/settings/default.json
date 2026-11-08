@@ -1522,6 +1522,15 @@
   //
   // Default: false
   "disable_ai": false,
+  // Settings for the Kotlin language server.
+  "kotlin": {
+    // Which Kotlin language server to run: "kotlin-lsp" (open source) or "intellij"
+    // (IntelliJ IDEA Ultimate license required).
+    "server": "kotlin-lsp",
+    // The JDK used for the Gradle import. Null detects one from the project's
+    // toolchain, JAVA_HOME and common locations.
+    "jdk_home": null
+  },
   // Inert in bongos, which never checks for updates.
   "auto_update": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.

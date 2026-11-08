@@ -2046,6 +2046,7 @@ dependencies = [
  "assets",
  "audio",
  "bongos_app",
+ "bongos_kotlin",
  "bongos_languages",
  "bongos_net",
  "bongos_version",
@@ -2205,6 +2206,15 @@ dependencies = [
  "settings",
  "settings_json",
  "tempfile",
+]
+
+[[package]]
+name = "bongos_kotlin"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "settings",
+ "util",
 ]
 
 [[package]]
