@@ -43,6 +43,9 @@ pub mod task {
             SetMergeShip,
             /// Picks a stacked task and points it at another sibling, or at main.
             Retarget,
+            /// Picks a stacked task that needs a rebase and marks its parent's current head as
+            /// seen, so it stops being flagged until the parent's branch moves again.
+            ClearRebase,
             /// Picks a leaf task and sets its result: a PR, document, link or other.
             SetResult,
             /// Picks a task with a result and clears it.
