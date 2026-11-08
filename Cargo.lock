@@ -2280,6 +2280,18 @@ name = "bongos_version"
 version = "0.1.0"
 
 [[package]]
+name = "bongos_work_model"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "borrow-or-share"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
