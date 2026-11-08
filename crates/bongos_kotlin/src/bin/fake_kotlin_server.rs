@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs,
-    io::{self, BufRead, Read, Write},
+    io::{self, BufRead, Write},
     path::PathBuf,
     process::ExitCode,
     sync::{Arc, Mutex},
