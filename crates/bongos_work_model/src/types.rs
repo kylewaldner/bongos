@@ -151,6 +151,9 @@ pub struct TaskResult {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<ResultState>,
+    /// The PRs of a `prs` result: the set a `babysit` task watches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -242,6 +245,30 @@ impl TaskFile {
             stacked_on: None,
             todos: Vec::new(),
             result: None,
+            history: Vec::new(),
+            extra: Extra::new(),
+        }
+    }
+}
+
+/// `task.toml` keeps at most this many history entries; the oldest move to `history.old.toml`.
+pub const HISTORY_LIMIT: usize = 200;
+
+/// `history.old.toml`: the oldest history entries of a task, oldest first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HistoryFile {
+    #[serde(default = "schema_one")]
+    pub schema: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<HistoryEntry>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl Default for HistoryFile {
+    fn default() -> Self {
+        Self {
+            schema: SCHEMA,
             history: Vec::new(),
             extra: Extra::new(),
         }

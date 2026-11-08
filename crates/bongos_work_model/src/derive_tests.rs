@@ -23,6 +23,7 @@ fn pr_result(state: ResultState) -> TaskResult {
         kind: ResultKind::Pr,
         url: Some("https://github.com/acme/invoicing/pull/1".to_string()),
         state: Some(state),
+        urls: Vec::new(),
         extra: Extra::new(),
     }
 }
