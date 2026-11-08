@@ -202,10 +202,17 @@ pub fn render_system(input: &RenderInput) -> String {
     out
 }
 
-/// `codex-instructions.md`: the same as `system.md`, and `context.md` as well because Codex has no
-/// hook to print it.
+/// The line that carries the bongos chat id in `codex-instructions.md`, so the session file Codex
+/// writes can be matched to its chat (see `capture.rs`). Whether Codex stores the instructions
+/// text in its session files is unverified.
+pub const CHAT_ID_LABEL: &str = "chat id: ";
+
+/// `codex-instructions.md`: a `chat id: <id>` line, the same as `system.md`, and `context.md` as
+/// well because Codex has no hook to print it. The file is also what the first-message fallback
+/// points Codex at, so the id line is in it on every path.
 pub fn render_codex_instructions(input: &RenderInput) -> String {
-    let mut parts = vec![prompt_body(input)];
+    let mut parts = vec![format!("{CHAT_ID_LABEL}{}", input.record.id)];
+    parts.push(prompt_body(input));
     parts.push(render_context(input).trim_end().to_string());
     let mut out = parts
         .into_iter()
@@ -227,10 +234,12 @@ pub fn shell_quote(path: &Path) -> Result<String> {
     Ok(format!("'{text}'"))
 }
 
-/// `claude-settings.json`: one `SessionStart` hook that prints `context.md`.
+/// `claude-settings.json`: one `SessionStart` hook that prints `context.md`, and the terminal bell
+/// notification channel so "waiting for input" rings (see `claude.rs` for what is verified).
 pub fn render_settings(context_path: &Path) -> Result<String> {
     let command = format!("cat {}", shell_quote(context_path)?);
     let settings = json!({
+        crate::claude::BELL_KEY: crate::claude::BELL_VALUE,
         "hooks": {
             "SessionStart": [
                 { "hooks": [ { "type": "command", "command": command } ] }

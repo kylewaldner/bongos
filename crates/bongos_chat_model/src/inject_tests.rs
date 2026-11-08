@@ -567,3 +567,32 @@ fn facts_carry_no_artifact() {
         pr_links: _,
     } = TaskFacts::default();
 }
+
+#[test]
+fn the_settings_turn_on_the_terminal_bell() {
+    let settings = render_settings(Path::new("/tmp/context.md")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(value[BELL_KEY], BELL_VALUE);
+    assert_eq!(value["preferredNotifChannel"], "terminal_bell");
+}
+
+/// The `codex-instructions.md` text for a chat with id `chat_id`, as the renderer writes it.
+pub(crate) fn rendered_codex_instructions(chat_id: &str) -> String {
+    let root = types_root();
+    let mut fixture = Fixture::new(&root, "implement", Agent::Codex, vec![]);
+    fixture.record.id = chat_id.to_string();
+    render_codex_instructions(&fixture.input())
+}
+
+#[test]
+fn codex_instructions_carry_the_chat_id() {
+    let text = rendered_codex_instructions("0190aaaa-bbbb-7ccc-8ddd-000011112222");
+    assert!(
+        text.lines()
+            .any(|line| line == "chat id: 0190aaaa-bbbb-7ccc-8ddd-000011112222")
+    );
+    // Claude's system file has no such line: its id is known before launch.
+    let root = types_root();
+    let fixture = Fixture::new(&root, "implement", Agent::Claude, vec![]);
+    assert!(!render_system(&fixture.input()).contains(CHAT_ID_LABEL));
+}
