@@ -5383,6 +5383,7 @@ mod tests {
                 "journal",
                 "keymap_editor",
                 "keystroke_input",
+                "kotlin",
                 "language_selector",
                 "line_ending_selector",
                 "lsp_tool",
