@@ -265,7 +265,8 @@ fn focus_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
 pub(crate) type AfterFocus =
     Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static>;
 
-/// Focuses the task `id`: records it, then switches the window to its [`target`].
+/// Focuses the task `id`: switches the window to its [`target`], and records the focus once that
+/// has worked (a failed open leaves the focus as it was).
 pub(crate) fn focus_task(
     id: &str,
     workspace: &mut Workspace,
@@ -305,14 +306,20 @@ pub(crate) fn focus_task_then(
         return;
     };
     let leaving = cx.entity().downgrade();
-    focus.update(cx, |focus, cx| focus.focus(id.to_string(), leaving, cx));
-    if let Some(store) = WorkStore::global(cx) {
-        store.update(cx, |store, cx| store.refresh_rebase(cx));
-    }
+    let id = id.to_string();
     cx.spawn_in(window, async move |workspace, cx| {
         match activate_paths(handle, vec![path], cx).await {
             Ok(opened) => {
-                focus.update(cx, |focus, _| focus.opened(&opened));
+                cx.update(|_, cx| {
+                    focus.update(cx, |focus, cx| {
+                        focus.focus(id, leaving, cx);
+                        focus.opened(&opened);
+                    });
+                    if let Some(store) = WorkStore::global(cx) {
+                        store.update(cx, |store, cx| store.refresh_rebase(cx));
+                    }
+                })
+                .log_err();
                 if let Some(note) = note {
                     opened.update(cx, |opened, cx| show_toast(opened, note, cx));
                 }
