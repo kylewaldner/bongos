@@ -14,12 +14,12 @@ use bongos_work_model::layout;
 use collections::HashMap;
 use editor::Editor;
 use fs::{CreateOptions, Fs};
-use project::Project;
 use gpui::{
     Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Styled as _,
     Subscription, WeakEntity, Window, px,
 };
+use project::Project;
 use settings::{Settings as _, SettingsStore};
 use ui::{IconName, Label, LabelCommon as _, prelude::*, v_flex};
 use workspace::dock::{DockPosition, Panel, PanelEvent};

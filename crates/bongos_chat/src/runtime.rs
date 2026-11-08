@@ -922,13 +922,10 @@ impl ChatRuntime {
             store.delete_if(
                 path,
                 move |record| {
-                    let verdict = cleanup_verdict(
-                        record,
-                        saw_input,
-                        live_session.as_deref(),
-                        &home,
-                        || capture.as_ref().and_then(CaptureInput::run),
-                    );
+                    let verdict =
+                        cleanup_verdict(record, saw_input, live_session.as_deref(), &home, || {
+                            capture.as_ref().and_then(CaptureInput::run)
+                        });
                     log::info!("chats: cleanup of an unprompted chat: {verdict:?}");
                     verdict == Cleanup::Delete
                 },

@@ -91,9 +91,7 @@ pub(crate) struct ChatPlan {
 /// Registers the commands of this module on `workspace`.
 pub fn register(workspace: &mut Workspace) {
     workspace
-        .register_action(|w, _: &chat::New, window, cx| {
-            new_chat(NewChat::asking(), w, window, cx)
-        })
+        .register_action(|w, _: &chat::New, window, cx| new_chat(NewChat::asking(), w, window, cx))
         .register_action(|w, _: &chat::NewWithOptions, window, cx| {
             let spec = NewChat {
                 chat_type: None,
@@ -154,9 +152,7 @@ fn new_chat(
             "Chat on which task?",
             "There is no task",
             |task, _| task.file.is_some(),
-            Box::new(move |id, workspace, window, cx| {
-                new_chat_on(id, spec, workspace, window, cx)
-            }),
+            Box::new(move |id, workspace, window, cx| new_chat_on(id, spec, workspace, window, cx)),
         ),
     }
 }
@@ -340,7 +336,8 @@ fn choose_type(
         configure(task_id, spec, agent, chat_type, workspace, window, cx);
         return;
     }
-    let Some(store) = ChatRuntime::global(cx).map(|runtime| runtime.read(cx).store().clone()) else {
+    let Some(store) = ChatRuntime::global(cx).map(|runtime| runtime.read(cx).store().clone())
+    else {
         return;
     };
     let types_root = store.read(cx).types_root(cx);
@@ -978,10 +975,7 @@ fn close(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Worksp
     pick(
         workspace,
         format!("{name} is in the middle of a turn. Close it?"),
-        vec![
-            "Keep it running".to_string(),
-            format!("Close {name} now"),
-        ],
+        vec!["Keep it running".to_string(), format!("Close {name} now")],
         0,
         Box::new(move |index, _, _, cx| {
             if index == 1 {
@@ -1029,7 +1023,8 @@ pub(crate) fn offer_resume_and_send(
             cx.spawn(async move |workspace, cx| {
                 let result = match opened.await {
                     Ok(()) => {
-                        let sent = cx.update(|cx| send(&chat_id, text, SendOptions { submit: true }, cx));
+                        let sent =
+                            cx.update(|cx| send(&chat_id, text, SendOptions { submit: true }, cx));
                         sent.await.map(|_| ()).map_err(|error| error.to_string())
                     }
                     Err(message) => Err(message),

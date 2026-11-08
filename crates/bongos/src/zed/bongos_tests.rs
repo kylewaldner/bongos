@@ -393,8 +393,8 @@ async fn task_mode_chat_reaches_the_real_chat_new(cx: &mut TestAppContext) {
     });
     let loaded = |cx: &mut TestAppContext| {
         cx.update(|cx| {
-            let tree = bongos_work::WorkStore::global(cx)
-                .and_then(|store| store.read(cx).snapshot());
+            let tree =
+                bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot());
             let focused = bongos_work::Focus::global(cx)
                 .and_then(|focus| focus.read(cx).task_id().map(str::to_string));
             tree.is_some_and(|tree| tree.task_by_id("t1").is_some())
@@ -430,7 +430,8 @@ async fn task_mode_chat_reaches_the_real_chat_new(cx: &mut TestAppContext) {
 
     dispatch("task::Mode", cx);
     assert!(
-        workspace.update_in(cx, |workspace, window, cx| workspace.has_active_modal(window, cx)),
+        workspace.update_in(cx, |workspace, window, cx| workspace
+            .has_active_modal(window, cx)),
         "the mode picker is open"
     );
     cx.simulate_input("Chat:");

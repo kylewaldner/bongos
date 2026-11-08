@@ -181,7 +181,10 @@ fn test_implement_without_a_worktree_is_refused() {
     );
     // Other types run in the task directory.
     let plan = resolve_scope(&tree, "t1", "plan", &repositories, None).unwrap();
-    assert_eq!(plan.cwd, base.join("work/projects/invoicing/tasks/backfill"));
+    assert_eq!(
+        plan.cwd,
+        base.join("work/projects/invoicing/tasks/backfill")
+    );
     // A document leaf is not a pull request: implement runs in its directory.
     let notes = resolve_scope(&tree, "t3", "implement", &repositories, None).unwrap();
     assert_eq!(notes.cwd_source, CwdSource::ScopeDir);
@@ -206,12 +209,26 @@ fn test_session_types_list_shipped_first() {
     write(&root.join("skills/model-routing/SKILL.md"), "skill\n");
     write(&root.join("broken/type.toml"), "schema = \n");
     std::fs::create_dir_all(root.join("empty")).unwrap();
-    let names: Vec<String> = list_types(&root).into_iter().map(|(name, _)| name).collect();
+    let names: Vec<String> = list_types(&root)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     assert_eq!(
         names,
-        ["plan", "implement", "review", "thinking", "free", "audit", "broken"]
+        [
+            "plan",
+            "implement",
+            "review",
+            "thinking",
+            "free",
+            "audit",
+            "broken"
+        ]
     );
-    let labels: Vec<String> = list_types(&root).into_iter().map(|(_, label)| label).collect();
+    let labels: Vec<String> = list_types(&root)
+        .into_iter()
+        .map(|(_, label)| label)
+        .collect();
     assert!(labels[5].starts_with("audit: Audit the code"));
     assert_eq!(labels[6], "broken: type.toml has an error");
 }
@@ -281,7 +298,7 @@ fn test_cleanup_deletes_only_when_sure() {
         Cleanup::Keep(KeepReason::ConversationStored)
     );
     // Unsure: an agent this version does not know.
-    let mut unknown = claude.clone();
+    let mut unknown = claude;
     unknown.agent = "gemini".to_string();
     assert_eq!(
         cleanup_verdict(&unknown, false, None, &home, never),
@@ -345,7 +362,10 @@ async fn test_a_missing_cli_is_not_offered(cx: &mut TestAppContext) {
     };
     assert_eq!(offered(None, cx), [Agent::Claude, Agent::Codex]);
     // The last agent comes first.
-    assert_eq!(offered(Some(Agent::Codex), cx), [Agent::Codex, Agent::Claude]);
+    assert_eq!(
+        offered(Some(Agent::Codex), cx),
+        [Agent::Codex, Agent::Claude]
+    );
     let labels: Vec<String> = health.read_with(cx, |health, _| {
         agent_choices(health.all(), None)
             .into_iter()
@@ -545,18 +565,26 @@ fn logged_cwds(h: &Harness) -> Vec<String> {
 }
 
 #[gpui::test]
-async fn test_new_chats_run_in_the_worktree_the_repository_and_the_group(
-    cx: &mut TestAppContext,
-) {
+async fn test_new_chats_run_in_the_worktree_the_repository_and_the_group(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
     cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
     add_tasks(&h, cx).await;
     let extra = h.base.join("extra");
     let projects = vec![h.project.clone()];
     let cases = [
-        ("t2", "implement", extra.join("worktrees/spec"), "billing/tasks/spec"),
+        (
+            "t2",
+            "implement",
+            extra.join("worktrees/spec"),
+            "billing/tasks/spec",
+        ),
         ("b-top", "plan", extra.join("repos/app"), "billing"),
-        ("g1", "plan", h.root.join("projects/billing/tasks/phase"), "billing/tasks/phase"),
+        (
+            "g1",
+            "plan",
+            h.root.join("projects/billing/tasks/phase"),
+            "billing/tasks/phase",
+        ),
     ];
     for (index, (task_id, chat_type, cwd, scope)) in cases.into_iter().enumerate() {
         let plan = plan_for(task_id, chat_type, Agent::Claude, cx);
@@ -598,16 +626,23 @@ async fn test_new_chat_through_its_pickers(cx: &mut TestAppContext) {
     let record = read_record(&record_path(&h.scope, &id)).unwrap();
     assert_eq!(record.agent, "claude");
     assert_eq!(record.chat_type, "plan");
-    assert_eq!(record.cwd, h.scope, "a PR leaf without a worktree: plan runs in its directory");
+    assert_eq!(
+        record.cwd, h.scope,
+        "a PR leaf without a worktree: plan runs in its directory"
+    );
     // The dock opened; the terminal did not take focus.
-    assert!(workspace.read_with(cx, |workspace, cx| workspace.right_dock().read(cx).is_open()));
+    assert!(workspace.read_with(cx, |workspace, cx| {
+        workspace.right_dock().read(cx).is_open()
+    }));
     let session = panel_of(&workspace, cx).read_with(cx, |panel, _| panel.session().unwrap());
     wait_for(cx, "the terminal view", STARTUP, |cx| {
         session.read_with(cx, |session, _| session.terminal_view().is_some())
     })
     .await;
     let view = session.read_with(cx, |session, _| session.terminal_view().cloned().unwrap());
-    assert!(!view.update_in(cx, |view, window, cx| view.focus_handle(cx).is_focused(window)));
+    assert!(!view.update_in(cx, |view, window, cx| {
+        view.focus_handle(cx).is_focused(window)
+    }));
     assert!(!toast_shown(&workspace, cx));
     // The next `chat: new` offers this agent first.
     assert_eq!(
@@ -668,7 +703,12 @@ async fn test_resume_uses_the_stored_id_and_cwd(cx: &mut TestAppContext) {
         .unwrap();
     assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
     // Elsewhere now: the resume still runs in the recorded directory.
-    let starts = |h: &Harness| h.log_lines("claude").iter().filter(|line| *line == "start").count();
+    let starts = |h: &Harness| {
+        h.log_lines("claude")
+            .iter()
+            .filter(|line| *line == "start")
+            .count()
+    };
     assert_eq!(starts(&h), 1);
     wait_for(cx, "the chat in the index", STARTUP, |cx| {
         h.store.read_with(cx, |store, _| store.find(&id).is_some())
@@ -695,13 +735,16 @@ async fn test_resume_uses_the_stored_id_and_cwd(cx: &mut TestAppContext) {
     assert_eq!(h.state(&id, cx), ChatState::Running);
 
     // Opening the running chat shows it, with no new launch.
-    let launches = h.runtime.read_with(cx, |runtime, _| runtime.stats().launches);
+    let launches = h
+        .runtime
+        .read_with(cx, |runtime, _| runtime.stats().launches);
     let opened = workspace.update_in(cx, |workspace, window, cx| {
         open_chat(&id, workspace, window, cx)
     });
     opened.await.unwrap();
     assert_eq!(
-        h.runtime.read_with(cx, |runtime, _| runtime.stats().launches),
+        h.runtime
+            .read_with(cx, |runtime, _| runtime.stats().launches),
         launches
     );
 }
@@ -817,7 +860,11 @@ async fn test_cleanup_deletes_a_never_prompted_chat_on_close(cx: &mut TestAppCon
         !h.runtime_root.join(&id).exists()
     })
     .await;
-    assert_eq!(h.runtime.read_with(cx, |runtime, _| runtime.stats().cleanups), 1);
+    assert_eq!(
+        h.runtime
+            .read_with(cx, |runtime, _| runtime.stats().cleanups),
+        1
+    );
 }
 
 #[gpui::test]
@@ -832,7 +879,11 @@ async fn test_cleanup_deletes_a_never_prompted_chat_on_exit(cx: &mut TestAppCont
     // The later close finds nothing more to do.
     assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
     settle(cx).await;
-    assert_eq!(h.runtime.read_with(cx, |runtime, _| runtime.stats().cleanups), 1);
+    assert_eq!(
+        h.runtime
+            .read_with(cx, |runtime, _| runtime.stats().cleanups),
+        1
+    );
 }
 
 #[gpui::test]
@@ -844,7 +895,11 @@ async fn test_cleanup_keeps_a_chat_with_input(cx: &mut TestAppContext) {
     assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
     settle(cx).await;
     assert!(read_record(&record_path(&h.scope, &id)).unwrap().prompted);
-    assert_eq!(h.runtime.read_with(cx, |runtime, _| runtime.stats().cleanups), 0);
+    assert_eq!(
+        h.runtime
+            .read_with(cx, |runtime, _| runtime.stats().cleanups),
+        0
+    );
 }
 
 #[gpui::test]
