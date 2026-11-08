@@ -30,9 +30,9 @@ use crate::{
 };
 
 /// What a test allows for a state change to reach the runtime.
-const WITHIN: Duration = Duration::from_secs(1);
+pub(super) const WITHIN: Duration = Duration::from_secs(1);
 /// How long a test waits for something that has no time promise (a process starting).
-const STARTUP: Duration = Duration::from_secs(10);
+pub(super) const STARTUP: Duration = Duration::from_secs(10);
 
 /// The human-only artifacts of the test task: path, description.
 const SECRETS: [(&str, &str); 3] = [
@@ -91,27 +91,27 @@ fn codex_caps() -> Capabilities {
     CodexAdapter::new("codex").capabilities_from_help("codex-cli 0.46.0", help)
 }
 
-struct Harness {
+pub(super) struct Harness {
     _temp: TempDir,
-    base: PathBuf,
+    pub(super) base: PathBuf,
     /// The fake CLIs' log.
-    log: PathBuf,
+    pub(super) log: PathBuf,
     /// The home directory the runtime and fake Codex use.
-    home: PathBuf,
-    runtime_root: PathBuf,
-    work: Entity<WorkStore>,
-    store: Entity<ChatStore>,
-    types_root: PathBuf,
+    pub(super) home: PathBuf,
+    pub(super) runtime_root: PathBuf,
+    pub(super) work: Entity<WorkStore>,
+    pub(super) store: Entity<ChatStore>,
+    pub(super) types_root: PathBuf,
     /// The task directory chats are scoped to.
-    scope: PathBuf,
+    pub(super) scope: PathBuf,
     /// The directory chats run in.
-    cwd: PathBuf,
-    app_state: Arc<AppState>,
-    project: Entity<Project>,
-    runtime: Entity<ChatRuntime>,
+    pub(super) cwd: PathBuf,
+    pub(super) app_state: Arc<AppState>,
+    pub(super) project: Entity<Project>,
+    pub(super) runtime: Entity<ChatRuntime>,
 }
 
-fn set_chat_settings(cx: &mut TestAppContext, enabled: bool, idle_after_secs: u64) {
+pub(super) fn set_chat_settings(cx: &mut TestAppContext, enabled: bool, idle_after_secs: u64) {
     cx.update(|cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
@@ -135,7 +135,7 @@ fn set_chat_settings(cx: &mut TestAppContext, enabled: bool, idle_after_secs: u6
 
 /// A runtime over temporary directories. `env` is added to the fakes' environment (through the
 /// health's terminal environment, as a launch does).
-async fn harness(
+pub(super) async fn harness(
     cx: &mut TestAppContext,
     enabled: bool,
     idle_after_secs: u64,
@@ -227,7 +227,7 @@ async fn harness_with(
 
 impl Harness {
     /// A new chat of `agent` on the test task, its record written, and the request to launch it.
-    fn request(&self, agent: Agent, chat_type: &str) -> LaunchRequest {
+    pub(super) fn request(&self, agent: Agent, chat_type: &str) -> LaunchRequest {
         let record = ChatRecord::new(agent, chat_type, self.cwd.clone());
         let path = record_path(&self.scope, &record.id);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -263,7 +263,7 @@ impl Harness {
         }
     }
 
-    async fn launch(
+    pub(super) async fn launch(
         &self,
         request: LaunchRequest,
         project: &Entity<Project>,
@@ -277,7 +277,7 @@ impl Harness {
     }
 
     /// Launches `agent` and waits for the fake to be ready for input. Returns the chat id.
-    async fn start(&self, agent: Agent, cx: &mut TestAppContext) -> String {
+    pub(super) async fn start(&self, agent: Agent, cx: &mut TestAppContext) -> String {
         let request = self.request(agent, "implement");
         let id = request.record.id.clone();
         self.launch(request, &self.project, cx).await.unwrap();
@@ -291,7 +291,7 @@ impl Harness {
     }
 
     /// The fake's log lines of `name` (`claude` or `codex`), without the prefix.
-    fn log_lines(&self, name: &str) -> Vec<String> {
+    pub(super) fn log_lines(&self, name: &str) -> Vec<String> {
         let prefix = format!("{name} ");
         std::fs::read_to_string(&self.log)
             .unwrap_or_default()
@@ -309,12 +309,12 @@ impl Harness {
             .collect()
     }
 
-    fn state(&self, id: &str, cx: &mut TestAppContext) -> ChatState {
+    pub(super) fn state(&self, id: &str, cx: &mut TestAppContext) -> ChatState {
         self.runtime.read_with(cx, |runtime, _| runtime.state(id))
     }
 
     /// Types `line` and Enter into the chat's terminal.
-    fn type_line(&self, id: &str, line: &str, cx: &mut TestAppContext) {
+    pub(super) fn type_line(&self, id: &str, line: &str, cx: &mut TestAppContext) {
         let text = format!("{line}\r");
         self.runtime.update(cx, |runtime, cx| {
             let terminal = runtime.live(id).unwrap().terminal().clone();
@@ -339,7 +339,7 @@ impl Harness {
         );
     }
 
-    async fn wait_content(&self, id: &str, text: &str, cx: &mut TestAppContext) {
+    pub(super) async fn wait_content(&self, id: &str, text: &str, cx: &mut TestAppContext) {
         wait_for(cx, &format!("`{text}` in the terminal"), STARTUP, |cx| {
             self.runtime.update(cx, |runtime, cx| {
                 runtime
@@ -352,7 +352,7 @@ impl Harness {
 }
 
 /// Waits up to `limit` for `check`.
-async fn wait_for(
+pub(super) async fn wait_for(
     cx: &mut TestAppContext,
     what: &str,
     limit: Duration,
@@ -364,7 +364,7 @@ async fn wait_for(
 }
 
 /// Waits up to `limit` for `check`; returns whether it held.
-async fn try_wait_for(
+pub(super) async fn try_wait_for(
     cx: &mut TestAppContext,
     limit: Duration,
     check: impl Fn(&mut TestAppContext) -> bool,
@@ -882,7 +882,7 @@ fn todo_starts(h: &Harness, cx: &mut TestAppContext) -> Vec<Option<bongos_work_m
     })
 }
 
-async fn wait_for_task(h: &Harness, cx: &mut TestAppContext) {
+pub(super) async fn wait_for_task(h: &Harness, cx: &mut TestAppContext) {
     wait_for(cx, "t1 in the work tree", STARTUP, |cx| {
         h.work.read_with(cx, |work, _| {
             work.snapshot()

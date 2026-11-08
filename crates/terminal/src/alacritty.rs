@@ -840,6 +840,11 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+/// The term's modes now, not as of the last [`make_content`].
+pub(super) fn current_modes(term: &Term<ZedListener>) -> Modes {
+    terminal_modes_from_alacritty(*term.mode())
+}
+
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
 }

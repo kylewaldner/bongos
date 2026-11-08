@@ -1773,6 +1773,12 @@ impl Terminal {
         total_lines(&self.term.lock_unfair())
     }
 
+    /// The modes the program set, as of now. [`Terminal::last_content`] holds the modes of the
+    /// last sync, which runs only while a view draws the terminal.
+    pub fn current_modes(&self) -> Modes {
+        crate::alacritty::current_modes(&self.term.lock_unfair())
+    }
+
     pub fn viewport_lines(&self) -> usize {
         screen_lines(&self.term.lock_unfair())
     }
@@ -2167,9 +2173,10 @@ impl Terminal {
         cx.notify();
     }
 
-    ///Paste text into the terminal
+    ///Paste text into the terminal. Bracketed when the program asked for it as of now, not as of
+    ///the last sync, so a paste into a terminal no view draws is bracketed too.
     pub fn paste(&mut self, text: &str) {
-        let paste_text = if self.last_content.mode.contains(Modes::BRACKETED_PASTE) {
+        let paste_text = if self.current_modes().contains(Modes::BRACKETED_PASTE) {
             format!("{}{}{}", "\x1b[200~", text.replace('\x1b', ""), "\x1b[201~")
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")

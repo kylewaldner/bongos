@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use bongos_chat_model::{Agent, CaptureQuery, Fallback, adapter_for};
+use bongos_chat_model::{Agent, CaptureQuery, Fallback, NamedBy, adapter_for, from_title};
 use bongos_work_model::SharedArtifact;
 use futures::FutureExt as _;
 use futures::channel::oneshot;
@@ -108,6 +108,10 @@ pub struct LiveChat {
     command: String,
     session_id: Option<String>,
     prompted: bool,
+    /// Something was pasted through [`crate::send`]; the send names the chat, not a title.
+    sent: bool,
+    /// The chat has a name other than its default one, or a title already tried to name it.
+    auto_named: bool,
     last_output: Instant,
     bell_at: Option<Instant>,
     last_active_write: Option<Instant>,
@@ -159,6 +163,14 @@ impl LiveChat {
     pub fn prompted(&self) -> bool {
         self.prompted
     }
+
+    pub fn agent(&self) -> Agent {
+        self.agent
+    }
+
+    pub(crate) fn record_path(&self) -> &PathBuf {
+        &self.record_path
+    }
 }
 
 /// A launch's place in the per-directory queue of launches that capture their session id.
@@ -194,6 +206,11 @@ pub struct ChatRuntime {
     capture_slots: HashMap<PathBuf, CaptureSlot>,
     next_generation: usize,
     active_debounce: Duration,
+    bracketed_wait: Duration,
+    /// Per chat, the last send in line and its number: a send waits until the one before it has
+    /// written its Enter, so two pastes never interleave.
+    send_queues: HashMap<String, (usize, Shared<oneshot::Receiver<()>>)>,
+    next_send: usize,
     stats: RuntimeStats,
 }
 
@@ -214,6 +231,9 @@ impl ChatRuntime {
             capture_slots: HashMap::new(),
             next_generation: 0,
             active_debounce: ACTIVE_DEBOUNCE,
+            bracketed_wait: crate::send::BRACKETED_WAIT,
+            send_queues: HashMap::new(),
+            next_send: 0,
             stats: RuntimeStats::default(),
         }
     }
@@ -231,6 +251,49 @@ impl ChatRuntime {
     /// Replaces [`ACTIVE_DEBOUNCE`] (tests use a short one).
     pub fn set_active_debounce(&mut self, debounce: Duration) {
         self.active_debounce = debounce;
+    }
+
+    /// Replaces [`crate::send::BRACKETED_WAIT`] (tests use a short one).
+    pub fn set_bracketed_wait(&mut self, wait: Duration) {
+        self.bracketed_wait = wait;
+    }
+
+    pub(crate) fn bracketed_wait(&self) -> Duration {
+        self.bracketed_wait
+    }
+
+    /// Puts a send to `chat_id` in line. Returns what it waits for (the send before it), the
+    /// sender to drop once its Enter is written, and its number for [`Self::leave_send_queue`].
+    pub(crate) fn join_send_queue(
+        &mut self,
+        chat_id: &str,
+    ) -> (
+        Option<Shared<oneshot::Receiver<()>>>,
+        oneshot::Sender<()>,
+        usize,
+    ) {
+        let (done, done_rx) = oneshot::channel();
+        self.next_send += 1;
+        let number = self.next_send;
+        let previous = self
+            .send_queues
+            .insert(chat_id.to_string(), (number, done_rx.shared()));
+        (previous.map(|(_, previous)| previous), done, number)
+    }
+
+    /// Forgets the queue of `chat_id` when send `number` is still its last.
+    pub(crate) fn leave_send_queue(&mut self, chat_id: &str, number: usize) {
+        if self
+            .send_queues
+            .get(chat_id)
+            .is_some_and(|(last, _)| *last == number)
+        {
+            self.send_queues.remove(chat_id);
+        }
+    }
+
+    pub(crate) fn store(&self) -> &Entity<ChatStore> {
+        &self.store
     }
 
     pub fn stats(&self) -> RuntimeStats {
@@ -533,6 +596,8 @@ impl ChatRuntime {
             command,
             session_id: prepared.record.session_id,
             prompted: prepared.record.prompted,
+            sent: false,
+            auto_named: prepared.record.named_by != NamedBy::None,
             last_output: Instant::now(),
             bell_at: None,
             last_active_write: Some(Instant::now()),
@@ -569,6 +634,7 @@ impl ChatRuntime {
                 };
                 if chat.title != title {
                     chat.title = title;
+                    self.name_from_title(chat_id, cx);
                     self.touch_active(chat_id, cx);
                     cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
                     cx.notify();
@@ -585,6 +651,64 @@ impl ChatRuntime {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Names a chat that is still called by its default name and was prompted only by typing from
+    /// its title (design D16), once: the first title that is not the program's name or a spinner.
+    fn name_from_title(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self.live.get_mut(chat_id) else {
+            return;
+        };
+        let typed = chat.prompted || chat.terminal.read(cx).keyboard_input_sent();
+        if chat.auto_named || chat.sent || !typed {
+            return;
+        }
+        let Some(title) = chat.title.as_deref() else {
+            return;
+        };
+        let program = std::path::Path::new(&chat.command)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| chat.command.clone());
+        let name = from_title(title, &program)
+            .filter(|_| from_title(title, crate::health::agent_title(chat.agent)).is_some())
+            .filter(|_| from_title(title, chat.agent.as_str()).is_some());
+        let Some(name) = name else {
+            return;
+        };
+        chat.auto_named = true;
+        let path = chat.record_path.clone();
+        let write = self.store.update(cx, |store, cx| {
+            store.update(
+                path,
+                move |record| {
+                    crate::send::apply_name(record, name);
+                    Ok(())
+                },
+                cx,
+            )
+        });
+        cx.background_spawn(async move {
+            if let Err(error) = write.await {
+                log::warn!("chats: could not name the chat from its title: {error}");
+            }
+        })
+        .detach();
+    }
+
+    /// The text of a send was pasted into the chat: it counts as prompted, and the send, not a
+    /// title, names it.
+    pub(crate) fn note_pasted(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self.live.get_mut(chat_id) else {
+            return;
+        };
+        chat.sent = true;
+        chat.auto_named = true;
+        if !chat.prompted {
+            chat.prompted = true;
+            cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
+            cx.notify();
         }
     }
 

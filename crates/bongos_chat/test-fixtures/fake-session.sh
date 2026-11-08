@@ -7,18 +7,18 @@
 #   cwd <directory>
 #   env <NAME>=<value>         one line per BONGOS_* variable, sorted
 #   session <id>               fake-codex only, when it wrote a session file (see FAKE_CLI_HOME)
-# then turns on bracketed paste (ESC[?2004h), sets the OSC title to $FAKE_CLI_TITLE when set,
-# prints `ready` and reads the terminal in raw mode, byte for byte. Each byte is appended to
-# $FAKE_CLI_INPUT (when set) as three octal digits and a space, so a bracketed paste and its Enter
-# can be checked exactly. Each line (ended by CR or LF) is logged as `input <line>` and run:
+# then turns on bracketed paste (ESC[?2004h) unless $FAKE_CLI_NO_BRACKETED is set, sets the OSC
+# title to $FAKE_CLI_TITLE when set, prints `ready` and reads the terminal in raw mode, byte for
+# byte. Each byte is appended to $FAKE_CLI_INPUT (when set) as three octal digits and a space, so a
+# bracketed paste and its Enter can be checked exactly. Each line (ended by CR or LF) is logged as `input <line>` and run:
 #   bell            rings the bell (BEL)
 #   title <text>    sets the OSC title
 #   exit <code>     logs `exit <code>` and exits with that code
 #   anything else   is answered with `got <line>`
 # End of input (the terminal went away) logs `exit eof`.
 #
-# Knobs (environment variables): FAKE_CLI_LOG, FAKE_CLI_INPUT, FAKE_CLI_TITLE, and for fake-codex
-# FAKE_CLI_HOME: when set, a new or forked session writes the session file Codex would,
+# Knobs (environment variables): FAKE_CLI_LOG, FAKE_CLI_INPUT, FAKE_CLI_TITLE, FAKE_CLI_NO_BRACKETED,
+# and for fake-codex FAKE_CLI_HOME: when set, a new or forked session writes the session file Codex would,
 # `$FAKE_CLI_HOME/.codex/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl`, whose first line holds
 # the id and the working directory.
 
@@ -79,7 +79,9 @@ fake_session() {
   fi
 
   stty raw -echo 2>/dev/null
-  printf '\033[?2004h'
+  if [ -z "${FAKE_CLI_NO_BRACKETED:-}" ]; then
+    printf '\033[?2004h'
+  fi
   if [ -n "${FAKE_CLI_TITLE:-}" ]; then
     printf '\033]0;%s\007' "$FAKE_CLI_TITLE"
   fi
