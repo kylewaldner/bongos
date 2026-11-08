@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate 1: format (changed Rust files only), clippy on changed crates, hosts, licenses, no .github, no webrtc.
+# Gate 1: format (changed Rust files only), clippy on changed crates, hosts, licenses, .github holds only workflows/release.yml, no webrtc.
 # One line per check; the failing part of the output only for a check that fails. Full output is in
 # the log (script/bongos/tail-log check).
 #   BONGOS_FMT_ALL=1 checks the whole workspace with cargo fmt --all instead of the changed files.
@@ -58,12 +58,16 @@ run_check notice "$here/check-notice"
 run_check icons "$here/check-icons"
 
 no_github() {
-  if [ -e .github ] || [ -n "$(git ls-files .github)" ]; then
-    echo "bongos: .github must not exist; upstream workflows must not run here"
+  # Zed's own workflows stay out; the release workflow is the one tracked path allowed under .github/.
+  local bad
+  bad=$(git ls-files .github | grep -vx '.github/workflows/release.yml' || true)
+  if [ -n "$bad" ]; then
+    echo "bongos: .github may hold only workflows/release.yml; upstream workflows must not run here"
+    echo "$bad"
     return 1
   fi
 }
-run_check "no .github" no_github
+run_check ".github allowlist" no_github
 
 no_webrtc() {
   local tree

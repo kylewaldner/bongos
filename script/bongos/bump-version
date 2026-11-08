@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Sets the bongos version in one step: crates/bongos/Cargo.toml, crates/bongos_version/Cargo.toml and the
+# two matching Cargo.lock [[package]] entries. Edits files only; it never builds and never uses the network.
+#   bump-version <patch|minor|major>   bump, verify the lockfile with `cargo metadata --offline`, print the new version
+#   bump-version --show                print the current version; fails if the two crates disagree
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+cd "$root"
+
+die() { echo "bump-version: $*" >&2; exit 1; }
+
+app_toml=crates/bongos/Cargo.toml
+ver_toml=crates/bongos_version/Cargo.toml
+
+# The first `version = "..."` line is the [package] one in both manifests.
+manifest_version() {
+  local v
+  v=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$1" | head -n1)
+  [ -n "$v" ] || die "no version in $1"
+  echo "$v"
+}
+
+current_version() {
+  local a b
+  a=$(manifest_version "$app_toml")
+  b=$(manifest_version "$ver_toml")
+  [ "$a" = "$b" ] || die "versions disagree: $app_toml has $a, $ver_toml has $b"
+  echo "$a"
+}
+
+case ${1:-} in
+  -h|--help) sed -n '2,5p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --show) [ $# -eq 1 ] || die "--show takes no argument"; current_version; exit 0 ;;
+  patch|minor|major) [ $# -eq 1 ] || die "unexpected argument: $2" ;;
+  *) die "usage: bump-version <patch|minor|major> | --show" ;;
+esac
+
+old=$(current_version)
+[[ $old =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || die "current version is not X.Y.Z: $old"
+major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+case $1 in
+  patch) patch=$((patch + 1)) ;;
+  minor) minor=$((minor + 1)); patch=0 ;;
+  major) major=$((major + 1)); minor=0; patch=0 ;;
+esac
+new="$major.$minor.$patch"
+
+# Rewrite the first version line of a manifest.
+set_manifest() {
+  sed -i "0,/^version = \"[^\"]*\"\$/s//version = \"$new\"/" "$1"
+}
+
+# Rewrite the version line right after `name = "<package>"` in Cargo.lock.
+set_lock() {
+  local pkg=$1 n
+  n=$(grep -c "^name = \"$pkg\"\$" Cargo.lock || true)
+  [ "$n" = 1 ] || die "Cargo.lock has $n [[package]] entries for $pkg, expected 1"
+  sed -i "/^name = \"$pkg\"\$/{n;s/^version = \".*\"\$/version = \"$new\"/}" Cargo.lock
+  grep -A1 "^name = \"$pkg\"\$" Cargo.lock | grep -qx "version = \"$new\"" || die "could not set $pkg in Cargo.lock"
+}
+
+set_manifest "$app_toml"
+set_manifest "$ver_toml"
+set_lock bongos
+set_lock bongos_version
+
+[ "$(current_version)" = "$new" ] || die "manifests do not read $new after the edit"
+cargo metadata --offline --format-version 1 >/dev/null || die "cargo metadata --offline failed; the lockfile does not match the manifests"
+
+echo "$new"
