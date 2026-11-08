@@ -6,8 +6,8 @@ use std::rc::Rc;
 use bongos_work_model::commands::default_todos;
 use bongos_work_model::{Kind, TaskFile, Todo, TodoState, layout, serialize_task};
 use db::AppDatabase;
-use settings::Settings as _;
 use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
+use settings::Settings as _;
 
 use crate::artifact_tests::with_artifacts;
 use crate::command_tests::{Harness, Input, dispatch, harness, wait_until};
@@ -355,7 +355,10 @@ async fn a_default_workspace_has_the_work_panel(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     let panel = workspace.read_with(cx, |workspace, cx| workspace.panel::<WorkPanel>(cx));
-    assert!(panel.is_some(), "no setting was written, yet the panel exists");
+    assert!(
+        panel.is_some(),
+        "no setting was written, yet the panel exists"
+    );
 }
 
 #[gpui::test]
