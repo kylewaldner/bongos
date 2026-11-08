@@ -366,3 +366,34 @@ fn an_invalid_agent_file_fails_only_that_agent() {
     let error = resolve_in(&root, "plan", Agent::Codex).unwrap_err();
     assert_eq!(error.path, Some(dir.join("codex.toml")));
 }
+
+#[test]
+fn a_broken_skill_is_missing_not_an_error() {
+    let root = seeded();
+    let claude_home = root.path().join("claude-home");
+    let skills = root.path().join(SKILLS_DIR);
+    // A plain file where the skill directory should be (NotADirectory).
+    fs::create_dir_all(&skills).unwrap();
+    fs::write(skills.join("model-routing"), "not a directory").unwrap();
+    let resolved = resolve("implement", Agent::Claude, root.path(), &claude_home).unwrap();
+    assert!(resolved.skills.is_empty());
+    assert_eq!(resolved.missing_skills, ["model-routing"]);
+
+    // A SKILL.md that is a directory (IsADirectory), then invalid UTF-8; the next root is tried.
+    fs::remove_file(skills.join("model-routing")).unwrap();
+    fs::create_dir_all(skills.join("model-routing").join("SKILL.md")).unwrap();
+    let resolved = resolve("implement", Agent::Claude, root.path(), &claude_home).unwrap();
+    assert_eq!(resolved.missing_skills, ["model-routing"]);
+
+    fs::remove_dir_all(skills.join("model-routing")).unwrap();
+    fs::create_dir_all(skills.join("model-routing")).unwrap();
+    fs::write(skills.join("model-routing").join("SKILL.md"), [0xff, 0xfe]).unwrap();
+    write_skill(
+        &claude_home.join("skills"),
+        "model-routing",
+        "from claude home",
+    );
+    let resolved = resolve("implement", Agent::Claude, root.path(), &claude_home).unwrap();
+    assert_eq!(resolved.skills[0].text, "from claude home");
+    assert!(resolved.missing_skills.is_empty());
+}

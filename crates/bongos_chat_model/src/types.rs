@@ -3,10 +3,9 @@
 //! for an agent. A type is read from disk at every resolve, so an edit applies to the next chat.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use bongos_work_model::files::write_atomic;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, ErrorKind, Result};
@@ -110,7 +109,8 @@ fn valid_skill_name(name: &str) -> bool {
 /// as needed. An existing directory is left exactly as it is, whatever it holds, so a file Kyle
 /// edited or added, or one he deleted, is never touched. A directory is only ever written by the
 /// call that created it (`create_dir` fails when it exists), so nothing is replaced. Returns the
-/// names of the types written.
+/// names of the types written. A crash part way through can leave a type directory with only some
+/// of its files; that is not repaired, by design, because an existing directory is never touched.
 pub fn seed(types_root: &Path) -> Result<Vec<String>> {
     fs::create_dir_all(types_root).map_err(|error| Error::io(types_root, error))?;
     let mut written = Vec::new();
@@ -123,11 +123,27 @@ pub fn seed(types_root: &Path) -> Result<Vec<String>> {
         }
         for (file_name, text) in shipped.files {
             let path = dir.join(file_name);
-            write_atomic(&path, text.as_bytes()).map_err(|error| Error::io(&path, error))?;
+            create_new(&path, text.as_bytes()).map_err(|error| Error::io(&path, error))?;
         }
         written.push(shipped.name.to_string());
     }
     Ok(written)
+}
+
+/// Creates `path` with `bytes`; fails with `AlreadyExists` rather than replacing anything. An
+/// `AlreadyExists` result is not an error: whatever is there stays.
+fn create_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 /// Reads the type `chat_type` under `types_root` for `agent`, fresh from disk, and looks up its
@@ -171,7 +187,7 @@ pub fn resolve(
     let mut skills = Vec::new();
     let mut missing_skills = Vec::new();
     for name in &config.skills {
-        match find_skill(name, types_root, claude_home)? {
+        match find_skill(name, types_root, claude_home) {
             Some(skill) => skills.push(skill),
             None => missing_skills.push(name.clone()),
         }
@@ -189,21 +205,23 @@ pub fn resolve(
     })
 }
 
-fn find_skill(name: &str, types_root: &Path, claude_home: &Path) -> Result<Option<ResolvedSkill>> {
+fn find_skill(name: &str, types_root: &Path, claude_home: &Path) -> Option<ResolvedSkill> {
     if !valid_skill_name(name) {
-        return Ok(None);
+        return None;
     }
     for root in [types_root.join(SKILLS_DIR), claude_home.join("skills")] {
         let dir = root.join(name);
-        if let Some(text) = read_optional(&dir.join(SKILL_FILE))? {
-            return Ok(Some(ResolvedSkill {
+        // Any read error (not a directory, a directory, permissions, invalid UTF-8) means this
+        // root has no usable skill: a broken skill must never fail the resolve.
+        if let Ok(text) = fs::read_to_string(dir.join(SKILL_FILE)) {
+            return Some(ResolvedSkill {
                 name: name.to_string(),
                 dir,
                 text,
-            }));
+            });
         }
     }
-    Ok(None)
+    None
 }
 
 /// The text of a file, or `None` when it does not exist.
