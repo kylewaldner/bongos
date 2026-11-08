@@ -176,7 +176,7 @@ pub fn menu_items(snapshot: &Snapshot) -> Vec<MenuItem> {
             .as_ref()
             .is_some_and(|fallback| fallback.kind == FallbackReason::EulaNotAccepted);
     let no_jdk = failure.is_some_and(|reason| reason.starts_with(NO_JDK_REASON));
-    let has_gradle_error = failure.is_some() && snapshot.gradle_error.is_some();
+    let has_gradle_error = snapshot.gradle_error.is_some();
     if eula || no_jdk || has_gradle_error {
         items.push(MenuItem::Separator);
     }
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_the_last_gradle_error_shows_only_after_a_failure() {
+    fn test_the_last_gradle_error_shows_whenever_it_is_set() {
         let mut snapshot = lsp(failed("server exited unexpectedly (exit status: 1)"));
         snapshot.gradle_error = Some("Gradle import failed: Could not resolve x".into());
         assert_eq!(
@@ -453,6 +453,12 @@ mod tests {
             ))
         );
         snapshot.status = ServerStatus::Ready;
+        assert!(
+            menu_items(&snapshot)
+                .iter()
+                .any(|item| matches!(item, MenuItem::Note(_)))
+        );
+        snapshot.gradle_error = None;
         assert!(
             !menu_items(&snapshot)
                 .iter()

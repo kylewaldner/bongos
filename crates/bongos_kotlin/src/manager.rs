@@ -881,6 +881,11 @@ impl KotlinProjectManager {
         let runs_intellij = self.worktree(worktree_id).is_some_and(|state| {
             state.effective == KotlinServerKind::Intellij && state.fallback.is_none()
         });
+        if let Some(state) = self.worktrees.get_mut(&worktree_id)
+            && let Some(line) = text.lines().rev().find(|line| is_gradle_error(line))
+        {
+            state.gradle_error = Some(line.trim().to_string());
+        }
         if runs_intellij && is_license_lost_signal(text) {
             let line = text
                 .lines()
@@ -1774,6 +1779,18 @@ mod tests {
             manager.worktree(worktree()).unwrap().gradle_error.clone()
         });
         assert_eq!(error.as_deref(), Some("Gradle import failed: no wrapper"));
+    }
+
+    #[gpui::test]
+    fn test_a_gradle_failure_on_live_stderr_is_kept_for_the_menu(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_text(worktree(), "Gradle import failed: offline\n", cx)
+        });
+        let error = harness.manager.read_with(cx, |manager, _| {
+            manager.worktree(worktree()).unwrap().gradle_error.clone()
+        });
+        assert_eq!(error.as_deref(), Some("Gradle import failed: offline"));
     }
 
     #[gpui::test]
