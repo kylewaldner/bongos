@@ -12,14 +12,14 @@ use std::sync::Arc;
 
 use fs::Fs;
 use gpui::{
-    Action, AnyElement, App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    Action, AnyElement, App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     ScrollStrategy, StatefulInteractiveElement as _, Styled as _, Subscription,
     UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 use settings::{Settings as _, SettingsStore};
 use ui::{
-    Button, ButtonCommon as _, Clickable as _, Color, IconName, Label, LabelCommon as _,
+    Button, Clickable as _, Color, IconName, Label, LabelCommon as _,
     LabelSize, ListItem, ListItemSpacing, Tooltip, h_flex, prelude::*, v_flex,
 };
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -408,7 +408,7 @@ impl Render for WorkPanel {
                 }),
             )
             .track_scroll(&self.scroll_handle)
-            .flex_grow()
+            .flex_1()
             .into_any_element()
         };
         v_flex()
