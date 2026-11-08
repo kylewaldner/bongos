@@ -244,7 +244,7 @@ fn set_default_visibility(
 }
 
 /// The focused task's id, when it names a task in `tree`.
-pub(crate) fn focused(tree: &WorkTree, cx: &gpui::App) -> Option<String> {
+pub fn focused(tree: &WorkTree, cx: &gpui::App) -> Option<String> {
     let focus = Focus::global(cx)?;
     let id = focus.read(cx).task_id()?.to_string();
     tree.task_by_id(&id).is_some().then_some(id)

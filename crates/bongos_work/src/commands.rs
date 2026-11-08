@@ -161,7 +161,7 @@ pub fn register(workspace: &mut Workspace) {
     filters::register(workspace);
 }
 
-pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+pub fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
     workspace.show_toast(
         Toast::new(NotificationId::unique::<WorkToast>(), message),
         cx,
@@ -169,7 +169,7 @@ pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Co
 }
 
 /// The tree, when the store is on and has loaded it; otherwise a toast says why.
-pub(crate) fn ready(
+pub fn ready(
     workspace: &mut Workspace,
     cx: &mut Context<Workspace>,
 ) -> Option<Arc<WorkTree>> {
@@ -313,7 +313,7 @@ pub(crate) fn task_choices(
 
 /// Asks which task, among those that pass `keep`, then calls `then` with its id. With none, a
 /// toast says `none`.
-pub(crate) fn with_task(
+pub fn with_task(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,

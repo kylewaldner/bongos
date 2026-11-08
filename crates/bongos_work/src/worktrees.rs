@@ -305,7 +305,7 @@ pub(crate) fn remote_names(url: &str, github: &str) -> bool {
 }
 
 /// `path` with a leading `~` replaced by the home directory.
-pub(crate) fn expand_home(path: &str) -> PathBuf {
+pub fn expand_home(path: &str) -> PathBuf {
     if path == "~" {
         util::paths::home_dir().clone()
     } else if let Some(rest) = path.strip_prefix("~/") {

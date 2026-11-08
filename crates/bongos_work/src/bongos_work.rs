@@ -36,7 +36,11 @@ use gpui::{App, AppContext as _, Entity, Global};
 pub use actions::{artifact, project, task, todo, work};
 pub use changes::CHANGES_INTERVAL;
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
-pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE};
+pub use artifacts::focused;
+pub use commands::{ready, show_toast, with_task};
+pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, is_project_top, target};
+pub use modals::{Then, ask, pick};
+pub use worktrees::expand_home;
 pub use panel::{WorkPanel, init_panel};
 pub use rebase::{CHECK_INTERVAL, RebaseState};
 pub use registry::{

@@ -14,7 +14,7 @@ use bongos_chat_model::{
     Agent, AgentAdapter as _, Capabilities, ChatRecord, ClaudeAdapter, CodexAdapter, LaunchKind,
     TaskFacts, read_record, record_path, resolve, seed, write_record,
 };
-use bongos_work::{WorkDirs, WorkSettings, WorkStore};
+use bongos_work::{LiveModesRegistry, WorkDirs, WorkSettings, WorkStore, WorkStoreEvent};
 use bongos_work_model::session_context;
 use fs::RealFs;
 use gpui::{AppContext as _, Entity, TestAppContext, UpdateGlobal as _};
@@ -53,12 +53,18 @@ fn write(path: &Path, text: &str) {
 }
 
 /// A task with one shared file and the human-only files of `SECRETS`.
-fn seed_task(dir: &Path) {
-    write(
-        &dir.join("task.toml"),
+fn seed_task(dir: &Path, todos: bool) {
+    let mut task = String::from(
         "schema = 1\nid = \"t1\"\ngoal = \"Backfill usage events\"\nkind = \"pr-ship\"\n\
          status = \"open\"\ncreated = 2020-01-01T10:00:00Z\n",
     );
+    if todos {
+        task.push_str(
+            "\n[[todos]]\nname = \"implement\"\nstate = \"open\"\n\n\
+             [[todos]]\nname = \"review\"\nstate = \"open\"\n",
+        );
+    }
+    write(&dir.join("task.toml"), &task);
     write(&dir.join("docs/design.md"), "# design\n");
     let mut manifest = String::from(
         "schema = 1\n\n[[artifact]]\npath = \"docs/design.md\"\ndescription = \"The backfill \
@@ -93,6 +99,8 @@ struct Harness {
     /// The home directory the runtime and fake Codex use.
     home: PathBuf,
     runtime_root: PathBuf,
+    work: Entity<WorkStore>,
+    store: Entity<ChatStore>,
     types_root: PathBuf,
     /// The task directory chats are scoped to.
     scope: PathBuf,
@@ -133,12 +141,33 @@ async fn harness(
     idle_after_secs: u64,
     env: &[(&str, &str)],
 ) -> Harness {
+    harness_with(cx, enabled, idle_after_secs, env, false).await
+}
+
+/// `harness`, with todos on the test task when `todos` (none of them started).
+async fn harness_with(
+    cx: &mut TestAppContext,
+    enabled: bool,
+    idle_after_secs: u64,
+    env: &[(&str, &str)],
+    todos: bool,
+) -> Harness {
     cx.executor().allow_parking();
     let temp = TempDir::new().unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
     let root = base.join("work");
     let scope = root.join("projects/invoicing/tasks/backfill");
-    seed_task(&scope);
+    // The project the task is in, so the work tree holds it.
+    write(
+        &root.join("projects/invoicing/project.toml"),
+        "schema = 1\ntitle = \"Invoicing\"\n",
+    );
+    write(
+        &root.join("projects/invoicing/task.toml"),
+        "schema = 1\nid = \"top\"\ngoal = \"Invoicing\"\nkind = \"other\"\nstatus = \"open\"\n\
+         created = 2020-01-01T10:00:00Z\n",
+    );
+    seed_task(&scope, todos);
     let cwd = base.join("worktree");
     std::fs::create_dir_all(&cwd).unwrap();
     let home = base.join("home");
@@ -162,11 +191,13 @@ async fn harness(
 
     let fs = Arc::new(RealFs::new(None, cx.executor()));
     let work = cx.new(|cx| WorkStore::new(fs, WorkDirs { root }, cx));
+    let work_store = work.clone();
     let dirs = ChatDirs {
         types_root: types_root.clone(),
         runtime: runtime_root.clone(),
     };
     let store = cx.new(|cx| ChatStore::new(work, dirs, cx));
+    let chat_store = store.clone();
     let mut health_env: BTreeMap<String, String> = env
         .iter()
         .map(|(name, value)| (name.to_string(), value.to_string()))
@@ -183,6 +214,8 @@ async fn harness(
         log,
         home,
         runtime_root,
+        work: work_store,
+        store: chat_store,
         types_root,
         scope,
         cwd,
@@ -826,4 +859,186 @@ async fn test_codex_launches_in_one_directory_wait_for_the_capture(cx: &mut Test
         })
         .collect();
     assert_eq!(recorded, session_ids);
+}
+
+/// The `started` times of the todos of `t1` in the Work snapshot.
+fn todo_starts(h: &Harness, cx: &mut TestAppContext) -> Vec<Option<bongos_work_model::Timestamp>> {
+    h.work.read_with(cx, |work, _| {
+        let tree = work.snapshot().expect("the work tree is loaded");
+        let task = tree.task_by_id("t1").expect("t1 is in the tree");
+        task.file
+            .as_ref()
+            .unwrap()
+            .todos
+            .iter()
+            .map(|todo| todo.started)
+            .collect()
+    })
+}
+
+async fn wait_for_task(h: &Harness, cx: &mut TestAppContext) {
+    wait_for(cx, "t1 in the work tree", STARTUP, |cx| {
+        h.work.read_with(cx, |work, _| {
+            work.snapshot()
+                .is_some_and(|tree| tree.task_by_id("t1").is_some())
+        })
+    })
+    .await;
+}
+
+#[gpui::test]
+async fn test_the_work_store_reports_the_open_chat_until_it_ends(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    wait_for_task(&h, cx).await;
+    cx.update(|cx| crate::live_modes::init(&h.runtime, &h.store, cx));
+    let changes = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    cx.update(|cx| {
+        let changes = changes.clone();
+        cx.subscribe(&h.work, move |_, event, _| {
+            if *event == WorkStoreEvent::LiveModesChanged {
+                changes.set(changes.get() + 1);
+            }
+        })
+        .detach();
+    });
+    let open_chats = |cx: &mut TestAppContext| {
+        cx.update(|cx| LiveModesRegistry::live_modes("t1", cx).open_chats)
+    };
+    assert_eq!(open_chats(cx), 0);
+
+    let id = h.start(Agent::Claude, cx).await;
+    // The record is in the chat index once the work store has seen its file.
+    wait_for(cx, "one open chat on t1", STARTUP, |cx| open_chats(cx) == 1).await;
+    assert_eq!(cx.update(|cx| LiveModesRegistry::live_modes("top", cx).open_chats), 0);
+    let after_start = changes.get();
+    assert!(after_start >= 1, "the registry was told the chat started");
+
+    h.type_line(&id, "bell", cx);
+    h.wait_state(&id, ChatState::Waiting, cx).await;
+    assert_eq!(open_chats(cx), 1, "a waiting chat is still open");
+
+    h.type_line(&id, "exit 0", cx);
+    h.wait_state(&id, ChatState::Exited { code: Some(0) }, cx)
+        .await;
+    wait_for(cx, "no open chat on t1", WITHIN, |cx| open_chats(cx) == 0).await;
+    assert!(changes.get() > after_start, "the registry was told the chat ended");
+}
+
+#[gpui::test]
+async fn test_a_chat_start_starts_the_current_todo_once(cx: &mut TestAppContext) {
+    let h = harness_with(cx, true, 60, &[], true).await;
+    wait_for_task(&h, cx).await;
+    assert_eq!(todo_starts(&h, cx), vec![None, None]);
+
+    let id = h.start(Agent::Claude, cx).await;
+    wait_for(cx, "the current todo to start", STARTUP, |cx| {
+        todo_starts(&h, cx)[0].is_some()
+    })
+    .await;
+    let started = todo_starts(&h, cx);
+    assert!(started[0].is_some());
+    assert_eq!(started[1], None, "only the current todo starts");
+    let history = |cx: &mut TestAppContext| {
+        h.work.read_with(cx, |work, _| {
+            let tree = work.snapshot().unwrap();
+            let file = tree.task_by_id("t1").unwrap().file.clone().unwrap();
+            file.history
+                .iter()
+                .filter(|entry| entry.event == "todo started")
+                .map(|entry| entry.by.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(history(cx), vec!["chat".to_string()]);
+
+    // A second chat on the task leaves the time as it is.
+    assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
+    h.start(Agent::Claude, cx).await;
+    cx.run_until_parked();
+    assert_eq!(todo_starts(&h, cx), started);
+    assert_eq!(history(cx).len(), 1);
+
+    // Asked directly, it says it did nothing.
+    let again = cx.update(|cx| crate::start_current_todo(&h.work, "t1", cx));
+    assert_eq!(again.await, Ok(false));
+    assert_eq!(todo_starts(&h, cx), started);
+}
+
+#[gpui::test]
+async fn test_start_current_todo_writes_once_and_ignores_other_tasks(cx: &mut TestAppContext) {
+    let h = harness_with(cx, true, 60, &[], true).await;
+    wait_for_task(&h, cx).await;
+    // A group and an unknown task have no todo to start.
+    for id in ["top", "nope"] {
+        let task = cx.update(|cx| crate::start_current_todo(&h.work, id, cx));
+        assert_eq!(task.await, Ok(false), "{id}");
+    }
+    assert_eq!(todo_starts(&h, cx), vec![None, None]);
+
+    let first = cx.update(|cx| crate::start_current_todo(&h.work, "t1", cx));
+    assert_eq!(first.await, Ok(true));
+    let started = todo_starts(&h, cx);
+    assert!(started[0].is_some() && started[1].is_none());
+    let second = cx.update(|cx| crate::start_current_todo(&h.work, "t1", cx));
+    assert_eq!(second.await, Ok(false));
+    assert_eq!(todo_starts(&h, cx), started);
+}
+
+#[gpui::test]
+async fn test_a_dropped_launch_task_frees_its_chat_id(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let request = h.request(Agent::Claude, "implement");
+    let projects = vec![h.project.clone()];
+    let task = h.runtime.update(cx, |runtime, cx| {
+        runtime.launch(request.clone(), &projects, cx)
+    });
+    // While the task lives, the chat counts as launching.
+    let again = h.runtime.update(cx, |runtime, cx| {
+        runtime.launch(request.clone(), &projects, cx)
+    });
+    assert_eq!(again.await, Err(LaunchError::AlreadyRunning));
+    drop(task);
+    h.launch(request, &h.project, cx).await.unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_runtime_root_is_created_private_and_checked() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    use crate::launch::write_runtime_dir;
+
+    let temp = TempDir::new().unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let files = vec![(PathBuf::from("context.md"), "text\n".to_string())];
+
+    // Created with its missing parents; only the root and below are private.
+    let root = base.join("deep/er/runtime");
+    write_runtime_dir(&root, &root.join("c1"), &files).unwrap();
+    assert_eq!(mode(&root), 0o700);
+    write_runtime_dir(&root, &root.join("c1"), &files).unwrap();
+
+    // A root anyone else can read is refused, not repaired, and nothing is written in it.
+    let open = base.join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let error = write_runtime_dir(&open, &open.join("c1"), &files).unwrap_err();
+    assert!(error.to_string().contains("0700"), "{error}");
+    assert!(!open.join("c1").exists());
+    assert_eq!(mode(&open), 0o755);
+
+    // A symbolic link, even to a private directory, is refused.
+    let target = base.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let link = base.join("link");
+    symlink(&target, &link).unwrap();
+    let error = write_runtime_dir(&link, &link.join("c1"), &files).unwrap_err();
+    assert!(error.to_string().contains("not a real directory"), "{error}");
+    assert!(!target.join("c1").exists());
+
+    // So is a file in its place.
+    let file = base.join("file");
+    std::fs::write(&file, "x").unwrap();
+    assert!(write_runtime_dir(&file, &file.join("c1"), &files).is_err());
 }

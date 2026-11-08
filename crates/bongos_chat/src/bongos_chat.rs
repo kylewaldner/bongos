@@ -6,7 +6,9 @@
 
 mod actions;
 mod health;
+mod facts;
 mod launch;
+mod live_modes;
 mod runtime;
 mod settings;
 mod store;
@@ -24,6 +26,8 @@ pub use health::{
     PROBE_TIMEOUT, find_program, fix_logged_out, fix_login_unchecked, fix_not_found,
     fix_not_probed,
 };
+pub use facts::task_facts;
+pub use live_modes::{SOURCE_NAME, start_current_todo};
 pub use launch::{
     CLAUDE_SETTINGS_FILE, CODEX_INSTRUCTIONS_FILE, CONTEXT_FILE, LaunchError, LaunchRequest,
     PLUGIN_DIR, SYSTEM_FILE,
@@ -72,7 +76,8 @@ pub fn init(dirs: ChatDirs, cx: &mut App) {
     };
     let store = cx.new(|cx| ChatStore::new(work, dirs, cx));
     cx.set_global(GlobalChatStore(store.clone()));
-    let runtime = cx.new(|_| ChatRuntime::new(store, util::paths::home_dir().clone()));
+    let runtime = cx.new(|_| ChatRuntime::new(store.clone(), util::paths::home_dir().clone()));
+    live_modes::init(&runtime, &store, cx);
     ChatRuntime::set_global(runtime, cx);
 }
 
@@ -83,6 +88,9 @@ impl ChatStore {
             .map(|global| global.0.clone())
     }
 }
+
+#[cfg(test)]
+mod facts_tests;
 
 #[cfg(test)]
 mod health_tests;

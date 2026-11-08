@@ -14,7 +14,7 @@ use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
 use workspace::{ModalView, Workspace};
 
 /// What runs once a choice or a line is made, on the workspace and after the modal has closed.
-pub(crate) type Then<T> =
+pub type Then<T> =
     Box<dyn FnOnce(T, &mut Workspace, &mut Window, &mut Context<Workspace>) + 'static>;
 
 /// Closes the active modal, then runs `then`.
@@ -51,7 +51,7 @@ pub(crate) fn show<V: ModalView>(
 
 /// Opens a list of `choices`; `then` gets the index of the one confirmed. `selected` is the row
 /// highlighted first.
-pub(crate) fn pick(
+pub fn pick(
     workspace: &mut Workspace,
     placeholder: impl Into<SharedString>,
     choices: Vec<String>,
@@ -193,7 +193,7 @@ impl PickerDelegate for ChoiceDelegate {
 
 /// Opens a line of text titled `title`, starting with `initial`; `then` gets the trimmed text
 /// when it is confirmed. An empty line is refused unless `allow_empty`.
-pub(crate) fn ask(
+pub fn ask(
     workspace: &mut Workspace,
     title: impl Into<SharedString>,
     initial: &str,

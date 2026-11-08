@@ -23,6 +23,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use bongos_chat_model::{Agent, CaptureQuery, Fallback, adapter_for};
@@ -166,12 +167,30 @@ struct CaptureSlot {
     done: Shared<oneshot::Receiver<()>>,
 }
 
+/// Removes a chat id from the launching set when dropped: at the end of its launch task, or when
+/// the task is dropped before it finished, so the chat can be launched again.
+struct LaunchGuard {
+    launching: Arc<Mutex<HashSet<String>>>,
+    chat_id: String,
+}
+
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        self.launching
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.chat_id);
+    }
+}
+
 /// The global runtime of chats. See the module documentation.
 pub struct ChatRuntime {
     store: Entity<ChatStore>,
     home: PathBuf,
     live: HashMap<String, LiveChat>,
-    launching: HashSet<String>,
+    /// Shared with each launch task's [`LaunchGuard`], which removes the id even when the task is
+    /// dropped without being awaited.
+    launching: Arc<Mutex<HashSet<String>>>,
     capture_slots: HashMap<PathBuf, CaptureSlot>,
     next_generation: usize,
     active_debounce: Duration,
@@ -191,7 +210,7 @@ impl ChatRuntime {
             store,
             home,
             live: HashMap::new(),
-            launching: HashSet::new(),
+            launching: Arc::default(),
             capture_slots: HashMap::new(),
             next_generation: 0,
             active_debounce: ACTIVE_DEBOUNCE,
@@ -262,7 +281,7 @@ impl ChatRuntime {
             return Err(LaunchError::Off);
         }
         let chat_id = request.record.id.clone();
-        if self.live.contains_key(&chat_id) || self.launching.contains(&chat_id) {
+        if self.live.contains_key(&chat_id) || self.is_launching(&chat_id) {
             return Err(LaunchError::AlreadyRunning);
         }
         let project = projects
@@ -317,10 +336,15 @@ impl ChatRuntime {
             None => (None, None, None),
         };
 
-        self.launching.insert(chat_id.clone());
+        self.launching_set().insert(chat_id.clone());
+        let guard = LaunchGuard {
+            launching: self.launching.clone(),
+            chat_id: chat_id,
+        };
         let label = format!("{}: {}", agent.as_str(), prepared.record.name);
         let store = self.store.clone();
         let record_path = request.record_path;
+        let task_id = request.task_id;
         Ok(cx.spawn(async move |this, cx| {
             let result = async {
                 if let Some(previous) = previous_capture {
@@ -376,14 +400,17 @@ impl ChatRuntime {
                         started,
                         capture_done,
                         cx,
-                    )
+                    );
+                    if let Some(task_id) = &task_id {
+                        this.start_todo(task_id, cx);
+                    }
                 })
                 .map_err(|error| LaunchError::Spawn(format!("{error:#}")))?;
                 Ok(())
             }
             .await;
+            drop(guard);
             this.update(cx, |this, _| {
-                this.launching.remove(&chat_id);
                 if let Some(generation) = capture_generation
                     && result.is_err()
                 {
@@ -393,6 +420,26 @@ impl ChatRuntime {
             .ok();
             result
         }))
+    }
+
+    fn launching_set(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.launching.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn is_launching(&self, chat_id: &str) -> bool {
+        self.launching_set().contains(chat_id)
+    }
+
+    /// A chat started on the leaf `task_id`: its current todo starts if it had not (design D23).
+    fn start_todo(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let work = self.store.read(cx).work().clone();
+        let start = crate::live_modes::start_current_todo(&work, task_id, cx);
+        cx.spawn(async move |_, _| {
+            if let Err(error) = start.await {
+                log::warn!("chats: could not start the task's current todo: {error}");
+            }
+        })
+        .detach();
     }
 
     fn release_capture_slot(&mut self, generation: usize) {
