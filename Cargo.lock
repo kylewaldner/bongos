@@ -2239,7 +2239,9 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "toml 0.8.23",
+ "ui",
  "util",
+ "workspace",
  "worktree",
  "zed_actions",
 ]

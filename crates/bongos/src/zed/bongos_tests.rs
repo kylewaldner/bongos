@@ -148,3 +148,36 @@ async fn kotlin_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let cases: [(&str, Box<dyn gpui::Action>, &str); 3] = [
+            (
+                "kotlin::ShowLogs",
+                Box::new(bongos_kotlin::ShowLogs),
+                "kotlin: show logs",
+            ),
+            (
+                "kotlin::ShowStatusMenu",
+                Box::new(bongos_kotlin::ShowStatusMenu),
+                "kotlin: show status menu",
+            ),
+            (
+                "kotlin::CancelInstall",
+                Box::new(bongos_kotlin::CancelInstall),
+                "kotlin: cancel install",
+            ),
+        ];
+        for (name, expected, humanized) in cases {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert!(action.partial_eq(expected.as_ref()), "{name}");
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        // The menu's "Open protocol log" entry builds this action by name.
+        assert!(cx.build_action("dev::OpenLanguageServerLogs", None).is_ok());
+    });
+}

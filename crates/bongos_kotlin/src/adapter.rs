@@ -28,8 +28,8 @@ use crate::{
     install::{InstallCancelled, ProgressFn, spawn_ensure_installed},
     installed::{check_installed, not_installed, server_name, version_dir},
     intellij::{
-        LICENSE_TIMEOUT, LicenseOutcome, bundle_eula_hash, eula_accepted, eula_argument,
-        license_check,
+        EULA_NOT_ACCEPTED_REASON, LICENSE_TIMEOUT, LicenseOutcome, bundle_eula_hash, eula_accepted,
+        eula_argument, license_check,
     },
     jdk,
     manager::{ADAPTER_NAME, EXPIRED_REASON, KotlinProjectManager, KotlinRegistry},
@@ -317,7 +317,7 @@ async fn intellij_gates(
     };
     if !accepted {
         return Err(fail(
-            "IntelliJ EULA not accepted".into(),
+            EULA_NOT_ACCEPTED_REASON.into(),
             format!("eula {hash} is not accepted"),
             cx,
         ));

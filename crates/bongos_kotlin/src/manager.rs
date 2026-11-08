@@ -22,7 +22,7 @@ use settings::{KotlinServerKind, SettingsStore, WorktreeId};
 use crate::{
     KotlinDirs,
     installed::server_name,
-    log::KotlinLog,
+    log::{KotlinLog, StderrMirror},
     resolve::{Resolved, clear_project_override, project_key, resolve, set_project_override},
 };
 
@@ -105,6 +105,19 @@ pub struct KotlinWorktreeState {
     pending: Vec<(String, String)>,
     /// Keeps the stderr forwarder alive while the server runs.
     io_subscription: Option<lsp::Subscription>,
+    /// Writes the running server's stderr to `kotlin.log` once.
+    stderr_mirror: Option<StderrMirror>,
+    /// Why the server asked for is not the one running, once a fallback happened.
+    pub fallback: Option<Fallback>,
+    /// The last line the server wrote to stderr that looks like a Gradle failure.
+    pub gradle_error: Option<String>,
+}
+
+/// A server that runs because the one the user asked for could not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fallback {
+    /// Why the requested server is not running, such as "IntelliJ unlicensed".
+    pub reason: String,
 }
 
 /// Maps canonical worktree roots to their managers, so the adapter finds the manager of the project
@@ -167,6 +180,11 @@ impl KotlinProjectManager {
         self.worktrees.get(&worktree_id)
     }
 
+    /// Every worktree the manager tracks, in id order.
+    pub fn worktrees(&self) -> impl Iterator<Item = (WorktreeId, &KotlinWorktreeState)> {
+        self.worktrees.iter().map(|(id, state)| (*id, state))
+    }
+
     pub fn status(&self, worktree_id: WorktreeId) -> Option<&ServerStatus> {
         self.worktree(worktree_id)?.status.as_ref()
     }
@@ -188,6 +206,9 @@ impl KotlinProjectManager {
                 install_cancel: None,
                 pending: Vec::new(),
                 io_subscription: None,
+                stderr_mirror: None,
+                fallback: None,
+                gradle_error: None,
             },
         );
         cx.notify();
@@ -490,6 +511,7 @@ impl KotlinProjectManager {
         state.server_id = None;
         state.pending.clear();
         state.io_subscription = None;
+        state.stderr_mirror = None;
         // A restart already says `starting`, and a failure stays failed.
         if matches!(
             state.status,
@@ -676,7 +698,19 @@ impl KotlinProjectManager {
     /// A line the server wrote to stderr while starting. An expired build says so here before it
     /// exits, and that is what ends its start for good.
     pub fn startup_stderr(&mut self, worktree_id: WorktreeId, text: &str, cx: &mut Context<Self>) {
-        self.log.stderr(text);
+        let mirror = self
+            .worktrees
+            .get(&worktree_id)
+            .and_then(|state| state.stderr_mirror.clone());
+        match mirror {
+            Some(mirror) => mirror.startup(text),
+            None => self.log.stderr(text),
+        }
+        if let Some(state) = self.worktrees.get_mut(&worktree_id)
+            && let Some(line) = text.lines().rev().find(|line| is_gradle_error(line))
+        {
+            state.gradle_error = Some(line.trim().to_string());
+        }
         if text.contains(EXPIRED_MESSAGE)
             && let Some(effective) = self
                 .worktrees
@@ -685,6 +719,22 @@ impl KotlinProjectManager {
         {
             self.mark_expired(worktree_id, effective, cx);
         }
+    }
+
+    /// Starts mirroring the server's stderr for the worktree. The startup text, if the server wrote
+    /// any, is delivered by the same update that added the server, so the held live lines are
+    /// released by a task, which runs only after that update.
+    fn begin_stderr_mirror(
+        &mut self,
+        worktree_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) -> Option<StderrMirror> {
+        let state = self.worktrees.get_mut(&worktree_id)?;
+        let mirror = StderrMirror::new(self.log.clone());
+        state.stderr_mirror = Some(mirror.clone());
+        let release = mirror.clone();
+        cx.spawn(async move |_, _| release.release()).detach();
+        Some(mirror)
     }
 
     /// Forwards the running server's stderr to `kotlin.log` and watches for it exiting.
@@ -698,10 +748,12 @@ impl KotlinProjectManager {
         let Some(server) = lsp_store.read(cx).language_server_for_id(server_id) else {
             return;
         };
-        let log = self.log.clone();
+        let Some(mirror) = self.begin_stderr_mirror(worktree_id, cx) else {
+            return;
+        };
         let subscription = server.on_io(move |kind, text| {
             if matches!(kind, IoKind::StdErr) {
-                log.stderr(text);
+                mirror.live(text);
             }
         });
         if let Some(state) = self.worktrees.get_mut(&worktree_id) {
@@ -721,6 +773,12 @@ impl KotlinProjectManager {
         })
         .detach();
     }
+}
+
+/// A stderr line that reports a Gradle failure.
+fn is_gradle_error(line: &str) -> bool {
+    let line = line.to_lowercase();
+    line.contains("gradle") && (line.contains("error") || line.contains("fail"))
 }
 
 fn is_kotlin(name: &LanguageServerName) -> bool {
@@ -1181,6 +1239,79 @@ mod tests {
             })
         );
         assert!(harness.log().contains("restart skipped: server expired"));
+    }
+
+    fn stderr_lines(harness: &Harness) -> Vec<String> {
+        harness
+            .log()
+            .lines()
+            .filter_map(|line| {
+                line.split_once(" stderr ")
+                    .map(|(_, text)| text.to_string())
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn test_stderr_read_during_startup_is_logged_once(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        let mirror = harness
+            .manager
+            .update(cx, |manager, cx| {
+                manager.begin_stderr_mirror(worktree(), cx)
+            })
+            .unwrap();
+        // The line read between the subscription and the capture being taken is in both.
+        mirror.live("before\n");
+        mirror.live("both\n");
+        harness.manager.update(cx, |manager, cx| {
+            manager.startup_stderr(worktree(), "before\nboth\n", cx)
+        });
+        mirror.live("after\n");
+        cx.run_until_parked();
+        assert_eq!(stderr_lines(&harness), ["before", "both", "after"]);
+    }
+
+    #[gpui::test]
+    fn test_stderr_with_no_startup_text_is_logged_once(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        let mirror = harness
+            .manager
+            .update(cx, |manager, cx| {
+                manager.begin_stderr_mirror(worktree(), cx)
+            })
+            .unwrap();
+        mirror.live("one\n");
+        // The release task runs after the update that added the server.
+        cx.run_until_parked();
+        mirror.live("two\n");
+        assert_eq!(stderr_lines(&harness), ["one", "two"]);
+    }
+
+    #[gpui::test]
+    fn test_stderr_of_a_start_that_failed_is_logged_once(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.startup_stderr(worktree(), "boom\nboom\n", cx)
+        });
+        // Repeated lines stay: only the overlap of two sources is dropped.
+        assert_eq!(stderr_lines(&harness), ["boom", "boom"]);
+    }
+
+    #[gpui::test]
+    fn test_a_gradle_failure_on_stderr_is_kept_for_the_menu(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.startup_stderr(
+                worktree(),
+                "loading\nGradle import failed: no wrapper\n",
+                cx,
+            )
+        });
+        let error = harness.manager.read_with(cx, |manager, _| {
+            manager.worktree(worktree()).unwrap().gradle_error.clone()
+        });
+        assert_eq!(error.as_deref(), Some("Gradle import failed: no wrapper"));
     }
 
     #[gpui::test]

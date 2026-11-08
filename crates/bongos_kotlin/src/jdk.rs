@@ -27,6 +27,9 @@ use crate::{
 /// The label of the status menu entry that opens the settings file when no JDK fits.
 pub const SET_JDK_HOME_LABEL: &str = "Set kotlin.jdk_home";
 
+/// The start of the `Failed` text for an unmet toolchain.
+pub const NO_JDK_REASON: &str = "no JDK for Gradle import";
+
 /// Locations that hold one JDK per directory. A `*` matches any run of characters inside one path
 /// component. The macOS entries are patterns only on that platform; elsewhere they match nothing.
 pub fn default_candidate_patterns(home: Option<&Path>) -> Vec<String> {
@@ -131,10 +134,9 @@ impl Detection {
     /// The `Failed` status text for an unmet toolchain.
     pub fn failure_reason(&self) -> Option<String> {
         match &self.choice {
-            JdkChoice::Unmet(toolchain) => Some(format!(
-                "no JDK for Gradle import (toolchain {})",
-                toolchain.version
-            )),
+            JdkChoice::Unmet(toolchain) => {
+                Some(format!("{NO_JDK_REASON} (toolchain {})", toolchain.version))
+            }
             _ => None,
         }
     }

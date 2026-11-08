@@ -23,6 +23,9 @@ use crate::resolve::{commit_staged, stage};
 /// The agreement at the root of the IntelliJ bundle.
 pub const EULA_FILE: &str = "EULA.txt";
 
+/// The `Failed` text of an IntelliJ start whose agreement the user has not accepted.
+pub const EULA_NOT_ACCEPTED_REASON: &str = "IntelliJ EULA not accepted";
+
 /// Where acceptances are kept, under the state directory.
 const STATE_FILE: &str = "kotlin-eula.json";
 const STATE_VERSION: u32 = 1;

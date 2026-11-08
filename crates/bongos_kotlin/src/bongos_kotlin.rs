@@ -8,6 +8,8 @@ mod log;
 mod manager;
 mod manifest;
 mod resolve;
+mod status;
+mod status_item;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -28,9 +30,9 @@ pub use jdk::{
     default_candidate_patterns, detect, find_toolchain, set_jdk_home_entry,
 };
 use language::{LanguageName, LanguageRegistry};
-pub use log::KotlinLog;
+pub use log::{KotlinLog, MAX_LOG_BYTES, StderrMirror};
 pub use manager::{
-    ADAPTER_NAME, EXPIRED_REASON, KotlinHost, KotlinProjectManager, KotlinRegistry,
+    ADAPTER_NAME, EXPIRED_REASON, Fallback, KotlinHost, KotlinProjectManager, KotlinRegistry,
     KotlinWorktreeState, ServerStatus,
 };
 pub use manifest::{ArchiveKind, Manifest, ManifestEntry, OVERRIDE_VAR, current_platform};
@@ -39,6 +41,8 @@ pub use resolve::{
     project_override, resolve, set_project_override,
 };
 use settings::{KotlinServerKind, RegisterSetting, Settings, SettingsContent};
+pub use status::{Command, MenuItem, Snapshot, StatusLine, menu_items, status_line};
+pub use status_item::{KotlinStatusItem, cancel_installs, show_logs};
 
 actions!(
     kotlin,
@@ -46,6 +50,12 @@ actions!(
         /// Shows the JDK that imports Gradle projects, why it was chosen, and the server's own
         /// runtime.
         ShowJdk,
+        /// Opens `kotlin.log`.
+        ShowLogs,
+        /// Opens or closes the Kotlin status menu in the status bar.
+        ShowStatusMenu,
+        /// Cancels the Kotlin server download in progress.
+        CancelInstall,
     ]
 );
 

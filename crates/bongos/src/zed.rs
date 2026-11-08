@@ -593,6 +593,27 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             }
         });
 
+        let kotlin_menu_handle = PopoverMenuHandle::default();
+        let kotlin_status = cx.new(|cx| {
+            bongos_kotlin::KotlinStatusItem::new(
+                workspace.project().clone(),
+                kotlin_menu_handle.clone(),
+                cx,
+            )
+        });
+        workspace.register_action({
+            move |_, _: &bongos_kotlin::ShowStatusMenu, window, cx| {
+                kotlin_menu_handle.toggle(window, cx);
+            }
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::ShowLogs, window, cx| {
+            bongos_kotlin::show_logs(workspace, window, cx);
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::CancelInstall, _, cx| {
+            let project = workspace.project().clone();
+            bongos_kotlin::cancel_installs(&project, cx);
+        });
+
         let cursor_position =
             cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
         let line_ending_indicator =
@@ -602,6 +623,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         workspace.status_bar().update(cx, |status_bar, cx| {
             status_bar.add_left_item(search_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
+            status_bar.add_left_item(kotlin_status, window, cx);
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);
