@@ -12,6 +12,7 @@ use crate::commands::{NewTask, make_one_off, move_task, move_to_project, split};
 use crate::fixtures::{at, ctx};
 use crate::journal::{Journal, run_operation, run_steps, write_journal};
 use crate::layout::{self, OP_FILE};
+use crate::rules::Place;
 use crate::store::{Task, WorkTree, load, reload};
 use crate::*;
 
@@ -608,4 +609,59 @@ fn a_move_never_lands_on_an_existing_path() {
     apply(root, &change).unwrap_err();
     assert_eq!(snapshot(root), before);
     assert!(no_journal_left(root));
+}
+
+#[test]
+fn a_moved_group_keeps_the_repository_of_a_nested_worktree() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fixture(root);
+    // `area` and its child `piece` inherit `invoicing`; `piece` has a worktree there.
+    let area = layout::child_dir(&layout::project_dir(root, "invoicing"), "area");
+    let mut area_file = task_file("area", "Area", Kind::Other);
+    area_file.todos.clear();
+    put(&area, &area_file);
+    let mut piece = task_file("piece", "Piece", Kind::PrShip);
+    piece.worktree = Some("/src/invoicing/.bongos-worktrees/piece".to_string());
+    put(&layout::child_dir(&area, "piece"), &piece);
+    let tree = load(root);
+    assert_clean(&tree);
+
+    let tree = accept(
+        root,
+        &tree,
+        move_to_project(&tree, &ctx(), "area", "billing"),
+    );
+    let moved = by_id(&tree, "area");
+    assert_eq!(
+        moved.dir,
+        layout::project_dir(root, "billing").join("tasks/area")
+    );
+    assert_eq!(
+        file_of(&tree, "area").repository.as_deref(),
+        Some("invoicing")
+    );
+    let place = Place::locate(&tree, "piece").unwrap();
+    assert_eq!(
+        place.repository(file_of(&tree, "piece")).as_deref(),
+        Some("invoicing")
+    );
+}
+
+#[test]
+fn an_unfinished_journal_is_never_replaced() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let tree = loaded(&temp);
+    let change = move_task(&tree, &ctx(), "schema", "docs").unwrap();
+    // A journal that could not finish sits in the source parent.
+    let stuck = layout::op_file(&layout::children_dir(&layout::project_dir(
+        root,
+        "invoicing",
+    )));
+    put_text(&stuck, "not a journal");
+    let before = files_under(root);
+    let error = apply(root, &change).unwrap_err().to_string();
+    assert!(error.contains("holds an unfinished operation"), "{error}");
+    assert_eq!(files_under(root), before);
 }

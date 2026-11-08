@@ -162,6 +162,23 @@ pub fn make_one_off(tree: &WorkTree, ctx: &Context, id: &str, activity: &str) ->
     relocate(tree, ctx, id, Destination::OneOff(activity), "made one-off")
 }
 
+/// Whether `task`, or a descendant that inherits its repository from it, has a worktree or a
+/// branch.
+fn holds_inherited_branch(task: &Task) -> bool {
+    let Some(file) = &task.file else {
+        return false;
+    };
+    file.worktree.is_some()
+        || file.branch.is_some()
+        || task.children.iter().any(|child| {
+            child
+                .file
+                .as_ref()
+                .is_some_and(|child_file| child_file.repository.is_none())
+                && holds_inherited_branch(child)
+        })
+}
+
 /// Where a moved task goes.
 enum Destination<'a> {
     /// Under this task.
@@ -305,10 +322,11 @@ fn relocate(
         details.push(format!("edges removed: {}", removed.join(", ")));
     }
 
-    // A worktree or branch stays in the repository it was made in.
+    // A worktree or branch stays in the repository it was made in, also one in the subtree that
+    // inherits its repository from the moved task.
     let before = place.repository(&file);
     if file.repository.is_none()
-        && (file.worktree.is_some() || file.branch.is_some())
+        && holds_inherited_branch(place.task)
         && before.is_some()
         && before != inherited
     {

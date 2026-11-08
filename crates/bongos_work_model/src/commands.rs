@@ -232,8 +232,8 @@ pub fn kind_name(kind: Kind) -> &'static str {
 /// more than [`HISTORY_LIMIT`] history entries has its oldest moved to `history.old.toml` in the
 /// same step.
 ///
-/// The write guard is the command's job; this only writes. Every path must be under `root`, and
-/// no move may land on a path that exists.
+/// The write guard is the command's job; this only writes. Every path must be under `root`, no
+/// move may land on a path that exists, and no unfinished journal may sit where the new one goes.
 pub fn apply(root: &Path, change: &Change) -> Result<()> {
     match plan(root, change)? {
         Plan::One { path, content } => {
@@ -327,6 +327,14 @@ pub(crate) fn plan(root: &Path, change: &Change) -> Result<Plan> {
         .ancestors()
         .find(|dir| dir.starts_with(root) && dir.is_dir())
         .map_or_else(|| root.to_path_buf(), Path::to_path_buf);
+    // A journal left there by an operation that could not finish is never replaced.
+    let stuck = layout::op_file(&dir);
+    if stuck.symlink_metadata().is_ok() {
+        return Err(Error::new(ErrorKind::InvalidJournal(format!(
+            "{} holds an unfinished operation; reload to finish it, or fix it by hand, first",
+            stuck.display()
+        ))));
+    }
     let journal = Journal::new(change.entry.event.clone(), ids, steps);
     Ok(Plan::Journal { dir, journal })
 }
