@@ -11,6 +11,8 @@
 #   BONGOS_MAC_SIGN_IDENTITY=ID   sign with this local codesign identity (default: ad-hoc, "-"). The
 #                                 signature has no secure timestamp (that needs Apple's server) and the
 #                                 bundle is never notarized, so Gatekeeper still asks on first open.
+#   BONGOS_MAC_SECURE_TIMESTAMP=1 with a signing identity, ask Apple's timestamp server for a secure
+#                                 timestamp (notarization requires one; this is the only network use)
 #   BONGOS_MAC_GIT=FILE           copy this git binary into the bundle (Contents/MacOS/git); without it
 #                                 the editor uses the git on PATH
 # Needs macOS with Xcode command line tools, Rust, and `dmg-license` on PATH (install it yourself:
@@ -189,6 +191,9 @@ sign_identity="${BONGOS_MAC_SIGN_IDENTITY:--}"
 sign_flags=(--force --timestamp=none)
 if [ "$sign_identity" != "-" ]; then
   sign_flags+=(--options runtime)
+  if [ "${BONGOS_MAC_SECURE_TIMESTAMP:-}" = 1 ]; then
+    sign_flags=(--force --timestamp --options runtime)
+  fi
 fi
 entitlements="crates/bongos/resources/bongos.entitlements"
 if [ -f "$app_dir/Contents/MacOS/git" ]; then

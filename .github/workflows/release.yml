@@ -1,0 +1,197 @@
+# Builds the release files for Linux and macOS and, for a version tag, publishes them as a GitHub
+# Release. Runs on a tag like v0.1.1 and by hand (workflow_dispatch builds both files and does not
+# publish). It never runs on a branch push.
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the version
+        id: version
+        run: echo "version=$(script/bongos/bump-version --show)" >> "$GITHUB_OUTPUT"
+      - name: Check the tag against the tree
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "tag $TAG does not match the version $VERSION in the tree" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "$GITHUB_SHA is not on main" >&2
+            exit 1
+          fi
+
+  linux:
+    # The oldest Ubuntu LTS runner GitHub still hosts, for glibc compatibility.
+    needs: verify
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev \
+            libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld \
+            llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential \
+            pkg-config python3
+          # Ubuntu ships llvm-objcopy only with a version suffix; bundle-linux calls it unversioned.
+          if ! command -v llvm-objcopy >/dev/null; then
+            sudo ln -s "$(ls /usr/bin/llvm-objcopy-* | sort -V | tail -n1)" /usr/local/bin/llvm-objcopy
+          fi
+      - name: Build the tarball
+        run: |
+          set -euo pipefail
+          # The root disk has too little room for a release build; /mnt has about 60 GB more.
+          sudo mkdir -p /mnt/bongos-workspace
+          sudo chown "$USER" /mnt/bongos-workspace
+          export BONGOS_WORKSPACE=/mnt/bongos-workspace
+          . script/bongos/env.sh
+          rustup toolchain install
+          script/bongos/bundle-linux --out "$RUNNER_TEMP/dist"
+          mkdir -p dist
+          cp "$RUNNER_TEMP/dist/bongos-linux-$(uname -m).tar.gz" "dist/bongos-$VERSION-linux-x86_64.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: dist/bongos-${{ needs.verify.outputs.version }}-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  macos:
+    needs: verify
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      # The secrets context is not available in step conditions, so the switch is made here.
+      SIGNED: ${{ secrets.MACOS_CERTIFICATE != '' }}
+    outputs:
+      signed: ${{ env.SIGNED }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: |
+          npm i -g dmg-license
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin
+      - name: Import the Developer ID certificate
+        if: ${{ env.SIGNED == 'true' }}
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          keychain_password="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n1)"
+          [ -n "$identity" ] || { echo "no Developer ID Application identity in the certificate" >&2; exit 1; }
+          echo "BONGOS_MAC_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "BONGOS_MAC_SECURE_TIMESTAMP=1" >> "$GITHUB_ENV"
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: Build the disk image
+        run: |
+          set -euo pipefail
+          script/bongos/bundle-mac --target aarch64-apple-darwin --out "$RUNNER_TEMP/dist"
+          mkdir -p dist
+          cp "$RUNNER_TEMP/dist/bongos-aarch64.dmg" "dist/bongos-$VERSION-macos-aarch64.dmg"
+      - name: Sign the disk image, notarize and staple
+        if: ${{ env.SIGNED == 'true' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          dmg="dist/bongos-$VERSION-macos-aarch64.dmg"
+          codesign --force --timestamp --sign "$BONGOS_MAC_SIGN_IDENTITY" "$dmg"
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$dmg"
+      - name: Delete the keychain
+        if: ${{ always() && env.SIGNED == 'true' }}
+        run: security delete-keychain "$KEYCHAIN" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos
+          path: dist/bongos-${{ needs.verify.outputs.version }}-macos-aarch64.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, linux, macos]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      SIGNED: ${{ needs.macos.outputs.signed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write the checksums and the notes
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum "bongos-$VERSION-linux-x86_64.tar.gz" "bongos-$VERSION-macos-aarch64.dmg" > SHA256SUMS)
+          previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$TAG^" 2>/dev/null || true)"
+          if [ -n "$previous" ]; then range="$previous..$TAG"; else range="$TAG"; fi
+          {
+            echo "bongos $VERSION"
+            echo
+            if [ -n "$previous" ]; then echo "Changes since $previous:"; else echo "Changes:"; fi
+            echo
+            git log --first-parent --format='- %s' "$range"
+            echo
+            echo "Checksums are in SHA256SUMS."
+            if [ "$SIGNED" != "true" ]; then
+              echo
+              echo "The macOS build is ad-hoc signed and not notarized. To open it, move bongos to Applications, try to open it once, then go to System Settings, Privacy & Security, and press Open Anyway."
+            fi
+          } > notes.md
+      - name: Create the release
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --title "bongos $VERSION" --notes-file notes.md \
+            "dist/bongos-$VERSION-linux-x86_64.tar.gz" "dist/bongos-$VERSION-macos-aarch64.dmg" dist/SHA256SUMS
