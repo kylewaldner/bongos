@@ -43,3 +43,6 @@ settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 terminal = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true

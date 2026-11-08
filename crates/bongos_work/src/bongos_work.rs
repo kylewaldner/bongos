@@ -34,9 +34,12 @@ use fs::Fs;
 use gpui::{App, AppContext as _, Entity, Global};
 
 pub use actions::{artifact, project, task, todo, work};
+pub use artifacts::focused;
 pub use changes::CHANGES_INTERVAL;
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
-pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE};
+pub use commands::{ready, show_toast, with_task};
+pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, is_project_top, target};
+pub use modals::{Then, ask, pick};
 pub use panel::{WorkPanel, init_panel};
 pub use rebase::{CHECK_INTERVAL, RebaseState};
 pub use registry::{
@@ -49,6 +52,7 @@ pub use status::{FocusStatus, breadcrumb};
 pub use store::{
     ECHO_TTL, MAX_RETRIES, Stats, WATCH_LATENCY, WorkCommand, WorkStore, WorkStoreEvent, WriteError,
 };
+pub use worktrees::expand_home;
 
 /// Where the work tree lives. The app passes `~/.bongos`; tests pass a temporary directory, so no
 /// test touches the real home.

@@ -143,6 +143,11 @@ impl ChatStore {
         self.enabled
     }
 
+    /// The Work store this index is built from.
+    pub fn work(&self) -> &Entity<WorkStore> {
+        &self.work
+    }
+
     pub fn dirs(&self) -> &ChatDirs {
         &self.dirs
     }

@@ -261,8 +261,7 @@ pub(crate) fn write_runtime_dir(
     dir: &Path,
     files: &[(PathBuf, String)],
 ) -> io::Result<()> {
-    fs::create_dir_all(runtime_root)?;
-    set_private(runtime_root, DIR_MODE)?;
+    ensure_private_root(runtime_root)?;
     match fs::remove_dir_all(dir) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -279,6 +278,44 @@ pub(crate) fn write_runtime_dir(
         file.sync_all()?;
     }
     Ok(())
+}
+
+/// Makes sure `root` is a real directory of ours that only we can use: created `0700` (so there is
+/// no moment it is wider), then checked with `symlink_metadata`, which refuses a symbolic link, a
+/// directory of another user and a mode that is not `0700`. Missing parents are created normally.
+#[cfg(unix)]
+fn ensure_private_root(root: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    if let Some(parent) = root.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::DirBuilder::new().mode(DIR_MODE).create(root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let metadata = fs::symlink_metadata(root)?;
+    let refuse = |why: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} {why}", root.display()),
+        ))
+    };
+    if !metadata.file_type().is_dir() {
+        return refuse("is not a real directory");
+    }
+    if metadata.uid() != nix::unistd::geteuid().as_raw() {
+        return refuse("belongs to another user");
+    }
+    if metadata.mode() & 0o777 != DIR_MODE {
+        return refuse("must have mode 0700");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_root(root: &Path) -> io::Result<()> {
+    fs::create_dir_all(root)
 }
 
 const DIR_MODE: u32 = 0o700;

@@ -178,14 +178,14 @@ fn persist(task: Option<String>, cx: &App) {
 
 /// Where focusing a task takes the window.
 #[derive(Debug, PartialEq)]
-pub(crate) struct Target {
-    pub(crate) path: PathBuf,
+pub struct Target {
+    pub path: PathBuf,
     /// Why the window goes somewhere other than the task asks for.
-    pub(crate) note: Option<String>,
+    pub note: Option<String>,
 }
 
 /// The directory focusing the task `id` opens: a leaf's worktree, else the task directory.
-pub(crate) fn target(tree: &WorkTree, id: &str) -> Result<Target, String> {
+pub fn target(tree: &WorkTree, id: &str) -> Result<Target, String> {
     let place = Place::locate(tree, id)?;
     let task = place.task;
     let at_dir = |note| Target {
@@ -207,6 +207,14 @@ pub(crate) fn target(tree: &WorkTree, id: &str) -> Result<Target, String> {
             place.slug()
         ))))
     }
+}
+
+/// Whether `id` is a project's top task: focusing a project focuses this task, and a chat on it is
+/// a project chat.
+pub fn is_project_top(tree: &WorkTree, id: &str) -> bool {
+    tree.projects
+        .iter()
+        .any(|project| project.task.id() == Some(id))
 }
 
 fn focus(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
