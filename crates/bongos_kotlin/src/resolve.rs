@@ -167,7 +167,7 @@ pub fn clear_project_override(state_dir: &Path, worktree_root: &Path) -> Result<
     store(state_dir, &file)
 }
 
-fn settings_server(worktree_id: WorktreeId, cx: &App) -> KotlinServerKind {
+pub(crate) fn settings_server(worktree_id: WorktreeId, cx: &App) -> KotlinServerKind {
     KotlinSettings::get(
         Some(SettingsLocation {
             worktree_id,

@@ -31,6 +31,7 @@ http_client.workspace = true
 language.workspace = true
 log.workspace = true
 lsp.workspace = true
+picker.workspace = true
 project.workspace = true
 rpc.workspace = true
 serde.workspace = true

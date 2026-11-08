@@ -609,6 +609,15 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         workspace.register_action(|workspace, _: &bongos_kotlin::ShowLogs, window, cx| {
             bongos_kotlin::show_logs(workspace, window, cx);
         });
+        workspace.register_action(|workspace, _: &bongos_kotlin::SwitchServer, window, cx| {
+            bongos_kotlin::switch_server(workspace, window, cx);
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::RestartServer, _, cx| {
+            bongos_kotlin::restart_server(workspace, cx);
+        });
+        workspace.register_action(|workspace, _: &bongos_kotlin::ReimportProject, _, cx| {
+            bongos_kotlin::reimport_project(workspace, cx);
+        });
         workspace.register_action(|workspace, _: &bongos_kotlin::CancelInstall, _, cx| {
             let project = workspace.project().clone();
             bongos_kotlin::cancel_installs(&project, cx);

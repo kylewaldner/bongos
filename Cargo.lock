@@ -2227,6 +2227,7 @@ dependencies = [
  "language",
  "log",
  "lsp",
+ "picker",
  "project",
  "release_channel",
  "reqwest_client",

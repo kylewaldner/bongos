@@ -1,4 +1,5 @@
 mod adapter;
+mod commands;
 mod glue;
 mod install;
 mod installed;
@@ -14,6 +15,7 @@ mod status_item;
 use std::{path::PathBuf, sync::Arc};
 
 pub use adapter::{INTELLIJ_DOWNLOAD_HINT, KotlinAdapter, server_command};
+pub use commands::{reimport_project, restart_server, switch_server};
 pub use glue::attach_managers;
 use gpui::{App, Global, actions};
 pub use install::{
@@ -47,6 +49,13 @@ pub use status_item::{KotlinStatusItem, cancel_installs, show_logs};
 actions!(
     kotlin,
     [
+        /// Picks the Kotlin server for this project: kotlin-lsp, the IntelliJ server, or the
+        /// setting's.
+        SwitchServer,
+        /// Restarts the Kotlin server and forgets any fallback and crash history.
+        RestartServer,
+        /// Reimports the project by restarting the Kotlin server, which imports Gradle on start.
+        ReimportProject,
         /// Shows the JDK that imports Gradle projects, why it was chosen, and the server's own
         /// runtime.
         ShowJdk,

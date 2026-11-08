@@ -11,6 +11,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use gpui::{App, Context, Entity, EntityId, Global, Subscription, WeakEntity};
@@ -111,6 +112,8 @@ pub struct KotlinWorktreeState {
     pub fallback: Option<Fallback>,
     /// The last line the server wrote to stderr that looks like a Gradle failure.
     pub gradle_error: Option<String>,
+    /// When the server exited unexpectedly in this run. `kotlin: restart server` forgets them.
+    crashes: Vec<Instant>,
 }
 
 /// A server that runs because the one the user asked for could not.
@@ -209,6 +212,7 @@ impl KotlinProjectManager {
                 stderr_mirror: None,
                 fallback: None,
                 gradle_error: None,
+                crashes: Vec::new(),
             },
         );
         cx.notify();
@@ -399,17 +403,33 @@ impl KotlinProjectManager {
         Ok(())
     }
 
-    /// `kotlin: restart server`: the same server again.
-    /// An expired server stays failed.
+    /// `kotlin: restart server`: the same server again, with the fallback and the crash history
+    /// forgotten. An expired server stays failed.
     pub fn restart_server(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
-        let Some(state) = self.worktrees.get(&worktree_id) else {
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
             return;
         };
         if state.expired.contains(&state.effective) {
             self.log.line("restart skipped: server expired");
             return;
         }
+        state.fallback = None;
+        state.crashes.clear();
+        self.log.line("restart requested");
         self.restart(worktree_id, cx);
+    }
+
+    /// `kotlin: reimport project`. kotlin-lsp has no reimport command, and both servers import
+    /// Gradle projects when they start, so a reimport is a restart.
+    pub fn reimport_project(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
+        self.log.line("reimport requested");
+        self.restart_server(worktree_id, cx);
+    }
+
+    /// How many times the worktree's server exited unexpectedly since the last restart request.
+    pub fn crash_count(&self, worktree_id: WorktreeId) -> usize {
+        self.worktree(worktree_id)
+            .map_or(0, |state| state.crashes.len())
     }
 
     fn refresh_all(&mut self, cx: &mut Context<Self>) {
@@ -543,6 +563,9 @@ impl KotlinProjectManager {
                 self.mark_expired(worktree_id, effective, cx);
                 return;
             }
+        }
+        if let Some(state) = self.worktrees.get_mut(&worktree_id) {
+            state.crashes.push(Instant::now());
         }
         self.set_status(
             worktree_id,
@@ -803,7 +826,7 @@ mod tests {
     use settings::{ActiveSettingsProfileName, Settings as _, SettingsStore};
 
     use super::*;
-    use crate::KotlinSettings;
+    use crate::{KotlinSettings, resolve::project_override};
 
     struct FakeInner {
         events: RefCell<Vec<String>>,
@@ -1396,5 +1419,119 @@ mod tests {
                 reason: "install cancelled".into()
             })
         );
+    }
+
+    /// Opens the `kotlin: switch server` choices and confirms the row labeled `label`, as the
+    /// picker does.
+    fn pick(harness: &Harness, label: &str, cx: &mut TestAppContext) {
+        let manager = harness.manager.clone();
+        cx.update(|cx| {
+            let mut delegate = crate::commands::SwitchServerDelegate::new(
+                WeakEntity::new_invalid(),
+                None,
+                manager,
+                worktree(),
+                cx,
+            );
+            delegate.selected_index = delegate
+                .choices
+                .iter()
+                .position(|(choice_label, _)| choice_label == label)
+                .unwrap_or_else(|| panic!("no choice {label:?}"));
+            delegate.choose(cx);
+        });
+    }
+
+    fn override_of(harness: &Harness) -> Option<KotlinServerKind> {
+        project_override(&harness.dirs.state_dir, &harness.root).unwrap()
+    }
+
+    #[gpui::test]
+    fn test_the_picker_writes_the_override_and_restarts(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.first_start(cx);
+
+        pick(&harness, "IntelliJ server", cx);
+        assert_eq!(override_of(&harness), Some(KotlinServerKind::Intellij));
+        cx.run_until_parked();
+        assert_eq!(
+            harness.events(),
+            ["start kotlin-lsp", "stop", "start intellij"]
+        );
+
+        pick(&harness, "kotlin-lsp", cx);
+        assert_eq!(override_of(&harness), Some(KotlinServerKind::KotlinLsp));
+        cx.run_until_parked();
+        assert_eq!(harness.events().last().unwrap(), "start kotlin-lsp");
+        assert_eq!(harness.host.0.max_live.get(), 1);
+    }
+
+    #[gpui::test]
+    fn test_use_setting_clears_the_override_and_restarts(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.first_start(cx);
+        pick(&harness, "IntelliJ server", cx);
+        cx.run_until_parked();
+        assert_eq!(override_of(&harness), Some(KotlinServerKind::Intellij));
+
+        pick(&harness, "Use setting (kotlin-lsp)", cx);
+        assert_eq!(override_of(&harness), None);
+        cx.run_until_parked();
+        assert_eq!(
+            harness.events(),
+            [
+                "start kotlin-lsp",
+                "stop",
+                "start intellij",
+                "stop",
+                "start kotlin-lsp"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn test_restart_clears_the_fallback_and_the_crash_history(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.first_start(cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_terminated(LanguageServerId(1), exited_with(1), cx)
+        });
+        harness.manager.update(cx, |manager, _| {
+            manager.worktrees.get_mut(&worktree()).unwrap().fallback = Some(Fallback {
+                reason: "IntelliJ unlicensed".into(),
+            });
+            assert_eq!(manager.crash_count(worktree()), 1);
+        });
+
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.restart_server(worktree(), cx));
+        cx.run_until_parked();
+        harness.manager.read_with(cx, |manager, _| {
+            assert_eq!(manager.crash_count(worktree()), 0);
+            assert_eq!(manager.worktree(worktree()).unwrap().fallback, None);
+        });
+        assert_eq!(
+            harness.events(),
+            ["start kotlin-lsp", "stop", "start kotlin-lsp"]
+        );
+        assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
+    }
+
+    #[gpui::test]
+    fn test_reimport_restarts_the_server(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.first_start(cx);
+
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.reimport_project(worktree(), cx));
+        assert_eq!(harness.status(cx), Some(ServerStatus::Starting));
+        cx.run_until_parked();
+        assert_eq!(
+            harness.events(),
+            ["start kotlin-lsp", "stop", "start kotlin-lsp"]
+        );
+        assert!(harness.log().contains("reimport requested"));
     }
 }

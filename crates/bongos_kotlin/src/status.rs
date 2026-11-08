@@ -130,18 +130,10 @@ pub enum Command {
 }
 
 impl Command {
-    /// Whether the command's action exists. Switch, restart and reimport come with the commands
-    /// step, license status and the EULA review with the license step; until then their entries
-    /// are drawn disabled.
+    /// Whether the command's action exists. License status and the EULA review come with the
+    /// license step; until then their entries are drawn disabled.
     pub fn implemented(&self) -> bool {
-        !matches!(
-            self,
-            Self::SwitchServer
-                | Self::RestartServer
-                | Self::ReimportProject
-                | Self::LicenseStatus
-                | Self::ReviewEula
-        )
+        !matches!(self, Self::LicenseStatus | Self::ReviewEula)
     }
 }
 
@@ -482,16 +474,13 @@ mod tests {
             Command::OpenProtocolLog,
             Command::CancelInstall,
             Command::SetJdkHome,
-        ] {
-            assert!(command.implemented(), "{command:?}");
-        }
-        for command in [
             Command::SwitchServer,
             Command::RestartServer,
             Command::ReimportProject,
-            Command::LicenseStatus,
-            Command::ReviewEula,
         ] {
+            assert!(command.implemented(), "{command:?}");
+        }
+        for command in [Command::LicenseStatus, Command::ReviewEula] {
             assert!(!command.implemented(), "{command:?}");
         }
     }

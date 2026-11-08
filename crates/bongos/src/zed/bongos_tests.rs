@@ -153,7 +153,22 @@ async fn kotlin_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
 async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     cx.update(|cx| {
-        let cases: [(&str, Box<dyn gpui::Action>, &str); 3] = [
+        let cases: [(&str, Box<dyn gpui::Action>, &str); 6] = [
+            (
+                "kotlin::SwitchServer",
+                Box::new(bongos_kotlin::SwitchServer),
+                "kotlin: switch server",
+            ),
+            (
+                "kotlin::RestartServer",
+                Box::new(bongos_kotlin::RestartServer),
+                "kotlin: restart server",
+            ),
+            (
+                "kotlin::ReimportProject",
+                Box::new(bongos_kotlin::ReimportProject),
+                "kotlin: reimport project",
+            ),
             (
                 "kotlin::ShowLogs",
                 Box::new(bongos_kotlin::ShowLogs),

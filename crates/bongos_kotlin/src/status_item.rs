@@ -15,7 +15,8 @@ use util::truncate_and_trailoff;
 use workspace::{OpenOptions, StatusItemView, Workspace};
 
 use crate::{
-    CancelInstall, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSetup, ShowLogs,
+    CancelInstall, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSetup, ReimportProject,
+    RestartServer, ShowLogs, SwitchServer,
     status::{self, Command, MAX_TEXT_CHARS, MenuItem, Snapshot},
 };
 
@@ -97,7 +98,7 @@ impl KotlinStatusItem {
     }
 }
 
-fn managers_of(project: &Project, cx: &App) -> Vec<Entity<KotlinProjectManager>> {
+pub(crate) fn managers_of(project: &Project, cx: &App) -> Vec<Entity<KotlinProjectManager>> {
     let Some(registry) = cx.try_global::<KotlinRegistry>() else {
         return Vec::new();
     };
@@ -180,11 +181,10 @@ fn action_for(command: &Command, cx: &App) -> Option<Box<dyn Action>> {
         Command::CancelInstall => Some(CancelInstall.boxed_clone()),
         Command::SetJdkHome => Some(zed_actions::OpenSettingsFile.boxed_clone()),
         Command::OpenProtocolLog => cx.build_action(PROTOCOL_LOG_ACTION, None).ok(),
-        Command::SwitchServer
-        | Command::RestartServer
-        | Command::ReimportProject
-        | Command::LicenseStatus
-        | Command::ReviewEula => None,
+        Command::SwitchServer => Some(SwitchServer.boxed_clone()),
+        Command::RestartServer => Some(RestartServer.boxed_clone()),
+        Command::ReimportProject => Some(ReimportProject.boxed_clone()),
+        Command::LicenseStatus | Command::ReviewEula => None,
     }
 }
 
