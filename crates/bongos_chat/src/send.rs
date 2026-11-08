@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use bongos_chat_model::{ChatRecord, NamedBy, from_prompt, timestamp_utc};
+use bongos_chat_model::{Agent, ChatRecord, NamedBy, from_prompt, timestamp_utc};
 use bongos_work_model::layout;
 use editor::{Editor, MultiBufferOffset};
-use gpui::{App, Context, Entity, Task};
+use gpui::{App, AsyncApp, Context, Entity, Task, WeakEntity};
 use settings::Settings as _;
 use terminal::{Modes, Terminal};
 use workspace::notifications::NotificationId;
@@ -53,7 +53,7 @@ pub struct Sent {
     pub named: Option<String>,
 }
 
-/// Why a send did not happen. The text was not sent; the caller still has it.
+/// Why a send did not happen. The caller keeps its text whatever the error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendError {
     /// `chats.enabled` is false.
@@ -62,10 +62,13 @@ pub enum SendError {
     Empty,
     /// No chat has this id.
     Unknown(String),
-    /// The chat has no running process. The command layer offers to resume it and send.
+    /// The chat has no running process. The command layer offers to resume it and send; the
+    /// "Resume <name> and send?" question arrives with open and resume (step 12 of the design).
     NotRunning { name: String },
     /// The CLI did not ask for bracketed paste in time, so a paste would be split into lines.
     NotAcceptingPastes { agent: &'static str },
+    /// The text was pasted, but the chat stopped before its Enter. The chat counts as prompted.
+    NotSubmitted { name: String },
 }
 
 impl fmt::Display for SendError {
@@ -77,6 +80,12 @@ impl fmt::Display for SendError {
             SendError::NotRunning { name } => write!(f, "{name} is not running"),
             SendError::NotAcceptingPastes { agent } => {
                 write!(f, "{agent} is not accepting pastes")
+            }
+            SendError::NotSubmitted { name } => {
+                write!(
+                    f,
+                    "The text was pasted into {name} but not submitted: it stopped"
+                )
             }
         }
     }
@@ -131,55 +140,23 @@ impl ChatRuntime {
         let deadline = chat.started() + self.bracketed_wait();
         let record_path = chat.record_path().clone();
         let chat_id = chat_id.to_string();
+        let (previous, done, number) = self.join_send_queue(&chat_id);
         cx.spawn(async move |this, cx| {
-            let gone = |this: &ChatRuntime, cx: &App| this.not_running(&chat_id, cx);
-            // 1. Wait for bracketed paste, then paste, in one update so the mode cannot change
-            //    between the check and the paste.
-            loop {
-                let pasted = this
-                    .update(cx, |this, cx| {
-                        if !this.runs_in(&chat_id, &terminal) {
-                            return Err(gone(this, cx));
-                        }
-                        if !accepts_pastes(&terminal, cx) {
-                            return Ok(false);
-                        }
-                        terminal.update(cx, |terminal, _| terminal.paste(&text));
-                        this.note_pasted(&chat_id, cx);
-                        Ok(true)
-                    })
-                    .map_err(|_| SendError::Off)??;
-                if pasted {
-                    break;
-                }
-                let left = deadline
-                    .duration_since(SystemTime::now())
-                    .unwrap_or_default();
-                if left.is_zero() {
-                    return Err(SendError::NotAcceptingPastes {
-                        agent: crate::health::agent_title(agent),
-                    });
-                }
-                cx.background_executor().timer(left.min(MODE_POLL)).await;
+            // One send at a time per chat: this one starts once the one before wrote its Enter.
+            if let Some(previous) = previous {
+                previous.await.ok();
             }
+            let delivered = deliver(
+                &this, &chat_id, &terminal, &text, options, agent, deadline, cx,
+            )
+            .await;
+            drop(done);
+            this.update(cx, |this, _| this.leave_send_queue(&chat_id, number))
+                .ok();
+            let submitted = delivered?;
 
-            // 2. Enter, once the CLI has handled the paste.
-            if options.submit {
-                let delay = cx.update(|cx| ChatsSettings::get_global(cx).submit_delay_ms);
-                cx.background_executor()
-                    .timer(Duration::from_millis(delay))
-                    .await;
-                this.update(cx, |this, cx| {
-                    if !this.runs_in(&chat_id, &terminal) {
-                        return Err(gone(this, cx));
-                    }
-                    terminal.update(cx, |terminal, _| terminal.input(b"\r".as_slice()));
-                    Ok(())
-                })
-                .map_err(|_| SendError::Off)??;
-            }
-
-            // 3. The record: prompted, last active, and the name while it has the default one.
+            // The text is in the CLI's input: the record says prompted, last active, and gets the
+            // name while it has the default one, even when the Enter could not follow.
             let name = from_prompt(&text);
             let named = Arc::new(Mutex::new(None));
             let named_in_write = named.clone();
@@ -207,6 +184,15 @@ impl ChatRuntime {
             if let Err(error) = write.await {
                 // The text was sent; only the record lags until the next write.
                 log::warn!("chats: could not record a send: {error}");
+            }
+            if options.submit && !submitted {
+                let name = this
+                    .update(cx, |this, cx| match this.not_running(&chat_id, cx) {
+                        SendError::NotRunning { name } => name,
+                        _ => chat_id.clone(),
+                    })
+                    .unwrap_or_else(|_| chat_id.clone());
+                return Err(SendError::NotSubmitted { name });
             }
             let named = named.lock().unwrap_or_else(|e| e.into_inner()).take();
             Ok(Sent {
@@ -238,6 +224,67 @@ impl ChatRuntime {
             None => SendError::Unknown(chat_id.to_string()),
         }
     }
+}
+
+/// Pastes `text` once the CLI accepts bracketed pastes, then presses Enter after the submit delay
+/// when `options.submit`. An error means nothing was written. `Ok(false)` means the paste went in
+/// but the chat stopped before its Enter.
+#[allow(clippy::too_many_arguments)]
+async fn deliver(
+    this: &WeakEntity<ChatRuntime>,
+    chat_id: &str,
+    terminal: &Entity<Terminal>,
+    text: &str,
+    options: SendOptions,
+    agent: Agent,
+    deadline: SystemTime,
+    cx: &mut AsyncApp,
+) -> Result<bool, SendError> {
+    // The check and the paste happen in one update, so the mode cannot change between them.
+    loop {
+        let pasted = this
+            .update(cx, |this, cx| {
+                if !this.runs_in(chat_id, terminal) {
+                    return Err(this.not_running(chat_id, cx));
+                }
+                if !accepts_pastes(terminal, cx) {
+                    return Ok(false);
+                }
+                terminal.update(cx, |terminal, _| terminal.paste(text));
+                this.note_pasted(chat_id, cx);
+                Ok(true)
+            })
+            .map_err(|_| SendError::Off)??;
+        if pasted {
+            break;
+        }
+        let left = deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or_default();
+        if left.is_zero() {
+            return Err(SendError::NotAcceptingPastes {
+                agent: crate::health::agent_title(agent),
+            });
+        }
+        cx.background_executor().timer(left.min(MODE_POLL)).await;
+    }
+    if !options.submit {
+        return Ok(true);
+    }
+    // Enter, once the CLI has handled the paste.
+    let delay = cx.update(|cx| ChatsSettings::get_global(cx).submit_delay_ms);
+    cx.background_executor()
+        .timer(Duration::from_millis(delay))
+        .await;
+    Ok(this
+        .update(cx, |this, cx| {
+            let running = this.runs_in(chat_id, terminal);
+            if running {
+                terminal.update(cx, |terminal, _| terminal.input(b"\r".as_slice()));
+            }
+            running
+        })
+        .unwrap_or(false))
 }
 
 /// Whether the program in `terminal` asked for bracketed paste.

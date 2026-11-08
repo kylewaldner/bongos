@@ -11,8 +11,11 @@ use std::time::Duration;
 use bongos_chat_model::{Agent, NamedBy, read_record, record_path, write_record};
 use editor::{Editor, MultiBufferOffset, SelectionEffects};
 use fs::RealFs;
-use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{
+    AppContext as _, Entity, Focusable as _, TestAppContext, UpdateGlobal as _, VisualTestContext,
+};
 use project::Project;
+use settings::SettingsStore;
 use tempfile::TempDir;
 use workspace::notifications::NotificationId;
 use workspace::{MultiWorkspace, Workspace};
@@ -118,6 +121,74 @@ async fn test_a_multiline_send_is_one_paste_and_one_enter(cx: &mut TestAppContex
         .unwrap();
     assert_eq!(sent.named, None);
     assert_eq!(record_of(&h, &id).name, "Fix the backfill for invoices");
+}
+
+#[gpui::test]
+async fn test_two_sends_at_once_do_not_interleave(cx: &mut TestAppContext) {
+    let (h, _input_dir, input) = send_harness(cx, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    written(&h, &id, cx);
+
+    let second_text = "Then\nwrite the tests";
+    let first = cx.update(|cx| send(&id, PROMPT.to_string(), SendOptions { submit: true }, cx));
+    let second = cx.update(|cx| {
+        send(
+            &id,
+            second_text.to_string(),
+            SendOptions { submit: true },
+            cx,
+        )
+    });
+    assert!(first.await.unwrap().submitted);
+    assert!(second.await.unwrap().submitted);
+    assert_eq!(
+        written(&h, &id, cx),
+        vec![
+            bracketed(PROMPT),
+            b"\r".to_vec(),
+            bracketed(second_text),
+            b"\r".to_vec()
+        ]
+    );
+    let mut expected = bracketed(PROMPT);
+    expected.push(b'\r');
+    expected.extend(bracketed(second_text));
+    expected.push(b'\r');
+    let expected = octal(&expected);
+    wait_for(cx, "both sends to reach the fake", STARTUP, |_| {
+        std::fs::read_to_string(&input).unwrap_or_default() == expected
+    })
+    .await;
+}
+
+#[gpui::test]
+async fn test_a_chat_that_stops_before_its_enter(cx: &mut TestAppContext) {
+    let (h, _input_dir, input) = send_harness(cx, &[]).await;
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.chats.get_or_insert_default().submit_delay_ms = Some(1500);
+            });
+        });
+    });
+    let id = h.start(Agent::Claude, cx).await;
+    let name = record_of(&h, &id).name;
+    wait_indexed(&h, &id, cx).await;
+
+    let task = cx.update(|cx| send(&id, PROMPT.to_string(), SendOptions { submit: true }, cx));
+    let pasted = octal(&bracketed(PROMPT));
+    wait_for(cx, "the paste to reach the fake", STARTUP, |_| {
+        std::fs::read_to_string(&input).unwrap_or_default() == pasted
+    })
+    .await;
+    assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
+    let error = task.await.unwrap_err();
+    assert_eq!(error, SendError::NotSubmitted { name: name.clone() });
+    assert_eq!(
+        error.to_string(),
+        format!("The text was pasted into {name} but not submitted: it stopped")
+    );
+    assert!(record_of(&h, &id).prompted);
 }
 
 #[gpui::test]

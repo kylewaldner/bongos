@@ -207,6 +207,10 @@ pub struct ChatRuntime {
     next_generation: usize,
     active_debounce: Duration,
     bracketed_wait: Duration,
+    /// Per chat, the last send in line and its number: a send waits until the one before it has
+    /// written its Enter, so two pastes never interleave.
+    send_queues: HashMap<String, (usize, Shared<oneshot::Receiver<()>>)>,
+    next_send: usize,
     stats: RuntimeStats,
 }
 
@@ -228,6 +232,8 @@ impl ChatRuntime {
             next_generation: 0,
             active_debounce: ACTIVE_DEBOUNCE,
             bracketed_wait: crate::send::BRACKETED_WAIT,
+            send_queues: HashMap::new(),
+            next_send: 0,
             stats: RuntimeStats::default(),
         }
     }
@@ -254,6 +260,36 @@ impl ChatRuntime {
 
     pub(crate) fn bracketed_wait(&self) -> Duration {
         self.bracketed_wait
+    }
+
+    /// Puts a send to `chat_id` in line. Returns what it waits for (the send before it), the
+    /// sender to drop once its Enter is written, and its number for [`Self::leave_send_queue`].
+    pub(crate) fn join_send_queue(
+        &mut self,
+        chat_id: &str,
+    ) -> (
+        Option<Shared<oneshot::Receiver<()>>>,
+        oneshot::Sender<()>,
+        usize,
+    ) {
+        let (done, done_rx) = oneshot::channel();
+        self.next_send += 1;
+        let number = self.next_send;
+        let previous = self
+            .send_queues
+            .insert(chat_id.to_string(), (number, done_rx.shared()));
+        (previous.map(|(_, previous)| previous), done, number)
+    }
+
+    /// Forgets the queue of `chat_id` when send `number` is still its last.
+    pub(crate) fn leave_send_queue(&mut self, chat_id: &str, number: usize) {
+        if self
+            .send_queues
+            .get(chat_id)
+            .is_some_and(|(last, _)| *last == number)
+        {
+            self.send_queues.remove(chat_id);
+        }
     }
 
     pub(crate) fn store(&self) -> &Entity<ChatStore> {
