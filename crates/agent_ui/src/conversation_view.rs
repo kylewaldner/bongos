@@ -3081,9 +3081,10 @@ fn native_available_skills(
 
 fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
     if agent_name == agent::ZED_AGENT_ID.as_ref() {
+        // Show the native agent's display label, not its stored id.
         format!(
             "Message the {}, @ to include context, / for commands",
-            agent_name
+            Agent::NativeAgent.label()
         )
     } else if has_commands {
         format!(
@@ -3420,6 +3421,16 @@ fn plan_label_markdown_style(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn test_placeholder_text_native_agent_shows_bongos_name() {
+        let text = super::placeholder_text(agent::ZED_AGENT_ID.as_ref(), true);
+        assert_eq!(
+            text,
+            "Message the bongos Agent, @ to include context, / for commands"
+        );
+        assert!(!text.contains(agent::ZED_AGENT_ID.as_ref()));
+    }
+
     use acp_thread::StubAgentConnection;
     use action_log::ActionLog;
     use agent::{AgentTool, EditFileTool, FetchTool, TerminalTool, ToolPermissionContext};
