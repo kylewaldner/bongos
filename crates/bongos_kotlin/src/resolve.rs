@@ -80,7 +80,7 @@ fn file_path(state_dir: &Path) -> PathBuf {
 
 /// The key for a worktree root. A root that cannot be canonicalized (it no longer exists) keeps its
 /// own spelling, so an entry for a deleted project can still be read and removed.
-fn project_key(worktree_root: &Path) -> String {
+pub(crate) fn project_key(worktree_root: &Path) -> String {
     fs::canonicalize(worktree_root)
         .unwrap_or_else(|_| worktree_root.to_path_buf())
         .to_string_lossy()
@@ -274,7 +274,7 @@ mod tests {
             let store = SettingsStore::new(cx, &settings::default_settings());
             cx.set_global(store);
             SettingsStore::observe_active_settings_profile_name(cx).detach();
-            crate::init(cx);
+            KotlinSettings::register(cx);
         });
     }
 

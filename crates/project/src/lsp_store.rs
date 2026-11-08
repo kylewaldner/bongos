@@ -625,6 +625,7 @@ impl LocalLspStore {
 
                 match result {
                     Ok(server) => {
+                        let name = adapter.name();
                         lsp_store
                             .update(cx, |lsp_store, cx| {
                                 lsp_store.insert_newly_running_language_server(
@@ -638,12 +639,34 @@ impl LocalLspStore {
                                 );
                             })
                             .ok();
-                        stderr_capture.lock().take();
+                        let startup_stderr = stderr_capture.lock().take().unwrap_or_default();
+                        if !startup_stderr.is_empty() {
+                            lsp_store
+                                .update(cx, |_, cx| {
+                                    cx.emit(LspStoreEvent::LanguageServerStartupStderr {
+                                        name,
+                                        worktree_id,
+                                        text: startup_stderr,
+                                    });
+                                })
+                                .ok();
+                        }
                         Some(server)
                     }
 
                     Err(err) => {
                         let log = stderr_capture.lock().take().unwrap_or_default();
+                        if !log.is_empty() {
+                            lsp_store
+                                .update(cx, |_, cx| {
+                                    cx.emit(LspStoreEvent::LanguageServerStartupStderr {
+                                        name: adapter.name(),
+                                        worktree_id,
+                                        text: log.clone(),
+                                    });
+                                })
+                                .ok();
+                        }
                         delegate.update_status(
                             adapter.name(),
                             BinaryStatus::Failed {
@@ -4142,6 +4165,13 @@ pub enum LspStoreEvent {
         message: proto::update_language_server::Variant,
     },
     LanguageServerLog(LanguageServerId, LanguageServerLogType, String),
+    /// What a language server wrote to stderr while it was starting, whether the start succeeded
+    /// or not. Stderr after the start reaches `lsp::LanguageServer::on_io`.
+    LanguageServerStartupStderr {
+        name: LanguageServerName,
+        worktree_id: WorktreeId,
+        text: String,
+    },
     LanguageServerPrompt(LanguageServerPromptRequest),
     LanguageDetected {
         buffer: Entity<Buffer>,

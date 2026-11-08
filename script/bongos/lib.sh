@@ -307,14 +307,17 @@ sandbox_env() {
 
 # The "Unrecognized Project" modal takes all keys, and a blinking cursor would hide when the UI has
 # settled. global_settings.json fixes both, and leaves settings.json and keymap.json for the app
-# to create.
+# to create. It also points the Kotlin language server at the fake server, so opening a .kt file
+# starts the fake and never downloads anything.
+BONGOS_FAKE_KOTLIN_SERVER=${BONGOS_FAKE_KOTLIN_SERVER:-$CARGO_TARGET_DIR/debug/bongos-fake-kotlin-server}
 seed_settings() {
   mkdir -p "$HOME/$BONGOS_CONFIG_PATH"
-  cat >"$HOME/$BONGOS_CONFIG_PATH/global_settings.json" <<'JSON'
+  cat >"$HOME/$BONGOS_CONFIG_PATH/global_settings.json" <<JSON
 {
   "session": { "trust_all_worktrees": true },
   "cursor_blink": false,
-  "terminal": { "blinking": "off" }
+  "terminal": { "blinking": "off" },
+  "lsp": { "kotlin": { "binary": { "path": "$BONGOS_FAKE_KOTLIN_SERVER" } } }
 }
 JSON
 }

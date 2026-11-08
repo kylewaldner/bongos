@@ -1,7 +1,7 @@
 //! A stand-in for kotlin-lsp and the IntelliJ server, used by tests and smoke scenarios. It speaks
 //! LSP over stdio with Content-Length framing. `BONGOS_FAKE_LSP_MODE` holds comma-separated modes:
 //! `progress`, `push`, `pull`, `crash-after=<ms>`, `hang-shutdown`, `license-lost-after=<ms>`,
-//! `slow-init=<ms>`. `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
+//! `slow-init=<ms>`, `stderr` (one line on stderr at start). `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
 //! `license status` prints per `BONGOS_FAKE_LICENSE=licensed|unlicensed|offline`.
 
 use serde_json::{Value, json};
@@ -17,6 +17,7 @@ use std::{
 };
 
 const EULA_TEXT: &str = "FAKE USER AGREEMENT\nVersion 1.0\n";
+const STARTUP_STDERR: &str = "fake server starting up";
 const LICENSE_LOST_TEXT: &str = "No valid license found";
 
 #[derive(Default)]
@@ -25,6 +26,7 @@ struct Modes {
     push: bool,
     pull: bool,
     hang_shutdown: bool,
+    stderr: bool,
     crash_after: Option<u64>,
     license_lost_after: Option<u64>,
     slow_init: Option<u64>,
@@ -48,6 +50,7 @@ impl Modes {
                 "push" => modes.push = true,
                 "pull" => modes.pull = true,
                 "hang-shutdown" => modes.hang_shutdown = true,
+                "stderr" => modes.stderr = true,
                 "crash-after" => modes.crash_after = number,
                 "license-lost-after" => modes.license_lost_after = number,
                 "slow-init" => modes.slow_init = number,
@@ -171,6 +174,10 @@ fn serve(modes: Modes) -> io::Result<()> {
     let mut input = io::BufReader::new(io::stdin());
     let mut documents: HashMap<String, String> = HashMap::new();
     let mut shut_down = false;
+
+    if modes.stderr {
+        eprintln!("{STARTUP_STDERR}");
+    }
 
     if let Some(milliseconds) = modes.crash_after {
         thread::spawn(move || {

@@ -2258,7 +2258,7 @@
       "language_servers": ["!ruby-lsp", "..."],
     },
     "Kotlin": {
-      "language_servers": ["!kotlin-language-server", "kotlin-lsp", "..."],
+      "language_servers": ["kotlin", "!kotlin-lsp", "!kotlin-language-server", "..."],
     },
     "LaTeX": {
       "formatter": "language_server",

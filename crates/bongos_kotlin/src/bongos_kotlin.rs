@@ -1,8 +1,22 @@
+mod adapter;
+mod glue;
+mod installed;
+mod log;
+mod manager;
 mod resolve;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
+pub use adapter::{KotlinAdapter, server_command};
+pub use glue::attach_managers;
 use gpui::App;
+pub use installed::{MARKER as INSTALLED_MARKER, find_installed, server_name};
+use language::{LanguageName, LanguageRegistry};
+pub use log::KotlinLog;
+pub use manager::{
+    ADAPTER_NAME, KotlinHost, KotlinProjectManager, KotlinRegistry, KotlinWorktreeState,
+    ServerStatus,
+};
 pub use resolve::{
     Layer, LayerReport, Resolved, ResolvedSource, clear_project_override, layer_report,
     project_override, resolve, set_project_override,
@@ -31,8 +45,25 @@ impl Settings for KotlinSettings {
     }
 }
 
-pub fn init(cx: &mut App) {
+/// Where bongos keeps Kotlin data. The app passes its `paths` values once; tests pass temp
+/// directories, so no test touches the real home.
+#[derive(Clone, Debug)]
+pub struct KotlinDirs {
+    /// Holds `kotlin-servers.json`.
+    pub state_dir: PathBuf,
+    /// Holds `kotlin.log`.
+    pub logs_dir: PathBuf,
+    /// Holds `<server>/<version>` for each installed server.
+    pub install_root: PathBuf,
+}
+
+pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
     KotlinSettings::register(cx);
+    languages.register_lsp_adapter(
+        LanguageName::new_static("Kotlin"),
+        Arc::new(KotlinAdapter::new(dirs.clone())),
+    );
+    attach_managers(dirs, cx);
 }
 
 #[cfg(test)]
@@ -54,7 +85,7 @@ mod tests {
             let store = SettingsStore::new(cx, &settings::default_settings());
             cx.set_global(store);
             SettingsStore::observe_active_settings_profile_name(cx).detach();
-            init(cx);
+            KotlinSettings::register(cx);
         });
     }
 

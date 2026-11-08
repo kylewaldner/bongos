@@ -514,7 +514,15 @@ fn main() {
         debug_adapter_extension::init(extension_host_proxy.clone(), cx);
         languages::init(languages.clone(), fs.clone(), node_runtime.clone(), cx);
         bongos_languages::init(&languages);
-        bongos_kotlin::init(cx);
+        bongos_kotlin::init(
+            &languages,
+            bongos_kotlin::KotlinDirs {
+                state_dir: paths::state_dir().clone(),
+                logs_dir: paths::logs_dir().clone(),
+                install_root: paths::languages_dir().join("kotlin"),
+            },
+            cx,
+        );
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 
