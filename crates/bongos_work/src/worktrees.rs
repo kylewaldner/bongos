@@ -19,8 +19,9 @@ use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{Kind, ResultKind, Status, TaskFile};
 use fs::Fs;
 use git::repository::{CreateWorktreeTarget, GitRepository, Worktree};
-use gpui::{AppContext as _, AsyncWindowContext, Context, WeakEntity, Window};
+use gpui::{AppContext as _, AsyncWindowContext, Context, SharedString, WeakEntity, Window};
 use settings::Settings as _;
+use util::ResultExt as _;
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
 
@@ -71,13 +72,18 @@ fn start(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Worksp
 enum Branch {
     /// A new branch cut from `base`, or from the repository's default branch when `None`.
     New { name: String, base: Option<String> },
-    /// The head of the GitHub PR `number`, fetched into the local branch `name`.
-    PullRequest { name: String, number: u64 },
+    /// The head of PR `number` of the GitHub repository `github` (`owner/name`), fetched from
+    /// the remote whose URL names that repository into the local branch `name`.
+    PullRequest {
+        name: String,
+        github: String,
+        number: u64,
+    },
 }
 
 /// What `task: start` does for one task, decided from the tree and the settings alone.
 #[derive(Clone, Debug)]
-struct Request {
+pub(crate) struct Request {
     id: String,
     repository: Repository,
     /// The repository's primary checkout, with `~` expanded.
@@ -88,7 +94,7 @@ struct Request {
 
 /// What the task should be started with, or the message of the toast that refuses or reports
 /// instead. A babysit task gets its PRs to choose from.
-enum Plan {
+pub(crate) enum Plan {
     Ready(Request),
     ChoosePullRequest { request: Request, urls: Vec<String> },
 }
@@ -115,7 +121,7 @@ fn start_task(
                 let Some(url) = urls.get(choice) else {
                     return;
                 };
-                let Some(number) = pull_number(url) else {
+                let Some((github, number)) = pull_request(url) else {
                     show_toast(
                         workspace,
                         format!("{url} is not a GitHub pull request URL"),
@@ -126,6 +132,7 @@ fn start_task(
                 let request = Request {
                     branch: Branch::PullRequest {
                         name: format!("pr-{number}"),
+                        github,
                         number,
                     },
                     ..request
@@ -139,7 +146,7 @@ fn start_task(
 }
 
 /// Decides what `task: start` does for the task `id`, or why it does nothing.
-fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Result<Plan, String> {
+pub(crate) fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Result<Plan, String> {
     let place = Place::locate(tree, id)?;
     let slug = place.slug();
     let file = place
@@ -154,7 +161,7 @@ fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Result<Plan, 
     }
     if !gets_worktree(file.kind) {
         return Err(format!(
-            "{slug} is a {} task; only pr-ship, pr-merge, spike and babysit tasks get a worktree",
+            "{slug} is of kind {}; only pr-ship, pr-merge, spike and babysit tasks get a worktree",
             model::kind_name(file.kind)
         ));
     }
@@ -165,9 +172,7 @@ fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Result<Plan, 
         return Err(if expand_home(existing).exists() {
             format!("{slug} already has its worktree at {existing}")
         } else {
-            format!(
-                "{slug} records the worktree {existing}, which no longer exists; nothing was created"
-            )
+            gone_worktree(slug, existing, file.branch.as_deref())
         });
     }
     if derive::state(place.task, tree) == State::Blocked {
@@ -212,6 +217,7 @@ fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Result<Plan, 
         }
         let placeholder = Branch::PullRequest {
             name: String::new(),
+            github: String::new(),
             number: 0,
         };
         return Ok(Plan::ChoosePullRequest {
@@ -243,6 +249,22 @@ fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Result<Plan, 
     Ok(Plan::Ready(request(Branch::New { name, base })))
 }
 
+/// What to do about a recorded worktree whose directory is gone: bring it back on its branch, or,
+/// without a branch, forget it and start again.
+fn gone_worktree(slug: &str, worktree: &str, branch: Option<&str>) -> String {
+    match branch {
+        Some(branch) => format!(
+            "{slug} records the worktree {worktree}, which no longer exists; nothing was created. \
+             To bring it back, run `git worktree prune` and then `git worktree add {worktree} \
+             {branch}` in its repository"
+        ),
+        None => format!(
+            "{slug} records the worktree {worktree}, which no longer exists; nothing was created. \
+             Remove the `worktree` line from its task.toml and start it again"
+        ),
+    }
+}
+
 fn parent_branch(parent: &Task) -> Option<String> {
     parent.file.as_ref()?.branch.clone()
 }
@@ -258,11 +280,28 @@ fn pull_request_urls(file: &TaskFile) -> Vec<String> {
     }
 }
 
-/// The number of a GitHub pull request URL such as `https://github.com/o/r/pull/12/files`.
-pub(crate) fn pull_number(url: &str) -> Option<u64> {
-    let mut segments = url.split('/');
-    segments.find(|segment| *segment == "pull")?;
-    segments.next()?.parse().ok()
+/// The repository (`owner/name`) and number of a GitHub pull request URL such as
+/// `https://github.com/o/r/pull/12/files`.
+pub(crate) fn pull_request(url: &str) -> Option<(String, u64)> {
+    let segments: Vec<&str> = url.split('/').collect();
+    let pull = segments.iter().position(|segment| *segment == "pull")?;
+    let number = segments.get(pull + 1)?.parse().ok()?;
+    let owner = segments.get(pull.checked_sub(2)?)?;
+    let name = segments.get(pull - 1)?;
+    if owner.is_empty() || name.is_empty() || owner.contains(':') {
+        return None;
+    }
+    Some((format!("{owner}/{name}"), number))
+}
+
+/// Whether the remote `url` (HTTPS, SSH or a path) names the GitHub repository `github`
+/// (`owner/name`).
+pub(crate) fn remote_names(url: &str, github: &str) -> bool {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url).to_lowercase();
+    let github = github.to_lowercase();
+    url.strip_suffix(&github)
+        .is_some_and(|rest| rest.ends_with('/') || rest.ends_with(':'))
 }
 
 /// `path` with a leading `~` replaced by the home directory.
@@ -531,11 +570,22 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
                 request.repository.name
             );
         }
+        // The base moved on since the branch was cut, perhaps; where they meet is what it was
+        // cut from.
         let (base, base_sha) = match &request.branch {
             Branch::New { base, .. } => {
                 let base = resolve_base(repository.as_ref(), base.clone()).await;
-                let sha = resolve_sha(repository.as_ref(), &base).await;
-                (Some(base), sha)
+                let base_sha = match (&git_binary, resolve_sha(repository.as_ref(), &base).await) {
+                    (Some(git_binary), Some(tip)) => run_git(
+                        git_binary,
+                        repository_path,
+                        &["merge-base", &tip, &branch_ref],
+                    )
+                    .await
+                    .log_err(),
+                    _ => None,
+                };
+                (Some(base), base_sha)
             }
             Branch::PullRequest { .. } => (None, None),
         };
@@ -592,19 +642,28 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
                 worktree: worktree_path,
             })
         }
-        Branch::PullRequest { number, .. } => {
+        Branch::PullRequest { github, number, .. } => {
             let git_binary =
                 git_binary.context("git is not on PATH, so the PR cannot be fetched")?;
-            let remotes = repository.get_all_remotes().await?;
-            let remote = if remotes
-                .iter()
-                .any(|remote| remote.name.as_ref() == "upstream")
-            {
-                "upstream"
-            } else {
-                "origin"
-            };
-            fetch_pull_request(&git_binary, repository_path, remote, *number, &branch).await?;
+            let mut remotes: Vec<(String, String)> =
+                repository.remote_urls().await.into_iter().collect();
+            remotes.sort();
+            let remote = remotes
+                .into_iter()
+                .find(|(_, url)| remote_names(url, github))
+                .map(|(name, _)| name)
+                .with_context(|| {
+                    format!(
+                        "No remote of {} points at {github}, so PR {number} cannot be fetched; \
+                         nothing was created",
+                        request.repository.name
+                    )
+                })?;
+            let refspec = format!("pull/{number}/head:refs/heads/{branch}");
+            // Not forced, so a local branch with commits the PR lacks is refused, not overwritten.
+            run_git(&git_binary, repository_path, &["fetch", &remote, &refspec])
+                .await
+                .with_context(|| format!("Fetching PR {number} from {remote}"))?;
             ensure_excluded(repository_path)?;
             repository
                 .create_worktree(
@@ -629,7 +688,12 @@ async fn resolve_base(repository: &dyn GitRepository, base: Option<String>) -> S
     if let Some(base) = base {
         return base;
     }
-    match repository.default_branch(false).await {
+    default_or_fallback(repository.default_branch(false).await)
+}
+
+/// The default branch git found, else `main`.
+pub(crate) fn default_or_fallback(found: Result<Option<SharedString>>) -> String {
+    match found {
         Ok(Some(branch)) => branch.to_string(),
         Ok(None) => FALLBACK_BASE.to_string(),
         Err(error) => {
@@ -654,27 +718,21 @@ async fn resolve_sha(repository: &dyn GitRepository, branch: &str) -> Option<Str
     }
 }
 
-/// Fetches the head of PR `number` from `remote` into the local branch `branch`. Not forced, so
-/// a local branch with commits the PR lacks is refused rather than overwritten.
-async fn fetch_pull_request(
-    git_binary: &Path,
-    repository: &Path,
-    remote: &str,
-    number: u64,
-    branch: &str,
-) -> Result<()> {
-    let refspec = format!("pull/{number}/head:refs/heads/{branch}");
+/// Runs git with `args` in `directory` and returns its trimmed output, or its error output as
+/// the error.
+async fn run_git(git_binary: &Path, directory: &Path, args: &[&str]) -> Result<String> {
     let output = util::command::new_command(git_binary)
-        .current_dir(repository)
-        .args([OsString::from("fetch"), remote.into(), refspec.into()])
+        .current_dir(directory)
+        .args(args.iter().map(OsString::from))
         .output()
         .await
-        .context("running git fetch")?;
+        .with_context(|| format!("running git {}", args.join(" ")))?;
     if output.status.success() {
-        Ok(())
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         Err(anyhow!(
-            "git fetch of PR {number} failed: {}",
+            "git {} failed: {}",
+            args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }

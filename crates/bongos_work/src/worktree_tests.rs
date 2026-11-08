@@ -5,17 +5,24 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 
-use bongos_work_model::{StackedOn, TodoState, UnblockPoint, layout, serialize_task};
+use bongos_work_model::commands::default_todos;
+use bongos_work_model::store::load;
+use bongos_work_model::{
+    Kind, ResultKind, StackedOn, TaskFile, TaskResult, TodoState, UnblockPoint, layout,
+    serialize_task,
+};
 use gpui::{App, Task, TestAppContext, UpdateGlobal as _, VisualTestContext, Window};
 use parking_lot::Mutex;
 use settings::{SettingsStore, WorkRepositoryContent};
 use tempfile::TempDir;
 use workspace::TerminalProvider;
 
+use crate::Repository;
 use crate::command_tests::{Harness, Input, dispatch, harness, wait_until};
-use crate::store_tests::write;
+use crate::store_tests::{project_toml, write};
 use crate::worktrees::{
-    EXCLUDE_LINE, branch_name, common_git_dir, ensure_excluded, free_worktree_path, pull_number,
+    EXCLUDE_LINE, Plan, branch_name, common_git_dir, default_or_fallback, ensure_excluded,
+    expand_home, free_worktree_path, plan, pull_request, remote_names,
 };
 
 /// Runs git in `dir` with no user or system configuration, and returns its trimmed output.
@@ -81,9 +88,10 @@ fn set_repository(cx: &mut VisualTestContext, path: &Path, setup_command: Option
     });
 }
 
-/// Records every task spawned in a terminal and reports it ran successfully.
+/// Records every task spawned in a terminal and reports it ended with the exit status it holds
+/// (success by default).
 #[derive(Clone, Default)]
-struct Recorder(Arc<Mutex<Vec<::task::SpawnInTerminal>>>);
+struct Recorder(Arc<Mutex<Vec<::task::SpawnInTerminal>>>, ExitStatus);
 
 impl TerminalProvider for Recorder {
     fn spawn(
@@ -93,7 +101,7 @@ impl TerminalProvider for Recorder {
         _: &mut App,
     ) -> Task<Option<anyhow::Result<ExitStatus>>> {
         self.0.lock().push(task);
-        Task::ready(Some(Ok(ExitStatus::default())))
+        Task::ready(Some(Ok(self.1)))
     }
 }
 
@@ -350,10 +358,318 @@ fn branch_names_paths_and_pull_numbers() {
         repository.join(".bongos-worktrees/alpha")
     );
 
-    assert_eq!(pull_number("https://github.com/o/r/pull/12"), Some(12));
+    let pull = pull_request;
     assert_eq!(
-        pull_number("https://github.com/o/r/pull/12/files"),
-        Some(12)
+        pull("https://github.com/o/r/pull/12"),
+        Some(("o/r".to_string(), 12))
     );
-    assert_eq!(pull_number("https://example.com/o/r/issues/12"), None);
+    assert_eq!(
+        pull("https://github.com/o/r/pull/12/files"),
+        Some(("o/r".to_string(), 12))
+    );
+    assert_eq!(pull("https://example.com/o/r/issues/12"), None);
+    assert_eq!(pull("https://github.com/pull/12"), None);
+
+    assert!(remote_names(
+        "https://github.com/Acme/Invoicing.git",
+        "acme/invoicing"
+    ));
+    assert!(remote_names(
+        "git@github.com:acme/invoicing.git",
+        "acme/invoicing"
+    ));
+    assert!(remote_names(
+        "/srv/git/acme/invoicing.git/",
+        "acme/invoicing"
+    ));
+    assert!(!remote_names(
+        "https://github.com/acme/invoicing-old",
+        "acme/invoicing"
+    ));
+    assert!(!remote_names(
+        "https://github.com/notacme/invoicing",
+        "acme/invoicing"
+    ));
+    assert!(!remote_names(
+        "https://github.com/acme/elsewhere",
+        "acme/invoicing"
+    ));
+}
+
+#[test]
+fn home_is_expanded_only_at_the_start() {
+    let home = util::paths::home_dir();
+    assert_eq!(expand_home("~"), *home);
+    assert_eq!(expand_home("~/src/invoicing"), home.join("src/invoicing"));
+    assert_eq!(
+        expand_home("/srv/invoicing"),
+        PathBuf::from("/srv/invoicing")
+    );
+    assert_eq!(expand_home("~kyle/src"), PathBuf::from("~kyle/src"));
+    assert_eq!(expand_home("src/~/x"), PathBuf::from("src/~/x"));
+}
+
+#[test]
+fn the_base_falls_back_to_main_when_git_finds_no_default_branch() {
+    assert_eq!(default_or_fallback(Ok(None)), "main");
+    assert_eq!(default_or_fallback(Err(anyhow::anyhow!("no git"))), "main");
+    assert_eq!(default_or_fallback(Ok(Some("trunk".into()))), "trunk");
+}
+
+#[test]
+fn a_path_held_through_a_symbolic_link_counts_as_held() {
+    let temp = TempDir::new().unwrap();
+    let real = std::fs::canonicalize(temp.path())
+        .unwrap()
+        .join("invoicing");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    // Neither `.bongos-worktrees` nor the worktree exists yet; the link still resolves.
+    let held = [link.join(".bongos-worktrees").join("backfill")];
+    let (path, slug) = free_worktree_path(&real, "backfill", &held);
+    assert_eq!(slug, "backfill-2");
+    assert_eq!(path, real.join(".bongos-worktrees").join("backfill-2"));
+    let (path, _) = free_worktree_path(&link, "backfill", &held);
+    assert_eq!(path, link.join(".bongos-worktrees").join("backfill-2"));
+}
+
+fn leaf(dir: &Path, id: &str, kind: Kind, edit: impl FnOnce(&mut TaskFile)) {
+    let mut file = TaskFile::new(id, kind);
+    file.id = id.to_string();
+    file.todos = default_todos(kind);
+    edit(&mut file);
+    write(&layout::task_file(dir), &serialize_task(&file).unwrap());
+}
+
+fn refusal(planned: Result<Plan, String>) -> String {
+    match planned {
+        Err(message) => message,
+        Ok(_) => panic!("expected a refusal"),
+    }
+}
+
+#[test]
+fn documents_others_groups_and_gone_worktrees_are_refused() {
+    let temp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("work");
+    let project = layout::project_dir(&root, "invoicing");
+    write(&layout::project_file(&project), &project_toml("Invoicing"));
+    leaf(&project, "top", Kind::PrShip, |file| file.todos.clear());
+    let group = layout::child_dir(&project, "group");
+    leaf(&group, "group", Kind::PrShip, |file| file.todos.clear());
+    leaf(
+        &layout::child_dir(&group, "inner"),
+        "inner",
+        Kind::PrShip,
+        |_| {},
+    );
+    leaf(
+        &layout::child_dir(&project, "doc"),
+        "doc",
+        Kind::Document,
+        |_| {},
+    );
+    leaf(
+        &layout::child_dir(&project, "misc"),
+        "misc",
+        Kind::Other,
+        |_| {},
+    );
+    let gone = root.join("nowhere").to_string_lossy().into_owned();
+    leaf(
+        &layout::child_dir(&project, "gone"),
+        "gone",
+        Kind::PrShip,
+        |file| {
+            file.worktree = Some(gone.clone());
+            file.branch = Some("gone".to_string());
+        },
+    );
+    leaf(
+        &layout::child_dir(&project, "lost"),
+        "lost",
+        Kind::PrShip,
+        |file| {
+            file.worktree = Some(gone.clone());
+        },
+    );
+    let tree = load(&root);
+    assert!(tree.errors.is_empty(), "{:?}", tree.errors);
+    let repositories = [Repository {
+        name: "invoicing".to_string(),
+        path: root.join("repository").to_string_lossy().into_owned(),
+        setup_command: None,
+        merge_is_ship: true,
+        deployments: true,
+        branch_template: "{slug}".to_string(),
+    }];
+    let refused = |id: &str| refusal(plan(&tree, id, &repositories));
+
+    assert_eq!(
+        refused("doc"),
+        "doc is of kind document; only pr-ship, pr-merge, spike and babysit tasks get a worktree"
+    );
+    assert_eq!(
+        refused("misc"),
+        "misc is of kind other; only pr-ship, pr-merge, spike and babysit tasks get a worktree"
+    );
+    assert_eq!(
+        refused("group"),
+        "group is a group; only a leaf task gets a worktree"
+    );
+    assert!(refused("top").ends_with("is a group; only a leaf task gets a worktree"));
+    let gone_message = refused("gone");
+    assert!(
+        gone_message.contains(&format!("git worktree add {gone} gone")),
+        "{gone_message}"
+    );
+    assert!(
+        refused("lost").contains("Remove the `worktree` line from its task.toml"),
+        "says what to do"
+    );
+    // A pr-ship leaf is planned.
+    assert!(plan(&tree, "inner", &repositories).is_ok());
+}
+
+#[gpui::test]
+async fn a_failing_setup_command_shows_a_toast_and_keeps_the_worktree(cx: &mut TestAppContext) {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let (setup, cx) = setup(cx, Some("false")).await;
+    let harness = &setup.harness;
+    let failing = Recorder(Default::default(), ExitStatus::from_raw(1 << 8));
+    harness.workspace.update(cx, |workspace, _| {
+        workspace.set_terminal_provider(failing.clone())
+    });
+    harness.clear_toasts(cx);
+    harness
+        .run_and_wait(cx, "task::Start", &[Input::Pick("backfill")])
+        .await;
+    wait_until(cx, "the failure toast", |cx| harness.has_toast(cx)).await;
+    assert_eq!(failing.0.lock().len(), 1);
+    let worktree = setup.repository.join(".bongos-worktrees").join("backfill");
+    assert!(worktree.join(".git").exists(), "the worktree stays");
+    assert_eq!(
+        harness.file(cx, &["backfill"]).worktree,
+        Some(worktree.to_string_lossy().into_owned())
+    );
+    assert_eq!(worktree_count(&setup.real), 2);
+}
+
+#[gpui::test]
+async fn an_unrecorded_worktree_is_adopted_with_the_merge_base_as_its_base(
+    cx: &mut TestAppContext,
+) {
+    let (setup, cx) = setup(cx, None).await;
+    let harness = &setup.harness;
+    let cut_from = git(&setup.real, &["rev-parse", "main"]);
+    let worktree = setup.real.join(".bongos-worktrees").join("backfill");
+    git(
+        &setup.real,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "backfill",
+            worktree.to_str().unwrap(),
+            "main",
+        ],
+    );
+    git(
+        &setup.real,
+        &["commit", "-q", "--allow-empty", "-m", "main moves on"],
+    );
+
+    harness
+        .run_and_wait(cx, "task::Start", &[Input::Pick("backfill")])
+        .await;
+    let file = harness.file(cx, &["backfill"]);
+    assert_eq!(file.branch.as_deref(), Some("backfill"));
+    assert_eq!(file.base.as_deref(), Some("main"));
+    assert_eq!(file.base_sha.as_deref(), Some(cut_from.as_str()));
+    assert!(file.worktree.is_some());
+    assert_eq!(worktree_count(&setup.real), 2);
+    assert!(!harness.has_toast(cx));
+}
+
+#[gpui::test]
+async fn babysit_fetches_the_pr_head_from_the_remote_that_names_its_repository(
+    cx: &mut TestAppContext,
+) {
+    let (setup, cx) = setup(cx, None).await;
+    let harness = &setup.harness;
+    let real = &setup.real;
+    let remotes = real.parent().unwrap().join("remotes");
+    let mirror = remotes.join("acme").join("invoicing.git");
+    let other = remotes.join("someone").join("else.git");
+    for bare in [&mirror, &other] {
+        std::fs::create_dir_all(bare).unwrap();
+        git(bare, &["init", "-q", "--bare"]);
+    }
+    // `origin` is not the PR's repository and has no PR refs; `mirror` is and has one.
+    git(real, &["remote", "add", "origin", other.to_str().unwrap()]);
+    git(real, &["remote", "add", "mirror", mirror.to_str().unwrap()]);
+    git(real, &["checkout", "-q", "-b", "feature"]);
+    git(real, &["commit", "-q", "--allow-empty", "-m", "pr work"]);
+    let head = git(real, &["rev-parse", "HEAD"]);
+    git(real, &["push", "-q", "mirror", "feature:refs/pull/1/head"]);
+    git(real, &["checkout", "-q", "main"]);
+    git(real, &["branch", "-q", "-D", "feature"]);
+
+    let watch_dir = harness.task_dir(&["watch"]);
+    leaf(&watch_dir, "b1", Kind::Babysit, |file| {
+        file.goal = "Watch the PRs".to_string();
+        file.result = Some(TaskResult {
+            kind: ResultKind::Prs,
+            url: None,
+            state: None,
+            urls: vec![
+                "https://github.com/acme/elsewhere/pull/2".to_string(),
+                "https://github.com/acme/invoicing/pull/1".to_string(),
+            ],
+            extra: Default::default(),
+        });
+    });
+    wait_until(cx, "the babysit task to load", |cx| {
+        harness.tree(cx).task_by_id("b1").is_some()
+    })
+    .await;
+
+    // No remote points at acme/elsewhere: refused, nothing fetched or created.
+    harness.clear_toasts(cx);
+    let writes = harness.writes(cx);
+    harness
+        .run(
+            cx,
+            "task::Start",
+            &[Input::Pick("watch"), Input::Pick("elsewhere")],
+        )
+        .await;
+    wait_until(cx, "the refusal", |cx| harness.has_toast(cx)).await;
+    assert_eq!(harness.writes(cx), writes);
+    assert_eq!(git(real, &["branch", "--list", "pr-2"]), "");
+    assert!(!real.join(".bongos-worktrees").join("watch").exists());
+
+    // acme/invoicing is `mirror`: its pull/1/head becomes `pr-1`, checked out in the worktree.
+    harness.clear_toasts(cx);
+    harness
+        .run_and_wait(
+            cx,
+            "task::Start",
+            &[Input::Pick("watch"), Input::Pick("invoicing/pull/1")],
+        )
+        .await;
+    let file = harness.file(cx, &["watch"]);
+    let worktree = setup.repository.join(".bongos-worktrees").join("watch");
+    assert_eq!(file.branch.as_deref(), Some("pr-1"));
+    assert_eq!(file.base, None);
+    assert_eq!(file.base_sha, None);
+    assert_eq!(file.worktree, Some(worktree.to_string_lossy().into_owned()));
+    assert_eq!(git(real, &["rev-parse", "pr-1"]), head);
+    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&worktree, &["branch", "--show-current"]), "pr-1");
+    assert_eq!(exclude_lines(&real.join(".git")), 1);
+    assert!(!harness.has_toast(cx));
 }
