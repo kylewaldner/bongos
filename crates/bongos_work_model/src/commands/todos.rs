@@ -62,13 +62,18 @@ pub fn advance(tree: &WorkTree, ctx: &Context, id: &str, override_ship: bool) ->
     })
 }
 
-/// `todo: skip`: close an open todo without doing it.
+/// `todo: skip`: close an open todo without doing it. Skipping the ships todo of a task stacked
+/// on a sibling that is not Done is refused like shipping it, since a skipped ships todo ends
+/// the task just the same.
 pub fn todo_skip(tree: &WorkTree, ctx: &Context, id: &str, index: Option<usize>) -> Outcome {
     edit_task(tree, ctx, id, |place, file| {
         require_leaf(place, tree, "todos")?;
         let index = todo_index(place, file, index)?;
+        require_todo_open(&file.todos[index])?;
+        if let Some((parent, state)) = rules::ship_waits_on(place, tree, file, index) {
+            return Err(rules::ship_refusal(place, parent, state));
+        }
         let todo = &mut file.todos[index];
-        require_todo_open(todo)?;
         todo.state = TodoState::Skipped;
         Ok(("todo skipped", Some(todo.name.clone())))
     })
