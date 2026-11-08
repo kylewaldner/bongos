@@ -25,7 +25,7 @@ use crate::adapter::{
     AgentAdapter, Capabilities, CaptureQuery, Fallback, HiddenFlag, LaunchKind, LaunchPlan,
     LaunchSpec, Login, Shape, launch_env, note,
 };
-use crate::capture::{Candidate, created_at, is_uuid, pick_by_chat_id, pick_newest};
+use crate::capture::{Candidate, created_at, is_uuid, pick_newest};
 use crate::record::Agent;
 
 /// `--help` hides these flags that the CLI accepts.
@@ -64,6 +64,8 @@ impl ClaudeAdapter {
             args.push(SYSTEM_FILE_FLAG.to_string());
             args.push(files.system_path.to_string_lossy().into_owned());
         } else if caps.has_flag(SYSTEM_TEXT_FLAG) {
+            // The one case where argv carries the system text, and so possibly the paths of shared
+            // artifacts (never a human-only one): allowed by D8, labeled on the row.
             args.push(SYSTEM_TEXT_FLAG.to_string());
             args.push(files.system_text.clone());
             note(fallbacks, Fallback::SystemPromptAsText);
@@ -198,8 +200,7 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn capture_session_id(&self, query: &CaptureQuery) -> Option<String> {
         // The newest transcript created after launch, unless one of them names this chat.
-        let candidates = transcripts(query);
-        pick_by_chat_id(query, &candidates).or_else(|| pick_newest(&candidates))
+        pick_newest(query, transcripts(query))
     }
 }
 

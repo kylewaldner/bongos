@@ -157,7 +157,9 @@ fn system_prompt_falls_back_to_text_then_to_nothing() {
         .iter()
         .position(|a| a == "--append-system-prompt")
         .unwrap();
+    // The one case where argv carries the system text, which may hold shared artifact paths (D8).
     assert_eq!(spec.args[at + 1], p.files.system_text);
+    assert!(spec.args[at + 1].contains(ARTIFACT));
     assert!(
         !spec
             .args

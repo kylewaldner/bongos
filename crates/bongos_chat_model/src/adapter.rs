@@ -191,7 +191,7 @@ pub enum Fallback {
     NameOmitted,
     /// No model flag in the help, so the model was not passed.
     ModelOmitted,
-    /// The session id is not known before launch and is read from the CLI's own files.
+    /// Claude: the session id is not known before launch and is read from the CLI's own files.
     CaptureSessionId,
     /// A native fork was asked for and the CLI cannot do it; started as a handoff.
     ForkUnsupported,

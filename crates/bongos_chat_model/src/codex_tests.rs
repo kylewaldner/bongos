@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
 use crate::adapter_tests::{ARTIFACT, RUNTIME, SESSION, SOURCE, codex_caps, plan, strings};
+use crate::inject_tests::rendered_codex_instructions;
 use crate::*;
 
 const KEY: &str = "model_instructions_file";
@@ -50,7 +51,8 @@ fn new_line_unverified() {
     let spec = launch(LaunchKind::New, None, &[]);
     assert_eq!(spec.program, "codex");
     assert_eq!(spec.args, line(&[]));
-    assert_eq!(spec.fallbacks, vec![Fallback::CaptureSessionId]);
+    // Capture is the only way to learn a Codex id, so it is no fallback label.
+    assert!(spec.fallbacks.is_empty());
     assert!(spec.capture_session_id);
 }
 
@@ -72,17 +74,14 @@ fn fork_line_unverified() {
 fn handoff_line_unverified_is_a_new_conversation() {
     let spec = launch(fork(false), None, &[]);
     assert_eq!(spec.args, line(&[]));
-    assert_eq!(spec.fallbacks, vec![Fallback::CaptureSessionId]);
+    assert!(spec.fallbacks.is_empty() && spec.capture_session_id);
 }
 
 #[test]
 fn no_fork_subcommand_starts_a_handoff_unverified() {
     let spec = launch(fork(true), None, &["fork"]);
     assert_eq!(spec.args, line(&[]));
-    assert_eq!(
-        spec.fallbacks,
-        vec![Fallback::ForkUnsupported, Fallback::CaptureSessionId]
-    );
+    assert_eq!(spec.fallbacks, vec![Fallback::ForkUnsupported]);
     assert!(!adapter().shape(&codex_caps(&["fork"])).native_fork);
     assert!(adapter().shape(&codex_caps(&[])).native_fork);
 }
@@ -260,25 +259,29 @@ fn capture_skips_claimed_ids_and_files_older_than_the_launch() {
     assert_eq!(late.ask(CHAT, &[]), None);
 }
 
+/// A session file line that holds the rendered instructions, as JSON escapes them.
+fn stored_instructions(chat_id: &str) -> String {
+    serde_json::json!({ "instructions": rendered_codex_instructions(chat_id) }).to_string()
+}
+
 #[test]
-fn two_same_second_starts_are_told_apart_by_the_chat_id() {
+fn two_same_second_starts_are_told_apart_by_the_chat_id_unverified() {
+    // Unverified: that Codex stores the instructions text in its session file at all.
     let c = Capture::new();
-    rollout(
-        &c.home,
-        ID_A,
-        CWD,
-        &format!("instructions mention {CHAT}"),
-        false,
-    );
-    rollout(
-        &c.home,
-        ID_B,
-        CWD,
-        &format!("instructions mention {OTHER_CHAT}"),
-        false,
-    );
+    rollout(&c.home, ID_A, CWD, &stored_instructions(CHAT), false);
+    rollout(&c.home, ID_B, CWD, &stored_instructions(OTHER_CHAT), false);
     assert_eq!(c.ask(CHAT, &[]).as_deref(), Some(ID_A));
     assert_eq!(c.ask(OTHER_CHAT, &[]).as_deref(), Some(ID_B));
+}
+
+#[test]
+fn a_file_naming_another_chat_is_never_a_candidate() {
+    let c = Capture::new();
+    rollout(&c.home, ID_B, CWD, &stored_instructions(OTHER_CHAT), false);
+    assert_eq!(c.ask(CHAT, &[]), None);
+    // A file that names no chat is still usable when it is the only one left.
+    rollout(&c.home, ID_A, CWD, "", false);
+    assert_eq!(c.ask(CHAT, &[]).as_deref(), Some(ID_A));
 }
 
 #[test]

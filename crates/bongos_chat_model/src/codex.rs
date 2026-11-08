@@ -10,9 +10,10 @@
 //! - unverified: `codex login status` exits 0 when logged in and nonzero when not; its text is not
 //!   relied on beyond a "not logged in" marker, and it is never kept.
 //!
-//! Two Codex chats started in one directory within a second are told apart by the bongos chat id when
-//! the session file holds the instructions text; if it does not, the second waits until the first
-//! has been captured (see [`crate::capture`]).
+//! Two Codex chats started in one directory within a second are told apart by the `chat id: <id>`
+//! line of `codex-instructions.md`, but only if Codex stores the instructions text in its session
+//! files, which is unverified. The runtime must therefore launch Codex chats one at a time per
+//! directory, claiming each id before the next launch (see [`crate::CaptureQuery`]).
 
 use std::fs;
 use std::path::Path;
@@ -140,9 +141,7 @@ impl AgentAdapter for CodexAdapter {
             }
             LaunchKind::New => capture = true,
         }
-        if capture {
-            note(&mut fallbacks, Fallback::CaptureSessionId);
-        }
+        // Capturing the id is the only way to get it from Codex, so it is not a fallback here.
 
         let system_path = plan.files.system_path.to_string_lossy().into_owned();
         let mut first_message = None;
@@ -198,7 +197,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn capture_session_id(&self, query: &CaptureQuery) -> Option<String> {
-        pick_unambiguous(query, &self.rollouts(query))
+        pick_unambiguous(query, self.rollouts(query))
     }
 }
 

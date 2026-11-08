@@ -31,8 +31,8 @@ pub use digest::{DIGEST_PREFIX, context_digest};
 pub use error::{Error, ErrorKind, Result};
 pub use facts::TaskFacts;
 pub use inject::{
-    HandoffParent, RenderInput, handoff_note, render_codex_instructions, render_context,
-    render_env, render_settings, render_system, shell_quote,
+    CHAT_ID_LABEL, HandoffParent, RenderInput, handoff_note, render_codex_instructions,
+    render_context, render_env, render_settings, render_system, shell_quote,
 };
 pub use list::{ChatEntry, ChatLists, chat_lists, forks_of, read_chats_dir, read_scope_chats};
 pub use naming::{MAX_NAME_CHARS, default_name, from_prompt, from_title};
