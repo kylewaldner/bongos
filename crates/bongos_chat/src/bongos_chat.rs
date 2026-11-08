@@ -8,9 +8,12 @@ mod actions;
 mod facts;
 mod health;
 mod launch;
+mod layout;
 mod live_modes;
+mod panel;
 mod runtime;
 mod send;
+mod session_view;
 mod settings;
 mod store;
 
@@ -32,13 +35,18 @@ pub use launch::{
     CLAUDE_SETTINGS_FILE, CODEX_INSTRUCTIONS_FILE, CONTEXT_FILE, LaunchError, LaunchRequest,
     PLUGIN_DIR, SYSTEM_FILE,
 };
+pub use layout::PROMPT_PANE_OFF;
 pub use live_modes::{SOURCE_NAME, start_current_todo};
+pub use panel::{ChatPanel, init_panel};
 pub use runtime::{
     ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChatRuntime, ChatRuntimeEvent, ChatState,
     LiveChat, RuntimeStats,
 };
 pub use send::{
-    BRACKETED_WAIT, ChatToast, SendError, SendOptions, Sent, chat_for_prompts_file, register, send,
+    BRACKETED_WAIT, ChatToast, SendError, SendOptions, Sent, chat_for_prompts_file, send,
+};
+pub use session_view::{
+    PromptPaneProvider, SessionView, SessionViewEvent, set_prompt_pane_provider,
 };
 pub use settings::{AgentCommand, ChatsSettings};
 pub use store::{ChatStats, ChatStore, ChatStoreEvent, ChatWriteError, IndexedChat};
@@ -61,6 +69,12 @@ impl ChatDirs {
             runtime: data_dir.join("chats"),
         }
     }
+}
+
+/// Registers the actions of the `chat` namespace that have handlers on `workspace`.
+pub fn register(workspace: &mut workspace::Workspace) {
+    send::register(workspace);
+    panel::register(workspace);
 }
 
 struct GlobalChatStore(Entity<ChatStore>);
@@ -95,6 +109,9 @@ impl ChatStore {
 
 #[cfg(test)]
 mod facts_tests;
+
+#[cfg(test)]
+mod panel_tests;
 
 #[cfg(test)]
 mod health_tests;

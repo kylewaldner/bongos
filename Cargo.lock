@@ -2214,14 +2214,17 @@ dependencies = [
 name = "bongos_chat"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bongos_chat_model",
  "bongos_work",
  "bongos_work_model",
+ "collections",
  "command_palette_hooks",
  "editor",
  "fs",
  "futures 0.3.32",
  "gpui",
+ "language",
  "log",
  "nix 0.29.0",
  "project",
@@ -2233,6 +2236,8 @@ dependencies = [
  "task",
  "tempfile",
  "terminal",
+ "terminal_view",
+ "ui",
  "util",
  "uuid",
  "which 6.0.3",

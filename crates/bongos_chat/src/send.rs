@@ -12,7 +12,8 @@
 //! never replaced.
 //!
 //! `chat: send region` sends the selection of the active editor, or its whole buffer, to the chat
-//! whose prompts file the editor shows. Focus stays where it is.
+//! whose prompts file the editor shows (or, from the prompts pane of the Chats panel, to the chat
+//! the panel shows). Focus stays where it is.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use std::time::{Duration, SystemTime};
 use bongos_chat_model::{Agent, ChatRecord, NamedBy, from_prompt, timestamp_utc};
 use bongos_work_model::layout;
 use editor::{Editor, MultiBufferOffset};
-use gpui::{App, AsyncApp, Context, Entity, Task, WeakEntity};
+use gpui::{App, AsyncApp, Context, Entity, Task, WeakEntity, Window};
 use settings::Settings as _;
 use terminal::{Modes, Terminal};
 use workspace::notifications::NotificationId;
@@ -30,7 +31,7 @@ use workspace::{Toast, Workspace};
 
 use crate::actions::chat;
 use crate::live_modes::is_open;
-use crate::{ChatRuntime, ChatsSettings};
+use crate::{ChatPanel, ChatRuntime, ChatsSettings};
 
 /// How long after its launch a chat has to ask for bracketed paste before a send is refused.
 pub const BRACKETED_WAIT: Duration = Duration::from_secs(5);
@@ -297,7 +298,7 @@ fn accepts_pastes(terminal: &Entity<Terminal>, cx: &App) -> bool {
 
 /// The prompts file of an indexed chat: its `prompts_file` (relative to the scope directory when
 /// relative), else the scope's `prompts.txt`.
-fn prompts_file(scope_dir: &Path, record: &ChatRecord) -> PathBuf {
+pub(crate) fn prompts_file(scope_dir: &Path, record: &ChatRecord) -> PathBuf {
     match &record.prompts_file {
         Some(path) => scope_dir.join(path),
         None => layout::prompts_file(scope_dir),
@@ -327,7 +328,7 @@ pub fn chat_for_prompts_file(path: &Path, cx: &App) -> Option<String> {
 /// A toast of the chat commands.
 pub struct ChatToast;
 
-fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
     workspace.show_toast(
         Toast::new(NotificationId::unique::<ChatToast>(), message),
         cx,
@@ -336,8 +337,8 @@ fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Works
 
 /// Registers `chat: send region` on `workspace`.
 pub fn register(workspace: &mut Workspace) {
-    workspace.register_action(|workspace, _: &chat::SendRegion, _, cx| {
-        send_region(workspace, cx);
+    workspace.register_action(|workspace, _: &chat::SendRegion, window, cx| {
+        send_region(workspace, window, cx);
     });
 }
 
@@ -355,13 +356,22 @@ fn region_text(editor: &mut Editor, cx: &mut Context<Editor>) -> String {
 }
 
 /// `chat: send region`: sends the region of the active editor to the chat whose prompts file it
-/// shows. The buffer is only read; a refusal leaves it as it was and says why in a toast.
-fn send_region(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+/// shows, or, while the prompts pane of the Chats panel has focus, the region of its editor to the
+/// chat the panel shows. The buffer is only read; a refusal leaves it as it was and says why in a
+/// toast.
+fn send_region(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if !ChatsSettings::get_global(cx).enabled {
         show_toast(workspace, SendError::Off.to_string(), cx);
         return;
     }
-    let Some(editor) = workspace.active_item_as::<Editor>(cx) else {
+    let in_panel = workspace
+        .panel::<ChatPanel>(cx)
+        .and_then(|panel| panel.read(cx).focused_prompts(window, cx));
+    let Some(editor) = in_panel
+        .as_ref()
+        .map(|(editor, _)| editor.clone())
+        .or_else(|| workspace.active_item_as::<Editor>(cx))
+    else {
         show_toast(
             workspace,
             "Open the prompts file of a chat to send from it".to_string(),
@@ -372,7 +382,11 @@ fn send_region(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
     let (text, path) = editor.update(cx, |editor, cx| {
         (region_text(editor, cx), editor.target_file_abs_path(cx))
     });
-    let Some(chat_id) = path.and_then(|path| chat_for_prompts_file(&path, cx)) else {
+    let chat_id = match in_panel {
+        Some((_, chat_id)) => Some(chat_id),
+        None => path.and_then(|path| chat_for_prompts_file(&path, cx)),
+    };
+    let Some(chat_id) = chat_id else {
         show_toast(
             workspace,
             "This buffer is not the prompts file of a chat".to_string(),
