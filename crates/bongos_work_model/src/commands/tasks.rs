@@ -319,3 +319,51 @@ pub fn reopen(tree: &WorkTree, ctx: &Context, id: &str) -> Outcome {
         Ok(("reopened", None))
     })
 }
+
+/// What `task: start` made: the branch, what it was cut from, and the worktree holding it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StartedWorktree {
+    pub branch: String,
+    /// The branch it was cut from; `None` for a branch that already existed (a PR's head).
+    pub base: Option<String>,
+    pub base_sha: Option<String>,
+    /// The absolute path of the worktree.
+    pub worktree: String,
+}
+
+/// `task: start`: record the worktree just created for an open leaf and mark its current todo
+/// started. Refused when the task already records a worktree, so a second one is never written
+/// over the first.
+pub fn record_worktree(
+    tree: &WorkTree,
+    ctx: &Context,
+    id: &str,
+    started: StartedWorktree,
+) -> Outcome {
+    edit_task(tree, ctx, id, |place, file| {
+        super::require_leaf(place, tree, "worktree")?;
+        super::require_open(place.slug(), file)?;
+        if let Some(existing) = &file.worktree {
+            return Err(format!(
+                "{} already has the worktree {existing}",
+                place.slug()
+            ));
+        }
+        file.branch = Some(started.branch.clone());
+        file.base = started.base.clone();
+        file.base_sha = started.base_sha.clone();
+        file.worktree = Some(started.worktree.clone());
+        if let Some(todo) = file
+            .todos
+            .iter_mut()
+            .find(|todo| todo.state == TodoState::Open)
+            && todo.started.is_none()
+        {
+            todo.started = Some(ctx.at);
+        }
+        Ok((
+            "worktree created",
+            Some(format!("{} at {}", started.branch, started.worktree)),
+        ))
+    })
+}
