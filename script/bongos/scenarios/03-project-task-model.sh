@@ -20,7 +20,7 @@
 #   6. A group of twelve leaves written as files reads 4/12, and 4/11 after task: drop.
 #   7. One-offs written with old times: two days old fades, four days old is under Stale.
 #   8. Quit and relaunch: the drill path and the focused task come back.
-#   9. The proxy log is empty.
+#   9. No request through the proxy beyond the two kinds every launch makes (see Work 9).
 # The scenario leaves the app quit, restores settings.json and never writes final.png.
 
 if [ -n "${stock:-}" ]; then
@@ -147,10 +147,11 @@ expect_detail() {
   [ "$got" = "$2" ] || fail "the Work view detail of '$1' reads '${got:-no such row}', expected '$2': $(cat "$VIEW_FILE")"
 }
 
-# Moves the panel's selection to the row of <goal> (from a fresh dump).
+# Moves the panel's selection to the row of <goal>. With `reuse`, the last dump is still what the
+# panel shows (nothing has run since it), so no new one is taken.
 select_row() {
   local pos sel tgt
-  dump_view select
+  if [ "${2:-}" != reuse ]; then dump_view select; fi
   pos=$(awk -v goal="$1" 'NR > 1 && substr($0, 2, 1) != " " {
     n++; t = substr($0, 2)
     if (substr($0, 1, 1) == ">") sel = n
@@ -169,9 +170,9 @@ select_row() {
   wait_for_settled
 }
 
-# RET on the row of the group <goal>: the panel shows its tasks.
+# RET on the row of the group <goal>: the panel shows its tasks. `reuse` as for select_row.
 drill() {
-  select_row "$1"
+  select_row "$1" "${2:-}"
   act keys Return
   dump_view drill
   [ "$(breadcrumb | sed 's/.* > //')" = "$1" ] || fail "drilling into '$1' shows '$(breadcrumb)'"
@@ -190,7 +191,7 @@ go_top() {
 
 project_level() {
   go_top
-  drill Invoicing
+  drill Invoicing reuse
 }
 
 # --- Reading files ----------------------------------------------------------------------------
@@ -303,6 +304,8 @@ move_in_and_wait() {
 
 # ---------------------------------------------------------------------------------------------
 step "Work setup: a repository with one commit, base_keymap Emacs, work.repositories"
+# Work 9 looks only at the requests made from here on.
+PROXY_LINES_BEFORE=$(wc -l <"$RUN/proxy.log")
 mkdir -p "$RUN/config-backup"
 cp "$SETTINGS_FILE" "$RUN/config-backup/settings-03.json"
 git init -q -b main "$REPO"
@@ -381,7 +384,7 @@ wait_toml "$FIRST_DIR/task.toml" 'd.get("branch")' backfill-usage-events
 [ "$(toml "$FIRST_DIR/task.toml" 'd["base"]')" = main ] || fail "the first task's base is not main: $(cat "$FIRST_DIR/task.toml")"
 [ -z "$(git -C "$REPO" status --porcelain)" ] || fail "the repository is not clean with the worktree in it: $(git -C "$REPO" status --porcelain)"
 drill Invoicing
-drill "Usage events"
+drill "Usage events" reuse
 expect_title "Bill usage events" "Bill usage events  Blocked"
 expect_title "Backfill usage events" "Backfill usage events  In Progress"
 shot work-blocked
@@ -454,7 +457,7 @@ move_in_and_wait "$STAGE/stack-tree" "$STACK_DIR"
 dump_view stack-project
 [ -n "$(view_title "Stack tree")" ] || fail "the stack tree is not in the Work view: $(cat "$VIEW_FILE")"
 case $(view_detail "Stack tree") in *error*) fail "the stack tree has an error: $(view_detail "Stack tree")" ;; esac
-drill "Stack tree"
+drill "Stack tree" reuse
 for goal in Base Left Right "Left top" "Right top"; do
   [ -n "$(view_title "$goal")" ] || fail "no row '$goal' in the stack tree: $(cat "$VIEW_FILE")"
   case $(view_detail "$goal") in *error*) fail "'$goal' has an error: $(view_detail "$goal")" ;; esac
@@ -581,8 +584,8 @@ say "smoke: support fades and research is Stale: $RUN/work-stale.png"
 
 # ---------------------------------------------------------------------------------------------
 step "Work 8: quit and relaunch restore the drill path and the focused task"
-drill Invoicing
-drill "Usage events"
+drill Invoicing reuse
+drill "Usage events" reuse
 quit_app
 launch_drawn
 focus_center
@@ -600,11 +603,19 @@ say "smoke: drill path and focus restored: $RUN/work-restored.png"
 
 # ---------------------------------------------------------------------------------------------
 step "Work 9: no network"
-if [ -s "$RUN/proxy.log" ]; then
-  echo "bongos: the Work scenario reached the proxy:" >&2
-  cat "$RUN/proxy.log" >&2
+# Every launch of the app, with or without the Work view, makes two kinds of request that the base
+# flow shows too: CONNECT cdn.agentclientprotocol.com (the ACP agent registry fetch when its cache is
+# empty, AgentRegistryStore::init_global; allowed in hosts-allow.txt) and GET localhost (the local
+# model providers, such as Ollama, asking a server on this machine for its models). Neither comes
+# from the Work view. Anything else the scenario sent through the proxy is a failure.
+work_requests=$(tail -n +"$((PROXY_LINES_BEFORE + 1))" "$RUN/proxy.log")
+stray_requests=$(printf '%s\n' "$work_requests" |
+  awk 'NF && $0 != "CONNECT cdn.agentclientprotocol.com" && $0 != "GET localhost"')
+if [ -n "$stray_requests" ]; then
+  echo "bongos: the Work scenario reached the proxy for other hosts:" >&2
+  printf '%s\n' "$stray_requests" | sort | uniq -c >&2
   exit 1
 fi
-say "smoke: proxy.log is empty"
+say "smoke: no request beyond the app's startup ones ($(printf '%s' "$work_requests" | grep -c . || true) requests, all to the ACP registry or localhost)"
 
 cp "$RUN/config-backup/settings-03.json" "$SETTINGS_FILE"
