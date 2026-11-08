@@ -3,6 +3,7 @@
 //! layout, and atomic file writes. It has no UI dependency and never touches the real home
 //! directory: every path function takes the root it works under.
 
+pub mod derive;
 mod error;
 pub mod files;
 pub mod io;
@@ -19,6 +20,9 @@ pub use io::{
     serialize_task,
 };
 pub use types::*;
+
+#[cfg(test)]
+mod derive_tests;
 
 #[cfg(test)]
 mod store_tests;
