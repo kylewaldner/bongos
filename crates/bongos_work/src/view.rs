@@ -8,26 +8,50 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use bongos_work_model::activity::{created_at, tree_activity_time};
+use bongos_work_model::activity::{
+    Entry, Freshness, Item, created_at, is_closed, top_level, tree_activity_time,
+};
 use bongos_work_model::artifacts::{GUARANTEE, task_artifacts};
 use bongos_work_model::commands::kind_name;
 use bongos_work_model::derive::{self, Shape, State};
-use bongos_work_model::graph::{child_order, state_label};
+use bongos_work_model::graph::{child_order, level_graph, state_label};
 use bongos_work_model::rollup::{Rollup, rollup};
 use bongos_work_model::store::{Activity, Task, WorkTree};
 use bongos_work_model::{ResultKind, ResultState, TaskResult, TodoState, Visibility};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 
+use crate::filters::Filters;
 use crate::rebase::RebaseState;
 use crate::registry::LiveModes;
 
-/// What a row stands for: a task, or the heading of an activity's one-offs at the top level.
+/// The parts of the top level that start folded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Section {
+    /// Open items idle for the stale threshold.
+    Stale,
+    /// Items that are done, cancelled or archived.
+    Closed,
+}
+
+impl Section {
+    fn name(self) -> &'static str {
+        match self {
+            Section::Stale => "Stale",
+            Section::Closed => "Closed",
+        }
+    }
+}
+
+/// What a row stands for: a task, the heading of an activity's one-offs at the top level, or the
+/// heading of a folded section of it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     /// A task, by id.
     Task(String),
     /// An activity, by slug.
     Activity(String),
+    /// A section of the top level.
+    Section(Section),
 }
 
 /// The text shown above the guarantee of every task with artifacts while a session is open.
@@ -41,6 +65,8 @@ pub enum LineKind {
     Title,
     /// The rest of a row.
     Detail,
+    /// A line of the graph that is not a row: the top and bottom of a box, an arrow.
+    Graph,
     /// A line of an expanded row.
     Extra,
 }
@@ -56,6 +82,8 @@ pub struct Line {
     pub trailing: String,
     /// What a tooltip says when the line is cut off.
     pub full: Option<String>,
+    /// Whether the row has gone quiet (idle for the fade threshold) and is shown dimmed.
+    pub faded: bool,
 }
 
 impl Line {
@@ -66,6 +94,7 @@ impl Line {
             text: text.into(),
             trailing: String::new(),
             full: None,
+            faded: false,
         }
     }
 
@@ -76,6 +105,7 @@ impl Line {
             LineKind::Title if self.trailing.is_empty() => self.text.clone(),
             LineKind::Title => format!("{}  {}", self.text, self.trailing),
             LineKind::Detail => format!("    {}", self.text),
+            LineKind::Graph => self.text.clone(),
             LineKind::Extra => format!("      {}", self.text),
         }
     }
@@ -92,6 +122,8 @@ pub struct Level {
     pub lines: Vec<Line>,
     /// Whether the row is a group (RET drills in) rather than a leaf (RET focuses it), by key.
     pub groups: HashMap<Key, bool>,
+    /// Whether the lines draw a graph (they are a list otherwise).
+    pub graph: bool,
 }
 
 impl Level {
@@ -127,6 +159,13 @@ pub struct Inputs<'a> {
     pub changed_files: &'a dyn Fn(&str) -> Option<usize>,
     pub now: DateTime<Utc>,
     pub expanded: &'a HashSet<Key>,
+    pub filters: &'a Filters,
+    /// Idle for this long fades an open item.
+    pub fade: TimeDelta,
+    /// Idle for this long moves an open item of the top level to Stale.
+    pub stale: TimeDelta,
+    /// Whether a group is drawn as a graph rather than listed.
+    pub graph: bool,
 }
 
 enum Node<'a> {
@@ -150,8 +189,15 @@ fn resolve<'a>(tree: &'a WorkTree, path: &[Key]) -> (Node<'a>, usize) {
             (Node::Top, Key::Task(id)) => tree
                 .projects
                 .iter()
-                .find(|project| project.task.id() == Some(id))
-                .map(|project| Node::Group(&project.task)),
+                .map(|project| &project.task)
+                .chain(
+                    tree.activities
+                        .iter()
+                        .flat_map(|activity| activity.oneoffs.iter()),
+                )
+                .find(|task| task.id() == Some(id))
+                .filter(|task| derive::shape(task, tree) == Shape::Group)
+                .map(Node::Group),
             (Node::Activity(activity), Key::Task(id)) => activity
                 .oneoffs
                 .iter()
@@ -198,36 +244,153 @@ pub fn build(path: &[Key], inputs: &Inputs) -> Level {
         ..Level::default()
     };
     match node {
-        Node::Top => {
-            for project in &tree.projects {
-                let archived = project.file.as_ref().is_some_and(|file| file.archived);
-                add_task(
-                    &mut level,
-                    &project.task,
-                    None,
-                    archived,
-                    inputs,
-                    &needs_set,
-                );
-            }
-            for activity in &tree.activities {
-                add_activity(&mut level, activity, inputs, &needs_set);
-            }
-        }
+        Node::Top => add_top(&mut level, inputs, &needs_set),
         Node::Activity(activity) => {
-            let mut oneoffs: Vec<&Task> = activity.oneoffs.iter().collect();
+            let mut oneoffs: Vec<&Task> = activity
+                .oneoffs
+                .iter()
+                .filter(|task| inputs.filters.passes(task, tree))
+                .collect();
             oneoffs.sort_by_key(|task| (created_at(task), task.slug.clone()));
             for task in oneoffs {
-                add_task(&mut level, task, None, false, inputs, &needs_set);
+                add_member(&mut level, task, None, inputs, &needs_set);
             }
+        }
+        Node::Group(group) if inputs.graph => {
+            level.graph = true;
+            add_graph(&mut level, group, inputs);
         }
         Node::Group(group) => {
             for task in child_order(group) {
-                add_task(&mut level, task, Some(group), false, inputs, &needs_set);
+                if inputs.filters.passes(task, tree) {
+                    add_member(&mut level, task, Some(group), inputs, &needs_set);
+                }
             }
         }
     }
     level
+}
+
+/// Adds the row of a task inside a group or an activity, dimmed when it has gone quiet. Only the
+/// top level moves a quiet task away; here it keeps its place.
+fn add_member(
+    level: &mut Level,
+    task: &Task,
+    parent: Option<&Task>,
+    inputs: &Inputs,
+    needs_set: &HashSet<String>,
+) {
+    let start = level.lines.len();
+    add_task(level, task, parent, false, inputs, needs_set);
+    let quiet = !is_closed(task, inputs.tree)
+        && tree_activity_time(task, inputs.tree)
+            .is_some_and(|time| inputs.now - time >= inputs.fade);
+    if quiet {
+        fade_from(level, start);
+    }
+}
+
+fn fade_from(level: &mut Level, start: usize) {
+    for line in &mut level.lines[start..] {
+        line.faded = true;
+    }
+}
+
+/// The top level: open items by freshness, then the Stale and Closed sections, each folded unless
+/// the filters say to show it.
+fn add_top<'a>(level: &mut Level, inputs: &Inputs<'a>, needs_set: &HashSet<String>) {
+    let top = top_level(inputs.tree, inputs.now, inputs.fade, inputs.stale);
+    let passing = |entries: &[Entry<'a>]| -> Vec<Entry<'a>> {
+        entries
+            .iter()
+            .filter(|entry| item_passes(&entry.item, inputs))
+            .copied()
+            .collect()
+    };
+    for entry in passing(&top.open) {
+        add_entry(level, &entry, inputs, needs_set);
+    }
+    for (section, entries, open) in [
+        (
+            Section::Stale,
+            passing(&top.stale),
+            inputs.filters.show_stale,
+        ),
+        (
+            Section::Closed,
+            passing(&top.closed),
+            inputs.filters.show_closed,
+        ),
+    ] {
+        if entries.is_empty() {
+            continue;
+        }
+        let mut heading = Line::new(
+            Some(Key::Section(section)),
+            LineKind::Title,
+            format!("{} ({})", section.name(), entries.len()),
+        );
+        if !open {
+            heading.trailing = "folded".to_string();
+        }
+        level.lines.push(heading);
+        if open {
+            for entry in &entries {
+                add_entry(level, entry, inputs, needs_set);
+            }
+        }
+    }
+}
+
+fn item_passes(item: &Item, inputs: &Inputs) -> bool {
+    let filters = inputs.filters;
+    match item {
+        Item::Project(project) => filters.passes(&project.task, inputs.tree),
+        Item::Activity(activity) => activity
+            .oneoffs
+            .iter()
+            .any(|oneoff| filters.passes(oneoff, inputs.tree)),
+        Item::Task(task) => filters.passes(task, inputs.tree),
+    }
+}
+
+/// Adds the row of a top-level item, dimmed while it is fading.
+fn add_entry(level: &mut Level, entry: &Entry, inputs: &Inputs, needs_set: &HashSet<String>) {
+    let start = level.lines.len();
+    match entry.item {
+        Item::Project(project) => {
+            let archived = project.file.as_ref().is_some_and(|file| file.archived);
+            add_task(level, &project.task, None, archived, inputs, needs_set);
+        }
+        Item::Activity(activity) => add_activity(level, activity, inputs, needs_set),
+        Item::Task(task) => add_task(level, task, None, false, inputs, needs_set),
+    }
+    if entry.freshness == Freshness::Fading {
+        fade_from(level, start);
+    }
+}
+
+/// The boxes and arrows of `group`. The middle line of a box is its row; every line of a box
+/// carries its key, so a click anywhere on it selects it.
+fn add_graph(level: &mut Level, group: &Task, inputs: &Inputs) {
+    for line in level_graph(group, inputs.tree) {
+        let key = line.node.clone().map(Key::Task);
+        let label = line.text.starts_with("| ");
+        let kind = if label {
+            LineKind::Title
+        } else {
+            LineKind::Graph
+        };
+        if let (Some(id), true) = (&line.node, label)
+            && let Some(task) = group.children.iter().find(|task| task.id() == Some(id))
+        {
+            level.groups.insert(
+                Key::Task(id.clone()),
+                derive::shape(task, inputs.tree) == Shape::Group,
+            );
+        }
+        level.lines.push(Line::new(key, kind, line.text));
+    }
 }
 
 fn group_name(group: &Task) -> String {

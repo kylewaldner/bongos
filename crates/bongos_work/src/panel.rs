@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use chrono::TimeDelta;
 use fs::Fs;
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Focusable,
@@ -27,10 +28,17 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::work;
 use crate::commands::{ready, show_toast};
+use crate::filters::{Filters, Saved, ViewMode};
 use crate::focus::focus_task;
 use crate::registry::LiveModesRegistry;
 use crate::view::{self, Inputs, Key, Level, Line, LineKind};
 use crate::{WorkSettings, WorkStore, WriteError};
+use bongos_work_model::Kind;
+
+/// A number of days as a duration.
+fn days(days: f64) -> TimeDelta {
+    TimeDelta::try_milliseconds((days * 86_400_000.0) as i64).unwrap_or(TimeDelta::MAX)
+}
 
 /// The key under which the dock remembers the panel.
 const PANEL_KEY: &str = "WorkPanel";
@@ -45,6 +53,12 @@ pub struct WorkPanel {
     path: Vec<Key>,
     expanded: HashSet<Key>,
     selected: Option<Key>,
+    filters: Filters,
+    view: ViewMode,
+    /// What was last written to the key value store (D20).
+    saved: Saved,
+    /// Added to the clock, so a test can let days pass.
+    clock_skew: TimeDelta,
     level: Level,
     /// Whether the store has a snapshot to show.
     loaded: bool,
@@ -64,14 +78,20 @@ impl WorkPanel {
         if let Some(store) = WorkStore::global(cx) {
             subscriptions.push(cx.subscribe(&store, |this, _, _, cx| this.rebuild(cx)));
         }
+        // Read once; the path and the expanded rows are checked against the tree when it loads.
+        let saved = Saved::read(cx);
         let mut this = Self {
             workspace,
             fs,
             focus_handle: cx.focus_handle(),
             scroll_handle: UniformListScrollHandle::new(),
-            path: Vec::new(),
-            expanded: HashSet::new(),
+            path: saved.path.clone(),
+            expanded: saved.expanded.iter().cloned().collect(),
             selected: None,
+            filters: saved.filters.clone(),
+            view: saved.view,
+            saved,
+            clock_skew: TimeDelta::zero(),
             level: Level::default(),
             loaded: false,
             _subscriptions: subscriptions,
@@ -90,6 +110,12 @@ impl WorkPanel {
             return;
         };
         let app: &App = cx;
+        let settings = WorkSettings::get_global(app);
+        let (fade, stale) = (
+            days(settings.fade_after_days),
+            days(settings.stale_after_days),
+        );
+        let now = chrono::Utc::now() + self.clock_skew;
         let level = {
             let store = store.read(app);
             match store.snapshot().filter(|_| store.is_enabled()) {
@@ -104,8 +130,12 @@ impl WorkPanel {
                             rebase: store.rebase_states(),
                             live_modes: &live,
                             changed_files: &changed,
-                            now: chrono::Utc::now(),
+                            now,
                             expanded: &self.expanded,
+                            filters: &self.filters,
+                            fade,
+                            stale,
+                            graph: self.view == ViewMode::Graph,
                         },
                     ))
                 }
@@ -114,13 +144,102 @@ impl WorkPanel {
         };
         self.loaded = level.is_some();
         self.level = level.unwrap_or_default();
-        self.path = self.level.path.clone();
+        if self.loaded {
+            // What no longer exists is dropped without a word.
+            self.path = self.level.path.clone();
+            if let Some(tree) = store.read(app).snapshot() {
+                self.expanded.retain(|key| match key {
+                    Key::Task(id) => tree.task_by_id(id).is_some(),
+                    _ => false,
+                });
+            }
+            self.persist(cx);
+        }
         let rows = self.level.rows();
         if !self.selected.as_ref().is_some_and(|key| rows.contains(key)) {
             self.selected = rows.first().cloned();
         }
         self.scroll_to_selected();
         cx.notify();
+    }
+
+    /// Writes what changed since the last write (D20).
+    fn persist(&mut self, cx: &App) {
+        let now = Saved::new(&self.path, &self.expanded, &self.filters, self.view);
+        if now != self.saved {
+            now.write_changes(&self.saved, cx);
+            self.saved = now;
+        }
+    }
+
+    pub(crate) fn filters(&self) -> &Filters {
+        &self.filters
+    }
+
+    pub(crate) fn set_todo_filter(&mut self, todo: Option<String>, cx: &mut Context<Self>) {
+        self.filters.todo = todo;
+        self.rebuild(cx);
+    }
+
+    pub(crate) fn set_kind_filter(&mut self, kind: Option<Kind>, cx: &mut Context<Self>) {
+        self.filters.kind = kind;
+        self.rebuild(cx);
+    }
+
+    /// `work: show stale`: opens or folds the Stale section of the top level.
+    pub(crate) fn toggle_stale(&mut self, cx: &mut Context<Self>) {
+        self.filters.show_stale = !self.filters.show_stale;
+        self.rebuild(cx);
+    }
+
+    /// `work: show closed`: opens or folds the Closed section of the top level.
+    pub(crate) fn toggle_closed(&mut self, cx: &mut Context<Self>) {
+        self.filters.show_closed = !self.filters.show_closed;
+        self.rebuild(cx);
+    }
+
+    /// `work: graph`: draws the group the panel is in as a graph, or lists it again. The reason
+    /// it cannot, when it cannot.
+    pub(crate) fn toggle_graph(&mut self, cx: &mut Context<Self>) -> Option<&'static str> {
+        if self.view == ViewMode::Graph {
+            self.view = ViewMode::List;
+        } else if matches!(self.path.last(), Some(Key::Task(_))) {
+            self.view = ViewMode::Graph;
+        } else {
+            return Some("The graph shows the tasks of one group; open a group first");
+        }
+        self.rebuild(cx);
+        None
+    }
+
+    /// Lets time pass for the freshness of the rows.
+    #[cfg(test)]
+    pub(crate) fn skew_clock(&mut self, by: TimeDelta, cx: &mut Context<Self>) {
+        self.clock_skew = by;
+        self.rebuild(cx);
+    }
+
+    /// The titles of the dimmed rows.
+    #[cfg(test)]
+    pub(crate) fn faded_titles(&self) -> Vec<String> {
+        self.level
+            .lines
+            .iter()
+            .filter(|line| line.kind == LineKind::Title && line.faded)
+            .map(|line| line.text.clone())
+            .collect()
+    }
+
+    /// What the panel keeps between runs, as it stands now.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> Saved {
+        Saved::new(&self.path, &self.expanded, &self.filters, self.view)
+    }
+
+    /// Whether the level is drawn as a graph.
+    #[cfg(test)]
+    pub(crate) fn shows_graph(&self) -> bool {
+        self.level.graph
     }
 
     fn scroll_to_selected(&self) {
@@ -165,7 +284,11 @@ impl WorkPanel {
         for line in &self.level.lines {
             let selected = line.kind == LineKind::Title && line.key == self.selected;
             text.push('\n');
-            text.push_str(if selected { ">" } else { " " });
+            text.push_str(match (selected, line.faded) {
+                (true, _) => ">",
+                (false, true) => "~",
+                (false, false) => " ",
+            });
             text.push_str(&line.plain());
         }
         text.push('\n');
@@ -215,6 +338,10 @@ impl WorkPanel {
         let Some(key) = self.selected.clone() else {
             return;
         };
+        if matches!(key, Key::Section(_)) {
+            self.activate_section(&key, cx);
+            return;
+        }
         if !self.expanded.remove(&key) {
             self.expanded.insert(key);
         }
@@ -274,8 +401,21 @@ impl WorkPanel {
         }
     }
 
-    /// RET on a row: a group is drilled into, a leaf is focused.
+    /// RET on the heading of a section folds or opens it.
+    fn activate_section(&mut self, key: &Key, cx: &mut Context<Self>) {
+        match key {
+            Key::Section(view::Section::Stale) => self.toggle_stale(cx),
+            Key::Section(view::Section::Closed) => self.toggle_closed(cx),
+            _ => {}
+        }
+    }
+
+    /// RET on a row: a group is drilled into, a leaf is focused, a section is folded or opened.
     fn activate(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(key, Key::Section(_)) {
+            self.activate_section(&key, cx);
+            return;
+        }
         if self.level.is_group(&key) {
             self.drill(key, cx);
             return;
@@ -295,16 +435,35 @@ impl WorkPanel {
     fn render_line(&self, index: usize, line: &Line, cx: &mut Context<Self>) -> AnyElement {
         let selected = line.key.is_some() && line.key == self.selected;
         let id = ElementId::NamedInteger("work-line".into(), index as u64);
+        let title_color = if line.faded {
+            Color::Disabled
+        } else {
+            Color::Default
+        };
+        let quiet_color = if line.faded {
+            Color::Disabled
+        } else {
+            Color::Muted
+        };
         let content = match line.kind {
+            LineKind::Title if self.level.graph => div()
+                .w_full()
+                .child(
+                    Label::new(line.text.clone())
+                        .size(LabelSize::Small)
+                        .buffer_font(cx)
+                        .color(title_color),
+                )
+                .into_any_element(),
             LineKind::Title => h_flex()
                 .w_full()
                 .gap_2()
                 .justify_between()
-                .child(Label::new(line.text.clone()).truncate())
+                .child(Label::new(line.text.clone()).color(title_color).truncate())
                 .child(
                     Label::new(line.trailing.clone())
                         .size(LabelSize::Small)
-                        .color(Color::Muted),
+                        .color(quiet_color),
                 )
                 .into_any_element(),
             LineKind::Detail => div()
@@ -313,8 +472,17 @@ impl WorkPanel {
                 .child(
                     Label::new(line.text.clone())
                         .size(LabelSize::Small)
-                        .color(Color::Muted)
+                        .color(quiet_color)
                         .truncate(),
+                )
+                .into_any_element(),
+            LineKind::Graph => div()
+                .w_full()
+                .child(
+                    Label::new(line.text.clone())
+                        .size(LabelSize::Small)
+                        .buffer_font(cx)
+                        .color(quiet_color),
                 )
                 .into_any_element(),
             LineKind::Edge => div()
@@ -531,7 +699,7 @@ fn toggle_panel(workspace: &mut Workspace, window: &mut Window, cx: &mut Context
 }
 
 /// Runs `then` on the panel once the store is on and loaded; otherwise a toast says why.
-fn with_panel(
+pub(crate) fn with_panel(
     workspace: &mut Workspace,
     cx: &mut Context<Workspace>,
     then: impl FnOnce(&mut WorkPanel, &mut Context<WorkPanel>),

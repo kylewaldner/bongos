@@ -158,6 +158,20 @@ pub mod work {
             /// In the Work panel, expands the selected row to show its todos and artifacts, or
             /// folds it again.
             ToggleRow,
+            /// In the Work panel, picks a todo name and shows only tasks whose current todo is
+            /// that; "Any todo" clears it.
+            FilterTodo,
+            /// In the Work panel, picks a kind and shows only tasks of it; "Any kind" clears it.
+            FilterKind,
+            /// In the Work panel, opens or folds the Stale section of the top level: open items
+            /// with no activity for the stale threshold.
+            ShowStale,
+            /// In the Work panel, opens or folds the Closed section of the top level: items that
+            /// are done, cancelled or archived.
+            ShowClosed,
+            /// In the Work panel, draws the group shown as a graph of boxes and arrows, or lists
+            /// it again. Enter on a box drills into it or focuses it.
+            Graph,
         ]
     );
 

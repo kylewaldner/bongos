@@ -28,8 +28,8 @@ use crate::modals::{self, Then};
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
 use crate::{
-    artifacts, focus, links, modes, open, panel, projects, rebase, repositories, structure,
-    worktrees,
+    artifacts, filters, focus, links, modes, open, panel, projects, rebase, repositories,
+    structure, worktrees,
 };
 
 /// The activity a task made with `task: new` goes under: it names no parent, and the Work view
@@ -95,6 +95,11 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<work::TogglePanel>(),
         TypeId::of::<work::Up>(),
         TypeId::of::<work::ToggleRow>(),
+        TypeId::of::<work::FilterTodo>(),
+        TypeId::of::<work::FilterKind>(),
+        TypeId::of::<work::ShowStale>(),
+        TypeId::of::<work::ShowClosed>(),
+        TypeId::of::<work::Graph>(),
     ];
     #[cfg(debug_assertions)]
     {
@@ -153,6 +158,7 @@ pub fn register(workspace: &mut Workspace) {
     artifacts::register(workspace);
     modes::register(workspace);
     panel::register(workspace);
+    filters::register(workspace);
 }
 
 pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {

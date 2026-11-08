@@ -16,14 +16,20 @@ use crate::registry_tests::{FakeGates, gate, with_deep_leaf};
 use crate::store_tests::{set_enabled, write};
 use crate::{Focus, focus};
 
-fn panel_of(harness: &Harness, cx: &mut VisualTestContext) -> Option<Entity<WorkPanel>> {
+pub(crate) fn panel_of(harness: &Harness, cx: &mut VisualTestContext) -> Option<Entity<WorkPanel>> {
     harness
         .workspace
         .read_with(cx, |workspace, cx| workspace.panel::<WorkPanel>(cx))
 }
 
 /// Adds the panel to the harness window the way the app does, and waits for it to show the tree.
-async fn open_panel(harness: &Harness, cx: &mut VisualTestContext) -> Entity<WorkPanel> {
+pub(crate) async fn open_panel(harness: &Harness, cx: &mut VisualTestContext) -> Entity<WorkPanel> {
+    // A database of its own, so what one test saves never reaches another.
+    cx.update(|_, cx| {
+        if !cx.has_global::<AppDatabase>() {
+            cx.set_global(AppDatabase::test_new());
+        }
+    });
     harness.workspace.update_in(cx, |workspace, window, cx| {
         init_panel(workspace, window, cx)
     });
@@ -39,24 +45,24 @@ async fn open_panel(harness: &Harness, cx: &mut VisualTestContext) -> Entity<Wor
     panel
 }
 
-fn lines(panel: &Entity<WorkPanel>, cx: &mut VisualTestContext) -> Vec<String> {
+pub(crate) fn lines(panel: &Entity<WorkPanel>, cx: &mut VisualTestContext) -> Vec<String> {
     panel.read_with(cx, |panel, _| panel.lines())
 }
 
-fn breadcrumb(panel: &Entity<WorkPanel>, cx: &mut VisualTestContext) -> String {
+pub(crate) fn breadcrumb(panel: &Entity<WorkPanel>, cx: &mut VisualTestContext) -> String {
     panel.read_with(cx, |panel, _| panel.breadcrumb())
 }
 
-fn has(lines: &[String], text: &str) -> bool {
+pub(crate) fn has(lines: &[String], text: &str) -> bool {
     lines.iter().any(|line| line.contains(text))
 }
 
-fn press(cx: &mut VisualTestContext, action: impl gpui::Action) {
+pub(crate) fn press(cx: &mut VisualTestContext, action: impl gpui::Action) {
     cx.dispatch_action(action);
     cx.run_until_parked();
 }
 
-fn next_row(cx: &mut VisualTestContext) {
+pub(crate) fn next_row(cx: &mut VisualTestContext) {
     press(cx, menu::SelectNext);
 }
 
