@@ -25,14 +25,14 @@ use crate::modals::{ChoicePicker, TextPrompt};
 use crate::store_tests::{canonical, project_toml, set_enabled, write};
 use crate::{GlobalWorkStore, WorkDirs, WorkSettings, WorkStore};
 
-fn leaf_toml(id: &str, goal: &str, kind: Kind) -> String {
+pub(crate) fn leaf_toml(id: &str, goal: &str, kind: Kind) -> String {
     let mut file = TaskFile::new(goal, kind);
     file.id = id.to_string();
     file.todos = default_todos(kind);
     serialize_task(&file).unwrap()
 }
 
-fn group_toml(id: &str, goal: &str) -> String {
+pub(crate) fn group_toml(id: &str, goal: &str) -> String {
     let mut file = TaskFile::new(goal, Kind::PrShip);
     file.id = id.to_string();
     serialize_task(&file).unwrap()
@@ -590,7 +590,7 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
 }
 
 /// Every action these commands register, but the debug-only `work::DumpSessionContext`.
-const NAMES: [&str; 49] = [
+const NAMES: [&str; 50] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -635,6 +635,7 @@ const NAMES: [&str; 49] = [
     "work::AddRepository",
     "task::SetDefaultVisibility",
     "task::Think",
+    "task::Mode",
     "artifact::Hide",
     "artifact::Share",
     "artifact::HideAll",

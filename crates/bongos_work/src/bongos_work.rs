@@ -5,13 +5,16 @@
 
 pub mod actions;
 mod artifacts;
+mod changes;
 mod commands;
 mod focus;
 mod links;
 mod modals;
+mod modes;
 mod open;
 mod projects;
 mod rebase;
+mod registry;
 mod repositories;
 mod settings;
 mod status;
@@ -28,9 +31,14 @@ use fs::Fs;
 use gpui::{App, AppContext as _, Entity, Global};
 
 pub use actions::{artifact, project, task, todo, work};
+pub use changes::CHANGES_INTERVAL;
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE};
 pub use rebase::{CHECK_INTERVAL, RebaseState};
+pub use registry::{
+    ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
+    NeedsYouSource, RunStart,
+};
 pub use repositories::{default_kind, find_repository, resolve_repository};
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
 pub use status::{FocusStatus, breadcrumb};
@@ -85,7 +93,11 @@ mod command_tests_more;
 #[cfg(test)]
 mod focus_tests;
 #[cfg(test)]
+mod mode_tests;
+#[cfg(test)]
 mod rebase_tests;
+#[cfg(test)]
+mod registry_tests;
 #[cfg(test)]
 mod repository_tests;
 #[cfg(test)]

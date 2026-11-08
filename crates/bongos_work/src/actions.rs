@@ -84,6 +84,11 @@ pub mod task {
             /// Opens a new `untitled-<n>.md` document in the directory of the focused task, or of
             /// a task picked by name when none is focused. Starts nothing else.
             Think,
+            /// Picks a task (the focused one when there is one) and a mode to work it in: chat
+            /// (`chat: new`), run (`workflow: run`), manual (focuses its worktree or directory)
+            /// or thinking (`task: think`). Chat and run say which feature provides them when
+            /// it is not there yet.
+            Mode,
         ]
     );
 }

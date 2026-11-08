@@ -27,6 +27,7 @@ menu.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 picker.workspace = true
+project.workspace = true
 serde_json.workspace = true
 settings.workspace = true
 task.workspace = true

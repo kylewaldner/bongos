@@ -87,7 +87,7 @@ impl Focus {
         self.task.as_deref()
     }
 
-    fn set(&mut self, task: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn set(&mut self, task: Option<String>, cx: &mut Context<Self>) {
         if self.task == task {
             return;
         }
@@ -261,9 +261,24 @@ fn focus_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
     );
 }
 
+/// What runs in the workspace focus switched to, once it is active.
+pub(crate) type AfterFocus =
+    Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static>;
+
 /// Focuses the task `id`: records it, then switches the window to its [`target`].
 pub(crate) fn focus_task(
     id: &str,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    focus_task_then(id, None, workspace, window, cx)
+}
+
+/// [`focus_task`], then `after` in the workspace the window switched to.
+pub(crate) fn focus_task_then(
+    id: &str,
+    after: Option<AfterFocus>,
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -300,6 +315,11 @@ pub(crate) fn focus_task(
                 focus.update(cx, |focus, _| focus.opened(&opened));
                 if let Some(note) = note {
                     opened.update(cx, |opened, cx| show_toast(opened, note, cx));
+                }
+                if let Some(after) = after {
+                    opened
+                        .update_in(cx, |opened, window, cx| after(opened, window, cx))
+                        .log_err();
                 }
             }
             Err(error) => {
