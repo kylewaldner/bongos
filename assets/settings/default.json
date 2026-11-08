@@ -2598,8 +2598,8 @@
   // Settings for the Work view: projects and tasks kept as files under ~/.bongos.
   "work": {
     // Whether the Work view is on. While it is off, bongos neither reads nor
-    // watches ~/.bongos.
-    "enabled": false,
+    // watches ~/.bongos, and the Work panel and commands are hidden.
+    "enabled": true,
     // Where the Work panel docks: "left", "bottom" or "right".
     "dock": "left",
     // Default width of the Work panel, in pixels.

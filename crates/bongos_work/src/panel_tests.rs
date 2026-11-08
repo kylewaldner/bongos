@@ -6,6 +6,7 @@ use std::rc::Rc;
 use bongos_work_model::commands::default_todos;
 use bongos_work_model::{Kind, TaskFile, Todo, TodoState, layout, serialize_task};
 use db::AppDatabase;
+use settings::Settings as _;
 use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
 
 use crate::artifact_tests::with_artifacts;
@@ -321,6 +322,40 @@ async fn the_panel_is_absent_while_disabled_and_follows_the_setting(cx: &mut Tes
     set_enabled(cx, false);
     cx.run_until_parked();
     assert!(panel_of(&harness, cx).is_none());
+}
+
+#[gpui::test]
+fn work_is_enabled_by_default(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let settings = settings::SettingsStore::test(cx);
+        cx.set_global(settings);
+        crate::WorkSettings::register(cx);
+        assert!(crate::WorkSettings::get_global(cx).enabled);
+    });
+}
+
+#[gpui::test]
+async fn a_default_workspace_has_the_work_panel(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let app_state = cx.update(|cx| {
+        let app_state = workspace::AppState::test(cx);
+        crate::WorkSettings::register(cx);
+        if !cx.has_global::<AppDatabase>() {
+            cx.set_global(AppDatabase::test_new());
+        }
+        app_state
+    });
+    let project = project::Project::test(app_state.fs.clone(), [], cx).await;
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+    });
+    let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+    workspace.update_in(cx, |workspace, window, cx| {
+        init_panel(workspace, window, cx)
+    });
+    cx.run_until_parked();
+    let panel = workspace.read_with(cx, |workspace, cx| workspace.panel::<WorkPanel>(cx));
+    assert!(panel.is_some(), "no setting was written, yet the panel exists");
 }
 
 #[gpui::test]
