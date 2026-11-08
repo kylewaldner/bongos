@@ -300,7 +300,7 @@ async fn start_command(
         Some(binary) => binary,
         None => {
             if server == KotlinServerKind::Intellij && !intellij_download_allowed(worktree_id, cx) {
-                let reason = not_installed(server).to_string();
+                let reason = INTELLIJ_DOWNLOAD_HINT.to_string();
                 cx.update(|cx| {
                     log_line(
                         worktree_root,
@@ -1252,7 +1252,7 @@ launcher = "bin/launcher"
         assert_eq!(
             fixture.status(cx),
             Some(ServerStatus::Failed {
-                reason: "intellij is not installed".into()
+                reason: INTELLIJ_DOWNLOAD_HINT.into()
             })
         );
         assert_eq!(
