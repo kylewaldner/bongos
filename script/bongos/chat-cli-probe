@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Prints facts about the agent CLIs chats launch: for each of claude and codex on PATH, the version,
+# which of the flags and subcommands chats use appear in --help, the result of the login probe, and
+# which session file directories exist. A CLI that is not on PATH prints "<name>: not found on PATH".
+# Only yes/no, version and path facts are printed, never tokens, account data or conversation text.
+# Run by hand on a machine with the CLIs; never part of a gate.
+#   chat-cli-probe [-h|--help]
+#   CLAUDE_CONFIG_DIR and CODEX_HOME move the session directories, as the CLIs themselves honor them.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+usage: chat-cli-probe [-h|--help]
+
+For claude and codex, each if on PATH, prints:
+  version         the output of <cli> --version
+  flags           yes/no for each flag in the CLI's --help (names only)
+  subcommands     yes/no for each subcommand in the CLI's --help (codex only)
+  login           yes/no/unknown from claude auth status, or from codex login status
+  session dirs    whether the session file directory exists, and how many entries it holds
+A CLI that is missing prints "<name>: not found on PATH". The exit code is 0 either way.
+Only yes/no, version and path facts are printed; no tokens, account data or conversation text.
+USAGE
+}
+
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  "") ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+log_init chat-cli-probe
+
+CLAUDE_FLAGS=(--session-id --resume --fork-session --append-system-prompt-file --append-system-prompt --name --plugin-dir --settings)
+CODEX_FLAGS=(--last --model -m --config -c)
+CODEX_SUBCOMMANDS=(resume fork login status)
+
+# has_flag <help text> <flag>: an option line of the help (leading blanks, then comma-separated names)
+# lists the flag, long or short. Mentions in prose do not count.
+has_flag() {
+  grep -qE -- "^[[:space:]]+(-[-[:alnum:]]+,[[:space:]]+)*$2([^-[:alnum:]]|$)" <<<"$1"
+}
+
+# has_subcommand <help text> <name>: a line of the help starts with the name.
+has_subcommand() {
+  grep -qE -- "^[[:space:]]+$2([[:space:]]|$)" <<<"$1"
+}
+
+yesno() { if "$@"; then echo yes; else echo no; fi; }
+
+dir_facts() { # <label> <dir>
+  local entries
+  if [ -d "$2" ]; then
+    entries=$(find "$2" -mindepth 1 -maxdepth 1 | wc -l)
+    say "  $1: yes, $2 ($entries entries)"
+  else
+    say "  $1: no, $2"
+  fi
+}
+
+probe_claude() {
+  local help login out rc=0 flag
+  say "claude: $(claude --version 2>&1 | head -n1)"
+  help=$(claude --help 2>&1 || true)
+  for flag in "${CLAUDE_FLAGS[@]}"; do
+    say "  flag $flag: $(yesno has_flag "$help" "$flag")"
+  done
+  login=unknown
+  out=$(claude auth status 2>&1) || rc=$?
+  if [ "$rc" = 0 ]; then
+    if grep -qE '"loggedIn":[[:space:]]*true' <<<"$out"; then
+      login=yes
+    elif grep -qE '"loggedIn":[[:space:]]*false' <<<"$out"; then
+      login=no
+    fi
+  fi
+  say "  login (claude auth status, exit $rc): $login"
+  dir_facts "session dir" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+}
+
+probe_codex() {
+  local help login_help rc=0 flag sub
+  say "codex: $(codex --version 2>&1 | head -n1)"
+  help=$(codex --help 2>&1 || true)
+  login_help=$(codex login --help 2>&1 || true)
+  for flag in "${CODEX_FLAGS[@]}"; do
+    say "  flag $flag: $(yesno has_flag "$help" "$flag")"
+  done
+  for sub in "${CODEX_SUBCOMMANDS[@]}"; do
+    case "$sub" in
+      status) say "  subcommand login status: $(yesno has_subcommand "$login_help" status)" ;;
+      *) say "  subcommand $sub: $(yesno has_subcommand "$help" "$sub")" ;;
+    esac
+  done
+  codex login status >/dev/null 2>&1 || rc=$?
+  if [ "$rc" = 0 ]; then
+    say "  login (codex login status, exit 0): yes"
+  else
+    say "  login (codex login status, exit $rc): no or unknown"
+  fi
+  dir_facts "session dir" "${CODEX_HOME:-$HOME/.codex}/sessions"
+}
+
+for cli in claude codex; do
+  if command -v "$cli" >/dev/null 2>&1; then
+    "probe_$cli"
+  else
+    say "$cli: not found on PATH"
+  fi
+done
+SUMMARY="done"
