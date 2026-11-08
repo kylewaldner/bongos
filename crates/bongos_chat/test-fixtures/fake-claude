@@ -1,0 +1,68 @@
+#!/bin/sh
+# A stand-in for the `claude` CLI, for the health probe tests. It answers `--version`, `--help`
+# (a synthetic flag list, not the real help text) and `auth status`, and nothing else.
+#
+# Knobs (environment variables):
+#   FAKE_CLI_LOG        append one line per call (the arguments only) to this file
+#   FAKE_CLI_VERSION    the version to report (default 2.1.319)
+#   FAKE_CLI_LOGGED_OUT set to anything: `auth status` reports a logged-out account
+#   FAKE_CLI_NO_AUTH    set to anything: `--help` lists no `auth` command, so no login probe exists
+#   FAKE_CLI_HANG       version, help, login or all: that call never answers (it sleeps 30 s)
+
+if [ -n "${FAKE_CLI_LOG:-}" ]; then
+  printf 'claude %s\n' "$*" >> "$FAKE_CLI_LOG"
+fi
+
+hang() {
+  case "${FAKE_CLI_HANG:-}" in
+    all | "$1") exec sleep 30 ;;
+  esac
+}
+
+case "${1:-}" in
+  --version)
+    hang version
+    echo "${FAKE_CLI_VERSION:-2.1.319} (Claude Code)"
+    ;;
+  --help | -h)
+    hang help
+    cat <<'HELP'
+Usage: claude [options] [command] [prompt]
+
+Options:
+  -h, --help                        Display help for command
+  -v, --version                     Output the version number
+  -c, --continue                    Continue the most recent conversation
+  -r, --resume [value]              Resume a conversation by session ID
+  --session-id <uuid>               Use a specific session ID
+  --fork-session                    Create a new session ID when resuming
+  -n, --name <name>                 Set a display name for the session
+  --append-system-prompt <prompt>   Append to the default system prompt
+  --plugin-dir <path>               Load plugins from a directory
+  --settings <file-or-json>         Load additional settings
+
+Commands:
+  mcp                               Configure and manage MCP servers
+HELP
+    if [ -z "${FAKE_CLI_NO_AUTH:-}" ]; then
+      echo "  auth                              Manage authentication"
+    fi
+    ;;
+  auth)
+    hang login
+    if [ "${2:-}" = status ]; then
+      if [ -n "${FAKE_CLI_LOGGED_OUT:-}" ]; then
+        echo '{"loggedIn": false}'
+        exit 1
+      fi
+      echo '{"loggedIn": true}'
+    else
+      echo "fake-claude: unsupported auth command" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "fake-claude: unsupported arguments" >&2
+    exit 2
+    ;;
+esac
