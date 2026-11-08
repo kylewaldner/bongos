@@ -65,7 +65,7 @@ jobs:
       CARGO_TARGET_DIR: /mnt/bongos-workspace/target
       # Save the cache even when a later step fails, so a retry reuses the compile.
       CACHE_ON_FAILURE: 'true'
-      BONGOS_BUNDLE_BIN_DIR: ${{ inputs.package_only && format('{0}/stub', runner.temp) || '' }}
+      BONGOS_BUNDLE_BIN_DIR: ${{ inputs.package_only && '/tmp/bongos-stub' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -123,7 +123,7 @@ jobs:
       SIGNED: ${{ secrets.MACOS_CERTIFICATE != '' }}
       # Save the cache even when a later step fails, so a retry reuses the compile.
       CACHE_ON_FAILURE: 'true'
-      BONGOS_BUNDLE_BIN_DIR: ${{ inputs.package_only && format('{0}/stub', runner.temp) || '' }}
+      BONGOS_BUNDLE_BIN_DIR: ${{ inputs.package_only && '/tmp/bongos-stub' || '' }}
     outputs:
       signed: ${{ env.SIGNED }}
     steps:
