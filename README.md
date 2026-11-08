@@ -27,6 +27,16 @@ full GPL text, and [ORIGIN.md](ORIGIN.md) for the Zed fork it is derived from.
 - Diagrams: clickable code-bound diagrams for review, and a freeform canvas for describing
   systems to agents.
 
+## Privacy
+
+bongos's own code, and the telemetry and update checks of the language servers it runs, contact
+no host beyond what a feature needs (the JetBrains license check for the IntelliJ server). A
+project's own Gradle build is exempt: it may contact its hosts, such as services.gradle.org,
+plugins.gradle.org, Maven repositories and Artifact Registry.
+
+kotlin-lsp builds are early access and expire about 29 days after build, so bongos pins one
+build per release and releases roughly monthly. If the pinned build has expired, update bongos.
+
 ## Layout
 
 | Path | What |
