@@ -49,7 +49,7 @@ fn changeable(task: &Task, visibility: Visibility) -> Vec<(String, String)> {
     task_artifacts(task)
         .artifacts
         .into_iter()
-        .filter(|artifact| artifact.visibility != visibility)
+        .filter(|artifact| artifact.visibility != Some(visibility))
         .map(|artifact| {
             let label = if artifact.description.is_empty() {
                 artifact.path.clone()

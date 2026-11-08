@@ -147,7 +147,7 @@ fn a_hidden_artifact_never_appears_in_the_shared_list_or_the_session_context() {
         .iter()
         .find(|artifact| artifact.path == SECRET_PATH)
         .unwrap();
-    assert_eq!(secret.visibility, Visibility::HumanOnly);
+    assert_eq!(secret.visibility, Some(Visibility::HumanOnly));
     assert_eq!(secret.description, SECRET_DESCRIPTION);
 
     let context = session_context(&backfill).unwrap();
@@ -237,7 +237,7 @@ fn a_new_file_takes_the_default_visibility_and_a_gone_file_is_dropped() {
         .iter()
         .find(|artifact| artifact.path == "notes/findings.md")
         .unwrap();
-    assert_eq!(findings.visibility, Visibility::Shared);
+    assert_eq!(findings.visibility, Some(Visibility::Shared));
     assert_eq!(findings.description, "");
     assert!(
         list.artifacts
@@ -269,6 +269,8 @@ fn a_new_file_takes_the_default_visibility_and_a_gone_file_is_dropped() {
 fn a_human_only_default_hides_files_an_agent_adds() {
     let temp = TempDir::new().unwrap();
     let (root, backfill) = seed(&temp);
+    // A write pins the visibility of every file in the manifest.
+    run(&root, |tree| artifact_hide(tree, &ctx(), "l1", "plan.md"));
     let change = run(&root, |tree| {
         set_default_visibility(tree, &ctx(), "l1", Visibility::HumanOnly)
     });
@@ -285,11 +287,84 @@ fn a_human_only_default_hides_files_an_agent_adds() {
     let context = serialized(&backfill);
     assert!(context.contains(PUBLIC_PATH), "{context}");
     assert!(!context.contains("agent-scratch"), "{context}");
-    // Files the manifest already lists keep their visibility.
+    // Files the manifest lists with a visibility keep it.
     assert!(context.contains(SECRET_PATH), "{context}");
 
     let tree = load(&root);
     assert!(set_default_visibility(&tree, &ctx(), "l1", Visibility::HumanOnly).is_err());
+}
+
+#[test]
+fn a_hidden_file_with_a_backslash_in_its_name_stays_hidden() {
+    let temp = TempDir::new().unwrap();
+    let (root, backfill) = seed(&temp);
+    // One file name holding a backslash, not `payroll/secret.md`.
+    let name = "notes/payroll\\secret.md";
+    write(&backfill.join(name), "numbers\n");
+    assert!(serialized(&backfill).contains("secret.md"));
+
+    run(&root, |tree| artifact_hide(tree, &ctx(), "l1", name));
+    let after = serialized(&backfill);
+    assert!(after.contains(PUBLIC_PATH), "{after}");
+    for needle in ["secret.md", "payroll"] {
+        assert!(!after.contains(needle), "{needle} leaked into {after}");
+    }
+    let manifest = read_artifacts(&layout::artifacts_file(&backfill)).unwrap();
+    assert!(manifest.artifacts.iter().any(
+        |artifact| artifact.path == name && artifact.visibility == Some(Visibility::HumanOnly)
+    ));
+}
+
+#[test]
+fn an_entry_without_a_visibility_follows_the_default() {
+    let temp = TempDir::new().unwrap();
+    let (root, backfill) = seed(&temp);
+    // No visibility, and a misspelled key that is kept but means nothing.
+    write(
+        &layout::artifacts_file(&backfill),
+        &format!(
+            "schema = 1\n\n[[artifact]]\npath = \"{PUBLIC_PATH}\"\ndescription = \"{PUBLIC_DESCRIPTION}\"\n\n\
+             [[artifact]]\npath = \"{SECRET_PATH}\"\ndescription = \"{SECRET_DESCRIPTION}\"\n\
+             visiblity = \"shared\"\n"
+        ),
+    );
+    // Under the shared default both are told, so the search below would find them.
+    let shared = serialized(&backfill);
+    for needle in [
+        PUBLIC_PATH,
+        PUBLIC_DESCRIPTION,
+        SECRET_PATH,
+        SECRET_DESCRIPTION,
+    ] {
+        assert!(
+            shared.contains(needle),
+            "{needle} should be found in {shared}"
+        );
+    }
+
+    run(&root, |tree| {
+        set_default_visibility(tree, &ctx(), "l1", Visibility::HumanOnly)
+    });
+    let hidden = serialized(&backfill);
+    for needle in [
+        PUBLIC_PATH,
+        PUBLIC_DESCRIPTION,
+        SECRET_PATH,
+        SECRET_DESCRIPTION,
+    ] {
+        assert!(!hidden.contains(needle), "{needle} leaked into {hidden}");
+    }
+    // A write pins the resolved visibility and keeps the unknown key.
+    run(&root, |tree| artifact_share(tree, &ctx(), "l1", "plan.md"));
+    let manifest = read_artifacts(&layout::artifacts_file(&backfill)).unwrap();
+    let secret = manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == SECRET_PATH)
+        .unwrap();
+    assert_eq!(secret.visibility, Some(Visibility::HumanOnly));
+    assert!(secret.extra.contains_key("visiblity"));
+    assert!(!serialized(&backfill).contains(SECRET_PATH));
 }
 
 #[test]
@@ -410,6 +485,6 @@ fn merge_keeps_the_strictest_duplicate_and_normalizes_paths() {
     assert_eq!(merged.artifacts.len(), 2);
     assert_eq!(merged.artifacts[0].path, "notes/a.md");
     assert_eq!(merged.artifacts[0].description, "first");
-    assert_eq!(merged.artifacts[0].visibility, Visibility::HumanOnly);
-    assert_eq!(merged.artifacts[1].visibility, Visibility::Shared);
+    assert_eq!(merged.artifacts[0].visibility, Some(Visibility::HumanOnly));
+    assert_eq!(merged.artifacts[1].visibility, Some(Visibility::Shared));
 }

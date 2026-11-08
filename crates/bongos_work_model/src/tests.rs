@@ -175,7 +175,10 @@ visibility = "human-only"
 "#;
     let artifacts = parse_artifacts(text).unwrap();
     assert_eq!(artifacts.artifacts.len(), 2);
-    assert_eq!(artifacts.artifacts[1].visibility, Visibility::HumanOnly);
+    assert_eq!(
+        artifacts.artifacts[1].visibility,
+        Some(Visibility::HumanOnly)
+    );
     let written = serialize_artifacts(&artifacts).unwrap();
     assert_eq!(parse_artifacts(&written).unwrap(), artifacts);
 

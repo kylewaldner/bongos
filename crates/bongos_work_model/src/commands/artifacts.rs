@@ -61,10 +61,10 @@ fn set_visibility(
         .iter_mut()
         .find(|artifact| artifact.path == path)
         .ok_or_else(|| format!("{} has no artifact {path}", place.slug()))?;
-    if artifact.visibility == visibility {
+    if artifact.visibility == Some(visibility) {
         return Err(format!("{path} is already {}", visibility_name(visibility)));
     }
-    artifact.visibility = visibility;
+    artifact.visibility = Some(visibility);
     Ok(manifest_change(
         ctx,
         &place,
@@ -83,7 +83,7 @@ fn set_all(tree: &WorkTree, ctx: &Context, id: &str, visibility: Visibility) -> 
     if list
         .artifacts
         .iter()
-        .all(|artifact| artifact.visibility == visibility)
+        .all(|artifact| artifact.visibility == Some(visibility))
     {
         return Err(format!(
             "Every artifact of {} is already {}",
@@ -92,7 +92,7 @@ fn set_all(tree: &WorkTree, ctx: &Context, id: &str, visibility: Visibility) -> 
         ));
     }
     for artifact in &mut list.artifacts {
-        artifact.visibility = visibility;
+        artifact.visibility = Some(visibility);
     }
     Ok(manifest_change(
         ctx,

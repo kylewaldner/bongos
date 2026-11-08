@@ -328,8 +328,10 @@ pub struct Artifact {
     pub path: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
-    pub visibility: Visibility,
+    /// Unset follows the task's `default_visibility`. Every entry of a merged list
+    /// ([`crate::artifacts::merge`]) has it set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
     #[serde(flatten)]
     pub extra: Extra,
 }

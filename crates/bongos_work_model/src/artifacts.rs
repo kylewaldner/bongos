@@ -83,8 +83,9 @@ pub fn artifact_keys<'a>(files: impl IntoIterator<Item = &'a PathBuf>) -> Vec<St
 }
 
 /// A manifest path as written by hand, normalized to a key: `./notes//a.md` is `notes/a.md`.
+/// Only `/` separates names, as in [`artifact_key`]: on disk `a\b.md` is one file name.
 fn normalize(path: &str) -> String {
-    path.split(['/', '\\'])
+    path.split('/')
         .filter(|name| !name.is_empty() && *name != ".")
         .collect::<Vec<_>>()
         .join("/")
@@ -100,10 +101,11 @@ fn visibility_of_new(key: &str, default: Visibility) -> Visibility {
 }
 
 /// The artifact list: one entry per key in `keys`, in that order, from `manifest` when it lists
-/// the file and otherwise with `default` visibility and no description. Entries whose file is not
-/// in `keys` are dropped. When the manifest lists a file twice, the first entry gives the
-/// description, and the file is human-only if any entry says so. The manifest's other keys are
-/// kept.
+/// the file and otherwise with `default` visibility and no description. An entry without a
+/// visibility takes `default` too. Entries whose file is not in `keys` are dropped. When the
+/// manifest lists a file twice, the first entry gives the description, and the file is human-only
+/// if any entry is. Every entry of the result has its visibility set. The manifest's other keys
+/// are kept.
 pub fn merge(
     keys: &[String],
     manifest: Option<&ArtifactsFile>,
@@ -115,19 +117,26 @@ pub fn merge(
         .iter()
         .map(|key| {
             let mut entries = listed.iter().filter(|entry| normalize(&entry.path) == *key);
+            let resolve = |entry: &Artifact| {
+                entry
+                    .visibility
+                    .unwrap_or_else(|| visibility_of_new(key, default))
+            };
             match entries.next() {
                 Some(first) => {
                     let mut artifact = first.clone();
                     artifact.path = key.clone();
-                    if entries.any(|entry| entry.visibility == Visibility::HumanOnly) {
-                        artifact.visibility = Visibility::HumanOnly;
+                    let mut visibility = resolve(first);
+                    if entries.any(|entry| resolve(entry) == Visibility::HumanOnly) {
+                        visibility = Visibility::HumanOnly;
                     }
+                    artifact.visibility = Some(visibility);
                     artifact
                 }
                 None => Artifact {
                     path: key.clone(),
                     description: String::new(),
-                    visibility: visibility_of_new(key, default),
+                    visibility: Some(visibility_of_new(key, default)),
                     extra: Extra::new(),
                 },
             }
@@ -184,7 +193,7 @@ pub fn shared_artifacts(task_dir: &Path) -> Vec<SharedArtifact> {
     };
     list.artifacts
         .into_iter()
-        .filter(|artifact| artifact.visibility == Visibility::Shared)
+        .filter(|artifact| artifact.visibility == Some(Visibility::Shared))
         .map(|artifact| SharedArtifact {
             path: task_dir.join(&artifact.path),
             description: artifact.description,
