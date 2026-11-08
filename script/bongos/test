@@ -34,6 +34,9 @@ if [ "${#crates[@]}" -eq 0 ]; then
 fi
 
 require_space
+# BONGOS_TEST_NO_NET=1: cargo runs in a network namespace with loopback only, so a test that reaches
+# out fails. The real filesystem stays writable, so tests must use temp directories.
+[ "${BONGOS_TEST_NO_NET:-}" = 1 ] && export BONGOS_CARGO_NO_NET=1
 filter=()
 [ -n "${BONGOS_TEST_FILTER:-}" ] && filter=("$BONGOS_TEST_FILTER")
 

@@ -26,6 +26,9 @@ start=$(date +%s)
 run_build() {
   local rc=0
   cargo_limited build -p bongos -p cli --locked --color never >"$out" 2>&1 || rc=$?
+  if [ "$rc" = 0 ]; then
+    cargo_limited build -p bongos_kotlin --bin bongos-fake-kotlin-server --locked --color never >>"$out" 2>&1 || rc=$?
+  fi
   cat "$out"
   return "$rc"
 }

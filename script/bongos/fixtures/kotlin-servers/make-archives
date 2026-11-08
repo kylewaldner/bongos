@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# make-archives <out-dir> <fake-server-binary> <port>
+# Builds kotlin-lsp.tar.gz and intellij.tar.gz (each: a launcher that execs the fake server, and for
+# IntelliJ an EULA.txt), a tampered copy of each (one byte changed, so the pinned digest no longer
+# matches), and servers.toml with the SHA-256 of the genuine archives and http://127.0.0.1:<port>/ URLs.
+set -euo pipefail
+[ "$#" -eq 3 ] || { echo "usage: make-archives <out-dir> <fake-server-binary> <port>" >&2; exit 2; }
+out=$(mkdir -p "$1" && cd "$1" && pwd)
+fake=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+port=$3
+[ -x "$fake" ] || { echo "bongos: $fake is not an executable" >&2; exit 1; }
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+build_archive() {
+  local name=$1 mode=$2 root="$work/$1"
+  mkdir -p "$root/bin"
+  cat >"$root/bin/launcher.sh" <<LAUNCHER
+#!/bin/sh
+BONGOS_FAKE_LSP_MODE="\${BONGOS_FAKE_LSP_MODE:-$mode}"
+export BONGOS_FAKE_LSP_MODE
+exec "$fake" "\$@"
+LAUNCHER
+  chmod +x "$root/bin/launcher.sh"
+  if [ "$name" = intellij ]; then
+    printf 'FAKE USER AGREEMENT\nVersion 1.0\n' >"$root/EULA.txt"
+  fi
+  tar -C "$root" --owner=0 --group=0 --mtime=@0 --sort=name -cf - . | gzip -n >"$out/$name.tar.gz"
+  # Tampered copy: same name plus .tampered, last byte of the archive flipped.
+  cp "$out/$name.tar.gz" "$out/$name.tampered.tar.gz"
+  printf '\377' | dd of="$out/$name.tampered.tar.gz" bs=1 seek=$(( $(stat -c %s "$out/$name.tar.gz") - 1 )) conv=notrunc 2>/dev/null
+}
+
+build_archive kotlin-lsp progress,push
+build_archive intellij progress,push
+
+digest() { sha256sum "$1" | cut -d' ' -f1; }
+{
+  for name in kotlin-lsp intellij; do
+    printf '[%s]\nversion = "0.0.1"\nurl = "http://127.0.0.1:%s/%s.tar.gz"\nsha256 = "%s"\nlauncher = "bin/launcher.sh"\n\n' \
+      "$name" "$port" "$name" "$(digest "$out/$name.tar.gz")"
+  done
+} >"$out/servers.toml"
+echo "$out/servers.toml"

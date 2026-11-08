@@ -12,10 +12,16 @@ workspace = true
 path = "src/bongos_kotlin.rs"
 doctest = false
 
+[[bin]]
+name = "bongos-fake-kotlin-server"
+path = "src/bin/fake_kotlin_server.rs"
+
 [dependencies]
 gpui.workspace = true
+serde_json.workspace = true
 settings.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 util.workspace = true
+tempfile.workspace = true
