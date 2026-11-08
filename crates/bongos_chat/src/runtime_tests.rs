@@ -499,7 +499,13 @@ async fn test_runtime_files_are_private_and_regenerated(cx: &mut TestAppContext)
     let request = h.request(Agent::Claude, "implement");
     let id = request.record.id.clone();
     let dir = h.runtime_root.join(&id);
-    // A file an earlier launch left behind is not kept: the directory is regenerated.
+    // A file an earlier launch left behind is not kept: the directory is regenerated. The root
+    // it sits in is private, as an earlier launch made it.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::create_dir_all(&h.runtime_root).unwrap();
+        std::fs::set_permissions(&h.runtime_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     write(&dir.join("stale.md"), "old\n");
     h.launch(request, &h.project, cx).await.unwrap();
 
@@ -890,11 +896,22 @@ async fn wait_for_task(h: &Harness, cx: &mut TestAppContext) {
 async fn test_the_work_store_reports_the_open_chat_until_it_ends(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
     wait_for_task(&h, cx).await;
-    cx.update(|cx| crate::live_modes::init(&h.runtime, &h.store, cx));
+    // The registry notifies the global work store.
+    cx.update(|cx| {
+        bongos_work::init(
+            Arc::new(RealFs::new(None, cx.background_executor().clone())),
+            WorkDirs {
+                root: h.base.join("work"),
+            },
+            cx,
+        );
+        crate::live_modes::init(&h.runtime, &h.store, cx);
+    });
     let changes = std::rc::Rc::new(std::cell::Cell::new(0usize));
     cx.update(|cx| {
         let changes = changes.clone();
-        cx.subscribe(&h.work, move |_, event, _| {
+        let global = WorkStore::global(cx).unwrap();
+        cx.subscribe(&global, move |_, event, _| {
             if *event == WorkStoreEvent::LiveModesChanged {
                 changes.set(changes.get() + 1);
             }
@@ -998,6 +1015,7 @@ async fn test_a_dropped_launch_task_frees_its_chat_id(cx: &mut TestAppContext) {
     });
     assert_eq!(again.await, Err(LaunchError::AlreadyRunning));
     drop(task);
+    cx.run_until_parked();
     h.launch(request, &h.project, cx).await.unwrap();
 }
 
