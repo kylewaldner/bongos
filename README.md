@@ -37,6 +37,21 @@ plugins.gradle.org, Maven repositories and Artifact Registry.
 kotlin-lsp builds are early access and expire about 29 days after build, so bongos pins one
 build per release and releases roughly monthly. If the pinned build has expired, update bongos.
 
+## JetBrains servers and their terms
+
+bongos ships neither Kotlin language server, so the GPL work does not include them. Both come from
+JetBrains and stay under JetBrains' terms.
+
+- kotlin-lsp (partly closed source) is downloaded on first need from `download.jetbrains.com`,
+  under JetBrains' terms. The pinned build and its SHA-256 are in
+  `crates/bongos_kotlin/servers.toml`, and the download is checked against that digest.
+- The IntelliJ language server is proprietary and is never downloaded unless the setting
+  `kotlin.intellij.download` is `true` (default `false`). It is under the JetBrains EULA, which you
+  must accept before it runs; until you do, bongos uses kotlin-lsp. With the setting off, you can
+  point `lsp.kotlin.binary.path` at a server you installed yourself.
+- `kotlin.log` in the logs directory records each install and every fallback from IntelliJ to
+  kotlin-lsp.
+
 ## Layout
 
 | Path | What |
