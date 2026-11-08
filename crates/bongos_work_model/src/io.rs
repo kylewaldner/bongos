@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::types::{ArtifactsFile, LinkFile, ProjectFile, SCHEMA, TaskFile};
+use crate::types::{ArtifactsFile, HistoryFile, LinkFile, ProjectFile, SCHEMA, TaskFile};
 
 /// A file with a `schema` key at the top.
 pub trait SchemaFile: Serialize + DeserializeOwned {
@@ -23,7 +23,7 @@ macro_rules! schema_file {
         }
     )*};
 }
-schema_file!(TaskFile, ProjectFile, ArtifactsFile, LinkFile);
+schema_file!(TaskFile, ProjectFile, ArtifactsFile, LinkFile, HistoryFile);
 
 #[derive(serde::Deserialize)]
 struct SchemaProbe {
@@ -82,6 +82,7 @@ file_functions!(
     serialize_artifacts
 );
 file_functions!(LinkFile, parse_link, read_link, serialize_link);
+file_functions!(HistoryFile, parse_history, read_history, serialize_history);
 
 pub(crate) fn parse_task_at(text: &str, path: &Path) -> Result<TaskFile> {
     parse(text, Some(path))
@@ -92,5 +93,9 @@ pub(crate) fn parse_project_at(text: &str, path: &Path) -> Result<ProjectFile> {
 }
 
 pub(crate) fn parse_artifacts_at(text: &str, path: &Path) -> Result<ArtifactsFile> {
+    parse(text, Some(path))
+}
+
+pub(crate) fn parse_history_at(text: &str, path: &Path) -> Result<HistoryFile> {
     parse(text, Some(path))
 }

@@ -1,9 +1,10 @@
-//! In-memory trees for the roll-up, activity and graph tests.
+//! In-memory trees for the roll-up, activity, graph, rules and command tests.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::store::{Activity, Project, Task, WorkTree};
+use crate::commands::{Change, Context, Write};
+use crate::store::{Activity, FileError, Project, Task, WorkTree};
 use crate::*;
 
 pub fn at(text: &str) -> Timestamp {
@@ -133,4 +134,51 @@ pub fn find<'a>(tree: &'a WorkTree, slug: &str) -> &'a Task {
 
 pub fn id_of(tree: &WorkTree, slug: &str) -> TaskId {
     find(tree, slug).id().unwrap().to_string()
+}
+
+/// Kyle at a fixed time.
+pub fn ctx() -> Context {
+    Context::new("kyle", at("2026-11-08T12:00:00Z"))
+}
+
+/// Applies the task writes of `change` to the tasks already in `tree`, in memory.
+pub fn update(tree: &mut WorkTree, change: &Change) {
+    fn visit(task: &mut Task, change: &Change) {
+        for write in &change.writes {
+            if let Write::Task { dir, file } = write
+                && *dir == task.dir
+            {
+                task.file = Some(file.clone());
+            }
+        }
+        for child in &mut task.children {
+            visit(child, change);
+        }
+    }
+    for project in &mut tree.projects {
+        visit(&mut project.task, change);
+    }
+    for activity in &mut tree.activities {
+        for oneoff in &mut activity.oneoffs {
+            visit(oneoff, change);
+        }
+    }
+}
+
+/// `task` with an error badge on its `task.toml`, as the loader leaves an invalid file.
+pub fn badged(mut task: Task) -> Task {
+    task.errors.push(FileError {
+        path: task.dir.join("task.toml"),
+        line: Some(3),
+        reason: "expected a value".to_string(),
+    });
+    task
+}
+
+/// Marks the todos of `task` at `indices` done.
+pub fn done(mut task: Task, indices: &[usize]) -> Task {
+    for index in indices {
+        file_mut(&mut task).todos[*index].state = TodoState::Done;
+    }
+    task
 }
