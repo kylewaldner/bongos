@@ -1021,7 +1021,7 @@ mod tests {
                 "{}/Library/Java/JavaVirtualMachines/*/Contents/Home",
                 tree.path().display()
             )),
-            vec![library.clone()]
+            vec![library]
         );
 
         let mut inputs = tree.inputs();
@@ -1095,7 +1095,7 @@ mod tests {
         );
         jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.2");
         let query = JdkQuery {
-            inputs: inputs.clone(),
+            inputs,
             server: KotlinServerKind::KotlinLsp,
             install_root: tree.path().join("kotlin"),
         };
