@@ -2,7 +2,8 @@
 # make-archives <out-dir> <fake-server-binary> <port>
 # Builds kotlin-lsp.tar.gz and intellij.tar.gz (each: a launcher that execs the fake server, and for
 # IntelliJ an EULA.txt), a tampered copy of each (one byte changed, so the pinned digest no longer
-# matches), and servers.toml with the SHA-256 of the genuine archives and http://127.0.0.1:<port>/ URLs.
+# matches), and a servers.toml (the format of crates/bongos_kotlin/servers.toml) with the SHA-256 of
+# the genuine archives and http://127.0.0.1:<port>/ URLs.
 set -euo pipefail
 [ "$#" -eq 3 ] || { echo "usage: make-archives <out-dir> <fake-server-binary> <port>" >&2; exit 2; }
 out=$(mkdir -p "$1" && cd "$1" && pwd)
@@ -35,10 +36,15 @@ build_archive kotlin-lsp progress,push
 build_archive intellij progress,push
 
 digest() { sha256sum "$1" | cut -d' ' -f1; }
+# Same format as crates/bongos_kotlin/servers.toml. The fixture archives have no top directory, so
+# strip_components is 0, and one build is pinned for every platform.
 {
   for name in kotlin-lsp intellij; do
-    printf '[%s]\nversion = "0.0.1"\nurl = "http://127.0.0.1:%s/%s.tar.gz"\nsha256 = "%s"\nlauncher = "bin/launcher.sh"\n\n' \
-      "$name" "$port" "$name" "$(digest "$out/$name.tar.gz")"
+    printf '[%s]\nversion = "0.0.1"\nargs = ["--stdio"]\n\n' "$name"
+    for platform in linux-x64 linux-arm64 macos-arm64 macos-x64; do
+      printf '[%s.platform.%s]\nurl = "http://127.0.0.1:%s/%s.tar.gz"\nsha256 = "%s"\narchive = "tar.gz"\nlauncher = "bin/launcher.sh"\n\n' \
+        "$name" "$platform" "$port" "$name" "$(digest "$out/$name.tar.gz")"
+    done
   done
 } >"$out/servers.toml"
 echo "$out/servers.toml"
