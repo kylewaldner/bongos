@@ -21,6 +21,8 @@ pub enum ErrorKind {
     UnsupportedSchema { found: Option<String> },
     #[error("{0}")]
     Serialize(String),
+    #[error("{0}")]
+    InvalidJournal(String),
 }
 
 fn unsupported_schema_message(found: &Option<String>) -> String {

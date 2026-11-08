@@ -82,3 +82,15 @@ file_functions!(
     serialize_artifacts
 );
 file_functions!(LinkFile, parse_link, read_link, serialize_link);
+
+pub(crate) fn parse_task_at(text: &str, path: &Path) -> Result<TaskFile> {
+    parse(text, Some(path))
+}
+
+pub(crate) fn parse_project_at(text: &str, path: &Path) -> Result<ProjectFile> {
+    parse(text, Some(path))
+}
+
+pub(crate) fn parse_artifacts_at(text: &str, path: &Path) -> Result<ArtifactsFile> {
+    parse(text, Some(path))
+}
