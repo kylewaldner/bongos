@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// A failure to read, parse or write a chat record. It names the file when the failure came from
+/// A failure to read, parse or write a chat record or a session type. It names the file when the failure came from
 /// a path, and the line and column when the TOML parser gives them.
 #[derive(Debug)]
 pub struct Error {
@@ -21,6 +21,10 @@ pub enum ErrorKind {
     UnsupportedSchema { found: Option<String> },
     #[error("{0}")]
     Serialize(String),
+    #[error("`{0}` is not a usable session type or skill name")]
+    InvalidName(String),
+    #[error("no session type `{0}`")]
+    NoSuchType(String),
 }
 
 fn unsupported_schema_message(found: &Option<String>) -> String {

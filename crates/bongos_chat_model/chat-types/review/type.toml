@@ -1,0 +1,8 @@
+schema = 1
+description = "Review a task: the PR links and the artifact list"
+layout = "dual"            # dual | chat-only
+skills = []                # skill names, looked up in ../skills/<name>/ then ~/.claude/skills/<name>/
+task_context = false       # task file, notes directory, worktree, dependencies
+review_context = true      # PR links from the task's [result]
+thinking = false           # tells the session the task is in thinking mode
+artifacts = true           # the shared artifact list

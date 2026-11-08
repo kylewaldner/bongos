@@ -1,0 +1,8 @@
+schema = 1
+description = "Implement a task: model-routing skill and the task context"
+layout = "dual"            # dual | chat-only
+skills = ["model-routing"] # skill names, looked up in ../skills/<name>/ then ~/.claude/skills/<name>/
+task_context = true        # task file, notes directory, worktree, dependencies
+review_context = false     # PR links from the task's [result]
+thinking = false           # tells the session the task is in thinking mode
+artifacts = true           # the shared artifact list
