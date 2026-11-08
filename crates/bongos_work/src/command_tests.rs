@@ -589,8 +589,8 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
     wait_until(cx, "the refusal toast", |cx| harness.has_toast(cx)).await;
 }
 
-/// Every action these commands register.
-const NAMES: [&str; 42] = [
+/// Every action these commands register, but the debug-only `work::DumpSessionContext`.
+const NAMES: [&str; 49] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -633,16 +633,33 @@ const NAMES: [&str; 42] = [
     "project::OpenFolder",
     "project::Focus",
     "work::AddRepository",
+    "task::SetDefaultVisibility",
+    "task::Think",
+    "artifact::Hide",
+    "artifact::Share",
+    "artifact::HideAll",
+    "artifact::ShareAll",
+    "artifact::Link",
 ];
+
+/// [`NAMES`], and in a debug build the debug-only actions.
+fn names() -> Vec<&'static str> {
+    let mut names = NAMES.to_vec();
+    if cfg!(debug_assertions) {
+        names.push("work::DumpSessionContext");
+    }
+    names
+}
 
 #[gpui::test]
 async fn while_disabled_the_actions_are_hidden_and_refuse(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx, false, true).await;
-    assert_eq!(action_types().len(), NAMES.len());
+    let names = names();
+    assert_eq!(action_types().len(), names.len());
     let hidden = |cx: &mut VisualTestContext| -> Vec<bool> {
         cx.update(|_, cx| {
             let filter = CommandPaletteFilter::try_global(cx).unwrap();
-            NAMES
+            names
                 .iter()
                 .map(|name| filter.is_hidden(&*cx.build_action(name, None).unwrap()))
                 .collect()
@@ -650,7 +667,7 @@ async fn while_disabled_the_actions_are_hidden_and_refuse(cx: &mut TestAppContex
     };
     assert!(hidden(cx).iter().all(|hidden| *hidden), "hidden while off");
 
-    for name in NAMES {
+    for name in names.iter().copied() {
         harness.clear_toasts(cx);
         dispatch(cx, name);
         assert!(harness.picker(cx).is_none(), "{name} opened a picker");

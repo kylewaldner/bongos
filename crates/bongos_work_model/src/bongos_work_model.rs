@@ -5,6 +5,7 @@
 //! function takes the root it works under.
 
 pub mod activity;
+pub mod artifacts;
 pub mod commands;
 pub mod derive;
 mod error;
@@ -19,6 +20,7 @@ pub mod slug;
 pub mod store;
 mod types;
 
+pub use artifacts::{SessionContext, SharedArtifact, session_context, shared_artifacts};
 pub use error::{Error, ErrorKind, Result};
 pub use io::{
     SchemaFile, parse_artifacts, parse_history, parse_link, parse_project, parse_task,
@@ -29,6 +31,9 @@ pub use types::*;
 
 #[cfg(test)]
 mod activity_tests;
+
+#[cfg(test)]
+mod artifacts_tests;
 
 #[cfg(test)]
 mod commands_tests;

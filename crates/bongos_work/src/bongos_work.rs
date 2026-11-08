@@ -4,6 +4,7 @@
 //! file formats live in `bongos_work_model`, which has no UI dependency.
 
 pub mod actions;
+mod artifacts;
 mod commands;
 mod focus;
 mod links;
@@ -26,7 +27,7 @@ pub use bongos_work_model as model;
 use fs::Fs;
 use gpui::{App, AppContext as _, Entity, Global};
 
-pub use actions::{project, task, todo, work};
+pub use actions::{artifact, project, task, todo, work};
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE};
 pub use rebase::{CHECK_INTERVAL, RebaseState};
@@ -75,6 +76,8 @@ impl WorkStore {
     }
 }
 
+#[cfg(test)]
+mod artifact_tests;
 #[cfg(test)]
 mod command_tests;
 #[cfg(test)]

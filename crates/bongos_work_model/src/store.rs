@@ -529,7 +529,7 @@ fn load_task(slug: String, dir: PathBuf, previous: &Previous, errors: &mut Vec<F
 }
 
 /// Records the mtime of every file under `dir` that the task owns.
-fn collect_files(
+pub(crate) fn collect_files(
     dir: &Path,
     relative: &Path,
     files: &mut BTreeMap<PathBuf, SystemTime>,

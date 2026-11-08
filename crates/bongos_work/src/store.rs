@@ -705,8 +705,9 @@ impl Echoes {
         self.entries.clear();
     }
 
-    /// Records every path `change` touched: the files it replaced (and `history.old.toml` beside
-    /// each), the directories it created or moved, and their parents up to the root.
+    /// Records every path `change` touched: the files it replaced (and `history.old.toml` and
+    /// `prompts.txt` beside each), the directories it created or moved, and their parents up to
+    /// the root.
     fn record(&mut self, root: &Path, change: &Change) {
         let now = Instant::now();
         self.entries
@@ -724,6 +725,8 @@ impl Echoes {
             let path = write.path();
             if let Some(dir) = path.parent() {
                 paths.insert(layout::history_old_file(dir));
+                // `apply` creates it beside the `task.toml` of a new task.
+                paths.insert(layout::prompts_file(dir));
             }
             with_parents(&path, &mut paths);
         }
