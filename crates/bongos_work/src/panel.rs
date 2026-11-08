@@ -573,11 +573,3 @@ fn dump_view(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
     };
     show_toast(workspace, message, cx);
 }
-
-impl WorkPanel {
-    /// The panel's entity of `workspace`, for tests.
-    #[cfg(test)]
-    pub(crate) fn of(workspace: &Entity<Workspace>, cx: &App) -> Option<Entity<WorkPanel>> {
-        workspace.read(cx).panel::<WorkPanel>(cx)
-    }
-}

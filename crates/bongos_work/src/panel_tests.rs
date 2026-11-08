@@ -16,13 +16,19 @@ use crate::registry_tests::{FakeGates, gate, with_deep_leaf};
 use crate::store_tests::{set_enabled, write};
 use crate::{Focus, focus};
 
+fn panel_of(harness: &Harness, cx: &mut VisualTestContext) -> Option<Entity<WorkPanel>> {
+    harness
+        .workspace
+        .read_with(cx, |workspace, cx| workspace.panel::<WorkPanel>(cx))
+}
+
 /// Adds the panel to the harness window the way the app does, and waits for it to show the tree.
 async fn open_panel(harness: &Harness, cx: &mut VisualTestContext) -> Entity<WorkPanel> {
     harness
         .workspace
         .update_in(cx, |workspace, window, cx| init_panel(workspace, window, cx));
     cx.run_until_parked();
-    let panel = WorkPanel::of(&harness.workspace, &*cx).expect("the panel is added while enabled");
+    let panel = panel_of(&harness, cx).expect("the panel is added while enabled");
     wait_until(cx, "the panel to show the tree", |cx| {
         panel.read_with(cx, |panel, _| !panel.lines().is_empty())
     })
@@ -269,15 +275,15 @@ async fn the_panel_is_absent_while_disabled_and_follows_the_setting(cx: &mut Tes
         .workspace
         .update_in(cx, |workspace, window, cx| init_panel(workspace, window, cx));
     cx.run_until_parked();
-    assert!(WorkPanel::of(&harness.workspace, &*cx).is_none());
+    assert!(panel_of(&harness, cx).is_none());
 
     set_enabled(cx, true);
     cx.run_until_parked();
-    assert!(WorkPanel::of(&harness.workspace, &*cx).is_some(), "added when enabled");
+    assert!(panel_of(&harness, cx).is_some(), "added when enabled");
 
     set_enabled(cx, false);
     cx.run_until_parked();
-    assert!(WorkPanel::of(&harness.workspace, &*cx).is_none());
+    assert!(panel_of(&harness, cx).is_none());
 }
 
 #[gpui::test]
