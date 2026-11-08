@@ -66,6 +66,19 @@ failure_excerpt() {
     if grep -qE '^---- .* stdout ----$' "$f"; then
       awk '/^---- .* stdout ----$/ {on = 1; n = 0} /^failures:$/ {on = 0}
            on && NF && n < 14 {print; n++}' "$f"
+    elif grep -qE '^[[:space:]]*(FAIL|TIMEOUT) \[' "$f"; then
+      # cargo-nextest: the Summary line, then each distinct failed test with the start of its
+      # stderr block (only the first occurrence has the blocks; the final list repeats the line).
+      grep -E '^[[:space:]]*Summary \[' "$f" | tail -n1 | sed 's/^[[:space:]]*//'
+      awk '/^[[:space:]]*(FAIL|TIMEOUT) \[/ {
+             key = $0; sub(/^[^]]*\][[:space:]]*/, "", key); sub(/^\([0-9]+\/[0-9]+\)[[:space:]]*/, "", key)
+             if (key in seen) {on = 0; next}
+             seen[key] = 1; on = 1; err = 0; n = 0
+             sub(/^[[:space:]]*/, ""); print; next
+           }
+           /^[[:space:]]*(SLOW|PASS|Summary|Starting|Cancelling) / {on = 0}
+           on && /^[[:space:]]*stderr ───/ {err = 1; next}
+           on && err && NF && n < 14 {sub(/^[[:space:]]+/, "  "); print; n++}' "$f"
     elif grep -qE '^error(\[[A-Z0-9]+\])?:' "$f"; then
       awk '/^error(\[[A-Z0-9]+\])?:/ {
              if ($0 ~ /^error: (aborting|could not compile|test failed|build failed)/) {print; on = 0; next}
@@ -132,11 +145,21 @@ cargo_meta_file() {
   echo "$f"
 }
 
-# Stop under 30 GB free on the target drive; drop incremental output under 40 GB.
+# Free space on the target drive, in whole GB.
+target_free_gb() {
+  echo $(( $(df --output=avail -k "$CARGO_TARGET_DIR" | tail -n1 | tr -d ' ') / 1024 / 1024 ))
+}
+
+# Under 100 GB free, sweep stale artifacts once (script/bongos/sweep) and measure again; under 40 GB,
+# also drop incremental output; under 30 GB, stop.
 require_space() {
-  local avail_kb avail_gb
-  avail_kb=$(df --output=avail -k "$CARGO_TARGET_DIR" | tail -n1 | tr -d ' ')
-  avail_gb=$((avail_kb / 1024 / 1024))
+  local avail_gb
+  avail_gb=$(target_free_gb)
+  if [ "$avail_gb" -lt 100 ]; then
+    say "bongos: ${avail_gb} GB free for $CARGO_TARGET_DIR; sweeping stale build artifacts"
+    "$BONGOS_ROOT/script/bongos/sweep" || echo "bongos: sweep failed; continuing"
+    avail_gb=$(target_free_gb)
+  fi
   if [ "$avail_gb" -lt 30 ]; then
     echo "bongos: only ${avail_gb} GB free for $CARGO_TARGET_DIR; need at least 30 GB" >&2
     return 1

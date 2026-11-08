@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Garbage collection of the shared target directory with cargo-sweep: removes build artifacts not
+# used for BONGOS_SWEEP_DAYS days (default 2).
+#   sweep [--dry-run]     --dry-run only reports what would be removed
+# Staleness: cargo-sweep looks at each unit's directory in target/*/.fingerprint/ and takes the
+# newest access time (atime) of the files in it; the unit and its artifacts in deps/, build/ and
+# .fingerprint/ go when that is older than the limit. Cargo reads those fingerprint files whenever
+# it reuses an artifact, which refreshes the atime. The file system's relatime option refreshes an
+# atime at most once a day, so a unit used in the last 24 hours has an atime under 48 hours old:
+# 2 days is the smallest safe limit, and it keeps the directory to about two days of build churn.
+# require_space in lib.sh runs this by itself when free space is low.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+log_init sweep
+
+dry=()
+case "${1:-}" in
+  "") ;;
+  --dry-run) dry=(--dry-run) ;;
+  *) echo "usage: sweep [--dry-run]" >&2; exit 2 ;;
+esac
+
+removed="unknown"
+free_before=$(target_free_gb)
+free_after=$free_before
+summary_hook() {
+  local verb=removed
+  [ "${#dry[@]}" -gt 0 ] && verb="would remove"
+  SUMMARY="$verb $removed; free ${free_before} GB before, ${free_after} GB after"
+}
+
+if ! cargo sweep --version >/dev/null 2>&1; then
+  echo "bongos: cargo-sweep is missing; install it with: cargo install cargo-sweep --locked" >&2
+  exit 1
+fi
+
+# cargo-sweep takes a project, not a target directory; the project's target directory is
+# $CARGO_TARGET_DIR (set by env.sh).
+cargo sweep --time "${BONGOS_SWEEP_DAYS:-2}" ${dry[@]+"${dry[@]}"} "$BONGOS_ROOT"
+free_after=$(target_free_gb)
+removed=$(grep -oE '(Would clean|Cleaned)[: ]+[0-9.]+ [A-Za-z]+' "$LOG" | tail -n1 | sed -E 's/^[A-Za-z ]+[: ]+//' || true)
+[ -n "$removed" ] || removed="nothing"

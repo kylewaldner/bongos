@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# The full test suite with cargo-nextest: every library, binary and integration test of the
+# workspace, in one build, one process per test. A hung test is killed after 10 minutes and reported
+# as TIMEOUT (.config/nextest.toml). Doctests are not run (nextest does not run them).
+#   test-all [crate...]   named crates only, replacing --workspace; for a cheap trial of the script
+#   BONGOS_TEST_FILTER=s  only tests whose name contains s (a positional nextest filter)
+#   BONGOS_TEST_NO_NET=1  cargo runs offline (CARGO_NET_OFFLINE=true)
+# The extension_host dev-extension test (test_extension_store_with_test_extension) expects a wasi-sdk
+# in the repository's own target/wasi-sdk and tries to download one when it is missing; in a fresh
+# worktree that failed on 2026-11-07 (the test's HTTP client is a fake), so a failure of that one
+# test alone is the environment, not the change under test, until the dropped error is logged.
+# Prints the nextest totals; the full output is in the log.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+log_init test-all
+
+if ! cargo nextest --version >/dev/null 2>&1; then
+  echo "bongos: cargo-nextest is missing; install it with: cargo install cargo-nextest --locked (or the distro package)" >&2
+  exit 1
+fi
+
+# nextest's final line: "Summary [ 12.3s] 100 tests run: 99 passed (1 slow), 1 failed, 4 skipped".
+# Timeouts show in it as "N timed out" (and in the failures as TIMEOUT).
+summary_hook() {
+  local line
+  line=$(grep -E '^ *Summary \[' "$LOG" | tail -n1 || true)
+  if [ -z "$line" ]; then
+    SUMMARY="no nextest summary"
+    return 0
+  fi
+  SUMMARY=$(awk '{
+    p = f = s = t = 0
+    if (match($0, /[0-9]+ passed/)) p = substr($0, RSTART, RLENGTH) + 0
+    if (match($0, /[0-9]+ failed/)) f = substr($0, RSTART, RLENGTH) + 0
+    if (match($0, /[0-9]+ skipped/)) s = substr($0, RSTART, RLENGTH) + 0
+    if (match($0, /[0-9]+ timed out/)) t = substr($0, RSTART, RLENGTH) + 0
+    printf "passed=%d failed=%d skipped=%d timed_out=%d", p, f, s, t
+  }' <<<"$line")
+}
+
+require_space
+
+scope=(--workspace)
+if [ "$#" -gt 0 ]; then
+  scope=()
+  for c in "$@"; do scope+=(-p "$c"); done
+fi
+
+# Offline cargo, so a missing dependency fails the run instead of fetching it.
+if [ "${BONGOS_TEST_NO_NET:-}" = 1 ]; then
+  export CARGO_NET_OFFLINE=true
+fi
+
+filter=()
+[ -n "${BONGOS_TEST_FILTER:-}" ] && filter=("$BONGOS_TEST_FILTER")
+
+cargo_limited nextest run "${scope[@]}" "${filter[@]}" --lib --bins --tests --locked --no-fail-fast --color never

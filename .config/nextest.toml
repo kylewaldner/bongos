@@ -1,0 +1,9 @@
+[profile.default]
+# A test running past 60 s is reported as slow; after 10 periods (10 minutes) it is killed
+# and reported as TIMEOUT. A randomized editor test legitimately took 237 s in the full run, and
+# under load 300 s is too tight.
+slow-timeout = { period = "60s", terminate-after = 10 }
+fail-fast = false
+retries = 0
+status-level = "fail"
+final-status-level = "slow"
