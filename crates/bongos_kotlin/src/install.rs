@@ -1068,8 +1068,6 @@ pub(crate) mod tests {
         let archive = tar_gz(&files(0, true));
         let entry = entry_for(&archive, ArchiveKind::TarGz);
         let served = counting(archive);
-        let mut stale = entry.clone();
-        stale.sha256 = "0".repeat(64);
         // A version directory whose marker names another digest does not count as installed.
         let version_dir = dir.join(VERSION);
         fs::create_dir_all(version_dir.join("bin")).unwrap();
@@ -1078,7 +1076,7 @@ pub(crate) mod tests {
             version_dir.join(MARKER),
             serde_json::to_string(&Marker {
                 version: VERSION.into(),
-                sha256: stale.sha256.clone(),
+                sha256: "0".repeat(64),
             })
             .unwrap(),
         )
