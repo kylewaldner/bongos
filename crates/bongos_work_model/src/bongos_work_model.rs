@@ -52,4 +52,7 @@ mod rules_tests;
 mod store_tests;
 
 #[cfg(test)]
+mod structure_tests;
+
+#[cfg(test)]
 mod tests;

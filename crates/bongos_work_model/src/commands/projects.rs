@@ -45,6 +45,7 @@ pub fn project_new(tree: &WorkTree, ctx: &Context, new: NewProject) -> Outcome {
             Write::Project { dir, file: project },
         ],
         entry,
+        moves: Vec::new(),
     })
 }
 
@@ -87,6 +88,7 @@ fn set_archived(tree: &WorkTree, ctx: &Context, slug: &str, archived: bool) -> O
             Write::Project { dir, file },
         ],
         entry,
+        moves: Vec::new(),
     })
 }
 

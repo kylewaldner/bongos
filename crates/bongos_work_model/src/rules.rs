@@ -202,6 +202,28 @@ pub fn check_add_child(place: &Place, tree: &WorkTree) -> Result<(), Refusal> {
             join_and(&has)
         ));
     }
+    check_not_stacked(place, file)
+}
+
+/// `task: split` turns a leaf into a group with one child that takes its work; a group is refused,
+/// and so is a leaf in a stack, because a group is never stackable.
+pub fn check_split(place: &Place, tree: &WorkTree) -> Result<(), Refusal> {
+    let task = place.task;
+    if derive::shape(task, tree) == Shape::Group {
+        return Err(format!(
+            "{} is already a group; use task: new child",
+            task.slug
+        ));
+    }
+    match &task.file {
+        Some(file) => check_not_stacked(place, file),
+        None => Ok(()),
+    }
+}
+
+/// A task about to become a group is in no stack, at either end.
+fn check_not_stacked(place: &Place, file: &TaskFile) -> Result<(), Refusal> {
+    let task = place.task;
     if let Some(edge) = &file.stacked_on {
         return Err(format!(
             "{} is stacked on {}, and a group cannot be stacked; remove that edge first",

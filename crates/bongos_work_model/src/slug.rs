@@ -57,3 +57,15 @@ pub fn unique_slug<S: AsRef<str>>(base: &str, existing_siblings: &[S]) -> String
 pub fn oneoff_dir_name(date: NaiveDate, slug: &str) -> String {
     format!("{}-{slug}", date.format("%Y-%m-%d"))
 }
+
+/// The slug in a one-off directory name from [`oneoff_dir_name`]: the name without its date. A
+/// name with no date prefix is returned as it is.
+pub fn oneoff_slug(dir_name: &str) -> &str {
+    let dated = dir_name.get(..11).is_some_and(|prefix| {
+        prefix.ends_with('-') && NaiveDate::parse_from_str(&prefix[..10], "%Y-%m-%d").is_ok()
+    });
+    match dir_name.get(11..) {
+        Some(slug) if dated && !slug.is_empty() => slug,
+        _ => dir_name,
+    }
+}

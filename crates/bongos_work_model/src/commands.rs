@@ -12,6 +12,7 @@
 
 mod links;
 mod projects;
+mod structure;
 mod tasks;
 mod todos;
 
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 pub use links::*;
 pub use projects::*;
+pub use structure::*;
 pub use tasks::*;
 pub use todos::*;
 
@@ -91,15 +93,27 @@ impl Write {
     }
 }
 
+/// A directory (or file) that a multi-file operation renames, with everything under it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Move {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
 /// What a command changes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Change {
-    /// The directory of the task the command acted on (for a new task, its new directory).
+    /// The directory of the task the command acted on (for a new task, its new directory; for a
+    /// moved task, where it goes).
     pub dir: PathBuf,
-    /// The files to replace, the task's own first.
+    /// The files to replace, the task's own first. A file in a moved directory is named by its
+    /// path after the move.
     pub writes: Vec<Write>,
     /// The history entry recorded on that task, also present in its written `task.toml`.
     pub entry: HistoryEntry,
+    /// The renames of a multi-file operation (`split`, `move`, `move to project`, `make one
+    /// off`), done before the writes. A source that is gone is skipped.
+    pub moves: Vec<Move>,
 }
 
 impl Change {
@@ -161,6 +175,7 @@ fn single(
         dir: dir.clone(),
         writes: vec![Write::Task { dir, file }],
         entry,
+        moves: Vec::new(),
     }
 }
 
@@ -212,22 +227,72 @@ pub fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-/// Writes `change`. One file is replaced with [`write_atomic`]; several go through an `.op.toml`
-/// journal (D4), so a crash leaves all of them or none. A `task.toml` holding more than
-/// [`HISTORY_LIMIT`] history entries has its oldest moved to `history.old.toml` in the same step.
+/// Writes `change`. One file is replaced with [`write_atomic`]; several files, or any move, go
+/// through an `.op.toml` journal (D4), so a crash leaves all of them or none. A `task.toml` holding
+/// more than [`HISTORY_LIMIT`] history entries has its oldest moved to `history.old.toml` in the
+/// same step.
 ///
-/// The write guard is the command's job; this only writes. Every path must be under `root`.
+/// The write guard is the command's job; this only writes. Every path must be under `root`, and
+/// no move may land on a path that exists.
 pub fn apply(root: &Path, change: &Change) -> Result<()> {
-    let files = rendered(change)?;
-    if let [(path, content)] = files.as_slice() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
+    match plan(root, change)? {
+        Plan::One { path, content } => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
+            }
+            write_atomic(&path, content.as_bytes()).map_err(|error| Error::io(&path, error))
         }
-        return write_atomic(path, content.as_bytes()).map_err(|error| Error::io(path, error));
+        Plan::Journal { dir, journal } => {
+            std::fs::create_dir_all(&dir).map_err(|error| Error::io(&dir, error))?;
+            journal::run_operation(root, &dir, &journal)
+        }
+    }
+}
+
+/// How [`apply`] writes a change.
+#[derive(Debug)]
+pub(crate) enum Plan {
+    /// One file, replaced atomically.
+    One { path: PathBuf, content: String },
+    /// A journal to write into `dir` and run.
+    Journal { dir: PathBuf, journal: Journal },
+}
+
+/// The writes of `change`, and for a multi-file change its journal: every move (creating the
+/// target's parent first), then every file. Reads `history.old.toml` files and checks that no move
+/// target exists, but writes nothing.
+pub(crate) fn plan(root: &Path, change: &Change) -> Result<Plan> {
+    let files = rendered(change)?;
+    if change.moves.is_empty()
+        && let [(path, content)] = files.as_slice()
+    {
+        return Ok(Plan::One {
+            path: path.clone(),
+            content: content.clone(),
+        });
     }
 
     let mut steps = Vec::new();
     let mut made = HashSet::new();
+    for moved in &change.moves {
+        if moved.to.symlink_metadata().is_ok() {
+            return Err(Error::new(ErrorKind::InvalidJournal(format!(
+                "cannot move {} to {}: the target exists",
+                moved.from.display(),
+                moved.to.display()
+            ))));
+        }
+        if let Some(parent) = moved.to.parent() {
+            let parent = relative(root, parent)?;
+            if made.insert(parent.clone()) {
+                steps.push(Step::CreateDir { path: parent });
+            }
+        }
+        steps.push(Step::Rename {
+            from: relative(root, &moved.from)?,
+            to: relative(root, &moved.to)?,
+        });
+    }
     for (path, content) in files {
         if let Some(parent) = path.parent() {
             let parent = relative(root, parent)?;
@@ -248,17 +313,36 @@ pub fn apply(root: &Path, change: &Change) -> Result<()> {
             Write::Project { .. } => None,
         })
         .collect();
-    // The journal goes in the nearest directory that exists: the task's own, or for a new task
-    // its parent's, `tasks/`, the activity, `oneoffs/`, `projects/` or the root, all of which the
-    // loader searches for journals.
-    let journal_dir = change
-        .dir
+    // The journal of a move goes in the source parent, which no move of this change renames
+    // (each moves a task directory out of it, or a directory out of the task). Otherwise it goes
+    // in the nearest directory that exists: the task's own, or for a new task its parent's,
+    // `tasks/`, the activity, `oneoffs/`, `projects/` or the root. The loader searches all of
+    // them for journals.
+    let near = change
+        .moves
+        .first()
+        .and_then(|moved| moved.from.parent())
+        .unwrap_or(&change.dir);
+    let dir = near
         .ancestors()
         .find(|dir| dir.starts_with(root) && dir.is_dir())
         .map_or_else(|| root.to_path_buf(), Path::to_path_buf);
-    std::fs::create_dir_all(&journal_dir).map_err(|error| Error::io(&journal_dir, error))?;
     let journal = Journal::new(change.entry.event.clone(), ids, steps);
-    journal::run_operation(root, &journal_dir, &journal)
+    Ok(Plan::Journal { dir, journal })
+}
+
+/// Where the directory `dir`, named by its path after `change`, is before it: inside a moved
+/// directory, the matching path under the move's source.
+fn before_moves(change: &Change, dir: &Path) -> PathBuf {
+    change
+        .moves
+        .iter()
+        .find_map(|moved| {
+            dir.strip_prefix(&moved.to)
+                .ok()
+                .map(|rest| moved.from.join(rest))
+        })
+        .unwrap_or_else(|| dir.to_path_buf())
 }
 
 /// The path and content of every file `change` writes, with history beyond the limit moved out.
@@ -271,12 +355,14 @@ fn rendered(change: &Change) -> Result<Vec<(PathBuf, String)>> {
                 let overflow = file.history.len() - HISTORY_LIMIT;
                 let moved: Vec<HistoryEntry> = file.history.drain(..overflow).collect();
                 let old_path = layout::history_old_file(dir);
-                let mut old = match std::fs::read_to_string(&old_path) {
-                    Ok(text) => parse_history_at(&text, &old_path)?,
+                // A moved task's `history.old.toml` is still at its source.
+                let current = layout::history_old_file(&before_moves(change, dir));
+                let mut old = match std::fs::read_to_string(&current) {
+                    Ok(text) => parse_history_at(&text, &current)?,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         HistoryFile::default()
                     }
-                    Err(error) => return Err(Error::io(&old_path, error)),
+                    Err(error) => return Err(Error::io(&current, error)),
                 };
                 old.history.extend(moved);
                 files.push((old_path, serialize_history(&old)?));
