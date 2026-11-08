@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Gate 3: unit and UI tests for the named crates, else the crates changed on this branch.
+# Gate 3: unit and UI tests for the named crates, else the crates changed on this branch, run with
+# cargo-nextest: one process per test, and a hung test is killed after the per-test timeout in
+# .config/nextest.toml (the same one test-all uses) and reported as TIMEOUT. Doctests are not run.
 # Prints pass and fail counts, and the name and failure text of each failing test; the full output
 # is in the log.
 #   test [crate...]       BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
+#   BONGOS_TEST_NO_NET=1  cargo runs offline (CARGO_NET_OFFLINE=true)
 # Prefer running it with no crate names, which tests the crates changed on this branch, and narrow
 # the run with BONGOS_TEST_FILTER. Every distinct set of -p flags makes cargo unify features
 # differently and build another full set of dependency artifacts, so name crates only when the
@@ -14,12 +17,29 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BONGOS_ROOT"
 log_init test
 
-# Counts over every cargo test run so far; the run that failed is included.
+if ! cargo nextest --version >/dev/null 2>&1; then
+  echo "bongos: cargo-nextest is missing; install it with: cargo install cargo-nextest --locked (or the distro package)" >&2
+  exit 1
+fi
+
+# nextest's final line: "Summary [ 12.3s] 100 tests run: 99 passed (1 slow), 1 failed, 4 skipped".
+# A timeout counts as a failure (it shows as "N timed out" there and as TIMEOUT in the failures).
+# Skipped tests are reported as ignored.
 summary_hook() {
-  local counts
-  counts=$(awk '/^test result:/ {for (i = 1; i < NF; i++) {if ($(i+1) ~ /^passed/) p += $i; if ($(i+1) ~ /^failed/) f += $i; if ($(i+1) ~ /^ignored/) g += $i}}
-    END {printf "passed=%d failed=%d ignored=%d", p, f, g}' "$LOG")
-  SUMMARY="$counts"
+  local line
+  line=$(grep -E '^ *Summary \[' "$LOG" | tail -n1 || true)
+  if [ -z "$line" ]; then
+    SUMMARY="no nextest summary"
+    return 0
+  fi
+  SUMMARY=$(awk '{
+    p = f = s = t = 0
+    if (match($0, /[0-9]+ passed/)) p = substr($0, RSTART, RLENGTH) + 0
+    if (match($0, /[0-9]+ failed/)) f = substr($0, RSTART, RLENGTH) + 0
+    if (match($0, /[0-9]+ skipped/)) s = substr($0, RSTART, RLENGTH) + 0
+    if (match($0, /[0-9]+ timed out/)) t = substr($0, RSTART, RLENGTH) + 0
+    printf "passed=%d failed=%d ignored=%d", p, f + t, s
+  }' <<<"$line")
 }
 
 crates=()
@@ -41,31 +61,9 @@ require_space
 filter=()
 [ -n "${BONGOS_TEST_FILTER:-}" ] && filter=("$BONGOS_TEST_FILTER")
 
-# A package with only a binary, such as zed, has no library: --lib would fail with "no library
-# targets". Split the packages and run the binary-only ones with --bins --tests.
-meta=$(cat "$(cargo_meta_file)")
-libs=() bins=()
-for ((i = 1; i < ${#crates[@]}; i += 2)); do
-  name=${crates[i]}
-  if printf '%s' "$meta" | python3 -I -c '
-import json, sys
-m = json.load(sys.stdin)
-for p in m["packages"]:
-    if p["name"] == sys.argv[1]:
-        sys.exit(0 if any(k in ("lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro")
-                          for t in p["targets"] for k in t["kind"]) else 1)
-sys.exit(2)
-' "$name"; then
-    libs+=(-p "$name")
-  else
-    rc=$?
-    if [ "$rc" = 2 ]; then echo "bongos: no package named $name"; exit 1; fi
-    bins+=(-p "$name")
-  fi
-done
-if [ "${#libs[@]}" -gt 0 ]; then
-  cargo_limited test -q --color never "${libs[@]}" --lib --bins --tests --locked ${filter[@]+"${filter[@]}"}
+# Offline cargo, so a missing dependency fails the run instead of fetching it.
+if [ "${BONGOS_TEST_NO_NET:-}" = 1 ]; then
+  export CARGO_NET_OFFLINE=true
 fi
-if [ "${#bins[@]}" -gt 0 ]; then
-  cargo_limited test -q --color never "${bins[@]}" --bins --tests --locked ${filter[@]+"${filter[@]}"}
-fi
+
+cargo_limited nextest run "${crates[@]}" ${filter[@]+"${filter[@]}"} --lib --bins --tests --locked --no-fail-fast --no-tests=pass --color never
