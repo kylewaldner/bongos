@@ -12,18 +12,18 @@ use std::sync::Arc;
 
 use fs::Fs;
 use gpui::{
-    Action, AnyElement, App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    ScrollStrategy, StatefulInteractiveElement as _, Styled as _, Subscription,
-    UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
+    Action, AnyElement, App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy,
+    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle,
+    WeakEntity, Window, div, px, uniform_list,
 };
 use settings::{Settings as _, SettingsStore};
 use ui::{
-    Button, Clickable as _, Color, IconName, Label, LabelCommon as _,
-    LabelSize, ListItem, ListItemSpacing, Tooltip, h_flex, prelude::*, v_flex,
+    Button, Clickable as _, Color, IconName, Label, LabelCommon as _, LabelSize, ListItem,
+    ListItemSpacing, Tooltip, h_flex, prelude::*, v_flex,
 };
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::Workspace;
+use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::work;
 use crate::commands::{ready, show_toast};
@@ -127,9 +127,11 @@ impl WorkPanel {
         let Some(selected) = &self.selected else {
             return;
         };
-        if let Some(index) = self.level.lines.iter().position(|line| {
-            line.kind == LineKind::Title && line.key.as_ref() == Some(selected)
-        }) {
+        if let Some(index) =
+            self.level.lines.iter().position(|line| {
+                line.kind == LineKind::Title && line.key.as_ref() == Some(selected)
+            })
+        {
             self.scroll_handle
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
@@ -370,9 +372,8 @@ impl WorkPanel {
                 .disabled(depth == last);
             if depth < last {
                 // The crumb at `depth` is the level with `depth` keys of the path.
-                button = button.on_click(cx.listener(move |this, _, _, cx| {
-                    this.show_depth(depth, cx)
-                }));
+                button =
+                    button.on_click(cx.listener(move |this, _, _, cx| this.show_depth(depth, cx)));
             }
             bar = bar.child(button);
         }
@@ -550,7 +551,10 @@ pub(crate) const DUMP_FILE: &str = "work-view.txt";
 
 /// Writes `text` to [`DUMP_FILE`] in `logs_dir` and returns the path.
 #[cfg(debug_assertions)]
-pub(crate) fn write_view(text: &str, logs_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+pub(crate) fn write_view(
+    text: &str,
+    logs_dir: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
     std::fs::create_dir_all(logs_dir)?;
     let path = logs_dir.join(DUMP_FILE);
     std::fs::write(&path, text)?;

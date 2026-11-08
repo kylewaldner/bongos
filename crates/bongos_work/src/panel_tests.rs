@@ -24,20 +24,18 @@ fn panel_of(harness: &Harness, cx: &mut VisualTestContext) -> Option<Entity<Work
 
 /// Adds the panel to the harness window the way the app does, and waits for it to show the tree.
 async fn open_panel(harness: &Harness, cx: &mut VisualTestContext) -> Entity<WorkPanel> {
-    harness
-        .workspace
-        .update_in(cx, |workspace, window, cx| init_panel(workspace, window, cx));
+    harness.workspace.update_in(cx, |workspace, window, cx| {
+        init_panel(workspace, window, cx)
+    });
     cx.run_until_parked();
     let panel = panel_of(&harness, cx).expect("the panel is added while enabled");
     wait_until(cx, "the panel to show the tree", |cx| {
         panel.read_with(cx, |panel, _| !panel.lines().is_empty())
     })
     .await;
-    harness
-        .workspace
-        .update_in(cx, |workspace, window, cx| {
-            workspace.focus_panel::<WorkPanel>(window, cx)
-        });
+    harness.workspace.update_in(cx, |workspace, window, cx| {
+        workspace.focus_panel::<WorkPanel>(window, cx)
+    });
     panel
 }
 
@@ -71,7 +69,10 @@ async fn ret_drills_in_and_up_returns(cx: &mut TestAppContext) {
     assert_eq!(breadcrumb(&panel, cx), "Work");
     let top = lines(&panel, cx);
     assert!(has(&top, "Invoicing"), "{top:?}");
-    assert!(!has(&top, "Backfill") && !has(&top, "Phase") && !has(&top, "Alpha"), "{top:?}");
+    assert!(
+        !has(&top, "Backfill") && !has(&top, "Phase") && !has(&top, "Alpha"),
+        "{top:?}"
+    );
 
     // RET on the project shows its children, one level only.
     press(cx, menu::Confirm);
@@ -95,7 +96,8 @@ async fn ret_drills_in_and_up_returns(cx: &mut TestAppContext) {
     assert_eq!(breadcrumb(&panel, cx), "Work > Invoicing");
     let text = panel.read_with(cx, |panel, _| panel.view_text());
     assert!(
-        text.lines().any(|line| line.starts_with('>') && line.contains("Phase")),
+        text.lines()
+            .any(|line| line.starts_with('>') && line.contains("Phase")),
         "{text}"
     );
     dispatch(cx, "work::Up");
@@ -111,7 +113,10 @@ async fn a_gate_three_deep_shows_on_the_top_row_and_drills_to_the_task(cx: &mut 
     with_deep_leaf(&harness, cx).await;
     let panel = open_panel(&harness, cx).await;
     let source = Rc::new(FakeGates::default());
-    source.0.borrow_mut().push(gate("l4", "gate: approve the plan"));
+    source
+        .0
+        .borrow_mut()
+        .push(gate("l4", "gate: approve the plan"));
     cx.update(|_, cx| NeedsYouRegistry::add_source("gates", source.clone(), cx));
     cx.run_until_parked();
 
@@ -119,18 +124,27 @@ async fn a_gate_three_deep_shows_on_the_top_row_and_drills_to_the_task(cx: &mut 
     assert!(has(&lines(&panel, cx), "1 needs you"));
     press(cx, menu::Confirm);
     let level = lines(&panel, cx);
-    assert!(has(&level, "Phase") && has(&level, "1 needs you"), "{level:?}");
+    assert!(
+        has(&level, "Phase") && has(&level, "1 needs you"),
+        "{level:?}"
+    );
     next_row(cx);
     press(cx, menu::Confirm);
     let level = lines(&panel, cx);
-    assert!(has(&level, "Deep") && has(&level, "1 needs you"), "{level:?}");
+    assert!(
+        has(&level, "Deep") && has(&level, "1 needs you"),
+        "{level:?}"
+    );
     // Alpha, Beta, then Deep.
     next_row(cx);
     next_row(cx);
     press(cx, menu::Confirm);
     assert_eq!(breadcrumb(&panel, cx), "Work > Invoicing > Phase > Deep");
     let level = lines(&panel, cx);
-    assert!(has(&level, "Gate") && has(&level, "needs you: gate: approve the plan"), "{level:?}");
+    assert!(
+        has(&level, "Gate") && has(&level, "needs you: gate: approve the plan"),
+        "{level:?}"
+    );
 
     // Removing the source clears it everywhere.
     cx.update(|_, cx| NeedsYouRegistry::remove_source("gates", cx));
@@ -174,7 +188,10 @@ async fn expanding_a_row_shows_todos_only_when_there_is_more_than_one(cx: &mut T
     // Backfill has several todos: expanding lists them.
     dispatch(cx, "work::ToggleRow");
     let expanded = lines(&panel, cx);
-    assert!(has(&expanded, "Todos") && has(&expanded, "[ ] "), "{expanded:?}");
+    assert!(
+        has(&expanded, "Todos") && has(&expanded, "[ ] "),
+        "{expanded:?}"
+    );
     dispatch(cx, "work::ToggleRow");
     assert!(!has(&lines(&panel, cx), "Todos"));
 
@@ -182,7 +199,11 @@ async fn expanding_a_row_shows_todos_only_when_there_is_more_than_one(cx: &mut T
     next_row(cx);
     next_row(cx);
     let text = panel.read_with(cx, |panel, _| panel.view_text());
-    assert!(text.lines().any(|line| line.starts_with('>') && line.contains("Solo")), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with('>') && line.contains("Solo")),
+        "{text}"
+    );
     dispatch(cx, "work::ToggleRow");
     let solo = lines(&panel, cx);
     assert!(!has(&solo, "Todos"), "{solo:?}");
@@ -215,7 +236,10 @@ async fn expanding_shows_the_artifacts_the_lock_and_the_guarantee(cx: &mut TestA
     assert!(has(&expanded, "salary-review.md  locked"), "{expanded:?}");
     assert!(has(&expanded, "design.md  shared"), "{expanded:?}");
     // No session is open, so the line about new sessions is not there.
-    assert!(!has(&expanded, "Changes apply to new sessions"), "{expanded:?}");
+    assert!(
+        !has(&expanded, "Changes apply to new sessions"),
+        "{expanded:?}"
+    );
 }
 
 #[gpui::test]
@@ -241,9 +265,18 @@ async fn edge_markers_sit_between_siblings(cx: &mut TestAppContext) {
     let panel = open_panel(&harness, cx).await;
     press(cx, menu::Confirm);
     let level = lines(&panel, cx);
-    let marker = level.iter().position(|line| line.contains("after Backfill")).unwrap();
-    let backfill = level.iter().position(|line| line.contains("Backfill  ")).unwrap();
-    let phase = level.iter().position(|line| line.contains("Phase")).unwrap();
+    let marker = level
+        .iter()
+        .position(|line| line.contains("after Backfill"))
+        .unwrap();
+    let backfill = level
+        .iter()
+        .position(|line| line.contains("Backfill  "))
+        .unwrap();
+    let phase = level
+        .iter()
+        .position(|line| line.contains("Phase"))
+        .unwrap();
     assert!(backfill < marker && marker < phase, "{level:?}");
 }
 
@@ -259,9 +292,7 @@ async fn ret_on_a_leaf_focuses_it(cx: &mut TestAppContext) {
     // `backfill` is the first row of the project's level and a leaf.
     press(cx, menu::Confirm);
     wait_until(cx, "the focus", |cx| {
-        cx.update(|_, cx| {
-            Focus::global(cx).unwrap().read(cx).task_id() == Some("l1")
-        })
+        cx.update(|_, cx| Focus::global(cx).unwrap().read(cx).task_id() == Some("l1"))
     })
     .await;
     // The panel stayed on the same level.
@@ -271,9 +302,9 @@ async fn ret_on_a_leaf_focuses_it(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn the_panel_is_absent_while_disabled_and_follows_the_setting(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx, false, true).await;
-    harness
-        .workspace
-        .update_in(cx, |workspace, window, cx| init_panel(workspace, window, cx));
+    harness.workspace.update_in(cx, |workspace, window, cx| {
+        init_panel(workspace, window, cx)
+    });
     cx.run_until_parked();
     assert!(panel_of(&harness, cx).is_none());
 
@@ -290,11 +321,9 @@ async fn the_panel_is_absent_while_disabled_and_follows_the_setting(cx: &mut Tes
 async fn the_panel_actions_dispatch_by_name(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx, true, true).await;
     let panel = open_panel(&harness, cx).await;
-    harness
-        .workspace
-        .update_in(cx, |workspace, window, cx| {
-            window.focus(&workspace.focus_handle(cx), cx)
-        });
+    harness.workspace.update_in(cx, |workspace, window, cx| {
+        window.focus(&workspace.focus_handle(cx), cx)
+    });
     let focused = |cx: &mut VisualTestContext| {
         cx.update(|window, cx| panel.focus_handle(cx).contains_focused(window, cx))
     };
@@ -321,6 +350,9 @@ async fn the_view_dump_writes_the_rows_of_the_level(cx: &mut TestAppContext) {
     assert_eq!(path, logs.path().join(DUMP_FILE));
     let written = std::fs::read_to_string(&path).unwrap();
     assert!(written.starts_with("Work > Invoicing\n"), "{written}");
-    assert!(written.contains("Backfill") && written.contains("Phase"), "{written}");
+    assert!(
+        written.contains("Backfill") && written.contains("Phase"),
+        "{written}"
+    );
     assert!(!written.contains("Alpha"), "{written}");
 }

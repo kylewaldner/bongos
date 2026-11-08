@@ -18,8 +18,8 @@ use bongos_work_model::store::{Activity, Task, WorkTree};
 use bongos_work_model::{ResultKind, ResultState, TaskResult, TodoState, Visibility};
 use chrono::{DateTime, Utc};
 
-use crate::registry::LiveModes;
 use crate::rebase::RebaseState;
+use crate::registry::LiveModes;
 
 /// What a row stands for: a task, or the heading of an activity's one-offs at the top level.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -201,7 +201,14 @@ pub fn build(path: &[Key], inputs: &Inputs) -> Level {
         Node::Top => {
             for project in &tree.projects {
                 let archived = project.file.as_ref().is_some_and(|file| file.archived);
-                add_task(&mut level, &project.task, None, archived, inputs, &needs_set);
+                add_task(
+                    &mut level,
+                    &project.task,
+                    None,
+                    archived,
+                    inputs,
+                    &needs_set,
+                );
             }
             for activity in &tree.activities {
                 add_activity(&mut level, activity, inputs, &needs_set);
@@ -294,7 +301,13 @@ fn edge_lines(task: &Task, parent: &Task) -> Vec<Line> {
     let mut lines: Vec<Line> = file
         .after
         .iter()
-        .map(|edge| Line::new(None, LineKind::Edge, format!("after {}", target(&edge.task))))
+        .map(|edge| {
+            Line::new(
+                None,
+                LineKind::Edge,
+                format!("after {}", target(&edge.task)),
+            )
+        })
         .collect();
     if let Some(edge) = &file.stacked_on {
         lines.push(Line::new(
@@ -345,9 +358,11 @@ fn add_task(
         level.groups.insert(key.clone(), shape == Shape::Group);
     }
     level.lines.push(title);
-    level
-        .lines
-        .push(Line::new(key.clone(), LineKind::Detail, details.join(" · ")));
+    level.lines.push(Line::new(
+        key.clone(),
+        LineKind::Detail,
+        details.join(" · "),
+    ));
     if let Some(key) = &key
         && inputs.expanded.contains(key)
     {
