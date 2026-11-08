@@ -2,7 +2,7 @@ use crate::{
     ExtensionLibraryKind, ExtensionManifest, GrammarManifestEntry, parse_wasm_extension_version,
 };
 use ::fs::Fs;
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use futures::{
     FutureExt, StreamExt,
     channel::oneshot::{self, Sender},
@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use util::{ResultExt, command::Stdio, rel_path::PathExt};
+use util::{command::Stdio, rel_path::PathExt};
 use wasm_encoder::{ComponentSectionId, Encode as _, RawSection, Section as _};
 use wasmparser::Parser;
 
@@ -117,8 +117,8 @@ impl ExtensionBuilder {
                 async {
                     self.install_wasi_sdk_if_needed()
                         .await
-                        .log_err()
                         .map(Arc::new)
+                        .map_err(Arc::new)
                 }
                 .shared(),
                 extension_manifest.grammars.len(),
@@ -160,6 +160,7 @@ impl ExtensionBuilder {
 
                     let clang_path = clang_path_task
                         .await
+                        .map_err(|error| anyhow!("{error:#}"))
                         .context("Failed to resolve clang path")?;
 
                     self.compile_grammar(
