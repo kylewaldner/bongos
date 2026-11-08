@@ -704,7 +704,7 @@ pub(crate) fn default_or_fallback(found: Result<Option<SharedString>>) -> String
 }
 
 /// The commit of the local branch `branch`, else of `origin/<branch>`.
-async fn resolve_sha(repository: &dyn GitRepository, branch: &str) -> Option<String> {
+pub(crate) async fn resolve_sha(repository: &dyn GitRepository, branch: &str) -> Option<String> {
     let revisions = vec![
         format!("refs/heads/{branch}"),
         format!("refs/remotes/origin/{branch}"),

@@ -39,6 +39,7 @@ use parking_lot::Mutex;
 use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
 
+use crate::rebase::{CHECK_INTERVAL, RebaseState};
 use crate::{WorkDirs, WorkSettings};
 
 /// How long the watcher gathers events before delivering them.
@@ -102,6 +103,8 @@ pub struct Stats {
 pub enum WorkStoreEvent {
     /// The snapshot changed (or went away).
     Changed,
+    /// The rebase and retarget states of stacked tasks changed.
+    RebaseChanged,
 }
 
 /// The global work tree. Reads nothing while `work.enabled` is false.
@@ -113,6 +116,8 @@ pub struct WorkStore {
     session: Option<Session>,
     disk_lock: Arc<Mutex<()>>,
     stats: Stats,
+    pub(crate) rebase: HashMap<String, RebaseState>,
+    pub(crate) rebase_check: Option<Task<()>>,
     _settings: Subscription,
 }
 
@@ -122,6 +127,8 @@ struct Session {
     /// Cleared when the session ends, so a write that has not started yet never starts.
     alive: Arc<AtomicBool>,
     _run: Task<()>,
+    /// Rechecks the rebase states every [`CHECK_INTERVAL`].
+    _rebase_timer: Task<()>,
 }
 
 impl Drop for Session {
@@ -149,6 +156,8 @@ impl WorkStore {
             session: None,
             disk_lock: Arc::new(Mutex::new(())),
             stats: Stats::default(),
+            rebase: HashMap::new(),
+            rebase_check: None,
             _settings: settings,
         };
         this.sync_enabled(cx);
@@ -213,6 +222,8 @@ impl WorkStore {
         } else {
             // Dropping the session cancels its task and the watcher; queued writes answer `Off`.
             self.session = None;
+            self.rebase_check = None;
+            self.set_rebase(HashMap::new(), cx);
             if self.snapshot.take().is_some() {
                 cx.emit(WorkStoreEvent::Changed);
             }
@@ -230,10 +241,22 @@ impl WorkStore {
             let alive = alive.clone();
             async move |this, cx| run(this, fs, root, lock, alive, receiver, cx).await
         });
+        let rebase_timer = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CHECK_INTERVAL).await;
+                if this
+                    .update(cx, |store, cx| store.refresh_rebase(cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
         self.session = Some(Session {
             requests,
             alive,
             _run: run,
+            _rebase_timer: rebase_timer,
         });
     }
 
@@ -262,6 +285,7 @@ impl WorkStore {
             self.snapshot = Some(tree);
             cx.emit(WorkStoreEvent::Changed);
             cx.notify();
+            self.refresh_rebase(cx);
         }
         // After the snapshot, so a caller that awaits the write sees its change.
         if let Some(reply) = done.reply {

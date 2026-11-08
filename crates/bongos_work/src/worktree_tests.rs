@@ -28,7 +28,7 @@ use crate::worktrees::{
 /// Runs git in `dir` with no user or system configuration, and returns its trimmed output.
 // Blocking is fine here: the fixtures are made before, or between, the steps of a test.
 #[allow(clippy::disallowed_methods)]
-fn git(dir: &Path, args: &[&str]) -> String {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -91,7 +91,7 @@ fn set_repository(cx: &mut VisualTestContext, path: &Path, setup_command: Option
 /// Records every task spawned in a terminal and reports it ended with the exit status it holds
 /// (success by default).
 #[derive(Clone, Default)]
-struct Recorder(Arc<Mutex<Vec<::task::SpawnInTerminal>>>, ExitStatus);
+pub(crate) struct Recorder(Arc<Mutex<Vec<::task::SpawnInTerminal>>>, ExitStatus);
 
 impl TerminalProvider for Recorder {
     fn spawn(
@@ -105,16 +105,16 @@ impl TerminalProvider for Recorder {
     }
 }
 
-struct Setup {
-    harness: Harness,
+pub(crate) struct Setup {
+    pub(crate) harness: Harness,
     /// The repository as the settings name it: a symbolic link to `real`.
-    repository: PathBuf,
-    real: PathBuf,
-    terminal: Recorder,
+    pub(crate) repository: PathBuf,
+    pub(crate) real: PathBuf,
+    pub(crate) terminal: Recorder,
     _temp: TempDir,
 }
 
-async fn setup<'a>(
+pub(crate) async fn setup<'a>(
     cx: &'a mut TestAppContext,
     setup_command: Option<&str>,
 ) -> (Setup, &'a mut VisualTestContext) {

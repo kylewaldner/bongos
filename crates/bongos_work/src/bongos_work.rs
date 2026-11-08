@@ -8,6 +8,7 @@ mod commands;
 mod links;
 mod modals;
 mod projects;
+mod rebase;
 mod repositories;
 mod settings;
 mod store;
@@ -24,6 +25,7 @@ use gpui::{App, AppContext as _, Entity, Global};
 
 pub use actions::{project, task, todo, work};
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
+pub use rebase::{CHECK_INTERVAL, RebaseState};
 pub use repositories::{default_kind, find_repository, resolve_repository};
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
 pub use store::{
@@ -56,6 +58,7 @@ pub fn init(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut App) {
     WorkSettings::register(cx);
     let store = cx.new(|cx| WorkStore::new(fs, dirs, cx));
     cx.set_global(GlobalWorkStore(store));
+    rebase::observe_focus(cx);
 }
 
 impl WorkStore {
@@ -70,6 +73,8 @@ impl WorkStore {
 mod command_tests;
 #[cfg(test)]
 mod command_tests_more;
+#[cfg(test)]
+mod rebase_tests;
 #[cfg(test)]
 mod repository_tests;
 #[cfg(test)]

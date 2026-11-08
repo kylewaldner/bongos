@@ -590,7 +590,7 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
 }
 
 /// Every action these commands register.
-const NAMES: [&str; 35] = [
+const NAMES: [&str; 36] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -614,6 +614,7 @@ const NAMES: [&str; 35] = [
     "task::SetUnblockPoint",
     "task::SetMergeShip",
     "task::Retarget",
+    "task::ClearRebase",
     "task::SetResult",
     "task::ClearResult",
     "task::Split",
