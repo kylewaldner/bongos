@@ -27,7 +27,9 @@ use crate::actions::{artifact, project, task, todo, work};
 use crate::modals::{self, Then};
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
-use crate::{artifacts, focus, links, open, projects, rebase, repositories, structure, worktrees};
+use crate::{
+    artifacts, focus, links, modes, open, projects, rebase, repositories, structure, worktrees,
+};
 
 /// The activity a task made with `task: new` goes under: it names no parent, and the Work view
 /// that would supply "the group at point" does not exist yet.
@@ -83,6 +85,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<work::AddRepository>(),
         TypeId::of::<task::SetDefaultVisibility>(),
         TypeId::of::<task::Think>(),
+        TypeId::of::<task::Mode>(),
         TypeId::of::<artifact::Hide>(),
         TypeId::of::<artifact::Share>(),
         TypeId::of::<artifact::HideAll>(),
@@ -141,6 +144,7 @@ pub fn register(workspace: &mut Workspace) {
     focus::register(workspace);
     open::register(workspace);
     artifacts::register(workspace);
+    modes::register(workspace);
 }
 
 pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {

@@ -18,7 +18,7 @@
 //! (which may now refuse it), up to [`MAX_RETRIES`] times, so an external edit is never
 //! overwritten by a stale copy.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,7 @@ use parking_lot::Mutex;
 use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
 
+use crate::changes::ChangedCount;
 use crate::rebase::{CHECK_INTERVAL, RebaseState};
 use crate::{WorkDirs, WorkSettings};
 
@@ -105,6 +106,12 @@ pub enum WorkStoreEvent {
     Changed,
     /// The rebase and retarget states of stacked tasks changed.
     RebaseChanged,
+    /// The tasks that sources say need the owner changed.
+    NeedsYouChanged,
+    /// A live-modes source was added or removed, or said its answer changed.
+    LiveModesChanged,
+    /// A changed-file count changed.
+    ChangedFilesChanged,
 }
 
 /// The global work tree. Reads nothing while `work.enabled` is false.
@@ -118,6 +125,10 @@ pub struct WorkStore {
     stats: Stats,
     pub(crate) rebase: HashMap<String, RebaseState>,
     pub(crate) rebase_check: Option<Task<()>>,
+    /// Tasks that need the owner, by id, with the reasons sources gave (D13). Never stored.
+    pub(crate) needs_you: BTreeMap<String, Vec<String>>,
+    pub(crate) changed: HashMap<PathBuf, ChangedCount>,
+    pub(crate) status_runs: usize,
     _settings: Subscription,
 }
 
@@ -158,6 +169,9 @@ impl WorkStore {
             stats: Stats::default(),
             rebase: HashMap::new(),
             rebase_check: None,
+            needs_you: BTreeMap::new(),
+            changed: HashMap::new(),
+            status_runs: 0,
             _settings: settings,
         };
         this.sync_enabled(cx);
