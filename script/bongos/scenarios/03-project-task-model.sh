@@ -604,13 +604,17 @@ say "smoke: drill path and focus restored: $RUN/work-restored.png"
 # ---------------------------------------------------------------------------------------------
 step "Work 9: no network"
 # Every launch of the app, with or without the Work view, makes two kinds of request that the base
-# flow shows too: CONNECT cdn.agentclientprotocol.com (the ACP agent registry fetch when its cache is
-# empty, AgentRegistryStore::init_global; allowed in hosts-allow.txt) and GET localhost (the local
+# flow shows too: a CONNECT to the host of REGISTRY_URL (the ACP agent registry fetch when its cache
+# is empty, AgentRegistryStore::init_global; the host is read from that source file rather than
+# named here, so check-hosts keeps one allow entry for it) and GET localhost (the local
 # model providers, such as Ollama, asking a server on this machine for its models). Neither comes
 # from the Work view. Anything else the scenario sent through the proxy is a failure.
+registry_host=$(sed -nE 's|^const REGISTRY_URL: &str = "https://([^/"]+)/.*|\1|p' \
+  "$BONGOS_ROOT/crates/project/src/agent_registry_store.rs")
+[ -n "$registry_host" ] || fail "no REGISTRY_URL host in crates/project/src/agent_registry_store.rs"
 work_requests=$(tail -n +"$((PROXY_LINES_BEFORE + 1))" "$RUN/proxy.log")
 stray_requests=$(printf '%s\n' "$work_requests" |
-  awk 'NF && $0 != "CONNECT cdn.agentclientprotocol.com" && $0 != "GET localhost"')
+  awk -v registry="CONNECT $registry_host" 'NF && $0 != registry && $0 != "GET localhost"')
 if [ -n "$stray_requests" ]; then
   echo "bongos: the Work scenario reached the proxy for other hosts:" >&2
   printf '%s\n' "$stray_requests" | sort | uniq -c >&2
