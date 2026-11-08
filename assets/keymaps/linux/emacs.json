@@ -165,6 +165,36 @@
       "ctrl-x ctrl-s": "workspace::Save", // save-buffer
       "ctrl-x ctrl-w": "workspace::SaveAs", // write-file
       "ctrl-x s": "workspace::SaveAll", // save-some-buffers
+      // Work panel (C-c w): tasks, todos, projects and artifacts. The unbound commands are in
+      // the command palette.
+      "ctrl-c w w": "work::TogglePanel",
+      "ctrl-c w g": "work::Graph",
+      "ctrl-c w n": "task::New",
+      "ctrl-c w N": "task::NewChild",
+      "ctrl-c w o": "task::NewOneOff",
+      "ctrl-c w s": "task::Start",
+      "ctrl-c w a": "task::Advance",
+      "ctrl-c w c": "task::Close",
+      "ctrl-c w t": "task::Think",
+      "ctrl-c w m": "task::Mode",
+      "ctrl-c w f": "task::Focus",
+      "ctrl-c w e": "task::AddEdge",
+      "ctrl-c w E": "task::RemoveEdge",
+      "ctrl-c w d a": "todo::Add",
+      "ctrl-c w d k": "todo::Remove",
+      "ctrl-c w d s": "todo::Skip",
+      "ctrl-c w d r": "todo::Reopen",
+      "ctrl-c w d m": "todo::Move",
+      "ctrl-c w d w": "todo::SetWorkflow",
+      "ctrl-c w d o": "todo::SetRole",
+      "ctrl-c w d b": "todo::Start",
+      "ctrl-c w p n": "project::New",
+      "ctrl-c w P": "project::Focus",
+      "ctrl-c w h": "artifact::Hide",
+      "ctrl-c w u": "artifact::Share",
+      "ctrl-c w H": "artifact::HideAll",
+      "ctrl-c w U": "artifact::ShareAll",
+      "ctrl-c w l": "artifact::Link",
     },
   },
   {
@@ -186,6 +216,61 @@
       "ctrl-x ctrl-s": null, // save-buffer
       "ctrl-x ctrl-w": null, // write-file
       "ctrl-x s": null, // save-some-buffers
+      // The Workspace block above makes ctrl-c a prefix (C-c w), so it is declared again here,
+      // after it, to keep sending ctrl-c to the terminal.
+      "ctrl-c": ["terminal::SendKeystroke", "ctrl-c"],
+    },
+  },
+  {
+    // Same reason: a ctrl-c declared before the Workspace block would otherwise wait for a
+    // second key. Picker query editors are left out on purpose: ctrl-c is Copy there, and
+    // stays a prefix for C-c w.
+    "context": "(menu || Picker) && !Editor",
+    "bindings": {
+      "ctrl-c": "menu::Cancel",
+    },
+  },
+  {
+    "context": "Markdown",
+    "bindings": {
+      "ctrl-c": "markdown::Copy",
+    },
+  },
+  {
+    "context": "AgentPanel > Markdown",
+    "bindings": {
+      "ctrl-c": "markdown::CopyAsMarkdown",
+    },
+  },
+  {
+    "context": "ProjectPanel",
+    "bindings": {
+      "ctrl-c": "project_panel::Copy",
+    },
+  },
+  {
+    "context": "VariableList",
+    "bindings": {
+      "ctrl-c": "variable_list::CopyVariableValue",
+    },
+  },
+  {
+    "context": "KeymapEditor",
+    "bindings": {
+      "ctrl-c": "keymap_editor::CopyAction",
+    },
+  },
+  {
+    "context": "NotebookEditor",
+    "bindings": {
+      "ctrl-c": "notebook::InterruptKernel",
+    },
+  },
+  {
+    "context": "WorkPanel",
+    "bindings": {
+      "tab": "work::ToggleRow",
+      "^": "work::Up",
     },
   },
   {

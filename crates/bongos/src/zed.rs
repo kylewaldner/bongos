@@ -15,6 +15,8 @@ pub mod remote_debug;
 pub mod visual_tests;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_only_instance;
+#[cfg(test)]
+mod work_keymap_tests;
 
 use agent_settings::{UserAgentsMdState, init_user_agents_md};
 use agent_ui::AgentDiffToolbar;
