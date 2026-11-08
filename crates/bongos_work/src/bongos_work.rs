@@ -3,6 +3,9 @@
 //! made by agents and editors, and writes every change through one serial writer. The rules and
 //! file formats live in `bongos_work_model`, which has no UI dependency.
 
+pub mod actions;
+mod commands;
+mod modals;
 mod settings;
 mod store;
 
@@ -14,6 +17,8 @@ pub use bongos_work_model as model;
 use fs::Fs;
 use gpui::{App, AppContext as _, Entity, Global};
 
+pub use actions::{task, todo};
+pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
 pub use settings::WorkSettings;
 pub use store::{
     ECHO_TTL, MAX_RETRIES, Stats, WATCH_LATENCY, WorkCommand, WorkStore, WorkStoreEvent, WriteError,
@@ -55,5 +60,7 @@ impl WorkStore {
     }
 }
 
+#[cfg(test)]
+mod command_tests;
 #[cfg(test)]
 mod store_tests;
