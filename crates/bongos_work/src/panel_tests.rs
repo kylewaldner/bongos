@@ -293,7 +293,7 @@ async fn the_panel_actions_dispatch_by_name(cx: &mut TestAppContext) {
     harness
         .workspace
         .update_in(cx, |workspace, window, cx| {
-            workspace.focus_center_pane(window, cx)
+            window.focus(&workspace.focus_handle(cx), cx)
         });
     let focused = |cx: &mut VisualTestContext| {
         cx.update(|window, cx| panel.focus_handle(cx).contains_focused(window, cx))
