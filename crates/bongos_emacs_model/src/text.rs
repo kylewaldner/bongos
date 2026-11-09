@@ -119,7 +119,7 @@ pub fn merge_targets(mut targets: Vec<Target>) -> Vec<Target> {
     merged
 }
 
-fn slice<T: TextSource + ?Sized>(text: &T, range: &Range<usize>) -> String {
+pub(crate) fn slice<T: TextSource + ?Sized>(text: &T, range: &Range<usize>) -> String {
     let mut out = String::new();
     let mut remaining = range.end - range.start;
     for c in text.chars_at(range.start) {
@@ -144,7 +144,8 @@ pub fn build_plan<T: TextSource + ?Sized>(
     let targets = merge_targets(targets);
     let mut plan = Plan::default();
     for target in &targets {
-        if target.range.is_empty() {
+        // An empty range is only worth visiting when the command may insert.
+        if target.range.is_empty() && kill {
             continue;
         }
         let old = slice(text, &target.range);
@@ -183,7 +184,7 @@ pub fn build_plan<T: TextSource + ?Sized>(
     plan
 }
 
-fn map_offset(edits: &[(Range<usize>, String)], offset: usize) -> usize {
+pub(crate) fn map_offset(edits: &[(Range<usize>, String)], offset: usize) -> usize {
     let mut delta = 0isize;
     for (range, new) in edits {
         if range.end <= offset {
@@ -201,6 +202,66 @@ fn map_offset(edits: &[(Range<usize>, String)], offset: usize) -> usize {
         }
     }
     (offset as isize + delta) as usize
+}
+
+/// Byte offset of the start of the line containing `offset`.
+pub(crate) fn line_start<T: TextSource + ?Sized>(text: &T, offset: usize) -> usize {
+    let mut pos = offset;
+    for c in text.reversed_chars_at(offset) {
+        if c == '\n' {
+            break;
+        }
+        pos -= c.len_utf8();
+    }
+    pos
+}
+
+/// Byte offset of the newline ending the line containing `offset`, or the
+/// text length on the last line.
+pub(crate) fn line_end<T: TextSource + ?Sized>(text: &T, offset: usize) -> usize {
+    let mut pos = offset;
+    for c in text.chars_at(offset) {
+        if c == '\n' {
+            break;
+        }
+        pos += c.len_utf8();
+    }
+    pos
+}
+
+/// A plan that only deletes `ranges` (overlapping ranges merge, empty ones are
+/// dropped). `carets` are pre-edit offsets, mapped to the new text, sorted, and
+/// merged when they land together.
+pub(crate) fn deletion_plan(
+    mut ranges: Vec<Range<usize>>,
+    carets: &[Caret],
+    killed: Vec<KilledPiece>,
+) -> Plan {
+    ranges.sort_by_key(|r| (r.start, r.end));
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    for range in ranges {
+        if range.is_empty() {
+            continue;
+        }
+        match edits.last_mut() {
+            Some((last, _)) if range.start < last.end => last.end = last.end.max(range.end),
+            _ => edits.push((range, String::new())),
+        }
+    }
+    let mut carets: Vec<Caret> = carets
+        .iter()
+        .map(|caret| Caret {
+            head: map_offset(&edits, caret.head),
+            tail: map_offset(&edits, caret.tail),
+        })
+        .collect();
+    carets.sort_by_key(|c| (c.head, c.tail));
+    carets.dedup();
+    Plan {
+        edits,
+        carets,
+        killed,
+    }
 }
 
 /// Applies a plan's edits to `text`.
