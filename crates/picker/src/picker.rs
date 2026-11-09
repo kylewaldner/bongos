@@ -21,6 +21,7 @@ use zed_actions::editor::{MoveDown, MoveUp};
 mod footer;
 mod head;
 pub mod highlighted_match_with_paths;
+mod minibuffer;
 pub mod parts;
 mod persistence;
 pub mod popover_menu;
@@ -103,6 +104,9 @@ enum Presentation {
     /// Embedded inside a larger container (e.g. another modal) that provides its
     /// own chrome and handles dismissal.
     Embedded,
+    /// Drawn in the minibuffer strip: an input row with the candidate list above it, no
+    /// container of its own, and no resizing, preview or footer.
+    Minibuffer,
 }
 
 /// The default size for a given preview layout. With the preview hidden the
@@ -139,6 +143,8 @@ pub struct Picker<D: PickerDelegate> {
     /// Handle for the default footer's Actions popover menu. Used to keep the
     /// picker open while that menu has focus.
     actions_menu_handle: PopoverMenuHandle<ContextMenu>,
+    /// State of the minibuffer presentation.
+    minibuffer: minibuffer::MinibufferState,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -258,6 +264,19 @@ pub trait PickerDelegate: Sized + 'static {
 
     fn editor_position(&self) -> PickerEditorPosition {
         PickerEditorPosition::default()
+    }
+
+    /// The text before the input in the minibuffer presentation. Defaults to the placeholder
+    /// text.
+    fn prompt_label(&self, _cx: &App) -> Option<SharedString> {
+        None
+    }
+
+    /// The text of match `ix` that TAB completes over in the minibuffer presentation: the input
+    /// is extended to the common prefix of these texts. `None` for a delegate that cannot say,
+    /// which makes TAB call [`Self::confirm_completion`] instead.
+    fn match_text(&self, _ix: usize) -> Option<String> {
+        None
     }
 
     /// Prevent closing the modal on clicking in a popover menu that portrudes out
@@ -543,6 +562,7 @@ impl<D: PickerDelegate> Picker<D> {
             item_bounds: Rc::new(RefCell::new(HashMap::default())),
             size_bounds,
             actions_menu_handle: PopoverMenuHandle::default(),
+            minibuffer: Default::default(),
         };
         this.update_matches("".to_string(), window, cx);
         // give the delegate 4ms to render the first set of suggestions.
@@ -824,6 +844,9 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     pub fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_minibuffer_menu(cx) {
+            return;
+        }
         if self.delegate.should_dismiss() {
             self.delegate.dismissed(window, cx);
             cx.emit(DismissEvent);
@@ -1132,6 +1155,7 @@ impl<D: PickerDelegate> Picker<D> {
 
         div()
             .id(("item", ix))
+            .debug_selector(|| format!("picker-item-{ix}"))
             .when(selectable, |this| this.cursor_pointer())
             .child(
                 canvas(
@@ -1280,6 +1304,9 @@ impl<D: PickerDelegate> Picker<D> {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod minibuffer_tests;
 
 #[cfg(test)]
 mod tests {

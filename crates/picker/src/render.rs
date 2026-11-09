@@ -21,6 +21,9 @@ pub mod window_controls;
 
 impl<D: PickerDelegate> Render for Picker<D> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.is_minibuffer() {
+            return self.render_minibuffer(window, cx);
+        }
         self.finish_any_completed_resize(window, cx);
 
         let content = match &self.preview {
@@ -71,6 +74,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                     .child(self.render_resize(LeftCorner(layout), window, cx))
                     .child(self.render_resize(RightCorner(layout), window, cx))
             })
+            .into_any_element()
     }
 }
 

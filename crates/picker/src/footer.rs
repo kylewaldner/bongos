@@ -19,6 +19,9 @@ pub enum PickerAction {
         label: SharedString,
         action: Box<dyn Action>,
         toggled: Option<bool>,
+        /// The key that runs the entry in the minibuffer presentation. When `None`, the first
+        /// free letter of the label is used.
+        key: Option<char>,
     },
 }
 
@@ -28,7 +31,16 @@ impl PickerAction {
             label: label.into(),
             action,
             toggled: None,
+            key: None,
         }
+    }
+
+    /// Sets the key that runs the previous entry in the minibuffer presentation.
+    pub fn key(mut self, key: char) -> Self {
+        if let Self::Entry { key: k, .. } = &mut self {
+            *k = Some(key);
+        }
+        self
     }
 
     /// A non-clickable section title.
@@ -57,6 +69,7 @@ impl PickerAction {
                 label,
                 action,
                 toggled: Some(toggled),
+                ..
             } => {
                 let dispatched = action.boxed_clone();
                 let handler_focus = focus_handle.clone();
@@ -75,6 +88,7 @@ impl PickerAction {
                 label,
                 action,
                 toggled: None,
+                ..
             } => menu.action(label, action.boxed_clone()),
         }
     }

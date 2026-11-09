@@ -11735,6 +11735,7 @@ name = "picker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_minibuffer_model",
  "db",
  "editor",
  "gpui",
