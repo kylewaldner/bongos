@@ -446,12 +446,23 @@ async fn test_a_missing_cli_is_not_offered(cx: &mut TestAppContext) {
 // ---------------------------------------------------------------------------------------------
 // The commands in a workspace.
 
+/// Waits for the first health probe to finish: starting a chat needs the capabilities it finds,
+/// and refuses with "not checked yet" before then.
+async fn wait_for_probe(cx: &mut TestAppContext) {
+    let health = cx.update(|cx| crate::ChatHealth::global(cx).unwrap());
+    wait_for(cx, "the health probe to finish", STARTUP, |cx| {
+        health.read_with(cx, |health, _| !health.is_probing())
+    })
+    .await;
+}
+
 /// A workspace with the `chat` commands and the panel, the harness's runtime as the global one,
 /// and the extra tasks of [`seed_tree`] (beside the harness's own) in the work tree.
 pub(super) async fn command_window<'a>(
     h: &Harness,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    wait_for_probe(cx).await;
     cx.update(|cx| {
         editor::init(cx);
         ChatRuntime::set_global(h.runtime.clone(), cx);
@@ -620,6 +631,7 @@ fn logged_cwds(h: &Harness) -> Vec<String> {
 #[gpui::test]
 async fn test_new_chats_run_in_the_worktree_the_repository_and_the_group(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
+    wait_for_probe(cx).await;
     cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
     add_tasks(&h, cx).await;
     let extra = h.base.join("extra");
@@ -1220,6 +1232,7 @@ impl crate::ContextExtension for TestExtension {
 #[gpui::test]
 async fn test_a_new_chat_gets_the_context_extension_section(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
+    wait_for_probe(cx).await;
     cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
     add_tasks(&h, cx).await;
     let projects = vec![h.project.clone()];
