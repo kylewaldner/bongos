@@ -194,6 +194,63 @@ pub struct ProposalRecord {
     pub extra: Extra,
 }
 
+/// How a linked task ended on the Linear side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinearCancel {
+    Cancelled,
+    Declined,
+}
+
+/// One `[[linear_state.offered]]` record: an applied proposal whose leaves were already offered
+/// as tickets, with the SHA-256 (lowercase hex) of its file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinearOffered {
+    pub root: String,
+    pub number: u32,
+    pub hash: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// The `[linear_state]` table of a task: the record behind its `linear` identifier. Written only
+/// on a task the Linear sync links; a task without it is not synced. A task with `linear` and
+/// this table set is a synced link; a leaf with `pending_create` and no `linear` has a create in
+/// flight and is not linked yet.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinearState {
+    /// Linear's issue UUID.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub issue_id: String,
+    /// The issue's team.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// The last description read from Linear.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// When the started write to Linear was decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_sent: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<LinearCancel>,
+    /// A create in flight: its idempotency key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_create: Option<String>,
+    /// Groups: dismissed suggestions, by identifier.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed: Vec<String>,
+    /// Groups: leaves declined for tickets, by task id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declined: Vec<String>,
+    /// Groups: applied proposals already offered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offered: Vec<LinearOffered>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
 /// `task.toml`. A group task has no `todos`, `result`, `branch` or `worktree`; those stay empty
 /// and are not written.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -243,6 +300,9 @@ pub struct TaskFile {
     pub planned_result: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proposals: Vec<ProposalRecord>,
+    /// Kept after `proposals` and before `history`: field order is the order in the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_state: Option<LinearState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<HistoryEntry>,
     #[serde(flatten)]
@@ -277,6 +337,7 @@ impl TaskFile {
             result: None,
             planned_result: None,
             proposals: Vec::new(),
+            linear_state: None,
             history: Vec::new(),
             extra: Extra::new(),
         }
