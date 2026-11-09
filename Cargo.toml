@@ -944,6 +944,7 @@ minidumper = { opt-level = 3 }
 serde_json = { opt-level = 3 }
 nucleo = { opt-level = 3 }
 nucleo-matcher = { opt-level = 3 }
+memchr = { opt-level = 3 }
 bongos_minibuffer_model = { opt-level = 3 }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 activity_indicator = { codegen-units = 1 }

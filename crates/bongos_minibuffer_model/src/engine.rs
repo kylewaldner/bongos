@@ -1,20 +1,12 @@
 use std::cmp::Ordering;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+use nucleo::Utf32String;
 use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Matcher, Utf32Str};
 
 use crate::candidate::{Candidate, Texts};
-
-/// How many items a thread matches between two looks at the cancel flag: the size of a block.
-const CANCEL_CHECK_INTERVAL: usize = 1024;
-
-/// Below this many items a pass runs on the calling thread: starting threads would cost more
-/// than it saves.
-const PARALLEL_MINIMUM: usize = 4096;
+use crate::pool::Scorer;
 
 /// A flag that stops a pass early. Clones share the flag.
 #[derive(Clone, Debug, Default)]
@@ -50,6 +42,7 @@ struct Pass {
 /// free: it pops back to the pass whose query the new one extends.
 pub struct Narrower {
     texts: Texts,
+    scorer: Scorer,
     all: Arc<[Candidate]>,
     stack: Vec<Pass>,
     last_scored: usize,
@@ -63,8 +56,13 @@ impl Narrower {
                 score: 0,
             })
             .collect();
+        let haystacks = texts
+            .iter()
+            .map(|text| Utf32String::from(&**text))
+            .collect();
         Self {
             texts,
+            scorer: Scorer::new(haystacks),
             all,
             stack: Vec::new(),
             last_scored: 0,
@@ -133,7 +131,7 @@ impl Narrower {
             Normalization::Smart,
             AtomKind::Fuzzy,
         );
-        let matches: Arc<[Candidate]> = self.run(&pattern, &source, cancel)?.into();
+        let matches: Arc<[Candidate]> = self.scorer.score(pattern, source.clone(), cancel)?.into();
         self.stack.truncate(kept);
         self.last_scored = source.len();
         self.stack.push(Pass {
@@ -142,93 +140,9 @@ impl Narrower {
         });
         Some(matches)
     }
-
-    fn run(
-        &self,
-        pattern: &Pattern,
-        source: &[Candidate],
-        cancel: &Cancel,
-    ) -> Option<Vec<Candidate>> {
-        let threads = if source.len() < PARALLEL_MINIMUM {
-            1
-        } else {
-            thread::available_parallelism().map_or(1, NonZeroUsize::get)
-        };
-        let next_block = AtomicUsize::new(0);
-        let mut merged = if threads == 1 {
-            score_blocks(pattern, &self.texts, source, &next_block, cancel)
-        } else {
-            let runs: Vec<Vec<Candidate>> = thread::scope(|scope| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        scope.spawn(|| {
-                            score_blocks(pattern, &self.texts, source, &next_block, cancel)
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                    })
-                    .collect()
-            });
-            // Each run is sorted, and the stable sort merges existing runs.
-            let mut merged = Vec::with_capacity(runs.iter().map(Vec::len).sum());
-            for run in runs {
-                merged.extend(run);
-            }
-            merged.sort_by(rank);
-            merged
-        };
-        if cancel.is_cancelled() {
-            return None;
-        }
-        merged.shrink_to_fit();
-        Some(merged)
-    }
 }
 
 /// Best score first, then source order. A total order, so every pass is deterministic.
-fn rank(a: &Candidate, b: &Candidate) -> Ordering {
+pub(crate) fn rank(a: &Candidate, b: &Candidate) -> Ordering {
     b.score.cmp(&a.score).then(a.index.cmp(&b.index))
-}
-
-/// Scores blocks of the source, claiming the next unclaimed block from `next_block` until none
-/// are left, so threads that start late or lose their core to other work do not hold up the
-/// pass. Returns the matches it found sorted by [`rank`]. Checks `cancel` before every block and
-/// stops early once it is set, and the caller then discards the result.
-fn score_blocks(
-    pattern: &Pattern,
-    texts: &Texts,
-    source: &[Candidate],
-    next_block: &AtomicUsize,
-    cancel: &Cancel,
-) -> Vec<Candidate> {
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut buffer = Vec::new();
-    let mut matches = Vec::new();
-    loop {
-        if cancel.is_cancelled() {
-            break;
-        }
-        let start = next_block.fetch_add(CANCEL_CHECK_INTERVAL, AtomicOrdering::Relaxed);
-        if start >= source.len() {
-            break;
-        }
-        let end = (start + CANCEL_CHECK_INTERVAL).min(source.len());
-        for candidate in &source[start..end] {
-            let haystack = Utf32Str::new(&texts[candidate.index as usize], &mut buffer);
-            if let Some(score) = pattern.score(haystack, &mut matcher) {
-                matches.push(Candidate {
-                    index: candidate.index,
-                    score,
-                });
-            }
-        }
-    }
-    matches.sort_unstable_by(rank);
-    matches
 }

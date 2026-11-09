@@ -8,6 +8,7 @@ mod answer;
 mod candidate;
 mod engine;
 mod history;
+mod pool;
 mod prefix;
 
 pub use answer::{parse_strict, parse_yes_no};
