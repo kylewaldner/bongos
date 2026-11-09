@@ -52,7 +52,7 @@ pub use health::{
 };
 pub use launch::{
     CLAUDE_SETTINGS_FILE, CODEX_INSTRUCTIONS_FILE, CONTEXT_FILE, ContextExtension, LaunchError,
-    LaunchRequest, PLUGIN_DIR, SYSTEM_FILE, set_context_extension,
+    LaunchRequest, PLUGIN_DIR, SYSTEM_FILE, add_context_extension, set_context_extension,
 };
 pub use layout::PROMPT_PANE_OFF;
 pub use live_modes::{SOURCE_NAME, start_current_todo};

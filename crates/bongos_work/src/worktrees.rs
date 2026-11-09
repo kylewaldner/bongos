@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use bongos_work_model::commands::{self as model, StartedWorktree};
 use bongos_work_model::derive::{self, Shape, State};
 use bongos_work_model::files::write_atomic;
-use bongos_work_model::rules::Place;
+use bongos_work_model::rules::{Place, linear_branch_segment};
 use bongos_work_model::slug::oneoff_slug;
 use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{Kind, ResultKind, Status, TaskFile};
@@ -90,6 +90,17 @@ pub(crate) struct Request {
     repository_path: PathBuf,
     worktree: PathBuf,
     branch: Branch,
+}
+
+impl Request {
+    /// The name of the new branch, when the request cuts one.
+    #[cfg(test)]
+    pub(crate) fn new_branch_name(&self) -> Option<&str> {
+        match &self.branch {
+            Branch::New { name, .. } => Some(name),
+            Branch::PullRequest { .. } => None,
+        }
+    }
 }
 
 /// What the task should be started with, or the message of the toast that refuses or reports
@@ -225,13 +236,7 @@ pub(crate) fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Re
             urls,
         });
     }
-    let linear = file.linear.as_deref().or_else(|| {
-        place
-            .ancestors
-            .iter()
-            .find_map(|task| task.file.as_ref()?.linear.as_deref())
-    });
-    let name = branch_name(&repository.branch_template, &slug, linear);
+    let name = start_branch_name(&repository.branch_template, &slug, file, &place.ancestors);
     let base = match &file.stacked_on {
         Some(edge) => {
             let parent = place.sibling(&edge.task).and_then(parent_branch);
@@ -359,6 +364,31 @@ pub(crate) fn free_worktree_path(
         }
         number += 1;
     }
+}
+
+/// Whether `file` is a synced Linear link: an identifier and the `[linear_state]` record behind
+/// it. A hand-set `linear` and a pending create (no identifier yet) are not.
+fn is_synced_link(file: &TaskFile) -> bool {
+    file.linear.is_some() && file.linear_state.is_some()
+}
+
+/// The branch a started leaf gets (D15). A leaf with a synced Linear link takes
+/// [`linear_branch_segment`]. Any other leaf takes [`branch_name`] with its own `linear`, else the
+/// nearest ancestor's hand-set one; an ancestor with a synced link is skipped, so a group's
+/// identifier never appears in a leaf's branch.
+fn start_branch_name(template: &str, slug: &str, file: &TaskFile, ancestors: &[&Task]) -> String {
+    if is_synced_link(file)
+        && let Some(identifier) = file.linear.as_deref()
+    {
+        return linear_branch_segment(identifier, template, slug);
+    }
+    let linear = file.linear.as_deref().or_else(|| {
+        ancestors.iter().find_map(|task| {
+            let file = task.file.as_ref()?;
+            file.linear.as_deref().filter(|_| !is_synced_link(file))
+        })
+    });
+    branch_name(template, slug, linear)
 }
 
 /// The branch from `template`: `{slug}` becomes `slug` and `{linear}` the Linear id. Without a

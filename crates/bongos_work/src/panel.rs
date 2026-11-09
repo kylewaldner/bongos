@@ -30,7 +30,7 @@ use crate::actions::work;
 use crate::commands::{ready, show_toast};
 use crate::filters::{Filters, Saved, ViewMode};
 use crate::focus::focus_task;
-use crate::registry::LiveModesRegistry;
+use crate::registry::{LiveModesRegistry, RowChipsRegistry};
 use crate::view::{self, Inputs, Key, Level, Line, LineKind};
 use crate::{WorkSettings, WorkStore, WriteError};
 use bongos_work_model::Kind;
@@ -131,6 +131,7 @@ impl WorkPanel {
                 Some(tree) => {
                     let live = |id: &str| LiveModesRegistry::live_modes(id, app);
                     let changed = |id: &str| store.changed_files(id);
+                    let chips = |id: &str| RowChipsRegistry::chips(id, app);
                     Some(view::build(
                         &self.path,
                         &Inputs {
@@ -138,6 +139,7 @@ impl WorkPanel {
                             needs_you: store.needs_you(),
                             rebase: store.rebase_states(),
                             live_modes: &live,
+                            row_chips: &chips,
                             changed_files: &changed,
                             now,
                             expanded: &self.expanded,
@@ -653,6 +655,7 @@ impl Panel for WorkPanel {
         if active {
             self.rebuild(cx);
             self.refresh_changes(cx);
+            cx.defer(crate::registry::view_opened);
         }
     }
 

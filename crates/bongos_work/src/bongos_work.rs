@@ -44,7 +44,7 @@ pub use panel::{WorkPanel, init_panel, task_at_point};
 pub use rebase::{CHECK_INTERVAL, RebaseState};
 pub use registry::{
     ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
-    NeedsYouSource, RunStart,
+    NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart, observe_view_opened,
 };
 pub use repositories::{default_kind, find_repository, resolve_repository};
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};

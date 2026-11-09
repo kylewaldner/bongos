@@ -218,6 +218,7 @@ pub fn is_project_top(tree: &WorkTree, id: &str) -> bool {
 }
 
 fn focus(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    cx.defer(crate::registry::view_opened);
     let Some(tree) = ready(workspace, cx) else {
         return;
     };

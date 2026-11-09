@@ -10,6 +10,10 @@
 //! run. It also answers "one active run per leaf" ([`LiveModesRegistry::can_start_run`]), which
 //! the workflow engine enforces.
 //!
+//! [`RowChipsRegistry`] holds sources of extra chips for a task's row, shown after its Linear
+//! identifier. [`ViewOpenedRegistry`] holds observers told when the Work panel is shown or
+//! `task: focus` runs. With nothing registered, neither changes anything.
+//!
 //! Adding or removing a source, and a source telling the registry its answer changed, notify the
 //! store, which recomputes and emits an event. None of these calls may be made from inside an
 //! update of the store.
@@ -18,7 +22,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use bongos_work_model::rollup::{self, Rollup};
-use gpui::{App, Context, Global};
+use gpui::{App, Context, Global, SharedString};
 
 use crate::{WorkStore, WorkStoreEvent};
 
@@ -123,6 +127,80 @@ pub trait LiveModesSource: 'static {
 struct LiveModesSources(Vec<(String, Rc<dyn LiveModesSource>)>);
 
 impl Global for LiveModesSources {}
+
+/// Something that adds chips to the row of a task, such as the state of its Linear ticket.
+pub trait RowChipsSource: 'static {
+    fn chips(&self, task_id: &str, cx: &App) -> Vec<SharedString>;
+}
+
+#[derive(Default)]
+struct RowChipsSources(Vec<(String, Rc<dyn RowChipsSource>)>);
+
+impl Global for RowChipsSources {}
+
+/// The sources of row chips. A namespace for the global registry.
+pub struct RowChipsRegistry;
+
+impl RowChipsRegistry {
+    /// Adds the source `name`, replacing one of the same name, and notifies the store.
+    pub fn add_source(name: &str, source: Rc<dyn RowChipsSource>, cx: &mut App) {
+        let sources = cx.default_global::<RowChipsSources>();
+        sources.0.retain(|(existing, _)| existing != name);
+        sources.0.push((name.to_string(), source));
+        Self::changed(cx);
+    }
+
+    /// Removes the source `name` and notifies the store.
+    pub fn remove_source(name: &str, cx: &mut App) {
+        cx.default_global::<RowChipsSources>()
+            .0
+            .retain(|(existing, _)| existing != name);
+        Self::changed(cx);
+    }
+
+    /// Tells the store that what a source reports changed.
+    pub fn changed(cx: &mut App) {
+        if let Some(store) = WorkStore::global(cx) {
+            store.update(cx, |store, cx| store.live_modes_changed(cx));
+        }
+    }
+
+    /// The chips of `task_id` across all sources, in the order the sources were added.
+    pub fn chips(task_id: &str, cx: &App) -> Vec<SharedString> {
+        let sources: Vec<_> = cx
+            .try_global::<RowChipsSources>()
+            .map(|sources| sources.0.iter().map(|(_, source)| source.clone()).collect())
+            .unwrap_or_default();
+        sources
+            .into_iter()
+            .flat_map(|source| source.chips(task_id, cx))
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct ViewOpenedObservers(Vec<Rc<dyn Fn(&mut App)>>);
+
+impl Global for ViewOpenedObservers {}
+
+/// Calls `f` each time the Work panel becomes active and each time `task: focus` runs. Observers
+/// stay for the life of the app.
+pub fn observe_view_opened(cx: &mut App, f: impl Fn(&mut App) + 'static) {
+    cx.default_global::<ViewOpenedObservers>()
+        .0
+        .push(Rc::new(f));
+}
+
+/// Tells the observers of [`observe_view_opened`]. Does nothing with none.
+pub(crate) fn view_opened(cx: &mut App) {
+    let observers: Vec<_> = cx
+        .try_global::<ViewOpenedObservers>()
+        .map(|observers| observers.0.clone())
+        .unwrap_or_default();
+    for observer in observers {
+        observer(cx);
+    }
+}
 
 /// The answer to "may a run start on this leaf".
 #[derive(Clone, Debug, PartialEq, Eq)]
