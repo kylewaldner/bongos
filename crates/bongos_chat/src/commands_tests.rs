@@ -1222,7 +1222,7 @@ async fn test_only_a_new_or_forked_claude_chat_is_given_a_session_id(cx: &mut Te
     for kind in [LaunchKind::New, LaunchKind::Resume, fork(true)] {
         assert_eq!(
             given_session(&h, Agent::Claude, kind, kept).as_deref(),
-            kept.as_deref()
+            kept
         );
     }
     // A resume with none stored never makes one up.

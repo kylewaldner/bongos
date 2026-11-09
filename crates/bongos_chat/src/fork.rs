@@ -171,7 +171,7 @@ pub(crate) fn fork_chat(
                 scope_dir: indexed.scope_dir.clone(),
                 task_id,
                 chat_type: cached.chat_type.clone(),
-                cwd: cached.cwd.clone(),
+                cwd: cached.cwd,
                 fallback_cwd,
             }
         }

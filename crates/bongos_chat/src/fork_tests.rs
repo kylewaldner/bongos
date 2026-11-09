@@ -170,7 +170,7 @@ async fn test_claude_forks_natively_with_a_session_of_its_own(cx: &mut TestAppCo
     let record = record_of(&h.scope, &forked.chat_id);
     assert_eq!(record.fork, Some(Fork::Native));
     assert_eq!(record.parent.as_deref(), Some(source.id.as_str()));
-    let own = record.session_id.clone().unwrap();
+    let own = record.session_id.unwrap();
     assert_ne!(own, SESSION);
 
     let args = last_args(&h, "claude");
