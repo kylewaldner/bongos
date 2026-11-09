@@ -7,9 +7,10 @@ use std::collections::HashMap;
 
 use gpui::{AnyWindowHandle, App, Context, Entity, Global, Subscription, Window};
 use ui::prelude::*;
-use workspace::{ModalLayer, MultiWorkspace, Workspace};
+use workspace::{MinibufferMessageKind, ModalLayer, MultiWorkspace, Workspace};
 
 use crate::MinibufferSettings;
+use crate::echo::Echo;
 use ::settings::Settings as _;
 
 /// The strip of one window.
@@ -18,6 +19,8 @@ pub struct Minibuffer {
     /// redraws for. The layer is drawn by the window's root, not by the workspace, so nothing
     /// else would tell the strip that a prompt opened or closed.
     observed_layer: Option<(Entity<ModalLayer>, Subscription)>,
+    /// The echo area, which the strip shows while no prompt is open.
+    pub(crate) echo: Echo,
 }
 
 /// The strip of every window that has one, keyed by window.
@@ -35,6 +38,7 @@ impl Minibuffer {
     fn new() -> Self {
         Self {
             observed_layer: None,
+            echo: Echo::default(),
         }
     }
 
@@ -44,7 +48,11 @@ impl Minibuffer {
             return;
         }
         self.observed_layer = layer.map(|layer| {
-            let subscription = cx.observe(&layer, |_, _, cx| cx.notify());
+            let subscription = cx.observe(&layer, |this, layer, cx| {
+                let hosted = layer.read(cx).bottom_modal().is_some();
+                this.set_hosted(hosted, cx);
+                cx.notify();
+            });
             (layer, subscription)
         });
     }
@@ -67,7 +75,21 @@ impl Render for Minibuffer {
                 .relative()
                 .track_focus(&focus_handle)
                 .child(view),
-            None => div().id("minibuffer-echo-area"),
+            None => {
+                let echo = div().id("minibuffer-echo-area");
+                match self.echo.current.as_ref() {
+                    Some(line) => echo
+                        .px_1()
+                        .debug_selector(|| "echo-text".to_string())
+                        .child(Label::new(line.text.clone()).single_line().color(
+                            match line.kind {
+                                MinibufferMessageKind::Message => Color::Default,
+                                MinibufferMessageKind::Error => Color::Error,
+                            },
+                        )),
+                    None => echo,
+                }
+            }
         };
         v_flex()
             .key_context("Minibuffer")
