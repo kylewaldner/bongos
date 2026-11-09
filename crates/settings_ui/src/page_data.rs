@@ -259,9 +259,14 @@ fn chats_page() -> SettingsPage {
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("chats.idle_after_secs"),
-                    pick: |settings_content| settings_content.chats.as_ref()?.idle_after_secs.as_ref(),
+                    pick: |settings_content| {
+                        settings_content.chats.as_ref()?.idle_after_secs.as_ref()
+                    },
                     write: |settings_content, value, _| {
-                        settings_content.chats.get_or_insert_default().idle_after_secs = value;
+                        settings_content
+                            .chats
+                            .get_or_insert_default()
+                            .idle_after_secs = value;
                     },
                 }),
                 metadata: None,
@@ -273,9 +278,14 @@ fn chats_page() -> SettingsPage {
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("chats.submit_delay_ms"),
-                    pick: |settings_content| settings_content.chats.as_ref()?.submit_delay_ms.as_ref(),
+                    pick: |settings_content| {
+                        settings_content.chats.as_ref()?.submit_delay_ms.as_ref()
+                    },
                     write: |settings_content, value, _| {
-                        settings_content.chats.get_or_insert_default().submit_delay_ms = value;
+                        settings_content
+                            .chats
+                            .get_or_insert_default()
+                            .submit_delay_ms = value;
                     },
                 }),
                 metadata: None,
