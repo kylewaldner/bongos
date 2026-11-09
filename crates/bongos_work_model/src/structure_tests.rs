@@ -440,7 +440,10 @@ fn new_task_todos_override_the_kind_defaults() {
         .into_iter()
         .find(|task| task.slug == "verify")
         .unwrap();
-    assert_eq!(verify.file.as_ref().unwrap().todos, [plan.clone()]);
+    assert_eq!(
+        verify.file.as_ref().unwrap().todos,
+        std::slice::from_ref(&plan)
+    );
 
     // Unset, the kind's defaults apply, as before.
     let tree = accept(
