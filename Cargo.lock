@@ -2378,6 +2378,7 @@ dependencies = [
  "theme",
  "ui",
  "util",
+ "which_key",
  "workspace",
  "zed_actions",
 ]

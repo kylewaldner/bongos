@@ -23,6 +23,7 @@ settings.workspace = true
 theme.workspace = true
 ui.workspace = true
 util.workspace = true
+which_key.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 

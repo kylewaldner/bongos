@@ -7,9 +7,13 @@ use gpui::{App, Keystroke};
 use settings::Settings;
 use std::{sync::LazyLock, time::Duration};
 use util::ResultExt;
-use which_key_modal::WhichKeyModal;
-use which_key_settings::WhichKeySettings;
-use workspace::Workspace;
+pub use which_key_modal::{WhichKeyModal, continuations};
+pub use which_key_settings::WhichKeySettings;
+use workspace::{Workspace, routes_to_minibuffer};
+
+/// The minibuffer surface that shows the pending keys and their continuations in its strip
+/// (`minibuffer.enabled_for`). While it is routed the which-key modal stays closed.
+pub const KEY_HINT: &str = "key_hint";
 
 pub fn init(cx: &mut App) {
     WhichKeySettings::register(cx);
@@ -29,7 +33,7 @@ pub fn init(cx: &mut App) {
             }
 
             let which_key_settings = WhichKeySettings::get_global(cx);
-            if !which_key_settings.enabled {
+            if !which_key_settings.enabled || routes_to_minibuffer(KEY_HINT, cx) {
                 return;
             }
 
@@ -41,7 +45,9 @@ pub fn init(cx: &mut App) {
                     .await;
                 workspace_handle
                     .update_in(cx, |workspace, window, cx| {
-                        if workspace.active_modal::<WhichKeyModal>(cx).is_some() {
+                        if workspace.active_modal::<WhichKeyModal>(cx).is_some()
+                            || routes_to_minibuffer(KEY_HINT, cx)
+                        {
                             return;
                         };
 

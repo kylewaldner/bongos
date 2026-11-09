@@ -11,6 +11,7 @@ use workspace::{MinibufferMessageKind, ModalLayer, MultiWorkspace, Workspace};
 
 use crate::MinibufferSettings;
 use crate::echo::Echo;
+use crate::hint::Hint;
 use ::settings::Settings as _;
 
 /// The strip of one window.
@@ -21,6 +22,8 @@ pub struct Minibuffer {
     observed_layer: Option<(Entity<ModalLayer>, Subscription)>,
     /// The echo area, which the strip shows while no prompt is open.
     pub(crate) echo: Echo,
+    /// The pending-key hint and the prefix echo.
+    pub(crate) hint: Hint,
 }
 
 /// The strip of every window that has one, keyed by window.
@@ -39,6 +42,7 @@ impl Minibuffer {
         Self {
             observed_layer: None,
             echo: Echo::default(),
+            hint: Hint::default(),
         }
     }
 
@@ -76,9 +80,14 @@ impl Render for Minibuffer {
                 .track_focus(&focus_handle)
                 .child(view),
             None => {
-                let echo = div().id("minibuffer-echo-area");
-                match self.echo.current.as_ref() {
-                    Some(line) => echo
+                let echo = div().id("minibuffer-echo-area").relative();
+                match (self.hint_text(), self.echo.current.as_ref()) {
+                    (Some(text), _) => echo
+                        .px_1()
+                        .debug_selector(|| "hint-text".to_string())
+                        .child(Label::new(text).single_line())
+                        .children(self.hint_list(cx)),
+                    (None, Some(line)) => echo
                         .px_1()
                         .debug_selector(|| "echo-text".to_string())
                         .child(Label::new(line.text.clone()).single_line().color(
@@ -87,7 +96,7 @@ impl Render for Minibuffer {
                                 MinibufferMessageKind::Error => Color::Error,
                             },
                         )),
-                    None => echo,
+                    (None, None) => echo,
                 }
             }
         };
