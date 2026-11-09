@@ -579,3 +579,39 @@ async fn test_a_gone_resume_directory_offers_a_fork_with_handoff(cx: &mut TestAp
         "a handoff resumes nothing"
     );
 }
+
+#[gpui::test]
+async fn test_a_same_scope_fork_of_a_chat_on_no_task_is_refused(cx: &mut TestAppContext) {
+    let h = ready(cx).await;
+    // A directory under the project's tasks with no `task.toml`: its chats are indexed with no
+    // task id.
+    let loose = h.root.join("projects/invoicing/tasks/loose");
+    let mut record = ChatRecord::new(Agent::Claude, "plan", h.cwd.clone());
+    record.prompted = true;
+    record.session_id = Some("8c1e4f8a-0000-4000-8000-0000000000cc".to_string());
+    let path = record_path(&loose, &record.id);
+    write(&path, "");
+    write_record(&path, &record).unwrap();
+    wait_for(cx, "the chat in the index", STARTUP, |cx| {
+        h.store.read_with(cx, |store, _| {
+            store
+                .find(&record.id)
+                .is_some_and(|chat| chat.task_id.is_none())
+        })
+    })
+    .await;
+    let request = ForkRequest {
+        source_id: record.id.clone(),
+        target: ForkTarget::SameScope,
+        force_handoff: false,
+        caps: Some(claude_caps()),
+    };
+    let projects = vec![h.project.clone()];
+    let error = cx
+        .update(|cx| fork_chat(request, projects, cx))
+        .await
+        .map(|forked| forked.chat_id)
+        .unwrap_err();
+    assert_eq!(error, "This chat is on no task");
+    assert!(!h.runtime_root.join(&record.id).exists());
+}

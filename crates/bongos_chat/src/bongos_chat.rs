@@ -4,10 +4,12 @@
 //! state), the send path, the `chat` actions and their commands (new, open, next, previous, close,
 //! with the scope rules of [`scope`] and the never-prompted cleanup of [`cleanup`]), the commands
 //! archive, restore, rename and delete, the offer to archive a finished task's chats
-//! ([`lifecycle`]), and fork and fork to task ([`fork`]). Everything is off while `chats.enabled`
-//! is false. The file formats and pure rules live in `bongos_chat_model`.
+//! ([`lifecycle`]), fork and fork to task ([`fork`]), the artifacts view with its stale marker
+//! ([`artifacts_view`]) and the session type files command ([`types_cmd`]). Everything is off
+//! while `chats.enabled` is false. The file formats and pure rules live in `bongos_chat_model`.
 
 mod actions;
+mod artifacts_view;
 mod cleanup;
 mod commands;
 mod facts;
@@ -24,6 +26,7 @@ mod send;
 mod session_view;
 mod settings;
 mod store;
+mod types_cmd;
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +36,7 @@ use bongos_work::WorkStore;
 use gpui::{App, AppContext as _, Entity, Global};
 
 pub use actions::{action_types, chat, init_palette};
+pub use artifacts_view::{ROW_NOTE, STALE_LINE, artifacts_text, is_stale, stale_chat};
 pub use cleanup::{Cleanup, KeepReason, cleanup_verdict};
 pub use commands::{agent_choices, list_types};
 pub use facts::task_facts;
@@ -63,6 +67,7 @@ pub use session_view::{
 };
 pub use settings::{AgentCommand, ChatsSettings};
 pub use store::{ChatStats, ChatStore, ChatStoreEvent, ChatWriteError, IndexedChat};
+pub use types_cmd::type_files;
 
 /// Where chats keep their files outside task directories. The app passes the real directories;
 /// tests pass temporary ones, so no test touches the real home.
@@ -89,6 +94,8 @@ pub fn register(workspace: &mut workspace::Workspace) {
     send::register(workspace);
     panel::register(workspace);
     commands::register(workspace);
+    artifacts_view::register(workspace);
+    types_cmd::register(workspace);
 }
 
 struct GlobalChatStore(Entity<ChatStore>);
@@ -121,6 +128,9 @@ impl ChatStore {
             .map(|global| global.0.clone())
     }
 }
+
+#[cfg(test)]
+mod artifacts_tests;
 
 #[cfg(test)]
 mod commands_tests;
