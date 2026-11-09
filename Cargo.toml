@@ -208,6 +208,7 @@ members = [
     "crates/bongos_chat_model",
     "crates/bongos_kotlin",
     "crates/bongos_languages",
+    "crates/bongos_minibuffer",
     "crates/bongos_minibuffer_model",
     "crates/bongos_net",
     "crates/bongos_prompts",
@@ -460,6 +461,7 @@ bongos_chat = { path = "crates/bongos_chat" }
 bongos_chat_model = { path = "crates/bongos_chat_model" }
 bongos_kotlin = { path = "crates/bongos_kotlin" }
 bongos_languages = { path = "crates/bongos_languages" }
+bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
 bongos_net = { path = "crates/bongos_net" }
 bongos_prompts = { path = "crates/bongos_prompts" }

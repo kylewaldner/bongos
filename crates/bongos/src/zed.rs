@@ -5478,6 +5478,7 @@ mod tests {
                 "lsp_tool",
                 "markdown",
                 "menu",
+                "minibuffer",
                 "multi_workspace",
                 "new_process_modal",
                 "notebook",

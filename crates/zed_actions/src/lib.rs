@@ -356,6 +356,44 @@ pub mod command_palette {
     );
 }
 
+pub mod minibuffer {
+    use gpui::actions;
+
+    actions!(
+        minibuffer,
+        [
+            /// Closes the minibuffer without answering.
+            Cancel,
+            /// Answers the minibuffer with the selected candidate.
+            Confirm,
+            /// Answers the minibuffer with the text typed, ignoring the selected candidate.
+            ConfirmInput,
+            /// Selects the next candidate, or the next history entry at the end of the list.
+            SelectNext,
+            /// Selects the previous candidate, or the previous history entry at the top of the list.
+            SelectPrev,
+            /// Moves the selection down by a page of candidates.
+            PageDown,
+            /// Moves the selection up by a page of candidates.
+            PageUp,
+            /// Extends the input to the common prefix of the matching candidates.
+            CompleteCommonPrefix,
+            /// Replaces the input with the previous history entry.
+            HistoryPrev,
+            /// Replaces the input with the next history entry.
+            HistoryNext,
+            /// Lists the actions available on the selected candidate.
+            Actions,
+            /// Opens the minibuffer.
+            Open,
+            /// Moves focus to the minibuffer.
+            Focus,
+            /// Lists the messages shown in the echo area, newest first.
+            ShowMessages,
+        ]
+    );
+}
+
 pub mod text_finder {
     use gpui::actions;
 

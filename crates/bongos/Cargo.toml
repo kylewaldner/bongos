@@ -165,6 +165,7 @@ bongos_app.workspace = true
 bongos_chat.workspace = true
 bongos_kotlin.workspace = true
 bongos_languages.workspace = true
+bongos_minibuffer.workspace = true
 bongos_net.workspace = true
 bongos_prompts.workspace = true
 bongos_version.workspace = true
