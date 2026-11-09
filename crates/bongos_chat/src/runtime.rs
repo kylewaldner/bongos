@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -912,9 +913,19 @@ impl ChatRuntime {
 
     /// Writes `last_active` (and `prompted`, once set) now, replacing a pending write.
     fn write_active_now(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        let Some(chat) = self.live.get_mut(chat_id) else {
-            return;
-        };
+        if let Some(write) = self.write_active(chat_id, cx) {
+            cx.background_spawn(write).detach();
+        }
+    }
+
+    /// Queues the write of [`ChatRuntime::write_active_now`]; the future resolves when it is on
+    /// disk (a failure is logged). `None` when the chat is not live.
+    fn write_active(
+        &mut self,
+        chat_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<impl Future<Output = ()> + use<>> {
+        let chat = self.live.get_mut(chat_id)?;
         chat.pending_active_write = None;
         chat.last_active_write = Some(Instant::now());
         let path = chat.record_path.clone();
@@ -933,12 +944,57 @@ impl ChatRuntime {
                 cx,
             )
         });
-        cx.background_spawn(async move {
+        Some(async move {
             if let Err(error) = write.await {
                 log::warn!("chats: could not write last_active: {error}");
             }
         })
-        .detach();
+    }
+
+    /// The names of the chats that are running (not exited), for the quit prompt. Empty while
+    /// `chats.enabled` is false.
+    pub fn running_names(&self, cx: &App) -> Vec<String> {
+        if !ChatsSettings::get_global(cx).enabled {
+            return Vec::new();
+        }
+        let store = self.store.read(cx);
+        let mut names: Vec<String> = self
+            .live
+            .iter()
+            .filter(|(_, chat)| !matches!(chat.state, ChatState::Exited { .. }))
+            .map(|(id, _)| {
+                store
+                    .find(id)
+                    .and_then(|found| found.entry.record())
+                    .map_or_else(|| id.clone(), |record| record.name.clone())
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The app is quitting (design D18): ends every running chat's process and writes its
+    /// `last_active`, so the Chats panel lists the chats after the next launch and `chat: open`
+    /// resumes them. The records stay open, and the never-prompted cleanup does not run. The
+    /// future resolves once the writes are on disk. Nothing happens while `chats.enabled` is
+    /// false.
+    pub(crate) fn end_for_quit(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl Future<Output = ()> + use<> {
+        let mut writes = Vec::new();
+        if ChatsSettings::get_global(cx).enabled {
+            let ids: Vec<String> = self.live.keys().cloned().collect();
+            for id in ids {
+                self.poll_input(&id, cx);
+                if let Some(chat) = self.live.get_mut(&id) {
+                    chat.cleanup_checked = true;
+                }
+                self.kill(&id, cx);
+                writes.extend(self.write_active(&id, cx));
+            }
+        }
+        future::join_all(writes).map(|_| ())
     }
 
     /// The never-prompted cleanup of `chat_id`, which ended or is being closed (design D17), once
