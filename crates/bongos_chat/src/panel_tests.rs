@@ -421,9 +421,11 @@ async fn test_a_prompts_file_changed_away_and_back_ends_on_the_record(cx: &mut T
     set.await.unwrap();
     wait_for(cx, "the index on the task's own file", STARTUP, |cx| {
         h.store.read_with(cx, |store, _| {
-            store
-                .find(&id)
-                .is_some_and(|chat| chat.entry.record().is_some_and(|r| r.prompts_file.is_none()))
+            store.find(&id).is_some_and(|chat| {
+                chat.entry
+                    .record()
+                    .is_some_and(|r| r.prompts_file.is_none())
+            })
         })
     })
     .await;
