@@ -27,6 +27,19 @@ const NAMES: &[&str] = &[
     "linear::ClearToken",
 ];
 
+/// The actions that go through the requests seam; the token actions open the modal and clear the
+/// store instead (see `token_tests`).
+const SEAM_NAMES: &[&str] = &[
+    "task::NewFromLinear",
+    "task::LinkToLinear",
+    "task::UnlinkFromLinear",
+    "task::OpenInLinear",
+    "task::CreateMissingSubtickets",
+    "task::RefreshFromLinear",
+    "task::ShowLinearSuggestions",
+    "task::CopyPrTitle",
+];
+
 /// Counts the commands that reach the seam.
 #[derive(Default)]
 struct CountingRequests {
@@ -97,12 +110,17 @@ async fn actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext
     }
 }
 
-async fn workspace_with_actions(
+pub(crate) async fn workspace_with_actions(
     cx: &mut TestAppContext,
 ) -> (gpui::Entity<Workspace>, &mut VisualTestContext) {
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
         crate::init(cx);
+        // No test may reach the application's credential store.
+        crate::token::install_credentials_provider(
+            Arc::new(crate::token_tests::FakeCredentials::default()),
+            cx,
+        );
         app_state
     });
     let project = Project::test(app_state.fs.clone(), [], cx).await;
@@ -119,13 +137,13 @@ async fn workspace_with_actions(
     (workspace, cx)
 }
 
-fn dispatch(name: &str, cx: &mut VisualTestContext) {
+pub(crate) fn dispatch(name: &str, cx: &mut VisualTestContext) {
     let action = cx.update(|_, cx| cx.build_action(name, None).unwrap());
     cx.update(|window, cx| window.dispatch_action(action, cx));
     cx.run_until_parked();
 }
 
-fn toast_shown(workspace: &gpui::Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+pub(crate) fn toast_shown(workspace: &gpui::Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
     workspace.read_with(cx, |workspace, _| {
         workspace
             .notification_ids()
@@ -133,7 +151,7 @@ fn toast_shown(workspace: &gpui::Entity<Workspace>, cx: &mut VisualTestContext) 
     })
 }
 
-fn set_enabled_in(cx: &mut VisualTestContext, enabled: bool) {
+pub(crate) fn set_enabled_in(cx: &mut VisualTestContext, enabled: bool) {
     cx.update(|_, cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
@@ -169,7 +187,7 @@ async fn while_on_each_action_reaches_the_seam_without_a_toast(cx: &mut TestAppC
     let requests = Arc::new(CountingRequests::default());
     cx.update(|_, cx| crate::install_requests(requests.clone(), cx));
     set_enabled_in(cx, true);
-    for (index, name) in NAMES.iter().enumerate() {
+    for (index, name) in SEAM_NAMES.iter().enumerate() {
         dispatch(name, cx);
         assert_eq!(requests.count.load(Ordering::SeqCst), index + 1, "{name}");
     }
@@ -177,7 +195,7 @@ async fn while_on_each_action_reaches_the_seam_without_a_toast(cx: &mut TestAppC
 
     set_enabled_in(cx, false);
     dispatch("task::NewFromLinear", cx);
-    assert_eq!(requests.count.load(Ordering::SeqCst), NAMES.len());
+    assert_eq!(requests.count.load(Ordering::SeqCst), SEAM_NAMES.len());
     assert!(toast_shown(&workspace, cx));
 }
 
@@ -185,7 +203,7 @@ async fn while_on_each_action_reaches_the_seam_without_a_toast(cx: &mut TestAppC
 async fn while_on_without_a_sink_nothing_happens(cx: &mut TestAppContext) {
     let (workspace, cx) = workspace_with_actions(cx).await;
     set_enabled_in(cx, true);
-    for name in NAMES {
+    for name in SEAM_NAMES {
         dispatch(name, cx);
     }
     assert!(!toast_shown(&workspace, cx));

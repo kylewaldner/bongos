@@ -2,11 +2,13 @@
 //! actions of the sync, hidden from the command palette while `linear.enabled` is false. While it
 //! is false each handler only says that the sync is off, and nothing here reaches the network.
 //! While it is true the handlers hand their command to the installed [`LinearRequests`], of which
-//! this step installs none, so they do nothing yet. The keys are bound in the Emacs keymaps, not
-//! here.
+//! this step installs none, so they do nothing yet. `linear: set token` and `linear: clear token`
+//! open the masked token modal and clear the stored token instead (see [`token`]). No keys are
+//! bound to these actions yet; they are reached from the command palette.
 
 mod actions;
 mod settings;
+pub mod token;
 
 use ::settings::Settings as _;
 use gpui::App;
@@ -24,3 +26,5 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod token_tests;
