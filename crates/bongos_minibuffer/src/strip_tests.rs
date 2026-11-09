@@ -386,3 +386,27 @@ async fn minibuffer_focus_focuses_the_hosted_view(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.update(|window, _| modal_focus.is_focused(window)));
 }
+
+#[gpui::test]
+async fn minibuffer_closed_window_leaves_no_strip_behind(cx: &mut TestAppContext) {
+    let app_state = init(cx, &["test"]);
+    let kept = add_window(cx, &app_state).await;
+    let closed = add_window(cx, &app_state).await;
+    assert!(
+        cx.update(|cx| minibuffer_for_window(closed.into(), cx))
+            .is_some()
+    );
+
+    closed
+        .update(cx, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert!(
+        cx.update(|cx| minibuffer_for_window(closed.into(), cx))
+            .is_none()
+    );
+    assert!(
+        cx.update(|cx| minibuffer_for_window(kept.into(), cx))
+            .is_some()
+    );
+}

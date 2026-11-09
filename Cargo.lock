@@ -2351,13 +2351,20 @@ dependencies = [
 name = "bongos_minibuffer"
 version = "0.1.0"
 dependencies = [
+ "bongos_minibuffer_model",
  "command_palette_hooks",
+ "db",
+ "editor",
  "fs",
+ "futures 0.3.32",
  "gpui",
+ "menu",
+ "picker",
  "project",
  "settings",
  "theme",
  "ui",
+ "util",
  "workspace",
  "zed_actions",
 ]

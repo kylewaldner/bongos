@@ -13,17 +13,25 @@ path = "src/bongos_minibuffer.rs"
 doctest = false
 
 [dependencies]
+bongos_minibuffer_model.workspace = true
 command_palette_hooks.workspace = true
+db.workspace = true
+futures.workspace = true
 gpui.workspace = true
+picker.workspace = true
 settings.workspace = true
 theme.workspace = true
 ui.workspace = true
+util.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 
 [dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
+editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+menu.workspace = true
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
