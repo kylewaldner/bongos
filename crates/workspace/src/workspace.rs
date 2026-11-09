@@ -1360,6 +1360,7 @@ pub struct Workspace {
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
+    bottom_item: Option<AnyView>,
     notifications: Notifications,
     suppressed_notifications: HashSet<NotificationId>,
     project: Entity<Project>,
@@ -1779,6 +1780,7 @@ impl Workspace {
             modal_layer,
             toast_layer,
             titlebar_item: None,
+            bottom_item: None,
             notifications: Notifications::default(),
             suppressed_notifications: HashSet::default(),
             left_dock,
@@ -2908,6 +2910,33 @@ impl Workspace {
     pub fn set_titlebar_item(&mut self, item: AnyView, _: &mut Window, cx: &mut Context<Self>) {
         self.titlebar_item = Some(item);
         cx.notify();
+    }
+
+    /// Sets (or clears) the view drawn below the status bar, the minibuffer strip. Clearing it
+    /// hides a modal that was placed in it, since nothing draws that modal anymore.
+    pub fn set_bottom_item(
+        &mut self,
+        item: Option<AnyView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cleared = item.is_none() && self.bottom_item.is_some();
+        self.bottom_item = item;
+        if cleared {
+            self.modal_layer.update(cx, |modal_layer, cx| {
+                modal_layer.hide_bottom_modal(window, cx)
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn bottom_item(&self) -> Option<AnyView> {
+        self.bottom_item.clone()
+    }
+
+    /// The modal layer of this workspace, for views that draw its modal themselves.
+    pub fn modal_layer(&self) -> &Entity<ModalLayer> {
+        &self.modal_layer
     }
 
     pub fn set_prompt_for_new_path(&mut self, prompt: PromptForNewPath) {
@@ -8412,6 +8441,7 @@ impl Render for Workspace {
                     .when(self.status_bar_visible(cx), |parent| {
                         parent.child(self.status_bar.clone())
                     })
+                    .children(self.bottom_item.clone())
                     .child(self.toast_layer.clone()),
             )
     }

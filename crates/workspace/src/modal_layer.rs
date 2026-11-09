@@ -171,11 +171,21 @@ pub fn routes_to_minibuffer(name: &str, cx: &App) -> bool {
         .is_some_and(|routing| routing.is_routed(name))
 }
 
+/// Where an active modal is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// By the layer, over the window.
+    Centered,
+    /// By the minibuffer strip, which asks for it through [`ModalLayer::bottom_modal`].
+    Bottom,
+}
+
 trait ModalViewHandle {
     fn on_before_dismiss(&mut self, window: &mut Window, cx: &mut App) -> DismissDecision;
     fn view(&self) -> AnyView;
     fn fade_out_background(&self, cx: &mut App) -> bool;
     fn render_bare(&self, cx: &mut App) -> bool;
+    fn focus(&self, window: &mut Window, cx: &mut App);
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -194,6 +204,11 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
     fn render_bare(&self, cx: &mut App) -> bool {
         self.read(cx).render_bare()
     }
+
+    fn focus(&self, window: &mut Window, cx: &mut App) {
+        let focus_handle = self.focus_handle(cx);
+        window.focus(&focus_handle, cx);
+    }
 }
 
 pub struct ActiveModal {
@@ -201,6 +216,7 @@ pub struct ActiveModal {
     _subscriptions: [Subscription; 2],
     previous_focus_handle: Option<FocusHandle>,
     focus_handle: FocusHandle,
+    placement: Placement,
 }
 
 pub struct ModalLayer {
@@ -257,6 +273,10 @@ impl ModalLayer {
         V: ModalView,
     {
         let focus_handle = cx.focus_handle();
+        let placement = match new_modal.read(cx).minibuffer_name() {
+            Some(name) if routes_to_minibuffer(name, cx) => Placement::Bottom,
+            _ => Placement::Centered,
+        };
         self.active_modal = Some(ActiveModal {
             modal: Box::new(new_modal.clone()),
             _subscriptions: [
@@ -275,6 +295,7 @@ impl ModalLayer {
             ],
             previous_focus_handle: window.focused(cx),
             focus_handle,
+            placement,
         });
         cx.defer_in(window, move |_, window, cx| {
             window.focus(&new_modal.focus_handle(cx), cx);
@@ -332,6 +353,32 @@ impl ModalLayer {
     pub fn has_active_modal(&self) -> bool {
         self.active_modal.is_some()
     }
+
+    /// The active modal and the layer's focus handle when it is placed in the minibuffer strip,
+    /// which draws it inside an element that tracks the handle (so that [`Self::hide_modal`]
+    /// can tell whether focus is inside the modal). `None` for a centered modal.
+    pub fn bottom_modal(&self) -> Option<(AnyView, FocusHandle)> {
+        let active_modal = self.active_modal.as_ref()?;
+        (active_modal.placement == Placement::Bottom)
+            .then(|| (active_modal.modal.view(), active_modal.focus_handle.clone()))
+    }
+
+    /// Hides the active modal if it is placed in the minibuffer strip. Returns whether it did.
+    pub fn hide_bottom_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.bottom_modal().is_some() && self.hide_modal(window, cx)
+    }
+
+    /// Moves focus into the active modal if it is placed in the minibuffer strip. Returns
+    /// whether there was one.
+    pub fn focus_bottom_modal(&self, window: &mut Window, cx: &mut App) -> bool {
+        match &self.active_modal {
+            Some(active_modal) if active_modal.placement == Placement::Bottom => {
+                active_modal.modal.focus(window, cx);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Render for ModalLayer {
@@ -339,6 +386,10 @@ impl Render for ModalLayer {
         let Some(active_modal) = &self.active_modal else {
             return div().into_any_element();
         };
+
+        if active_modal.placement == Placement::Bottom {
+            return div().into_any_element();
+        }
 
         if active_modal.modal.render_bare(cx) {
             return active_modal.modal.view().into_any_element();
