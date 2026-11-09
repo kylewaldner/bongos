@@ -116,7 +116,9 @@ async fn test_archive_and_restore_never_delete_and_keep_every_field(cx: &mut Tes
 async fn test_archive_of_a_running_chat_ends_the_process_first(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
     set_global_runtime(&h, cx);
-    // Nothing was said in this chat: the never-prompted cleanup would delete it, an archive keeps it.
+    // Nothing was said in this chat and Claude's storage is there to look in, so the never-prompted
+    // cleanup would delete it: only an archive that skips the cleanup keeps it.
+    std::fs::create_dir_all(h.home.join(".claude/projects")).unwrap();
     let id = h.start(Agent::Claude, cx).await;
     wait_indexed(&h, &[&id], cx).await;
     let pid = h.runtime.update(cx, |runtime, cx| {

@@ -80,13 +80,13 @@ fn seed_task(dir: &Path, todos: bool) {
     write(&dir.join("artifacts.toml"), &manifest);
 }
 
-fn claude_caps() -> Capabilities {
+pub(super) fn claude_caps() -> Capabilities {
     let flags = "--session-id\n--resume\n--fork-session\n--name\n--append-system-prompt\n\
                  --plugin-dir\n--settings\n--model\n";
     ClaudeAdapter::new("claude").capabilities_from_help("2.1.319 (Claude Code)", flags)
 }
 
-fn codex_caps() -> Capabilities {
+pub(super) fn codex_caps() -> Capabilities {
     let help = "-m, --model <model>\n-c, --config <key=value>\nresume\nfork\nlogin\n";
     CodexAdapter::new("codex").capabilities_from_help("codex-cli 0.46.0", help)
 }

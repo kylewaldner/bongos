@@ -3,14 +3,15 @@
 //! session types, the health of the agent CLIs, [`ChatRuntime`] (the running chats and their live
 //! state), the send path, the `chat` actions and their commands (new, open, next, previous, close,
 //! with the scope rules of [`scope`] and the never-prompted cleanup of [`cleanup`]), the commands
-//! archive, restore, rename and delete, and the offer to archive a finished task's chats
-//! ([`lifecycle`]). Everything is off while `chats.enabled` is false. The file
-//! formats and pure rules live in `bongos_chat_model`.
+//! archive, restore, rename and delete, the offer to archive a finished task's chats
+//! ([`lifecycle`]), and fork and fork to task ([`fork`]). Everything is off while `chats.enabled`
+//! is false. The file formats and pure rules live in `bongos_chat_model`.
 
 mod actions;
 mod cleanup;
 mod commands;
 mod facts;
+mod fork;
 mod health;
 mod launch;
 mod layout;
@@ -132,6 +133,9 @@ mod lifecycle_tests;
 
 #[cfg(test)]
 mod panel_tests;
+
+#[cfg(test)]
+mod fork_tests;
 
 #[cfg(test)]
 mod health_tests;
