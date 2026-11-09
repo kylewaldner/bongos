@@ -5,6 +5,9 @@
 //! hides a prompt in the strip and `Focus` focuses it; with no prompt, every action says "No
 //! active minibuffer".
 
+mod history_store;
+mod session;
+mod session_view;
 mod settings;
 mod strip;
 
@@ -13,6 +16,11 @@ use command_palette_hooks::CommandPaletteFilter;
 use gpui::{App, BorrowAppContext as _, Context, Window};
 use workspace::{MinibufferMessageKind, MinibufferRouting, ModalLayer};
 
+pub use history_store::{HISTORY_NAMESPACE, HistoryStore};
+pub use session::{
+    Candidate, DynamicSource, Outcome, Preview, Session, SessionHandle, Source, Value, open,
+};
+pub use session_view::SessionView;
 pub use settings::MinibufferSettings;
 pub use strip::{Minibuffer, minibuffer_for_window};
 
@@ -126,6 +134,8 @@ fn register_actions(cx: &mut App) {
     );
 }
 
+#[cfg(test)]
+mod session_tests;
 #[cfg(test)]
 mod settings_tests;
 #[cfg(test)]

@@ -119,6 +119,13 @@ fn strip_for_window(window: AnyWindowHandle, cx: &mut App) -> Entity<Minibuffer>
 /// enabled.
 pub(crate) fn init(cx: &mut App) {
     cx.set_global(Minibuffers::default());
+    // A closed window leaves no strip behind.
+    cx.on_window_closed(|cx, closed| {
+        cx.global_mut::<Minibuffers>()
+            .0
+            .retain(|handle, _| handle.window_id() != closed);
+    })
+    .detach();
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;
