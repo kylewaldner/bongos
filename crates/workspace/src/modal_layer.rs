@@ -59,8 +59,9 @@ pub enum MinibufferMessageOutcome {
 pub type MinibufferMessageHook =
     Rc<dyn Fn(&mut Window, &mut App, &str, MinibufferMessageKind) -> bool>;
 
-/// Shows a toast in the echo area of the workspace; returns whether it did.
-pub type MinibufferToastHook = Rc<dyn Fn(&Toast, &mut Context<crate::Workspace>) -> bool>;
+/// Shows a toast in the echo area of the workspace's window; returns whether it did. It runs while
+/// the workspace is being updated, so it gets the workspace by reference.
+pub type MinibufferToastHook = Rc<dyn Fn(&Toast, &Workspace, &mut Context<Workspace>) -> bool>;
 
 /// The settings of the minibuffer that `workspace` and `picker` read, and the hooks the
 /// minibuffer crate installs. `bongos_minibuffer::init` installs it and mirrors the settings into

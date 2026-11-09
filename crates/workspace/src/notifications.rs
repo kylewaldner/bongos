@@ -1,5 +1,6 @@
 use crate::{
-    MultiWorkspace, SuppressNotification, Toast, Workspace, workspace_error::WorkspaceError,
+    MinibufferRouting, MultiWorkspace, SuppressNotification, Toast, Workspace,
+    workspace_error::WorkspaceError,
 };
 use anyhow::Context as _;
 use gpui::{
@@ -69,6 +70,18 @@ pub trait Notification:
 }
 
 pub struct SuppressEvent;
+
+impl Toast {
+    /// The text of the toast.
+    pub fn text(&self) -> &str {
+        &self.message
+    }
+
+    /// Whether the toast carries a click action, which keeps it a notification.
+    pub fn has_click_action(&self) -> bool {
+        self.on_click.is_some()
+    }
+}
 
 impl Workspace {
     #[cfg(any(test, feature = "test-support"))]
@@ -181,6 +194,16 @@ impl Workspace {
 
     pub fn show_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
         self.dismiss_notification(&toast.id, cx);
+        // While `messages` is routed to the minibuffer, a toast with no click action goes to the
+        // echo area instead of becoming a notification.
+        if !toast.has_click_action()
+            && let Some(hook) = cx
+                .try_global::<MinibufferRouting>()
+                .and_then(|routing| routing.toast_hook())
+            && hook(&toast, self, cx)
+        {
+            return;
+        }
         self.show_notification(toast.id.clone(), cx, |cx| {
             cx.new(|cx| {
                 simple_message_notification::MessageNotification::new(toast.message, cx).when_some(
