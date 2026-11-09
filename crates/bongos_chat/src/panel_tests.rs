@@ -402,6 +402,43 @@ async fn test_the_session_view_follows_the_prompts_file(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+async fn test_a_prompts_file_changed_away_and_back_ends_on_the_record(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &id, cx).await;
+    let (workspace, cx) = panel_window(&h, cx).await;
+    let panel = panel_of(&workspace, cx);
+    let session = show(&panel, &id, cx);
+    wait_prompts_loaded(&session, cx).await;
+    let own = h.scope.join("prompts.txt");
+
+    let project_file = h.root.join("projects/invoicing/prompts.txt");
+    std::fs::write(&project_file, "project prompt\n").unwrap();
+    // A to B to A in quick succession: B's load may still be running when the record is back on A.
+    let set = cx.update(|_, cx| crate::set_prompts_file(&id, Some(project_file.clone()), cx));
+    set.await.unwrap();
+    let set = cx.update(|_, cx| crate::set_prompts_file(&id, None, cx));
+    set.await.unwrap();
+    wait_for(cx, "the index on the task's own file", STARTUP, |cx| {
+        h.store.read_with(cx, |store, _| {
+            store
+                .find(&id)
+                .is_some_and(|chat| chat.entry.record().is_some_and(|r| r.prompts_file.is_none()))
+        })
+    })
+    .await;
+    cx.executor()
+        .timer(std::time::Duration::from_millis(300))
+        .await;
+    cx.run_until_parked();
+    assert_eq!(prompts_shown(&session, cx), Some(own));
+    let items = session.read_with(cx, |session, cx| {
+        session.prompts_pane().read(cx).items_len()
+    });
+    assert_eq!(items, 1);
+}
+
+#[gpui::test]
 async fn test_a_reload_never_drops_a_dirty_prompts_buffer(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
     let id = h.start(Agent::Claude, cx).await;

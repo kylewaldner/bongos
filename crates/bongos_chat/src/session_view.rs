@@ -439,10 +439,14 @@ impl SessionView {
         let Some(path) = self.prompts_path(cx) else {
             return;
         };
-        if self.loaded_prompts.as_ref() == Some(&path)
-            || self.loading_prompts.as_ref() == Some(&path)
-            || self.prompts_dirty(cx)
-        {
+        if self.loaded_prompts.as_ref() == Some(&path) {
+            // The record is back on the file the pane shows: a load of another file still in
+            // flight is stale, so it is cancelled rather than left to replace the pane.
+            self.loading_prompts = None;
+            self._loading_prompts = None;
+            return;
+        }
+        if self.loading_prompts.as_ref() == Some(&path) || self.prompts_dirty(cx) {
             return;
         }
         self.load_prompts(window, cx);
@@ -482,6 +486,9 @@ impl SessionView {
             .await;
             this.update_in(cx, |this, window, cx| {
                 this.loading_prompts = None;
+                if this.prompts_path(cx).as_ref() != Some(&path) {
+                    return;
+                }
                 match opened {
                     Ok(buffer) => this.set_prompts_buffer(path, buffer, window, cx),
                     Err(error) => log::warn!("chats: could not open the prompts file: {error}"),
