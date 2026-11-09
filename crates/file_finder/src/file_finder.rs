@@ -1760,6 +1760,25 @@ impl PickerDelegate for FileFinderDelegate {
         self.open_selected_file(secondary, true, window, cx);
     }
 
+    /// Opens the typed path as is: the "create new" entry when the path does not exist yet, the
+    /// selected entry otherwise.
+    fn confirm_input(
+        &mut self,
+        secondary: bool,
+        window: &mut Window,
+        cx: &mut Context<Picker<FileFinderDelegate>>,
+    ) {
+        if let Some(ix) = self
+            .matches
+            .matches
+            .iter()
+            .position(|m| matches!(m, Match::CreateNew(_)))
+        {
+            self.selected_index = ix;
+        }
+        self.open_selected_file(secondary, true, window, cx);
+    }
+
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<FileFinderDelegate>>) {
         self.file_finder
             .update(cx, |_, cx| cx.emit(DismissEvent))
