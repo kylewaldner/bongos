@@ -94,6 +94,9 @@ pub struct ChatRecord {
     pub prompts_file: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Overrides the auto-submit default for this session; absent means follow the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_submit: Option<bool>,
     /// The id of the chat this one was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
@@ -133,6 +136,7 @@ impl ChatRecord {
             layout: Layout::Dual,
             prompts_file: None,
             model: None,
+            auto_submit: None,
             parent: None,
             fork: None,
             created: now,

@@ -368,6 +368,11 @@ impl Editor {
         cx.set_global(KillRing(item))
     }
 
+    /// Puts `text` on the Emacs kill ring, so the next `KillRingYank` inserts it.
+    pub fn set_kill_ring_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        cx.set_global(KillRing(ClipboardItem::new_string(text.into())));
+    }
+
     pub(super) fn kill_ring_yank(
         &mut self,
         _: &KillRingYank,

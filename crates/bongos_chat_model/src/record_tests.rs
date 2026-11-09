@@ -287,3 +287,16 @@ fn timestamps_order_across_offsets() {
     assert_eq!(local, utc);
     assert_eq!(timestamp_utc(&"2026-11-08".parse().unwrap()), None);
 }
+
+#[test]
+fn auto_submit_round_trips_when_set_and_is_omitted_when_none() {
+    let mut record = parse_record(MINIMAL).unwrap();
+    assert_eq!(record.auto_submit, None);
+    assert!(!serialize_record(&record).unwrap().contains("auto_submit"));
+
+    record.auto_submit = Some(false);
+    let text = serialize_record(&record).unwrap();
+    assert!(text.contains("auto_submit = false"), "{text}");
+    assert_eq!(parse_record(&text).unwrap().auto_submit, Some(false));
+    assert!(record.extra.is_empty());
+}

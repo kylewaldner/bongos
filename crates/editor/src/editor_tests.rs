@@ -38795,3 +38795,15 @@ async fn test_select_delimiters_expansion(cx: &mut TestAppContext) {
     cx.dispatch_action(SelectInsideDelimiters);
     cx.assert_editor_state("foo(«x, { a: 1 }ˇ»);");
 }
+
+#[gpui::test]
+async fn test_set_kill_ring_text_is_yanked(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("one ˇtwo");
+    cx.update_editor(|e, _, cx| e.set_kill_ring_text("sent prompt ", cx));
+    cx.update_editor(|e, window, cx| e.kill_ring_yank(&KillRingYank, window, cx));
+    cx.assert_editor_state("one sent prompt ˇtwo");
+}

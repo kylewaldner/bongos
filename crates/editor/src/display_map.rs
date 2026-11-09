@@ -182,6 +182,7 @@ pub enum HighlightKey {
     PendingInput,
     PickerPreview,
     ProjectSearchView,
+    PromptsSent,
     Rename,
     SearchWithinRange,
     SelectedTextHighlight,
