@@ -121,6 +121,8 @@ pub(crate) struct Prepared {
     /// The shared artifacts the chat is given; kept in memory, never written.
     pub given: Vec<SharedArtifact>,
     pub digest: String,
+    /// The skills the session type lists that were not found; the row says so.
+    pub missing_skills: Vec<String>,
 }
 
 /// Whether `id` is one plain path component.
@@ -235,6 +237,7 @@ pub(crate) fn prepare(
         spec,
         given,
         digest,
+        missing_skills: request.resolved.missing_skills.clone(),
     })
 }
 

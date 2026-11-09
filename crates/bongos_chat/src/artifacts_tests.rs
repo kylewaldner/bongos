@@ -26,7 +26,7 @@ use crate::{ROW_NOTE, STALE_LINE, artifacts_text, is_stale, stale_chat, type_fil
 
 /// The human-only files of the test task: neither their paths nor their descriptions may ever
 /// show.
-const HUMAN_ONLY: [&str; 6] = [
+pub(super) const HUMAN_ONLY: [&str; 6] = [
     "secret-root.md",
     "salary-review.md",
     "prompts.txt",
@@ -35,8 +35,8 @@ const HUMAN_ONLY: [&str; 6] = [
     "The private prompts Kyle typed",
 ];
 
-const EXTRA_PATH: &str = "docs/extra.md";
-const EXTRA_DESCRIPTION: &str = "Extra billing rules";
+pub(super) const EXTRA_PATH: &str = "docs/extra.md";
+pub(super) const EXTRA_DESCRIPTION: &str = "Extra billing rules";
 
 fn artifact(path: &str, description: &str) -> SharedArtifact {
     SharedArtifact {
@@ -47,7 +47,7 @@ fn artifact(path: &str, description: &str) -> SharedArtifact {
 
 /// The test task's manifest: `docs/design.md` shared, `docs/extra.md` shared or human-only, and
 /// the human-only files the harness made. `description` is the extra artifact's.
-fn write_manifest(h: &Harness, extra_shared: bool, description: &str) {
+pub(super) fn write_manifest(h: &Harness, extra_shared: bool, description: &str) {
     let visibility = if extra_shared { "shared" } else { "human-only" };
     let mut manifest = format!(
         "schema = 1\n\n[[artifact]]\npath = \"docs/design.md\"\ndescription = \"The backfill \
@@ -69,7 +69,7 @@ fn write_manifest(h: &Harness, extra_shared: bool, description: &str) {
 
 /// A harness whose task shares `docs/design.md` and `docs/extra.md`, with the harness's runtime
 /// as the global one.
-async fn ready(cx: &mut TestAppContext) -> Harness {
+pub(super) async fn ready(cx: &mut TestAppContext) -> Harness {
     let h = harness(cx, true, 60, &[]).await;
     write(&h.scope.join(EXTRA_PATH), "# extra\n");
     write_manifest(&h, true, EXTRA_DESCRIPTION);
@@ -148,7 +148,7 @@ async fn view_text(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) ->
     })
 }
 
-fn no_human_only(text: &str) {
+pub(super) fn no_human_only(text: &str) {
     for secret in HUMAN_ONLY {
         assert!(!text.contains(secret), "{secret} shows in:\n{text}");
     }

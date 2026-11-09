@@ -451,25 +451,31 @@ impl SessionView {
         });
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut line = String::new();
-        if let Some(runtime) = ChatRuntime::global(cx) {
-            let runtime = runtime.read(cx);
-            if let Some(record) = runtime
-                .store()
-                .read(cx)
-                .find(&self.chat_id)
-                .and_then(|chat| chat.entry.record())
-            {
-                line = format!(
+    /// The one line of the header: name, agent, type and state.
+    pub fn header_text(&self, cx: &App) -> String {
+        let Some(runtime) = ChatRuntime::global(cx) else {
+            return String::new();
+        };
+        let runtime = runtime.read(cx);
+        runtime
+            .store()
+            .read(cx)
+            .find(&self.chat_id)
+            .and_then(|chat| chat.entry.record())
+            .map(|record| {
+                format!(
                     "{} - {} - {} - {}",
                     record.name,
                     record.agent,
                     record.chat_type,
                     runtime.state(&self.chat_id)
-                );
-            }
-        }
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let line = self.header_text(cx);
         h_flex()
             .px_2()
             .py_1()

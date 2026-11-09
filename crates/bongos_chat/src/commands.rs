@@ -16,8 +16,9 @@
 //!   [`crate::cleanup`]).
 //!
 //! - `chat: archive` ends the shown chat's process if it runs and moves the record to the archive;
-//!   `chat: restore` and `chat: show archive` pick an archived chat of the focused task (else of
-//!   every task) and move it back to the open list. `chat: rename` sets a name that no later send
+//!   `chat: restore` picks an archived chat of the focused task (else of every task) and moves it
+//!   back to the open list; `chat: show archive` opens the Chats list with Archived expanded (see
+//!   [`crate::list_view`]). `chat: rename` sets a name that no later send
 //!   or title replaces. `chat: delete` asks, then removes the record and its launch files and
 //!   nothing else. None of these deletes anything but `chat: delete`; the CLI's own transcripts
 //!   are never touched. See [`crate::lifecycle`] for the offer to archive a closed task's chats.
@@ -134,10 +135,7 @@ pub fn register(workspace: &mut Workspace) {
         .register_action(|w, _: &chat::Previous, window, cx| cycle(-1, w, window, cx))
         .register_action(|w, _: &chat::Close, window, cx| close(w, window, cx))
         .register_action(|w, _: &chat::Archive, window, cx| archive(w, window, cx))
-        .register_action(|w, _: &chat::Restore, window, cx| restore(RESTORE_TITLE, w, window, cx))
-        .register_action(|w, _: &chat::ShowArchive, window, cx| {
-            restore(ARCHIVE_TITLE, w, window, cx)
-        })
+        .register_action(|w, _: &chat::Restore, window, cx| restore(w, window, cx))
         .register_action(|w, _: &chat::Rename, window, cx| rename(w, window, cx))
         .register_action(|w, _: &chat::Delete, window, cx| delete(w, window, cx));
     crate::fork::register(workspace);
@@ -256,21 +254,27 @@ pub fn agent_choices(health: &[Health], last: Option<Agent>) -> Vec<(Agent, Stri
         .collect()
 }
 
-/// The agent offered first: the last one `chat: new` started in this session, else the agent of
-/// the newest chat on record.
-fn last_agent(cx: &App) -> Option<Agent> {
+/// The agent offered first: the last one `chat: new` started (this session, else the one the key
+/// value store kept from an earlier run), else the agent of the newest chat on record.
+pub(crate) fn last_agent(cx: &App) -> Option<Agent> {
     let runtime = ChatRuntime::global(cx)?;
     let runtime = runtime.read(cx);
-    runtime.last_agent().or_else(|| {
-        runtime
-            .store()
-            .read(cx)
-            .index()
-            .values()
-            .filter_map(|chat| chat.entry.record())
-            .max_by_key(|record| timestamp_utc(&record.created))
-            .and_then(ChatRecord::known_agent)
-    })
+    runtime
+        .last_agent()
+        .or_else(|| {
+            crate::view_state::read(crate::view_state::LAST_AGENT_KEY, cx)
+                .and_then(|name| Agent::from_name(&name))
+        })
+        .or_else(|| {
+            runtime
+                .store()
+                .read(cx)
+                .index()
+                .values()
+                .filter_map(|chat| chat.entry.record())
+                .max_by_key(|record| timestamp_utc(&record.created))
+                .and_then(ChatRecord::known_agent)
+        })
 }
 
 fn choose_agent(
@@ -545,7 +549,7 @@ fn start_new(
         Ok(chat_id) => {
             cx.update(|_, cx| {
                 if let Some(runtime) = ChatRuntime::global(cx) {
-                    runtime.update(cx, |runtime, _| runtime.set_last_agent(agent));
+                    runtime.update(cx, |runtime, cx| runtime.set_last_agent(agent, cx));
                 }
             })
             .ok();
@@ -975,7 +979,7 @@ fn open(any: bool, workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
     );
 }
 
-fn toast_on_error(task: Task<Result<(), String>>, cx: &mut Context<Workspace>) {
+pub(crate) fn toast_on_error(task: Task<Result<(), String>>, cx: &mut Context<Workspace>) {
     cx.spawn(async move |workspace, cx| {
         if let Err(message) = task.await
             && !message.is_empty()
@@ -1076,7 +1080,6 @@ fn close(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Worksp
 }
 
 const RESTORE_TITLE: &str = "Restore which chat?";
-const ARCHIVE_TITLE: &str = "Archived chats: pick one to restore";
 
 /// The launch-files directory of `chat_id` under `runtime_root`; `None` when the id is not one
 /// plain path component, so nothing outside `runtime_root` can ever be named.
@@ -1250,9 +1253,21 @@ fn archive(workspace: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace
     let Some(chat_id) = shown_chat(workspace, cx) else {
         return;
     };
-    let name = chat_name(&chat_id, cx);
-    let archived = archive_chat(&chat_id, cx);
+    archive_and_say(&chat_id, cx);
+}
+
+/// Archives `chat_id` and says so in a toast.
+pub(crate) fn archive_and_say(chat_id: &str, cx: &mut Context<Workspace>) {
+    let name = chat_name(chat_id, cx);
+    let archived = archive_chat(chat_id, cx);
     toast_on_result(archived, format!("Archived {name}"), cx);
+}
+
+/// Restores `chat_id` and says so in a toast.
+pub(crate) fn restore_and_say(chat_id: &str, cx: &mut Context<Workspace>) {
+    let name = chat_name(chat_id, cx);
+    let restored = restore_chat(chat_id, cx);
+    toast_on_result(restored, format!("Restored {name}"), cx);
 }
 
 /// `chat: rename`: asks for the shown chat's name.
@@ -1260,6 +1275,16 @@ fn rename(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Works
     let Some(chat_id) = shown_chat(workspace, cx) else {
         return;
     };
+    ask_rename(chat_id, workspace, window, cx);
+}
+
+/// Asks for the new name of `chat_id`, then renames it.
+pub(crate) fn ask_rename(
+    chat_id: String,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let name = chat_name(&chat_id, cx);
     ask(
         workspace,
@@ -1297,14 +1322,9 @@ fn delete(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Works
     );
 }
 
-/// `chat: restore` and `chat: show archive`: the archived chats of the focused task (else of every
-/// task), one of which is moved back to the open list.
-fn restore(
-    title: &'static str,
-    workspace: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
+/// `chat: restore`: the archived chats of the focused task (else of every task), one of which is
+/// moved back to the open list.
+fn restore(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if !chats_on(workspace, cx) {
         return;
     }
@@ -1326,14 +1346,10 @@ fn restore(
         chats.into_iter().map(|chat| (chat.id, chat.label)).unzip();
     pick(
         workspace,
-        title,
+        RESTORE_TITLE,
         labels,
         0,
-        Box::new(move |index, _, _, cx| {
-            let name = chat_name(&ids[index], cx);
-            let restored = restore_chat(&ids[index], cx);
-            toast_on_result(restored, format!("Restored {name}"), cx);
-        }),
+        Box::new(move |index, _, _, cx| restore_and_say(&ids[index], cx)),
         window,
         cx,
     );
