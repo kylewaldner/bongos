@@ -53,6 +53,9 @@ pub struct WorkPanel {
     path: Vec<Key>,
     expanded: HashSet<Key>,
     selected: Option<Key>,
+    /// Whether the panel or something in it has focus, kept by focus listeners so a caller with
+    /// no window ([`task_at_point`](crate::task_at_point)) can ask.
+    focused: bool,
     filters: Filters,
     view: ViewMode,
     /// What was last written to the key value store (D20).
@@ -68,13 +71,28 @@ pub struct WorkPanel {
 impl EventEmitter<PanelEvent> for WorkPanel {}
 
 impl WorkPanel {
+    /// The id of the selected row when it is a task, and the panel has focus.
+    pub(crate) fn task_at_selection(&self) -> Option<&str> {
+        match &self.selected {
+            Some(Key::Task(id)) if self.focused => Some(id),
+            _ => None,
+        }
+    }
+
     pub fn new(
         workspace: WeakEntity<Workspace>,
         fs: Arc<dyn Fs>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut subscriptions = Vec::new();
+        let focus_handle = cx.focus_handle();
+        subscriptions.push(cx.on_focus_in(&focus_handle, window, |this, _, _| {
+            this.focused = true;
+        }));
+        subscriptions.push(cx.on_focus_out(&focus_handle, window, |this, _, _, _| {
+            this.focused = false;
+        }));
         if let Some(store) = WorkStore::global(cx) {
             subscriptions.push(cx.subscribe(&store, |this, _, _, cx| this.rebuild(cx)));
         }
@@ -83,11 +101,12 @@ impl WorkPanel {
         let mut this = Self {
             workspace,
             fs,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             scroll_handle: UniformListScrollHandle::new(),
             path: saved.path.clone(),
             expanded: saved.expanded.iter().cloned().collect(),
             selected: None,
+            focused: false,
             filters: saved.filters.clone(),
             view: saved.view,
             saved,
@@ -650,6 +669,18 @@ impl Panel for WorkPanel {
     fn activation_priority(&self) -> u32 {
         7
     }
+}
+
+/// The task id a command acts on without asking: the selected row of the Work panel while the
+/// panel has focus and the row is a task, else the focused task when it names a task in the tree.
+pub fn task_at_point(workspace: &Workspace, cx: &App) -> Option<String> {
+    let tree = WorkStore::global(cx)?.read(cx).snapshot()?;
+    let selected = workspace
+        .panel::<WorkPanel>(cx)
+        .and_then(|panel| panel.read(cx).task_at_selection().map(str::to_string));
+    selected
+        .or_else(|| crate::focused(&tree, cx))
+        .filter(|id| tree.task_by_id(id).is_some())
 }
 
 /// Adds the Work panel to `workspace` while `work.enabled` is true and removes it while false,

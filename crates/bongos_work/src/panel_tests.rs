@@ -307,6 +307,54 @@ async fn ret_on_a_leaf_focuses_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn task_at_point_prefers_the_focused_panels_selection_then_the_focused_task(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = harness(cx, true, true).await;
+    cx.update(|_, cx| {
+        cx.set_global(AppDatabase::test_new());
+        focus::init(cx);
+    });
+    let panel = open_panel(&harness, cx).await;
+    // Into the project; its first row, `backfill` (`l1`), is selected.
+    press(cx, menu::Confirm);
+    let at_point = |cx: &mut VisualTestContext| {
+        harness
+            .workspace
+            .read_with(cx, |workspace, cx| crate::task_at_point(workspace, cx))
+    };
+    let set_focus = |cx: &mut VisualTestContext, id: Option<&str>| {
+        cx.update(|_, cx| {
+            Focus::global(cx)
+                .unwrap()
+                .update(cx, |focus, cx| focus.set(id.map(str::to_string), cx))
+        })
+    };
+    assert!(
+        cx.update(|window, cx| panel.focus_handle(cx).contains_focused(window, cx)),
+        "the panel has focus"
+    );
+
+    // The panel has focus: its selection wins over the focused task.
+    assert_eq!(at_point(cx), Some("l1".to_string()));
+    set_focus(cx, Some("l2"));
+    assert_eq!(at_point(cx), Some("l1".to_string()));
+
+    // Focus leaves the panel: the focused task is the answer.
+    harness.workspace.update_in(cx, |workspace, window, cx| {
+        window.focus(&workspace.focus_handle(cx), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(at_point(cx), Some("l2".to_string()));
+
+    // Neither: nothing. An id that names no task is not an answer.
+    set_focus(cx, None);
+    assert_eq!(at_point(cx), None);
+    set_focus(cx, Some("gone"));
+    assert_eq!(at_point(cx), None);
+}
+
+#[gpui::test]
 async fn the_panel_is_absent_while_disabled_and_follows_the_setting(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx, false, true).await;
     harness.workspace.update_in(cx, |workspace, window, cx| {

@@ -41,6 +41,7 @@ use crate::commands::{
     chat_name, chats_on, discard_unstarted, list_types, local_projects, show_when_indexed,
     shown_chat, snapshot,
 };
+use crate::launch::extension_section;
 use crate::scope::{IMPLEMENT_TYPE, resolve_scope};
 use crate::send::show_toast;
 use crate::{
@@ -202,6 +203,7 @@ pub(crate) fn fork_chat(
     let same_scope = request.target == ForkTarget::SameScope;
     let force_handoff = request.force_handoff;
     let launch_caps = caps.clone();
+    let extra_context = extension_section(&placement.chat_type, Some(&placement.task_id), cx);
 
     cx.spawn(async move |cx| {
         let read_home = home.clone();
@@ -278,6 +280,7 @@ pub(crate) fn fork_chat(
             handoff,
             caps: Some(launch_caps),
             force: Vec::new(),
+            extra_context,
         };
         let launch = runtime.update(cx, |runtime, cx| {
             runtime.launch(launch_request, &projects, cx)

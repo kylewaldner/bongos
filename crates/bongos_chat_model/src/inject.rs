@@ -49,6 +49,9 @@ pub struct RenderInput<'a> {
     pub skills_as_plugin: bool,
     /// Set for a handoff fork.
     pub handoff: Option<&'a HandoffParent>,
+    /// Text a caller adds at the very end of the context, after the shared artifacts. It is
+    /// rendered as given and is the caller's to keep free of anything hidden.
+    pub extra_context: Option<&'a str>,
 }
 
 impl RenderInput<'_> {
@@ -74,7 +77,7 @@ fn artifact_line(artifact: &SharedArtifact) -> String {
 }
 
 /// `context.md`: the scope pointer, then per the type the notes directory, dependencies, PR links
-/// and the thinking line, then the shared artifacts.
+/// and the thinking line, then the shared artifacts, then `extra_context`.
 pub fn render_context(input: &RenderInput) -> String {
     let context = input.context;
     let facts = input.facts;
@@ -140,6 +143,11 @@ pub fn render_context(input: &RenderInput) -> String {
                 let _ = writeln!(out, "\nPrompts file: {}", prompts.display());
             }
         }
+    }
+    if let Some(extra) = input.extra_context.map(str::trim_end)
+        && !extra.is_empty()
+    {
+        let _ = writeln!(out, "\n{extra}");
     }
     out
 }
