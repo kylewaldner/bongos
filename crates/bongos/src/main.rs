@@ -541,6 +541,7 @@ fn main() {
             cx,
         );
         bongos_linear::init(cx);
+        bongos_linear::init_client(cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 

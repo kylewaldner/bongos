@@ -1525,9 +1525,9 @@ impl Editor {
         self.last_selection_from_search = effects.from_search;
         window.invalidate_character_coordinates();
 
-        // Copy selections to primary selection buffer
+        // Copy selections to primary selection buffer, never from a masked (secret) editor
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if local {
+        if local && !self.display_map.read(cx).masked {
             let selections = self
                 .selections
                 .all::<MultiBufferOffset>(&self.display_snapshot(cx));

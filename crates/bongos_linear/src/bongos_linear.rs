@@ -7,7 +7,10 @@
 //! bound to these actions yet; they are reached from the command palette.
 
 mod actions;
+pub(crate) mod client;
+pub mod dump;
 mod settings;
+pub mod sync;
 pub mod token;
 
 use ::settings::Settings as _;
@@ -19,12 +22,28 @@ pub use actions::{
 };
 pub use settings::LinearSettings;
 
-/// Registers the `linear` settings. Call before [`init_palette`].
+/// Registers the `linear` settings and creates the sync. Call before [`init_palette`].
 pub fn init(cx: &mut App) {
     LinearSettings::register(cx);
+    sync::install(cx);
+}
+
+/// Installs the client that talks to Linear over the application's HTTP client. Call once the
+/// HTTP client is set. Until then `linear: set token` cannot check a token and says so.
+pub fn init_client(cx: &mut App) {
+    token::install_client_factory(
+        client::http_factory(cx.http_client(), cx.background_executor().clone()),
+        cx,
+    );
 }
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod client_tests;
+#[cfg(test)]
+mod dump_tests;
+#[cfg(test)]
+mod sync_tests;
 #[cfg(test)]
 mod token_tests;
