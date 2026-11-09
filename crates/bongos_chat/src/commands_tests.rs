@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bongos_chat_model::{
-    Agent, ChatRecord, Layout, NamedBy, project_slug, read_record, record_path, write_record,
+    Agent, ChatRecord, LaunchKind, Layout, NamedBy, project_slug, read_record, record_path,
+    write_record,
 };
 use bongos_work::Repository;
 use bongos_work_model::store::{WorkTree, load};
@@ -23,11 +24,14 @@ use tempfile::TempDir;
 use workspace::notifications::NotificationId;
 use workspace::{MultiWorkspace, Workspace};
 
-use crate::commands::{ChatPlan, open_chat, resume_chat, start_chat};
-use crate::runtime_tests::{Harness, STARTUP, WITHIN, harness, wait_for, write};
+use crate::commands::{ChatPlan, open_chat, resume_chat, runtime_dir_of, start_chat};
+use crate::launch::prepare;
+use crate::runtime_tests::{
+    Harness, STARTUP, WITHIN, claude_caps, codex_caps, harness, wait_for, write,
+};
 use crate::{
-    ChatPanel, ChatRuntime, ChatState, ChatToast, Cleanup, CwdSource, HealthState, KeepReason,
-    START_FIRST, agent_choices, cleanup_verdict, init_panel, list_types, resolve_scope,
+    AgentCommand, ChatPanel, ChatRuntime, ChatState, ChatToast, Cleanup, CwdSource, HealthState,
+    KeepReason, START_FIRST, agent_choices, cleanup_verdict, init_panel, list_types, resolve_scope,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -537,7 +541,7 @@ pub(super) fn records_in(scope: &Path) -> Vec<ChatRecord> {
 
 /// Adds the tasks of [`seed_tree`] to the harness's tree as the project `billing`, sets
 /// `work.repositories`, and waits for the work store to see them.
-async fn add_tasks(h: &Harness, cx: &mut TestAppContext) {
+pub(super) async fn add_tasks(h: &Harness, cx: &mut TestAppContext) {
     let extra = h.base.join("extra");
     let root = seed_tree(&extra);
     // Move the extra project in beside the harness's own one.
@@ -576,7 +580,12 @@ async fn add_tasks(h: &Harness, cx: &mut TestAppContext) {
     .await;
 }
 
-fn plan_for(task_id: &str, chat_type: &str, agent: Agent, cx: &mut TestAppContext) -> ChatPlan {
+pub(super) fn plan_for(
+    task_id: &str,
+    chat_type: &str,
+    agent: Agent,
+    cx: &mut TestAppContext,
+) -> ChatPlan {
     let scope = cx.update(|cx| {
         let tree = bongos_work::WorkStore::global(cx)
             .unwrap()
@@ -1111,6 +1120,9 @@ async fn test_the_commands_dispatch_by_name_and_say_when_off(cx: &mut TestAppCon
         "chat::Next",
         "chat::Previous",
         "chat::Close",
+        "chat::Fork",
+        "chat::ForkToTask",
+        "chat::ForkToTaskAs",
     ] {
         workspace.update(cx, |workspace, cx| workspace.clear_all_notifications(cx));
         dispatch(cx, name);
@@ -1142,4 +1154,144 @@ async fn test_open_any_lists_every_task_and_open_says_when_none(cx: &mut TestApp
         shown(&workspace, cx).as_deref() == Some(id.as_str())
     })
     .await;
+}
+
+#[test]
+fn test_a_launch_directory_is_named_only_by_one_plain_component() {
+    let root = Path::new("/chats/runtime");
+    assert_eq!(runtime_dir_of(root, "abc-123"), Some(root.join("abc-123")));
+    for bad in ["..", "a/b", ".", "", "foo/", "/abs", "../x", "x/.."] {
+        assert_eq!(runtime_dir_of(root, bad), None, "{bad:?}");
+    }
+}
+
+/// The session id a launch of `kind` gives a record that has none.
+fn given_session(
+    h: &Harness,
+    agent: Agent,
+    kind: LaunchKind,
+    session: Option<&str>,
+) -> Option<String> {
+    let mut request = h.request(agent, "plan");
+    request.kind = kind;
+    request.record.session_id = session.map(str::to_string);
+    let (command, caps) = match agent {
+        Agent::Claude => ("claude", claude_caps()),
+        Agent::Codex => ("codex", codex_caps()),
+    };
+    let command = AgentCommand {
+        command: command.to_string(),
+        extra_args: Vec::new(),
+    };
+    prepare(&request, &h.runtime_root, &h.home, &command, &caps)
+        .unwrap()
+        .record
+        .session_id
+}
+
+#[gpui::test]
+async fn test_only_a_new_or_forked_claude_chat_is_given_a_session_id(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let source = "8c1e4f8a-0000-4000-8000-000000000010";
+    let fork = |native| LaunchKind::Fork {
+        source_session: source.to_string(),
+        native,
+    };
+    let is_uuid = |id: &Option<String>| {
+        id.as_deref()
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    };
+    // A new chat and a fork (native or handoff) choose their own id.
+    assert!(is_uuid(&given_session(
+        &h,
+        Agent::Claude,
+        LaunchKind::New,
+        None
+    )));
+    for native in [true, false] {
+        let own = given_session(&h, Agent::Claude, fork(native), None);
+        assert!(is_uuid(&own));
+        assert_ne!(
+            own.as_deref(),
+            Some(source),
+            "a fork never takes the source's id"
+        );
+    }
+    // An id already there stays, whatever the kind.
+    let kept = Some("8c1e4f8a-0000-4000-8000-000000000011");
+    for kind in [LaunchKind::New, LaunchKind::Resume, fork(true)] {
+        assert_eq!(
+            given_session(&h, Agent::Claude, kind, kept).as_deref(),
+            kept.as_deref()
+        );
+    }
+    // A resume with none stored never makes one up.
+    assert_eq!(
+        given_session(&h, Agent::Claude, LaunchKind::Resume, None),
+        None
+    );
+    // Codex reports its id in its own files: none is chosen.
+    for kind in [LaunchKind::New, LaunchKind::Resume, fork(true), fork(false)] {
+        assert_eq!(given_session(&h, Agent::Codex, kind, None), None);
+    }
+}
+
+#[gpui::test]
+async fn test_a_refused_launch_removes_the_record_only_when_sure_nothing_was_said(
+    cx: &mut TestAppContext,
+) {
+    let h = harness(cx, true, 60, &[]).await;
+    cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
+    std::fs::create_dir_all(h.home.join(".codex/sessions")).unwrap();
+    std::fs::create_dir_all(h.home.join(".claude/projects")).unwrap();
+    wait_for(cx, "the task in the tree", STARTUP, |cx| {
+        h.work.read_with(cx, |work, _| {
+            work.snapshot()
+                .is_some_and(|tree| tree.task_by_id("t1").is_some())
+        })
+    })
+    .await;
+    // Both CLIs are gone, so every launch is refused.
+    let missing = h.base.join("no-such-cli").to_string_lossy().into_owned();
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |content| {
+                let agents = content
+                    .chats
+                    .get_or_insert_default()
+                    .agents
+                    .get_or_insert_default();
+                agents.claude.get_or_insert_default().command = Some(missing.clone());
+                agents.codex.get_or_insert_default().command = Some(missing.clone());
+            });
+        });
+    });
+    let health = cx.update(|cx| crate::ChatHealth::global(cx).unwrap());
+    wait_for(cx, "both CLIs not found", STARTUP, |cx| {
+        health.read_with(cx, |health, _| {
+            health
+                .all()
+                .iter()
+                .all(|health| health.state == HealthState::NotFound)
+        })
+    })
+    .await;
+    let projects = vec![h.project.clone()];
+
+    // Codex: no session id was captured and none is found; the record that never ran is removed.
+    let plan = plan_for("t1", "plan", Agent::Codex, cx);
+    let started = cx.update(|cx| start_chat(plan, projects.clone(), cx)).await;
+    assert!(started.is_err());
+    assert!(records_in(&h.scope).is_empty());
+    assert!(
+        !h.runtime_root.exists() || std::fs::read_dir(&h.runtime_root).unwrap().next().is_none()
+    );
+
+    // Claude: the record has no session id to look a transcript up by, so it is unsure and kept.
+    let plan = plan_for("t1", "plan", Agent::Claude, cx);
+    let started = cx.update(|cx| start_chat(plan, projects, cx)).await;
+    assert!(started.is_err());
+    let kept = records_in(&h.scope);
+    assert_eq!(kept.len(), 1);
+    assert!(!kept[0].prompted);
 }

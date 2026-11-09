@@ -98,9 +98,19 @@ pub fn cleanup_verdict(
 }
 
 /// Whether Claude Code keeps a transcript of `session` run in `cwd`: `None` when its projects
-/// directory is not there or a lookup failed. The directory is looked up for `cwd` as written and
-/// as resolved, since either can name it.
+/// directory is not there or a lookup failed.
 fn claude_transcript_exists(home: &Path, cwd: &Path, session: &str) -> Option<bool> {
+    claude_transcript(home, cwd, session).map(|found| found.is_some())
+}
+
+/// The transcript file of the Claude Code `session` run in `cwd`: `Some(None)` when there is none,
+/// `None` when its projects directory is not there or a lookup failed. The directory is looked up
+/// for `cwd` as written and as resolved, since either can name it.
+pub(crate) fn claude_transcript(home: &Path, cwd: &Path, session: &str) -> Option<Option<PathBuf>> {
+    // The id is one file name; anything else is not looked up.
+    if session.is_empty() || session.starts_with('.') || session.contains(['/', '\\', '\0']) {
+        return None;
+    }
     let projects = home.join(".claude").join("projects");
     if !projects.is_dir() {
         return None;
@@ -116,10 +126,10 @@ fn claude_transcript_exists(home: &Path, cwd: &Path, session: &str) -> Option<bo
             .join(project_slug(&cwd))
             .join(format!("{session}.jsonl"));
         match std::fs::symlink_metadata(&transcript) {
-            Ok(_) => return Some(true),
+            Ok(_) => return Some(Some(transcript)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(_) => return None,
         }
     }
-    Some(false)
+    Some(None)
 }
