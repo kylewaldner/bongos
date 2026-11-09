@@ -30,9 +30,11 @@ export CARGO_HOME="$BONGOS_WORKSPACE/cargo"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BONGOS_WORKSPACE/target}"
 if [ -z "${BONGOS_TMPDIR:-}" ] && [ -f "$HOME/.config/bongos-dev/tmpdir" ]; then
   IFS= read -r BONGOS_TMPDIR <"$HOME/.config/bongos-dev/tmpdir" || true
+  BONGOS_TMPDIR=${BONGOS_TMPDIR%$'\r'}
 fi
 if [ -z "${BONGOS_SMOKE_SCRATCH:-}" ] && [ -f "$HOME/.config/bongos-dev/smoke-scratch" ]; then
   IFS= read -r BONGOS_SMOKE_SCRATCH <"$HOME/.config/bongos-dev/smoke-scratch" || true
+  BONGOS_SMOKE_SCRATCH=${BONGOS_SMOKE_SCRATCH%$'\r'}
 fi
 # A directory chosen by the environment or a config file must already exist (the drive may be unmounted).
 _bongos_need_dir() {
