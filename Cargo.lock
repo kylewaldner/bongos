@@ -2217,6 +2217,7 @@ name = "bongos_builder_model"
 version = "0.1.0"
 dependencies = [
  "bongos_work_model",
+ "sha2",
 ]
 
 [[package]]

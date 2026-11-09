@@ -8,7 +8,7 @@ use bongos_work_model::graph::child_order;
 use bongos_work_model::layout::PROPOSALS_DIR;
 use bongos_work_model::rules::{EdgeKind, role_name};
 use bongos_work_model::store::{Task, WorkTree};
-use bongos_work_model::{TaskId, TodoState, UnblockPoint};
+use bongos_work_model::{ResultKind, ResultState, TaskId, TodoState, UnblockPoint};
 
 use crate::grammar::{kind_name, unblock_name};
 
@@ -16,19 +16,102 @@ use crate::grammar::{kind_name, unblock_name};
 pub const COMMENT: &str = "# bongos task proposal. Lines starting with # are comments. \
     The format is in ~/.bongos/task-builder/format.txt";
 
-/// The work that is running now. Later steps define where it comes from; the printer only asks
-/// which tasks have some.
+/// The work that is running now, collected by the app just before a print or a diff: the tasks
+/// with an open chat or an active run (feature 03's live modes). A task's worktree, branch and
+/// open PR are read from its own file, so they are not listed here; [`LiveSet::sources`] reports
+/// all of them together.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveSet {
-    /// The ids of tasks with a running chat, workflow run or worktree.
+    /// The ids of tasks with running work whose source is not known (a chat or a run).
     pub running: BTreeSet<TaskId>,
+    /// The ids of tasks with an open chat.
+    pub chats: BTreeSet<TaskId>,
+    /// The ids of tasks with an active run.
+    pub runs: BTreeSet<TaskId>,
+}
+
+/// One reason a task counts as live: work on it must not be disturbed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LiveSource {
+    Worktree,
+    Branch,
+    OpenPr,
+    Chat,
+    Run,
+    /// Running work of a source the collector did not say.
+    Running,
+}
+
+impl LiveSource {
+    /// The words the preview shows after the task's name, such as `has a running chat`.
+    pub fn reason(self) -> &'static str {
+        match self {
+            LiveSource::Worktree => "has a worktree",
+            LiveSource::Branch => "has a branch",
+            LiveSource::OpenPr => "has an open PR",
+            LiveSource::Chat => "has a running chat",
+            LiveSource::Run => "has a running run",
+            LiveSource::Running => "has running work",
+        }
+    }
 }
 
 impl LiveSet {
+    /// Records an open chat on the task `id`.
+    pub fn add_chat(&mut self, id: impl Into<TaskId>) {
+        self.chats.insert(id.into());
+    }
+
+    /// Records an active run on the task `id`.
+    pub fn add_run(&mut self, id: impl Into<TaskId>) {
+        self.runs.insert(id.into());
+    }
+
+    /// Whether a chat or a run is going on the task `id` itself.
+    pub fn has_running_work(&self, id: &str) -> bool {
+        self.chats.contains(id) || self.runs.contains(id) || self.running.contains(id)
+    }
+
+    /// Why `task` itself is live, in a fixed order: its worktree, branch and open or approved PR
+    /// from its file, then a running chat or run from this set. Empty when it is not live.
+    pub fn sources(&self, task: &Task) -> Vec<LiveSource> {
+        let mut sources = Vec::new();
+        if let Some(file) = &task.file {
+            if file.worktree.is_some() {
+                sources.push(LiveSource::Worktree);
+            }
+            if file.branch.is_some() {
+                sources.push(LiveSource::Branch);
+            }
+            let open_pr = file.result.as_ref().is_some_and(|result| {
+                matches!(result.kind, ResultKind::Pr | ResultKind::Prs)
+                    && matches!(
+                        result.state,
+                        Some(ResultState::Open) | Some(ResultState::Approved)
+                    )
+            });
+            if open_pr {
+                sources.push(LiveSource::OpenPr);
+            }
+        }
+        if let Some(id) = task.id() {
+            if self.chats.contains(id) {
+                sources.push(LiveSource::Chat);
+            }
+            if self.runs.contains(id) {
+                sources.push(LiveSource::Run);
+            }
+            if self.running.contains(id) && !self.chats.contains(id) && !self.runs.contains(id) {
+                sources.push(LiveSource::Running);
+            }
+        }
+        sources
+    }
+
     fn touches(&self, task: &Task) -> bool {
         task.walk()
             .iter()
-            .any(|descendant| descendant.id().is_some_and(|id| self.running.contains(id)))
+            .any(|descendant| descendant.id().is_some_and(|id| self.has_running_work(id)))
     }
 }
 
