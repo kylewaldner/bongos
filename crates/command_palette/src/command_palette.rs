@@ -15,7 +15,7 @@ use command_palette_hooks::{
 use fuzzy_nucleo::{StringMatch, StringMatchCandidate};
 use gpui::{
     Action, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    ParentElement, Render, Styled, Task, TaskExt, WeakEntity, Window,
+    ParentElement, Render, SharedString, Styled, Task, TaskExt, WeakEntity, Window,
 };
 use persistence::CommandPaletteDB;
 use picker::Direction;
@@ -32,7 +32,14 @@ pub fn init(cx: &mut App) {
     cx.observe_new(CommandPalette::register).detach();
 }
 
-impl ModalView for CommandPalette {}
+/// The name the palette is routed by in `minibuffer.enabled_for`.
+pub const MINIBUFFER_NAME: &str = "command_palette";
+
+impl ModalView for CommandPalette {
+    fn minibuffer_name(&self) -> Option<&'static str> {
+        Some(MINIBUFFER_NAME)
+    }
+}
 
 pub struct CommandPalette {
     picker: Entity<Picker<CommandPaletteDelegate>>,
@@ -124,11 +131,17 @@ impl CommandPalette {
         );
 
         let picker = cx.new(|cx| {
-            let picker = Picker::uniform_list(delegate, window, cx);
+            let picker = Picker::uniform_list(delegate, window, cx).minibuffer(MINIBUFFER_NAME, cx);
             picker.set_query(query, window, cx);
             picker
         });
         Self { picker }
+    }
+
+    /// The picker the palette shows, for tests in other crates.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn picker(&self) -> &Entity<Picker<CommandPaletteDelegate>> {
+        &self.picker
     }
 
     pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -380,6 +393,15 @@ impl PickerDelegate for CommandPaletteDelegate {
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
         "Execute a command...".into()
+    }
+
+    fn prompt_label(&self, _cx: &App) -> Option<SharedString> {
+        Some("M-x ".into())
+    }
+
+    fn match_text(&self, ix: usize) -> Option<String> {
+        let candidate_id = self.matches.get(ix)?.candidate_id;
+        Some(self.commands.get(candidate_id)?.name.clone())
     }
 
     fn select_history(

@@ -149,6 +149,8 @@ mod focus_tests;
 #[cfg(test)]
 mod hint_tests;
 #[cfg(test)]
+mod palette_tests;
+#[cfg(test)]
 mod prompts_tests;
 #[cfg(test)]
 mod session_tests;
