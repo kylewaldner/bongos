@@ -231,14 +231,19 @@ pub fn new_oneoff(tree: &WorkTree, ctx: &Context, activity: &str, new: NewTask) 
     })
 }
 
-/// `task: edit`: goal, kind and repository. The directory keeps its slug, so artifacts, chats and
+/// `task: edit`: goal, kind and repository. A goal that comes from Linear
+/// ([`rules::goal_locked`]) is refused; kind and repository stay editable. The directory keeps its slug, so artifacts, chats and
 /// the worktree stay where they are.
 pub fn edit(tree: &WorkTree, ctx: &Context, id: &str, edit: TaskEdit) -> Outcome {
     edit_task(tree, ctx, id, |place, file| {
         let mut changed = Vec::new();
         if let Some(goal) = &edit.goal {
             let goal = check_goal(goal)?;
+            // Setting a locked goal to what it already is changes nothing, so it is not refused.
             if goal != file.goal {
+                if let Some(reason) = rules::goal_locked(file) {
+                    return Err(reason);
+                }
                 changed.push(format!("goal: {:?} -> {goal:?}", file.goal));
                 file.goal = goal.to_string();
             }

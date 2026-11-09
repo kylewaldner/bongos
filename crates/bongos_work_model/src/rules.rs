@@ -21,6 +21,67 @@ use crate::types::{Kind, ResultKind, Status, TaskFile, TaskResult, Todo, TodoRol
 /// Why a command was refused, in words the UI shows as they are.
 pub type Refusal = String;
 
+/// Why the goal of `file` cannot be changed here, or `None` when it can. A synced link (`linear`
+/// and `linear_state` both set) takes its title from Linear. An unlinked task, a hand-set
+/// `linear` alone and a pending create (`linear_state` without `linear`) keep an editable goal.
+pub fn goal_locked(file: &TaskFile) -> Option<Refusal> {
+    let identifier = file.linear.as_deref()?;
+    file.linear_state.as_ref()?;
+    Some(format!(
+        "the title comes from Linear ({identifier}); change it there or run task: open in linear"
+    ))
+}
+
+/// The branch name for a leaf with a synced Linear link: the one implementation, which the
+/// worktree code and the Linear context text both call.
+///
+/// The identifier is lowercased. A `template` without `{linear}` (the default is `{slug}`) gets
+/// `<id>-` in front of its last path segment, so `{slug}` gives `seq-121-proration-engine` and
+/// `kyle/{slug}` gives `kyle/seq-121-proration-engine`. A template with `{linear}` expands it
+/// and `{slug}` as given.
+pub fn linear_branch_segment(identifier: &str, template: &str, slug: &str) -> String {
+    let identifier = identifier.to_lowercase();
+    if template.contains("{linear}") {
+        return template
+            .replace("{slug}", slug)
+            .replace("{linear}", &identifier);
+    }
+    let expanded = template.replace("{slug}", slug);
+    match expanded.rsplit_once('/') {
+        Some((head, last)) => format!("{head}/{identifier}-{last}"),
+        None => format!("{identifier}-{expanded}"),
+    }
+}
+
+/// Template, slug, identifier and the branch they give, for the tests of every caller of
+/// [`linear_branch_segment`] to share.
+pub const LINEAR_BRANCH_VECTOR: [(&str, &str, &str, &str); 4] = [
+    (
+        "SEQ-121",
+        "{slug}",
+        "proration-engine",
+        "seq-121-proration-engine",
+    ),
+    (
+        "SEQ-121",
+        "kyle/{slug}",
+        "proration-engine",
+        "kyle/seq-121-proration-engine",
+    ),
+    (
+        "SEQ-121",
+        "{linear}-{slug}",
+        "proration-engine",
+        "seq-121-proration-engine",
+    ),
+    (
+        "SEQ-121",
+        "kyle/{linear}/{slug}",
+        "proration-engine",
+        "kyle/seq-121/proration-engine",
+    ),
+];
+
 /// The two kinds of ordering edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EdgeKind {

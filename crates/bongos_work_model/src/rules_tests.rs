@@ -428,3 +428,51 @@ fn stacked_tasks_keep_their_roles() {
         todo_set_role(moved, &ctx(), &a, 1, Some(TodoRole::Ships))
     });
 }
+
+fn linked(identifier: Option<&str>, state: Option<LinearState>) -> TaskFile {
+    let mut file = TaskFile::new("Proration engine", Kind::PrShip);
+    file.linear = identifier.map(str::to_string);
+    file.linear_state = state;
+    file
+}
+
+#[test]
+fn goal_locked_only_for_a_synced_link() {
+    let state = || LinearState {
+        issue_id: "6f0c".to_string(),
+        ..LinearState::default()
+    };
+    assert_eq!(
+        rules::goal_locked(&linked(Some("SEQ-121"), Some(state()))).as_deref(),
+        Some("the title comes from Linear (SEQ-121); change it there or run task: open in linear")
+    );
+    // Unlinked, a hand-set identifier alone, and a pending create keep an editable goal.
+    assert_eq!(rules::goal_locked(&linked(None, None)), None);
+    assert_eq!(rules::goal_locked(&linked(Some("SEQ-121"), None)), None);
+    let pending = LinearState {
+        pending_create: Some("3d2e".to_string()),
+        ..LinearState::default()
+    };
+    assert_eq!(rules::goal_locked(&linked(None, Some(pending))), None);
+}
+
+#[test]
+fn linear_branch_segment_follows_the_template() {
+    for (identifier, template, slug, branch) in rules::LINEAR_BRANCH_VECTOR {
+        assert_eq!(
+            rules::linear_branch_segment(identifier, template, slug),
+            branch,
+            "{template}"
+        );
+    }
+    // Lowercased whatever the case it came in.
+    assert_eq!(
+        rules::linear_branch_segment("seq-121", "{slug}", "x"),
+        "seq-121-x"
+    );
+    // A template with no `{slug}` still gets the prefix on its last segment.
+    assert_eq!(
+        rules::linear_branch_segment("SEQ-1", "team/fixed", "x"),
+        "team/seq-1-fixed"
+    );
+}

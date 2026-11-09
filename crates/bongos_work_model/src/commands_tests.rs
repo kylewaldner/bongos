@@ -227,6 +227,47 @@ fn close_drop_and_reopen() {
 }
 
 #[test]
+fn edit_refuses_a_goal_that_comes_from_linear() {
+    let mut a = pr_ship("a");
+    file_mut(&mut a).linear = Some("SEQ-121".to_string());
+    file_mut(&mut a).linear_state = Some(LinearState::default());
+    let t = tree(vec![a]);
+    let a = id_of(&t, "a");
+    let goal = |text: &str| TaskEdit {
+        goal: Some(text.to_string()),
+        ..TaskEdit::default()
+    };
+    assert_eq!(
+        refusal(edit(&t, &ctx(), &a, goal("Renamed"))),
+        "the title comes from Linear (SEQ-121); change it there or run task: open in linear"
+    );
+    // The same goal changes nothing, so it is not a refusal of the goal; kind and repository
+    // stay editable.
+    let change = edit(
+        &t,
+        &ctx(),
+        &a,
+        TaskEdit {
+            goal: Some("a".to_string()),
+            kind: Some(Kind::PrMerge),
+            repository: Some(Some("billing".to_string())),
+        },
+    )
+    .unwrap();
+    let file = change.file().unwrap();
+    assert_eq!(file.goal, "a");
+    assert_eq!(file.kind, Kind::PrMerge);
+    assert_eq!(file.repository.as_deref(), Some("billing"));
+    assert!(file.linear_state.is_some());
+    // A hand-set identifier alone does not lock the goal.
+    let mut hand = pr_ship("b");
+    file_mut(&mut hand).linear = Some("SEQ-9".to_string());
+    let t = tree(vec![hand]);
+    let b = id_of(&t, "b");
+    assert!(edit(&t, &ctx(), &b, goal("Renamed")).is_ok());
+}
+
+#[test]
 fn edit_changes_fields_and_keeps_the_slug() {
     let t = tree(vec![pr_ship("a")]);
     let a = id_of(&t, "a");

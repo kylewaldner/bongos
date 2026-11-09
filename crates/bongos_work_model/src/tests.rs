@@ -668,3 +668,133 @@ fn proposal_file_is_numbered_under_proposals() {
     // Not a reserved name, so it is listed like any artifact directory.
     assert!(!is_reserved(PROPOSALS_DIR));
 }
+
+fn linked_state() -> LinearState {
+    LinearState {
+        issue_id: "6f0c8a1e-2b9c-4c55-9d1a-0e7f3c2b8a41".to_string(),
+        team_id: "0a1b".to_string(),
+        url: "https://linear.app/sequence/issue/SEQ-121/proration-engine".to_string(),
+        description: "Prorate\nby the day.".to_string(),
+        started_sent: Some("2026-11-09T12:00:00Z".parse().unwrap()),
+        cancel: Some(LinearCancel::Declined),
+        pending_create: Some("3d2e".to_string()),
+        dismissed: vec!["SEQ-127".to_string()],
+        declined: vec!["0196f1c2-aaaa".to_string()],
+        offered: vec![
+            LinearOffered {
+                root: "0196f1c2-bbbb".to_string(),
+                number: 2,
+                hash: "9f86d081".to_string(),
+                extra: Extra::new(),
+            },
+            LinearOffered {
+                root: "0196f1c2-cccc".to_string(),
+                number: 3,
+                hash: "00".to_string(),
+                extra: Extra::new(),
+            },
+        ],
+        extra: Extra::new(),
+    }
+}
+
+#[test]
+fn files_without_the_linear_state_serialize_without_it_and_are_stable() {
+    let mut fixtures = vec![
+        parse_task(LEAF).unwrap(),
+        parse_task(GROUP).unwrap(),
+        leaf(),
+        crate::fixtures::pr_ship("a").file.unwrap(),
+        TaskFile::new("plain", Kind::Other),
+    ];
+    // Files a command writes (feature 03's writers), with a proposal and history around.
+    let tree = crate::fixtures::tree(vec![crate::fixtures::pr_ship("a")]);
+    let change = crate::commands::new_task(
+        &tree,
+        &crate::fixtures::ctx(),
+        crate::commands::Placement::Under(crate::fixtures::id_of(&tree, "a")),
+        crate::commands::NewTask {
+            goal: "Child".to_string(),
+            ..Default::default()
+        },
+    );
+    fixtures.extend(change.ok().and_then(|change| change.file().cloned()));
+    for file in fixtures {
+        assert_eq!(file.linear_state, None);
+        let written = serialize_task(&file).unwrap();
+        assert!(!written.contains("linear_state"), "{written}");
+        assert_eq!(
+            serialize_task(&parse_task(&written).unwrap()).unwrap(),
+            written
+        );
+    }
+}
+
+#[test]
+fn linear_state_round_trips_and_sits_between_proposals_and_history() {
+    let mut file = parse_task(LEAF).unwrap();
+    file.proposals.push(ProposalRecord {
+        number: 1,
+        state: ProposalState::Applied,
+        at: "2026-11-09T12:00:00Z".parse().unwrap(),
+        by: "agent".to_string(),
+        hash: "00".to_string(),
+        extra: Extra::new(),
+    });
+    file.linear_state = Some(linked_state());
+    let written = serialize_task(&file).unwrap();
+    for expected in [
+        "[linear_state]",
+        "[[linear_state.offered]]",
+        "started_sent = 2026-11-09T12:00:00Z",
+        "cancel = \"declined\"",
+        "pending_create = \"3d2e\"",
+        "dismissed = [\"SEQ-127\"]",
+    ] {
+        assert!(written.contains(expected), "{expected} missing: {written}");
+    }
+    let position = |needle: &str| written.find(needle).unwrap();
+    assert!(position("[[proposals]]") < position("[linear_state]"));
+    assert!(position("[[linear_state.offered]]") < position("[[history]]"));
+    let parsed = parse_task(&written).unwrap();
+    assert_eq!(parsed, file);
+    assert_eq!(serialize_task(&parsed).unwrap(), written);
+}
+
+#[test]
+fn linear_state_omits_empty_fields_and_keeps_unknown_keys() {
+    let mut file = parse_task(GROUP).unwrap();
+    file.linear = Some("SEQ-121".to_string());
+    file.linear_state = Some(LinearState {
+        issue_id: "6f0c".to_string(),
+        ..LinearState::default()
+    });
+    let written = serialize_task(&file).unwrap();
+    assert!(
+        written.contains("[linear_state]\nissue_id = \"6f0c\"\n"),
+        "{written}"
+    );
+    for absent in [
+        "team_id",
+        "url",
+        "description",
+        "started_sent",
+        "cancel",
+        "pending_create",
+        "dismissed",
+        "declined",
+        "offered",
+    ] {
+        assert!(!written.contains(absent), "{absent} written: {written}");
+    }
+    let future = written.replace("[linear_state]\n", "[linear_state]\nfuture = \"kept\"\n");
+    let parsed = parse_task(&future).unwrap();
+    let state = parsed.linear_state.as_ref().unwrap();
+    assert_eq!(state.extra.get("future").unwrap().as_str(), Some("kept"));
+    assert!(parsed.extra.is_empty());
+    assert!(
+        serialize_task(&parsed)
+            .unwrap()
+            .contains("future = \"kept\"")
+    );
+}
