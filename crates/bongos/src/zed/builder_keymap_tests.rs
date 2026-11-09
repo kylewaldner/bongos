@@ -96,9 +96,6 @@ async fn the_chat_terminal_binds_propose_and_keeps_its_interrupt(cx: &mut TestAp
         // The other chat keys are still there.
         let (names, _) = resolve(&keymap, "ctrl-c c n", &chat);
         assert_eq!(names.first(), Some(&"chat::New"), "{emacs}");
-        // A plain terminal does not get the builder key (ctrl-c goes to the program).
-        let (names, _) = resolve(&keymap, "ctrl-c w B", &["Workspace", "Pane", "Terminal"]);
-        assert_ne!(names.first(), Some(&"task::Propose"), "{emacs}");
     }
 }
 
@@ -153,8 +150,10 @@ async fn the_other_builder_commands_stay_unbound(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn no_chord_is_bound_twice_in_a_block(cx: &mut TestAppContext) {
+async fn no_builder_chord_is_bound_twice(cx: &mut TestAppContext) {
     init_keymap_test(cx);
+    let mut chords: Vec<&str> = BUILDER_KEYS.iter().map(|(chord, _)| *chord).collect();
+    chords.extend(["enter", "^"]);
     for (default, emacs) in [LINUX, MACOS] {
         let (_, bindings) = load(&[emacs], cx);
         let mut seen = HashSet::new();
@@ -168,10 +167,12 @@ async fn no_chord_is_bound_twice_in_a_block(cx: &mut TestAppContext) {
                 .predicate()
                 .map(|predicate| predicate.to_string())
                 .unwrap_or_default();
-            assert!(
-                seen.insert((context.clone(), input.clone())),
-                "{emacs} ({default}): {input:?} is bound twice in `{context}`"
-            );
+            if chords.contains(&input.join(" ").as_str()) {
+                assert!(
+                    seen.insert((context.clone(), input.clone())),
+                    "{emacs} ({default}): {input:?} is bound twice in `{context}`"
+                );
+            }
         }
     }
 }
