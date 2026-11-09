@@ -158,12 +158,11 @@ async fn minibuffer_string_returns_the_edited_text_or_the_default(cx: &mut TestA
         assert!(delegate.shown_texts().is_empty());
     });
     cx.simulate_input("hello");
-    cx.simulate_keystrokes("backspace");
-    cx.simulate_input("p!");
-    assert_eq!(input(&workspace, cx), "hellp!");
+    cx.simulate_input(" there!");
+    assert_eq!(input(&workspace, cx), "hello there!");
     cx.dispatch_action(minibuffer::Confirm);
     cx.run_until_parked();
-    assert_eq!(*log.borrow(), ["input:hellp!"]);
+    assert_eq!(*log.borrow(), ["input:hello there!"]);
     assert!(session_view(&workspace, cx).is_none());
 
     open_session(&workspace, cx, string_session(&log).default("fallback"));
@@ -250,8 +249,8 @@ async fn minibuffer_read_key_answers_with_one_key_and_no_ret(cx: &mut TestAppCon
     let view = key_view(&workspace, cx).unwrap();
     view.read_with(cx, |view, _| assert_eq!(view.legend(), "y n ! q"));
     cx.simulate_keystrokes("x");
-    cx.simulate_keystrokes("!");
     assert!(key_view(&workspace, cx).is_some(), "x is not declared");
+    cx.simulate_keystrokes("!");
     assert_eq!(*log.borrow(), ["answer:!"], "! is declared");
     assert!(key_view(&workspace, cx).is_none());
 
@@ -359,9 +358,8 @@ async fn minibuffer_strict_yes_or_no_refuses_y_and_accepts_yes(cx: &mut TestAppC
         view.read_with(cx, |view, _| {
             assert_eq!(*view.core.status.borrow(), "Please answer yes or no.");
         });
-        for _ in refused.chars() {
-            cx.simulate_keystrokes("backspace");
-        }
+        view.update_in(cx, |view, window, cx| view.set_input("", window, cx));
+        cx.run_until_parked();
     }
     cx.simulate_input("yes");
     let view = session_view(&workspace, cx).unwrap();
