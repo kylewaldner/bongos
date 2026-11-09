@@ -245,6 +245,7 @@ impl TokenModal {
         Self { editor, workspace }
     }
 
+    #[cfg(test)]
     pub(crate) fn editor(&self) -> &Entity<Editor> {
         &self.editor
     }
