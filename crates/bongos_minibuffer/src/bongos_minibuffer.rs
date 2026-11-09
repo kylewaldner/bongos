@@ -6,6 +6,7 @@
 //! active minibuffer".
 
 mod history_store;
+mod prompts;
 mod session;
 mod session_view;
 mod settings;
@@ -17,6 +18,7 @@ use gpui::{App, BorrowAppContext as _, Context, Window};
 use workspace::{MinibufferMessageKind, MinibufferRouting, ModalLayer};
 
 pub use history_store::{HISTORY_NAMESPACE, HistoryStore};
+pub use prompts::{ReadKey, ReadKeyView, read_key, strict_yes_or_no, yes_or_no};
 pub use session::{
     Candidate, DynamicSource, Outcome, Preview, Session, SessionHandle, Source, Value, open,
 };
@@ -136,6 +138,8 @@ fn register_actions(cx: &mut App) {
 
 #[cfg(test)]
 mod focus_tests;
+#[cfg(test)]
+mod prompts_tests;
 #[cfg(test)]
 mod session_tests;
 #[cfg(test)]

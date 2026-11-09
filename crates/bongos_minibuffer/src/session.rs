@@ -105,6 +105,8 @@ pub(crate) type PreviewHandler = Rc<dyn Fn(Preview, &mut Window, &mut App)>;
 pub(crate) type InputHandler = Rc<dyn Fn(&str, &SessionHandle, &mut Window, &mut App)>;
 pub(crate) type ConfirmHandler = Box<dyn FnOnce(Outcome, &mut Window, &mut App)>;
 pub(crate) type CancelHandler = Box<dyn FnOnce(&mut Window, &mut App)>;
+/// Decides whether free input may be answered as it is, for a session that refuses some of it.
+pub(crate) type InputCheck = Rc<dyn Fn(&str) -> bool>;
 pub(crate) type ActionHandler = Rc<dyn Fn(Value, &mut Window, &mut App)>;
 
 /// An entry of the M-o menu: it answers the session in place of `on_confirm`, with the selected
@@ -123,6 +125,7 @@ pub struct Session {
     initial_input: String,
     default: Option<String>,
     free_input: bool,
+    accept: Option<(InputCheck, SharedString)>,
     history: String,
     key_context: Option<KeyContext>,
     actions: Vec<SessionAction>,
@@ -144,6 +147,7 @@ impl Session {
             initial_input: String::new(),
             default: None,
             free_input: false,
+            accept: None,
             history: host.to_string(),
             key_context: None,
             actions: Vec::new(),
@@ -175,6 +179,18 @@ impl Session {
     /// time (C-j).
     pub fn free_input(mut self, free_input: bool) -> Self {
         self.free_input = free_input;
+        self
+    }
+
+    /// Free input is answered only when `accept` approves it (after an empty input became the
+    /// default). Otherwise the session stays open and shows `refusal` after the input, until the
+    /// input changes.
+    pub fn accept(
+        mut self,
+        accept: impl Fn(&str) -> bool + 'static,
+        refusal: impl Into<SharedString>,
+    ) -> Self {
+        self.accept = Some((Rc::new(accept), refusal.into()));
         self
     }
 
@@ -260,6 +276,9 @@ pub(crate) struct Core {
     pub(crate) status: RefCell<SharedString>,
     pub(crate) default: Option<String>,
     pub(crate) free_input: bool,
+    pub(crate) accept: Option<(InputCheck, SharedString)>,
+    /// Whether the status shows a refusal, which the next change of the input removes.
+    pub(crate) refused: Cell<bool>,
     pub(crate) history_name: String,
     pub(crate) history: HistoryStore,
     pub(crate) actions: Vec<SessionAction>,
@@ -411,6 +430,7 @@ pub fn open(
         initial_input,
         default,
         free_input,
+        accept,
         history,
         key_context,
         actions,
@@ -428,6 +448,8 @@ pub fn open(
         status: RefCell::new(SharedString::default()),
         default,
         free_input,
+        accept,
+        refused: Cell::new(false),
         history: HistoryStore::global(cx),
         history_name: history,
         actions,

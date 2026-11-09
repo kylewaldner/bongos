@@ -286,6 +286,9 @@ impl SessionDelegate {
             return;
         }
         self.last_input = query.to_string();
+        if self.core.refused.replace(false) {
+            self.core.handle().set_status("", cx);
+        }
         let Some(on_input) = self.core.on_input.clone() else {
             return;
         };
@@ -490,15 +493,19 @@ impl PickerDelegate for SessionDelegate {
                     self.query.clone()
                 }),
             },
-            None if self.core.free_input => self.input_finish(),
+            None if self.core.free_input => match self.input_finish(cx) {
+                Some(finish) => finish,
+                None => return,
+            },
             None => return,
         };
         self.core.finish(finish, true, window, cx);
     }
 
     fn confirm_input(&mut self, _: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        if self.core.free_input {
-            let finish = self.input_finish();
+        if self.core.free_input
+            && let Some(finish) = self.input_finish(cx)
+        {
             self.core.finish(finish, true, window, cx);
         }
     }
@@ -555,12 +562,21 @@ impl PickerDelegate for SessionDelegate {
 }
 
 impl SessionDelegate {
-    fn input_finish(&self) -> Finish {
+    /// The answer for the input as typed, or `None` (with the refusal shown) when the session
+    /// does not accept it.
+    fn input_finish(&self, cx: &mut App) -> Option<Finish> {
         let outcome = self.input_outcome();
+        if let (Some((accept, refusal)), Outcome::Input(input)) = (&self.core.accept, &outcome)
+            && !accept(input)
+        {
+            self.core.refused.set(true);
+            self.core.handle().set_status(refusal.clone(), cx);
+            return None;
+        }
         let history = match &outcome {
             Outcome::Input(input) if !input.is_empty() => Some(input.clone()),
             _ => None,
         };
-        Finish::Confirm { outcome, history }
+        Some(Finish::Confirm { outcome, history })
     }
 }
