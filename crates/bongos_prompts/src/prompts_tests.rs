@@ -94,6 +94,39 @@ async fn registering_the_language_twice_keeps_one(cx: &mut TestAppContext) {
     assert_eq!(count, 1);
 }
 
+fn set_markers(cx: &mut TestAppContext, open: &str, close: &str) {
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                let prompts = content.prompts.get_or_insert_default();
+                prompts.marker_open = Some(open.to_string());
+                prompts.marker_close = Some(close.to_string());
+            });
+        });
+    });
+}
+
+#[gpui::test]
+async fn marker_settings_default_fall_back_and_customize(cx: &mut TestAppContext) {
+    use_default_settings(cx);
+    cx.update(|cx| {
+        let syntax = PromptsSettings::get_global(cx).marker_syntax();
+        assert_eq!(syntax, bongos_prompts_model::MarkerSyntax::default());
+    });
+    // Empty, or with a line break, falls back to the default for that part.
+    set_markers(cx, "", "a\nb");
+    cx.update(|cx| {
+        let syntax = PromptsSettings::get_global(cx).marker_syntax();
+        assert_eq!(syntax, bongos_prompts_model::MarkerSyntax::default());
+    });
+    set_markers(cx, "<<< ask", ">>>");
+    cx.update(|cx| {
+        let syntax = PromptsSettings::get_global(cx).marker_syntax();
+        assert_eq!(syntax.open(), "<<< ask");
+        assert_eq!(syntax.close(), ">>>");
+    });
+}
+
 #[gpui::test]
 async fn default_settings_parse(cx: &mut TestAppContext) {
     use_default_settings(cx);

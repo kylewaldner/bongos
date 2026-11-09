@@ -1397,7 +1397,7 @@ pub struct PromptsSettingsContent {
     /// block, mode line) and the prompts commands are hidden. The `Prompts` language, which saves
     /// `prompts.txt` exactly as typed, applies either way.
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
     /// Whether sending a prompt also submits it (presses Enter in the chat). A chat can override
     /// it for itself.
@@ -1409,6 +1409,16 @@ pub struct PromptsSettingsContent {
     ///
     /// Default: true
     pub save_on_send: Option<bool>,
+    /// The text a marker line starts with. An empty value, or one with a line break, falls back
+    /// to the default. Markers in the default syntax are always recognized as well.
+    ///
+    /// Default: "=== prompt"
+    pub marker_open: Option<String>,
+    /// The text a marker line ends with. An empty value, or one with a line break, falls back to
+    /// the default.
+    ///
+    /// Default: "==="
+    pub marker_close: Option<String>,
 }
 
 /// Settings for chat sessions.

@@ -1,3 +1,4 @@
+use bongos_prompts_model::MarkerSyntax;
 use settings::{RegisterSetting, Settings, SettingsContent};
 
 /// The `prompts` settings.
@@ -11,6 +12,29 @@ pub struct PromptsSettings {
     pub auto_submit: bool,
     /// Whether a send saves the prompts file after marking it, unless it changed on disk.
     pub save_on_send: bool,
+    /// The configured marker open string; may be empty or invalid (see `marker_syntax`).
+    pub marker_open: String,
+    /// The configured marker close string; may be empty or invalid (see `marker_syntax`).
+    pub marker_close: String,
+}
+
+impl PromptsSettings {
+    /// The marker syntax to write new markers in. A value that is empty or contains a line
+    /// break falls back to the default for that part.
+    pub fn marker_syntax(&self) -> MarkerSyntax {
+        let usable = |value: &str| !value.contains(['\n', '\r']);
+        let open = if usable(&self.marker_open) {
+            self.marker_open.as_str()
+        } else {
+            ""
+        };
+        let close = if usable(&self.marker_close) {
+            self.marker_close.as_str()
+        } else {
+            ""
+        };
+        MarkerSyntax::new(open, close)
+    }
 }
 
 impl Settings for PromptsSettings {
@@ -29,6 +53,12 @@ impl Settings for PromptsSettings {
             save_on_send: prompts
                 .save_on_send
                 .expect("default.json defines `prompts.save_on_send`"),
+            marker_open: prompts
+                .marker_open
+                .expect("default.json defines `prompts.marker_open`"),
+            marker_close: prompts
+                .marker_close
+                .expect("default.json defines `prompts.marker_close`"),
         }
     }
 }
