@@ -104,7 +104,7 @@ fn minimal_record_gets_defaults_and_omits_absent_keys() {
 #[test]
 fn unknown_keys_survive_a_rewrite() {
     let text = format!(
-        "{MINIMAL}auto_submit = \"off\"\nretries = 3\n\n[feature25]\nlast_block = 7\nnames = [\"a\", \"b\"]\n"
+        "{MINIMAL}send_mode = \"off\"\nretries = 3\n\n[feature25]\nlast_block = 7\nnames = [\"a\", \"b\"]\n"
     );
     let record = parse_record(&text).unwrap();
     assert_eq!(record.extra.len(), 3);
@@ -115,7 +115,7 @@ fn unknown_keys_survive_a_rewrite() {
     let again = parse_record(&rewritten).unwrap();
     assert_eq!(again.name, "renamed");
     assert_eq!(again.extra, record.extra);
-    assert!(rewritten.contains("auto_submit = \"off\""));
+    assert!(rewritten.contains("send_mode = \"off\""));
     assert!(rewritten.contains("last_block = 7"));
 }
 
