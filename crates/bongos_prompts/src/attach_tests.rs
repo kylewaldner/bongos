@@ -4,7 +4,7 @@
 //! `Some`/`None` writes, and the mode line. The chats crate is replaced by [`FakeChats`].
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -21,7 +21,9 @@ use settings::{Settings as _, SettingsStore};
 use workspace::Workspace;
 
 use crate::actions::TOASTS;
-use crate::attach::{Attached, ChatLink, NO_CHAT_MESSAGE, OnSent, resolve, set_link, toggled};
+use crate::attach::{
+    Attached, ChatLink, NO_CHAT_MESSAGE, OnSent, PromptChoice, resolve, set_link, toggled,
+};
 use crate::mode_tests::{dispatch, open_in, workspace_on};
 use crate::send::NO_TASK_MESSAGE;
 
@@ -62,6 +64,13 @@ pub(crate) struct FakeChats {
     pub(crate) offers: RefCell<Vec<Offer>>,
     pub(crate) task: RefCell<Option<String>>,
     pub(crate) started: RefCell<Vec<String>>,
+    pub(crate) scope: RefCell<Option<PathBuf>>,
+    pub(crate) choices: RefCell<Vec<PromptChoice>>,
+    /// The writes of the prompts file, and the record they leave: `None` is the default file.
+    pub(crate) file_writes: RefCell<Vec<(String, Option<PathBuf>)>>,
+    pub(crate) record_file: RefCell<Option<PathBuf>>,
+    pub(crate) focus_calls: Cell<usize>,
+    pub(crate) center_calls: Cell<usize>,
 }
 
 pub(crate) fn sent() -> Sent {
@@ -85,6 +94,12 @@ impl Default for FakeChats {
             offers: RefCell::default(),
             task: RefCell::default(),
             started: RefCell::default(),
+            scope: RefCell::default(),
+            choices: RefCell::default(),
+            file_writes: RefCell::default(),
+            record_file: RefCell::default(),
+            focus_calls: Cell::new(0),
+            center_calls: Cell::new(0),
         }
     }
 }
@@ -176,6 +191,40 @@ impl ChatLink for FakeChats {
         _: &mut Context<Workspace>,
     ) {
         self.started.borrow_mut().push(task_id);
+    }
+
+    fn scope_dir(&self, _: &str, _: &App) -> Option<PathBuf> {
+        self.scope.borrow().clone()
+    }
+
+    fn prompt_choices(&self, _: &Path, _: &App) -> Vec<PromptChoice> {
+        self.choices.borrow().clone()
+    }
+
+    fn set_prompts_file(
+        &self,
+        chat_id: &str,
+        path: Option<PathBuf>,
+        _: &mut App,
+    ) -> Task<Result<(), String>> {
+        self.file_writes
+            .borrow_mut()
+            .push((chat_id.to_string(), path.clone()));
+        self.record_file.replace(path);
+        Task::ready(Ok(()))
+    }
+
+    fn focus_prompts(&self, _: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>) {
+        self.focus_calls.set(self.focus_calls.get() + 1);
+    }
+
+    fn open_prompts_in_center(
+        &self,
+        _: &mut Workspace,
+        _: &mut Window,
+        _: &mut Context<Workspace>,
+    ) {
+        self.center_calls.set(self.center_calls.get() + 1);
     }
 }
 

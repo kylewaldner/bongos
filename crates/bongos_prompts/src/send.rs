@@ -14,7 +14,7 @@ use bongos_chat::{ChatsSettings, SendError, SendOptions, Sent};
 use bongos_prompts_model::{BlockInfo, mark_sent};
 use chrono::NaiveDateTime;
 use editor::{Anchor, Editor, MultiBufferOffset, ToPoint as _};
-use gpui::{App, Context, Entity, TaskExt as _, WeakEntity, Window};
+use gpui::{App, Context, Entity, WeakEntity, Window};
 use language::Point;
 use multi_buffer::MultiBufferRow;
 use settings::Settings as _;
@@ -321,14 +321,14 @@ fn send_to(chat_id: String, request: Request, window: &mut Window, cx: &mut Cont
                 .ok();
             return;
         }
-        if let Err(error) = &result {
-            let message = error.to_string();
+        let note = result.as_ref().err().map(ToString::to_string);
+        if let Some(message) = note.clone() {
             workspace
                 .update(cx, |workspace, cx| show_toast(workspace, message, cx))
                 .ok();
         }
         if delivered(&result) {
-            cx.update(|window, cx| finish(request, workspace, window, cx))
+            cx.update(|window, cx| finish(request, workspace, note, window, cx))
                 .ok();
         }
     })
@@ -350,7 +350,7 @@ fn offer_resume(
     let weak = cx.entity().downgrade();
     let on_sent: OnSent = Box::new(move |result, window, cx| {
         if delivered(&result) {
-            finish(request, weak, window, cx);
+            finish(request, weak, None, window, cx);
         }
     });
     link(cx).offer_resume_and_send(chat_id, name, text, options, on_sent, workspace, window, cx);
@@ -384,8 +384,16 @@ fn offer_start(
 }
 
 /// After the text reached the CLI: marks, moves and saves (D14 steps 6 to 8). Toasts are shown
-/// later, since the workspace may be the entity being updated.
-fn finish(request: Request, workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) {
+/// later, since the workspace may be the entity being updated. `note` is the toast the send
+/// itself showed (a paste whose Enter could not follow); every prompts toast shares one id, so the
+/// toast of this step would replace it and so repeats it.
+fn finish(
+    request: Request,
+    workspace: WeakEntity<Workspace>,
+    note: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(anchors) = request.mark else {
         return;
     };
@@ -398,13 +406,16 @@ fn finish(request: Request, workspace: WeakEntity<Workspace>, window: &mut Windo
     };
     let mut messages = Vec::new();
     if marked == Marked::Changed {
-        messages.push(CHANGED_MESSAGE);
+        messages.push(CHANGED_MESSAGE.to_string());
     }
-    if let Some(message) = save(&request.editor, window, cx) {
-        messages.push(message);
+    if let Some(message) = save(&request.editor, &workspace, window, cx) {
+        messages.push(message.to_string());
     }
     if messages.is_empty() {
         return;
+    }
+    if let Some(note) = note {
+        messages.insert(0, note);
     }
     let message = messages.join(". ");
     cx.defer(move |cx| {
@@ -416,7 +427,13 @@ fn finish(request: Request, workspace: WeakEntity<Workspace>, window: &mut Windo
 
 /// Saves the prompts file when `prompts.save_on_send` is on, unless it changed on disk (then the
 /// returned toast says so). No formatting runs, so the bytes are saved as they are.
-fn save(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) -> Option<&'static str> {
+/// A failed save is said in a toast.
+fn save(
+    editor: &Entity<Editor>,
+    workspace: &WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<&'static str> {
     if !PromptsSettings::get_global(cx).save_on_send {
         return None;
     }
@@ -430,8 +447,17 @@ fn save(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) -> Option<&'
         force_format: false,
         autosave: false,
     };
-    editor
-        .update(cx, |editor, cx| editor.save(options, project, window, cx))
-        .detach_and_log_err(cx);
+    let saving = editor.update(cx, |editor, cx| editor.save(options, project, window, cx));
+    let workspace = workspace.clone();
+    cx.spawn(async move |cx| {
+        if let Err(error) = saving.await {
+            log::warn!("prompts: could not save after a send: {error:#}");
+            let message = format!("Sent; could not save the prompts file: {error}");
+            workspace
+                .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+                .ok();
+        }
+    })
+    .detach();
     None
 }

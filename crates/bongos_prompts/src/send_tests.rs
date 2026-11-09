@@ -287,6 +287,31 @@ async fn not_submitted_still_marks(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn not_submitted_is_still_said_when_a_conflict_follows(cx: &mut TestAppContext) {
+    let (workspace, editor, fake, cx) = running(cx, 4).await;
+    editor.update(cx, |editor, cx| {
+        editor.edit([(Point::new(7, 5)..Point::new(7, 5), "!")], cx)
+    });
+    let fs = workspace.read_with(cx, |workspace, _| workspace.app_state().fs.clone());
+    fs.as_fake()
+        .insert_file(PATH, b"changed elsewhere".to_vec())
+        .await;
+    cx.run_until_parked();
+    let error = SendError::NotSubmitted {
+        name: "chat a".into(),
+    };
+    *fake.reply.borrow_mut() = Err(error.clone());
+    toasts();
+    dispatch("prompts::Send", cx);
+    cx.run_until_parked();
+    // The toast that replaces the error's (they share one id) repeats it.
+    assert_eq!(
+        toasts(),
+        vec![error.to_string(), format!("{error}. {CONFLICT_MESSAGE}"),]
+    );
+}
+
+#[gpui::test]
 async fn edits_between_send_and_result_keep_the_mark_in_place(cx: &mut TestAppContext) {
     let (_workspace, editor, fake, cx) = running(cx, 4).await;
     fake.hold.set(true);

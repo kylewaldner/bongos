@@ -1,8 +1,8 @@
 //! The `prompts` actions, hidden from the command palette while `prompts.enabled` is false, and
 //! their handlers. While it is false each handler only says that the prompts mode is off. The
 //! navigation, new and copy commands live in [`crate::commands`], the send commands in
-//! [`crate::send`] and the auto-submit toggle in [`crate::attach`]; until the later steps give
-//! them behavior, the others do nothing while on. No key is bound to any of them.
+//! [`crate::send`], the auto-submit toggle in [`crate::attach`] and the file commands in
+//! [`crate::files`]. No key is bound to any of them.
 
 use std::any::TypeId;
 
@@ -16,7 +16,7 @@ use workspace::notifications::NotificationId;
 use editor::Editor;
 
 use crate::send::{self, SendKind};
-use crate::{LANGUAGE_NAME, PromptsSettings, attach, commands};
+use crate::{LANGUAGE_NAME, PromptsSettings, attach, commands, files};
 
 /// Actions in the `prompts` namespace.
 pub mod prompts {
@@ -172,11 +172,6 @@ fn register_gated_with<A: Action>(
     });
 }
 
-/// Registers an action that later steps give behavior to: only the off toast for now.
-fn register_one<A: Action>(workspace: &mut Workspace) {
-    register_gated::<A>(workspace, |_, _, _| {});
-}
-
 /// Registers the handlers of the `prompts` actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
     register_gated::<prompts::Send>(workspace, |workspace, window, cx| {
@@ -193,10 +188,10 @@ pub fn register(workspace: &mut Workspace) {
     register_gated_with::<prompts::Next>(workspace, commands::next);
     register_gated::<prompts::NextPending>(workspace, commands::next_pending);
     register_gated::<prompts::Copy>(workspace, commands::copy);
-    register_one::<prompts::UseFile>(workspace);
-    register_one::<prompts::UseDefault>(workspace);
+    register_gated::<prompts::UseFile>(workspace, files::use_file);
+    register_gated::<prompts::UseDefault>(workspace, files::use_default);
     register_gated::<prompts::ToggleAutoSubmit>(workspace, attach::toggle_auto_submit);
-    register_one::<prompts::Open>(workspace);
+    register_gated::<prompts::Open>(workspace, files::open);
     register_gated::<prompts::Mode>(workspace, prompts_mode);
     #[cfg(debug_assertions)]
     register_gated::<prompts::DumpView>(workspace, dump_view);

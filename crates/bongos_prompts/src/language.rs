@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use language::{LanguageConfig, LanguageMatcher, LanguageRegistry, LoadedLanguage};
+use gpui::{App, Entity};
+use language::{Buffer, LanguageConfig, LanguageMatcher, LanguageRegistry, LoadedLanguage};
+use project::Project;
 
 /// The name of the language.
 pub const NAME: &str = "Prompts";
@@ -43,4 +45,28 @@ pub fn register_language(languages: &LanguageRegistry) {
             })
         }),
     );
+}
+
+/// Gives `buffer` the `Prompts` language unless it has it already, which makes the prompts mode
+/// attach to a prompts file that is not called `prompts.txt` (a file picked with `prompts: use
+/// file`). The language is set once it has loaded.
+pub(crate) fn apply(project: &Entity<Project>, buffer: &Entity<Buffer>, cx: &mut App) {
+    let has_it = buffer
+        .read(cx)
+        .language()
+        .is_some_and(|language| language.name().as_ref() == NAME);
+    if has_it {
+        return;
+    }
+    let languages = project.read(cx).languages().clone();
+    let (project, buffer) = (project.clone(), buffer.clone());
+    cx.spawn(
+        async move |cx| match languages.language_for_name(NAME).await {
+            Ok(language) => project.update(cx, |project, cx| {
+                project.set_language_for_buffer(&buffer, language, cx)
+            }),
+            Err(error) => log::warn!("prompts: no Prompts language: {error}"),
+        },
+    )
+    .detach();
 }
