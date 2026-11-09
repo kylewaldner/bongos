@@ -11,7 +11,7 @@
 //! the workflow engine enforces.
 //!
 //! [`RowChipsRegistry`] holds sources of extra chips for a task's row, shown after its Linear
-//! identifier. [`ViewOpenedRegistry`] holds observers told when the Work panel is shown or
+//! identifier. [`observe_view_opened`] holds observers told when the Work panel is shown or
 //! `task: focus` runs. With nothing registered, neither changes anything.
 //!
 //! Adding or removing a source, and a source telling the registry its answer changed, notify the

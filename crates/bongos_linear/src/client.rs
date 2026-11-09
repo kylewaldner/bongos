@@ -66,7 +66,7 @@ pub fn is_loopback_url(text: &str) -> bool {
     loopback_url(text).is_some()
 }
 
-/// The parsed [`Url`] when `text` is a loopback url (see [`is_loopback_url`]).
+/// The parsed [`Url`] when `text` is a loopback url (see `is_loopback_url`, test only).
 fn loopback_url(text: &str) -> Option<Url> {
     let url = Url::parse(text.trim()).ok()?;
     let loopback = url.scheme() == "http"

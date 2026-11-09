@@ -29,12 +29,10 @@ const NAMES: &[&str] = &[
 ];
 
 /// The actions that go through the requests seam; the token actions open the modal and clear the
-/// store instead (see `token_tests`).
+/// store instead (see `token_tests`), and the three link commands are handled in `link` (see
+/// `link_tests`).
 const SEAM_NAMES: &[&str] = &[
     "task::NewFromLinear",
-    "task::LinkToLinear",
-    "task::UnlinkFromLinear",
-    "task::OpenInLinear",
     "task::CreateMissingSubtickets",
     "task::RefreshFromLinear",
     "task::ShowLinearSuggestions",
@@ -230,12 +228,9 @@ async fn only_the_commands_that_send_need_a_token(cx: &mut TestAppContext) {
     cx.update(|_, cx| crate::token::install_env(|_| None, cx));
     set_enabled_in(cx, true);
 
-    let sending = SEAM_NAMES.iter().filter(|name| {
-        !matches!(
-            **name,
-            "task::UnlinkFromLinear" | "task::OpenInLinear" | "task::CopyPrTitle"
-        )
-    });
+    let sending = SEAM_NAMES
+        .iter()
+        .filter(|name| !matches!(**name, "task::CopyPrTitle"));
     for name in sending {
         workspace.update(cx, |workspace, cx| {
             workspace.dismiss_notification(&NotificationId::unique::<LinearToast>(), cx)
@@ -248,14 +243,8 @@ async fn only_the_commands_that_send_need_a_token(cx: &mut TestAppContext) {
     }
     assert_eq!(requests.count.load(Ordering::SeqCst), 0);
 
-    for name in [
-        "task::UnlinkFromLinear",
-        "task::OpenInLinear",
-        "task::CopyPrTitle",
-    ] {
-        dispatch(name, cx);
-    }
-    assert_eq!(requests.count.load(Ordering::SeqCst), 3);
+    dispatch("task::CopyPrTitle", cx);
+    assert_eq!(requests.count.load(Ordering::SeqCst), 1);
     assert!(Command::NewFromLinear.needs_token());
     assert!(!Command::CopyPrTitle.needs_token());
 }
