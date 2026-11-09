@@ -299,12 +299,15 @@ async fn test_codex_without_fork_is_a_labelled_handoff_with_the_transcript_path(
     write(&transcript, "{}\n");
     let source = source(&h, Agent::Codex, cx, |_| {}).await;
     // What the parent's launch left: a fork copies and mentions none of it.
-    write(
-        &h.runtime_root
-            .join(&source.id)
-            .join("codex-instructions.md"),
-        "PARENT-RUNTIME-MARKER\n",
-    );
+    crate::launch::write_runtime_dir(
+        &h.runtime_root,
+        &h.runtime_root.join(&source.id),
+        &[(
+            PathBuf::from("codex-instructions.md"),
+            "PARENT-RUNTIME-MARKER\n".to_string(),
+        )],
+    )
+    .unwrap();
     let help = "-m, --model <model>\n-c, --config <key=value>\nresume\nlogin\n";
     let mut asked = request(&source, ForkTarget::SameScope);
     asked.caps = Some(CodexAdapter::new("codex").capabilities_from_help("codex-cli 0.46.0", help));
