@@ -499,6 +499,42 @@ async fn the_masked_modal_copies_and_kills_nothing(cx: &mut TestAppContext) {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[gpui::test]
+async fn selecting_in_the_masked_modal_leaves_the_primary_selection_alone(cx: &mut TestAppContext) {
+    let (fixture, cx) = fixture(cx).await;
+    let modal = open_modal(&fixture, cx);
+    let editor = modal.read_with(cx, |modal, _| modal.editor().clone());
+    cx.update(|_, cx| cx.write_to_primary(gpui::ClipboardItem::new_string("before".to_string())));
+
+    editor.update_in(cx, |editor, window, cx| {
+        editor.set_text(SECRET, window, cx);
+        editor.select_all(&editor::actions::SelectAll, window, cx);
+    });
+    cx.run_until_parked();
+    let primary = cx
+        .update(|_, cx| cx.read_from_primary())
+        .and_then(|item| item.text());
+    assert!(
+        primary.as_deref() == Some("before"),
+        "a masked selection never reaches the primary selection"
+    );
+
+    // Control: the same selection in an unmasked editor is written.
+    editor.update_in(cx, |editor, window, cx| {
+        editor.set_masked(false, cx);
+        editor.select_all(&editor::actions::SelectAll, window, cx);
+    });
+    cx.run_until_parked();
+    let primary = cx
+        .update(|_, cx| cx.read_from_primary())
+        .and_then(|item| item.text());
+    assert!(
+        primary.as_deref() == Some(SECRET),
+        "an unmasked selection is written"
+    );
+}
+
 #[test]
 fn a_token_needs_content() {
     assert!(Token::new("").is_none());

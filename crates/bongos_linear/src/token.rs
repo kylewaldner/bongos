@@ -5,10 +5,11 @@
 //! [`CREDENTIAL_URL`]. `linear: clear token` deletes it. [`read_token`] reads the store first and
 //! then the `LINEAR_API_KEY` environment variable.
 //!
-//! The token never reaches a file bongos writes, a log line, a toast, the clipboard or the kill
-//! ring: [`Token`] has no `Display` and a redacted `Debug`, every message built from an error
+//! The token never reaches a file bongos writes, a log line, a toast, the clipboard, the primary
+//! selection or the kill ring: [`Token`] has no `Display` and a redacted `Debug`, every message built from an error
 //! passes through [`Token::redact`] (the HTTP client scrubs its own errors by construction, see
-//! `client`), and the modal blocks copy, cut and kill while it is masked. The only place the
+//! `client`), and the modal blocks copy, cut and kill while it is masked, and a masked editor
+//! never writes its selection to the primary selection. The only place the
 //! bytes are kept at rest is the credential store. Every command reads the token through
 //! [`with_token`]; the sync learns from there whether one exists.
 

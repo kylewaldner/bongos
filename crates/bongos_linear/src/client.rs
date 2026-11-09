@@ -46,8 +46,8 @@ pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// The endpoint to use: `override_url` when this is a debug build and the url is
 /// `http://127.0.0.1:<port>/...`, else [`ENDPOINT`]. A release build ignores the override.
 pub fn resolve_endpoint(override_url: Option<&str>, is_debug: bool) -> String {
-    match override_url {
-        Some(url) if is_debug && is_loopback_url(url) => url.trim().to_string(),
+    match override_url.and_then(loopback_url) {
+        Some(url) if is_debug => url.to_string(),
         _ => ENDPOINT.to_string(),
     }
 }
@@ -62,20 +62,27 @@ pub fn endpoint() -> String {
 
 /// Whether `text` is an `http` url to `127.0.0.1` with an explicit port, no credentials, no query.
 pub fn is_loopback_url(text: &str) -> bool {
-    let Ok(url) = Url::parse(text.trim()) else {
-        return false;
-    };
-    url.scheme() == "http"
+    loopback_url(text).is_some()
+}
+
+/// The parsed [`Url`] when `text` is a loopback url (see [`is_loopback_url`]).
+fn loopback_url(text: &str) -> Option<Url> {
+    let url = Url::parse(text.trim()).ok()?;
+    let loopback = url.scheme() == "http"
         && url.host() == Some(http_client::Host::Ipv4([127, 0, 0, 1].into()))
         && url.port().is_some()
         && url.username().is_empty()
         && url.password().is_none()
         && url.query().is_none()
-        && url.fragment().is_none()
+        && url.fragment().is_none();
+    loopback.then_some(url)
 }
 
 /// A [`ClientFactory`] that builds [`HttpLinear`]s over `http`.
-pub fn http_factory(http: Arc<dyn HttpClient>, executor: BackgroundExecutor) -> ClientFactory {
+pub(crate) fn http_factory(
+    http: Arc<dyn HttpClient>,
+    executor: BackgroundExecutor,
+) -> ClientFactory {
     Arc::new(move |token: &Token| {
         Arc::new(HttpLinear::new(
             http.clone(),
@@ -120,7 +127,7 @@ impl fmt::Debug for HttpLinear {
 }
 
 impl HttpLinear {
-    pub fn new(
+    pub(crate) fn new(
         http: Arc<dyn HttpClient>,
         executor: BackgroundExecutor,
         token: Token,

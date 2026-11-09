@@ -7,7 +7,7 @@
 //! bound to these actions yet; they are reached from the command palette.
 
 mod actions;
-pub mod client;
+pub(crate) mod client;
 pub mod dump;
 mod settings;
 pub mod sync;
