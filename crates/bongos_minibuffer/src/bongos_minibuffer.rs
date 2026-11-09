@@ -4,6 +4,43 @@
 //! is not empty) and the `minibuffer` actions, hidden while `enabled_for` is empty. `Cancel`
 //! hides a prompt in the strip and `Focus` focuses it; with no prompt, every action says "No
 //! active minibuffer".
+//!
+//! # Hosting a prompt
+//!
+//! A host names its prompt and lists that name in the `minibuffer.enabled_for` setting; the
+//! prompt then opens in the strip, and anywhere else (the name is not listed, or the list is
+//! empty) it is a centered modal. Call [`init`] once at startup, after
+//! `command_palette::init`, and open a [`Session`] from a workspace:
+//!
+//! ```ignore
+//! // settings.json: routes the host named "my_host" to the strip.
+//! //   "minibuffer": { "enabled_for": ["my_host"] }
+//!
+//! bongos_minibuffer::init(cx);
+//!
+//! // A completing read, in an update of a workspace `Entity<Workspace>`.
+//! workspace.update_in(cx, |workspace, window, cx| {
+//!     let session = Session::completing_read("my_host", "Pick: ")
+//!         .source(Source::Fixed(vec![Candidate::text("alpha"), Candidate::text("beta")]))
+//!         .on_confirm(|outcome, _window, _cx| {
+//!             if let Outcome::Candidate(value) = outcome {
+//!                 // `Candidate::text` carries its text as a `String` value.
+//!                 let _picked = value.downcast_ref::<String>();
+//!             }
+//!         })
+//!         .on_cancel(|_window, _cx| {});
+//!     open(workspace, session, window, cx);
+//!
+//!     // Or a yes/no question, answered by `y` or `n` alone.
+//!     yes_or_no(workspace, "my_host", "Save? ", true, |_yes, _window, _cx| {}, window, cx);
+//! });
+//! ```
+//!
+//! A modal view of the host's own is routed by returning its name from
+//! `workspace::ModalView::minibuffer_name`; `workspace::routes_to_minibuffer` says whether a
+//! name is routed right now. Strip colors come from the theme (`status_bar_background` and
+//! `border` for the line, `elevated_surface_background` for the candidate list) and the input
+//! is a single-line editor, so it uses the buffer font.
 
 mod echo;
 mod hint;
@@ -190,3 +227,5 @@ mod session_tests;
 mod settings_tests;
 #[cfg(test)]
 mod strip_tests;
+#[cfg(test)]
+mod theme_tests;
