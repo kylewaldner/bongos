@@ -360,8 +360,9 @@ pub(crate) fn with_chat(
     }
 }
 
-/// The effective auto-submit of `chat_id`: its override, else `prompts.auto_submit`.
-pub(crate) fn effective_auto_submit(chat_id: Option<&str>, cx: &App) -> bool {
+/// The effective auto-submit of `chat_id`: its override, else `prompts.auto_submit`. Without a
+/// chat id it is `prompts.auto_submit`.
+pub fn effective_auto_submit(chat_id: Option<&str>, cx: &App) -> bool {
     chat_id
         .and_then(|chat_id| link(cx).auto_submit_override(chat_id, cx))
         .unwrap_or(PromptsSettings::get_global(cx).auto_submit)

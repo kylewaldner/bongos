@@ -112,8 +112,24 @@ impl Global for GlobalChatStore {}
 /// [`ChatRuntime`]. Call after `bongos_work::init`. The store reads and writes nothing, and the
 /// runtime starts nothing, until `chats.enabled` is true.
 pub fn init(dirs: ChatDirs, cx: &mut App) {
+    init_in(
+        util::paths::home_dir().clone(),
+        std::collections::BTreeMap::new(),
+        dirs,
+        cx,
+    )
+}
+
+/// [`init`] with the home directory the agents keep their own files in and the environment added
+/// to the CLI probes and launches, for a test that runs fake CLIs without touching the real home.
+pub fn init_in(
+    home: PathBuf,
+    env: std::collections::BTreeMap<String, String>,
+    dirs: ChatDirs,
+    cx: &mut App,
+) {
     ChatsSettings::register(cx);
-    let health = cx.new(|cx| ChatHealth::new(Default::default(), cx));
+    let health = cx.new(|cx| ChatHealth::new(env, cx));
     ChatHealth::set_global(health, cx);
     let Some(work) = WorkStore::global(cx) else {
         log::error!("chats: the work store is missing; chats stay off");
@@ -121,7 +137,7 @@ pub fn init(dirs: ChatDirs, cx: &mut App) {
     };
     let store = cx.new(|cx| ChatStore::new(work, dirs, cx));
     cx.set_global(GlobalChatStore(store.clone()));
-    let runtime = cx.new(|cx| ChatRuntime::new(store.clone(), util::paths::home_dir().clone(), cx));
+    let runtime = cx.new(|cx| ChatRuntime::new(store.clone(), home, cx));
     live_modes::init(&runtime, &store, cx);
     lifecycle::init(&store, cx);
     end_chats_on_quit(&runtime, cx);

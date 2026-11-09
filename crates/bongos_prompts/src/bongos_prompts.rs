@@ -26,6 +26,7 @@ use ::settings::Settings as _;
 use gpui::App;
 
 pub use actions::{PromptsToast, action_types, init_palette, prompts, register};
+pub use attach::effective_auto_submit;
 pub use bongos_prompts_model as model;
 pub use display::{PromptsCurrent, rule_label};
 pub use dump::{dump_path, dump_text};

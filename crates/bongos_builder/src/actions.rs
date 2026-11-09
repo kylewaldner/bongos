@@ -1,7 +1,8 @@
 //! The `task` and `proposal` actions of the task builder, hidden from the command palette while
 //! `task_builder.enabled` is false, and their handlers. While it is false each handler only says
-//! that the task builder is off. While it is true the handlers do nothing yet: the commands
-//! themselves arrive in later steps. The keys are bound in the Emacs keymaps, not here.
+//! that the task builder is off. While it is true `task: plan` and `task: new without plan` work
+//! (see [`crate::plan`]) and the others do nothing yet: their commands arrive in later steps. The
+//! keys are bound in the Emacs keymaps, not here.
 
 use std::any::TypeId;
 
@@ -12,7 +13,7 @@ use workspace::Toast;
 use workspace::Workspace;
 use workspace::notifications::NotificationId;
 
-use crate::TaskBuilderSettings;
+use crate::{TaskBuilderSettings, plan};
 
 /// New actions in the `task` namespace, shared with the work tree's and Zed's task runner; no
 /// name collides.
@@ -128,8 +129,19 @@ pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Co
 /// Registers the handler of `A`: the off toast while `task_builder.enabled` is false, nothing yet
 /// while it is true.
 fn register_action<A: Action>(workspace: &mut Workspace) {
-    workspace.register_action(move |workspace, _: &A, _window: &mut Window, cx| {
-        if !TaskBuilderSettings::get_global(cx).enabled {
+    register_with::<A>(workspace, |_, _, _| {});
+}
+
+/// Registers the handler of `A`: the off toast while `task_builder.enabled` is false, `run` while
+/// it is true.
+fn register_with<A: Action>(
+    workspace: &mut Workspace,
+    run: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+) {
+    workspace.register_action(move |workspace, _: &A, window: &mut Window, cx| {
+        if TaskBuilderSettings::get_global(cx).enabled {
+            run(workspace, window, cx);
+        } else {
             show_toast(workspace, OFF_MESSAGE.to_string(), cx);
         }
     });
@@ -137,13 +149,13 @@ fn register_action<A: Action>(workspace: &mut Workspace) {
 
 /// Registers the handlers of the builder's actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
-    register_action::<task::Plan>(workspace);
+    register_with::<task::Plan>(workspace, plan::plan);
     register_action::<task::Propose>(workspace);
     register_action::<task::ShowProposal>(workspace);
     register_action::<task::EditProposal>(workspace);
     register_action::<task::ApplyProposal>(workspace);
     register_action::<task::RejectProposal>(workspace);
-    register_action::<task::NewWithoutPlan>(workspace);
+    register_with::<task::NewWithoutPlan>(workspace, plan::new_without_plan);
     register_action::<task::ToggleAutoApply>(workspace);
     register_action::<proposal::Descend>(workspace);
     register_action::<proposal::Up>(workspace);
