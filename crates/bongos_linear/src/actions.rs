@@ -4,7 +4,9 @@
 //! [`LinearRequests`]; none is installed yet, so nothing happens. A command that sends requests
 //! reads the token first (see [`Command::needs_token`]) and toasts when there is none. The two
 //! token commands do not go through it: they open the token modal and clear the stored token (see
-//! `token`); `linear: dump state` writes the state of the sync (see `dump`). No keys are
+//! `token`); `linear: dump state` writes the state of the sync (see `dump`). The three link
+//! commands (`task: link to linear`, `unlink from linear`, `open in linear`) act on the task at
+//! point and are handled in `link`, not through the seam. No keys are
 //! bound to these actions yet; they are reached from the command palette.
 
 use std::any::TypeId;
@@ -19,6 +21,7 @@ use workspace::notifications::NotificationId;
 
 use crate::LinearSettings;
 use crate::dump;
+use crate::link;
 use crate::token;
 
 /// New actions in the `task` namespace, shared with the work tree's, the builder's and Zed's task
@@ -72,11 +75,10 @@ impl Command {
     pub fn needs_token(self) -> bool {
         match self {
             Command::NewFromLinear
-            | Command::LinkToLinear
             | Command::CreateMissingSubtickets
             | Command::RefreshFromLinear
             | Command::ShowLinearSuggestions => true,
-            Command::UnlinkFromLinear | Command::OpenInLinear | Command::CopyPrTitle => false,
+            Command::CopyPrTitle => false,
         }
     }
 }
@@ -85,9 +87,6 @@ impl Command {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     NewFromLinear,
-    LinkToLinear,
-    UnlinkFromLinear,
-    OpenInLinear,
     CreateMissingSubtickets,
     RefreshFromLinear,
     ShowLinearSuggestions,
@@ -214,9 +213,9 @@ fn register_direct<A: Action>(
 /// Registers the handlers of the sync's actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
     register_with::<task::NewFromLinear>(workspace, Command::NewFromLinear);
-    register_with::<task::LinkToLinear>(workspace, Command::LinkToLinear);
-    register_with::<task::UnlinkFromLinear>(workspace, Command::UnlinkFromLinear);
-    register_with::<task::OpenInLinear>(workspace, Command::OpenInLinear);
+    register_direct::<task::LinkToLinear>(workspace, link::link_to_linear);
+    register_direct::<task::UnlinkFromLinear>(workspace, link::unlink_from_linear);
+    register_direct::<task::OpenInLinear>(workspace, link::open_in_linear);
     register_with::<task::CreateMissingSubtickets>(workspace, Command::CreateMissingSubtickets);
     register_with::<task::RefreshFromLinear>(workspace, Command::RefreshFromLinear);
     register_with::<task::ShowLinearSuggestions>(workspace, Command::ShowLinearSuggestions);

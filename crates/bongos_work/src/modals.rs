@@ -20,7 +20,7 @@ pub type Then<T> =
     Box<dyn FnOnce(T, &mut Workspace, &mut Window, &mut Context<Workspace>) + 'static>;
 
 /// The name the work prompts are routed by (`minibuffer.enabled_for`).
-pub(crate) const MINIBUFFER_NAME: &str = "work";
+pub const MINIBUFFER_NAME: &str = "work";
 
 /// Runs `then` on the workspace once a minibuffer session has answered (and closed).
 fn run_then<T>(

@@ -87,7 +87,8 @@ impl Focus {
         self.task.as_deref()
     }
 
-    pub(crate) fn set(&mut self, task: Option<String>, cx: &mut Context<Self>) {
+    /// Focuses the task `task` (or none) without opening anything.
+    pub fn set(&mut self, task: Option<String>, cx: &mut Context<Self>) {
         if self.task == task {
             return;
         }
