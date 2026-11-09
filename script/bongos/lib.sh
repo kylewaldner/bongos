@@ -18,14 +18,14 @@ BONGOS_DISPLAY=${BONGOS_DISPLAY:-:99}
 BONGOS_PROXY_PORT=${BONGOS_PROXY_PORT:-18080}
 
 # Output contract, for every script: the full output goes to a log file under
-# $BONGOS_WORKSPACE/scratch/logs/, and the terminal gets a summary: at most 30 lines on success, at
+# $BONGOS_LOG_DIR (default $BONGOS_WORKSPACE/scratch/logs/), and the terminal gets a summary: at most 30 lines on success, at
 # most 80 on failure, and a last line "<name>: pass|FAIL <secs>s <details> log: <path>".
 # log_init <name> sends stdout and stderr to the log and keeps fd 3 as the terminal. A script then
 # prints with `say`, sets SUMMARY (and optionally defines summary_hook), and just exits: the EXIT
 # trap prints the failing part of the log on a nonzero exit, then the last line. When a script
 # runs inside another logged script (check calls check-hosts), it adds nothing to the terminal.
 # script/bongos/tail-log shows the failing part of a log again.
-BONGOS_LOG_DIR="$BONGOS_WORKSPACE/scratch/logs"
+BONGOS_LOG_DIR="${BONGOS_LOG_DIR:-$BONGOS_WORKSPACE/scratch/logs}"
 LOG_NO_EXCERPT=""
 
 log_init() {
