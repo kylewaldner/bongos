@@ -1476,6 +1476,40 @@ async fn test_history_items_uniqueness_for_multiple_worktree(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+async fn test_confirm_input_creates_the_typed_path(cx: &mut TestAppContext) {
+    let app_state = init_test(cx);
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree(path!("/root"), json!({ "dir": { "existing": "" } }))
+        .await;
+    let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let finder = open_file_picker(&workspace, cx);
+
+    finder
+        .update_in(cx, |f, window, cx| {
+            f.delegate
+                .spawn_search(test_path_position(path!("dir/exist")), window, cx)
+        })
+        .await;
+    cx.run_until_parked();
+    finder.update_in(cx, |picker, window, cx| {
+        // A fuzzy match is selected, yet confirm_input opens the typed path as a new file.
+        assert!(picker.delegate.matches.len() >= 2);
+        picker.delegate.confirm_input(false, window, cx)
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let editor = workspace.read(cx).active_item_as::<Editor>(cx).unwrap();
+        let project_path = editor.read(cx).active_project_path(cx).unwrap();
+        assert_eq!(project_path.path.as_ref(), rel_path("dir/exist"));
+    });
+}
+
+#[gpui::test]
 async fn test_create_file_for_multiple_worktrees(cx: &mut TestAppContext) {
     let app_state = init_test(cx);
     app_state

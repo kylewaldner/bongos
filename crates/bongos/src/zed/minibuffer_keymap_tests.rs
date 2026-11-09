@@ -3,7 +3,7 @@
 //! change nothing outside a `Minibuffer` context.
 
 use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
-use settings::{KeymapFile, KeymapFileLoadResult};
+use settings::{KeybindSource, KeymapFile, KeymapFileLoadResult};
 
 use super::tests::init_keymap_test;
 
@@ -60,18 +60,18 @@ const HOST_PICKER_EDITOR: [&str; 5] = [
 ];
 const WORKSPACE_EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full"];
 
-/// The keymaps in load order, with and without the Emacs base.
+/// The keymaps in load order, with the sources the app loads them with (`load_default_keymap`).
 fn load_all(platform: &Platform, emacs: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
     cx.update(|cx| {
-        let mut paths = vec![platform.default];
+        let mut paths = vec![(platform.default, KeybindSource::Default)];
         if emacs {
-            paths.push(platform.emacs);
+            paths.push((platform.emacs, KeybindSource::Base));
         }
-        paths.push(platform.overrides);
+        paths.push((platform.overrides, KeybindSource::Default));
         let mut all = Vec::new();
-        for path in paths {
+        for (path, source) in paths {
             all.extend(
-                KeymapFile::load_asset(path, None, cx)
+                KeymapFile::load_asset(path, Some(source), cx)
                     .unwrap_or_else(|error| panic!("{path}: {error}")),
             );
         }
@@ -280,4 +280,48 @@ async fn the_pending_ctrl_h_delays_replace_on_linux(cx: &mut TestAppContext) {
     let (names, pending) = resolve(&emacs, "ctrl-h", &WORKSPACE_EDITOR);
     assert!(pending, "with the Emacs base ctrl-h waits for the next key");
     assert_eq!(names.first(), Some(&"buffer_search::DeployReplace"));
+}
+
+const STRIP_FILE_FINDER: [&str; 5] = [
+    "Workspace",
+    "Minibuffer",
+    "FileFinder",
+    "Picker",
+    "Editor mode=full",
+];
+const MODAL_FILE_FINDER: [&str; 4] = ["Workspace", "FileFinder", "Picker", "Editor mode=full"];
+
+#[gpui::test]
+async fn the_routed_file_finder_strip_has_no_split_keys(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    let keymap = Keymap::new(load_all(&LINUX, true, cx));
+    assert_eq!(
+        first(&keymap, "ctrl-k", &STRIP_FILE_FINDER),
+        Some("editor::KillRingCut")
+    );
+    assert_eq!(
+        first(&keymap, "ctrl-l", &STRIP_FILE_FINDER),
+        Some("editor::ScrollCursorCenterTopBottom")
+    );
+    // ctrl-h is not a split and stays the prefix of `ctrl-h e`.
+    let (names, pending) = resolve(&keymap, "ctrl-h", &STRIP_FILE_FINDER);
+    assert!(!names.iter().any(|name| name.starts_with("pane::Split")));
+    assert!(pending, "ctrl-h waits for the next key in the strip");
+    assert_eq!(
+        first(&keymap, "ctrl-h e", &STRIP_FILE_FINDER),
+        Some("minibuffer::ShowMessages")
+    );
+    assert_eq!(
+        first(&keymap, "ctrl-j", &STRIP_FILE_FINDER),
+        Some("minibuffer::ConfirmInput")
+    );
+    // The centered modal keeps its split keys.
+    for (input, action) in [
+        ("ctrl-k", "pane::SplitUp"),
+        ("ctrl-h", "pane::SplitLeft"),
+        ("ctrl-l", "pane::SplitRight"),
+        ("ctrl-j", "pane::SplitDown"),
+    ] {
+        assert_eq!(first(&keymap, input, &MODAL_FILE_FINDER), Some(action));
+    }
 }
