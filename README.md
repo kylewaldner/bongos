@@ -115,6 +115,58 @@ launch.
   the archive and keeps it. Only `chat: delete` removes a record, and the CLIs' own transcripts are
   never touched.
 
+## Prompt editor
+
+`prompts.txt`, the file beside a task or project that its chat reads prompts from, gets an editing
+mode: each prompt is a block, and the mode sends a block to the chat. It is on by default;
+`prompts.enabled` set to `false` turns it off (no rules or mode line, and the commands are hidden).
+The file stays plain text: the mode never writes anything you did not type or send, and it saves
+exactly what is in the buffer (no trailing-whitespace trim, no final newline added, no formatting).
+
+```text
+=== prompt 2026-11-05 13:40 ===
+Add proration to the invoice lines.
+
+- cover credits
+- cover refunds
+=== prompt 2026-11-05 13:52 | sent 2026-11-05 14:02 ===
+Finish with unit tests.
+```
+
+- **Markers.** A block starts at a marker line, `=== prompt <created> ===`, and runs to the next
+  marker. The stamps are `YYYY-MM-DD HH:MM`; once the block is sent the marker reads
+  `=== prompt <created> | sent <sent> ===`, and a later send updates the sent stamp. Text before the
+  first marker is a block without one, and a send inserts the marker above it. Only a line that is
+  exactly a marker counts; anything else is prompt text. The editor draws each marker as a rule
+  with its stamps, dims the bodies of sent blocks and brightens the current one; the mode line
+  shows `prompt 3/7 - pending - auto-submit on` (or `sent 14:02`).
+- **Keys (Emacs keymap only, in the prompts editor).** `C-c C-c` sends the prompt at point (it asks
+  first when the block was sent before), `C-c C-r` sends the selection exactly and marks nothing (with no selection it is `C-c C-c`),
+  `C-c C-n` starts a new prompt, `C-c C-p` and `C-c C-f` go to the previous and next prompt,
+  `C-c C-j` to the next one not sent yet, `C-c C-w` copies the prompt (or the selection) and
+  `C-c C-a` turns auto-submit on or off for the chat. `C-c C-u` and `C-c C-d` choose the file
+  and go back to the default. `C-c c e` focuses the prompts pane of the shown chat. In the
+  command palette, `prompts: send without marking` sends the block and leaves its marker alone,
+  `prompts: open` and `prompts: mode` open the prompts and turn the mode on for the current file.
+  In a chat terminal these keys are not bound: `C-c C-c` and the rest reach the CLI as typed.
+- **A send is one paste.** The text of the block (without blank lines at its edges, and without the
+  marker) reaches the CLI as one bracketed paste, then Enter when auto-submit is on. After it
+  arrives the marker is stamped sent and point moves to the next block, or to a new one after the
+  last. Nothing is marked when the text could not be delivered.
+- **Auto-submit.** `prompts.auto_submit` (default `true`) says whether a send presses Enter. `C-c C-a`
+  writes an override into the chat's own record (`auto_submit = false` or `true`), so one chat can
+  paste without submitting while the others follow the setting; toggling back to the setting
+  removes the override. The mode line shows the value in effect.
+- **Use file.** A chat reads the `prompts.txt` of its task or project. `C-c C-u` picks another one,
+  among the project's and its tasks' or by a path you type, and records it as `prompts_file` in
+  the chat's record; the pane follows it, and it survives a restart. A file that is not there is
+  created empty. `C-c C-d` removes the field, back to the default. Both refuse while the buffer has
+  unsaved changes ("Save the prompts file first"), so no text is dropped.
+- **Save on send.** `prompts.save_on_send` (default `true`) saves the file right after a send has
+  stamped it, unless it changed on disk meanwhile; then a toast says so and the buffer is left as
+  it is. Typing is never saved on its own: use `C-x C-s`.
+- **Not there yet.** Spell check.
+
 ## Privacy
 
 bongos's own code, and the telemetry and update checks of the language servers it runs, contact
