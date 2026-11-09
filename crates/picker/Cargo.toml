@@ -17,6 +17,7 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
+bongos_minibuffer_model.workspace = true
 db.workspace = true
 editor.workspace = true
 language.workspace = true
