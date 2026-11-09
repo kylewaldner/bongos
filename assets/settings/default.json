@@ -2305,6 +2305,22 @@
         "words": "disabled",
       },
     },
+    // The language of `prompts.txt` files. Saved exactly as typed: nothing is trimmed,
+    // inserted, formatted or completed on its own.
+    "Prompts": {
+      "soft_wrap": "editor_width",
+      "remove_trailing_whitespace_on_save": false,
+      "ensure_final_newline_on_save": false,
+      "format_on_save": "off",
+      "use_autoclose": false,
+      "use_auto_surround": false,
+      "auto_indent": "none",
+      "auto_indent_on_paste": false,
+      "show_completions_on_input": false,
+      "completions": { "words": "disabled" },
+      "show_edit_predictions": false,
+      "enable_language_server": false,
+    },
     "Proto": {
       "language_servers": ["buf", "!protols", "!protobuf-language-server", "..."],
     },
@@ -2636,6 +2652,11 @@
       "claude": { "command": "claude", "extra_args": [] },
       "codex": { "command": "codex", "extra_args": [] },
     },
+  },
+  "prompts": {
+    // Whether the prompts editor is on. While it is off, `prompts.txt` files open as
+    // plain text and the prompts commands are hidden.
+    "enabled": false,
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.

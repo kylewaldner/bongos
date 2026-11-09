@@ -224,6 +224,7 @@ impl VsCodeSettings {
             which_key: None,
             work: None,
             chats: None,
+            prompts: None,
             modeline_lines: None,
             feature_flags: None,
             instrumentation: None,
