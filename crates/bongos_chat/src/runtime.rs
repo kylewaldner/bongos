@@ -841,6 +841,15 @@ impl ChatRuntime {
         true
     }
 
+    /// [`ChatRuntime::close`] for a chat that is about to be archived or deleted by Kyle: the
+    /// never-prompted cleanup does not run, so the record is left to the caller.
+    pub fn close_keeping_record(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
+        if let Some(chat) = self.live.get_mut(chat_id) {
+            chat.cleanup_checked = true;
+        }
+        self.close(chat_id, cx)
+    }
+
     /// Asks for a `last_active` write: now when the last one is older than the debounce, else
     /// once the debounce has passed.
     fn touch_active(&mut self, chat_id: &str, cx: &mut Context<Self>) {
@@ -906,6 +915,9 @@ impl ChatRuntime {
         let capture = self.capture_query(chat_id, cx);
         let runtime_dir = self.store.read(cx).dirs().runtime.join(chat_id);
         let home = self.home.clone();
+        let env = ChatHealth::global(cx)
+            .map(|health| health.read(cx).env().clone())
+            .unwrap_or_default();
         let Some(chat) = self.live.get_mut(chat_id) else {
             return;
         };
@@ -922,10 +934,14 @@ impl ChatRuntime {
             store.delete_if(
                 path,
                 move |record| {
-                    let verdict =
-                        cleanup_verdict(record, saw_input, live_session.as_deref(), &home, || {
-                            capture.as_ref().and_then(CaptureInput::run)
-                        });
+                    let verdict = cleanup_verdict(
+                        record,
+                        saw_input,
+                        live_session.as_deref(),
+                        &home,
+                        &env,
+                        || capture.as_ref().and_then(CaptureInput::run),
+                    );
                     log::info!("chats: cleanup of an unprompted chat: {verdict:?}");
                     verdict == Cleanup::Delete
                 },

@@ -149,8 +149,9 @@ pub(crate) fn prepare(
 
     let mut record = request.record.clone();
     // Claude takes the id of a new session on the command line, so it is chosen here and known
-    // before the CLI starts. A resume keeps the id it resumes.
-    if agent == Agent::Claude && record.session_id.is_none() {
+    // before the CLI starts. A resume keeps the id it resumes, and one with no stored id never
+    // makes up another.
+    if agent == Agent::Claude && request.kind == LaunchKind::New && record.session_id.is_none() {
         record.session_id = Some(uuid::Uuid::new_v4().to_string());
     }
 

@@ -2,7 +2,9 @@
 //! chat records, built from the work store's snapshot, and their serial writer), seeding of the
 //! session types, the health of the agent CLIs, [`ChatRuntime`] (the running chats and their live
 //! state), the send path, the `chat` actions and their commands (new, open, next, previous, close,
-//! with the scope rules of [`scope`] and the never-prompted cleanup of [`cleanup`]). Everything is off while `chats.enabled` is false. The file
+//! with the scope rules of [`scope`] and the never-prompted cleanup of [`cleanup`]), the commands
+//! archive, restore, rename and delete, and the offer to archive a finished task's chats
+//! ([`lifecycle`]). Everything is off while `chats.enabled` is false. The file
 //! formats and pure rules live in `bongos_chat_model`.
 
 mod actions;
@@ -12,6 +14,7 @@ mod facts;
 mod health;
 mod launch;
 mod layout;
+mod lifecycle;
 mod live_modes;
 mod panel;
 mod runtime;
@@ -106,6 +109,7 @@ pub fn init(dirs: ChatDirs, cx: &mut App) {
     cx.set_global(GlobalChatStore(store.clone()));
     let runtime = cx.new(|_| ChatRuntime::new(store.clone(), util::paths::home_dir().clone()));
     live_modes::init(&runtime, &store, cx);
+    lifecycle::init(&store, cx);
     ChatRuntime::set_global(runtime, cx);
 }
 
@@ -122,6 +126,9 @@ mod commands_tests;
 
 #[cfg(test)]
 mod facts_tests;
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod panel_tests;
