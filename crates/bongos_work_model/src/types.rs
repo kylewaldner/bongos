@@ -62,6 +62,8 @@ pub enum Visibility {
 pub enum TodoRole {
     ProducesBranch,
     Ships,
+    /// The planning todo, whatever it is named.
+    Plans,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -170,6 +172,28 @@ pub struct HistoryEntry {
     pub extra: Extra,
 }
 
+/// How a proposal file was settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProposalState {
+    Applied,
+    Rejected,
+}
+
+/// One `[[proposals]]` record of a task: a proposal file that was applied or rejected, with the
+/// SHA-256 of its bytes (lowercase hex) at that moment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProposalRecord {
+    pub number: u32,
+    pub state: ProposalState,
+    pub at: Timestamp,
+    /// `kyle`, `agent` or `workflow:<name>`.
+    pub by: String,
+    pub hash: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
 /// `task.toml`. A group task has no `todos`, `result`, `branch` or `worktree`; those stay empty
 /// and are not written.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -213,6 +237,12 @@ pub struct TaskFile {
     pub todos: Vec<Todo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<TaskResult>,
+    /// The result a leaf is planned to produce, in words; separate from `result`, the actual PR
+    /// or document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<ProposalRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<HistoryEntry>,
     #[serde(flatten)]
@@ -245,6 +275,8 @@ impl TaskFile {
             stacked_on: None,
             todos: Vec::new(),
             result: None,
+            planned_result: None,
+            proposals: Vec::new(),
             history: Vec::new(),
             extra: Extra::new(),
         }
@@ -305,6 +337,9 @@ pub struct ProjectFile {
     pub linear: Option<String>,
     #[serde(default)]
     pub archived: bool,
+    /// Whether proposals apply without a preview; unset follows the setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_apply_proposals: Option<bool>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -318,6 +353,7 @@ impl ProjectFile {
             docs_home: None,
             linear: None,
             archived: false,
+            auto_apply_proposals: None,
             extra: Extra::new(),
         }
     }

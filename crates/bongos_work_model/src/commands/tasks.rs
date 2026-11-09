@@ -18,6 +18,8 @@ pub struct NewTask {
     pub kind: Option<Kind>,
     /// Unset inherits from the parent, then the project.
     pub repository: Option<String>,
+    /// The todo list the task starts with; unset gives the kind's [`default_todos`].
+    pub todos: Option<Vec<Todo>>,
 }
 
 /// Where a new task goes.
@@ -80,11 +82,17 @@ pub(super) fn check_goal(goal: &str) -> Result<&str, Refusal> {
     }
 }
 
-fn new_file(ctx: &Context, goal: &str, kind: Kind, repository: Option<String>) -> TaskFile {
+fn new_file(
+    ctx: &Context,
+    goal: &str,
+    kind: Kind,
+    repository: Option<String>,
+    todos: Option<Vec<Todo>>,
+) -> TaskFile {
     let mut file = TaskFile::new(goal, kind);
     file.created = ctx.at;
     file.repository = repository;
-    file.todos = default_todos(kind);
+    file.todos = todos.unwrap_or_else(|| default_todos(kind));
     file
 }
 
@@ -112,7 +120,13 @@ pub fn new_child(tree: &WorkTree, ctx: &Context, parent: &str, new: NewTask) -> 
     let slug = free_slug(&slugify(goal), &siblings);
     let dir = layout::child_dir(&place.task.dir, &slug);
 
-    let mut file = new_file(ctx, goal, new.kind.unwrap_or(Kind::PrShip), new.repository);
+    let mut file = new_file(
+        ctx,
+        goal,
+        new.kind.unwrap_or(Kind::PrShip),
+        new.repository,
+        new.todos,
+    );
     let entry = ctx.entry("created", Some(goal.to_string()));
     file.history.push(entry.clone());
     let mut writes = vec![Write::Task {
@@ -136,7 +150,7 @@ pub fn new_child(tree: &WorkTree, ctx: &Context, parent: &str, new: NewTask) -> 
 
 /// A slug for a new directory among `siblings`, never one of the reserved names (such as `runs`),
 /// which the loader would not read as a task.
-pub(super) fn free_slug(base: &str, siblings: &[&str]) -> String {
+pub fn free_slug(base: &str, siblings: &[&str]) -> String {
     let mut taken: Vec<String> = siblings.iter().map(|slug| slug.to_string()).collect();
     loop {
         let slug = unique_slug(base, &taken);
@@ -148,23 +162,30 @@ pub(super) fn free_slug(base: &str, siblings: &[&str]) -> String {
 }
 
 /// When the plain leaf at `place` gains the child `child_slug` and so becomes a group, removes the
-/// todos from its `file` and records them in its history. Whether `file` changed.
-pub(super) fn give_up_todos(
+/// todos and the planned result from its `file` and records them in its history. Whether `file`
+/// changed.
+pub fn give_up_todos(
     ctx: &Context,
     place: &Place,
     tree: &WorkTree,
     file: &mut TaskFile,
     child_slug: &str,
 ) -> bool {
-    if derive::shape(place.task, tree) == Shape::Group || file.todos.is_empty() {
+    if derive::shape(place.task, tree) == Shape::Group
+        || (file.todos.is_empty() && file.planned_result.is_none())
+    {
         return false;
     }
-    let names: Vec<&str> = file.todos.iter().map(|todo| todo.name.as_str()).collect();
-    let detail = format!(
-        "{child_slug}; became a group, todos removed: {}",
-        names.join(", ")
-    );
-    file.todos.clear();
+    let mut removed = Vec::new();
+    if !file.todos.is_empty() {
+        let names: Vec<&str> = file.todos.iter().map(|todo| todo.name.as_str()).collect();
+        removed.push(format!("todos removed: {}", names.join(", ")));
+        file.todos.clear();
+    }
+    if file.planned_result.take().is_some() {
+        removed.push("planned result removed".to_string());
+    }
+    let detail = format!("{child_slug}; became a group, {}", removed.join(", "));
     file.history.push(ctx.entry("child added", Some(detail)));
     true
 }
@@ -192,7 +213,13 @@ pub fn new_oneoff(tree: &WorkTree, ctx: &Context, activity: &str, new: NewTask) 
     let slug = unique_slug(&slugify(goal), &taken);
     let dir = layout::oneoff_dir(&tree.root, &activity_slug, &oneoff_dir_name(date, &slug));
 
-    let mut file = new_file(ctx, goal, new.kind.unwrap_or(Kind::Spike), new.repository);
+    let mut file = new_file(
+        ctx,
+        goal,
+        new.kind.unwrap_or(Kind::Spike),
+        new.repository,
+        new.todos,
+    );
     file.activity = Some(activity.to_string());
     let entry = ctx.entry("created", Some(goal.to_string()));
     file.history.push(entry.clone());

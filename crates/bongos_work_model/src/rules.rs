@@ -162,6 +162,7 @@ pub fn role_name(role: TodoRole) -> &'static str {
     match role {
         TodoRole::ProducesBranch => "produces-branch",
         TodoRole::Ships => "ships",
+        TodoRole::Plans => "plans",
     }
 }
 
@@ -222,7 +223,7 @@ pub fn check_split(place: &Place, tree: &WorkTree) -> Result<(), Refusal> {
 }
 
 /// A task about to become a group is in no stack, at either end.
-fn check_not_stacked(place: &Place, file: &TaskFile) -> Result<(), Refusal> {
+pub fn check_not_stacked(place: &Place, file: &TaskFile) -> Result<(), Refusal> {
     let task = place.task;
     if let Some(edge) = &file.stacked_on {
         return Err(format!(

@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use crate::commands::{Change, Outcome, Plan, apply, default_todos, new_child, plan};
-use crate::commands::{NewTask, make_one_off, move_task, move_to_project, split};
+use crate::commands::{Change, Move, Outcome, Plan, Write, apply, default_todos, new_child, plan};
+use crate::commands::{NewTask, give_up_todos, make_one_off, move_task, move_to_project, split};
+use crate::commands::{free_slug, split_work};
 use crate::fixtures::{at, ctx};
 use crate::journal::{Journal, run_operation, run_steps, write_journal};
 use crate::layout::{self, OP_FILE};
@@ -274,6 +275,215 @@ fn split_moves_the_work_into_a_child_and_the_parent_becomes_a_group() {
         ..NewTask::default()
     };
     accept(root, &tree, new_child(&tree, &ctx(), "backfill", new));
+}
+
+#[test]
+fn split_work_moves_the_planned_result_to_the_keeper() {
+    let temp = TempDir::new().unwrap();
+    let tree = loaded(&temp);
+    let task = by_id(&tree, "backfill");
+    let mut parent = file_of(&tree, "backfill").clone();
+    parent.planned_result = Some("a PR that backfills".to_string());
+    let before = parent.clone();
+    let mut keeper = TaskFile::new("Keeper", Kind::PrShip);
+    let child_dir = layout::child_dir(&task.dir, "keeper");
+
+    let (moved, moves) = split_work(&mut parent, &mut keeper, task, &child_dir);
+    assert_eq!(
+        moved,
+        [
+            "todos",
+            "result",
+            "planned result",
+            "worktree",
+            "branch",
+            "base",
+            "base sha",
+            "chats/",
+            "runs/"
+        ]
+    );
+    assert_eq!(parent.planned_result, None);
+    assert_eq!(keeper.planned_result, before.planned_result);
+    assert_eq!(keeper.todos, before.todos);
+    assert_eq!(keeper.worktree, before.worktree);
+    assert!(parent.todos.is_empty() && parent.result.is_none());
+    assert_eq!(
+        moves,
+        [
+            Move {
+                from: task.dir.join("chats"),
+                to: child_dir.join("chats")
+            },
+            Move {
+                from: task.dir.join("runs"),
+                to: child_dir.join("runs")
+            },
+        ]
+    );
+}
+
+#[test]
+fn split_notes_a_moved_planned_result_in_the_history() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fixture(root);
+    let docs_dir = layout::child_dir(&layout::project_dir(root, "invoicing"), "docs");
+    let mut docs = task_file("docs", "Docs", Kind::Document);
+    docs.planned_result = Some("a design document".to_string());
+    put(&docs_dir, &docs);
+    let tree = load(root);
+    let tree = accept(root, &tree, split(&tree, &ctx(), "docs", Some("Write")));
+    let parent = file_of(&tree, "docs");
+    assert_eq!(parent.planned_result, None);
+    assert_eq!(
+        parent.history.last().unwrap().detail.as_deref(),
+        Some("write; moved: todos, planned result")
+    );
+    let child = &by_id(&tree, "docs").children[0];
+    assert_eq!(
+        child.file.as_ref().unwrap().planned_result.as_deref(),
+        Some("a design document")
+    );
+}
+
+#[test]
+fn giving_up_todos_clears_the_planned_result_and_says_so() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fixture(root);
+    let docs_dir = layout::child_dir(&layout::project_dir(root, "invoicing"), "docs");
+    let mut docs = task_file("docs", "Docs", Kind::Document);
+    docs.planned_result = Some("a design document".to_string());
+    put(&docs_dir, &docs);
+    let tree = load(root);
+
+    let place = Place::locate(&tree, "docs").unwrap();
+    let mut file = file_of(&tree, "docs").clone();
+    assert!(give_up_todos(&ctx(), &place, &tree, &mut file, "part"));
+    assert!(file.todos.is_empty());
+    assert_eq!(file.planned_result, None);
+    assert_eq!(
+        file.history.last().unwrap().detail.as_deref(),
+        Some("part; became a group, todos removed: draft, review, publish, planned result removed")
+    );
+
+    // With no todos left, a planned result alone is still given up.
+    let mut file = file_of(&tree, "docs").clone();
+    file.todos.clear();
+    assert!(give_up_todos(&ctx(), &place, &tree, &mut file, "part"));
+    assert_eq!(file.planned_result, None);
+    assert_eq!(
+        file.history.last().unwrap().detail.as_deref(),
+        Some("part; became a group, planned result removed")
+    );
+
+    // Nothing to give up: unchanged.
+    let mut file = file_of(&tree, "docs").clone();
+    file.todos.clear();
+    file.planned_result = None;
+    assert!(!give_up_todos(&ctx(), &place, &tree, &mut file, "part"));
+
+    // Through new_child, the same note lands on the parent's history.
+    let tree = accept(
+        root,
+        &tree,
+        new_child(
+            &tree,
+            &ctx(),
+            "docs",
+            NewTask {
+                goal: "Part".to_string(),
+                ..NewTask::default()
+            },
+        ),
+    );
+    let parent = file_of(&tree, "docs");
+    assert_eq!(parent.planned_result, None);
+    assert!(
+        parent
+            .history
+            .last()
+            .unwrap()
+            .detail
+            .as_deref()
+            .unwrap()
+            .ends_with("planned result removed")
+    );
+}
+
+#[test]
+fn new_task_todos_override_the_kind_defaults() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let tree = loaded(&temp);
+    let plan = Todo {
+        name: "plan".to_string(),
+        role: Some(TodoRole::Plans),
+        workflow: None,
+        state: TodoState::Open,
+        started: None,
+        extra: Extra::new(),
+    };
+    let new = |todos| NewTask {
+        goal: "Verify".to_string(),
+        todos,
+        ..NewTask::default()
+    };
+    let tree = accept(
+        root,
+        &tree,
+        new_child(&tree, &ctx(), "p1", new(Some(vec![plan.clone()]))),
+    );
+    let verify = tree
+        .tasks()
+        .into_iter()
+        .find(|task| task.slug == "verify")
+        .unwrap();
+    assert_eq!(
+        verify.file.as_ref().unwrap().todos,
+        std::slice::from_ref(&plan)
+    );
+
+    // Unset, the kind's defaults apply, as before.
+    let tree = accept(
+        root,
+        &tree,
+        new_child(
+            &tree,
+            &ctx(),
+            "p1",
+            NewTask {
+                goal: "Other".to_string(),
+                ..NewTask::default()
+            },
+        ),
+    );
+    let other = tree
+        .tasks()
+        .into_iter()
+        .find(|task| task.slug == "other")
+        .unwrap();
+    assert_eq!(
+        other.file.as_ref().unwrap().todos,
+        default_todos(Kind::PrShip)
+    );
+
+    // One-offs use it too.
+    let change =
+        crate::commands::new_oneoff(&tree, &ctx(), "support", new(Some(vec![plan.clone()])))
+            .unwrap();
+    match &change.writes[0] {
+        Write::Task { file, .. } => assert_eq!(file.todos, [plan]),
+        other => panic!("unexpected write {other:?}"),
+    }
+}
+
+#[test]
+fn free_slug_skips_taken_and_reserved_names() {
+    assert_eq!(free_slug("part", &[]), "part");
+    assert_eq!(free_slug("part", &["part"]), "part-2");
+    assert_ne!(free_slug("runs", &[]), "runs");
 }
 
 #[test]

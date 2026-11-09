@@ -556,3 +556,115 @@ fn write_atomic_into_a_missing_directory_fails_cleanly() {
     assert!(write_atomic(&path, b"x").is_err());
     assert!(names_in(directory.path()).is_empty());
 }
+
+#[test]
+fn existing_fixtures_serialize_without_the_new_keys() {
+    for text in [LEAF, GROUP] {
+        let task = parse_task(text).unwrap();
+        assert_eq!(task.planned_result, None);
+        assert!(task.proposals.is_empty());
+        let written = serialize_task(&task).unwrap();
+        for absent in ["planned_result", "proposals", "plans"] {
+            assert!(!written.contains(absent), "{absent} written: {written}");
+        }
+        assert_eq!(parse_task(&written).unwrap(), task);
+    }
+    let project = parse_project("schema = 1\ntitle = \"P\"\n").unwrap();
+    assert_eq!(project.auto_apply_proposals, None);
+    let written = serialize_project(&project).unwrap();
+    assert!(!written.contains("auto_apply_proposals"), "{written}");
+}
+
+#[test]
+fn planned_result_proposals_and_the_plans_role_round_trip() {
+    let leaf = LEAF.replacen(
+        "schema = 1\n",
+        "schema = 1\nplanned_result = \"a PR that backfills the events\"\n",
+        1,
+    );
+    let text = format!(
+        r#"{leaf}
+[[proposals]]
+number = 2
+state = "applied"
+at = 2026-11-09T12:00:00Z
+by = "agent"
+hash = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+future = "kept"
+
+[[proposals]]
+number = 3
+state = "rejected"
+at = 2026-11-09T13:00:00Z
+by = "workflow:planner"
+hash = "00"
+
+[[todos]]
+name = "plan"
+role = "plans"
+state = "open"
+"#
+    );
+    let task = parse_task(&text).unwrap();
+    assert_eq!(
+        task.planned_result.as_deref(),
+        Some("a PR that backfills the events")
+    );
+    assert_eq!(task.proposals.len(), 2);
+    assert_eq!(task.proposals[0].number, 2);
+    assert_eq!(task.proposals[0].state, ProposalState::Applied);
+    assert_eq!(task.proposals[0].by, "agent");
+    assert_eq!(
+        task.proposals[0].extra.get("future").unwrap().as_str(),
+        Some("kept")
+    );
+    assert_eq!(task.proposals[1].state, ProposalState::Rejected);
+    assert_eq!(task.todos[2].role, Some(TodoRole::Plans));
+    assert!(task.extra.is_empty());
+
+    let written = serialize_task(&task).unwrap();
+    assert!(written.contains("planned_result = "), "{written}");
+    assert!(written.contains("[[proposals]]"), "{written}");
+    assert!(written.contains("role = \"plans\""), "{written}");
+    assert!(written.contains("state = \"applied\""), "{written}");
+    assert_eq!(parse_task(&written).unwrap(), task);
+
+    // Emptied again, the keys disappear.
+    let mut task = task;
+    task.planned_result = None;
+    task.proposals.clear();
+    let written = serialize_task(&task).unwrap();
+    assert!(!written.contains("planned_result"), "{written}");
+    assert!(!written.contains("proposals"), "{written}");
+}
+
+#[test]
+fn auto_apply_proposals_round_trips_and_is_omitted_when_unset() {
+    let project =
+        parse_project("schema = 1\ntitle = \"P\"\nauto_apply_proposals = false\n").unwrap();
+    assert_eq!(project.auto_apply_proposals, Some(false));
+    let written = serialize_project(&project).unwrap();
+    assert!(
+        written.contains("auto_apply_proposals = false"),
+        "{written}"
+    );
+    assert_eq!(parse_project(&written).unwrap(), project);
+
+    let mut unset = project;
+    unset.auto_apply_proposals = None;
+    let written = serialize_project(&unset).unwrap();
+    assert!(!written.contains("auto_apply_proposals"), "{written}");
+}
+
+#[test]
+fn proposal_file_is_numbered_under_proposals() {
+    let dir = Path::new("projects/invoicing/tasks/backfill");
+    assert_eq!(PROPOSALS_DIR, "proposals");
+    assert_eq!(
+        proposal_file(dir, 2),
+        dir.join("proposals").join("2.proposal.txt")
+    );
+    assert!(proposal_file(dir, 12).ends_with("proposals/12.proposal.txt"));
+    // Not a reserved name, so it is listed like any artifact directory.
+    assert!(!is_reserved(PROPOSALS_DIR));
+}
