@@ -118,24 +118,38 @@ fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
-/// `create 5 tasks, 14 todos, 6 edges; nothing existing is touched`, or with what changes.
-pub fn summary(diff: &Diff) -> String {
-    let mut tasks = 0;
-    let mut todos = 0;
-    let mut edges = 0;
+/// What a diff does, counted for the summary line.
+struct Counts {
+    tasks: usize,
+    todos: usize,
+    edges: usize,
+    changed: usize,
+    moved: usize,
+    cancelled: usize,
+    split: usize,
+    kept: usize,
+}
+
+fn counts(diff: &Diff) -> Counts {
+    let mut counts = Counts {
+        tasks: 0,
+        todos: 0,
+        edges: 0,
+        changed: 0,
+        moved: 0,
+        cancelled: 0,
+        split: 0,
+        kept: 0,
+    };
     let mut changed = BTreeSet::new();
-    let mut moved = 0;
-    let mut cancelled = 0;
-    let mut split = 0;
-    let mut kept = 0;
     for op in &diff.ops {
         match op {
             Op::Create { task, .. } => {
-                tasks += 1;
-                todos += task.todos.len();
+                counts.tasks += 1;
+                counts.todos += task.todos.len();
             }
             Op::AddEdge { from, .. } => {
-                edges += 1;
+                counts.edges += 1;
                 if let TaskRef::Existing { id, .. } = from {
                     changed.insert(id.as_str());
                 }
@@ -147,47 +161,106 @@ pub fn summary(diff: &Diff) -> String {
             | Op::RemoveEdge { id, .. } => {
                 changed.insert(id.as_str());
             }
-            Op::Move { .. } => moved += 1,
-            Op::Cancel { .. } => cancelled += 1,
+            Op::Move { .. } => counts.moved += 1,
+            Op::Cancel { .. } => counts.cancelled += 1,
             // A leaf that held only its plan todo becoming a group is the plan itself.
             Op::Split { keeper, work, .. } => {
                 if keeper.is_some() || !only_plan(&work.todos) {
-                    split += 1;
+                    counts.split += 1;
                 }
             }
-            Op::Kept { .. } => kept += 1,
+            Op::Kept { .. } => counts.kept += 1,
             Op::PlanDone { .. } | Op::Untouched { .. } => {}
         }
     }
-    let mut text = format!(
-        "create {}, {}, {}",
-        plural(tasks, "task", "tasks"),
-        plural(todos, "todo", "todos"),
-        plural(edges, "edge", "edges")
+    counts.changed = changed.len();
+    counts
+}
+
+/// The words of the summary line in the present (preview) or the past (applied).
+struct Tense {
+    create: &'static str,
+    change: &'static str,
+    moved: &'static str,
+    cancel: &'static str,
+    split: &'static str,
+}
+
+const PRESENT: Tense = Tense {
+    create: "create",
+    change: "change",
+    moved: "move",
+    cancel: "cancel",
+    split: "split",
+};
+
+const PAST: Tense = Tense {
+    create: "created",
+    change: "changed",
+    moved: "moved",
+    cancel: "cancelled",
+    split: "split",
+};
+
+/// `create 5 tasks, 14 todos, 6 edges` and what else changes, as `; change 2 tasks, move 1`.
+fn counted(counts: &Counts, tense: &Tense) -> (String, Vec<String>) {
+    let text = format!(
+        "{} {}, {}, {}",
+        tense.create,
+        plural(counts.tasks, "task", "tasks"),
+        plural(counts.todos, "todo", "todos"),
+        plural(counts.edges, "edge", "edges")
     );
     let mut touched = Vec::new();
-    if !changed.is_empty() {
-        touched.push(format!("change {}", plural(changed.len(), "task", "tasks")));
+    if counts.changed > 0 {
+        touched.push(format!(
+            "{} {}",
+            tense.change,
+            plural(counts.changed, "task", "tasks")
+        ));
     }
-    if moved > 0 {
-        touched.push(format!("move {moved}"));
+    if counts.moved > 0 {
+        touched.push(format!("{} {}", tense.moved, counts.moved));
     }
-    if cancelled > 0 {
-        touched.push(format!("cancel {cancelled}"));
+    if counts.cancelled > 0 {
+        touched.push(format!("{} {}", tense.cancel, counts.cancelled));
     }
-    if split > 0 {
-        touched.push(format!("split {split}"));
+    if counts.split > 0 {
+        touched.push(format!("{} {}", tense.split, counts.split));
     }
+    (text, touched)
+}
+
+/// `create 5 tasks, 14 todos, 6 edges; nothing existing is touched`, or with what changes.
+pub fn summary(diff: &Diff) -> String {
+    let counts = counts(diff);
+    let (mut text, touched) = counted(&counts, &PRESENT);
     if touched.is_empty() {
         text.push_str("; nothing existing is touched");
     } else {
         text.push_str("; ");
         text.push_str(&touched.join(", "));
     }
-    if kept > 0 {
-        text.push_str(&format!("; {kept} kept"));
+    if counts.kept > 0 {
+        text.push_str(&format!("; {} kept", counts.kept));
     }
     text
+}
+
+/// The line the toast shows and the root's history records once proposal `number` is applied:
+/// `proposal 2 applied: created 5 tasks, 14 todos, 6 edges`, then what else changed and how many
+/// asks were kept.
+pub fn applied_summary(number: u32, diff: &Diff) -> String {
+    let counts = counts(diff);
+    let (mut text, touched) = counted(&counts, &PAST);
+    if !touched.is_empty() {
+        text.push_str("; ");
+        text.push_str(&touched.join(", "));
+    }
+    if counts.kept > 0 {
+        text.push_str(&format!("; {} kept", counts.kept));
+    }
+    format!("proposal {number} applied: {text}")
 }
 
 fn only_plan(todos: &[Todo]) -> bool {

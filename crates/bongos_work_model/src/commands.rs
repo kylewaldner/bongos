@@ -299,7 +299,7 @@ pub fn create_prompts(dir: &Path) -> Result<()> {
 
 /// How [`apply`] writes a change.
 #[derive(Debug)]
-pub(crate) enum Plan {
+pub enum Plan {
     /// One file, replaced atomically.
     One { path: PathBuf, content: String },
     /// A journal to write into `dir` and run.
@@ -308,8 +308,9 @@ pub(crate) enum Plan {
 
 /// The writes of `change`, and for a multi-file change its journal: every move (creating the
 /// target's parent first), then every file. Reads `history.old.toml` files and checks that no move
-/// target exists, but writes nothing.
-pub(crate) fn plan(root: &Path, change: &Change) -> Result<Plan> {
+/// target exists, but writes nothing. Public for the crash tests of other crates, which run a
+/// journal step by step.
+pub fn plan(root: &Path, change: &Change) -> Result<Plan> {
     let files = rendered(change)?;
     if change.moves.is_empty()
         && let [(path, content)] = files.as_slice()
