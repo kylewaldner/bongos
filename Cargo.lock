@@ -2390,6 +2390,7 @@ dependencies = [
  "settings",
  "tab_switcher",
  "theme",
+ "theme_settings",
  "ui",
  "util",
  "which_key",

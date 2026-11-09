@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use gpui::{AnyWindowHandle, App, Context, Entity, Global, Subscription, Window};
+use gpui::{AnyWindowHandle, App, Context, Entity, Global, Hsla, Subscription, Window};
 use ui::prelude::*;
 use workspace::{MinibufferMessageKind, ModalLayer, MultiWorkspace, Workspace};
 
@@ -62,6 +62,24 @@ impl Minibuffer {
     }
 }
 
+/// The colors of the strip's line, both taken from the theme: the status bar background (the
+/// strip reads as part of the status area) and the border above it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StripColors {
+    pub(crate) background: Hsla,
+    pub(crate) border: Hsla,
+}
+
+impl StripColors {
+    pub(crate) fn of(cx: &App) -> Self {
+        let colors = cx.theme().colors();
+        Self {
+            background: colors.status_bar_background,
+            border: colors.border,
+        }
+    }
+}
+
 impl Render for Minibuffer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layer =
@@ -72,7 +90,7 @@ impl Render for Minibuffer {
         self.observe(layer, cx);
 
         let line_height = window.line_height();
-        let colors = cx.theme().colors();
+        let colors = StripColors::of(cx);
         let line = match hosted {
             Some((view, focus_handle)) => div()
                 .id("minibuffer-hosted")
@@ -104,7 +122,7 @@ impl Render for Minibuffer {
             .key_context("Minibuffer")
             .flex_none()
             .w_full()
-            .bg(colors.status_bar_background)
+            .bg(colors.background)
             .border_t_1()
             .border_color(colors.border)
             .child(line.w_full().h(line_height))
