@@ -3,9 +3,8 @@
 //! Option produces. These tests feed `Keymap::bindings_for_input` keystrokes shaped as macOS and
 //! Linux report them.
 
-use gpui::{KeyBinding, Keymap, Keystroke, actions};
-
-actions!(emacs_keymap_tests, [ChordAction, OtherAction]);
+use gpui::{KeyBinding, Keymap, Keystroke};
+use menu::{Cancel as ChordAction, Confirm as OtherAction};
 
 /// A keystroke as macOS reports it: `key` is the key code's unmodified character and `key_char`
 /// the character Option produced on the US layout, `None` for a dead key.
