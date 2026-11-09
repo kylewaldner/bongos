@@ -69,4 +69,6 @@ if [ "${BONGOS_TEST_NO_NET:-}" = 1 ]; then
   export CARGO_NET_OFFLINE=true
 fi
 
-cargo_limited nextest run "${crates[@]}" ${filter[@]+"${filter[@]}"} --lib --bins --tests --locked --no-fail-fast --no-tests=pass --color never
+# No --lib: a package without a library target (the bongos binary crate) makes cargo fail. --tests
+# still runs every library's unit tests.
+cargo_limited nextest run "${crates[@]}" ${filter[@]+"${filter[@]}"} --bins --tests --locked --no-fail-fast --no-tests=pass --color never
