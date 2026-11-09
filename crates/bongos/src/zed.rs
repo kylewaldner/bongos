@@ -1771,13 +1771,7 @@ fn quit(_: &Quit, cx: &mut App) {
         {
             let answer = multi_workspace
                 .update(cx, |_, window, cx| {
-                    window.prompt(
-                        PromptLevel::Info,
-                        &question,
-                        None,
-                        &["Quit", "Cancel"],
-                        cx,
-                    )
+                    window.prompt(PromptLevel::Info, &question, None, &["Quit", "Cancel"], cx)
                 })
                 .log_err();
 
