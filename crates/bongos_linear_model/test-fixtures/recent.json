@@ -1,0 +1,18 @@
+{
+  "data": {
+    "viewer": {
+      "assignedIssues": {
+        "nodes": [
+          {
+            "id": "0196f1c2-0000-4000-8000-000000000121",
+            "identifier": "SEQ-121",
+            "title": "Parse tickets",
+            "url": "https://linear.app/acme/issue/SEQ-121/parse-tickets",
+            "team": { "id": "team-seq" },
+            "state": { "id": "st-todo", "name": "Todo", "type": "unstarted", "position": 1 }
+          }
+        ]
+      }
+    }
+  }
+}

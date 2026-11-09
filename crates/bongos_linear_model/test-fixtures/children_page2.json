@@ -1,0 +1,20 @@
+{
+  "data": {
+    "issue": {
+      "children": {
+        "pageInfo": { "hasNextPage": false, "endCursor": "cursor-3" },
+        "nodes": [
+          {
+            "id": "0196f1c2-0000-4000-8000-000000000123",
+            "identifier": "SEQ-123",
+            "title": "Write tests",
+            "description": "",
+            "url": "https://linear.app/acme/issue/SEQ-123/write-tests",
+            "team": { "id": "team-seq" },
+            "state": { "id": "st-done", "name": "Done", "type": "completed", "position": 3 }
+          }
+        ]
+      }
+    }
+  }
+}
