@@ -1064,7 +1064,7 @@ impl<'a> Differ<'a> {
                 // The creation rule of D3 also reads lines written without roles here, so a
                 // proposal applied once diffs to nothing when applied again.
                 let kind = node.attributes.kind.unwrap_or(file.kind);
-                let lines = with_creation_roles(&node.todos, kind);
+                let lines = with_creation_roles(&node.todos, kind, &file.todos);
                 let reconciled = reconcile(&file.todos, &frozen, &lines, line);
                 for (kept_line, what, reason) in reconciled.kept {
                     self.kept(id, kept_line, what, reason);
@@ -1392,7 +1392,7 @@ impl<'a> Differ<'a> {
         let (todos, todo_ops) = if keeper_node.todos.is_empty() {
             (file.todos.clone(), Vec::new())
         } else {
-            let lines = with_creation_roles(&keeper_node.todos, kind);
+            let lines = with_creation_roles(&keeper_node.todos, kind, &file.todos);
             let reconciled = reconcile(&file.todos, &frozen, &lines, keeper_node.line);
             for (kept_line, what, reason) in reconciled.kept {
                 self.kept(id, kept_line, what, reason);
@@ -2073,7 +2073,11 @@ fn open_todo(name: &str, role: Option<TodoRole>, workflow: Option<String>) -> To
 
 /// The proposal's todo lines with D3's creation rule: on a PR kind, when no line has a role,
 /// `produces-branch` goes on `implement` and `ships` on `ship` or `merge`, once each.
-fn with_creation_roles(lines: &[grammar::Todo], kind: Kind) -> Vec<grammar::Todo> {
+///
+/// A line that lines up with a todo already on `disk` gets the role only when that todo carries
+/// it: a leaf whose `implement` deliberately has no role stays so, while re-applying a proposal
+/// that created the roles diffs to nothing.
+fn with_creation_roles(lines: &[grammar::Todo], kind: Kind, disk: &[Todo]) -> Vec<grammar::Todo> {
     let mut lines = lines.to_vec();
     if matches!(kind, Kind::PrShip | Kind::PrMerge) && lines.iter().all(|line| line.role.is_none())
     {
@@ -2085,7 +2089,10 @@ fn with_creation_roles(lines: &[grammar::Todo], kind: Kind) -> Vec<grammar::Todo
                 .iter_mut()
                 .find(|line| names.contains(&line.name.as_str()))
             {
-                line.role = Some(role);
+                let on_disk = disk.iter().find(|todo| same(&todo.name, &line.name));
+                if on_disk.is_none_or(|todo| todo.role == Some(role)) {
+                    line.role = Some(role);
+                }
             }
         }
     }
@@ -2097,7 +2104,7 @@ fn new_todos(lines: &[grammar::Todo], kind: Kind) -> Vec<Todo> {
     if lines.is_empty() {
         return default_todos(kind);
     }
-    with_creation_roles(lines, kind)
+    with_creation_roles(lines, kind, &[])
         .into_iter()
         .map(|line| open_todo(&line.name, line.role, line.workflow))
         .collect()

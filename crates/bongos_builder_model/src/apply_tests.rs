@@ -15,7 +15,7 @@ use bongos_work_model::{
 };
 use tempfile::TempDir;
 
-use crate::apply::{Applied, STALE, applied, checked, file_hash, reject, rewritten};
+use crate::apply::{Applied, Request, STALE, applied, checked, file_hash, reject, rewritten};
 use crate::diff::{Choices, Diff, Op, TaskRef, diff, fingerprint};
 use crate::grammar::Node;
 use crate::print::LiveSet;
@@ -704,6 +704,101 @@ fn a_stale_fingerprint_refuses_and_writes_nothing() {
     .expect("the previewed tree applies");
     write_change(fixture.root(), &change).unwrap();
     assert_ne!(snapshot(fixture.root()), before);
+}
+
+/// The request the app queues after previewing `text` on the fixture with no live work.
+fn previewed_request(fixture: &Fixture, text: &str) -> Request {
+    let parsed = checked_parse(&fixture.tree, text);
+    let choices = Choices::default();
+    let previewed = diff(&parsed, &fixture.tree, &LiveSet::default(), &choices);
+    Request {
+        fingerprint: fingerprint(&previewed, &choices, &file_hash(text.as_bytes())),
+        parsed,
+        choices,
+    }
+}
+
+#[test]
+fn a_request_applies_when_nothing_changed_since_the_preview() {
+    let fixture = billing_fixture();
+    let text = billing_text();
+    let request = previewed_request(&fixture, &text);
+    let change = request
+        .run(&fixture.tree, &ctx(), &LiveSet::default(), text.as_bytes())
+        .expect("an unchanged preview applies");
+    let before = snapshot(fixture.root());
+    write_change(fixture.root(), &change).unwrap();
+    assert_ne!(snapshot(fixture.root()), before);
+    // The record holds the hash of the bytes read at confirm time.
+    let tree = fixture.reload();
+    let record = &file(&tree, &id_of("billing")).proposals[0];
+    assert_eq!(record.hash, file_hash(text.as_bytes()));
+}
+
+#[test]
+fn a_request_is_stale_when_the_file_changed_after_the_preview() {
+    let fixture = billing_fixture();
+    let text = billing_text();
+    let request = previewed_request(&fixture, &text);
+    let before = snapshot(fixture.root());
+    let edited = format!("{text}\n");
+    let refused = request.run(
+        &fixture.tree,
+        &ctx(),
+        &LiveSet::default(),
+        edited.as_bytes(),
+    );
+    assert_eq!(refused, Err(STALE.to_string()));
+    assert_eq!(snapshot(fixture.root()), before, "nothing is written");
+}
+
+#[test]
+fn a_request_is_stale_when_work_went_live_after_the_preview() {
+    let fixture = billing_fixture();
+    let text = billing_text();
+    let request = previewed_request(&fixture, &text);
+    let before = snapshot(fixture.root());
+    for add in [LiveSet::add_chat, LiveSet::add_run] {
+        let mut live = LiveSet::default();
+        add(&mut live, id_of("tidy"));
+        let refused = request.run(&fixture.tree, &ctx(), &live, text.as_bytes());
+        assert_eq!(refused, Err(STALE.to_string()));
+    }
+    assert_eq!(snapshot(fixture.root()), before, "nothing is written");
+}
+
+#[test]
+fn a_done_root_takes_no_proposal() {
+    let memory = tree(group(
+        "shipped",
+        "shipped",
+        vec![finished(leaf("only", "only", Kind::PrShip))],
+    ));
+    let fixture = Fixture::new(&memory, &[]);
+    let text = doc(
+        "shipped",
+        &format!(
+            "task shipped: shipped | id {}\n  task only: only | id {}\n",
+            id_of("shipped"),
+            id_of("only")
+        ),
+    );
+    let parsed = checked_parse(&fixture.tree, &text);
+    let diff = diff(
+        &parsed,
+        &fixture.tree,
+        &LiveSet::default(),
+        &Choices::default(),
+    );
+    let refused = applied(
+        &parsed,
+        &fixture.tree,
+        &diff,
+        &ctx(),
+        &file_hash(text.as_bytes()),
+    )
+    .expect_err("a done root is refused");
+    assert!(refused.contains("is done"), "{refused}");
 }
 
 #[test]

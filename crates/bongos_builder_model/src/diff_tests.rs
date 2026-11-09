@@ -1439,3 +1439,48 @@ fn the_fingerprint_is_stable_and_follows_the_operations_the_keeper_and_the_file(
         fingerprint(&run_with(&tree, &text, &live, &none), &none, "hash-1")
     );
 }
+
+// The creation rule of D3 reaches only todo lines that do not line up with a disk todo.
+
+fn bare_text(slug: &str) -> String {
+    doc(
+        "work",
+        &format!(
+            "task work: work | id {}\n  task {slug}: it | id {}\n    todo implement\n    todo review\n    todo ship\n",
+            id_of("work"),
+            id_of(slug)
+        ),
+    )
+}
+
+fn one_leaf(slug: &str, implement: Option<TodoRole>) -> WorkTree {
+    tree(group(
+        "work",
+        "work",
+        vec![leaf_with(
+            slug,
+            "it",
+            Kind::PrShip,
+            vec![
+                todo("implement", implement, TodoState::Open),
+                todo("review", None, TodoState::Open),
+                todo("ship", Some(TodoRole::Ships), TodoState::Open),
+            ],
+        )],
+    ))
+}
+
+#[test]
+fn creation_roles_are_not_added_to_todos_of_an_existing_leaf() {
+    // A leaf whose `implement` deliberately has no role prints without one, and diffs to nothing.
+    let plain = one_leaf("plain", None);
+    let printed = print(&plain, &id_of("work"), &LiveSet::default()).expect("prints");
+    assert!(!printed.contains("produces-branch"), "{printed}");
+    assert!(run(&plain, &printed).is_empty());
+    assert!(run(&plain, &bare_text("plain")).is_empty());
+
+    // A disk `implement` that carries the role still reads a role-less line as that role, so
+    // applying the same proposal twice diffs to nothing the second time.
+    let rolled = one_leaf("rolled", Some(TodoRole::ProducesBranch));
+    assert!(run(&rolled, &bare_text("rolled")).is_empty());
+}

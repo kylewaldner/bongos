@@ -49,29 +49,39 @@ pub fn file_hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// What the app hands the serial writer after the user confirms the preview.
+/// What the app hands the serial writer after the user confirms the preview: what was previewed,
+/// never what is true now. The writer supplies the present: [`Request::run`] takes the live work
+/// and the proposal file's bytes, both collected at confirm time, so a chat started or a file
+/// edited since the preview changes the recomputed fingerprint and the apply is refused.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
+    /// The proposal as parsed from the previewed file.
     pub parsed: Parsed,
-    pub live: LiveSet,
     pub choices: Choices,
-    /// The fingerprint of the previewed diff ([`fingerprint`]).
+    /// The fingerprint of the previewed diff ([`fingerprint`]), over the previewed live work and
+    /// the previewed file's hash.
     pub fingerprint: String,
-    /// The hash of the proposal file as previewed ([`file_hash`]).
-    pub file_hash: String,
 }
 
 impl Request {
-    /// The writer's command: [`checked`] on the tree the writer holds.
-    pub fn run(&self, tree: &WorkTree, ctx: &Context) -> Outcome {
+    /// The writer's command: [`checked`] on the tree the writer holds, with the `live` work
+    /// collected and the proposal file's `file_bytes` read when the user confirmed (the app reads
+    /// them just before queueing the command; this crate stays free of the filesystem and gpui).
+    pub fn run(
+        &self,
+        tree: &WorkTree,
+        ctx: &Context,
+        live: &LiveSet,
+        file_bytes: &[u8],
+    ) -> Outcome {
         checked(
             &self.parsed,
             tree,
             ctx,
-            &self.live,
+            live,
             &self.choices,
             &self.fingerprint,
-            &self.file_hash,
+            &file_hash(file_bytes),
         )
     }
 }
@@ -135,6 +145,13 @@ pub fn applied(
         return Err("the diff is not of this proposal".to_string());
     }
     let mut builder = Builder::new(tree, ctx, number);
+    // A done or cancelled root (or one under such a task) takes no proposal: not even its record.
+    if let Some(word) = builder.closed.get(diff.root.as_str()) {
+        let slug = tree.task_by_id(&diff.root).map_or("the root", |t| &t.slug);
+        return Err(format!(
+            "{slug} is {word}, and a {word} task is never changed"
+        ));
+    }
     builder.edit(&diff.root)?;
     builder.allocate(diff)?;
     builder.carry_out(diff)?;
