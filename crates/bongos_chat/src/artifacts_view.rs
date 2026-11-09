@@ -14,12 +14,16 @@
 //! on screen never reveals what Kyle has locked since. When the manifest does not parse the
 //! current list is empty, so a running chat then shows nothing.
 //!
+//! Under the list the view says how the chat was forked (a handoff fork says "forked as new chat
+//! with handoff from" its parent) and which fallbacks its launch used (a running chat only). Those
+//! lines name no artifact.
+//!
 //! A view reads the task's files and the in-memory list and writes nothing, in particular no
 //! record.
 
 use std::path::PathBuf;
 
-use bongos_chat_model::context_digest;
+use bongos_chat_model::{ChatRecord, Fallback, context_digest};
 use bongos_work_model::{SharedArtifact, shared_artifacts};
 use editor::{Editor, MultiBuffer};
 use gpui::{App, AppContext as _, Context, Task, Window};
@@ -29,6 +33,7 @@ use workspace::Workspace;
 use crate::ChatRuntime;
 use crate::actions::chat;
 use crate::commands::{chat_name, chats_on, shown_chat};
+use crate::fork::fork_label;
 use crate::live_modes::is_open;
 use crate::send::show_toast;
 
@@ -47,7 +52,12 @@ pub fn is_stale(given: &[SharedArtifact], current: &[SharedArtifact]) -> bool {
 
 /// The text of the view of the chat `name`. `given` is the list a running chat was given, `None`
 /// for a closed chat; `current` is the task's shared list now.
-pub fn render(name: &str, given: Option<&[SharedArtifact]>, current: &[SharedArtifact]) -> String {
+pub fn render(
+    name: &str,
+    given: Option<&[SharedArtifact]>,
+    current: &[SharedArtifact],
+    labels: &[String],
+) -> String {
     let mut text = format!("Artifacts of {name}\n\n");
     let (shown, intro): (Vec<&SharedArtifact>, &str) = match given {
         Some(given) => (
@@ -73,10 +83,37 @@ pub fn render(name: &str, given: Option<&[SharedArtifact]>, current: &[SharedArt
             text.push_str(&format!("  {}\n", artifact.description));
         }
     }
+    if !labels.is_empty() {
+        text.push('\n');
+        for label in labels {
+            text.push_str(&format!("{label}\n"));
+        }
+    }
     if given.is_some_and(|given| is_stale(given, current)) {
         text.push_str(&format!("\n{STALE_LINE}\n"));
     }
     text
+}
+
+/// The labels of a chat, from its record and the launch it runs on: how it was forked
+/// ([`fork_label`], naming the parent chat only) and each fallback the launch used (`fallbacks`
+/// is empty for a chat that does not run, whose next launch is not known yet). They name no
+/// artifact.
+pub fn labels(
+    record: Option<&ChatRecord>,
+    parent_name: &str,
+    fallbacks: &[Fallback],
+) -> Vec<String> {
+    let mut labels = Vec::new();
+    if let Some(fork) = record.and_then(|record| record.fork) {
+        labels.push(format!("This chat was {} {parent_name}", fork_label(fork)));
+    }
+    labels.extend(
+        fallbacks
+            .iter()
+            .map(|fallback| format!("Fallback used: {}", fallback.label())),
+    );
+    labels
 }
 
 /// What `chat_id`'s view says now: reads the task's shared list in the background. `Err` is the
@@ -85,7 +122,7 @@ pub fn artifacts_text(chat_id: &str, cx: &mut App) -> Task<Result<String, String
     let Some(runtime) = ChatRuntime::global(cx) else {
         return Task::ready(Err(crate::SendError::Off.to_string()));
     };
-    let (indexed, given) = {
+    let (indexed, given, fallbacks) = {
         let runtime = runtime.read(cx);
         let Some(indexed) = runtime.store().read(cx).find(chat_id).cloned() else {
             return Task::ready(Err(format!("No chat has the id {chat_id}")));
@@ -94,13 +131,25 @@ pub fn artifacts_text(chat_id: &str, cx: &mut App) -> Task<Result<String, String
             .live(chat_id)
             .filter(|live| is_open(live.state()))
             .map(|live| live.given().to_vec());
-        (indexed, given)
+        let fallbacks = runtime
+            .live(chat_id)
+            .filter(|live| is_open(live.state()))
+            .map(|live| live.fallbacks().to_vec())
+            .unwrap_or_default();
+        (indexed, given, fallbacks)
     };
     let name = chat_name(chat_id, cx);
+    let record = indexed.entry.record().cloned();
+    let parent_name = record
+        .as_ref()
+        .and_then(|record| record.parent.as_deref())
+        .map(|parent| chat_name(parent, cx))
+        .unwrap_or_default();
+    let labels = labels(record.as_ref(), &parent_name, &fallbacks);
     let scope_dir = indexed.scope_dir;
     cx.background_spawn(async move {
         let current = shared_artifacts(&scope_dir);
-        Ok(render(&name, given.as_deref(), &current))
+        Ok(render(&name, given.as_deref(), &current, &labels))
     })
 }
 

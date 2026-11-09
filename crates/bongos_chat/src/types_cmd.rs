@@ -1,7 +1,8 @@
 //! `chat: edit session type` (design D20): picks a session type and opens its two files,
-//! `type.toml` and `context.md`, in editor tabs. A type without a `context.md` gets an empty one
-//! first (the file is optional and empty when missing, so nothing changes for its chats). Nothing
-//! is written otherwise; the chats that run keep the files they were launched with.
+//! `type.toml` and `context.md`, in editor tabs. When a type has no `context.md`, an
+//! empty one is created first (the file is optional and empty when missing, so nothing changes
+//! for its chats). Nothing else is written; the chats that run keep the files they were launched
+//! with.
 
 use std::path::{Path, PathBuf};
 

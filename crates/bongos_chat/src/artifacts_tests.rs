@@ -2,14 +2,17 @@
 //! running chat shows exactly the list it was given, a hidden artifact is never named (the buffer
 //! text is searched for its path, name and description), human-only artifacts never appear, a
 //! closed chat shows the next start's list, a view writes no record, and both commands dispatch by
-//! name. Also the same-scope fork of a chat on no task.
+//! name.
 
 #![cfg(unix)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use bongos_chat_model::{Agent, ChatRecord, read_record, record_path, write_record};
+use bongos_chat_model::{
+    Agent, AgentAdapter as _, ChatRecord, ClaudeAdapter, Fork, read_record, record_path,
+    write_record,
+};
 use bongos_work_model::SharedArtifact;
 use editor::Editor;
 use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -18,8 +21,7 @@ use workspace::Workspace;
 use crate::commands_tests::{
     answer, command_window, dispatch, has_modal, panel_of, shown, toast_shown,
 };
-use crate::fork::{ForkRequest, ForkTarget, fork_chat};
-use crate::runtime_tests::{Harness, STARTUP, claude_caps, harness, wait_for, write};
+use crate::runtime_tests::{Harness, STARTUP, harness, wait_for, write};
 use crate::{ROW_NOTE, STALE_LINE, artifacts_text, is_stale, stale_chat, type_files};
 
 /// The human-only files of the test task: neither their paths nor their descriptions may ever
@@ -167,14 +169,14 @@ fn test_the_list_text_and_the_digest_comparison() {
     more.push(artifact("/t/c.md", "C"));
     assert!(is_stale(&given, &more));
 
-    let text = crate::artifacts_view::render("Audit", Some(&given), &given);
+    let text = crate::artifacts_view::render("Audit", Some(&given), &given, &[]);
     assert!(
         text.contains("/t/a.md") && text.contains("/t/b.md"),
         "{text}"
     );
     assert!(!text.contains(STALE_LINE));
     // A hidden artifact is left out of a running chat's list, and the stale line names nothing.
-    let text = crate::artifacts_view::render("Audit", Some(&given), &given[..1]);
+    let text = crate::artifacts_view::render("Audit", Some(&given), &given[..1], &[]);
     assert!(text.contains("/t/a.md"), "{text}");
     assert!(
         !text.contains("/t/b.md") && !text.contains("\n  B\n"),
@@ -183,13 +185,13 @@ fn test_the_list_text_and_the_digest_comparison() {
     assert!(text.contains(STALE_LINE));
     // A changed description keeps what the chat was given.
     let changed = [given[0].clone(), artifact("/t/b.md", "B2")];
-    let text = crate::artifacts_view::render("Audit", Some(&given), &changed);
+    let text = crate::artifacts_view::render("Audit", Some(&given), &changed, &[]);
     assert!(text.contains("  B\n") && !text.contains("B2"), "{text}");
     assert!(text.contains(STALE_LINE));
     // A closed chat shows what a start gets, and is never stale.
-    let text = crate::artifacts_view::render("Audit", None, &changed);
+    let text = crate::artifacts_view::render("Audit", None, &changed, &[]);
     assert!(text.contains("B2") && !text.contains(STALE_LINE), "{text}");
-    let empty = crate::artifacts_view::render("Audit", None, &[]);
+    let empty = crate::artifacts_view::render("Audit", None, &[], &[]);
     assert!(empty.contains("(none)"), "{empty}");
     assert_eq!(
         STALE_LINE,
@@ -215,6 +217,20 @@ async fn test_a_running_chat_shows_exactly_the_list_it_was_given(cx: &mut TestAp
     // The Chats list's note: not stale.
     let id = shown(&workspace, cx).unwrap();
     assert!(!cx.update(|_, cx| stale_chat(&id, cx)).await);
+    // The view wrote nothing: the record is what it was before the view, once a write that was
+    // already on its way has landed.
+    let path = record_path(&h.scope, &id);
+    for _ in 0..10 {
+        cx.run_until_parked();
+        cx.executor().timer(Duration::from_millis(50)).await;
+    }
+    let before = std::fs::read(&path).unwrap();
+    view_text(&workspace, cx).await;
+    for _ in 0..10 {
+        cx.run_until_parked();
+        cx.executor().timer(Duration::from_millis(50)).await;
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[gpui::test]
@@ -394,39 +410,112 @@ async fn test_show_artifacts_with_no_shown_chat_says_so_and_edit_type_asks(
     assert!(has_modal(&workspace, cx));
 }
 
-#[gpui::test]
-async fn test_a_same_scope_fork_of_a_chat_on_no_task_is_refused(cx: &mut TestAppContext) {
-    let h = ready(cx).await;
-    // A directory under the project's tasks with no `task.toml`: its chats are indexed with no
-    // task id.
-    let loose = h.root.join("projects/invoicing/tasks/loose");
+/// Writes a closed chat forked from `parent`, as a record.
+async fn closed_fork(
+    h: &Harness,
+    parent: &ChatRecord,
+    fork: Fork,
+    cx: &mut TestAppContext,
+) -> ChatRecord {
     let mut record = ChatRecord::new(Agent::Claude, "plan", h.cwd.clone());
+    record.name = "Forked audit".to_string();
     record.prompted = true;
-    record.session_id = Some("8c1e4f8a-0000-4000-8000-0000000000cc".to_string());
-    let path = record_path(&loose, &record.id);
+    record.parent = Some(parent.id.clone());
+    record.fork = Some(fork);
+    let path = record_path(&h.scope, &record.id);
     write(&path, "");
     write_record(&path, &record).unwrap();
-    wait_for(cx, "the chat in the index", STARTUP, |cx| {
-        h.store.read_with(cx, |store, _| {
-            store
-                .find(&record.id)
-                .is_some_and(|chat| chat.task_id.is_none())
-        })
+    wait_for(cx, "the fork in the index", STARTUP, |cx| {
+        h.store
+            .read_with(cx, |store, _| store.find(&record.id).is_some())
     })
     .await;
-    cx.update(|cx| crate::ChatRuntime::set_global(h.runtime.clone(), cx));
-    let request = ForkRequest {
-        source_id: record.id.clone(),
-        target: ForkTarget::SameScope,
-        force_handoff: false,
-        caps: Some(claude_caps()),
-    };
-    let projects = vec![h.project.clone()];
-    let error = cx
-        .update(|cx| fork_chat(request, projects, cx))
-        .await
-        .map(|forked| forked.chat_id)
-        .unwrap_err();
-    assert_eq!(error, "This chat is on no task");
-    assert!(!Path::new(&h.runtime_root.join(&record.id)).exists());
+    record
+}
+
+#[gpui::test]
+async fn test_a_handoff_fork_is_labeled_in_the_view_and_a_native_one_is_not_a_handoff(
+    cx: &mut TestAppContext,
+) {
+    let h = ready(cx).await;
+    let (workspace, cx) = command_window(&h, cx).await;
+    let parent = closed_chat(&h, cx).await;
+    let handoff = closed_fork(&h, &parent, Fork::Handoff, cx).await;
+    let panel = panel_of(&workspace, cx);
+    assert!(panel.update_in(cx, |panel, window, cx| panel.show_chat(
+        &handoff.id,
+        window,
+        cx
+    )));
+    write_manifest(&h, false, EXTRA_DESCRIPTION);
+    let text = view_text(&workspace, cx).await;
+    assert!(
+        text.contains("forked as new chat with handoff from Usage audit"),
+        "{text}"
+    );
+    assert!(text.contains("docs/design.md"), "{text}");
+    assert!(
+        !text.contains("extra.md") && !text.contains(EXTRA_DESCRIPTION),
+        "{text}"
+    );
+    no_human_only(&text);
+
+    let native = closed_fork(&h, &parent, Fork::Native, cx).await;
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.show_chat(&native.id, window, cx)
+    }));
+    let text = view_text(&workspace, cx).await;
+    assert!(text.contains("forked from Usage audit"), "{text}");
+    assert!(!text.contains("handoff"), "{text}");
+    // A chat that is no fork has no such line.
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.show_chat(&parent.id, window, cx)
+    }));
+    let text = view_text(&workspace, cx).await;
+    assert!(!text.contains("forked"), "{text}");
+}
+
+#[gpui::test]
+async fn test_a_used_fallback_is_labeled_in_the_view_without_naming_a_hidden_artifact(
+    cx: &mut TestAppContext,
+) {
+    let h = ready(cx).await;
+    let (workspace, cx) = command_window(&h, cx).await;
+    // A Claude without hooks, plugins and `--name`: the launch falls back three ways.
+    let flags = "--session-id\n--resume\n--fork-session\n--append-system-prompt\n--model\n";
+    let caps = ClaudeAdapter::new("claude").capabilities_from_help("2.1.319 (Claude Code)", flags);
+    let mut request = h.request(Agent::Claude, "implement");
+    request.caps = Some(caps);
+    let id = request.record.id.clone();
+    h.launch(request, &h.project, cx).await.unwrap();
+    wait_for(cx, "the chat in the index", STARTUP, |cx| {
+        h.store.read_with(cx, |store, _| store.find(&id).is_some())
+    })
+    .await;
+    let used: Vec<String> = h.runtime.read_with(cx, |runtime, _| {
+        runtime
+            .live(&id)
+            .unwrap()
+            .fallbacks()
+            .iter()
+            .map(|fallback| fallback.label().to_string())
+            .collect()
+    });
+    assert!(!used.is_empty(), "the launch used no fallback");
+    let panel = panel_of(&workspace, cx);
+    assert!(panel.update_in(cx, |panel, window, cx| panel.show_chat(&id, window, cx)));
+    write_manifest(&h, false, EXTRA_DESCRIPTION);
+    let text = view_text(&workspace, cx).await;
+    for label in &used {
+        assert!(
+            text.contains(&format!("Fallback used: {label}")),
+            "{label} in\n{text}"
+        );
+    }
+    assert!(text.contains(STALE_LINE), "{text}");
+    assert!(
+        !text.contains("extra.md") && !text.contains(EXTRA_DESCRIPTION),
+        "{text}"
+    );
+    no_human_only(&text);
 }
