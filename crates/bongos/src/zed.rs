@@ -648,6 +648,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         bongos_work::register(workspace);
         bongos_chat::register(workspace);
         bongos_prompts::register(workspace);
+        bongos_builder::register(workspace);
         let work_focus = cx.new(bongos_work::FocusStatus::new);
         let prompts_mode_line = cx.new(|_| bongos_prompts::PromptsModeLine::new());
 
@@ -5493,6 +5494,7 @@ mod tests {
                 "project_symbols",
                 "projects",
                 "prompts",
+                "proposal",
                 "recent_projects",
                 "remote_debug",
                 "repl",

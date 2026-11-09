@@ -263,6 +263,9 @@ pub struct SettingsContent {
     /// Settings for the prompts editor: the major mode of `prompts.txt` files.
     pub prompts: Option<PromptsSettingsContent>,
 
+    /// Settings for the task builder: proposals that lay out a task tree.
+    pub task_builder: Option<TaskBuilderSettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -1453,6 +1456,27 @@ pub struct PromptsSettingsContent {
     ///
     /// Default: "==="
     pub marker_close: Option<String>,
+}
+
+/// Settings for the task builder.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct TaskBuilderSettingsContent {
+    /// Whether the task builder is on. While it is off, its commands are hidden and each one only
+    /// says so. The `Proposal` language, which saves `*.proposal.txt` files exactly as typed,
+    /// applies either way.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// Whether a proposal that is valid and written by a chat applies on its own, unless the
+    /// project says otherwise.
+    ///
+    /// Default: true
+    pub auto_apply: Option<bool>,
+    /// The number of todos on a task after which the builder suggests splitting it.
+    ///
+    /// Default: 8
+    pub todo_warning: Option<u32>,
 }
 
 /// Settings for chat sessions.

@@ -2321,6 +2321,21 @@
       "show_edit_predictions": false,
       "enable_language_server": false,
     },
+    // The language of `*.proposal.txt` files. Saved exactly as typed, like `Prompts`.
+    "Proposal": {
+      "soft_wrap": "editor_width",
+      "remove_trailing_whitespace_on_save": false,
+      "ensure_final_newline_on_save": false,
+      "format_on_save": "off",
+      "use_autoclose": false,
+      "use_auto_surround": false,
+      "auto_indent": "none",
+      "auto_indent_on_paste": false,
+      "show_completions_on_input": false,
+      "completions": { "words": "disabled" },
+      "show_edit_predictions": false,
+      "enable_language_server": false,
+    },
     "Proto": {
       "language_servers": ["buf", "!protols", "!protobuf-language-server", "..."],
     },
@@ -2687,6 +2702,17 @@
     "marker_open": "=== prompt",
     // The text a marker line ends with.
     "marker_close": "===",
+  },
+  "task_builder": {
+    // Whether the task builder is on. While it is off, its commands are hidden and each
+    // one only says so. The `Proposal` language, which saves `*.proposal.txt` files exactly
+    // as typed, applies either way.
+    "enabled": false,
+    // Whether a valid proposal written by a chat applies on its own. A project can
+    // override it for itself.
+    "auto_apply": true,
+    // The number of todos on a task after which the builder suggests splitting it.
+    "todo_warning": 8,
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
