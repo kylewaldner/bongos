@@ -236,8 +236,9 @@ fn sync_dir(dir: &Path) -> Result<()> {
         .map_err(|error| Error::io(dir, error))
 }
 
-/// Runs the first `count` steps of `journal`. The test seam for a crash between steps.
-pub(crate) fn run_steps(root: &Path, journal: &Journal, count: usize) -> Result<()> {
+/// Runs the first `count` steps of `journal`. The test seam for a crash between steps, also for
+/// the crash tests of other crates.
+pub fn run_steps(root: &Path, journal: &Journal, count: usize) -> Result<()> {
     // Refuse a journal that leads outside the root before any of its steps runs; each step checks
     // its paths again, since earlier steps change the disk.
     for step in &journal.steps {

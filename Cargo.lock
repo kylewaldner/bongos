@@ -2218,6 +2218,7 @@ version = "0.1.0"
 dependencies = [
  "bongos_work_model",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]

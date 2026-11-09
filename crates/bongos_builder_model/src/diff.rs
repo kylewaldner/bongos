@@ -417,7 +417,8 @@ pub fn diff(parsed: &Parsed, tree: &WorkTree, live: &LiveSet, choices: &Choices)
     }
 }
 
-/// The first task the apply would write that carries an error badge, as a refusal naming its file.
+/// The first task the apply would write or move that carries an error badge, as a refusal naming
+/// its file. A move renames the whole subtree, so every task under a moved one counts.
 fn badge_refusal(ops: &[Op], root: &Task, infos: &HashMap<&str, Info<'_>>) -> Option<String> {
     let mut written = vec![root];
     for op in ops {
@@ -426,6 +427,11 @@ fn badge_refusal(ops: &[Op], root: &Task, infos: &HashMap<&str, Info<'_>>) -> Op
                 .into_iter()
                 .filter_map(|id| Some(infos.get(id)?.task)),
         );
+        if let Op::Move { id, .. } = op
+            && let Some(info) = infos.get(id.as_str())
+        {
+            written.extend(info.task.walk().into_iter().skip(1));
+        }
     }
     written.into_iter().find_map(|task| {
         task.check_writable()
@@ -925,9 +931,11 @@ impl<'a> Differ<'a> {
         if node.attributes.drop {
             match self.live_reason(task) {
                 None if self.cancelled.contains(id) => {
+                    // A task under a done or cancelled one is never written (D6).
                     let with = open_descendants(task, self.tree)
                         .into_iter()
                         .filter_map(Task::id)
+                        .filter(|id| self.infos.get(id).is_some_and(|info| info.closed.is_none()))
                         .map(str::to_string)
                         .collect();
                     self.ops.push(Op::Cancel {
@@ -1053,7 +1061,11 @@ impl<'a> Differ<'a> {
                 file.todos.clone()
             } else {
                 let frozen = self.frozen(task, plan);
-                let reconciled = reconcile(&file.todos, &frozen, &node.todos, line);
+                // The creation rule of D3 also reads lines written without roles here, so a
+                // proposal applied once diffs to nothing when applied again.
+                let kind = node.attributes.kind.unwrap_or(file.kind);
+                let lines = with_creation_roles(&node.todos, kind, &file.todos);
+                let reconciled = reconcile(&file.todos, &frozen, &lines, line);
                 for (kept_line, what, reason) in reconciled.kept {
                     self.kept(id, kept_line, what, reason);
                 }
@@ -1380,7 +1392,7 @@ impl<'a> Differ<'a> {
         let (todos, todo_ops) = if keeper_node.todos.is_empty() {
             (file.todos.clone(), Vec::new())
         } else {
-            let lines = with_creation_roles(&keeper_node.todos, kind);
+            let lines = with_creation_roles(&keeper_node.todos, kind, &file.todos);
             let reconciled = reconcile(&file.todos, &frozen, &lines, keeper_node.line);
             for (kept_line, what, reason) in reconciled.kept {
                 self.kept(id, kept_line, what, reason);
@@ -2061,7 +2073,11 @@ fn open_todo(name: &str, role: Option<TodoRole>, workflow: Option<String>) -> To
 
 /// The proposal's todo lines with D3's creation rule: on a PR kind, when no line has a role,
 /// `produces-branch` goes on `implement` and `ships` on `ship` or `merge`, once each.
-fn with_creation_roles(lines: &[grammar::Todo], kind: Kind) -> Vec<grammar::Todo> {
+///
+/// A line that lines up with a todo already on `disk` gets the role only when that todo carries
+/// it: a leaf whose `implement` deliberately has no role stays so, while re-applying a proposal
+/// that created the roles diffs to nothing.
+fn with_creation_roles(lines: &[grammar::Todo], kind: Kind, disk: &[Todo]) -> Vec<grammar::Todo> {
     let mut lines = lines.to_vec();
     if matches!(kind, Kind::PrShip | Kind::PrMerge) && lines.iter().all(|line| line.role.is_none())
     {
@@ -2073,7 +2089,10 @@ fn with_creation_roles(lines: &[grammar::Todo], kind: Kind) -> Vec<grammar::Todo
                 .iter_mut()
                 .find(|line| names.contains(&line.name.as_str()))
             {
-                line.role = Some(role);
+                let on_disk = disk.iter().find(|todo| same(&todo.name, &line.name));
+                if on_disk.is_none_or(|todo| todo.role == Some(role)) {
+                    line.role = Some(role);
+                }
             }
         }
     }
@@ -2085,7 +2104,7 @@ fn new_todos(lines: &[grammar::Todo], kind: Kind) -> Vec<Todo> {
     if lines.is_empty() {
         return default_todos(kind);
     }
-    with_creation_roles(lines, kind)
+    with_creation_roles(lines, kind, &[])
         .into_iter()
         .map(|line| open_todo(&line.name, line.role, line.workflow))
         .collect()
@@ -2207,8 +2226,9 @@ fn reconcile(
         let reason = reason_of(index).unwrap_or_default().to_string();
         match renamed_frozen.next() {
             Some(position) => pairs.push((position, index, reason)),
-            // The plan todo this proposal completes may be left out.
-            None if reason == PLAN_TODO => {}
+            // The plan todo may be left out: the one this proposal completes, and one done by an
+            // earlier proposal.
+            None if reason == PLAN_TODO || todo.role == Some(TodoRole::Plans) => {}
             None => kept.push((
                 node_line,
                 format!("todo '{}' not removed", todo.name),
