@@ -2722,6 +2722,11 @@
     // The number of todos on a task after which the builder suggests splitting it.
     "todo_warning": 8,
   },
+  "linear": {
+    // Whether the Linear sync is on. While it is off, bongos makes no request to Linear
+    // and every Linear command is hidden and only says so.
+    "enabled": false,
+  },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
   "server_url": "https://bongos.invalid",

@@ -266,6 +266,9 @@ pub struct SettingsContent {
     /// Settings for the task builder: proposals that lay out a task tree.
     pub task_builder: Option<TaskBuilderSettingsContent>,
 
+    /// Settings for the Linear sync of tasks.
+    pub linear: Option<LinearSettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -1477,6 +1480,17 @@ pub struct TaskBuilderSettingsContent {
     ///
     /// Default: 8
     pub todo_warning: Option<u32>,
+}
+
+/// Settings for the Linear sync.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct LinearSettingsContent {
+    /// Whether the Linear sync is on. While it is off, bongos makes no request to Linear and
+    /// every Linear command is hidden and only says so.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
 }
 
 /// Settings for chat sessions.
