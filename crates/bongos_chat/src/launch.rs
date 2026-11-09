@@ -69,8 +69,8 @@ pub struct LaunchRequest {
 /// Adds a section to the end of the context of a chat, after the shared artifacts. It never sees
 /// the artifacts: hidden ones stay out of the context whatever an extension writes.
 pub trait ContextExtension {
-    /// The section for a `chat_type` chat on `task_id` (`None` for a project chat), or `None` for
-    /// no section.
+    /// The section for a `chat_type` chat, or `None` for no section. `task_id` is the top task for
+    /// a project chat; it is `None` only when the index has no task.
     fn section(&self, chat_type: &str, task_id: Option<&str>, cx: &App) -> Option<String>;
 }
 

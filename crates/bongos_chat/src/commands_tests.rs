@@ -1258,7 +1258,7 @@ async fn test_a_new_chat_gets_the_context_extension_section(cx: &mut TestAppCont
     );
 
     // A section ends context.md, and codex-instructions.md for Codex.
-    let section = "## Task builder\nPlan with proposals.";
+    let section = "## Extra section\nPlan with proposals.";
     cx.update(|cx| {
         crate::set_context_extension(
             TestExtension {

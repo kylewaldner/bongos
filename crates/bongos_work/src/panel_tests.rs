@@ -319,9 +319,7 @@ async fn task_at_point_prefers_the_focused_panels_selection_then_the_focused_tas
     // Into the project; its first row, `backfill` (`l1`), is selected.
     press(cx, menu::Confirm);
     let at_point = |cx: &mut VisualTestContext| {
-        harness
-            .workspace
-            .read_with(cx, |workspace, cx| crate::task_at_point(workspace, cx))
+        cx.update(|window, cx| crate::task_at_point(harness.workspace.read(cx), window, cx))
     };
     let set_focus = |cx: &mut VisualTestContext, id: Option<&str>| {
         cx.update(|_, cx| {

@@ -591,7 +591,7 @@ async fn test_generated_files_hold_no_human_only_path(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn test_extra_context_ends_the_context_files_and_leaks_nothing(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
-    let section = "## Task builder\nPlan with proposals.";
+    let section = "## Extra section\nPlan with proposals.";
     let mut outputs: Vec<String> = Vec::new();
     for agent in [Agent::Claude, Agent::Codex] {
         let mut request = h.request(agent, "implement");

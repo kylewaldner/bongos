@@ -640,14 +640,14 @@ fn extra_context_ends_context_and_codex_instructions() {
         );
         let plain_context = render_context(&fixture.input());
         let plain_codex = render_codex_instructions(&fixture.input());
-        fixture.extra_context = Some("## Task builder\nPlan like this.\n".to_string());
+        fixture.extra_context = Some("## Extra section\nPlan like this.\n".to_string());
         let context = render_context(&fixture.input());
         let codex = render_codex_instructions(&fixture.input());
-        let tail = "\n## Task builder\nPlan like this.\n";
+        let tail = "\n## Extra section\nPlan like this.\n";
         assert_eq!(context, format!("{plain_context}{tail}"));
         assert_eq!(codex, format!("{plain_codex}{tail}"));
         // The shared artifacts come first.
-        assert!(context.find("/t/a.md").unwrap() < context.find("## Task builder").unwrap());
+        assert!(context.find("/t/a.md").unwrap() < context.find("## Extra section").unwrap());
     }
 }
 

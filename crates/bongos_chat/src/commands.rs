@@ -778,13 +778,13 @@ pub(crate) fn resume_chat(
             })
             .await?;
 
+        let extra_context =
+            cx.update(|cx| extension_section(&record.chat_type, indexed.task_id.as_deref(), cx));
         let launch = runtime.update(cx, |runtime, cx| {
             // An exited chat the panel still shows gives way to the resumed one.
             if runtime.live(&chat_id).is_some() {
                 runtime.close(&chat_id, cx);
             }
-            let extra_context =
-                extension_section(&record.chat_type, indexed.task_id.as_deref(), cx);
             let request = LaunchRequest {
                 record,
                 record_path,
