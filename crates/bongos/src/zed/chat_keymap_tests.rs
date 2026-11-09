@@ -137,12 +137,10 @@ async fn emacs_binds_every_chat_key_in_a_chat_terminal_and_the_list(cx: &mut Tes
                 assert!(!pending, "{emacs}: {input} in {contexts:?}");
             }
         }
-        for prefix in ["ctrl-c c"] {
-            assert!(
-                resolve(&keymap, prefix, &CHAT_TERMINAL).1,
-                "{emacs}: {prefix}"
-            );
-        }
+        assert!(
+            resolve(&keymap, "ctrl-c c", &CHAT_TERMINAL).1,
+            "{emacs}: ctrl-c c"
+        );
     }
 }
 
