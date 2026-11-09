@@ -42,7 +42,7 @@ are hidden).
 A project holds groups and tasks, nested through `tasks/<slug>/` directories; a one-off is a task
 that belongs to no project. Every task directory has a `task.toml` (goal, kind, todos, worktree).
 Any other file in a task directory is an artifact, described and made visible or human-only in
-`artifacts.toml`.
+`artifacts.toml`. A new task starts with a `plan` todo; the task builder (below) lays out the tree.
 
 - **Shared set.** What chat sessions learn about a task (its goal, paths and artifacts) is
   computed fresh from the files on every call, never from a cache, so the agent, the panel and the
@@ -166,6 +166,73 @@ Finish with unit tests.
   stamped it, unless it changed on disk meanwhile; then a toast says so and the buffer is left as
   it is. Typing is never saved on its own: use `C-x C-s`.
 - **Not there yet.** Spell check.
+
+## Task builder
+
+A new task starts with one todo, `plan`. A plan chat looks at the task and writes a proposal, a plain
+text file that lays out the tasks below it; you read it one level at a time, edit it, preview it and
+apply it. It is on by default; `task_builder.enabled` set to `false` turns it off (new tasks get their
+kind's todos as before, nothing is added to a chat's context, nothing applies on its own, and the
+commands are hidden). Proposals are plain files, so they can still be written and edited.
+
+```text
+<task dir>/proposals/<n>.proposal.txt     proposal n for that task (the root), numbered from 1, never overwritten
+~/.bongos/task-builder/format.txt         the format, written by bongos for chats to read
+```
+
+```text
+proposal 1
+for 0196f1c2-7c1e-7a8b-9d55-2f6c0e1a4b33
+by chat 0196f2aa-1d3e-7f00-8c11-0a9b8c7d6e5f
+why one PR per layer
+
+task billing: implement proration for billing | id 0196f1c2-7c1e-7a8b-9d55-2f6c0e1a4b33
+  task schema: add proration columns to plans
+    result a PR adding proration columns
+    todo implement | role produces-branch
+    todo ship | role ships
+  task engine: proration engine
+    stacked on schema
+    result a PR with the proration engine
+```
+
+- **The proposal.** Two-space indentation. A line with an `id` is an existing task (its goal may be
+  renamed); a line without one is new. `after` and `stacked on` join siblings only, so a cycle or an
+  edge across levels is an error that names the edge. The files are ordinary artifacts, so they
+  follow the task's visibility (`artifact: hide`). `proposals/` never becomes a child task.
+- **The splitting test.** Anything with its own result, a PR, a document or a spike's findings, is a
+  task; anything on the way to that result (implement, review, tests, CI) is a todo of that task. A
+  leaf names one result, so two `result` lines on a leaf are an error, a group has no todos, and
+  more than `task_builder.todo_warning` (default 8) todos on a leaf is a warning. A plan chat is
+  told the test, the format and the task's tree; any other chat gets a pointer to the format.
+- **Keys (Emacs keymap only).** `C-c w b` plans the task at point (starts its plan chat, or shows
+  the one it has, and pastes "Plan this task and write proposal <n>"), `C-c w B` proposes: it writes
+  the next proposal for the shown chat's task, pre-filled with the task's tree, and pastes a line
+  into the chat for you to finish (it also works in a chat terminal), `C-c w v` shows the proposal
+  one level at a time (`enter` goes into a task, `^` goes up), `C-c w V` opens the file, `C-c w A`
+  previews and applies it and `C-c w X` rejects it. `task: new without plan` and `task: toggle auto
+  apply` have no key; find them in the command palette.
+- **Apply.** The preview lists what is created, changed, cancelled, kept, split and left alone,
+  then asks before anything is written. The apply is one journaled step, so it finishes or leaves
+  the tree as it was; a tree or file that changed since the preview refuses it. Done tasks,
+  tasks with a worktree, branch or open PR, running chats and started todos are never disturbed: a
+  line that would do so is kept, with its reason, and the rest applies. A task the proposal does not
+  mention is untouched. A `drop` line cancels a task (it can be reopened); nothing is ever deleted.
+  Splitting a leaf that has work asks which new child keeps its worktree and branch (`keeps work`
+  marks it), and is kept while a chat runs on that leaf.
+- **Safe re-apply.** A proposal applied as it is cannot be applied twice. Edit the file and it is
+  pending again. Tasks are matched by `id` (a line without one is new), so edit the tree `C-c w B` prints, which carries every `id`, rather than a copy that lacks them.
+  Reject keeps the file and records it, so it stops waiting; an applied proposal cannot be rejected.
+- **Auto-apply.** A proposal whose header says `by chat <id>` applies on its own, and is logged in
+  the root's history and a toast, when that chat's task is the root or an ancestor of it, the root's
+  plan is done, it has no error, and it only adds or edits: no `drop`, move, kept line, rename of
+  the root or split without a marked keeper. Anything else, and every proposal by you or a
+  workflow, waits and shows as "needs you" on the root and its ancestors. `task_builder.auto_apply`
+  (default `true`) is the switch, and `task: toggle auto apply` sets `auto_apply_proposals` in the
+  project's `project.toml` to override it for that project. A proposal that is already there when
+  bongos starts is classified only; it never applies on its own.
+- **Not there yet.** Named workflows are not checked (a warning), because there is no workflow
+  engine yet.
 
 ## Privacy
 
