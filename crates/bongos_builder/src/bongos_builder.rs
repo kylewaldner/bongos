@@ -2,15 +2,19 @@
 //! (the major mode of `*.proposal.txt` files, whose defaults save a file exactly as typed), the
 //! `task` and `proposal` actions of the builder, hidden while `task_builder.enabled` is false, and
 //! the format reference written to `~/.bongos/task-builder/format.txt`, the plan todo of a new task,
-//! the plan chat and what every chat is told about proposals. The proposal format and
+//! the plan chat, what every chat is told about proposals and the proposal view. The proposal format and
 //! its pure rules live in `bongos_builder_model`, which has no UI dependency.
 
 mod actions;
+mod choose;
 mod context;
+#[cfg(debug_assertions)]
+mod dump;
 mod format_file;
 mod language;
 mod plan;
 mod settings;
+mod view;
 
 use std::sync::Arc;
 
@@ -25,6 +29,7 @@ pub use format_file::{BuilderDirs, FORMAT_FILE_NAME};
 pub use language::{FILE_SUFFIX, NAME as LANGUAGE_NAME, register_language};
 pub use plan::plan_todos;
 pub use settings::TaskBuilderSettings;
+pub use view::{Mark, ProposalView};
 
 /// Registers the `task_builder` settings, writes the format reference and installs the hooks of
 /// the work tree and the chats (the plan todo of a new task, the section of every chat's context),
@@ -41,3 +46,5 @@ pub fn init(fs: Arc<dyn Fs>, dirs: BuilderDirs, cx: &mut App) {
 mod builder_tests;
 #[cfg(test)]
 mod plan_tests;
+#[cfg(test)]
+mod view_tests;

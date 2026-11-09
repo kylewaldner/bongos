@@ -19,11 +19,16 @@ bongos_chat.workspace = true
 bongos_prompts.workspace = true
 bongos_work.workspace = true
 command_palette_hooks.workspace = true
+editor.workspace = true
 fs.workspace = true
 gpui.workspace = true
 language.workspace = true
 log.workspace = true
+menu.workspace = true
+paths.workspace = true
+project.workspace = true
 settings.workspace = true
+ui.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
@@ -32,7 +37,6 @@ editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
-menu.workspace = true
 # Like bongos_prompts: `project` and `workspace` are only lint-clean together under test-support.
 project = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true
