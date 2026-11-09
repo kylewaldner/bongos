@@ -1,0 +1,16 @@
+{
+  "data": {
+    "team": {
+      "states": {
+        "nodes": [
+          { "id": "st-backlog", "name": "Backlog", "type": "backlog", "position": 0 },
+          { "id": "st-todo", "name": "Todo", "type": "unstarted", "position": 1 },
+          { "id": "st-started", "name": "In Progress", "type": "started", "position": 2 },
+          { "id": "st-done", "name": "Done", "type": "completed", "position": 3 },
+          { "id": "st-canceled", "name": "Canceled", "type": "canceled", "position": 4 },
+          { "id": "st-dupe", "name": "Duplicate", "type": "duplicate", "position": 5 }
+        ]
+      }
+    }
+  }
+}

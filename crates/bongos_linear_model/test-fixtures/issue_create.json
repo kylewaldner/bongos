@@ -1,0 +1,15 @@
+{
+  "data": {
+    "issueCreate": {
+      "success": true,
+      "issue": {
+        "id": "3d2e0000-0000-4000-8000-000000000001",
+        "identifier": "SEQ-124",
+        "title": "New subticket",
+        "url": "https://linear.app/acme/issue/SEQ-124/new-subticket",
+        "team": { "id": "team-seq" },
+        "state": { "id": "st-backlog", "name": "Backlog", "type": "backlog", "position": 0 }
+      }
+    }
+  }
+}

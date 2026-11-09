@@ -1,0 +1,10 @@
+{
+  "data": null,
+  "errors": [
+    {
+      "message": "Duplicate issue id: an issue with this id already exists",
+      "path": ["issueCreate"],
+      "extensions": { "code": "INVALID_INPUT", "type": "invalid input", "userError": true }
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "data": {
+    "i0": {
+      "id": "0196f1c2-0000-4000-8000-000000000120",
+      "identifier": "SEQ-120",
+      "title": "Ship the importer",
+      "description": "Import tickets as tasks.",
+      "url": "https://linear.app/acme/issue/SEQ-120/ship-the-importer",
+      "team": { "id": "team-seq" },
+      "state": { "id": "st-started", "name": "In Progress", "type": "started", "position": 2 },
+      "parent": {
+        "id": "0196f1c2-0000-4000-8000-000000000100",
+        "identifier": "SEQ-100",
+        "title": "Linear sync",
+        "url": "https://linear.app/acme/issue/SEQ-100/linear-sync",
+        "team": { "id": "team-seq" },
+        "state": { "id": "st-todo", "name": "Todo", "type": "unstarted", "position": 1 }
+      },
+      "relations": {
+        "nodes": [
+          { "type": "blocks", "relatedIssue": { "id": "0196f1c2-0000-4000-8000-000000000130" } },
+          { "type": "related", "relatedIssue": { "id": "0196f1c2-0000-4000-8000-000000000140" } }
+        ]
+      },
+      "children": {
+        "pageInfo": { "hasNextPage": true, "endCursor": "cursor-2" },
+        "nodes": [
+          {
+            "id": "0196f1c2-0000-4000-8000-000000000121",
+            "identifier": "SEQ-121",
+            "title": "Parse tickets",
+            "description": null,
+            "url": "https://linear.app/acme/issue/SEQ-121/parse-tickets",
+            "team": { "id": "team-seq" },
+            "state": { "id": "st-todo", "name": "Todo", "type": "unstarted", "position": 1 }
+          },
+          {
+            "id": "0196f1c2-0000-4000-8000-000000000122",
+            "identifier": "SEQ-122",
+            "title": "Show preview",
+            "description": "A read-only buffer.",
+            "url": "https://linear.app/acme/issue/SEQ-122/show-preview",
+            "team": { "id": "team-seq" },
+            "state": { "id": "st-odd", "name": "Parked", "type": "paused", "position": 9.5 }
+          }
+        ]
+      }
+    },
+    "i1": null
+  },
+  "errors": [
+    {
+      "message": "Entity not found: Issue",
+      "path": ["i1"],
+      "extensions": { "code": "ENTITY_NOT_FOUND", "type": "invalid input", "userError": true }
+    }
+  ]
+}

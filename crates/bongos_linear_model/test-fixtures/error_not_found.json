@@ -1,0 +1,10 @@
+{
+  "data": null,
+  "errors": [
+    {
+      "message": "Entity not found: Issue",
+      "path": ["issue"],
+      "extensions": { "code": "ENTITY_NOT_FOUND", "type": "invalid input", "userError": true }
+    }
+  ]
+}
