@@ -226,6 +226,32 @@ async fn a_join_right_after_new_is_reverted_alone(cx: &mut TestAppContext) {
     assert_eq!(reverts(&editor, cx), 1);
 }
 
+/// The next marker is pending and made in the current minute, so the new marker equals it: the
+/// index keeps the old id for the new row, and its rule must still be rebuilt, or it covers the
+/// new body and the first typed character is lost.
+#[gpui::test]
+async fn typing_after_new_keeps_the_first_character_when_the_next_stamp_is_equal(
+    cx: &mut TestAppContext,
+) {
+    let stamp = bongos_prompts_model::format_stamp(&chrono::Local::now().naive_local());
+    let file = format!("=== prompt {stamp} ===\nfirst\n=== prompt {stamp} ===\nsecond");
+    let (editor, cx) = open_editor(cx, true, "prompts.txt", &file).await;
+    focus(&editor, cx);
+    put(&editor, Point::new(1, 0), cx);
+    editor.update_in(cx, |editor, window, cx| new_block(editor, window, cx));
+    cx.run_until_parked();
+    assert_eq!(head(&editor, cx), Point::new(3, 0));
+    editor.update_in(cx, |editor, window, cx| {
+        editor.handle_input("x", window, cx)
+    });
+    cx.run_until_parked();
+    let rows: Vec<String> = text(&editor, cx).split('\n').map(str::to_string).collect();
+    assert_eq!(rows[3], "x", "{rows:?}");
+    assert!(is_marker_line(&rows[2]), "{rows:?}");
+    assert_eq!(reverts(&editor, cx), 0, "nothing was reverted");
+    assert_eq!(blocks(&editor, cx), 3, "one rule per marker");
+}
+
 fn dispatch_editor(editor: &Entity<Editor>, action: impl gpui::Action, cx: &mut VisualTestContext) {
     focus(editor, cx);
     cx.update(|window, cx| window.dispatch_action(Box::new(action), cx));

@@ -89,16 +89,9 @@ pkeys() {
   wait_for_settled
 }
 
-# C-c C-n. The first edit typed into a block made this way is lost: the character never reaches the
-# file (seen with every typing method and any delay, and not after a yank). One character is typed and
-# deleted again, so the text that follows is typed whole whether or not that character was kept; the
-# Backspace at the first column of the body is a join the guard refuses, which leaves the row empty.
+# C-c C-n.
 new_block() {
   pkeys n
-  keys x
-  wait_for_settled
-  keys BackSpace
-  wait_for_settled
 }
 
 # Types text that has newlines: xdotool type drops them here, so each line is typed and Return is

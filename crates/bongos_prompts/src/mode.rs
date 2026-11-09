@@ -209,7 +209,8 @@ fn attach(editor: &mut Editor, cx: &mut Context<Editor>) {
     let snapshot = buffer.read(cx).text_snapshot();
     let index = PromptIndex::build(
         PromptsSettings::get_global(cx).marker_syntax(),
-        &split_rows(&snapshot.text()));
+        &split_rows(&snapshot.text()),
+    );
     let mut mode = PromptsMode {
         buffer,
         snapshot,
@@ -340,6 +341,17 @@ pub(crate) fn sync(mode: &mut PromptsMode, editor: &mut Editor, cx: &mut Context
                 before: old.version().clone(),
                 joined,
             });
+        }
+    }
+    // A marker that kept its id through an edit on its own row (the index matches the same marker
+    // at the same row) may still have moved: its rule is anchored to the old text, so rebuild it.
+    {
+        let gone: HashSet<u64> = removed.iter().copied().collect();
+        for (_, marker) in &touched_markers {
+            if !gone.contains(&marker.id) {
+                removed.push(marker.id);
+                added.push(marker.id);
+            }
         }
     }
     let markers_changed = !removed.is_empty() || !added.is_empty();
