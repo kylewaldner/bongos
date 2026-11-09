@@ -2,7 +2,7 @@
 //! pending, the newest; with several pending, one picked from a list. `task: edit proposal` opens
 //! the chosen file as a buffer; `task: show proposal` shows it in the proposal view.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bongos_builder_model::apply::file_hash;
 use bongos_work::model::layout::{PROPOSALS_DIR, proposal_file};
@@ -60,18 +60,24 @@ pub(crate) fn choose(mut candidates: Vec<Candidate>) -> Choice {
     }
 }
 
+/// The number of a `proposals/<n>.proposal.txt` path relative to its task's directory, as
+/// `Task::files` lists it.
+pub(crate) fn proposal_number(path: &Path) -> Option<u32> {
+    if !path.starts_with(PROPOSALS_DIR) {
+        return None;
+    }
+    path.file_name()?
+        .to_str()?
+        .strip_suffix(".proposal.txt")?
+        .parse()
+        .ok()
+}
+
 /// The numbers of the `<n>.proposal.txt` files the store lists for `task`.
 fn numbers(task: &Task) -> Vec<u32> {
     task.files
         .keys()
-        .filter(|path| path.starts_with(PROPOSALS_DIR))
-        .filter_map(|path| {
-            path.file_name()?
-                .to_str()?
-                .strip_suffix(".proposal.txt")?
-                .parse()
-                .ok()
-        })
+        .filter_map(|path| proposal_number(path))
         .collect()
 }
 
