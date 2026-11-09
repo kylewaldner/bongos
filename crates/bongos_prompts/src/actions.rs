@@ -1,6 +1,7 @@
 //! The `prompts` actions, hidden from the command palette while `prompts.enabled` is false, and
-//! their handlers. Until the later steps give them behavior, each handler only says that the
-//! prompts editor is off. No key is bound to any of them.
+//! their handlers. While it is false each handler only says that the prompts mode is off. Until
+//! the later steps give them behavior, the others do nothing while on. No key is bound to any of
+//! them.
 
 use std::any::TypeId;
 
@@ -11,7 +12,9 @@ use workspace::Toast;
 use workspace::Workspace;
 use workspace::notifications::NotificationId;
 
-use crate::PromptsSettings;
+use editor::Editor;
+
+use crate::{LANGUAGE_NAME, PromptsSettings};
 
 /// Actions in the `prompts` namespace.
 pub mod prompts {
@@ -106,9 +109,7 @@ fn sync_palette(cx: &mut App) {
 pub struct PromptsToast;
 
 /// The toast a command shows while `prompts.enabled` is false.
-pub(crate) fn off_message(command: &str) -> String {
-    format!("Prompts are off (prompts.enabled): {command}")
-}
+pub(crate) const OFF_MESSAGE: &str = "Prompts mode is off (prompts.enabled)";
 
 pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
     workspace.show_toast(
@@ -117,29 +118,96 @@ pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Co
     );
 }
 
-fn register_one<A: Action>(workspace: &mut Workspace, command: &'static str) {
-    workspace.register_action(move |workspace, _: &A, _window: &mut Window, cx| {
-        if !PromptsSettings::get_global(cx).enabled {
-            show_toast(workspace, off_message(command), cx);
+/// Registers `handler` for `A`, behind the off toast while `prompts.enabled` is false.
+fn register_gated<A: Action>(
+    workspace: &mut Workspace,
+    handler: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+) {
+    workspace.register_action(move |workspace, _: &A, window: &mut Window, cx| {
+        if PromptsSettings::get_global(cx).enabled {
+            handler(workspace, window, cx);
+        } else {
+            show_toast(workspace, OFF_MESSAGE.to_string(), cx);
         }
     });
 }
 
+/// Registers an action that later steps give behavior to: only the off toast for now.
+fn register_one<A: Action>(workspace: &mut Workspace) {
+    register_gated::<A>(workspace, |_, _, _| {});
+}
+
 /// Registers the handlers of the `prompts` actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
-    register_one::<prompts::Send>(workspace, "prompts: send");
-    register_one::<prompts::SendWithoutMarking>(workspace, "prompts: send without marking");
-    register_one::<prompts::SendRegion>(workspace, "prompts: send region");
-    register_one::<prompts::New>(workspace, "prompts: new");
-    register_one::<prompts::Previous>(workspace, "prompts: previous");
-    register_one::<prompts::Next>(workspace, "prompts: next");
-    register_one::<prompts::NextPending>(workspace, "prompts: next pending");
-    register_one::<prompts::Copy>(workspace, "prompts: copy");
-    register_one::<prompts::UseFile>(workspace, "prompts: use file");
-    register_one::<prompts::UseDefault>(workspace, "prompts: use default");
-    register_one::<prompts::ToggleAutoSubmit>(workspace, "prompts: toggle auto-submit");
-    register_one::<prompts::Open>(workspace, "prompts: open");
-    register_one::<prompts::Mode>(workspace, "prompts: mode");
+    register_one::<prompts::Send>(workspace);
+    register_one::<prompts::SendWithoutMarking>(workspace);
+    register_one::<prompts::SendRegion>(workspace);
+    register_one::<prompts::New>(workspace);
+    register_one::<prompts::Previous>(workspace);
+    register_one::<prompts::Next>(workspace);
+    register_one::<prompts::NextPending>(workspace);
+    register_one::<prompts::Copy>(workspace);
+    register_one::<prompts::UseFile>(workspace);
+    register_one::<prompts::UseDefault>(workspace);
+    register_one::<prompts::ToggleAutoSubmit>(workspace);
+    register_one::<prompts::Open>(workspace);
+    register_gated::<prompts::Mode>(workspace, prompts_mode);
     #[cfg(debug_assertions)]
-    register_one::<prompts::DumpView>(workspace, "prompts: dump view");
+    register_gated::<prompts::DumpView>(workspace, dump_view);
+}
+
+/// `prompts: mode`: gives the active file the `Prompts` language, the call the language selector
+/// makes, so the mode attaches and holds while the buffer lives.
+fn prompts_mode(workspace: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) {
+    let buffer = workspace
+        .active_item_as::<Editor>(cx)
+        .and_then(|editor| editor.read(cx).buffer().read(cx).as_singleton());
+    let Some(buffer) = buffer else {
+        show_toast(workspace, "No file to put in prompts mode".to_string(), cx);
+        return;
+    };
+    let project = workspace.project().clone();
+    let languages = project.read(cx).languages().clone();
+    cx.spawn(async move |workspace, cx| {
+        let language = languages.language_for_name(LANGUAGE_NAME).await;
+        match language {
+            Ok(language) => project.update(cx, |project, cx| {
+                project.set_language_for_buffer(&buffer, language, cx)
+            }),
+            Err(error) => {
+                log::warn!("prompts: no Prompts language: {error}");
+                workspace
+                    .update(cx, |workspace, cx| {
+                        show_toast(workspace, "The Prompts language is missing".to_string(), cx)
+                    })
+                    .ok();
+            }
+        }
+    })
+    .detach();
+}
+
+/// `prompts: dump view` (debug builds): writes the state of the prompts editor focused last, else
+/// of the active one, to `prompts-view.txt` in the logs directory.
+#[cfg(debug_assertions)]
+fn dump_view(workspace: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) {
+    let editor = crate::mode::last_focused(cx).or_else(|| {
+        workspace
+            .active_item_as::<Editor>(cx)
+            .filter(|editor| crate::mode::is_attached(editor.read(cx)))
+    });
+    let Some(text) = editor.and_then(|editor| crate::dump::dump_text(&editor, cx)) else {
+        show_toast(workspace, "No prompts view to dump".to_string(), cx);
+        return;
+    };
+    let path = crate::dump::dump_path();
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, text));
+    let message = match written {
+        Ok(()) => format!("Wrote {}", path.display()),
+        Err(error) => format!("Could not write {}: {error}", path.display()),
+    };
+    show_toast(workspace, message, cx);
 }

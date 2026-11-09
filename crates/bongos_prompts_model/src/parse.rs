@@ -34,15 +34,20 @@ pub fn split_rows(text: &str) -> Vec<&str> {
 }
 
 /// A body's rows with leading and trailing blank (whitespace-only) rows removed, joined with `\n`.
-/// Interior rows are untouched.
+/// Interior rows are untouched, except that the `\r` of a CRLF line break is dropped, so a file
+/// with CRLF line breaks sends the same text as one with LF.
 pub fn send_text(body: &[&str]) -> String {
+    let rows: Vec<&str> = body
+        .iter()
+        .map(|row| row.strip_suffix('\r').unwrap_or(row))
+        .collect();
     let blank = |row: &&str| row.trim().is_empty();
-    let start = body.iter().position(|row| !blank(row));
+    let start = rows.iter().position(|row| !blank(row));
     let Some(start) = start else {
         return String::new();
     };
-    let end = body.iter().rposition(|row| !blank(row)).unwrap_or(start);
-    body[start..=end].join("\n")
+    let end = rows.iter().rposition(|row| !blank(row)).unwrap_or(start);
+    rows[start..=end].join("\n")
 }
 
 /// Splits a file into blocks. Text before the first marker is block 0 with no marker, so an empty

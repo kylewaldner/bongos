@@ -21,7 +21,7 @@ use gpui::{
     Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Task, WeakEntity, Window,
 };
-use language::Buffer;
+use language::{Buffer, BufferEvent};
 use project::Project;
 use settings::{Settings as _, SettingsStore};
 use terminal_view::TerminalView;
@@ -109,7 +109,7 @@ pub struct SessionView {
     loading_prompts: Option<PathBuf>,
     _loading_prompts: Option<Task<()>>,
     /// Re-renders the header when the prompts editor changes.
-    _prompts_observation: Option<Subscription>,
+    _prompts_observation: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -219,7 +219,7 @@ impl SessionView {
             loaded_prompts: None,
             loading_prompts: None,
             _loading_prompts: None,
-            _prompts_observation: None,
+            _prompts_observation: Vec::new(),
             _subscriptions: subscriptions,
         };
         this.rebuild_group(cx);
@@ -434,7 +434,7 @@ impl SessionView {
 
     /// The record names another prompts file than the pane shows: opens it in the pane instead.
     /// A prompts buffer with unsaved changes is never dropped: the pane keeps it, and its path,
-    /// until a later change finds it saved.
+    /// until it is saved or a later change finds it saved.
     fn follow_prompts_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.prompts_path(cx) else {
             return;
@@ -515,10 +515,23 @@ impl SessionView {
             return;
         }
         let provider = prompt_pane_provider(cx);
-        let item = provider.build_item(buffer, self.project.clone(), window, cx);
+        let item = provider.build_item(buffer.clone(), self.project.clone(), window, cx);
         self._prompts_observation = item
             .act_as::<Editor>(cx)
-            .map(|editor| cx.observe(&editor, |_, _, cx| cx.notify()));
+            .map(|editor| cx.observe(&editor, |_, _, cx| cx.notify()))
+            .into_iter()
+            .collect();
+        // A kept unsaved buffer (see `follow_prompts_file`) gives way to the record's file as
+        // soon as it is saved, not only on the next change of the record.
+        self._prompts_observation.push(cx.subscribe_in(
+            &buffer,
+            window,
+            |this, _, event: &BufferEvent, window, cx| {
+                if matches!(event, BufferEvent::Saved) {
+                    this.follow_prompts_file(window, cx);
+                }
+            },
+        ));
         let focused = self
             .prompts_pane
             .focus_handle(cx)

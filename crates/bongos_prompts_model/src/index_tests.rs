@@ -226,3 +226,85 @@ fn same_row_edits_merge_into_one() {
     let merged = merge_row_edits(&[edit(2..2, 2..3), edit(2..3, 3..4)]);
     assert_eq!(merged, vec![edit(2..3, 2..4)]);
 }
+
+/// Edits as several cursors make them: byte ranges of one text, ascending and disjoint, often
+/// several on one row. Each becomes the rows it touches before and after, the way the mode reads
+/// `edits_since`; merged, applied last to first, they must give the index a fresh build gives, and
+/// parse each touched row once.
+#[test]
+fn random_same_row_edits_merge_and_match_a_rebuild() {
+    let inserts = [
+        "x".to_string(),
+        "\n".to_string(),
+        String::new(),
+        M1.to_string(),
+        format!("\n{M1}\n"),
+        format!("{M2}\nbody"),
+        "é".to_string(),
+    ];
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut text: String = (0..10)
+        .map(|_| random_line(&mut rng))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut index = PromptIndex::build(MarkerSyntax::default(), &split_rows(&text));
+    let row_of = |text: &str, offset: usize| text[..offset].matches('\n').count() as u32;
+    for _ in 0..1_000 {
+        let mut ranges: Vec<(usize, usize, &str)> = Vec::new();
+        let mut at = 0;
+        for _ in 0..1 + rng.next(4) {
+            let mut start = at + rng.next(6) as usize;
+            if start > text.len() {
+                break;
+            }
+            let mut end = (start + rng.next(3) as usize).min(text.len());
+            while !text.is_char_boundary(start) {
+                start += 1;
+            }
+            end = end.max(start);
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            let insert = inserts[rng.next(inserts.len() as u64) as usize].as_str();
+            if start == end && insert.is_empty() {
+                continue;
+            }
+            ranges.push((start, end, insert));
+            at = end + 1;
+        }
+        let mut new_text = String::new();
+        let mut last = 0;
+        let mut row_edits = Vec::new();
+        for (start, end, insert) in &ranges {
+            new_text.push_str(&text[last..*start]);
+            let new_start = row_of(&new_text, new_text.len());
+            new_text.push_str(insert);
+            let new_end = row_of(&new_text, new_text.len());
+            last = *end;
+            row_edits.push(RowEdit {
+                old_rows: row_of(&text, *start)..row_of(&text, *end) + 1,
+                new_rows: new_start..new_end + 1,
+            });
+        }
+        new_text.push_str(&text[last..]);
+
+        let merged = merge_row_edits(&row_edits);
+        for pair in merged.windows(2) {
+            assert!(pair[0].old_rows.end <= pair[1].old_rows.start, "{merged:?}");
+            assert!(pair[0].new_rows.end <= pair[1].new_rows.start, "{merged:?}");
+        }
+        let rows = split_rows(&new_text);
+        let before = index.stats().lines_parsed;
+        for edit in merged.iter().rev() {
+            index.edit(
+                edit.old_rows.clone(),
+                &rows[edit.new_rows.start as usize..edit.new_rows.end as usize],
+            );
+        }
+        let touched: u64 = merged.iter().map(|edit| edit.new_rows.len() as u64).sum();
+        assert_eq!(index.stats().lines_parsed - before, touched);
+        let lines: Vec<String> = rows.iter().map(|row| row.to_string()).collect();
+        check_matches_rebuild(&index, &lines);
+        text = new_text;
+    }
+}

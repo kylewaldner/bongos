@@ -1393,11 +1393,17 @@ pub struct WorkSettingsContent {
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct PromptsSettingsContent {
-    /// Whether the prompts editor is on. While it is off, `prompts.txt` files open as plain
-    /// text and the prompts commands are hidden.
+    /// Whether the prompts mode is on. While it is off, no editor gets the mode (rules, current
+    /// block, mode line) and the prompts commands are hidden. The `Prompts` language, which saves
+    /// `prompts.txt` exactly as typed, applies either way.
     ///
     /// Default: false
     pub enabled: Option<bool>,
+    /// Whether sending a prompt also submits it (presses Enter in the chat). A chat can override
+    /// it for itself.
+    ///
+    /// Default: true
+    pub auto_submit: Option<bool>,
 }
 
 /// Settings for chat sessions.

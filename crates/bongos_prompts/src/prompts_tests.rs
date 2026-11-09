@@ -65,6 +65,7 @@ async fn prompts_txt_gets_the_prompts_language_and_notes_txt_plain_text(cx: &mut
     for (path, expected) in [
         ("prompts.txt", "Prompts"),
         ("/home/me/.bongos/work/projects/a/prompts.txt", "Prompts"),
+        ("foo.prompts.txt", "Prompts"),
         ("notes.txt", "Plain Text"),
         ("myprompts.txt", "Plain Text"),
     ] {
@@ -110,6 +111,12 @@ async fn default_settings_parse(cx: &mut TestAppContext) {
         assert!(!prompts.show_completions_on_input);
         assert!(!prompts.show_edit_predictions);
         assert!(!prompts.enable_language_server);
+        assert!(matches!(
+            prompts.auto_indent,
+            settings::AutoIndentMode::None
+        ));
+        assert!(matches!(prompts.soft_wrap, settings::SoftWrap::EditorWidth));
+        assert!(PromptsSettings::get_global(cx).auto_submit);
 
         // The global defaults, and Plain Text, still rewrite.
         let plain = AllLanguageSettings::get_global(cx).language(
@@ -273,13 +280,16 @@ async fn dispatch_by_name_shows_the_off_toast(cx: &mut TestAppContext) {
         );
         dispatch(name, cx);
         assert!(toast_shown(&workspace, cx), "{name} shows the off toast");
-        let message = crate::actions::off_message(command);
-        assert!(message.contains(command), "{message}");
-        assert!(
-            message.contains("prompts.enabled"),
-            "the toast names the setting: {message}"
-        );
+        assert!(!command.is_empty());
     }
+}
+
+#[test]
+fn the_off_toast_names_the_setting() {
+    assert_eq!(
+        crate::actions::OFF_MESSAGE,
+        "Prompts mode is off (prompts.enabled)"
+    );
 }
 
 #[gpui::test]
