@@ -1,0 +1,18 @@
+[package]
+name = "bongos_minibuffer_model"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_minibuffer_model.rs"
+doctest = false
+
+[dependencies]
+nucleo.workspace = true
+serde.workspace = true
+serde_json.workspace = true
