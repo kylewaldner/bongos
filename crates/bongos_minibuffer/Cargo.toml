@@ -16,9 +16,14 @@ doctest = false
 command_palette_hooks.workspace = true
 gpui.workspace = true
 settings.workspace = true
+theme.workspace = true
+ui.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 
 [dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }
