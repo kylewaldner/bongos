@@ -12,6 +12,7 @@ mod commands;
 mod display;
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 mod dump;
+mod files;
 mod guard;
 mod language;
 mod mode;
@@ -48,6 +49,8 @@ pub fn init(cx: &mut App) {
 mod attach_tests;
 #[cfg(test)]
 mod commands_tests;
+#[cfg(test)]
+mod files_tests;
 #[cfg(test)]
 mod guard_tests;
 #[cfg(test)]

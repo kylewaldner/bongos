@@ -402,6 +402,39 @@ async fn test_the_session_view_follows_the_prompts_file(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+async fn test_a_new_session_view_opens_the_recorded_prompts_file(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &id, cx).await;
+    let project_file = h.root.join("projects/invoicing/prompts.txt");
+    std::fs::write(&project_file, "project prompt\n").unwrap();
+    cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
+    let set = cx.update(|cx| crate::set_prompts_file(&id, Some(project_file.clone()), cx));
+    set.await.unwrap();
+    wait_for(cx, "the record to name the project's file", STARTUP, |cx| {
+        h.store.read_with(cx, |store, _| {
+            store.find(&id).is_some_and(|chat| {
+                chat.entry
+                    .record()
+                    .is_some_and(|record| record.prompts_file.as_deref() == Some(&*project_file))
+            })
+        })
+    })
+    .await;
+    // A window that never saw the chat before, as after a restart.
+    let (workspace, cx) = panel_window(&h, cx).await;
+    let panel = panel_of(&workspace, cx);
+    let session = show(&panel, &id, cx);
+    wait_prompts_loaded(&session, cx).await;
+    assert_eq!(prompts_shown(&session, cx), Some(project_file));
+    let editor = session.read_with(cx, |session, cx| session.prompts_editor(cx).unwrap());
+    assert_eq!(
+        editor.read_with(cx, |editor, cx| editor.text(cx)),
+        "project prompt\n"
+    );
+}
+
+#[gpui::test]
 async fn test_a_prompts_file_changed_away_and_back_ends_on_the_record(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
     let id = h.start(Agent::Claude, cx).await;

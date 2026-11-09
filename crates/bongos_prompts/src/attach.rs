@@ -81,6 +81,41 @@ pub(crate) trait ChatLink {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     );
+    /// The task or project directory `chat_id` belongs to.
+    fn scope_dir(&self, chat_id: &str, cx: &App) -> Option<PathBuf>;
+    /// The prompts files `prompts: use file` offers for a chat scoped to `scope_dir`: the
+    /// project's, then each task's of the project (or the activity).
+    fn prompt_choices(&self, scope_dir: &Path, cx: &App) -> Vec<PromptChoice>;
+    /// Writes the prompts file of `chat_id`; `None` goes back to the scope's own file.
+    fn set_prompts_file(
+        &self,
+        chat_id: &str,
+        path: Option<PathBuf>,
+        cx: &mut App,
+    ) -> Task<Result<(), String>>;
+    /// `chat: focus prompts`: the prompts pane of the chat shown, else the focused task's file in
+    /// the center. With chats off it only says so.
+    fn focus_prompts(
+        &self,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    );
+    /// The focused task's (or project's) `prompts.txt` in the center, without the chats.
+    fn open_prompts_in_center(
+        &self,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    );
+}
+
+/// A prompts file `prompts: use file` offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromptChoice {
+    /// "project: <title>" or "task: <goal>".
+    pub(crate) label: String,
+    pub(crate) path: PathBuf,
 }
 
 /// The [`ChatLink`] of the app: `bongos_chat` and the Work snapshot.
@@ -160,6 +195,51 @@ impl ChatLink for Chats {
         cx: &mut Context<Workspace>,
     ) {
         bongos_chat::start_chat_on_task(task_id, workspace, window, cx)
+    }
+
+    fn scope_dir(&self, chat_id: &str, cx: &App) -> Option<PathBuf> {
+        Some(
+            ChatStore::global(cx)?
+                .read(cx)
+                .find(chat_id)?
+                .scope_dir
+                .clone(),
+        )
+    }
+
+    fn prompt_choices(&self, scope_dir: &Path, cx: &App) -> Vec<PromptChoice> {
+        WorkStore::global(cx)
+            .and_then(|store| store.read(cx).snapshot())
+            .map(|tree| crate::files::choices_for(&tree, scope_dir))
+            .unwrap_or_default()
+    }
+
+    fn set_prompts_file(
+        &self,
+        chat_id: &str,
+        path: Option<PathBuf>,
+        cx: &mut App,
+    ) -> Task<Result<(), String>> {
+        let write = bongos_chat::set_prompts_file(chat_id, path, cx);
+        cx.spawn(async move |_| write.await.map_err(|error| error.to_string()))
+    }
+
+    fn focus_prompts(
+        &self,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        bongos_chat::focus_prompts(workspace, window, cx)
+    }
+
+    fn open_prompts_in_center(
+        &self,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        bongos_chat::open_prompts_in_center(workspace, window, cx)
     }
 }
 

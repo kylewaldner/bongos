@@ -24,6 +24,11 @@ impl PromptPaneProvider for PromptsPaneProvider {
         window: &mut Window,
         cx: &mut App,
     ) -> Box<dyn ItemHandle> {
+        // A prompts file the chat was pointed at (`prompts: use file`) may have another name, so
+        // the language, and with it the mode, is applied each time the pane loads.
+        if PromptsSettings::get_global(cx).enabled {
+            crate::language::apply(&project, &buffer, cx);
+        }
         Box::new(cx.new(|cx| Editor::for_buffer(buffer, Some(project), window, cx)))
     }
 
