@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -912,33 +913,97 @@ impl ChatRuntime {
 
     /// Writes `last_active` (and `prompted`, once set) now, replacing a pending write.
     fn write_active_now(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        let Some(chat) = self.live.get_mut(chat_id) else {
-            return;
-        };
-        chat.pending_active_write = None;
-        chat.last_active_write = Some(Instant::now());
-        let path = chat.record_path.clone();
-        let prompted = chat.prompted;
-        self.stats.active_writes += 1;
+        if let Some(write) = self.write_active(chat_id, cx) {
+            cx.background_spawn(write).detach();
+        }
+    }
+
+    /// Queues the write of [`ChatRuntime::write_active_now`]; the future resolves when it is on
+    /// disk (a failure is logged). `None` when the chat is not live.
+    fn write_active(
+        &mut self,
+        chat_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<impl Future<Output = ()> + use<>> {
+        let (path, prompted) = self.note_active_write(chat_id)?;
         let write = self.store.update(cx, |store, cx| {
-            store.update(
-                path,
-                move |record| {
-                    record.last_active = bongos_work_model::now();
-                    if prompted {
-                        record.prompted = true;
-                    }
-                    Ok(())
-                },
-                cx,
-            )
+            store.update(path, active_change(prompted), cx)
         });
-        cx.background_spawn(async move {
+        Some(async move {
             if let Err(error) = write.await {
                 log::warn!("chats: could not write last_active: {error}");
             }
         })
-        .detach();
+    }
+
+    /// Books an active write of `chat_id` (replacing a pending one): its record path and whether
+    /// it is prompted. `None` when the chat is not live.
+    fn note_active_write(&mut self, chat_id: &str) -> Option<(PathBuf, bool)> {
+        let chat = self.live.get_mut(chat_id)?;
+        chat.pending_active_write = None;
+        chat.last_active_write = Some(Instant::now());
+        self.stats.active_writes += 1;
+        Some((chat.record_path.clone(), chat.prompted))
+    }
+
+    /// The names of the chats that are running (not exited), for the quit prompt. Empty while
+    /// `chats.enabled` is false.
+    pub fn running_names(&self, cx: &App) -> Vec<String> {
+        if !ChatsSettings::get_global(cx).enabled {
+            return Vec::new();
+        }
+        let store = self.store.read(cx);
+        let mut names: Vec<String> = self
+            .live
+            .iter()
+            .filter(|(_, chat)| !matches!(chat.state, ChatState::Exited { .. }))
+            .map(|(id, _)| {
+                store
+                    .find(id)
+                    .and_then(|found| found.entry.record())
+                    .map_or_else(|| id.clone(), |record| record.name.clone())
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The app is quitting (design D18): ends every running chat's process and writes its
+    /// `last_active`, so the Chats panel lists the chats after the next launch and `chat: open`
+    /// resumes them. The records stay open, and the never-prompted cleanup does not run. The
+    /// future resolves once the writes are on disk. It waits on the writer's own reply channels
+    /// only, never on a main-thread task: `App::shutdown` blocks the main thread on it, and
+    /// nothing on that thread runs meanwhile. Nothing happens while `chats.enabled` is false.
+    pub(crate) fn end_for_quit(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl Future<Output = ()> + use<> {
+        let mut writes = Vec::new();
+        if ChatsSettings::get_global(cx).enabled {
+            let ids: Vec<String> = self.live.keys().cloned().collect();
+            for id in ids {
+                self.poll_input(&id, cx);
+                if let Some(chat) = self.live.get_mut(&id) {
+                    chat.cleanup_checked = true;
+                }
+                self.kill(&id, cx);
+                let Some((path, prompted)) = self.note_active_write(&id) else {
+                    continue;
+                };
+                writes.push(self.store.update(cx, |store, _| {
+                    store.update_reply(path, active_change(prompted))
+                }));
+            }
+        }
+        async move {
+            for reply in future::join_all(writes).await {
+                match reply {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => log::warn!("chats: could not write last_active: {error}"),
+                    Err(_) => log::warn!("chats: the last_active write was dropped"),
+                }
+            }
+        }
     }
 
     /// The never-prompted cleanup of `chat_id`, which ended or is being closed (design D17), once
@@ -1118,4 +1183,18 @@ async fn capture_now(
     this.update(cx, |this, cx| this.set_session_id(chat_id, session_id, cx))
         .ok()?;
     Some(true)
+}
+
+/// The change of a `last_active` write: the time now, and `prompted` once the chat is.
+fn active_change(
+    prompted: bool,
+) -> impl FnOnce(&mut bongos_chat_model::ChatRecord) -> bongos_chat_model::Result<()> + Send + 'static
+{
+    move |record| {
+        record.last_active = bongos_work_model::now();
+        if prompted {
+            record.prompted = true;
+        }
+        Ok(())
+    }
 }

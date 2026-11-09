@@ -120,7 +120,51 @@ pub fn init(dirs: ChatDirs, cx: &mut App) {
     let runtime = cx.new(|cx| ChatRuntime::new(store.clone(), util::paths::home_dir().clone(), cx));
     live_modes::init(&runtime, &store, cx);
     lifecycle::init(&store, cx);
+    end_chats_on_quit(&runtime, cx);
     ChatRuntime::set_global(runtime, cx);
+}
+
+/// On quit every running chat is ended and its `last_active` written (design D18).
+fn end_chats_on_quit(runtime: &Entity<ChatRuntime>, cx: &mut App) {
+    // Weak, so the hook does not keep the runtime alive.
+    let runtime = runtime.downgrade();
+    cx.on_app_quit(move |cx| {
+        let end = runtime
+            .update(cx, |runtime, cx| runtime.end_for_quit(cx))
+            .ok();
+        async move {
+            if let Some(end) = end {
+                end.await;
+            }
+        }
+    })
+    .detach();
+}
+
+/// The names of the chats that are running, for the quit prompt. Empty while `chats.enabled` is
+/// false or before [`init`].
+pub fn live_chats(cx: &App) -> Vec<String> {
+    ChatRuntime::global(cx).map_or_else(Vec::new, |runtime| runtime.read(cx).running_names(cx))
+}
+
+/// The text of the quit prompt for the chats named `names` (design D18): `None` when none run.
+pub fn quit_prompt_text(names: &[String]) -> Option<String> {
+    let list = names.join(", ");
+    match names.len() {
+        0 => None,
+        1 => Some(format!(
+            "1 chat is running ({list}). Quitting ends it; it resumes from the Chats panel."
+        )),
+        count => Some(format!(
+            "{count} chats are running ({list}). Quitting ends them; they resume from the Chats panel."
+        )),
+    }
+}
+
+/// What the app's quit asks before its own confirmation: the prompt text while chats run, `None`
+/// otherwise. Asked whatever `confirm_quit` says, because quitting ends the chats.
+pub fn quit_prompt(cx: &App) -> Option<String> {
+    quit_prompt_text(&live_chats(cx))
 }
 
 impl ChatStore {
@@ -148,6 +192,9 @@ mod list_tests;
 
 #[cfg(test)]
 mod panel_tests;
+
+#[cfg(test)]
+mod quit_tests;
 
 #[cfg(test)]
 mod fork_tests;
