@@ -80,13 +80,45 @@ pub fn plan_begun(file: &TaskFile) -> bool {
     todo.is_some_and(|todo| todo.started.is_some())
 }
 
+/// The leaves whose nearest linked group is `group`: those under it, not under a linked
+/// subgroup.
+fn leaves_of_group(group: &Task) -> Vec<&Task> {
+    fn visit<'a>(task: &'a Task, out: &mut Vec<&'a Task>) {
+        for child in &task.children {
+            if child.children.is_empty() {
+                out.push(child);
+            } else if link_of(child).is_none() {
+                visit(child, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(group, &mut out);
+    out
+}
+
+/// Whether a linked leaf's own started decision was an actual write to Linear: `started_sent` is
+/// recorded and its `linear started` history entry carries no reason. A decision recorded with a
+/// reason (a stacked leaf, a ticket already started) wrote nothing and does not start a group.
+fn leaf_wrote_started(leaf: &Task) -> bool {
+    let (Some(file), Some((_, state))) = (&leaf.file, link_of(leaf)) else {
+        return false;
+    };
+    file.stacked_on.is_none()
+        && state.started_sent.is_some()
+        && file
+            .history
+            .iter()
+            .any(|entry| entry.event == "linear started" && entry.detail.is_none())
+}
+
 /// D13 for the task `task_id` against its ticket's state and its team's states.
 ///
 /// Only once (`started_sent` absent) and only for a synced link. A leaf: once its plan has
 /// begun; never when stacked. From `backlog`, `unstarted` or `triage` only, to the team's
 /// `started` state with the lowest `position`; from any other state nothing is written and the
-/// decision is recorded. A group: the same, once a linked leaf under it that is not stacked has
-/// begun its plan.
+/// decision is recorded. A group: the same, once a leaf whose nearest linked group it is had its
+/// own decision be an actual write (see [`leaf_wrote_started`]), not merely a recorded one.
 pub fn started_decision(
     tree: &WorkTree,
     task_id: &str,
@@ -104,14 +136,7 @@ pub fn started_decision(
         return StartedDecision::Nothing;
     }
     if derive::shape(task, tree) == Shape::Group {
-        let begun = task.walk().into_iter().skip(1).any(|leaf| {
-            leaf.children.is_empty()
-                && link_of(leaf).is_some()
-                && leaf
-                    .file
-                    .as_ref()
-                    .is_some_and(|file| file.stacked_on.is_none() && plan_begun(file))
-        });
+        let begun = leaves_of_group(task).into_iter().any(leaf_wrote_started);
         if !begun {
             return StartedDecision::Nothing;
         }
@@ -319,8 +344,9 @@ pub fn cancel_question(tree: &WorkTree, task_id: &str) -> Result<CancelQuestion,
 }
 
 /// `status::cancel_write`: the move to the team's `canceled` state with the lowest position, only
-/// for a cancelled linked task, from a state that is not completed, canceled or duplicate, and
-/// never for a stacked leaf. Duplicate and unknown kinds are never targets.
+/// for a cancelled linked task, from a state that is not completed, canceled or duplicate, never
+/// for a stacked leaf, and never for a group while a leaf under it is open. Duplicate and
+/// unknown kinds are never targets.
 pub fn cancel_write(
     tree: &WorkTree,
     task_id: &str,
@@ -332,6 +358,10 @@ pub fn cancel_write(
     let file = task.file.as_ref()?;
     let (_, state) = link_of(task)?;
     if file.status != Status::Cancelled || file.stacked_on.is_some() {
+        return None;
+    }
+    // A group's ticket is never canceled while a leaf under it is open, whatever the answer.
+    if derive::shape(task, tree) == Shape::Group && may_cancel_group(tree, task_id).is_err() {
         return None;
     }
     if matches!(ticket_state.kind, StateKind::Completed) || ticket_state.kind.is_dropped() {

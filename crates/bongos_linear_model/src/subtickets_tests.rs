@@ -233,6 +233,68 @@ fn finish_create_needs_the_key_in_flight() {
     assert!(begin_create(&tree, &ctx(), &a, Uuid::new_v4(), true).is_err());
 }
 
+#[test]
+fn finish_create_seeds_a_group_offered_with_the_applied_proposals_under_it() {
+    let mut mid = group("mid", vec![applied(leaf("deep"), 2, "kyle")]);
+    applied_record(&mut mid, 1, ProposalState::Applied, "h1", "agent");
+    applied_record(&mut mid, 3, ProposalState::Rejected, "h3", "kyle");
+    let disk = Disk::new(vec![synced(group("g", vec![mid, leaf("flat")]), "SEQ-1")]);
+    let tree = disk.tree();
+    let (mid_id, flat_id) = (id(&tree, "mid"), id(&tree, "flat"));
+    for (task, number) in [(&mid_id, 8), (&flat_id, 9)] {
+        let key = Uuid::new_v4();
+        let tree = disk.tree();
+        disk.apply(&begin_create(&tree, &ctx(), task, key, true).unwrap());
+        let tree = disk.tree();
+        let mut summary = ticket(number, None).summary();
+        summary.id = key.hyphenated().to_string();
+        disk.apply(&finish_create(&tree, &ctx(), task, &summary, "").unwrap());
+    }
+    let tree = disk.tree();
+    let offered = file(&tree, "mid").linear_state.clone().unwrap().offered;
+    let seen: Vec<_> = offered
+        .iter()
+        .map(|item| (item.root.clone(), item.number, item.hash.clone()))
+        .collect();
+    // The applied proposals under the new group, none of the rejected one; they are not offered
+    // again as tickets.
+    assert_eq!(
+        seen,
+        vec![
+            (mid_id, 1, "h1".to_string()),
+            (id(&tree, "deep"), 2, "hash-2".to_string())
+        ]
+    );
+    assert!(unoffered(&tree).is_empty());
+    // A leaf gets no list.
+    assert!(
+        file(&tree, "flat")
+            .linear_state
+            .as_ref()
+            .unwrap()
+            .offered
+            .is_empty()
+    );
+}
+
+#[test]
+fn finish_create_refuses_a_ticket_another_task_links() {
+    let key = Uuid::new_v4();
+    let disk = Disk::new(vec![synced(
+        group("g", vec![leaf("a"), synced(leaf("other"), "SEQ-9")]),
+        "SEQ-1",
+    )]);
+    let tree = disk.tree();
+    let a = id(&tree, "a");
+    disk.apply(&begin_create(&tree, &ctx(), &a, key, true).unwrap());
+    let tree = disk.tree();
+    let mut summary = ticket(9, None).summary();
+    summary.id = key.hyphenated().to_string();
+    let refused = finish_create(&tree, &ctx(), &a, &summary, "").unwrap_err();
+    assert_eq!(refused, "SEQ-9 is linked to p/g/other");
+    assert!(!is_synced(file(&tree, "a")));
+}
+
 fn applied_record(
     task: &mut bongos_work_model::store::Task,
     number: u32,

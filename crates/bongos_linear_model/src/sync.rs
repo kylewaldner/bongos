@@ -69,7 +69,8 @@ pub fn task_path(tree: &WorkTree, task: &Task) -> String {
 }
 
 /// A task that already links the ticket, by Linear's UUID or by identifier (a hand-set link
-/// counts), other than `except`.
+/// counts), or whose create in flight carries the ticket's UUID (the ticket may already exist
+/// in Linear), other than `except`.
 pub fn linked_task<'a>(
     tree: &'a WorkTree,
     issue_id: &str,
@@ -91,7 +92,12 @@ pub fn linked_task<'a>(
             .linear_state
             .as_ref()
             .is_some_and(|state| !state.issue_id.is_empty() && state.issue_id == issue_id);
-        same_identifier || same_id
+        let same_pending = file
+            .linear_state
+            .as_ref()
+            .and_then(|state| state.pending_create.as_deref())
+            .is_some_and(|pending| pending.eq_ignore_ascii_case(issue_id));
+        same_identifier || same_id || same_pending
     })
 }
 
@@ -165,11 +171,11 @@ pub(crate) fn not_linked(slug: &str) -> Refusal {
 
 /// `task: link to linear`: `task_id` takes the ticket `issue` and its title.
 ///
-/// Refused when the task already has a synced link (unlink first) or a create in flight, when
-/// another task already links the ticket, and when a group would link a ticket that is itself a
-/// subticket of its linked parent group's ticket (it would duplicate the level). A leaf may link
-/// a ticket with subtickets; they are ignored. A group's `offered` list starts with every applied
-/// proposal under it, so only later applies are offered tickets.
+/// Refused when the task already has a synced link (unlink first) or a create in flight, or
+/// another task already links the ticket (or has a create in flight for it). A group may link a
+/// subticket of its linked parent group's ticket: import and create build that shape. A leaf may
+/// link a ticket with subtickets; they are ignored. A group's `offered` list starts with every
+/// applied proposal under it, so only later applies are offered tickets.
 pub fn link(tree: &WorkTree, ctx: &Context, task_id: &str, issue: &Issue) -> Outcome {
     edit(tree, ctx, task_id, |place, file| {
         let slug = place.slug();
@@ -193,21 +199,6 @@ pub fn link(tree: &WorkTree, ctx: &Context, task_id: &str, issue: &Issue) -> Out
             ));
         }
         let group = derive::shape(place.task, tree) == Shape::Group;
-        if group
-            && let Some(parent) = nearest_linked_ancestor(place)
-            && let Some((_, parent_state)) = link_of(parent)
-            && issue
-                .parent
-                .as_ref()
-                .is_some_and(|ticket_parent| ticket_parent.id == parent_state.issue_id)
-        {
-            return Err(format!(
-                "{} is a subticket of {}, which {} is already linked under; link its leaves instead",
-                issue.identifier,
-                link_of(parent).map_or("", |(identifier, _)| identifier),
-                parent.slug,
-            ));
-        }
         let mut state = LinearState {
             issue_id: issue.id.clone(),
             team_id: issue.team_id.clone(),
@@ -407,21 +398,9 @@ pub fn suggestions(tree: &WorkTree, group_id: &str, issue: &Issue) -> Vec<IssueS
                 .iter()
                 .any(|dismissed| dismissed.eq_ignore_ascii_case(&child.identifier))
                 && linked_task(tree, &child.id, &child.identifier, None).is_none()
-                && !pending_create_of(tree, &child.id)
         })
         .map(Issue::summary)
         .collect()
-}
-
-/// Whether a task has a create in flight with this UUID: its ticket may already exist in Linear.
-fn pending_create_of(tree: &WorkTree, issue_id: &str) -> bool {
-    tree.tasks().into_iter().any(|task| {
-        task.file
-            .as_ref()
-            .and_then(|file| file.linear_state.as_ref())
-            .and_then(|state| state.pending_create.as_deref())
-            .is_some_and(|pending| pending.eq_ignore_ascii_case(issue_id))
-    })
 }
 
 /// An unlinked leaf under `group_id` whose goal equals the ticket's title: the suggestion is

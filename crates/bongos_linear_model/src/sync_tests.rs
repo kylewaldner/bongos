@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use bongos_work_model::derive::{self, Shape};
 use bongos_work_model::{Kind, TodoRole, layout};
 use uuid::Uuid;
 
@@ -81,16 +82,18 @@ fn link_refuses_what_would_break_a_link() {
     assert_eq!(refused, "SEQ-121 is linked to p/holder");
     let refused = link(&tree, &ctx(), &id(&tree, "free"), &parent.children[1]).unwrap_err();
     assert_eq!(refused, "SEQ-122 is linked to p/hand");
-    // A group may not link a subticket of the ticket its parent group links.
-    let refused = link(
-        &tree,
-        &ctx(),
-        &id(&tree, "sub"),
-        &ticket(130, Some(&parent)),
-    )
-    .unwrap_err();
-    assert!(refused.contains("link its leaves instead"), "{refused}");
-    // A leaf may, and a leaf may link a ticket that has subtickets.
+    // A group may link a subticket of the ticket its parent group links: import and create
+    // build that shape.
+    assert!(
+        link(
+            &tree,
+            &ctx(),
+            &id(&tree, "sub"),
+            &ticket(130, Some(&parent))
+        )
+        .is_ok()
+    );
+    // A leaf may too, and a leaf may link a ticket that has subtickets.
     assert!(
         link(
             &tree,
@@ -549,4 +552,51 @@ fn the_refresh_write_records_the_old_and_new_title_and_skips_changed_links() {
     );
     assert_eq!(entry.by, "linear");
     assert_eq!(file(&tree, "b").goal, "Old b");
+}
+
+#[test]
+fn an_imported_nested_group_can_be_relinked_after_unlink() {
+    let fake = fake_with_children(2);
+    let three = fake.issue("SEQ-3").unwrap();
+    fake.add_issue(ticket(9, Some(&three)));
+    let issue = read_levels(&fake, "SEQ-1", 3);
+    let disk = Disk::new(vec![leaf("existing")]);
+    let tree = disk.tree();
+    let plan = crate::import::plan(&issue, &tree, &id(&tree, "p")).unwrap();
+    disk.apply(&crate::import::change(&tree, &ctx(), &plan, Kind::PrShip).unwrap());
+    let tree = disk.tree();
+    let nested = tree
+        .tasks()
+        .into_iter()
+        .find(|task| task.file.as_ref().and_then(|f| f.linear.as_deref()) == Some("SEQ-3"))
+        .expect("the nested group");
+    assert_eq!(derive::shape(nested, &tree), Shape::Group);
+    let nested_id = nested.id().unwrap().to_string();
+    disk.apply(&unlink(&tree, &ctx(), &nested_id).unwrap());
+    let tree = disk.tree();
+    let subticket = fake.issue("SEQ-3").unwrap();
+    assert_eq!(subticket.parent.as_ref().unwrap().identifier, "SEQ-1");
+    disk.apply(&link(&tree, &ctx(), &nested_id, &subticket).unwrap());
+    let tree = disk.tree();
+    let relinked = tree.task_by_id(&nested_id).unwrap();
+    assert_eq!(link_of(relinked).unwrap().0, "SEQ-3");
+}
+
+#[test]
+fn a_create_in_flight_counts_as_linked() {
+    let key = "0196f1c2-0000-4000-8000-000000000000";
+    let disk = Disk::new(vec![
+        pending(leaf("pend"), key),
+        leaf("free"),
+        synced(group("g", vec![leaf("x")]), "SEQ-1"),
+    ]);
+    let tree = disk.tree();
+    let found = linked_task(&tree, key, "SEQ-5", None).unwrap();
+    assert_eq!(found.slug, "pend");
+    assert!(linked_task(&tree, key, "SEQ-5", Some(&id(&tree, "pend"))).is_none());
+    // The ticket the crashed create made is not linkable a second time.
+    let mut made = ticket(5, None);
+    made.id = key.to_string();
+    let refused = link(&tree, &ctx(), &id(&tree, "free"), &made).unwrap_err();
+    assert_eq!(refused, "SEQ-5 is linked to p/pend");
 }

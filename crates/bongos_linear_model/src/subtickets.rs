@@ -14,7 +14,10 @@ use bongos_work_model::{LinearOffered, LinearState, ProposalState, Status, TaskI
 use uuid::Uuid;
 
 use crate::api::{IssueSummary, NewIssue};
-use crate::sync::{edit, edit_linked, is_synced, link_of, nearest_linked_ancestor, not_linked};
+use crate::sync::{
+    edit, edit_linked, is_synced, link_of, linked_task, nearest_linked_ancestor, not_linked,
+    task_path,
+};
 
 /// Which tasks `missing` lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,7 +183,8 @@ pub fn begin_create(
 /// Completes a create: writes `linear` and the rest of `linear_state` from the ticket Linear
 /// answered with (a created ticket, or one read by its UUID after a `Duplicate`) and clears
 /// `pending_create`. `description` is what the ticket was created with. The goal stays: the
-/// ticket was created with it.
+/// ticket was created with it. A group's `offered` list starts with the applied proposals under
+/// it, as [`crate::sync::link`] does. Refused when another task already links the ticket.
 pub fn finish_create(
     tree: &WorkTree,
     ctx: &Context,
@@ -204,14 +208,25 @@ pub fn finish_create(
                 issue.identifier
             ));
         }
-        file.linear = Some(issue.identifier.clone());
-        file.linear_state = Some(LinearState {
+        if let Some(other) = linked_task(tree, &issue.id, &issue.identifier, Some(&file.id)) {
+            return Err(format!(
+                "{} is linked to {}",
+                issue.identifier,
+                task_path(tree, other)
+            ));
+        }
+        let mut state = LinearState {
             issue_id: issue.id.clone(),
             team_id: issue.team_id.clone(),
             url: issue.url.clone(),
             description: description.to_string(),
             ..LinearState::default()
-        });
+        };
+        if derive::shape(place.task, tree) == Shape::Group {
+            state.offered = applied_under(place.task);
+        }
+        file.linear = Some(issue.identifier.clone());
+        file.linear_state = Some(state);
         Ok((format!("created ticket {}", issue.identifier), None))
     })
 }

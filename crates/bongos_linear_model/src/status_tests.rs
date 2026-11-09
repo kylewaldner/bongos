@@ -1,4 +1,5 @@
-use bongos_work_model::{LinearCancel, Status, TodoRole};
+use bongos_work_model::store::Task;
+use bongos_work_model::{HistoryEntry, LinearCancel, Status, TodoRole};
 
 use crate::api::StateKind;
 use crate::status::*;
@@ -191,6 +192,22 @@ fn started_ignores_tasks_that_are_not_synced() {
     }
 }
 
+/// A leaf whose started decision was made: `reason` `None` is an actual write, `Some` a recorded
+/// decision with that reason.
+fn decided(mut task: Task, reason: Option<&str>) -> Task {
+    let at = timestamp("2026-11-09T11:30:00Z");
+    let file = file_mut(&mut task);
+    file.linear_state.as_mut().unwrap().started_sent = Some(at);
+    file.history.push(HistoryEntry {
+        at,
+        by: "kyle".to_string(),
+        event: "linear started".to_string(),
+        detail: reason.map(str::to_string),
+        extra: Default::default(),
+    });
+    task
+}
+
 #[test]
 fn a_group_moves_when_a_linked_unstacked_leaf_begins() {
     let backlog = state("backlog", StateKind::Backlog, 1.0);
@@ -213,7 +230,10 @@ fn a_group_moves_when_a_linked_unstacked_leaf_begins() {
     );
 
     let begun = Disk::new(vec![synced(
-        group("g", vec![begin_plan(synced(plan_leaf("x"), "SEQ-11"))]),
+        group(
+            "g",
+            vec![decided(begin_plan(synced(plan_leaf("x"), "SEQ-11")), None)],
+        ),
         "SEQ-10",
     )]);
     let tree = begun.tree();
@@ -225,6 +245,45 @@ fn a_group_moves_when_a_linked_unstacked_leaf_begins() {
         started_decision(&tree, &id(&tree, "g"), &started, &team_states()),
         StartedDecision::Record(NoWrite::State("doing".to_string()))
     );
+}
+
+#[test]
+fn a_group_moves_only_for_a_leaf_whose_decision_was_a_write() {
+    let backlog = state("backlog", StateKind::Backlog, 1.0);
+    let decision = |leaves: Vec<Task>| {
+        let disk = Disk::new(vec![synced(group("g", leaves), "SEQ-10")]);
+        let tree = disk.tree();
+        started_decision(&tree, &id(&tree, "g"), &backlog, &team_states())
+    };
+    let begun =
+        |slug: &str, number: u32| begin_plan(synced(plan_leaf(slug), &format!("SEQ-{number}")));
+    // A begun plan, undecided: the leaf has not been written yet.
+    assert_eq!(decision(vec![begun("x", 11)]), StartedDecision::Nothing);
+    // Decided with a reason (the ticket was already started, or stacked): nothing was written.
+    assert_eq!(
+        decision(vec![decided(begun("x", 11), Some("already started"))]),
+        StartedDecision::Nothing
+    );
+    assert_eq!(
+        decision(vec![decided(
+            begun("x", 11),
+            Some(&NoWrite::Stacked.detail())
+        )]),
+        StartedDecision::Nothing
+    );
+    // An actual write fires the group.
+    assert!(matches!(
+        decision(vec![decided(begun("x", 11), None)]),
+        StartedDecision::Write(_)
+    ));
+    // Only the leaves whose nearest linked group is this one count.
+    let inner = synced(
+        group("inner", vec![decided(begun("deep", 21), None)]),
+        "SEQ-20",
+    );
+    assert_eq!(decision(vec![inner]), StartedDecision::Nothing);
+    let plain = group("plain", vec![decided(begun("deep", 21), None)]);
+    assert!(matches!(decision(vec![plain]), StartedDecision::Write(_)));
 }
 
 #[test]
@@ -373,11 +432,39 @@ fn cancel_group_never_with_an_open_leaf() {
         cancel_question(&tree, &open),
         Err(NoQuestion::OpenLeaf("d".to_string()))
     );
-    // Whatever the answer, no write comes out of a question that is not asked: the group's own
-    // write rule still needs the group cancelled, which this one is, so the guard is the
-    // question and `may_cancel_group`.
-    let g = id(&tree, "g");
-    assert_eq!(may_cancel_group(&tree, &g), Ok(()));
+    assert_eq!(may_cancel_group(&tree, &id(&tree, "g")), Ok(()));
+    // Not even the write: the group's own rule refuses while a leaf is open, cancelled or not.
+    let ticket = state("backlog", StateKind::Backlog, 1.0);
+    assert_eq!(cancel_write(&tree, &open, &ticket, &team_states()), None);
+    assert!(cancel_write(&tree, &id(&tree, "g"), &ticket, &team_states()).is_some());
+}
+
+#[test]
+fn a_leaf_reopened_while_the_question_waits_stops_the_group_write() {
+    let tree_with = |leaf_cancelled: bool| {
+        let x = synced(plan_leaf("x"), "SEQ-11");
+        let x = if leaf_cancelled { cancelled(x) } else { x };
+        Disk::new(vec![cancelled(synced(group("g", vec![x]), "SEQ-10"))])
+    };
+    let asked = tree_with(true);
+    let tree = asked.tree();
+    let question = cancel_question(&tree, &id(&tree, "g")).unwrap();
+    // Kyle reopens the leaf before he answers.
+    let reopened = tree_with(false);
+    let tree = reopened.tree();
+    let ticket = |_: &str| Some(state("backlog", StateKind::Backlog, 1.0));
+    let team = |_: &str| team_states();
+    for answer in [
+        CancelAnswer::All,
+        CancelAnswer::LeavesOnly,
+        CancelAnswer::Leave,
+    ] {
+        let plan = cancel_plan(&tree, &question, answer, &ticket, &team);
+        assert!(
+            plan.writes.is_empty() && plan.cancelled.is_empty(),
+            "{answer:?}"
+        );
+    }
 }
 
 #[test]

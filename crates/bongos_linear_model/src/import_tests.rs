@@ -102,6 +102,43 @@ fn an_already_imported_ticket_makes_no_plan() {
 }
 
 #[test]
+fn a_crashed_create_is_never_imported_a_second_time() {
+    let (_, issue) = read_parent(2);
+    // The ticket SEQ-2 was created for `crashed`, which never saw the answer.
+    let disk = Disk::new(vec![pending(leaf("crashed"), "uuid-SEQ-2")]);
+    let tree = disk.tree();
+    let plan = plan(&issue, &tree, &top(&disk)).unwrap();
+    assert_eq!(plan.leaves(), 1);
+    assert_eq!(
+        plan.skipped,
+        vec![Skipped {
+            identifier: "SEQ-2".to_string(),
+            reason: SkipReason::AlreadyLinked {
+                path: "p/crashed".to_string()
+            }
+        }]
+    );
+    let two = issue.children[0].clone();
+    let refused = plan_for(&two, &tree, &top(&disk)).unwrap_err();
+    assert_eq!(
+        refused,
+        ImportError::AlreadyImported {
+            identifier: "SEQ-2".to_string(),
+            task_id: Some(id(&tree, "crashed")),
+            path: "p/crashed".to_string(),
+        }
+    );
+}
+
+fn plan_for(
+    issue: &crate::api::Issue,
+    tree: &bongos_work_model::store::WorkTree,
+    placement: &str,
+) -> Result<ImportPlan, ImportError> {
+    plan(issue, tree, placement)
+}
+
+#[test]
 fn a_subticket_linked_elsewhere_is_listed_and_skipped() {
     let (_, issue) = read_parent(3);
     let disk = Disk::new(vec![
