@@ -32,7 +32,7 @@ second
 === prompt 2026-11-05 14:30 ===
 third";
 
-fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
+pub(crate) fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
     cx.update(|cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
@@ -43,7 +43,7 @@ fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
 }
 
 /// Settings, theme, editor and the prompts mode; returns the app state with its fake file system.
-fn init(cx: &mut TestAppContext, enabled: bool) -> Arc<AppState> {
+pub(crate) fn init(cx: &mut TestAppContext, enabled: bool) -> Arc<AppState> {
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
         editor::init(cx);
@@ -54,7 +54,7 @@ fn init(cx: &mut TestAppContext, enabled: bool) -> Arc<AppState> {
     app_state
 }
 
-async fn open_buffer(
+pub(crate) async fn open_buffer(
     cx: &mut TestAppContext,
     enabled: bool,
     name: &str,
@@ -78,7 +78,7 @@ async fn open_buffer(
     (project, buffer)
 }
 
-async fn open_editor<'a>(
+pub(crate) async fn open_editor<'a>(
     cx: &'a mut TestAppContext,
     enabled: bool,
     name: &str,
@@ -91,7 +91,7 @@ async fn open_editor<'a>(
     (editor, cx)
 }
 
-fn attached(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> bool {
+pub(crate) fn attached(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> bool {
     editor.read_with(cx, |editor, _| is_attached(editor))
 }
 
@@ -112,11 +112,11 @@ fn lines_parsed(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> u64 {
     })
 }
 
-fn display_text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
+pub(crate) fn display_text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
     editor.update(cx, |editor, cx| editor.display_text(cx))
 }
 
-fn move_to(editor: &Entity<Editor>, row: u32, cx: &mut VisualTestContext) {
+pub(crate) fn move_to(editor: &Entity<Editor>, row: u32, cx: &mut VisualTestContext) {
     editor.update_in(cx, |editor, window, cx| {
         editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
             s.select_ranges([Point::new(row, 0)..Point::new(row, 0)])
@@ -125,7 +125,12 @@ fn move_to(editor: &Entity<Editor>, row: u32, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn edit(editor: &Entity<Editor>, range: Range<Point>, text: &str, cx: &mut VisualTestContext) {
+pub(crate) fn edit(
+    editor: &Entity<Editor>,
+    range: Range<Point>,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
     editor.update(cx, |editor, cx| {
         let buffer = editor.buffer().read(cx).as_singleton().unwrap();
         buffer.update(cx, |buffer, cx| buffer.edit([(range, text)], None, cx));
@@ -514,7 +519,7 @@ async fn the_pane_provider_gives_the_session_header_its_mode_line(cx: &mut TestA
     );
 }
 
-async fn workspace_on(
+pub(crate) async fn workspace_on(
     cx: &mut TestAppContext,
     enabled: bool,
 ) -> (Entity<Workspace>, &mut VisualTestContext) {
@@ -538,7 +543,7 @@ async fn workspace_on(
     (workspace, cx)
 }
 
-async fn open_in(
+pub(crate) async fn open_in(
     workspace: &Entity<Workspace>,
     name: &str,
     cx: &mut VisualTestContext,
@@ -558,7 +563,7 @@ async fn open_in(
     cx.update(|_, cx| item.act_as::<Editor>(cx)).unwrap()
 }
 
-fn dispatch(name: &str, cx: &mut VisualTestContext) {
+pub(crate) fn dispatch(name: &str, cx: &mut VisualTestContext) {
     let action = cx.update(|_, cx| cx.build_action(name, None).unwrap());
     cx.update(|window, cx| window.dispatch_action(action, cx));
     cx.run_until_parked();

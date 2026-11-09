@@ -8,16 +8,17 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use bongos_prompts_model::{
-    BlockInfo, MarkerSyntax, PromptIndex, RowEdit, merge_row_edits, split_rows,
+    BlockInfo, IndexedMarker, MarkerSyntax, PromptIndex, RowEdit, merge_row_edits, split_rows,
 };
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::display_map::CustomBlockId;
-use editor::{Addon, Editor, EditorEvent, ToPoint as _};
-use gpui::{App, Context, Entity, Global, KeyContext, WeakEntity};
+use editor::{Addon, Anchor, Editor, EditorEvent, ToPoint as _};
+use gpui::{App, Context, Entity, Global, KeyContext, WeakEntity, Window};
 use language::{Buffer, Point, TextBufferSnapshot};
 use settings::{Settings as _, SettingsStore};
 
-use crate::{LANGUAGE_NAME, PromptsSettings, display};
+use crate::guard::{self, GuardState};
+use crate::{LANGUAGE_NAME, PromptsSettings, display, skip};
 
 /// The key context identifier the mode adds, so the keymap context is `Editor && prompts`.
 pub const KEY_CONTEXT: &str = "prompts";
@@ -25,23 +26,32 @@ pub const KEY_CONTEXT: &str = "prompts";
 /// More changed rows than this in one sync rebuild the index instead of editing it.
 const REBUILD_ROWS: u32 = 2_000;
 
-/// Counters tests read: how many calls the display made to the editor's block map.
+/// Counters tests read: how many calls the display made to the editor's block map, how many
+/// selection changes point skipping made, and how many joins the guard reverted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ModeStats {
     pub insert_blocks_calls: usize,
     pub remove_blocks_calls: usize,
+    pub skip_moves: usize,
+    pub guard_reverts: usize,
 }
 
 /// The state of the mode in one editor.
 pub struct PromptsMode {
-    buffer: Entity<Buffer>,
-    version: clock::Global,
+    pub(crate) buffer: Entity<Buffer>,
+    /// The buffer as of the last sync.
+    snapshot: TextBufferSnapshot,
     pub(crate) index: PromptIndex,
     /// The rule block of each marker, by marker id.
     pub(crate) rules: HashMap<u64, CustomBlockId>,
     /// The block of the newest selection's head, as of the last sync or selection change.
     pub(crate) current: Option<BlockInfo>,
     pub(crate) stats: ModeStats,
+    /// The selection heads after the last selection change, to tell which way a head moved.
+    pub(crate) heads: Vec<Anchor>,
+    /// Whether a selection was not empty after the last selection change.
+    pub(crate) region: bool,
+    pub(crate) guard: GuardState,
 }
 
 impl PromptsMode {
@@ -103,14 +113,19 @@ pub fn last_focused(cx: &App) -> Option<Entity<Editor>> {
 /// Watches every new full editor on a single buffer: it gets the mode when its buffer is (or
 /// becomes) a `Prompts` buffer while `prompts.enabled` is true.
 pub(crate) fn init(cx: &mut App) {
-    cx.observe_new(|editor: &mut Editor, _window, cx: &mut Context<Editor>| {
+    cx.observe_new(|editor: &mut Editor, window, cx: &mut Context<Editor>| {
         if !editor.mode().is_full() || !editor.buffer().read(cx).is_singleton() {
             return;
         }
         let this = cx.entity();
-        cx.subscribe(&this, |editor, _, event: &EditorEvent, cx| {
-            on_event(editor, event, cx)
-        })
+        match window {
+            Some(window) => cx.subscribe_in(&this, window, |editor, _, event, window, cx| {
+                on_event(editor, event, Some(window), cx)
+            }),
+            None => cx.subscribe(&this, |editor, _, event: &EditorEvent, cx| {
+                on_event(editor, event, None, cx)
+            }),
+        }
         .detach();
         cx.observe_global::<SettingsStore>(refresh).detach();
         refresh(editor, cx);
@@ -118,7 +133,12 @@ pub(crate) fn init(cx: &mut App) {
     .detach();
 }
 
-fn on_event(editor: &mut Editor, event: &EditorEvent, cx: &mut Context<Editor>) {
+fn on_event(
+    editor: &mut Editor,
+    event: &EditorEvent,
+    window: Option<&mut Window>,
+    cx: &mut Context<Editor>,
+) {
     match event {
         // Also emitted on a language change; the language is checked again.
         EditorEvent::Reparsed(_) => refresh(editor, cx),
@@ -131,7 +151,22 @@ fn on_event(editor: &mut Editor, event: &EditorEvent, cx: &mut Context<Editor>) 
             if let Some(mode) = mode_of(editor) {
                 let mut mode = mode.borrow_mut();
                 sync(&mut mode, editor, cx);
+                match window {
+                    Some(window) => skip::skip_markers(&mut mode, editor, window, cx),
+                    None => skip::remember_heads(&mut mode, editor, cx),
+                }
                 display::update_current(&mut mode, editor, false, cx);
+            }
+        }
+        EditorEvent::TransactionBegun { transaction_id } => {
+            if let Some(mode) = mode_of(editor) {
+                guard::on_transaction_begun(&mut mode.borrow_mut(), *transaction_id);
+            }
+        }
+        EditorEvent::Edited { transaction_id } => {
+            if let Some(mode) = mode_of(editor) {
+                let mut mode = mode.borrow_mut();
+                guard::on_edited(&mut mode, editor, *transaction_id, window, cx);
             }
         }
         EditorEvent::Focused => {
@@ -169,19 +204,22 @@ fn attach(editor: &mut Editor, cx: &mut Context<Editor>) {
     let Some(buffer) = singleton_buffer(editor, cx) else {
         return;
     };
-    let (text, version) = {
-        let buffer = buffer.read(cx);
-        (buffer.text(), buffer.version())
-    };
-    let index = PromptIndex::build(MarkerSyntax::default(), &split_rows(&text));
+    let snapshot = buffer.read(cx).text_snapshot();
+    let index = PromptIndex::build(MarkerSyntax::default(), &split_rows(&snapshot.text()));
     let mut mode = PromptsMode {
         buffer,
-        version,
+        snapshot,
         index,
         rules: HashMap::default(),
         current: None,
         stats: ModeStats::default(),
+        heads: Vec::new(),
+        region: false,
+        guard: GuardState::default(),
     };
+    // Edits made before the mode never group with the first one made in it.
+    editor.finalize_last_transaction(cx);
+    skip::remember_heads(&mut mode, editor, cx);
     let added: Vec<u64> = mode
         .index
         .markers()
@@ -211,25 +249,49 @@ fn line_text(snapshot: &TextBufferSnapshot, row: u32) -> String {
         .collect()
 }
 
+/// The markers whose rows are in `rows`.
+fn markers_in(index: &PromptIndex, rows: std::ops::Range<u32>) -> &[IndexedMarker] {
+    let markers = index.markers();
+    let start = markers.partition_point(|marker| marker.row < rows.start);
+    let end = markers.partition_point(|marker| marker.row < rows.end);
+    &markers[start..end]
+}
+
 /// Brings the index up to date with the buffer: every edit since the last sync, as whole rows,
 /// edits on the same row merged into one, applied last to first. Then the rules and highlights.
+/// A marker the edits joined into a line is noted for the guard.
 pub(crate) fn sync(mode: &mut PromptsMode, editor: &mut Editor, cx: &mut Context<Editor>) {
-    let (edits, snapshot) = {
+    let (edits, deleted, snapshot) = {
         let buffer = mode.buffer.read(cx);
-        if !buffer.version().changed_since(&mode.version) {
+        if !buffer.version().changed_since(mode.snapshot.version()) {
             return;
         }
         let edits: Vec<RowEdit> = buffer
-            .edits_since::<Point>(&mode.version)
+            .edits_since::<Point>(mode.snapshot.version())
             .map(|edit| RowEdit {
                 old_rows: edit.old.start.row..edit.old.end.row + 1,
                 new_rows: edit.new.start.row..edit.new.end.row + 1,
             })
             .collect();
-        (edits, buffer.text_snapshot())
+        let deleted: Vec<std::ops::Range<usize>> = buffer
+            .edits_since::<usize>(mode.snapshot.version())
+            .map(|edit| edit.old)
+            .filter(|old| !old.is_empty())
+            .collect();
+        (edits, deleted, buffer.text_snapshot())
     };
-    mode.version = snapshot.version().clone();
+    let old = std::mem::replace(&mut mode.snapshot, snapshot.clone());
     let merged = merge_row_edits(&edits);
+    // The markers on the rows the edits replace, with the edit they are in.
+    let touched_markers: Vec<(usize, IndexedMarker)> = merged
+        .iter()
+        .enumerate()
+        .flat_map(|(ix, edit)| {
+            markers_in(&mode.index, edit.old_rows.clone())
+                .iter()
+                .map(move |marker| (ix, *marker))
+        })
+        .collect();
     let touched: u32 = merged
         .iter()
         .map(|edit| edit.new_rows.len().max(edit.old_rows.len()) as u32)
@@ -252,6 +314,27 @@ pub(crate) fn sync(mode: &mut PromptsMode, editor: &mut Editor, cx: &mut Context
             let change = mode.index.edit(edit.old_rows.clone(), &lines);
             removed.extend(change.removed);
             added.extend(change.added);
+        }
+    }
+    if !touched_markers.is_empty() && !removed.is_empty() {
+        let removed: HashSet<u64> = removed.iter().copied().collect();
+        // A marker is lost when it went and no marker line like it took its place.
+        let lost: Vec<u32> = touched_markers
+            .iter()
+            .filter(|(ix, marker)| {
+                removed.contains(&marker.id)
+                    && !markers_in(&mode.index, merged[*ix].new_rows.clone())
+                        .iter()
+                        .any(|new| new.marker == marker.marker)
+            })
+            .map(|(_, marker)| marker.row)
+            .collect();
+        if !lost.is_empty() {
+            let joined = lost.iter().any(|row| guard::is_join(&old, &deleted, *row));
+            mode.guard.losses.push(guard::Loss {
+                before: old.version().clone(),
+                joined,
+            });
         }
     }
     let markers_changed = !removed.is_empty() || !added.is_empty();
