@@ -485,7 +485,7 @@ async fn test_a_reload_never_drops_a_dirty_prompts_buffer(cx: &mut TestAppContex
     );
     assert_eq!(prompts_shown(&session, cx), Some(own));
 
-    // Saved, the next change of the record opens the new file.
+    // Saved, the pane opens the new file at once, with no other change of the record.
     let buffer = editor.read_with(cx, |editor, cx| {
         editor.buffer().read(cx).as_singleton().unwrap()
     });
@@ -494,8 +494,6 @@ async fn test_a_reload_never_drops_a_dirty_prompts_buffer(cx: &mut TestAppContex
         .update(cx, |project, cx| project.save_buffer(buffer, cx))
         .await
         .unwrap();
-    let set = cx.update(|_, cx| crate::set_auto_submit(&id, Some(false), cx));
-    set.await.unwrap();
     wait_for(
         cx,
         "the session view on the project's file",
