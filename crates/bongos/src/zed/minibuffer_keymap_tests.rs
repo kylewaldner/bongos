@@ -3,7 +3,7 @@
 //! change nothing outside a `Minibuffer` context.
 
 use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
-use settings::{KeymapFile, KeymapFileLoadResult};
+use settings::{KeybindSource, KeymapFile, KeymapFileLoadResult};
 
 use super::tests::init_keymap_test;
 
@@ -60,18 +60,18 @@ const HOST_PICKER_EDITOR: [&str; 5] = [
 ];
 const WORKSPACE_EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full"];
 
-/// The keymaps in load order, with and without the Emacs base.
+/// The keymaps in load order, with the sources the app loads them with (`load_default_keymap`).
 fn load_all(platform: &Platform, emacs: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
     cx.update(|cx| {
-        let mut paths = vec![platform.default];
+        let mut paths = vec![(platform.default, KeybindSource::Default)];
         if emacs {
-            paths.push(platform.emacs);
+            paths.push((platform.emacs, KeybindSource::Base));
         }
-        paths.push(platform.overrides);
+        paths.push((platform.overrides, KeybindSource::Default));
         let mut all = Vec::new();
-        for path in paths {
+        for (path, source) in paths {
             all.extend(
-                KeymapFile::load_asset(path, None, cx)
+                KeymapFile::load_asset(path, Some(source), cx)
                     .unwrap_or_else(|error| panic!("{path}: {error}")),
             );
         }
