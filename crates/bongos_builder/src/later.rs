@@ -25,7 +25,7 @@
 //! the builder or the store is turned on) are only classified, never applied on their own.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -136,7 +136,7 @@ pub(crate) struct Later {
     /// By absolute path.
     pub entries: BTreeMap<PathBuf, Entry>,
     /// The hash of each file when it was last judged for an auto-apply.
-    judged: HashMap<PathBuf, String>,
+    pub judged: HashMap<PathBuf, String>,
     /// The first scan since start (or since the builder or the store was turned on) is done.
     baseline_done: bool,
     scanning: bool,
@@ -619,12 +619,39 @@ fn run_queue(cx: &mut App) {
     .detach();
 }
 
+/// Whether the tree records the content the last run read from `path` as the latest record of
+/// its proposal.
+fn recorded_as_applied(path: &Path, cx: &App) -> bool {
+    let later = cx.global::<Later>();
+    let (Some(entry), Some(hash)) = (later.entries.get(path), later.judged.get(path)) else {
+        return false;
+    };
+    let Some(tree) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()) else {
+        return false;
+    };
+    tree.tasks()
+        .into_iter()
+        .find(|task| task.id() == Some(entry.task_id.as_str()))
+        .and_then(|task| task.file.as_ref())
+        .is_some_and(|file| {
+            file.proposals
+                .iter()
+                .rev()
+                .find(|record| record.number == entry.number)
+                .is_some_and(|record| &record.hash == hash)
+        })
+}
+
 /// Records how the auto-apply went, toasts a success and starts the next one.
-fn finish_apply(path: PathBuf, result: Result<String, String>, cx: &mut App) {
+pub(crate) fn finish_apply(path: PathBuf, result: Result<String, String>, cx: &mut App) {
+    // A path queued twice for edited content runs twice on the same file; the second run is
+    // refused because the first one applied it. The tree says so, so that is not a failure.
+    let recorded = result.is_err() && recorded_as_applied(&path, cx);
     let later = cx.global_mut::<Later>();
     later.applying = false;
     let status = match &result {
         Ok(_) => Status::Settled,
+        Err(_) if recorded => Status::Settled,
         Err(error) => Status::Failed(error.clone()),
     };
     if let Some(entry) = later.entries.get_mut(&path) {

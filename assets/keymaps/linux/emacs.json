@@ -214,6 +214,14 @@
       "ctrl-c w H": "artifact::HideAll",
       "ctrl-c w U": "artifact::ShareAll",
       "ctrl-c w l": "artifact::Link",
+      // Task builder (C-c w b and friends): plan, propose and apply. The unbound commands are in
+      // the command palette.
+      "ctrl-c w b": "task::Plan",
+      "ctrl-c w B": "task::Propose",
+      "ctrl-c w v": "task::ShowProposal",
+      "ctrl-c w V": "task::EditProposal",
+      "ctrl-c w A": "task::ApplyProposal",
+      "ctrl-c w X": "task::RejectProposal",
       // Chats (C-c c): chat sessions. The unbound commands are in the command palette.
       "ctrl-c c n": "chat::New",
       "ctrl-c c P": "chat::TogglePanel",
@@ -278,6 +286,7 @@
       "ctrl-c c t": "chat::FocusTerminal",
       "ctrl-c c e": "chat::FocusPrompts",
       "ctrl-c c v": "chat::ShowArtifacts",
+      "ctrl-c w B": "task::Propose",
       "ctrl-c ctrl-c": ["terminal::SendKeystroke", "ctrl-c"],
     },
   },
@@ -342,6 +351,13 @@
     "bindings": {
       "tab": "work::ToggleRow",
       "^": "work::Up",
+    },
+  },
+  {
+    "context": "ProposalView",
+    "bindings": {
+      "enter": "proposal::Descend",
+      "^": "proposal::Up",
     },
   },
   {

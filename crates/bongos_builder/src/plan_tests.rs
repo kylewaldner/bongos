@@ -127,12 +127,12 @@ struct Harness {
     big: PathBuf,
 }
 
-fn set_settings(cx: &mut TestAppContext, builder: bool) {
+fn set_settings(cx: &mut TestAppContext, builder: Option<bool>) {
     cx.update(|cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(true);
-                content.task_builder.get_or_insert_default().enabled = Some(builder);
+                content.task_builder.get_or_insert_default().enabled = builder;
                 let chats = content.chats.get_or_insert_default();
                 chats.enabled = Some(true);
                 chats.idle_after_secs = Some(60);
@@ -161,10 +161,11 @@ fn set_builder_enabled(cx: &mut VisualTestContext, enabled: bool) {
 }
 
 /// The app's wiring over temporary directories and the fake CLIs, with a window that has the work,
-/// chat and builder commands, the focused task `t1` and `builder` as `task_builder.enabled`.
+/// chat and builder commands, the focused task `t1` and `builder` as `task_builder.enabled`
+/// (`None` leaves the default).
 async fn harness(
     cx: &mut TestAppContext,
-    builder: bool,
+    builder: impl Into<Option<bool>>,
     children: usize,
 ) -> (Harness, Entity<Workspace>, &mut VisualTestContext) {
     cx.executor().allow_parking();
@@ -193,7 +194,7 @@ async fn harness(
         bongos_chat::ChatsSettings::register(cx);
         TaskBuilderSettings::register(cx);
     });
-    set_settings(cx, builder);
+    set_settings(cx, builder.into());
     let db = cx.update(|cx| db::kvp::KeyValueStore::global(cx));
     db.scoped(bongos_work::KVP_NAMESPACE)
         .write(bongos_work::FOCUS_KEY.to_string(), "\"t1\"".to_string())
@@ -455,6 +456,14 @@ async fn a_new_task_has_one_plan_todo_while_enabled_and_the_kind_defaults_otherw
         Kind::PrShip,
         "a one-off is not a pull request"
     );
+}
+
+#[gpui::test]
+async fn a_new_task_has_the_plan_todo_with_the_default_settings(cx: &mut TestAppContext) {
+    // No `task_builder.enabled` set: the default (on) applies.
+    let (_h, workspace, cx) = harness(cx, Option::<bool>::None, 0).await;
+    let planned = create(&workspace, "task::New", "Default task", cx).await;
+    assert_eq!(todo_names(&planned), vec!["plan".to_string()]);
 }
 
 #[gpui::test]

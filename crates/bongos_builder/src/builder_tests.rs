@@ -99,7 +99,7 @@ async fn default_settings_parse(cx: &mut TestAppContext) {
     use_default_settings(cx);
     cx.update(|cx| {
         let settings = TaskBuilderSettings::get_global(cx);
-        assert!(!settings.enabled, "off by default");
+        assert!(settings.enabled, "on by default");
         assert!(settings.auto_apply);
         assert_eq!(settings.todo_warning, 8);
 
@@ -210,6 +210,11 @@ async fn actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext
 
     let names = names();
     assert_eq!(names.len(), action_types().len(), "every action is listed");
+    for name in &names {
+        assert!(!palette_hidden(name, cx), "{name} shows by default");
+    }
+
+    set_enabled(cx, false);
     for name in &names {
         assert!(palette_hidden(name, cx), "{name} is hidden while off");
     }

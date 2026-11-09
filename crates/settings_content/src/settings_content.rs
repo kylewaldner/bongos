@@ -1466,7 +1466,7 @@ pub struct TaskBuilderSettingsContent {
     /// says so. The `Proposal` language, which saves `*.proposal.txt` files exactly as typed,
     /// applies either way.
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
     /// Whether a proposal that is valid and written by a chat applies on its own, unless the
     /// project says otherwise.
