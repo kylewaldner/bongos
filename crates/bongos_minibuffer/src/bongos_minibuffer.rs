@@ -16,7 +16,7 @@ mod strip;
 
 use ::settings::{Settings as _, SettingsStore};
 use command_palette_hooks::CommandPaletteFilter;
-use gpui::{App, BorrowAppContext as _, Context, Window};
+use gpui::{Action as _, App, BorrowAppContext as _, Context, Window};
 use workspace::{MinibufferMessageKind, MinibufferRouting, ModalLayer};
 
 pub use echo::{EchoLine, LOG_CAPACITY, MESSAGES, error, message};
@@ -107,6 +107,36 @@ fn act_on_session(
         .unwrap_or(false)
 }
 
+/// What `Open` answers while a minibuffer is already active, in the wording of Emacs.
+pub const MINIBUFFER_IN_MINIBUFFER: &str =
+    "Command attempted to use minibuffer while in minibuffer";
+
+/// `minibuffer::Open` (M-x): opens the command palette, or says so when a prompt is already in
+/// the strip. It always handles the action.
+fn open_palette(cx: &mut App) -> bool {
+    let Some(window) = cx.active_window() else {
+        return true;
+    };
+    window
+        .update(cx, |_, window, cx| {
+            let active = strip::active_workspace(window, cx).is_some_and(|workspace| {
+                workspace
+                    .read(cx)
+                    .modal_layer()
+                    .read(cx)
+                    .bottom_modal()
+                    .is_some()
+            });
+            if active {
+                echo::error(window, cx, MINIBUFFER_IN_MINIBUFFER);
+            } else {
+                window.dispatch_action(zed_actions::command_palette::Toggle.boxed_clone(), cx);
+            }
+        })
+        .ok();
+    true
+}
+
 fn register_actions(cx: &mut App) {
     use zed_actions::minibuffer::*;
 
@@ -137,7 +167,7 @@ fn register_actions(cx: &mut App) {
         HistoryPrev => |_| false,
         HistoryNext => |_| false,
         Actions => |_| false,
-        Open => |_| false,
+        Open => open_palette,
         ShowMessages => echo::show_messages,
     );
 }
@@ -148,6 +178,8 @@ mod echo_tests;
 mod focus_tests;
 #[cfg(test)]
 mod hint_tests;
+#[cfg(test)]
+mod palette_tests;
 #[cfg(test)]
 mod prompts_tests;
 #[cfg(test)]

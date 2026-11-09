@@ -2365,6 +2365,7 @@ name = "bongos_minibuffer"
 version = "0.1.0"
 dependencies = [
  "bongos_minibuffer_model",
+ "command_palette",
  "command_palette_hooks",
  "db",
  "editor",
