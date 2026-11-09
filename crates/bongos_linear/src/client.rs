@@ -61,6 +61,7 @@ pub fn endpoint() -> String {
 }
 
 /// Whether `text` is an `http` url to `127.0.0.1` with an explicit port, no credentials, no query.
+#[cfg(test)]
 pub fn is_loopback_url(text: &str) -> bool {
     loopback_url(text).is_some()
 }
