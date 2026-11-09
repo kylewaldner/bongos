@@ -56,7 +56,7 @@ use crate::scope::{ChatScope, project_repositories, resolve_scope};
 use crate::send::show_toast;
 use crate::{
     ChatHealth, ChatPanel, ChatRuntime, ChatStore, ChatsSettings, Health, HealthState,
-    LaunchRequest, PROBE_TIMEOUT, SendError, SendOptions, send, task_facts,
+    LaunchRequest, PROBE_TIMEOUT, SendError, SendOptions, Sent, send, task_facts,
 };
 
 /// How long a new chat waits for the index to list its record before the panel shows it.
@@ -106,7 +106,9 @@ pub(crate) struct ChatPlan {
 /// Registers the commands of this module on `workspace`.
 pub fn register(workspace: &mut Workspace) {
     workspace
-        .register_action(|w, _: &chat::New, window, cx| new_chat(NewChat::asking(), w, window, cx))
+        .register_action(|w, _: &chat::New, window, cx| {
+            on_chat_task(w, window, cx, start_chat_on_task)
+        })
         .register_action(|w, _: &chat::NewWithOptions, window, cx| {
             let spec = NewChat {
                 chat_type: None,
@@ -157,6 +159,19 @@ fn new_chat(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    on_chat_task(workspace, window, cx, move |id, workspace, window, cx| {
+        new_chat_on(id, spec, workspace, window, cx)
+    })
+}
+
+/// Calls `start` with the focused task, else with a task picked by name. Only says so while
+/// chats are off.
+fn on_chat_task(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    start: impl FnOnce(String, &mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) {
     if !chats_on(workspace, cx) {
         return;
     }
@@ -164,7 +179,7 @@ fn new_chat(
         return;
     };
     match bongos_work::focused(&tree, cx) {
-        Some(id) => new_chat_on(id, spec, workspace, window, cx),
+        Some(id) => start(id, workspace, window, cx),
         None => with_task(
             workspace,
             window,
@@ -172,9 +187,23 @@ fn new_chat(
             "Chat on which task?",
             "There is no task",
             |task, _| task.file.is_some(),
-            Box::new(move |id, workspace, window, cx| new_chat_on(id, spec, workspace, window, cx)),
+            Box::new(start),
         ),
     }
+}
+
+/// `chat: new` on the task `task_id`, whatever has focus: asks for the agent and the session
+/// type, then starts the chat where [`crate::scope`] says. Only says so while chats are off.
+pub fn start_chat_on_task(
+    task_id: String,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !chats_on(workspace, cx) {
+        return;
+    }
+    new_chat_on(task_id, NewChat::asking(), workspace, window, cx)
 }
 
 /// The scope of a new `chat_type` chat on `task_id`, from the Work snapshot and settings.
@@ -752,7 +781,7 @@ pub(crate) fn resume_chat(
 /// resolves when the chat runs and is shown, or to why it could not. A closed chat whose directory
 /// is gone is not resumed: Kyle is offered a fork instead (see [`crate::fork`]), and the task
 /// resolves to an empty message, which says nothing more.
-pub(crate) fn open_chat(
+pub fn open_chat(
     chat_id: &str,
     workspace: &mut Workspace,
     window: &mut Window,
@@ -1366,11 +1395,17 @@ pub(crate) fn chat_name(chat_id: &str, cx: &App) -> String {
 }
 
 /// A send found its chat not running: asks "Resume <name> and send?" and, on yes, resumes the
-/// chat and sends `text` once it runs. The text stays in its buffer whatever happens.
-pub(crate) fn offer_resume_and_send(
+/// chat and sends `text` with `options` once it runs, then calls `on_sent` with what the send did.
+/// A send error is also said in a toast. On cancel, or when the chat could not be resumed (said in
+/// a toast), nothing is sent and `on_sent` is not called. The text stays in its buffer whatever
+/// happens.
+#[allow(clippy::too_many_arguments)]
+pub fn offer_resume_and_send(
     chat_id: String,
     name: String,
     text: String,
+    options: SendOptions,
+    on_sent: Box<dyn FnOnce(Result<Sent, SendError>, &mut Window, &mut App)>,
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -1388,22 +1423,27 @@ pub(crate) fn offer_resume_and_send(
                 return;
             }
             let opened = open_chat(&chat_id, workspace, window, cx);
-            cx.spawn(async move |workspace, cx| {
-                let result = match opened.await {
-                    Ok(()) => {
-                        let sent =
-                            cx.update(|cx| send(&chat_id, text, SendOptions { submit: true }, cx));
-                        sent.await.map(|_| ()).map_err(|error| error.to_string())
+            cx.spawn_in(window, async move |workspace, cx| {
+                if let Err(message) = opened.await {
+                    if !message.is_empty() {
+                        workspace
+                            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+                            .ok();
                     }
-                    Err(message) => Err(message),
-                };
-                if let Err(message) = result
-                    && !message.is_empty()
-                {
-                    workspace
-                        .update(cx, |workspace, cx| show_toast(workspace, message, cx))
-                        .ok();
+                    return;
                 }
+                let Ok(sent) = cx.update(|_, cx| send(&chat_id, text, options, cx)) else {
+                    return;
+                };
+                let result = sent.await;
+                workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        if let Err(error) = &result {
+                            show_toast(workspace, error.to_string(), cx);
+                        }
+                        on_sent(result, window, cx);
+                    })
+                    .ok();
             })
             .detach();
         }),

@@ -5,8 +5,10 @@
 
 #![cfg(unix)]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1084,6 +1086,8 @@ async fn test_resume_and_send(cx: &mut TestAppContext) {
             id.clone(),
             name,
             "Next step".to_string(),
+            crate::SendOptions { submit: true },
+            Box::new(|_, _, _| {}),
             workspace,
             window,
             cx,
@@ -1099,6 +1103,81 @@ async fn test_resume_and_send(cx: &mut TestAppContext) {
     })
     .await;
     assert!(crate::live_modes::is_open(h.state(&id, cx)));
+    assert!(!toast_shown(&workspace, cx));
+}
+
+#[gpui::test]
+async fn test_resume_and_send_passes_the_options_through(cx: &mut TestAppContext) {
+    let input_dir = TempDir::new().unwrap();
+    let input = input_dir.path().join("input");
+    let input_text = input.to_string_lossy().into_owned();
+    let h = harness(cx, true, 60, &[("FAKE_CLI_INPUT", &input_text)]).await;
+    let (workspace, cx) = command_window(&h, cx).await;
+    let id = h.start(Agent::Claude, cx).await;
+    h.type_line(&id, "hello", cx);
+    h.wait_content(&id, "got hello", cx).await;
+    assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
+    wait_for(cx, "the chat in the index", STARTUP, |cx| {
+        h.store.read_with(cx, |store, _| store.find(&id).is_some())
+    })
+    .await;
+    std::fs::write(&input, "").unwrap();
+
+    let outcome = Rc::new(RefCell::new(None));
+    let name = read_record(&record_path(&h.scope, &id)).unwrap().name;
+    workspace.update_in(cx, |workspace, window, cx| {
+        let outcome = outcome.clone();
+        crate::offer_resume_and_send(
+            id.clone(),
+            name,
+            "Next step".to_string(),
+            crate::SendOptions { submit: false },
+            Box::new(move |result, _, _| *outcome.borrow_mut() = Some(result)),
+            workspace,
+            window,
+            cx,
+        )
+    });
+    answer(&workspace, "Resume", cx).await;
+    wait_for(cx, "the outcome of the send", STARTUP, |_| {
+        outcome.borrow().is_some()
+    })
+    .await;
+    let sent = outcome.borrow_mut().take().unwrap().unwrap();
+    assert!(!sent.submitted);
+    let expected: String = b"\x1b[200~Next step\x1b[201~"
+        .iter()
+        .map(|byte| format!("{byte:03o} "))
+        .collect();
+    wait_for(cx, "the paste after the resume", STARTUP, |_| {
+        std::fs::read_to_string(&input).unwrap_or_default() == expected
+    })
+    .await;
+    // No Enter follows.
+    cx.executor().timer(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::read_to_string(&input).unwrap(), expected);
+    assert!(crate::live_modes::is_open(h.state(&id, cx)));
+    assert!(!toast_shown(&workspace, cx));
+}
+
+#[gpui::test]
+async fn test_start_chat_on_a_task_that_is_not_focused(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let (workspace, cx) = command_window(&h, cx).await;
+    // No task is focused, and no task picker is asked: the agent and the type are.
+    workspace.update_in(cx, |workspace, window, cx| {
+        crate::start_chat_on_task("t1".to_string(), workspace, window, cx)
+    });
+    answer(&workspace, "claude:", cx).await;
+    answer(&workspace, "plan:", cx).await;
+    wait_for(cx, "the chat in the panel", STARTUP, |cx| {
+        shown(&workspace, cx).is_some()
+    })
+    .await;
+    let id = shown(&workspace, cx).unwrap();
+    let record = read_record(&record_path(&h.scope, &id)).unwrap();
+    assert_eq!(record.chat_type, "plan");
+    assert_eq!(h.state(&id, cx), ChatState::Running);
     assert!(!toast_shown(&workspace, cx));
 }
 

@@ -8,7 +8,7 @@
 //! text survives, and the terminal is not touched. The shown layout is written to the chat's
 //! record and read back when the view is created. Focus never moves to the terminal on its own.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -18,8 +18,8 @@ use editor::Editor;
 use fs::{CreateOptions, Fs};
 use gpui::{
     Action as _, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
-    Subscription, Task, WeakEntity, Window,
+    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Task, WeakEntity, Window,
 };
 use language::Buffer;
 use project::Project;
@@ -31,7 +31,7 @@ use workspace::{Pane, PaneGroup, PaneRenderContext, SplitDirection, Workspace};
 
 use crate::layout::{self, PROMPT_PANE_OFF};
 use crate::send::prompts_file;
-use crate::{ChatRuntime, ChatRuntimeEvent, ChatsSettings};
+use crate::{ChatRuntime, ChatRuntimeEvent, ChatStoreEvent, ChatsSettings};
 
 /// Builds the item of the prompts pane for a prompts file. The default is a plain editor; feature
 /// 25 installs its own with [`set_prompt_pane_provider`]. The item must act as an [`Editor`] for
@@ -44,6 +44,13 @@ pub trait PromptPaneProvider: 'static {
         window: &mut Window,
         cx: &mut App,
     ) -> Box<dyn ItemHandle>;
+
+    /// Extra text for the session header about `item`, the item of the prompts pane (for
+    /// feature 25, the mode line). Asked on every render; the view re-renders when the prompts
+    /// editor changes, so it can follow point.
+    fn mode_line(&self, _item: &dyn ItemHandle, _cx: &App) -> Option<SharedString> {
+        None
+    }
 }
 
 /// A plain text editor: no block rules, no `prompts:` commands.
@@ -96,7 +103,13 @@ pub struct SessionView {
     /// The layout the record asks for; what is shown also depends on `chats.prompt_pane`.
     layout: Layout,
     terminal_view: Option<Entity<TerminalView>>,
+    /// The prompts file the prompts pane shows.
+    loaded_prompts: Option<PathBuf>,
+    /// The prompts file being opened, while it is.
+    loading_prompts: Option<PathBuf>,
     _loading_prompts: Option<Task<()>>,
+    /// Re-renders the header when the prompts editor changes.
+    _prompts_observation: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -177,6 +190,14 @@ impl SessionView {
             ));
             let store = runtime.read(cx).store().clone();
             subscriptions.push(cx.observe(&store, |_, _, cx| cx.notify()));
+            subscriptions.push(cx.subscribe_in(
+                &store,
+                window,
+                |this, _, event: &ChatStoreEvent, window, cx| {
+                    let ChatStoreEvent::Changed = event;
+                    this.follow_prompts_file(window, cx);
+                },
+            ));
         }
         subscriptions.push(
             cx.observe_global_in::<SettingsStore>(window, |this, window, cx| {
@@ -195,7 +216,10 @@ impl SessionView {
             prompts_pane,
             layout,
             terminal_view: None,
+            loaded_prompts: None,
+            loading_prompts: None,
             _loading_prompts: None,
+            _prompts_observation: None,
             _subscriptions: subscriptions,
         };
         this.rebuild_group(cx);
@@ -237,6 +261,11 @@ impl SessionView {
             .read(cx)
             .active_item()?
             .act_as::<Editor>(cx)
+    }
+
+    /// The prompts file the prompts pane shows, once it has loaded.
+    pub fn prompts_file(&self) -> Option<&Path> {
+        self.loaded_prompts.as_deref()
     }
 
     /// The prompts editor while keyboard focus is inside the prompts pane.
@@ -403,12 +432,41 @@ impl SessionView {
         Some(prompts_file(&chat.scope_dir, chat.entry.record()?))
     }
 
+    /// The record names another prompts file than the pane shows: opens it in the pane instead.
+    /// A prompts buffer with unsaved changes is never dropped: the pane keeps it, and its path,
+    /// until a later change finds it saved.
+    fn follow_prompts_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.prompts_path(cx) else {
+            return;
+        };
+        if self.loaded_prompts.as_ref() == Some(&path) {
+            // The record is back on the file the pane shows: a load of another file still in
+            // flight is stale, so it is cancelled rather than left to replace the pane.
+            self.loading_prompts = None;
+            self._loading_prompts = None;
+            return;
+        }
+        if self.loading_prompts.as_ref() == Some(&path) || self.prompts_dirty(cx) {
+            return;
+        }
+        self.load_prompts(window, cx);
+    }
+
+    /// Whether the item of the prompts pane has unsaved changes.
+    fn prompts_dirty(&self, cx: &App) -> bool {
+        self.prompts_pane
+            .read(cx)
+            .items()
+            .any(|item| item.is_dirty(cx))
+    }
+
     /// Opens the prompts file into the prompts pane. The file is created empty when it is not
     /// there, so the pane never shows an error for a fresh chat.
     fn load_prompts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.prompts_path(cx) else {
             return;
         };
+        self.loading_prompts = Some(path.clone());
         let project = self.project.clone();
         let fs = self.fs.clone();
         self._loading_prompts = Some(cx.spawn_in(window, async move |this, cx| {
@@ -426,29 +484,59 @@ impl SessionView {
                     .await
             }
             .await;
-            match opened {
-                Ok(buffer) => {
-                    this.update_in(cx, |this, window, cx| {
-                        this.set_prompts_buffer(buffer, window, cx)
-                    })
-                    .ok();
+            this.update_in(cx, |this, window, cx| {
+                this.loading_prompts = None;
+                if this.prompts_path(cx).as_ref() != Some(&path) {
+                    return;
                 }
-                Err(error) => log::warn!("chats: could not open the prompts file: {error}"),
-            }
+                match opened {
+                    Ok(buffer) => this.set_prompts_buffer(path, buffer, window, cx),
+                    Err(error) => log::warn!("chats: could not open the prompts file: {error}"),
+                }
+            })
+            .ok();
         }));
     }
 
+    /// Shows `buffer`, the prompts file `path`, in the prompts pane, in place of the item there.
+    /// Refused, keeping the item, when the item has unsaved changes.
     fn set_prompts_buffer(
         &mut self,
+        path: PathBuf,
         buffer: Entity<Buffer>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.prompts_dirty(cx) {
+            log::info!(
+                "chats: kept the unsaved prompts buffer instead of opening {}",
+                path.display()
+            );
+            return;
+        }
         let provider = prompt_pane_provider(cx);
         let item = provider.build_item(buffer, self.project.clone(), window, cx);
+        self._prompts_observation = item
+            .act_as::<Editor>(cx)
+            .map(|editor| cx.observe(&editor, |_, _, cx| cx.notify()));
+        let focused = self
+            .prompts_pane
+            .focus_handle(cx)
+            .contains_focused(window, cx);
+        let new_id = item.item_id();
         self.prompts_pane.update(cx, |pane, cx| {
-            pane.add_item(item, false, false, None, window, cx)
+            let old: Vec<_> = pane
+                .items()
+                .map(|item| item.item_id())
+                .filter(|id| *id != new_id)
+                .collect();
+            pane.add_item(item, false, focused, None, window, cx);
+            for id in old {
+                pane.remove_item(id, false, false, window, cx);
+            }
         });
+        self.loaded_prompts = Some(path);
+        cx.notify();
     }
 
     /// The one line of the header: name, agent, type and state.
@@ -474,14 +562,30 @@ impl SessionView {
             .unwrap_or_default()
     }
 
+    /// The provider's text about the prompts pane's item, for the header.
+    pub fn mode_line(&self, cx: &App) -> Option<SharedString> {
+        let item = self.prompts_pane.read(cx).active_item()?;
+        prompt_pane_provider(cx).mode_line(item.as_ref(), cx)
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let line = self.header_text(cx);
+        let mode_line = self.mode_line(cx);
         h_flex()
             .px_2()
             .py_1()
             .gap_2()
             .justify_between()
-            .child(Label::new(line).size(LabelSize::Small).color(Color::Muted))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Label::new(line).size(LabelSize::Small).color(Color::Muted))
+                    .children(mode_line.map(|mode_line| {
+                        Label::new(mode_line)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                    })),
+            )
             .child(
                 Button::new("chat-session-list", "Chats")
                     .label_size(LabelSize::Small)

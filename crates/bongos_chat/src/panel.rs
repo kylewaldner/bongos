@@ -433,7 +433,7 @@ fn shown_session(
 
 /// `chat: focus prompts`: the prompts pane of the chat shown, else the prompts file of the focused
 /// task as an ordinary buffer in the center.
-fn focus_prompts(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+pub fn focus_prompts(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(panel) = enabled_panel(workspace, cx) else {
         return;
     };
@@ -449,7 +449,7 @@ fn focus_prompts(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
 
 /// Opens the `prompts.txt` of the focused task in the center, creating it empty when it is not
 /// there.
-fn open_prompts_in_center(
+pub fn open_prompts_in_center(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,

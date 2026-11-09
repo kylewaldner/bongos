@@ -534,3 +534,68 @@ async fn test_send_region_on_another_file_is_refused(cx: &mut TestAppContext) {
         Some(id)
     );
 }
+
+#[gpui::test]
+async fn test_set_prompts_file_stores_none_for_the_scope_file(cx: &mut TestAppContext) {
+    let (h, _input_dir, _input) = send_harness(cx, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &id, cx).await;
+    let project_file = h.root.join("projects/invoicing/prompts.txt");
+
+    // Another scope's file: the absolute path.
+    let set = cx.update(|cx| crate::set_prompts_file(&id, Some(project_file.clone()), cx));
+    set.await.unwrap();
+    assert_eq!(record_of(&h, &id).prompts_file, Some(project_file.clone()));
+
+    // The scope's own file: nothing, as for a new chat.
+    let set = cx.update(|cx| crate::set_prompts_file(&id, Some(h.scope.join("prompts.txt")), cx));
+    set.await.unwrap();
+    assert_eq!(record_of(&h, &id).prompts_file, None);
+    let set = cx.update(|cx| crate::set_prompts_file(&id, Some(project_file.clone()), cx));
+    set.await.unwrap();
+    let set = cx.update(|cx| crate::set_prompts_file(&id, None, cx));
+    set.await.unwrap();
+    assert_eq!(record_of(&h, &id).prompts_file, None);
+
+    // The auto-submit override, and back to the default.
+    let set = cx.update(|cx| crate::set_auto_submit(&id, Some(false), cx));
+    set.await.unwrap();
+    assert_eq!(record_of(&h, &id).auto_submit, Some(false));
+    let set = cx.update(|cx| crate::set_auto_submit(&id, None, cx));
+    set.await.unwrap();
+    assert_eq!(record_of(&h, &id).auto_submit, None);
+
+    // An unknown chat is refused.
+    let set = cx.update(|cx| crate::set_prompts_file("nope", None, cx));
+    assert!(set.await.is_err());
+}
+
+#[gpui::test]
+async fn test_chats_for_prompts_file_lists_running_first(cx: &mut TestAppContext) {
+    let (h, _input_dir, _input) = send_harness(cx, &[]).await;
+    let closed = h.start(Agent::Claude, cx).await;
+    assert!(
+        h.runtime
+            .update(cx, |runtime, cx| runtime.close(&closed, cx))
+    );
+    let running = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &closed, cx).await;
+    wait_indexed(&h, &running, cx).await;
+    let path = h.scope.join("prompts.txt");
+    let chats = cx.update(|cx| crate::chats_for_prompts_file(&path, cx));
+    let ids: Vec<(&str, bool)> = chats
+        .iter()
+        .map(|chat| (chat.id.as_str(), chat.running))
+        .collect();
+    assert_eq!(ids, [(running.as_str(), true), (closed.as_str(), false)]);
+    assert_eq!(chats[0].name, record_of(&h, &running).name);
+    assert_eq!(
+        cx.update(|cx| crate::chat_for_prompts_file(&path, cx)),
+        Some(running)
+    );
+    let other = h.root.join("projects/invoicing/prompts.txt");
+    assert!(
+        cx.update(|cx| crate::chats_for_prompts_file(&other, cx))
+            .is_empty()
+    );
+}

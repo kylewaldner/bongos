@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use bongos_chat_model::{Agent, ChatRecord, NamedBy, from_prompt, timestamp_utc};
+use bongos_chat_model::{Agent, ChatRecord, NamedBy, Timestamp, from_prompt, timestamp_utc};
 use bongos_work_model::layout;
 use editor::{Editor, MultiBufferOffset};
 use gpui::{App, AsyncApp, Context, Entity, Task, WeakEntity, Window};
@@ -32,7 +32,7 @@ use workspace::{Toast, Workspace};
 
 use crate::actions::chat;
 use crate::live_modes::is_open;
-use crate::{ChatPanel, ChatRuntime, ChatsSettings};
+use crate::{ChatPanel, ChatRuntime, ChatStore, ChatWriteError, ChatsSettings};
 
 /// How long after its launch a chat has to ask for bracketed paste before a send is refused.
 pub const BRACKETED_WAIT: Duration = Duration::from_secs(5);
@@ -305,24 +305,117 @@ pub(crate) fn prompts_file(scope_dir: &Path, record: &ChatRecord) -> PathBuf {
     }
 }
 
-/// The chat whose prompts file is `path`: the running one when one runs, else the one active
-/// last. Archived chats are left out.
-pub fn chat_for_prompts_file(path: &Path, cx: &App) -> Option<String> {
-    let runtime = ChatRuntime::global(cx)?;
+/// A chat that uses a prompts file, as [`chats_for_prompts_file`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatRef {
+    pub id: String,
+    pub name: String,
+    /// The chat has a running process.
+    pub running: bool,
+    pub last_active: Timestamp,
+}
+
+/// The chats whose prompts file is `path`, the one [`chat_for_prompts_file`] picks first: running
+/// ones before closed ones, then the one active last first. Archived chats are left out.
+pub fn chats_for_prompts_file(path: &Path, cx: &App) -> Vec<ChatRef> {
+    let Some(runtime) = ChatRuntime::global(cx) else {
+        return Vec::new();
+    };
     let runtime = runtime.read(cx);
     let store = runtime.store().read(cx);
-    store
+    let mut chats: Vec<ChatRef> = store
         .index()
         .values()
         .filter_map(|chat| Some((chat, chat.entry.record()?)))
         .filter(|(chat, record)| !record.archived && prompts_file(&chat.scope_dir, record) == path)
-        .max_by_key(|(_, record)| {
-            (
-                is_open(runtime.state(&record.id)),
-                timestamp_utc(&record.last_active),
-            )
+        .map(|(_, record)| ChatRef {
+            id: record.id.clone(),
+            name: record.name.clone(),
+            running: is_open(runtime.state(&record.id)),
+            last_active: record.last_active,
         })
-        .map(|(_, record)| record.id.clone())
+        .collect();
+    // `max_by_key` in `chat_for_prompts_file` keeps the last of equal keys: so does this order.
+    chats.reverse();
+    chats.sort_by_key(|chat| std::cmp::Reverse((chat.running, timestamp_utc(&chat.last_active))));
+    chats
+}
+
+/// The chat whose prompts file is `path`: the running one when one runs, else the one active
+/// last. Archived chats are left out.
+pub fn chat_for_prompts_file(path: &Path, cx: &App) -> Option<String> {
+    chats_for_prompts_file(path, cx)
+        .into_iter()
+        .next()
+        .map(|chat| chat.id)
+}
+
+/// The record file and the scope directory of `chat_id`.
+fn record_of(
+    chat_id: &str,
+    cx: &App,
+) -> Result<(Entity<ChatStore>, PathBuf, PathBuf), ChatWriteError> {
+    let store = ChatRuntime::global(cx)
+        .ok_or(ChatWriteError::Off)?
+        .read(cx)
+        .store()
+        .clone();
+    let chat = store
+        .read(cx)
+        .find(chat_id)
+        .ok_or_else(|| ChatWriteError::Failed(format!("No chat has the id {chat_id}")))?;
+    let (path, scope_dir) = (chat.entry.path.clone(), chat.scope_dir.clone());
+    Ok((store, path, scope_dir))
+}
+
+/// Writes `change` to the record of `chat_id`.
+fn write_record_of(
+    chat_id: &str,
+    cx: &mut App,
+    change: impl FnOnce(&Path, &mut ChatRecord) + Send + 'static,
+) -> Task<Result<(), ChatWriteError>> {
+    if !ChatsSettings::get_global(cx).enabled {
+        return Task::ready(Err(ChatWriteError::Off));
+    }
+    let (store, path, scope_dir) = match record_of(chat_id, cx) {
+        Ok(found) => found,
+        Err(error) => return Task::ready(Err(error)),
+    };
+    let write = store.update(cx, |store, cx| {
+        store.update(
+            path,
+            move |record| {
+                change(&scope_dir, record);
+                Ok(())
+            },
+            cx,
+        )
+    });
+    cx.spawn(async move |_| write.await.map(|_| ()))
+}
+
+/// Makes `path` the prompts file of `chat_id`. The record keeps `None` when `path` is the scope's
+/// own `prompts.txt` (the task's, or the project's), the absolute path otherwise; `None` goes
+/// back to the scope's file. A relative `path` is taken from the scope directory.
+pub fn set_prompts_file(
+    chat_id: &str,
+    path: Option<PathBuf>,
+    cx: &mut App,
+) -> Task<Result<(), ChatWriteError>> {
+    write_record_of(chat_id, cx, move |scope_dir, record| {
+        record.prompts_file = path
+            .map(|path| scope_dir.join(path))
+            .filter(|path| *path != layout::prompts_file(scope_dir));
+    })
+}
+
+/// Sets the auto-submit override of `chat_id`; `None` follows `prompts.auto_submit`.
+pub fn set_auto_submit(
+    chat_id: &str,
+    value: Option<bool>,
+    cx: &mut App,
+) -> Task<Result<(), ChatWriteError>> {
+    write_record_of(chat_id, cx, move |_, record| record.auto_submit = value)
 }
 
 /// A toast of the chat commands.
@@ -401,7 +494,14 @@ fn send_region(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
             workspace
                 .update_in(cx, |workspace, window, cx| {
                     crate::commands::offer_resume_and_send(
-                        chat_id, name, text, workspace, window, cx,
+                        chat_id,
+                        name,
+                        text,
+                        SendOptions { submit: true },
+                        Box::new(|_, _, _| {}),
+                        workspace,
+                        window,
+                        cx,
                     )
                 })
                 .ok();

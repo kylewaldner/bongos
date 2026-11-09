@@ -4,6 +4,7 @@
 
 #![cfg(unix)]
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bongos_chat_model::{Agent, Layout, read_record, record_path, write_record};
@@ -343,4 +344,172 @@ async fn test_focus_prompts_with_no_chat_needs_a_focused_task(cx: &mut TestAppCo
     assert!(workspace.read_with(cx, |workspace, cx| {
         workspace.active_item_as::<Editor>(cx).is_none()
     }));
+}
+
+fn prompts_shown(session: &Entity<SessionView>, cx: &mut VisualTestContext) -> Option<PathBuf> {
+    session.read_with(cx, |session, _| {
+        session.prompts_file().map(Path::to_path_buf)
+    })
+}
+
+#[gpui::test]
+async fn test_the_session_view_follows_the_prompts_file(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &id, cx).await;
+    let (workspace, cx) = panel_window(&h, cx).await;
+    let panel = panel_of(&workspace, cx);
+    let session = show(&panel, &id, cx);
+    wait_prompts_loaded(&session, cx).await;
+    let own = h.scope.join("prompts.txt");
+    assert_eq!(prompts_shown(&session, cx), Some(own.clone()));
+    let before = session.read_with(cx, |session, cx| session.prompts_editor(cx).unwrap());
+
+    let project_file = h.root.join("projects/invoicing/prompts.txt");
+    std::fs::write(&project_file, "project prompt\n").unwrap();
+    let set = cx.update(|_, cx| crate::set_prompts_file(&id, Some(project_file.clone()), cx));
+    set.await.unwrap();
+    wait_for(
+        cx,
+        "the session view on the project's file",
+        STARTUP,
+        |cx| {
+            session.read_with(cx, |session, _| {
+                session.prompts_file() == Some(&*project_file)
+            })
+        },
+    )
+    .await;
+    let after = session.read_with(cx, |session, cx| session.prompts_editor(cx).unwrap());
+    assert_ne!(after, before);
+    assert_eq!(
+        after.read_with(cx, |editor, cx| editor.text(cx)),
+        "project prompt\n"
+    );
+    let items = session.read_with(cx, |session, cx| {
+        session.prompts_pane().read(cx).items_len()
+    });
+    assert_eq!(items, 1, "the old editor is gone from the pane");
+
+    // Back to the scope's own file.
+    let set = cx.update(|_, cx| crate::set_prompts_file(&id, None, cx));
+    set.await.unwrap();
+    wait_for(cx, "the session view on the task's file", STARTUP, |cx| {
+        session.read_with(cx, |session, _| session.prompts_file() == Some(&*own))
+    })
+    .await;
+    assert!(!toast_shown(&workspace, cx));
+}
+
+#[gpui::test]
+async fn test_a_prompts_file_changed_away_and_back_ends_on_the_record(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &id, cx).await;
+    let (workspace, cx) = panel_window(&h, cx).await;
+    let panel = panel_of(&workspace, cx);
+    let session = show(&panel, &id, cx);
+    wait_prompts_loaded(&session, cx).await;
+    let own = h.scope.join("prompts.txt");
+
+    let project_file = h.root.join("projects/invoicing/prompts.txt");
+    std::fs::write(&project_file, "project prompt\n").unwrap();
+    // A to B to A in quick succession: B's load may still be running when the record is back on A.
+    let set = cx.update(|_, cx| crate::set_prompts_file(&id, Some(project_file.clone()), cx));
+    set.await.unwrap();
+    let set = cx.update(|_, cx| crate::set_prompts_file(&id, None, cx));
+    set.await.unwrap();
+    wait_for(cx, "the index on the task's own file", STARTUP, |cx| {
+        h.store.read_with(cx, |store, _| {
+            store.find(&id).is_some_and(|chat| {
+                chat.entry
+                    .record()
+                    .is_some_and(|r| r.prompts_file.is_none())
+            })
+        })
+    })
+    .await;
+    cx.executor()
+        .timer(std::time::Duration::from_millis(300))
+        .await;
+    cx.run_until_parked();
+    assert_eq!(prompts_shown(&session, cx), Some(own));
+    let items = session.read_with(cx, |session, cx| {
+        session.prompts_pane().read(cx).items_len()
+    });
+    assert_eq!(items, 1);
+}
+
+#[gpui::test]
+async fn test_a_reload_never_drops_a_dirty_prompts_buffer(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &id, cx).await;
+    let (workspace, cx) = panel_window(&h, cx).await;
+    let panel = panel_of(&workspace, cx);
+    let session = show(&panel, &id, cx);
+    wait_prompts_loaded(&session, cx).await;
+    let own = h.scope.join("prompts.txt");
+    let editor = session.read_with(cx, |session, cx| session.prompts_editor(cx).unwrap());
+    editor.update_in(cx, |editor, window, cx| {
+        editor.insert("unsaved draft", window, cx)
+    });
+    let dirty = |editor: &Entity<Editor>, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |editor, cx| editor.buffer().read(cx).is_dirty(cx))
+    };
+    assert!(dirty(&editor, cx));
+
+    let project_file = h.root.join("projects/invoicing/prompts.txt");
+    let set = cx.update(|_, cx| crate::set_prompts_file(&id, Some(project_file.clone()), cx));
+    set.await.unwrap();
+    wait_for(cx, "the index to see the new prompts file", STARTUP, |cx| {
+        h.store.read_with(cx, |store, _| {
+            store
+                .find(&id)
+                .and_then(|chat| chat.entry.record()?.prompts_file.clone())
+                .is_some()
+        })
+    })
+    .await;
+    cx.executor()
+        .timer(std::time::Duration::from_millis(300))
+        .await;
+    cx.run_until_parked();
+    let shown = session.read_with(cx, |session, cx| session.prompts_editor(cx).unwrap());
+    assert_eq!(shown, editor, "the dirty editor stays");
+    assert!(dirty(&shown, cx));
+    assert!(
+        shown
+            .read_with(cx, |editor, cx| editor.text(cx))
+            .starts_with("unsaved draft")
+    );
+    assert_eq!(prompts_shown(&session, cx), Some(own));
+
+    // Saved, the next change of the record opens the new file.
+    let buffer = editor.read_with(cx, |editor, cx| {
+        editor.buffer().read(cx).as_singleton().unwrap()
+    });
+    let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+    project
+        .update(cx, |project, cx| project.save_buffer(buffer, cx))
+        .await
+        .unwrap();
+    let set = cx.update(|_, cx| crate::set_auto_submit(&id, Some(false), cx));
+    set.await.unwrap();
+    wait_for(
+        cx,
+        "the session view on the project's file",
+        STARTUP,
+        |cx| {
+            session.read_with(cx, |session, _| {
+                session.prompts_file() == Some(&*project_file)
+            })
+        },
+    )
+    .await;
+    assert!(
+        std::fs::read_to_string(h.scope.join("prompts.txt"))
+            .unwrap()
+            .starts_with("unsaved draft")
+    );
 }

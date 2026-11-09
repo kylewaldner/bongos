@@ -104,7 +104,7 @@ fn minimal_record_gets_defaults_and_omits_absent_keys() {
 #[test]
 fn unknown_keys_survive_a_rewrite() {
     let text = format!(
-        "{MINIMAL}auto_submit = \"off\"\nretries = 3\n\n[feature25]\nlast_block = 7\nnames = [\"a\", \"b\"]\n"
+        "{MINIMAL}send_mode = \"off\"\nretries = 3\n\n[feature25]\nlast_block = 7\nnames = [\"a\", \"b\"]\n"
     );
     let record = parse_record(&text).unwrap();
     assert_eq!(record.extra.len(), 3);
@@ -115,7 +115,7 @@ fn unknown_keys_survive_a_rewrite() {
     let again = parse_record(&rewritten).unwrap();
     assert_eq!(again.name, "renamed");
     assert_eq!(again.extra, record.extra);
-    assert!(rewritten.contains("auto_submit = \"off\""));
+    assert!(rewritten.contains("send_mode = \"off\""));
     assert!(rewritten.contains("last_block = 7"));
 }
 
@@ -286,4 +286,17 @@ fn timestamps_order_across_offsets() {
     assert!(offset < utc);
     assert_eq!(local, utc);
     assert_eq!(timestamp_utc(&"2026-11-08".parse().unwrap()), None);
+}
+
+#[test]
+fn auto_submit_round_trips_when_set_and_is_omitted_when_none() {
+    let mut record = parse_record(MINIMAL).unwrap();
+    assert_eq!(record.auto_submit, None);
+    assert!(!serialize_record(&record).unwrap().contains("auto_submit"));
+
+    record.auto_submit = Some(false);
+    let text = serialize_record(&record).unwrap();
+    assert!(text.contains("auto_submit = false"), "{text}");
+    assert_eq!(parse_record(&text).unwrap().auto_submit, Some(false));
+    assert!(record.extra.is_empty());
 }
