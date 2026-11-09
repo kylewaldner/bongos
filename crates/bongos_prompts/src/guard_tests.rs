@@ -170,6 +170,64 @@ async fn a_region_kill_across_a_rule_merges_and_undo_restores_it(cx: &mut TestAp
 }
 
 #[gpui::test]
+async fn a_redo_after_a_no_op_key_is_not_taken_for_a_join(cx: &mut TestAppContext) {
+    let (editor, cx) = open_editor(cx, true, "prompts.txt", THREE).await;
+    focus(&editor, cx);
+    select(&editor, Point::new(5, 2), Point::new(7, 2), cx);
+    act(Cut, cx);
+    let killed = text(&editor, cx);
+    assert_eq!(rules(&editor, cx), 2);
+    act(Undo, cx);
+    assert_eq!(text(&editor, cx), THREE);
+
+    // Backspace at the start of the buffer begins a transaction that edits nothing.
+    put(&editor, Point::new(0, 0), cx);
+    act(Backspace, cx);
+    assert_eq!(text(&editor, cx), THREE);
+
+    // The redo's `Edited` is not this transaction's, so the guard leaves it alone.
+    act(Redo, cx);
+    assert_eq!(text(&editor, cx), killed, "the redo stays");
+    assert_eq!(rules(&editor, cx), 2);
+    assert_eq!(reverts(&editor, cx), 0);
+}
+
+#[gpui::test]
+async fn a_foreign_edit_grouped_with_a_keystroke_is_not_reverted(cx: &mut TestAppContext) {
+    let (editor, cx) = open_editor(cx, true, "prompts.txt", THREE).await;
+    focus(&editor, cx);
+    set_group_interval(&editor, cx);
+    put(&editor, Point::new(0, 0), cx);
+
+    // An edit that is not the editor's (a project replace, an agent) removes a marker line and
+    // stays an open undo group.
+    let marker = "=== prompt 2026-11-05 14:10 ===";
+    editor.update(cx, |editor, cx| {
+        let buffer = editor.buffer().read(cx).as_singleton().unwrap();
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit(
+                [(Point::new(2, 11)..Point::new(3, marker.len() as u32), "")],
+                None,
+                cx,
+            )
+        });
+    });
+    cx.run_until_parked();
+    let removed = text(&editor, cx);
+    assert_eq!(rules(&editor, cx), 2);
+
+    // Kyle types within the group interval: the transaction ends as the foreign entry.
+    type_text(&editor, "x", cx);
+    assert_eq!(text(&editor, cx), format!("x{removed}"));
+    assert_eq!(
+        reverts(&editor, cx),
+        0,
+        "the foreign edit is not Kyle's join"
+    );
+    assert_eq!(rules(&editor, cx), 2);
+}
+
+#[gpui::test]
 async fn c_k_above_two_markers_in_a_row_is_reverted(cx: &mut TestAppContext) {
     let (editor, cx) = open_editor(cx, true, "prompts.txt", RUNS).await;
     focus(&editor, cx);

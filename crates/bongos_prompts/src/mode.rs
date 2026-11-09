@@ -158,9 +158,9 @@ fn on_event(
                 display::update_current(&mut mode, editor, false, cx);
             }
         }
-        EditorEvent::TransactionBegun { .. } => {
+        EditorEvent::TransactionBegun { transaction_id } => {
             if let Some(mode) = mode_of(editor) {
-                guard::on_transaction_begun(&mut mode.borrow_mut());
+                guard::on_transaction_begun(&mut mode.borrow_mut(), *transaction_id);
             }
         }
         EditorEvent::Edited { transaction_id } => {

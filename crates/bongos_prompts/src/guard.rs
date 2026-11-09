@@ -30,9 +30,11 @@ pub const JOIN_MESSAGE: &str =
 /// The guard's state in one editor.
 #[derive(Default)]
 pub(crate) struct GuardState {
-    /// A local transaction began and its `Edited` has not come yet. Undo and redo emit `Edited`
-    /// without beginning a transaction, which is how the guard tells them apart.
-    begun: bool,
+    /// The local transaction that began and whose `Edited` has not come yet. Undo and redo emit
+    /// `Edited` without beginning a transaction, and a transaction that edited nothing begins
+    /// without an `Edited`, so the guard acts only on an `Edited` of this very transaction: a
+    /// different id is a redo, or an earlier foreign entry that `end_transaction` grouped with.
+    begun: Option<TransactionId>,
     /// The synced batches of edits that lost a marker, since the last `Edited`.
     pub(crate) losses: Vec<Loss>,
     /// The undo step the last local edits were merged into.
@@ -94,12 +96,13 @@ pub(crate) fn is_join(old: &TextBufferSnapshot, deleted: &[Range<usize>], row: u
 }
 
 /// `EditorEvent::TransactionBegun`: a local edit is under way.
-pub(crate) fn on_transaction_begun(mode: &mut PromptsMode) {
-    mode.guard.begun = true;
+pub(crate) fn on_transaction_begun(mode: &mut PromptsMode, transaction_id: TransactionId) {
+    mode.guard.begun = Some(transaction_id);
 }
 
 /// `EditorEvent::Edited`: reverts the transaction when it was a local join, else keeps the undo
-/// groups. Undo and redo (no transaction began) only reset the typing run.
+/// groups. Anything else (undo, redo, an edit the guard did not see begin) only resets the typing
+/// run.
 pub(crate) fn on_edited(
     mode: &mut PromptsMode,
     editor: &mut Editor,
@@ -109,7 +112,7 @@ pub(crate) fn on_edited(
 ) {
     sync(mode, editor, cx);
     let buffer = mode.buffer.clone();
-    let begun = std::mem::take(&mut mode.guard.begun);
+    let begun = std::mem::take(&mut mode.guard.begun) == Some(transaction_id);
     let losses = std::mem::take(&mut mode.guard.losses);
     let (on_top, start) = {
         let buffer = buffer.read(cx);
