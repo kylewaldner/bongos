@@ -2046,6 +2046,7 @@ dependencies = [
  "assets",
  "audio",
  "bongos_app",
+ "bongos_builder",
  "bongos_chat",
  "bongos_kotlin",
  "bongos_languages",
@@ -2210,6 +2211,25 @@ dependencies = [
  "settings",
  "settings_json",
  "tempfile",
+]
+
+[[package]]
+name = "bongos_builder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_builder_model",
+ "command_palette_hooks",
+ "fs",
+ "gpui",
+ "language",
+ "log",
+ "project",
+ "release_channel",
+ "semver",
+ "serde_json",
+ "settings",
+ "workspace",
 ]
 
 [[package]]

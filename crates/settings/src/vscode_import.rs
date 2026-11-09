@@ -226,6 +226,7 @@ impl VsCodeSettings {
             work: None,
             chats: None,
             prompts: None,
+            task_builder: None,
             modeline_lines: None,
             feature_flags: None,
             instrumentation: None,
