@@ -4,7 +4,7 @@
 //! unless a host asks, and a host that is not routed to the minibuffer (see
 //! `minibuffer.enabled_for`) gets them centered, as any other prompt.
 
-use bongos_minibuffer_model::answer::parse_strict;
+use bongos_minibuffer_model::parse_strict;
 use gpui::{
     App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, KeyDownEvent, SharedString,
     WeakEntity, Window, prelude::*,
