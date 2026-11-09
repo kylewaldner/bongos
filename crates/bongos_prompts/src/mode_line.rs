@@ -4,15 +4,15 @@
 
 use editor::Editor;
 use gpui::{App, Context, Entity, IntoElement, Render, SharedString, Subscription, Window, div};
-use settings::Settings as _;
 use ui::{Label, LabelSize, prelude::*};
 use workspace::{ItemHandle, StatusItemView};
 
-use crate::PromptsSettings;
+use crate::attach;
 use crate::mode::{PromptsMode, mode_of};
 
 impl PromptsMode {
-    /// The mode line text. Auto-submit is the global value until a chat is attached.
+    /// The mode line text. Auto-submit is the effective value of the chat of the file (design
+    /// D15), or the global value while no chat uses it.
     pub fn mode_line(&self, cx: &App) -> String {
         let total = self.index.block_count();
         let (number, state) = match &self.current {
@@ -25,7 +25,14 @@ impl PromptsMode {
             ),
             None => (1, "pending".to_string()),
         };
-        let auto_submit = if PromptsSettings::get_global(cx).auto_submit {
+        let chat = self
+            .buffer
+            .read(cx)
+            .file()
+            .and_then(|file| file.as_local())
+            .map(|file| file.abs_path(cx))
+            .and_then(|path| attach::mode_line_chat(self.chat.as_deref(), &path, cx));
+        let auto_submit = if attach::effective_auto_submit(chat.as_deref(), cx) {
             "on"
         } else {
             "off"

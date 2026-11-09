@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 bongos_chat.workspace = true
 bongos_prompts_model.workspace = true
+bongos_work.workspace = true
 chrono.workspace = true
 clock.workspace = true
 collections.workspace = true
@@ -35,6 +36,7 @@ workspace.workspace = true
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
+futures.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
 # Like bongos_chat: `project` and `workspace` are only lint-clean together under test-support.
