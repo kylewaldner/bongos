@@ -1,18 +1,19 @@
 //! The Work panel in a window: one level at a time, drilling in and up with the keys, the rows
 //! the snapshot and the registries produce, expansion, and the panel following `work.enabled`.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use bongos_work_model::commands::default_todos;
 use bongos_work_model::{Kind, TaskFile, Todo, TodoState, layout, serialize_task};
 use db::AppDatabase;
-use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{App, Entity, Focusable as _, SharedString, TestAppContext, VisualTestContext};
 use settings::Settings as _;
 
 use crate::artifact_tests::with_artifacts;
 use crate::command_tests::{Harness, Input, dispatch, harness, wait_until};
 use crate::panel::{WorkPanel, init_panel};
-use crate::registry::NeedsYouRegistry;
+use crate::registry::{NeedsYouRegistry, RowChipsRegistry, RowChipsSource, observe_view_opened};
 use crate::registry_tests::{FakeGates, gate, with_deep_leaf};
 use crate::store_tests::{set_enabled, write};
 use crate::{Focus, focus};
@@ -445,4 +446,111 @@ async fn the_view_dump_writes_the_rows_of_the_level(cx: &mut TestAppContext) {
         "{written}"
     );
     assert!(!written.contains("Alpha"), "{written}");
+}
+
+/// A row-chips source that says `chips` about the task `task`, and nothing about any other.
+struct FakeChips {
+    task: &'static str,
+    chips: Vec<&'static str>,
+}
+
+impl RowChipsSource for FakeChips {
+    fn chips(&self, task_id: &str, _: &App) -> Vec<SharedString> {
+        if task_id != self.task {
+            return Vec::new();
+        }
+        self.chips.iter().map(|chip| (*chip).into()).collect()
+    }
+}
+
+/// The line of the row `Solo` among `lines`.
+fn solo_detail(panel: &Entity<WorkPanel>, cx: &mut VisualTestContext) -> String {
+    let lines = lines(panel, cx);
+    let at = lines
+        .iter()
+        .position(|line| line.contains("Solo"))
+        .unwrap_or_else(|| panic!("no Solo row in {lines:?}"));
+    lines[at + 1].clone()
+}
+
+#[gpui::test]
+async fn row_chips_follow_the_identifier_and_leave_a_row_alone_without_a_source(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = harness(cx, true, true).await;
+    with_solo_leaf(&harness, cx).await;
+    // Give the leaf an identifier and wait for the rows to show it.
+    let mut file = TaskFile::new("Solo", Kind::Document);
+    file.id = "l9".to_string();
+    file.linear = Some("INV-7".to_string());
+    file.todos = default_todos(Kind::Document);
+    write(
+        &layout::task_file(&harness.task_dir(&["solo"])),
+        &serialize_task(&file).unwrap(),
+    );
+    wait_until(cx, "the identifier", |cx| {
+        harness
+            .tree(cx)
+            .task_by_id("l9")
+            .is_some_and(|task| task.file.as_ref().is_some_and(|file| file.linear.is_some()))
+    })
+    .await;
+    let panel = open_panel(&harness, cx).await;
+    press(cx, menu::Confirm);
+    let plain = solo_detail(&panel, cx);
+    assert!(plain.ends_with("INV-7"), "{plain}");
+
+    // Chips come after the identifier, in the order given; another task's row is untouched.
+    let source = Rc::new(FakeChips {
+        task: "l9",
+        chips: vec!["In Progress", "Kyle"],
+    });
+    cx.update(|_, cx| RowChipsRegistry::add_source("linear", source, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        solo_detail(&panel, cx),
+        format!("{plain} \u{b7} In Progress \u{b7} Kyle")
+    );
+    let other = lines(&panel, cx)
+        .into_iter()
+        .filter(|line| line.contains("In Progress"))
+        .count();
+    assert_eq!(other, 1, "only the Solo row has the chips");
+
+    // Without the source the row is what it was.
+    cx.update(|_, cx| RowChipsRegistry::remove_source("linear", cx));
+    cx.run_until_parked();
+    assert_eq!(solo_detail(&panel, cx), plain);
+}
+
+#[gpui::test]
+async fn view_observers_fire_when_the_panel_activates_and_on_task_focus(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    cx.update(|_, cx| {
+        cx.set_global(AppDatabase::test_new());
+        focus::init(cx);
+    });
+    let opened = Rc::new(Cell::new(0usize));
+    cx.update(|_, cx| {
+        let opened = opened.clone();
+        observe_view_opened(cx, move |_| opened.set(opened.get() + 1));
+    });
+    assert_eq!(opened.get(), 0, "nothing opened yet");
+
+    // Showing the panel activates it.
+    let _panel = open_panel(&harness, cx).await;
+    cx.run_until_parked();
+    let after_activation = opened.get();
+    assert!(
+        after_activation >= 1,
+        "the panel activating tells observers"
+    );
+
+    // `task: focus` tells them too.
+    dispatch(cx, "task::Focus");
+    cx.run_until_parked();
+    assert!(
+        opened.get() > after_activation,
+        "task: focus tells observers"
+    );
 }

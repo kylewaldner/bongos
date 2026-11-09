@@ -19,6 +19,7 @@ use bongos_work_model::rollup::{Rollup, rollup};
 use bongos_work_model::store::{Activity, Task, WorkTree};
 use bongos_work_model::{ResultKind, ResultState, TaskResult, TodoState, Visibility};
 use chrono::{DateTime, TimeDelta, Utc};
+use gpui::SharedString;
 
 use crate::filters::Filters;
 use crate::rebase::RebaseState;
@@ -156,6 +157,8 @@ pub struct Inputs<'a> {
     pub needs_you: &'a BTreeMap<String, Vec<String>>,
     pub rebase: &'a HashMap<String, RebaseState>,
     pub live_modes: &'a dyn Fn(&str) -> LiveModes,
+    /// The chips sources add after the Linear identifier.
+    pub row_chips: &'a dyn Fn(&str) -> Vec<SharedString>,
     pub changed_files: &'a dyn Fn(&str) -> Option<usize>,
     pub now: DateTime<Utc>,
     pub expanded: &'a HashSet<Key>,
@@ -591,6 +594,11 @@ fn leaf_details(task: &Task, inputs: &Inputs) -> Vec<String> {
     if let Some(linear) = &file.linear {
         details.push(linear.clone());
     }
+    details.extend(
+        (inputs.row_chips)(id)
+            .into_iter()
+            .map(|chip| chip.to_string()),
+    );
     let (total, locked) = artifact_counts(task);
     if total > 0 {
         details.push(if locked > 0 {

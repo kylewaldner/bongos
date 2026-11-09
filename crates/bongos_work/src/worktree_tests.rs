@@ -8,8 +8,8 @@ use std::sync::Arc;
 use bongos_work_model::commands::default_todos;
 use bongos_work_model::store::load;
 use bongos_work_model::{
-    Kind, ResultKind, StackedOn, TaskFile, TaskResult, TodoState, UnblockPoint, layout,
-    serialize_task,
+    Kind, LinearState, ResultKind, StackedOn, TaskFile, TaskResult, TodoState, UnblockPoint,
+    layout, serialize_task,
 };
 use gpui::{App, Task, TestAppContext, UpdateGlobal as _, VisualTestContext, Window};
 use parking_lot::Mutex;
@@ -530,6 +530,146 @@ fn documents_others_groups_and_gone_worktrees_are_refused() {
     );
     // A pr-ship leaf is planned.
     assert!(plan(&tree, "inner", &repositories).is_ok());
+}
+
+/// How a link sits on a task: nothing, a hand-set identifier, a synced link, or a create in flight.
+#[derive(Clone, Copy)]
+enum Link {
+    None,
+    Hand(&'static str),
+    Synced(&'static str),
+    Pending,
+}
+
+fn linked(file: &mut TaskFile, link: Link) {
+    match link {
+        Link::None => {}
+        Link::Hand(id) => file.linear = Some(id.to_string()),
+        Link::Synced(id) => {
+            file.linear = Some(id.to_string());
+            file.linear_state = Some(LinearState::default());
+        }
+        Link::Pending => {
+            file.linear_state = Some(LinearState {
+                pending_create: Some("key".to_string()),
+                ..Default::default()
+            });
+        }
+    }
+}
+
+/// The branch `task: start` would cut for the leaf `engine` under the group `phase`, with `group`
+/// linked as given and `engine` linked as given, under `template`.
+fn started_branch(group: Link, engine: Link, template: &str) -> String {
+    let temp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap().join("work");
+    let project = layout::project_dir(&root, "invoicing");
+    write(&layout::project_file(&project), &project_toml("Invoicing"));
+    let phase = layout::child_dir(&project, "phase");
+    leaf(&phase, "phase", Kind::PrShip, |file| {
+        file.todos.clear();
+        linked(file, group);
+    });
+    leaf(
+        &layout::child_dir(&phase, "engine"),
+        "engine",
+        Kind::PrShip,
+        |file| linked(file, engine),
+    );
+    let tree = load(&root);
+    assert!(tree.errors.is_empty(), "{:?}", tree.errors);
+    let repositories = [Repository {
+        name: "invoicing".to_string(),
+        path: root.join("repository").to_string_lossy().into_owned(),
+        setup_command: None,
+        merge_is_ship: true,
+        deployments: true,
+        branch_template: template.to_string(),
+    }];
+    match plan(&tree, "engine", &repositories) {
+        Ok(Plan::Ready(request)) => request.new_branch_name().unwrap().to_string(),
+        _ => panic!("expected a ready plan"),
+    }
+}
+
+#[test]
+fn branches_with_no_link_or_a_hand_set_one_are_the_ones_they_always_were() {
+    for template in [
+        "{slug}",
+        "kyle/{slug}",
+        "{linear}-{slug}",
+        "kyle/{linear}/{slug}",
+    ] {
+        assert_eq!(
+            started_branch(Link::None, Link::None, template),
+            branch_name(template, "engine", None)
+        );
+        // A hand-set link on the leaf, and on the group above it (the ancestor fallback), expand
+        // `{linear}` and never prefix a template without it.
+        for link in [
+            (Link::Hand("INV-7"), Link::None),
+            (Link::None, Link::Hand("INV-7")),
+        ] {
+            assert_eq!(
+                started_branch(link.0, link.1, template),
+                branch_name(template, "engine", Some("INV-7"))
+            );
+        }
+    }
+    assert_eq!(
+        started_branch(Link::Hand("INV-7"), Link::None, "{linear}-{slug}"),
+        "INV-7-engine"
+    );
+    // A pending create has no identifier yet and no branch rule.
+    assert_eq!(
+        started_branch(Link::None, Link::Pending, "kyle/{slug}"),
+        "kyle/engine"
+    );
+    assert_eq!(
+        started_branch(Link::Hand("INV-7"), Link::Pending, "{linear}-{slug}"),
+        "INV-7-engine"
+    );
+}
+
+#[test]
+fn a_synced_leaf_gets_its_identifier_in_the_branch() {
+    // The shared vector, with the leaf's slug in place of its `proration-engine`.
+    for (identifier, template, _, expected) in bongos_work_model::rules::LINEAR_BRANCH_VECTOR {
+        assert_eq!(
+            started_branch(Link::None, Link::Synced(identifier), template),
+            expected.replace("proration-engine", "engine")
+        );
+    }
+    assert_eq!(
+        started_branch(Link::None, Link::Synced("SEQ-121"), "{slug}"),
+        "seq-121-engine"
+    );
+    assert_eq!(
+        started_branch(Link::None, Link::Synced("SEQ-121"), "kyle/{slug}"),
+        "kyle/seq-121-engine"
+    );
+}
+
+#[test]
+fn a_synced_group_is_skipped_in_the_ancestor_fallback() {
+    // The group's identifier never reaches a leaf's branch, with or without `{linear}`.
+    assert_eq!(
+        started_branch(Link::Synced("SEQ-9"), Link::None, "{slug}"),
+        "engine"
+    );
+    assert_eq!(
+        started_branch(Link::Synced("SEQ-9"), Link::None, "{linear}-{slug}"),
+        "engine"
+    );
+    assert_eq!(
+        started_branch(Link::Synced("SEQ-9"), Link::Pending, "kyle/{slug}"),
+        "kyle/engine"
+    );
+    // The leaf's own synced link wins over its group's.
+    assert_eq!(
+        started_branch(Link::Synced("SEQ-9"), Link::Synced("SEQ-121"), "{slug}"),
+        "seq-121-engine"
+    );
 }
 
 #[gpui::test]
