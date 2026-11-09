@@ -8,7 +8,7 @@
 //! window or entity in them.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bongos_builder_model::grammar::{kind_name, unblock_name};
@@ -40,9 +40,9 @@ use ui::{
 use workspace::item::{Item, ItemEvent};
 use workspace::{OpenOptions, OpenVisible, Workspace};
 
-use crate::TaskBuilderSettings;
 use crate::actions::show_toast;
 use crate::choose::{self, Chosen};
+use crate::{TaskBuilderSettings, live};
 
 /// What a task line of the proposal does to the tree, as the row says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -95,13 +95,14 @@ pub(crate) struct Analysis {
 }
 
 /// Parses `text`, validates it as proposal `number` of the task `task_id`, and diffs it against
-/// `tree` for the marks. The running work is not collected here, so a split of a live leaf shows
-/// as `split` until the apply asks (the preview step).
+/// `tree` and the running work `live` for the marks, so a split of a leaf with a running chat
+/// shows as `kept`.
 pub(crate) fn analyze(
     text: &str,
     number: u32,
     task_id: &str,
     tree: &WorkTree,
+    live: &LiveSet,
     todo_warning: u32,
 ) -> Analysis {
     let parsed = parse(text);
@@ -116,7 +117,7 @@ pub(crate) fn analyze(
     let mut problems = parsed.problems.clone();
     problems.extend(validate(&parsed, tree, &checks));
     problems.sort_by_key(|problem| problem.line);
-    let diff = diff(&parsed, tree, &LiveSet::default(), &Choices::default());
+    let diff = diff(&parsed, tree, live, &Choices::default());
     let mut ops: HashMap<&str, Mark> = HashMap::new();
     for op in &diff.ops {
         let (id, mark) = match op {
@@ -499,6 +500,8 @@ pub struct ProposalView {
     buffer_subscription: Option<Subscription>,
     /// Counts the disk reads started, so a late answer to an older one is dropped.
     reads: usize,
+    /// Select the first problem once the text is analyzed (the apply stopped on an error).
+    prefer_problem: bool,
     _read: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -538,6 +541,7 @@ impl ProposalView {
             buffer: None,
             buffer_subscription: None,
             reads: 0,
+            prefer_problem: false,
             _read: Task::ready(()),
             _subscriptions: subscriptions,
         };
@@ -562,13 +566,7 @@ impl ProposalView {
 
     /// The open buffer of the file, if the project has one.
     fn open_buffer(&self, cx: &App) -> Option<Entity<Buffer>> {
-        let project = self.project.read(cx);
-        let (worktree, path) = project.find_worktree(&self.file, cx)?;
-        let project_path = ProjectPath {
-            worktree_id: worktree.read(cx).id(),
-            path,
-        };
-        project.get_open_buffer(&project_path, cx)
+        open_buffer(&self.project, &self.file, cx)
     }
 
     /// Finds where the text comes from now (the open buffer, else the disk) and shows it.
@@ -645,6 +643,7 @@ impl ProposalView {
                 self.number,
                 &self.task_id,
                 tree,
+                &live::collect(tree, cx),
                 TaskBuilderSettings::get_global(cx).todo_warning,
             )),
             _ => None,
@@ -658,6 +657,12 @@ impl ProposalView {
             None => self.level = Level::default(),
         }
         let rows = self.level.rows();
+        if self.prefer_problem && self.analysis.is_some() {
+            self.prefer_problem = false;
+            if let Some(problem) = rows.iter().find(|key| matches!(key, Key::Problem(_))) {
+                self.selected = Some(problem.clone());
+            }
+        }
         if !self
             .selected
             .as_ref()
@@ -908,6 +913,21 @@ impl ProposalView {
     }
 }
 
+/// The open buffer of `file` in `project`, if there is one.
+pub(crate) fn open_buffer(
+    project: &Entity<Project>,
+    file: &Path,
+    cx: &App,
+) -> Option<Entity<Buffer>> {
+    let project = project.read(cx);
+    let (worktree, path) = project.find_worktree(file, cx)?;
+    let project_path = ProjectPath {
+        worktree_id: worktree.read(cx).id(),
+        path,
+    };
+    project.get_open_buffer(&project_path, cx)
+}
+
 /// Opens `file` in an editor of `workspace` with the cursor at the 1-based `line`.
 pub(crate) fn open_file_at(
     workspace: WeakEntity<Workspace>,
@@ -1037,15 +1057,45 @@ pub(crate) fn show(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    show_with(chosen, false, workspace, window, cx);
+}
+
+/// [`show`], with the first problem selected: the apply stopped on an error.
+pub(crate) fn show_problems(
+    chosen: Chosen,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    show_with(chosen, true, workspace, window, cx);
+}
+
+fn show_with(
+    chosen: Chosen,
+    first_problem: bool,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let existing = workspace
         .items_of_type::<ProposalView>(cx)
         .find(|view| view.read(cx).file == chosen.path);
     if let Some(view) = existing {
-        view.update(cx, |view, cx| view.refresh(cx));
+        view.update(cx, |view, cx| {
+            view.prefer_problem = first_problem;
+            view.refresh(cx)
+        });
         workspace.activate_item(&view, true, true, window, cx);
         return;
     }
-    let view = cx.new(|cx| ProposalView::new(workspace, chosen, cx));
+    let view = cx.new(|cx| {
+        let mut view = ProposalView::new(workspace, chosen, cx);
+        if first_problem {
+            view.prefer_problem = true;
+            view.rebuild(cx);
+        }
+        view
+    });
     workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
 }
 

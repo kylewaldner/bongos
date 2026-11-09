@@ -708,6 +708,8 @@ fn the_subtree_is_printed_up_to_200_lines_and_a_pointer_replaces_more() {
 
     let none = plan_section(format_path, &task, 3, None);
     assert!(none.contains("`task: propose`"));
+    assert!(!none.contains("too long"), "{none}");
+    assert!(none.contains("could not be printed"), "{none}");
 }
 
 #[test]

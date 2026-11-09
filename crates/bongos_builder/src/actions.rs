@@ -2,8 +2,9 @@
 //! `task_builder.enabled` is false, and their handlers. While it is false each handler only says
 //! that the task builder is off. While it is true `task: plan` and `task: new without plan` work
 //! (see [`crate::plan`]), `task: show proposal`, `task: edit proposal` and the proposal view's
-//! actions work (see [`crate::view`] and [`crate::choose`]) and the others do nothing yet: their
-//! commands arrive in later steps. The keys are bound in the Emacs keymaps, not here.
+//! actions work (see [`crate::view`] and [`crate::choose`]), `task: apply proposal` and `task:
+//! reject proposal` work (see [`crate::apply`]) and the others do nothing yet: their commands
+//! arrive in later steps. The keys are bound in the Emacs keymaps, not here.
 
 use std::any::TypeId;
 
@@ -16,7 +17,7 @@ use workspace::notifications::NotificationId;
 
 #[cfg(debug_assertions)]
 use crate::dump;
-use crate::{TaskBuilderSettings, choose, plan, view};
+use crate::{TaskBuilderSettings, apply, choose, plan, view};
 
 /// New actions in the `task` namespace, shared with the work tree's and Zed's task runner; no
 /// name collides.
@@ -119,10 +120,19 @@ fn sync_palette(cx: &mut App) {
 /// A toast of the builder's commands.
 pub struct BuilderToast;
 
+/// The message of the last toast of the builder, for tests.
+#[cfg(test)]
+pub(crate) struct LastToast(pub String);
+
+#[cfg(test)]
+impl gpui::Global for LastToast {}
+
 /// The toast a command shows while `task_builder.enabled` is false.
 pub(crate) const OFF_MESSAGE: &str = "The task builder is off (task_builder.enabled)";
 
 pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+    #[cfg(test)]
+    cx.set_global(LastToast(message.clone()));
     workspace.show_toast(
         Toast::new(NotificationId::unique::<BuilderToast>(), message),
         cx,
@@ -156,8 +166,8 @@ pub fn register(workspace: &mut Workspace) {
     register_action::<task::Propose>(workspace);
     register_with::<task::ShowProposal>(workspace, view::show_proposal);
     register_with::<task::EditProposal>(workspace, choose::edit_proposal);
-    register_action::<task::ApplyProposal>(workspace);
-    register_action::<task::RejectProposal>(workspace);
+    register_with::<task::ApplyProposal>(workspace, apply::apply_proposal);
+    register_with::<task::RejectProposal>(workspace, apply::reject_proposal);
     register_with::<task::NewWithoutPlan>(workspace, plan::new_without_plan);
     register_action::<task::ToggleAutoApply>(workspace);
     register_with::<proposal::Descend>(workspace, view::descend_active);
@@ -165,6 +175,6 @@ pub fn register(workspace: &mut Workspace) {
     #[cfg(debug_assertions)]
     {
         register_with::<proposal::DumpView>(workspace, dump::dump_view);
-        register_action::<proposal::DumpPreview>(workspace);
+        register_with::<proposal::DumpPreview>(workspace, dump::dump_preview);
     }
 }

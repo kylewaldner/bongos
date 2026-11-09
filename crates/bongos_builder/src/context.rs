@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use bongos_builder_model::help::FORMAT;
-use bongos_builder_model::{LiveSet, next_number, print};
+use bongos_builder_model::{next_number, print};
 use bongos_chat::ContextExtension;
 use bongos_work::WorkStore;
 use bongos_work::model::layout::proposal_file;
@@ -19,7 +19,7 @@ use bongos_work::model::store::Task;
 use gpui::App;
 use settings::Settings as _;
 
-use crate::{BuilderDirs, TaskBuilderSettings};
+use crate::{BuilderDirs, TaskBuilderSettings, live};
 
 /// The session type that plans: the chats `task: plan` starts.
 pub const PLAN_TYPE: &str = "plan";
@@ -52,7 +52,8 @@ impl ContextExtension for BuilderContext {
         let Some(task) = task_id.and_then(|id| tree.task_by_id(id)) else {
             return Some(pointer_section(&format_path));
         };
-        let printed = task_id.and_then(|id| print(&tree, id, &LiveSet::default()));
+        let live = live::collect(&tree, cx);
+        let printed = task_id.and_then(|id| print(&tree, id, &live));
         Some(plan_section(
             &format_path,
             task,
@@ -75,7 +76,8 @@ pub fn pointer_section(format_path: &Path) -> String {
 
 /// The section of a plan chat on `task`: the splitting test, the rules, where to write proposal
 /// `number`, the format, and `printed` (the subtree as a proposal) when it is at most
-/// [`MAX_PRINTED_LINES`] long, else a pointer to `task: propose`.
+/// [`MAX_PRINTED_LINES`] long, else a pointer to `task: propose` saying why it is not there (too
+/// long, or `None`: the task's file did not read).
 pub fn plan_section(format_path: &Path, task: &Task, number: u32, printed: Option<&str>) -> String {
     let path = proposal_file(&task.dir, number);
     let subtree = match printed {
@@ -84,11 +86,15 @@ pub fn plan_section(format_path: &Path, task: &Task, number: u32, printed: Optio
              ````\n{}````\n",
             terminated(text)
         ),
-        _ => format!(
+        Some(_) => format!(
             "The subtree of this task is too long to print here (more than {MAX_PRINTED_LINES} \
              lines). Kyle runs `task: propose` to write a proposal file pre-filled with it; edit \
              that file instead of starting over.\n"
         ),
+        None => "The subtree of this task could not be printed here (its task file did not \
+             read). Kyle runs `task: propose` to write a proposal file pre-filled with it once it \
+             reads; edit that file instead of starting over.\n"
+            .to_string(),
     };
     format!(
         "## Task builder\n\n\
