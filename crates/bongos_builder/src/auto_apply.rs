@@ -34,18 +34,22 @@ pub fn effective_auto_apply(project: Option<&ProjectFile>, global: bool) -> bool
 /// subtree, the diff) are the caller's.
 pub fn auto_apply_allowed(tree: &WorkTree, task_id: &str, cx: &App) -> bool {
     let settings = TaskBuilderSettings::get_global(cx);
-    if !settings.enabled {
-        return false;
-    }
+    settings.enabled && switch_on(tree, task_id, settings.auto_apply)
+}
+
+/// The effective switch (D15) of the project of the task `task_id` of `tree`, with `global` the
+/// setting `task_builder.auto_apply`; off for a task not in `tree` or a project whose
+/// `project.toml` does not read. Pure, so the writer can read it on the tree it holds.
+pub(crate) fn switch_on(tree: &WorkTree, task_id: &str, global: bool) -> bool {
     let Ok(place) = Place::locate(tree, task_id) else {
         return false;
     };
     match place.project {
-        None => settings.auto_apply,
+        None => global,
         Some(project) => project
             .file
             .as_ref()
-            .is_some_and(|file| effective_auto_apply(Some(file), settings.auto_apply)),
+            .is_some_and(|file| effective_auto_apply(Some(file), global)),
     }
 }
 

@@ -3,7 +3,8 @@
 //! `task` and `proposal` actions of the builder, hidden while `task_builder.enabled` is false, and
 //! the format reference written to `~/.bongos/task-builder/format.txt`, the plan todo of a new task,
 //! the plan chat, what every chat is told about proposals, the proposal view, and the preview,
-//! apply and reject of a proposal, `task: propose` and the switches of the automatic apply. The
+//! apply and reject of a proposal, `task: propose`, the switches of the automatic apply, the
+//! watch of proposals written later with their automatic apply, and the "needs you" source. The
 //! proposal format and its pure rules live in `bongos_builder_model`, which has no UI dependency.
 
 mod actions;
@@ -15,7 +16,9 @@ mod context;
 mod dump;
 mod format_file;
 mod language;
+mod later;
 mod live;
+mod needs_you;
 mod plan;
 mod preview_view;
 mod propose;
@@ -41,19 +44,24 @@ pub use view::{Mark, ProposalView};
 
 /// Registers the `task_builder` settings, writes the format reference and installs the hooks of
 /// the work tree and the chats (the plan todo of a new task, the section of every chat's context),
-/// whatever the setting says; the hooks do nothing while `task_builder.enabled` is false. Call
-/// before [`init_palette`].
+/// whatever the setting says, and starts watching proposal files with the "needs you" source; the
+/// hooks, the watch and the source do nothing while `task_builder.enabled` is false. Call after
+/// `bongos_work::init` and before [`init_palette`].
 pub fn init(fs: Arc<dyn Fs>, dirs: BuilderDirs, cx: &mut App) {
     TaskBuilderSettings::register(cx);
     plan::install_hooks(cx);
     context::install(dirs.clone(), cx);
     format_file::write_at_init(fs, dirs, cx);
+    later::install(cx);
+    needs_you::install(cx);
 }
 
 #[cfg(test)]
 mod apply_tests;
 #[cfg(test)]
 mod builder_tests;
+#[cfg(test)]
+mod later_tests;
 #[cfg(test)]
 mod plan_tests;
 #[cfg(test)]
