@@ -45,4 +45,38 @@
       "cmd-l": "pane::SplitRight",
     },
   },
+  // The minibuffer strip (Emacs keys). Hosts add `Minibuffer > <HostContext> > Editor` blocks
+  // after these.
+  {
+    "context": "Minibuffer > Editor",
+    "bindings": {
+      "ctrl-g": "minibuffer::Cancel",
+      "escape": "minibuffer::Cancel",
+      "enter": "minibuffer::Confirm",
+      "ctrl-j": "minibuffer::ConfirmInput",
+      "ctrl-n": "minibuffer::SelectNext",
+      "down": "minibuffer::SelectNext",
+      "ctrl-p": "minibuffer::SelectPrev",
+      "up": "minibuffer::SelectPrev",
+      "alt-p": "minibuffer::HistoryPrev",
+      "alt-n": "minibuffer::HistoryNext",
+      "alt-x": "minibuffer::Open",
+    },
+  },
+  {
+    "context": "Minibuffer > Picker > Editor",
+    "bindings": {
+      "ctrl-v": "minibuffer::PageDown",
+      "alt-v": "minibuffer::PageUp",
+      "tab": "minibuffer::CompleteCommonPrefix",
+      "alt-o": "minibuffer::Actions",
+    },
+  },
+  {
+    "context": "Minibuffer",
+    "bindings": {
+      "ctrl-g": "minibuffer::Cancel",
+      "escape": "minibuffer::Cancel",
+    },
+  },
 ]
