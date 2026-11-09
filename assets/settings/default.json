@@ -2630,9 +2630,16 @@
   "minibuffer": {
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint".
-    // While the list is empty there is no minibuffer, nothing is routed to it and its
-    // commands are hidden.
-    "enabled_for": [],
+    // Remove a name to bring that prompt back as a centered modal. While the list is empty
+    // there is no minibuffer, nothing is routed to it and its commands are hidden.
+    "enabled_for": [
+      "command_palette",
+      "file_finder",
+      "tab_switcher",
+      "work",
+      "messages",
+      "key_hint"
+    ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,
     // Whether the minibuffer shows the number of matches in front of the prompt.

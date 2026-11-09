@@ -23,7 +23,8 @@ actions!(palette_tests, [Zebrafy]);
 
 type Ran = Rc<RefCell<usize>>;
 
-fn init(cx: &mut TestAppContext, enabled_for: &[&str]) -> (Arc<AppState>, Ran) {
+/// Installs everything but leaves `minibuffer.enabled_for` at its default.
+fn init_with_defaults(cx: &mut TestAppContext) -> (Arc<AppState>, Ran) {
     let ran = Ran::default();
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
@@ -34,6 +35,11 @@ fn init(cx: &mut TestAppContext, enabled_for: &[&str]) -> (Arc<AppState>, Ran) {
         cx.on_action(move |_: &Zebrafy, _| *counted.borrow_mut() += 1);
         app_state
     });
+    (app_state, ran)
+}
+
+fn init(cx: &mut TestAppContext, enabled_for: &[&str]) -> (Arc<AppState>, Ran) {
+    let (app_state, ran) = init_with_defaults(cx);
     cx.update(|cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
@@ -263,6 +269,30 @@ async fn open_with_no_session_opens_the_palette_in_the_strip(cx: &mut TestAppCon
     assert!(
         in_strip(&workspace, cx),
         "the palette is hosted by the strip"
+    );
+}
+
+#[gpui::test]
+async fn open_with_the_default_settings_opens_the_palette_in_the_strip(cx: &mut TestAppContext) {
+    // No `enabled_for` is written: this is a fresh install.
+    let (app_state, _) = init_with_defaults(cx);
+    let project = Project::test(app_state.fs.clone(), [], cx).await;
+    let window: WindowHandle<MultiWorkspace> =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    let cx = &mut cx;
+    add_editor(&workspace, cx);
+    assert!(!palette_open(&workspace, cx));
+
+    cx.dispatch_action(minibuffer::Open);
+    cx.run_until_parked();
+    assert!(palette_open(&workspace, cx));
+    assert!(
+        in_strip(&workspace, cx),
+        "the palette is hosted by the strip with no setting change"
     );
 }
 

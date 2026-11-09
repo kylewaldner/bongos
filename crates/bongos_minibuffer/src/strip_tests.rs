@@ -65,13 +65,18 @@ impl Render for TestModal {
     }
 }
 
-fn init(cx: &mut TestAppContext, enabled_for: &[&str]) -> Arc<AppState> {
-    let app_state = cx.update(|cx| {
+/// Installs the minibuffer and leaves `minibuffer.enabled_for` at its default.
+fn init_with_defaults(cx: &mut TestAppContext) -> Arc<AppState> {
+    cx.update(|cx| {
         let app_state = AppState::test(cx);
         command_palette_hooks::init(cx);
         crate::init(cx);
         app_state
-    });
+    })
+}
+
+fn init(cx: &mut TestAppContext, enabled_for: &[&str]) -> Arc<AppState> {
+    let app_state = init_with_defaults(cx);
     set_enabled_for(cx, enabled_for);
     app_state
 }
@@ -166,6 +171,31 @@ async fn minibuffer_empty_enabled_for_has_no_strip_and_modals_stay_centered(
     assert!(
         bounds.origin.y < window_size.height / 2.0,
         "the modal is drawn near the top: {bounds:?}"
+    );
+}
+
+#[gpui::test]
+async fn minibuffer_default_workspace_has_the_strip_and_routes_the_named_modals(
+    cx: &mut TestAppContext,
+) {
+    // No `enabled_for` is written: this is a fresh install.
+    let app_state = init_with_defaults(cx);
+    let window = add_window(cx, &app_state).await;
+    let workspace = home(window, cx);
+    let strip = cx
+        .update(|cx| minibuffer_for_window(window.into(), cx))
+        .expect("the window has a strip");
+    assert_eq!(bottom_item_id(&workspace, cx), Some(strip.entity_id()));
+
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        window.focus(&workspace.focus_handle(cx), cx);
+    });
+    cx.run_until_parked();
+    open(&workspace, &mut cx, Some("command_palette"));
+    assert!(
+        in_strip(&workspace, &mut cx),
+        "a default surface opens in the strip"
     );
 }
 

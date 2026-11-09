@@ -234,6 +234,27 @@ task billing: implement proration for billing | id 0196f1c2-7c1e-7a8b-9d55-2f6c0
 - **Not there yet.** Named workflows are not checked (a warning), because there is no workflow
   engine yet.
 
+## Minibuffer
+
+As in Emacs, prompts open in a one-line strip at the bottom of the window, below the status bar,
+instead of a centered modal: M-x (the command palette), the file finder, the tab switcher, the
+Work prompts and questions, messages (the echo area) and the hint that lists what keys can follow a
+prefix. It is on by default. The matches show in a list above the strip and focus returns where
+it was when the prompt ends.
+
+`minibuffer.enabled_for` names the prompts that use the strip. Its default is
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint"]`. Remove a name
+to bring that prompt back as a centered modal, for example:
+
+```json
+{ "minibuffer": { "enabled_for": ["command_palette", "work"] } }
+```
+
+An empty list turns the minibuffer off: there is no strip and every prompt is a modal. The rest of
+the `minibuffer` settings are `max_rows` (candidate rows shown, 15), `show_count` (the match count
+before the prompt, true), `message_timeout` (how long a message stays, 4000 ms) and
+`key_hint_delay` (how long a pending key sequence waits before its keys are shown, 500 ms).
+
 ## Privacy
 
 bongos's own code, and the telemetry and update checks of the language servers it runs, contact

@@ -13,6 +13,16 @@ use workspace::{
 
 use crate::MinibufferSettings;
 
+/// The default of `minibuffer.enabled_for`: every surface the minibuffer hosts.
+const DEFAULT_ROUTES: [&str; 6] = [
+    "command_palette",
+    "file_finder",
+    "tab_switcher",
+    "work",
+    "messages",
+    "key_hint",
+];
+
 fn use_default_settings(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let store = SettingsStore::new(cx, &settings::default_settings());
@@ -49,14 +59,14 @@ async fn minibuffer_default_settings_parse_with_the_five_keys(cx: &mut TestAppCo
     use_default_settings(cx);
     cx.update(|cx| {
         let settings = MinibufferSettings::get_global(cx);
-        assert!(settings.enabled_for.is_empty());
+        assert_eq!(settings.enabled_for, DEFAULT_ROUTES);
         assert_eq!(settings.max_rows, 15);
         assert!(settings.show_count);
         assert_eq!(settings.message_timeout.as_millis(), 4000);
         assert_eq!(settings.key_hint_delay.as_millis(), 500);
 
         let routing = cx.global::<MinibufferRouting>();
-        assert!(routing.routes().is_empty());
+        assert_eq!(routing.routes(), DEFAULT_ROUTES);
         assert_eq!(routing.max_rows(), 15);
         assert!(routing.show_count());
     });
@@ -65,6 +75,9 @@ async fn minibuffer_default_settings_parse_with_the_five_keys(cx: &mut TestAppCo
 #[gpui::test]
 async fn minibuffer_namespace_is_hidden_while_enabled_for_is_empty(cx: &mut TestAppContext) {
     use_default_settings(cx);
+    assert!(!namespace_hidden(cx), "shown with the default routes");
+
+    set_enabled_for(cx, &[]);
     assert!(namespace_hidden(cx), "hidden with []");
 
     set_enabled_for(cx, &["command_palette"]);
@@ -84,7 +97,12 @@ async fn routes_to_minibuffer_follows_the_setting(cx: &mut TestAppContext) {
     });
 
     use_default_settings(cx);
-    cx.update(|cx| assert!(!routes_to_minibuffer("command_palette", cx)));
+    cx.update(|cx| {
+        for name in DEFAULT_ROUTES {
+            assert!(routes_to_minibuffer(name, cx), "{name} routes by default");
+        }
+        assert!(!routes_to_minibuffer("something_else", cx));
+    });
 
     set_enabled_for(cx, &["command_palette", "work"]);
     cx.update(|cx| {
