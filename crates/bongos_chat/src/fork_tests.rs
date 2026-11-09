@@ -322,7 +322,8 @@ async fn test_codex_without_fork_is_a_labeled_handoff_with_the_transcript_path(
     let record = record_of(&h.scope, &forked.chat_id);
     assert_eq!(record.fork, Some(Fork::Handoff));
     assert_eq!(record.parent.as_deref(), Some(source.id.as_str()));
-    assert_eq!(record.session_id, None, "a new session: its id is captured");
+    // The new session's id is captured once the CLI reports it, so it is not asserted here: the
+    // start may have been captured already.
     wait_for(cx, "the fork to start", STARTUP, |_| {
         starts(&h, "codex") == 1
     })
