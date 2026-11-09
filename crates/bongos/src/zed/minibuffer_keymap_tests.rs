@@ -281,3 +281,47 @@ async fn the_pending_ctrl_h_delays_replace_on_linux(cx: &mut TestAppContext) {
     assert!(pending, "with the Emacs base ctrl-h waits for the next key");
     assert_eq!(names.first(), Some(&"buffer_search::DeployReplace"));
 }
+
+const STRIP_FILE_FINDER: [&str; 5] = [
+    "Workspace",
+    "Minibuffer",
+    "FileFinder",
+    "Picker",
+    "Editor mode=full",
+];
+const MODAL_FILE_FINDER: [&str; 4] = ["Workspace", "FileFinder", "Picker", "Editor mode=full"];
+
+#[gpui::test]
+async fn the_routed_file_finder_strip_has_no_split_keys(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    let keymap = Keymap::new(load_all(&LINUX, true, cx));
+    assert_eq!(
+        first(&keymap, "ctrl-k", &STRIP_FILE_FINDER),
+        Some("editor::KillRingCut")
+    );
+    assert_eq!(
+        first(&keymap, "ctrl-l", &STRIP_FILE_FINDER),
+        Some("editor::ScrollCursorCenterTopBottom")
+    );
+    // ctrl-h is not a split and stays the prefix of `ctrl-h e`.
+    let (names, pending) = resolve(&keymap, "ctrl-h", &STRIP_FILE_FINDER);
+    assert!(!names.iter().any(|name| name.starts_with("pane::Split")));
+    assert!(pending, "ctrl-h waits for the next key in the strip");
+    assert_eq!(
+        first(&keymap, "ctrl-h e", &STRIP_FILE_FINDER),
+        Some("minibuffer::ShowMessages")
+    );
+    assert_eq!(
+        first(&keymap, "ctrl-j", &STRIP_FILE_FINDER),
+        Some("minibuffer::ConfirmInput")
+    );
+    // The centered modal keeps its split keys.
+    for (input, action) in [
+        ("ctrl-k", "pane::SplitUp"),
+        ("ctrl-h", "pane::SplitLeft"),
+        ("ctrl-l", "pane::SplitRight"),
+        ("ctrl-j", "pane::SplitDown"),
+    ] {
+        assert_eq!(first(&keymap, input, &MODAL_FILE_FINDER), Some(action));
+    }
+}

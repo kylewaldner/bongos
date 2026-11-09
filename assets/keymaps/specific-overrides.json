@@ -68,6 +68,16 @@
       "alt-o": "minibuffer::Actions",
     },
   },
+  // The file finder keeps its `FileFinder` context in the strip; its split keys are for the
+  // centered modal, so the strip gets the Emacs keys back (splits are on `alt-o`).
+  {
+    "context": "Minibuffer > FileFinder > Picker > Editor",
+    "bindings": {
+      "ctrl-k": "editor::KillRingCut",
+      "ctrl-h": null,
+      "ctrl-l": "editor::ScrollCursorCenterTopBottom",
+    },
+  },
   {
     "context": "Minibuffer",
     "bindings": {
