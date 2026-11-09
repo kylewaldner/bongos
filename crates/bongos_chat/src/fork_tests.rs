@@ -288,7 +288,7 @@ async fn test_a_fork_into_a_task_is_given_the_tasks_list_not_the_sources(cx: &mu
 }
 
 #[gpui::test]
-async fn test_codex_without_fork_is_a_labelled_handoff_with_the_transcript_path(
+async fn test_codex_without_fork_is_a_labeled_handoff_with_the_transcript_path(
     cx: &mut TestAppContext,
 ) {
     let h = ready(cx).await;

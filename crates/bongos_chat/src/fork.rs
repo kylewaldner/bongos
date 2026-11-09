@@ -13,7 +13,7 @@
 //! source's session id is known. Otherwise it is a handoff: a fresh session whose instructions
 //! carry a note naming the source (name, type, agent and the path of its transcript when the
 //! agent's own files hold it), never anything of the source's artifacts. A handoff is always
-//! labelled; nothing pretends to be a native fork.
+//! labeled; nothing pretends to be a native fork.
 //!
 //! A fork never writes to the source's record or to anything of its. Opening a chat whose
 //! directory is gone offers a fork instead (D6).
