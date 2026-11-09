@@ -59,6 +59,62 @@ Any other file in a task directory is an artifact, described and made visible or
   palette (`assets/keymaps/linux/emacs.json`). In the panel, `tab` expands a row inline and `^`
   goes up one level.
 
+## Chat sessions
+
+Chats run Claude Code and Codex in terminals bound to a task. They are on by default and need the
+Work view; set `chats.enabled` to `false` to turn them off (no record is read, no session type is
+seeded, and the `chat:` commands are hidden). `chats.agents.claude.command` and
+`chats.agents.codex.command` name the programs to run, and `extra_args` adds arguments to every
+launch.
+
+```text
+<task dir>/chats/<id>.toml                a chat on that task (name, agent, type, layout, session id, parent)
+<project dir>/chats/<id>.toml             a project chat: one on the project's top task
+~/.bongos/chat-types/<type>/              session types: type.toml, context.md, optional claude.toml, codex.toml
+~/.bongos/chat-types/skills/<name>/       skills a type lists (then ~/.claude/skills/<name>/)
+```
+
+- **Session types.** `implement`, `review`, `plan`, `thinking` and `free` are seeded on first run
+  and never overwritten: edit them, add your own directory, or run `chat: edit session type`. A
+  type sets the layout (`dual` shows the terminal with the task's `prompts.txt` beside it,
+  `chat-only` the terminal alone), the skills, and which of the task file, notes directory,
+  worktree, PR links and artifact list the session is told about. An implement chat runs in the
+  task's worktree (start the task first); a chat on a group, document or project runs in the task
+  directory, or in the project's repository. Put skills in `~/.bongos/chat-types/skills/<name>/SKILL.md`
+  and list the name in a type's `skills`; a skill that cannot be found is labeled on the chat's
+  row as `missing skill`. A type is read at every start, so an edit applies to the next chat.
+- **What the session is told.** Each start writes its own launch files under the data directory
+  (`chats/<id>/`, readable by you only): `context.md` with the goal, paths and the shared
+  artifact list, which Claude prints through a `SessionStart` hook (or gets appended to its system
+  prompt when its CLI has no hooks) and Codex reads from an instructions file. The list is computed from the task's files at the start. The
+  Chats list says when it has changed since a running chat began; the next resume gets the new one.
+- **Human-only is a guarantee.** An artifact marked human-only (`C-c w h`) is never told to a
+  session: its path, name and description appear in no generated file, no command line argument and
+  no environment variable. Hide one and resume the chat, and the regenerated list no longer has it.
+  This is not file protection: a CLI can still read any file it can reach, and a manifest that
+  cannot be parsed lists nothing.
+- **Fallbacks are labeled.** bongos reads each CLI's own `--help` and uses only what it finds. When
+  a feature is missing, the chat still starts and its row in the Chats list says what changed
+  (`labels:`), for example "session id read from the CLI's files", "name not passed to the CLI",
+  "context appended to the system prompt (no hooks)", or "started a new session (no session to
+  resume)". A fork when the CLI has no fork command is a fresh session that starts from a note naming
+  the chat it continues, and is labeled `handoff`; nothing passes one off as a native fork.
+- **Keys (Emacs keymap only).** `C-c c n` starts a chat on the focused task, `C-c c o` opens one
+  (resuming it when closed), `C-c c ]` and `C-c c [` cycle, `C-c c k` closes, `C-c c a` archives and
+  `C-c c u` restores, `C-c c l` lists the archive, `C-c c r` renames, `C-c c f` forks into another
+  task and `C-c c F` forks in place, `C-c c p` shows or hides the prompts pane, `C-c c t` and
+  `C-c c e` focus the terminal and the prompts pane, `C-c c v` shows what the chat was given, and
+  `C-c c P` toggles the panel. The rest, such as `chat: send region` (sends the selection, or the
+  whole prompts buffer, as one paste and one Enter), are in the command palette. In a chat terminal
+  `C-c` starts a prefix, so `C-c C-c` sends the interrupt to the CLI at once, and a lone `C-c` reaches
+  it after the one-second prefix timeout.
+- **Closing and quitting.** Closing keeps the record; a chat that was never prompted is deleted
+  only when bongos is sure nothing was said in it. Quitting asks while chats are running, naming
+  them, then ends them; each resumes from the Chats panel with the CLI's own resume
+  (`claude --resume <id>`, `codex resume <id>`) in its recorded directory. Archiving moves a record to
+  the archive and keeps it. Only `chat: delete` removes a record, and the CLIs' own transcripts are
+  never touched.
+
 ## Privacy
 
 bongos's own code, and the telemetry and update checks of the language servers it runs, contact
