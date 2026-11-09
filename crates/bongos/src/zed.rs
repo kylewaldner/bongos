@@ -647,6 +647,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         bongos_chat::register(workspace);
         bongos_prompts::register(workspace);
         let work_focus = cx.new(bongos_work::FocusStatus::new);
+        let prompts_mode_line = cx.new(|_| bongos_prompts::PromptsModeLine::new());
 
         let cursor_position =
             cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
@@ -659,6 +660,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(kotlin_status, window, cx);
             status_bar.add_left_item(work_focus, window, cx);
+            status_bar.add_left_item(prompts_mode_line, window, cx);
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);

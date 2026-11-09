@@ -2332,11 +2332,18 @@ dependencies = [
 name = "bongos_prompts"
 version = "0.1.0"
 dependencies = [
+ "bongos_chat",
  "bongos_prompts_model",
+ "clock",
+ "collections",
  "command_palette_hooks",
+ "editor",
  "fs",
  "gpui",
  "language",
+ "log",
+ "multi_buffer",
+ "paths",
  "project",
  "release_channel",
  "remote",
@@ -2344,6 +2351,7 @@ dependencies = [
  "semver",
  "serde_json",
  "settings",
+ "ui",
  "workspace",
 ]
 

@@ -13,14 +13,24 @@ path = "src/bongos_prompts.rs"
 doctest = false
 
 [dependencies]
+bongos_chat.workspace = true
 bongos_prompts_model.workspace = true
+clock.workspace = true
+collections.workspace = true
 command_palette_hooks.workspace = true
+editor.workspace = true
 gpui.workspace = true
 language.workspace = true
+log.workspace = true
+multi_buffer.workspace = true
+paths.workspace = true
+project.workspace = true
 settings.workspace = true
+ui.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
+editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
