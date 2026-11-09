@@ -40,7 +40,9 @@ use gpui::{App, AppContext as _, Entity, Global};
 pub use actions::{action_types, chat, init_palette};
 pub use artifacts_view::{ROW_NOTE, STALE_LINE, artifacts_text, is_stale, stale_chat};
 pub use cleanup::{Cleanup, KeepReason, cleanup_verdict};
-pub use commands::{agent_choices, list_types};
+pub use commands::{
+    agent_choices, list_types, offer_resume_and_send, open_chat, start_chat_on_task,
+};
 pub use facts::task_facts;
 pub use health::{
     ChatHealth, ChatHealthEvent, Health, HealthState, HealthStats, MIN_REFRESH_INTERVAL,
@@ -53,7 +55,7 @@ pub use launch::{
 };
 pub use layout::PROMPT_PANE_OFF;
 pub use live_modes::{SOURCE_NAME, start_current_todo};
-pub use panel::{ChatPanel, init_panel};
+pub use panel::{ChatPanel, focus_prompts, init_panel, open_prompts_in_center};
 pub use runtime::{
     ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChatRuntime, ChatRuntimeEvent, ChatState,
     LiveChat, MID_TURN, RuntimeStats,
@@ -62,7 +64,8 @@ pub use scope::{
     ChatScope, CwdSource, IMPLEMENT_TYPE, START_FIRST, project_repositories, resolve_scope,
 };
 pub use send::{
-    BRACKETED_WAIT, ChatToast, SendError, SendOptions, Sent, chat_for_prompts_file, send,
+    BRACKETED_WAIT, ChatRef, ChatToast, SendError, SendOptions, Sent, chat_for_prompts_file,
+    chats_for_prompts_file, send, set_auto_submit, set_prompts_file,
 };
 pub use session_view::{
     PromptPaneProvider, SessionView, SessionViewEvent, set_prompt_pane_provider,
