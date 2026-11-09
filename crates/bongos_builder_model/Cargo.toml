@@ -14,3 +14,4 @@ doctest = false
 
 [dependencies]
 bongos_work_model.workspace = true
+sha2.workspace = true
