@@ -183,24 +183,19 @@ impl ChatStore {
         change: impl FnOnce(&mut ChatRecord) -> bongos_chat_model::Result<()> + Send + 'static,
         cx: &mut gpui::Context<Self>,
     ) -> Task<Result<ChatRecord, ChatWriteError>> {
-        self.queue(
-            move || {
-                update_now(&path, |record| {
-                    let id = record.id.clone();
-                    change(record)?;
-                    if record.id != id {
-                        // The id names the file; a record that changed it would be written
-                        // under the old name with a new id.
-                        return Err(model_error(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "a chat's id cannot be changed",
-                        )));
-                    }
-                    Ok(())
-                })
-            },
-            cx,
-        )
+        self.queue(update_job(path, change), cx)
+    }
+
+    /// [`ChatStore::update`] for a caller that waits off the main thread (the app-quit hook, which
+    /// `App::shutdown` blocks on without running main-thread tasks): the reply comes straight from
+    /// the writer, through a channel that wakes whoever awaits it. The write counter of
+    /// [`ChatStore::stats`] does not count it.
+    pub(crate) fn update_reply(
+        &mut self,
+        path: PathBuf,
+        change: impl FnOnce(&mut ChatRecord) -> bongos_chat_model::Result<()> + Send + 'static,
+    ) -> oneshot::Receiver<Result<ChatRecord, ChatWriteError>> {
+        self.queue_reply(update_job(path, change))
     }
 
     /// Queues the creation of `record` in `<scope_dir>/chats/`. Refused when the file exists.
@@ -255,23 +250,33 @@ impl ChatStore {
         )
     }
 
-    fn queue<T: Send + 'static>(
+    /// Hands `job` to the writer; the reply arrives on the receiver, which is resolved at once
+    /// with [`ChatWriteError::Off`] when there is no writer.
+    fn queue_reply<T: Send + 'static>(
         &mut self,
         job: impl FnOnce() -> Result<T, ChatWriteError> + Send + 'static,
-        cx: &mut gpui::Context<Self>,
-    ) -> Task<Result<T, ChatWriteError>> {
-        let Some(writer) = &self.writer else {
-            return Task::ready(Err(ChatWriteError::Off));
-        };
+    ) -> oneshot::Receiver<Result<T, ChatWriteError>> {
         let (reply, response) = oneshot::channel();
+        let Some(writer) = &self.writer else {
+            reply.send(Err(ChatWriteError::Off)).ok();
+            return response;
+        };
         let lock = self.disk_lock.clone();
         let job: Job = Box::new(move || {
             let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             reply.send(job()).ok();
         });
-        if writer.jobs.unbounded_send(job).is_err() {
-            return Task::ready(Err(ChatWriteError::Off));
-        }
+        // A failed send drops the job and its reply, so the receiver reports `Off`.
+        writer.jobs.unbounded_send(job).ok();
+        response
+    }
+
+    fn queue<T: Send + 'static>(
+        &mut self,
+        job: impl FnOnce() -> Result<T, ChatWriteError> + Send + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) -> Task<Result<T, ChatWriteError>> {
+        let response = self.queue_reply(job);
         cx.spawn(async move |this, cx| {
             let result = response.await.unwrap_or(Err(ChatWriteError::Off));
             if result.is_ok() {
@@ -471,5 +476,27 @@ pub(crate) fn expand_home(dir: &str) -> PathBuf {
     match dir.strip_prefix("~/") {
         Some(rest) => util::paths::home_dir().join(rest),
         None => PathBuf::from(dir),
+    }
+}
+
+/// The writer job of [`ChatStore::update`].
+fn update_job(
+    path: PathBuf,
+    change: impl FnOnce(&mut ChatRecord) -> bongos_chat_model::Result<()> + Send + 'static,
+) -> impl FnOnce() -> Result<ChatRecord, ChatWriteError> + Send + 'static {
+    move || {
+        update_now(&path, |record| {
+            let id = record.id.clone();
+            change(record)?;
+            if record.id != id {
+                // The id names the file; a record that changed it would be written
+                // under the old name with a new id.
+                return Err(model_error(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a chat's id cannot be changed",
+                )));
+            }
+            Ok(())
+        })
     }
 }

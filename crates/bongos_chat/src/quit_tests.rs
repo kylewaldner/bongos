@@ -156,3 +156,35 @@ async fn test_nothing_runs_on_quit_while_chats_are_off(cx: &mut TestAppContext) 
         0
     );
 }
+
+/// `App::shutdown` blocks the main thread on the hook's future and runs no main-thread task
+/// meanwhile, so the future must wait on the writer's reply channels alone. It is `Send`, so it
+/// holds no entity or main-thread handle, and a thread that only polls it sees the write finish
+/// (the test scheduler runs the writer, a background task, while the main thread parks).
+#[gpui::test]
+async fn test_the_quit_future_waits_on_the_writer_alone(cx: &mut TestAppContext) {
+    fn assert_send<T: Send>(_: &T) {}
+
+    let h = harness(cx, true, 60, &[]).await;
+    h.runtime.update(cx, |runtime, _| {
+        runtime.set_active_debounce(Duration::from_secs(3600))
+    });
+    cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
+    let id = h.start(Agent::Claude, cx).await;
+    let path = record_path(&h.scope, &id);
+    let mut record = read_record(&path).unwrap();
+    let old = "2020-01-01T10:00:00Z".parse().unwrap();
+    record.last_active = old;
+    write_record(&path, &record).unwrap();
+
+    let end = h.runtime.update(cx, |runtime, cx| runtime.end_for_quit(cx));
+    assert_send(&end);
+    let waiter = std::thread::spawn(move || futures::executor::block_on(end));
+    wait_for(cx, "the quit future to finish", WITHIN * 10, |_| {
+        waiter.is_finished()
+    })
+    .await;
+    waiter.join().unwrap();
+    assert_ne!(read_record(&path).unwrap().last_active, old);
+    assert!(!read_record(&path).unwrap().archived);
+}

@@ -925,30 +925,25 @@ impl ChatRuntime {
         chat_id: &str,
         cx: &mut Context<Self>,
     ) -> Option<impl Future<Output = ()> + use<>> {
-        let chat = self.live.get_mut(chat_id)?;
-        chat.pending_active_write = None;
-        chat.last_active_write = Some(Instant::now());
-        let path = chat.record_path.clone();
-        let prompted = chat.prompted;
-        self.stats.active_writes += 1;
+        let (path, prompted) = self.note_active_write(chat_id)?;
         let write = self.store.update(cx, |store, cx| {
-            store.update(
-                path,
-                move |record| {
-                    record.last_active = bongos_work_model::now();
-                    if prompted {
-                        record.prompted = true;
-                    }
-                    Ok(())
-                },
-                cx,
-            )
+            store.update(path, active_change(prompted), cx)
         });
         Some(async move {
             if let Err(error) = write.await {
                 log::warn!("chats: could not write last_active: {error}");
             }
         })
+    }
+
+    /// Books an active write of `chat_id` (replacing a pending one): its record path and whether
+    /// it is prompted. `None` when the chat is not live.
+    fn note_active_write(&mut self, chat_id: &str) -> Option<(PathBuf, bool)> {
+        let chat = self.live.get_mut(chat_id)?;
+        chat.pending_active_write = None;
+        chat.last_active_write = Some(Instant::now());
+        self.stats.active_writes += 1;
+        Some((chat.record_path.clone(), chat.prompted))
     }
 
     /// The names of the chats that are running (not exited), for the quit prompt. Empty while
@@ -976,8 +971,9 @@ impl ChatRuntime {
     /// The app is quitting (design D18): ends every running chat's process and writes its
     /// `last_active`, so the Chats panel lists the chats after the next launch and `chat: open`
     /// resumes them. The records stay open, and the never-prompted cleanup does not run. The
-    /// future resolves once the writes are on disk. Nothing happens while `chats.enabled` is
-    /// false.
+    /// future resolves once the writes are on disk. It waits on the writer's own reply channels
+    /// only, never on a main-thread task: `App::shutdown` blocks the main thread on it, and
+    /// nothing on that thread runs meanwhile. Nothing happens while `chats.enabled` is false.
     pub(crate) fn end_for_quit(
         &mut self,
         cx: &mut Context<Self>,
@@ -991,10 +987,23 @@ impl ChatRuntime {
                     chat.cleanup_checked = true;
                 }
                 self.kill(&id, cx);
-                writes.extend(self.write_active(&id, cx));
+                let Some((path, prompted)) = self.note_active_write(&id) else {
+                    continue;
+                };
+                writes.push(self.store.update(cx, |store, _| {
+                    store.update_reply(path, active_change(prompted))
+                }));
             }
         }
-        future::join_all(writes).map(|_| ())
+        async move {
+            for reply in future::join_all(writes).await {
+                match reply {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => log::warn!("chats: could not write last_active: {error}"),
+                    Err(_) => log::warn!("chats: the last_active write was dropped"),
+                }
+            }
+        }
     }
 
     /// The never-prompted cleanup of `chat_id`, which ended or is being closed (design D17), once
@@ -1174,4 +1183,18 @@ async fn capture_now(
     this.update(cx, |this, cx| this.set_session_id(chat_id, session_id, cx))
         .ok()?;
     Some(true)
+}
+
+/// The change of a `last_active` write: the time now, and `prompted` once the chat is.
+fn active_change(
+    prompted: bool,
+) -> impl FnOnce(&mut bongos_chat_model::ChatRecord) -> bongos_chat_model::Result<()> + Send + 'static
+{
+    move |record| {
+        record.last_active = bongos_work_model::now();
+        if prompted {
+            record.prompted = true;
+        }
+        Ok(())
+    }
 }
