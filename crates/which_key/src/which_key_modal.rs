@@ -65,74 +65,83 @@ impl WhichKeyModal {
             cx.emit(DismissEvent);
             return;
         };
-        let bindings = window.possible_bindings_for_input(pending_keys);
-
-        let mut binding_data = bindings
-            .iter()
-            .map(|binding| {
-                // Map to keystrokes
-                (
-                    binding
-                        .keystrokes()
-                        .iter()
-                        .map(|k| k.inner().to_owned())
-                        .collect::<Vec<_>>(),
-                    binding.action(),
-                )
-            })
-            .filter(|(keystrokes, _action)| {
-                // Check if this binding matches any filtered keystroke pattern
-                !FILTERED_KEYSTROKES.iter().any(|filtered| {
-                    keystrokes.len() >= filtered.len()
-                        && keystrokes[..filtered.len()] == filtered[..]
-                })
-            })
-            .map(|(keystrokes, action)| {
-                // Map to remaining keystrokes and action name
-                let remaining_keystrokes = keystrokes[pending_keys.len()..].to_vec();
-                let action_name: SharedString =
-                    command_palette::humanize_action_name(action.name()).into();
-                (remaining_keystrokes, action_name)
-            })
-            .collect();
-
-        binding_data = group_bindings(binding_data);
-
-        // Sort bindings from shortest to longest, with groups last
-        // Using stable sort to preserve relative order of equal elements
-        binding_data.sort_by(|(keystrokes_a, action_a), (keystrokes_b, action_b)| {
-            // Groups (actions starting with "+") should go last
-            let is_group_a = action_a.starts_with('+');
-            let is_group_b = action_b.starts_with('+');
-
-            // First, separate groups from non-groups
-            let group_cmp = is_group_a.cmp(&is_group_b);
-            if group_cmp != std::cmp::Ordering::Equal {
-                return group_cmp;
-            }
-
-            // Then sort by keystroke count
-            let keystroke_cmp = keystrokes_a.len().cmp(&keystrokes_b.len());
-            if keystroke_cmp != std::cmp::Ordering::Equal {
-                return keystroke_cmp;
-            }
-
-            // Finally sort by text length, then lexicographically for full stability
-            let text_a = text_for_keystrokes(keystrokes_a, cx);
-            let text_b = text_for_keystrokes(keystrokes_b, cx);
-            let text_len_cmp = text_a.len().cmp(&text_b.len());
-            if text_len_cmp != std::cmp::Ordering::Equal {
-                return text_len_cmp;
-            }
-            text_a.cmp(&text_b)
-        });
-        binding_data.dedup();
-        self.pending_keys = text_for_keystrokes(&pending_keys, cx).into();
-        self.bindings = binding_data
-            .into_iter()
-            .map(|(keystrokes, action)| (text_for_keystrokes(&keystrokes, cx).into(), action))
-            .collect();
+        self.bindings = continuations(pending_keys, window, cx);
+        self.pending_keys = text_for_keystrokes(pending_keys, cx).into();
     }
+}
+
+/// The keys that can follow `pending_keys`, as (remaining keys, action name) pairs: filtered,
+/// grouped by first key (`+N keybinds`), groups last, shortest first.
+pub fn continuations(
+    pending_keys: &[Keystroke],
+    window: &Window,
+    cx: &App,
+) -> Vec<(SharedString, SharedString)> {
+    let bindings = window.possible_bindings_for_input(pending_keys);
+
+    let mut binding_data = bindings
+        .iter()
+        .map(|binding| {
+            // Map to keystrokes
+            (
+                binding
+                    .keystrokes()
+                    .iter()
+                    .map(|k| k.inner().to_owned())
+                    .collect::<Vec<_>>(),
+                binding.action(),
+            )
+        })
+        .filter(|(keystrokes, _action)| {
+            // Check if this binding matches any filtered keystroke pattern
+            !FILTERED_KEYSTROKES.iter().any(|filtered| {
+                keystrokes.len() >= filtered.len() && keystrokes[..filtered.len()] == filtered[..]
+            })
+        })
+        .map(|(keystrokes, action)| {
+            // Map to remaining keystrokes and action name
+            let remaining_keystrokes = keystrokes[pending_keys.len()..].to_vec();
+            let action_name: SharedString =
+                command_palette::humanize_action_name(action.name()).into();
+            (remaining_keystrokes, action_name)
+        })
+        .collect();
+
+    binding_data = group_bindings(binding_data);
+
+    // Sort bindings from shortest to longest, with groups last
+    // Using stable sort to preserve relative order of equal elements
+    binding_data.sort_by(|(keystrokes_a, action_a), (keystrokes_b, action_b)| {
+        // Groups (actions starting with "+") should go last
+        let is_group_a = action_a.starts_with('+');
+        let is_group_b = action_b.starts_with('+');
+
+        // First, separate groups from non-groups
+        let group_cmp = is_group_a.cmp(&is_group_b);
+        if group_cmp != std::cmp::Ordering::Equal {
+            return group_cmp;
+        }
+
+        // Then sort by keystroke count
+        let keystroke_cmp = keystrokes_a.len().cmp(&keystrokes_b.len());
+        if keystroke_cmp != std::cmp::Ordering::Equal {
+            return keystroke_cmp;
+        }
+
+        // Finally sort by text length, then lexicographically for full stability
+        let text_a = text_for_keystrokes(keystrokes_a, cx);
+        let text_b = text_for_keystrokes(keystrokes_b, cx);
+        let text_len_cmp = text_a.len().cmp(&text_b.len());
+        if text_len_cmp != std::cmp::Ordering::Equal {
+            return text_len_cmp;
+        }
+        text_a.cmp(&text_b)
+    });
+    binding_data.dedup();
+    binding_data
+        .into_iter()
+        .map(|(keystrokes, action)| (text_for_keystrokes(&keystrokes, cx).into(), action))
+        .collect()
 }
 
 impl Render for WhichKeyModal {

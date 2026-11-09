@@ -6,6 +6,7 @@
 //! active minibuffer".
 
 mod echo;
+mod hint;
 mod history_store;
 mod prompts;
 mod session;
@@ -19,6 +20,7 @@ use gpui::{App, BorrowAppContext as _, Context, Window};
 use workspace::{MinibufferMessageKind, MinibufferRouting, ModalLayer};
 
 pub use echo::{EchoLine, LOG_CAPACITY, MESSAGES, error, message};
+pub use hint::{KEY_HINT, set_prefix_echo};
 pub use history_store::{HISTORY_NAMESPACE, HistoryStore};
 pub use prompts::{ReadKey, ReadKeyView, read_key, strict_yes_or_no, yes_or_no};
 pub use session::{
@@ -43,6 +45,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(MinibufferRouting::default());
     strip::init(cx);
     echo::init(cx);
+    hint::init(cx);
     sync(cx);
     cx.observe_global::<SettingsStore>(sync).detach();
     register_actions(cx);
@@ -143,6 +146,8 @@ fn register_actions(cx: &mut App) {
 mod echo_tests;
 #[cfg(test)]
 mod focus_tests;
+#[cfg(test)]
+mod hint_tests;
 #[cfg(test)]
 mod prompts_tests;
 #[cfg(test)]
