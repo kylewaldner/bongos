@@ -260,7 +260,10 @@ async fn open_with_no_session_opens_the_palette_in_the_strip(cx: &mut TestAppCon
     cx.dispatch_action(minibuffer::Open);
     cx.run_until_parked();
     assert!(palette_open(&workspace, cx));
-    assert!(in_strip(&workspace, cx), "the palette is hosted by the strip");
+    assert!(
+        in_strip(&workspace, cx),
+        "the palette is hosted by the strip"
+    );
 }
 
 #[gpui::test]

@@ -108,7 +108,8 @@ fn act_on_session(
 }
 
 /// What `Open` answers while a minibuffer is already active, in the wording of Emacs.
-pub const MINIBUFFER_IN_MINIBUFFER: &str = "Command attempted to use minibuffer while in minibuffer";
+pub const MINIBUFFER_IN_MINIBUFFER: &str =
+    "Command attempted to use minibuffer while in minibuffer";
 
 /// `minibuffer::Open` (M-x): opens the command palette, or says so when a prompt is already in
 /// the strip. It always handles the action.
@@ -119,7 +120,12 @@ fn open_palette(cx: &mut App) -> bool {
     window
         .update(cx, |_, window, cx| {
             let active = strip::active_workspace(window, cx).is_some_and(|workspace| {
-                workspace.read(cx).modal_layer().read(cx).bottom_modal().is_some()
+                workspace
+                    .read(cx)
+                    .modal_layer()
+                    .read(cx)
+                    .bottom_modal()
+                    .is_some()
             });
             if active {
                 echo::error(window, cx, MINIBUFFER_IN_MINIBUFFER);
