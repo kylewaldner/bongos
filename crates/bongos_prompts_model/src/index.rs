@@ -261,7 +261,9 @@ pub struct RowEdit {
 
 /// Merges edits that touch the same rows, given in ascending order, into one edit each, so a row is
 /// parsed and shifted once (several cursors typing on one line). Edits that only neighbor each
-/// other stay separate.
+/// other stay separate. As from `edits_since`, old rows are rows of the text before all the edits
+/// and new rows rows of the text after all of them, so the later of two merged edits ends the
+/// merged one on both sides.
 pub fn merge_row_edits(edits: &[RowEdit]) -> Vec<RowEdit> {
     let mut merged: Vec<RowEdit> = Vec::new();
     for edit in edits {
@@ -273,11 +275,8 @@ pub fn merge_row_edits(edits: &[RowEdit]) -> Vec<RowEdit> {
             merged.push(edit.clone());
             continue;
         }
-        let old_end = last.old_rows.end.max(edit.old_rows.end);
-        let new_end = (last.new_rows.end + (old_end - last.old_rows.end))
-            .max(edit.new_rows.end + (old_end - edit.old_rows.end));
-        last.old_rows.end = old_end;
-        last.new_rows.end = new_end;
+        last.old_rows.end = last.old_rows.end.max(edit.old_rows.end);
+        last.new_rows.end = last.new_rows.end.max(edit.new_rows.end);
     }
     merged
 }

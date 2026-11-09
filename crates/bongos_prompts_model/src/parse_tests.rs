@@ -72,3 +72,52 @@ fn near_miss_lines_stay_in_the_body() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].body, 1..6);
 }
+
+#[test]
+fn send_text_drops_the_cr_of_crlf_rows() {
+    let text = format!("{M1}\r\n\r\nfirst\r\n  second\t\r\n\r\n");
+    let blocks = parse(&text, &syntax());
+    assert_eq!(
+        blocks.len(),
+        1,
+        "a marker row ending in \\r is still a marker"
+    );
+    assert_eq!(
+        blocks[0].send_text(&split_rows(&text)),
+        Some("first\n  second\t".to_string())
+    );
+    assert_eq!(send_text(&["a\r", "b"]), "a\nb");
+    // Only the line break's \r goes; one inside a row stays.
+    assert_eq!(send_text(&["a\rb\r"]), "a\rb");
+}
+
+#[test]
+fn non_ascii_text_is_body_and_sends_unchanged() {
+    let text = format!(
+        "préambule — 日本語\n{M1}\n\u{3000}\nhéllo ünïcödé 🎉\n\t“quoted”\n=== prompt 2026-11-05 13:4\u{FF10} ===\n"
+    );
+    let blocks = parse(&text, &syntax());
+    assert_eq!(
+        blocks.len(),
+        2,
+        "a stamp with a full-width digit is not a marker"
+    );
+    let rows = split_rows(&text);
+    assert_eq!(
+        blocks[0].send_text(&rows),
+        Some("préambule — 日本語".to_string())
+    );
+    assert_eq!(
+        blocks[1].send_text(&rows),
+        Some("héllo ünïcödé 🎉\n\t“quoted”\n=== prompt 2026-11-05 13:4\u{FF10} ===".to_string()),
+        "an ideographic space is a blank row"
+    );
+
+    let custom = MarkerSyntax::new("### 提示", "###");
+    let marker = custom
+        .parse("### 提示 2026-11-05 13:40 ###")
+        .expect("a marker");
+    assert_eq!(custom.render(&marker), "### 提示 2026-11-05 13:40 ###");
+    assert_eq!(custom.parse("### 提示 2026-11-05 13:40 ###é"), None);
+    assert_eq!(custom.parse("### 提示 2026-11-05 13:4é ###"), None);
+}
