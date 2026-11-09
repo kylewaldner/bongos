@@ -1,8 +1,9 @@
 //! The `task` and `linear` actions of the Linear sync, hidden from the command palette while
 //! `linear.enabled` is false, and their handlers. While it is false each handler only says that
 //! the sync is off. While it is true each handler passes its [`Command`] to the installed
-//! [`LinearRequests`]; none is installed yet, so nothing happens. The keys are bound in the Emacs
-//! keymaps, not here.
+//! [`LinearRequests`]; none is installed yet, so nothing happens. The two token commands do not go
+//! through it: they open the token modal and clear the stored token (see `token`). No keys are
+//! bound to these actions yet; they are reached from the command palette.
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use workspace::Workspace;
 use workspace::notifications::NotificationId;
 
 use crate::LinearSettings;
+use crate::token;
 
 /// New actions in the `task` namespace, shared with the work tree's, the builder's and Zed's task
 /// runner; no name collides.
@@ -70,8 +72,6 @@ pub enum Command {
     RefreshFromLinear,
     ShowLinearSuggestions,
     CopyPrTitle,
-    SetToken,
-    ClearToken,
 }
 
 /// The seam between the actions and the sync: the one place an enabled handler goes through.
@@ -138,7 +138,7 @@ impl Global for LastToast {}
 /// The toast a command shows while `linear.enabled` is false.
 pub(crate) const OFF_MESSAGE: &str = "Linear sync is off (linear.enabled)";
 
-fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
     #[cfg(test)]
     cx.set_global(LastToast(message.clone()));
     workspace.show_toast(
@@ -161,6 +161,21 @@ fn register_with<A: Action>(workspace: &mut Workspace, command: Command) {
     });
 }
 
+/// Registers the handler of `A` that runs `handler` while `linear.enabled` is true and shows the
+/// off toast while it is false.
+fn register_direct<A: Action>(
+    workspace: &mut Workspace,
+    handler: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+) {
+    workspace.register_action(move |workspace, _: &A, window: &mut Window, cx| {
+        if !LinearSettings::get_global(cx).enabled {
+            show_toast(workspace, OFF_MESSAGE.to_string(), cx);
+            return;
+        }
+        handler(workspace, window, cx);
+    });
+}
+
 /// Registers the handlers of the sync's actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
     register_with::<task::NewFromLinear>(workspace, Command::NewFromLinear);
@@ -171,6 +186,6 @@ pub fn register(workspace: &mut Workspace) {
     register_with::<task::RefreshFromLinear>(workspace, Command::RefreshFromLinear);
     register_with::<task::ShowLinearSuggestions>(workspace, Command::ShowLinearSuggestions);
     register_with::<task::CopyPrTitle>(workspace, Command::CopyPrTitle);
-    register_with::<linear::SetToken>(workspace, Command::SetToken);
-    register_with::<linear::ClearToken>(workspace, Command::ClearToken);
+    register_direct::<linear::SetToken>(workspace, token::set_token);
+    register_direct::<linear::ClearToken>(workspace, token::clear_token);
 }

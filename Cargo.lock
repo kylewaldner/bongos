@@ -2365,13 +2365,23 @@ dependencies = [
 name = "bongos_linear"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bongos_linear_model",
  "command_palette_hooks",
+ "credentials_provider",
+ "editor",
+ "futures 0.3.32",
  "gpui",
+ "log",
+ "menu",
  "project",
  "release_channel",
  "semver",
  "settings",
+ "tempfile",
+ "ui",
  "workspace",
+ "zed_credentials_provider",
 ]
 
 [[package]]
