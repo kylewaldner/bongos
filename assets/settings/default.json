@@ -2654,9 +2654,13 @@
     },
   },
   "prompts": {
-    // Whether the prompts editor is on. While it is off, `prompts.txt` files open as
-    // plain text and the prompts commands are hidden.
+    // Whether the prompts mode is on. While it is off, no editor gets the mode (rules,
+    // current block, mode line) and the prompts commands are hidden. The `Prompts`
+    // language, which saves `prompts.txt` exactly as typed, applies either way.
     "enabled": false,
+    // Whether sending a prompt also submits it (presses Enter in the chat). A chat can
+    // override it for itself.
+    "auto_submit": true,
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
