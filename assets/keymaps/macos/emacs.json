@@ -2,6 +2,8 @@
 //
 // To see the default key bindings run `zed: open default keymap`
 // from the command palette.
+//
+// Write Option-Shift chords as `alt-shift-<letter>`, matched by key code, never by the character Option produces.
 [
   {
     "context": "!GitPanel",

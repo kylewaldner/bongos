@@ -6,6 +6,8 @@ mod builder_keymap_tests;
 #[cfg(test)]
 mod chat_keymap_tests;
 pub mod edit_prediction_registry;
+#[cfg(test)]
+mod emacs_keymap_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
 mod migrate;
