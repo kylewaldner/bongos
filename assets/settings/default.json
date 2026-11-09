@@ -2611,6 +2611,24 @@
     // Delay in milliseconds before showing the which-key popup.
     "delay_ms": 1000,
   },
+  // Settings for the minibuffer: the strip at the bottom of the window that hosts prompts.
+  "minibuffer": {
+    // The prompts that open in the minibuffer instead of a centered modal. Names:
+    // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint".
+    // While the list is empty there is no minibuffer, nothing is routed to it and its
+    // commands are hidden.
+    "enabled_for": [],
+    // The most candidate rows the minibuffer shows at once.
+    "max_rows": 15,
+    // Whether the minibuffer shows the number of matches in front of the prompt.
+    "show_count": true,
+    // How long a message stays in the echo area, in milliseconds. Errors stay until the
+    // next keystroke.
+    "message_timeout": 4000,
+    // Delay in milliseconds before the minibuffer shows the keys typed so far of a pending
+    // key sequence.
+    "key_hint_delay": 500,
+  },
   // Settings for the Work view: projects and tasks kept as files under ~/.bongos.
   "work": {
     // Whether the Work view is on. While it is off, bongos neither reads nor

@@ -250,6 +250,9 @@ pub struct SettingsContent {
     /// Settings for the which-key popup.
     pub which_key: Option<WhichKeySettingsContent>,
 
+    /// Settings for the minibuffer: the strip at the bottom of the window that hosts prompts.
+    pub minibuffer: Option<MinibufferSettingsContent>,
+
     /// Settings for the Work view: projects and tasks kept as files under `~/.bongos`.
     pub work: Option<WorkSettingsContent>,
 
@@ -1356,6 +1359,37 @@ pub struct WhichKeySettingsContent {
     ///
     /// Default: 700
     pub delay_ms: Option<u64>,
+}
+
+/// Settings for the minibuffer.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct MinibufferSettingsContent {
+    /// The prompts that open in the minibuffer at the bottom of the window instead of a centered
+    /// modal. Names: `command_palette`, `file_finder`, `tab_switcher`, `work`, `messages`,
+    /// `key_hint`. While the list is empty there is no minibuffer, nothing is routed to it and
+    /// its commands are hidden.
+    ///
+    /// Default: []
+    pub enabled_for: Option<Vec<String>>,
+    /// The most candidate rows the minibuffer shows at once.
+    ///
+    /// Default: 15
+    pub max_rows: Option<usize>,
+    /// Whether the minibuffer shows the number of matches in front of the prompt.
+    ///
+    /// Default: true
+    pub show_count: Option<bool>,
+    /// How long a message stays in the echo area, in milliseconds. Errors stay until the next
+    /// keystroke.
+    ///
+    /// Default: 4000
+    pub message_timeout: Option<u64>,
+    /// Delay in milliseconds before the minibuffer shows the keys typed so far of a pending key
+    /// sequence.
+    ///
+    /// Default: 500
+    pub key_hint_delay: Option<u64>,
 }
 
 #[with_fallible_options]

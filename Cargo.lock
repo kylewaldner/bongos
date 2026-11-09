@@ -2049,6 +2049,7 @@ dependencies = [
  "bongos_chat",
  "bongos_kotlin",
  "bongos_languages",
+ "bongos_minibuffer",
  "bongos_net",
  "bongos_prompts",
  "bongos_version",
@@ -2322,6 +2323,17 @@ dependencies = [
  "tree-sitter-java",
  "tree-sitter-kotlin",
  "tree-sitter-toml-ng",
+]
+
+[[package]]
+name = "bongos_minibuffer"
+version = "0.1.0"
+dependencies = [
+ "command_palette_hooks",
+ "gpui",
+ "settings",
+ "workspace",
+ "zed_actions",
 ]
 
 [[package]]

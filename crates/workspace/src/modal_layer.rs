@@ -1,8 +1,11 @@
 use gpui::{
-    AnyView, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable as _, ManagedView,
+    AnyView, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable as _, Global, ManagedView,
     MouseButton, Subscription,
 };
+use std::rc::Rc;
 use ui::prelude::*;
+
+use crate::Toast;
 
 #[derive(Debug)]
 pub enum DismissDecision {
@@ -26,6 +29,146 @@ pub trait ModalView: ManagedView {
     fn render_bare(&self) -> bool {
         false
     }
+
+    /// The name this modal is routed by, matched against `minibuffer.enabled_for`; `None` for
+    /// modals that never move to the minibuffer.
+    fn minibuffer_name(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// How a message sent to the echo area is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinibufferMessageKind {
+    /// Fades after `minibuffer.message_timeout`.
+    Message,
+    /// Stays until the next keystroke.
+    Error,
+}
+
+/// Where a message sent through [`MinibufferRouting::message`] ended up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinibufferMessageOutcome {
+    /// The echo area showed it.
+    Echoed,
+    /// There is no echo area; it went to the log.
+    Logged,
+}
+
+/// Shows a message in the echo area of the window; returns whether it did.
+pub type MinibufferMessageHook =
+    Rc<dyn Fn(&mut Window, &mut App, &str, MinibufferMessageKind) -> bool>;
+
+/// Shows a toast in the echo area of the workspace; returns whether it did.
+pub type MinibufferToastHook = Rc<dyn Fn(&Toast, &mut Context<crate::Workspace>) -> bool>;
+
+/// The settings of the minibuffer that `workspace` and `picker` read, and the hooks the
+/// minibuffer crate installs. `bongos_minibuffer::init` installs it and mirrors the settings into
+/// it. Nothing in it does anything while `routes` is empty and no hook is installed.
+pub struct MinibufferRouting {
+    routes: Vec<String>,
+    max_rows: usize,
+    show_count: bool,
+    toast_hook: Option<MinibufferToastHook>,
+    message_hook: Option<MinibufferMessageHook>,
+}
+
+impl Global for MinibufferRouting {}
+
+impl Default for MinibufferRouting {
+    fn default() -> Self {
+        Self {
+            routes: Vec::new(),
+            max_rows: 15,
+            show_count: true,
+            toast_hook: None,
+            message_hook: None,
+        }
+    }
+}
+
+impl MinibufferRouting {
+    /// The names routed to the minibuffer (`minibuffer.enabled_for`).
+    pub fn routes(&self) -> &[String] {
+        &self.routes
+    }
+
+    /// Replaces the routed names.
+    pub fn set_routes(&mut self, routes: Vec<String>) {
+        self.routes = routes;
+    }
+
+    /// Whether `name` is routed to the minibuffer.
+    pub fn is_routed(&self, name: &str) -> bool {
+        self.routes.iter().any(|route| route == name)
+    }
+
+    /// The most candidate rows to show at once.
+    pub fn max_rows(&self) -> usize {
+        self.max_rows
+    }
+
+    /// Whether to show the match count in front of the prompt.
+    pub fn show_count(&self) -> bool {
+        self.show_count
+    }
+
+    /// Sets the row limit and whether the count is shown.
+    pub fn set_display(&mut self, max_rows: usize, show_count: bool) {
+        self.max_rows = max_rows;
+        self.show_count = show_count;
+    }
+
+    /// The hook that sends toasts to the echo area, if one is installed.
+    pub fn toast_hook(&self) -> Option<MinibufferToastHook> {
+        self.toast_hook.clone()
+    }
+
+    /// Installs (or removes) the hook that sends toasts to the echo area.
+    pub fn set_toast_hook(&mut self, hook: Option<MinibufferToastHook>) {
+        self.toast_hook = hook;
+    }
+
+    /// Installs (or removes) the hook that shows messages in the echo area.
+    pub fn set_message_hook(&mut self, hook: Option<MinibufferMessageHook>) {
+        self.message_hook = hook;
+    }
+
+    /// Sends `text` to the echo area of `window`. Without an echo area (no hook installed, or
+    /// the hook declines) it goes to the log instead.
+    pub fn message(
+        window: &mut Window,
+        cx: &mut App,
+        text: &str,
+        kind: MinibufferMessageKind,
+    ) -> MinibufferMessageOutcome {
+        let hook = cx
+            .try_global::<MinibufferRouting>()
+            .and_then(|routing| routing.message_hook.clone());
+        if let Some(hook) = hook
+            && hook(window, cx, text, kind)
+        {
+            return MinibufferMessageOutcome::Echoed;
+        }
+        Self::log_message(text, kind);
+        MinibufferMessageOutcome::Logged
+    }
+
+    /// The fallback of [`Self::message`] while no echo area exists.
+    pub fn log_message(text: &str, kind: MinibufferMessageKind) {
+        match kind {
+            MinibufferMessageKind::Message => log::info!("minibuffer: {text}"),
+            MinibufferMessageKind::Error => log::error!("minibuffer: {text}"),
+        }
+    }
+}
+
+/// Whether the prompt called `name` (see [`ModalView::minibuffer_name`]) is routed to the
+/// minibuffer. False before the minibuffer is initialized and while `minibuffer.enabled_for` is
+/// empty.
+pub fn routes_to_minibuffer(name: &str, cx: &App) -> bool {
+    cx.try_global::<MinibufferRouting>()
+        .is_some_and(|routing| routing.is_routed(name))
 }
 
 trait ModalViewHandle {

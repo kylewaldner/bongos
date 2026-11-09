@@ -723,6 +723,7 @@ fn main() {
         json_schema_store::init(cx);
         miniprofiler_ui::init(*STARTUP_TIME.get().unwrap(), cx);
         which_key::init(cx);
+        bongos_minibuffer::init(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);
 

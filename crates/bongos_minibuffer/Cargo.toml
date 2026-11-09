@@ -1,0 +1,24 @@
+[package]
+name = "bongos_minibuffer"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_minibuffer.rs"
+doctest = false
+
+[dependencies]
+command_palette_hooks.workspace = true
+gpui.workspace = true
+settings.workspace = true
+workspace.workspace = true
+zed_actions.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }

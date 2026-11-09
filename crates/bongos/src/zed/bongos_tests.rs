@@ -329,6 +329,46 @@ const PROMPTS_ACTIONS: [(&str, &str); 13] = [
     ("prompts::Mode", "prompts: mode"),
 ];
 
+/// The `minibuffer` commands, with the palette text of each.
+const MINIBUFFER_ACTIONS: [(&str, &str); 14] = [
+    ("minibuffer::Cancel", "minibuffer: cancel"),
+    ("minibuffer::Confirm", "minibuffer: confirm"),
+    ("minibuffer::ConfirmInput", "minibuffer: confirm input"),
+    ("minibuffer::SelectNext", "minibuffer: select next"),
+    ("minibuffer::SelectPrev", "minibuffer: select prev"),
+    ("minibuffer::PageDown", "minibuffer: page down"),
+    ("minibuffer::PageUp", "minibuffer: page up"),
+    (
+        "minibuffer::CompleteCommonPrefix",
+        "minibuffer: complete common prefix",
+    ),
+    ("minibuffer::HistoryPrev", "minibuffer: history prev"),
+    ("minibuffer::HistoryNext", "minibuffer: history next"),
+    ("minibuffer::Actions", "minibuffer: actions"),
+    ("minibuffer::Open", "minibuffer: open"),
+    ("minibuffer::Focus", "minibuffer: focus"),
+    ("minibuffer::ShowMessages", "minibuffer: show messages"),
+];
+
+#[gpui::test]
+async fn minibuffer_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in MINIBUFFER_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        assert!(
+            cx.build_action("minibuffer::Cancel", None)
+                .unwrap()
+                .partial_eq(&zed_actions::minibuffer::Cancel)
+        );
+    });
+}
+
 #[gpui::test]
 async fn prompts_commands_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
