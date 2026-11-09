@@ -2661,6 +2661,9 @@
     // Whether sending a prompt also submits it (presses Enter in the chat). A chat can
     // override it for itself.
     "auto_submit": true,
+    // Whether sending a prompt saves the prompts file right after marking it sent. A
+    // file that changed on disk since it was opened is left unsaved.
+    "save_on_send": true,
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.

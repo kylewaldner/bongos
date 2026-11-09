@@ -1,7 +1,8 @@
 //! The `prompts` actions, hidden from the command palette while `prompts.enabled` is false, and
 //! their handlers. While it is false each handler only says that the prompts mode is off. The
-//! navigation, new and copy commands live in [`crate::commands`]; until the later steps give them
-//! behavior, the others do nothing while on. No key is bound to any of them.
+//! navigation, new and copy commands live in [`crate::commands`], the send commands in
+//! [`crate::send`] and the auto-submit toggle in [`crate::attach`]; until the later steps give
+//! them behavior, the others do nothing while on. No key is bound to any of them.
 
 use std::any::TypeId;
 
@@ -14,7 +15,8 @@ use workspace::notifications::NotificationId;
 
 use editor::Editor;
 
-use crate::{LANGUAGE_NAME, PromptsSettings, commands};
+use crate::send::{self, SendKind};
+use crate::{LANGUAGE_NAME, PromptsSettings, attach, commands};
 
 /// Actions in the `prompts` namespace.
 pub mod prompts {
@@ -27,7 +29,7 @@ pub mod prompts {
             Send,
             /// Sends the prompt at point without marking it as sent.
             SendWithoutMarking,
-            /// Sends the selection, or else the whole buffer, to the chat.
+            /// Sends the selection exactly, or else the prompt at point, to the chat.
             SendRegion,
             /// Adds a new prompt.
             New,
@@ -128,10 +130,18 @@ pub struct PromptsToast;
 pub(crate) const OFF_MESSAGE: &str = "Prompts mode is off (prompts.enabled)";
 
 pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+    #[cfg(test)]
+    TOASTS.with(|toasts| toasts.borrow_mut().push(message.clone()));
     workspace.show_toast(
         Toast::new(NotificationId::unique::<PromptsToast>(), message),
         cx,
     );
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every toast message shown on this thread, for tests.
+    pub(crate) static TOASTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Registers `handler` for `A`, behind the off toast while `prompts.enabled` is false.
@@ -169,9 +179,15 @@ fn register_one<A: Action>(workspace: &mut Workspace) {
 
 /// Registers the handlers of the `prompts` actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
-    register_one::<prompts::Send>(workspace);
-    register_one::<prompts::SendWithoutMarking>(workspace);
-    register_one::<prompts::SendRegion>(workspace);
+    register_gated::<prompts::Send>(workspace, |workspace, window, cx| {
+        send::send_command(SendKind::Mark, workspace, window, cx)
+    });
+    register_gated::<prompts::SendWithoutMarking>(workspace, |workspace, window, cx| {
+        send::send_command(SendKind::WithoutMarking, workspace, window, cx)
+    });
+    register_gated::<prompts::SendRegion>(workspace, |workspace, window, cx| {
+        send::send_command(SendKind::Region, workspace, window, cx)
+    });
     register_gated::<prompts::New>(workspace, commands::new);
     register_gated_with::<prompts::Previous>(workspace, commands::previous);
     register_gated_with::<prompts::Next>(workspace, commands::next);
@@ -179,7 +195,7 @@ pub fn register(workspace: &mut Workspace) {
     register_gated::<prompts::Copy>(workspace, commands::copy);
     register_one::<prompts::UseFile>(workspace);
     register_one::<prompts::UseDefault>(workspace);
-    register_one::<prompts::ToggleAutoSubmit>(workspace);
+    register_gated::<prompts::ToggleAutoSubmit>(workspace, attach::toggle_auto_submit);
     register_one::<prompts::Open>(workspace);
     register_gated::<prompts::Mode>(workspace, prompts_mode);
     #[cfg(debug_assertions)]

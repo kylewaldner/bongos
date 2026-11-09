@@ -9,6 +9,8 @@ pub struct PromptsSettings {
     pub enabled: bool,
     /// Whether a send also submits, unless the chat overrides it.
     pub auto_submit: bool,
+    /// Whether a send saves the prompts file after marking it, unless it changed on disk.
+    pub save_on_send: bool,
 }
 
 impl Settings for PromptsSettings {
@@ -24,6 +26,9 @@ impl Settings for PromptsSettings {
             auto_submit: prompts
                 .auto_submit
                 .expect("default.json defines `prompts.auto_submit`"),
+            save_on_send: prompts
+                .save_on_send
+                .expect("default.json defines `prompts.save_on_send`"),
         }
     }
 }

@@ -117,6 +117,7 @@ async fn default_settings_parse(cx: &mut TestAppContext) {
         ));
         assert!(matches!(prompts.soft_wrap, settings::SoftWrap::EditorWidth));
         assert!(PromptsSettings::get_global(cx).auto_submit);
+        assert!(PromptsSettings::get_global(cx).save_on_send);
 
         // The global defaults, and Plain Text, still rewrite.
         let plain = AllLanguageSettings::get_global(cx).language(
@@ -302,6 +303,6 @@ async fn no_toast_while_on(cx: &mut TestAppContext) {
             });
         });
     });
-    dispatch("prompts::Send", cx);
+    dispatch("prompts::Open", cx);
     assert!(!toast_shown(&workspace, cx));
 }

@@ -29,6 +29,9 @@ pub(crate) const NOTHING_TO_COPY_MESSAGE: &str = "Nothing to copy: this prompt i
 /// The toast of a `prompts: copy`.
 pub(crate) const COPIED_MESSAGE: &str = "Copied";
 
+/// The toast of a command with no prompts editor to act on.
+pub(crate) const NO_VIEW_MESSAGE: &str = "No prompts view";
+
 /// What a navigation command did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Moved {
@@ -63,7 +66,7 @@ pub(crate) enum Copied {
 
 /// The prompts editor a command acts on: the one with focus, else the active item when it has
 /// the mode, else the one focused last (the prompts pane of the Chats panel is not an item).
-fn target(
+pub(crate) fn target(
     workspace: &Workspace,
     window: &Window,
     cx: &mut Context<Workspace>,
@@ -88,7 +91,7 @@ fn with_target<T>(
     command: impl FnOnce(&mut Editor, &mut Window, &mut Context<Editor>) -> Option<T>,
 ) -> Option<T> {
     let Some(editor) = target(workspace, window, cx) else {
-        show_toast(workspace, "No prompts view".to_string(), cx);
+        show_toast(workspace, NO_VIEW_MESSAGE.to_string(), cx);
         return None;
     };
     editor.update(cx, |editor, cx| command(editor, window, cx))
@@ -168,7 +171,7 @@ fn put_point(editor: &mut Editor, point: Point, window: &mut Window, cx: &mut Co
 
 /// Puts point at the first body row of a block. A block with no body has no such row; point goes
 /// to the row where its body would be, which point skipping moves off a marker.
-fn put_at_body(
+pub(crate) fn put_at_body(
     editor: &mut Editor,
     body: Range<u32>,
     window: &mut Window,
@@ -178,7 +181,7 @@ fn put_at_body(
 }
 
 /// The mode of `editor` with its index up to date, and the row of its newest head.
-fn mode_and_row(
+pub(crate) fn mode_and_row(
     editor: &mut Editor,
     cx: &mut Context<Editor>,
 ) -> Option<(std::rc::Rc<std::cell::RefCell<crate::PromptsMode>>, u32)> {

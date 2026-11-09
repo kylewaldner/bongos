@@ -3,10 +3,11 @@
 //! mode (an editor addon that draws marker lines as rules, brightens the current block, dims sent
 //! ones, keeps the mode line, moves point off the rules and reverts edits that would join a rule
 //! into a line), the prompts pane provider of the Chats panel, and the `prompts`
-//! actions (navigation, new and copy among them), hidden while `prompts.enabled` is false. The
+//! actions (navigation, new, copy, send and the auto-submit toggle among them), hidden while `prompts.enabled` is false. The
 //! file formats and pure rules live in `bongos_prompts_model`, which has no UI dependency.
 
 mod actions;
+mod attach;
 mod commands;
 mod display;
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
@@ -16,6 +17,7 @@ mod language;
 mod mode;
 mod mode_line;
 mod provider;
+mod send;
 mod settings;
 mod skip;
 
@@ -43,6 +45,8 @@ pub fn init(cx: &mut App) {
 }
 
 #[cfg(test)]
+mod attach_tests;
+#[cfg(test)]
 mod commands_tests;
 #[cfg(test)]
 mod guard_tests;
@@ -50,5 +54,7 @@ mod guard_tests;
 mod mode_tests;
 #[cfg(test)]
 mod prompts_tests;
+#[cfg(test)]
+mod send_tests;
 #[cfg(test)]
 mod skip_tests;

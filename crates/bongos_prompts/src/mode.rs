@@ -52,6 +52,8 @@ pub struct PromptsMode {
     /// Whether a selection was not empty after the last selection change.
     pub(crate) region: bool,
     pub(crate) guard: GuardState,
+    /// The chat picked among several running ones for this editor (design D13).
+    pub(crate) chat: Option<String>,
 }
 
 impl PromptsMode {
@@ -216,6 +218,7 @@ fn attach(editor: &mut Editor, cx: &mut Context<Editor>) {
         heads: Vec::new(),
         region: false,
         guard: GuardState::default(),
+        chat: None,
     };
     // Edits made before the mode never group with the first one made in it.
     editor.finalize_last_transaction(cx);

@@ -1404,6 +1404,11 @@ pub struct PromptsSettingsContent {
     ///
     /// Default: true
     pub auto_submit: Option<bool>,
+    /// Whether sending a prompt saves the prompts file right after marking it sent. A file that
+    /// changed on disk since it was opened is left unsaved.
+    ///
+    /// Default: true
+    pub save_on_send: Option<bool>,
 }
 
 /// Settings for chat sessions.
