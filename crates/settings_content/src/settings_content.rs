@@ -1393,7 +1393,7 @@ pub struct ChatsSettingsContent {
     /// Whether chat sessions are on. While they are off, bongos neither indexes chat records nor
     /// seeds the session types, and the chat commands are hidden.
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
     /// Where the chat panel docks.
     ///

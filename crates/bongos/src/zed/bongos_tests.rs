@@ -384,6 +384,7 @@ async fn task_mode_chat_reaches_the_real_chat_new(cx: &mut TestAppContext) {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(true);
+                content.chats.get_or_insert_default().enabled = Some(false);
             });
         });
         let fs = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
@@ -451,6 +452,56 @@ async fn task_mode_chat_reaches_the_real_chat_new(cx: &mut TestAppContext) {
     assert!(
         !toasts.contains(&NotificationId::unique::<bongos_work::WorkToast>()),
         "the Work view did not say chats are missing"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A workspace in a default configuration (nothing sets `chats.enabled`) has the Chats panel.
+#[gpui::test]
+async fn default_workspace_has_the_chats_panel(cx: &mut TestAppContext) {
+    use std::sync::Arc;
+
+    use gpui::VisualTestContext;
+    use project::Project;
+    use workspace::MultiWorkspace;
+
+    let app_state = super::tests::init_test(cx);
+    cx.executor().allow_parking();
+    let dir = std::env::temp_dir().join(format!(
+        "bongos-default-chats-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    cx.update(|cx| {
+        let fs = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+        bongos_work::init(
+            fs,
+            bongos_work::WorkDirs {
+                root: dir.join("work"),
+            },
+            cx,
+        );
+        bongos_chat::init(
+            bongos_chat::ChatDirs {
+                types_root: dir.join("chat-types"),
+                runtime: dir.join("runtime"),
+            },
+            cx,
+        );
+    });
+
+    let project = Project::test(app_state.fs.clone(), [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |multi, _| multi.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    cx.run_until_parked();
+    assert!(
+        workspace.read_with(cx, |workspace, cx| workspace
+            .panel::<bongos_chat::ChatPanel>(cx)
+            .is_some()),
+        "the Chats panel is in a workspace with default settings"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
