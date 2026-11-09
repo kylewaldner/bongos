@@ -164,7 +164,8 @@ async fn save_exactly(cx: &mut TestAppContext, name: &str, text: &str) -> (Strin
 
 #[gpui::test]
 async fn saving_a_prompts_buffer_writes_the_same_bytes(cx: &mut TestAppContext) {
-    let text = "--- prompt 1 ---\nsay hi   \n\tindented with a tab\t\n\n   \nlast line, no newline  ";
+    let text =
+        "--- prompt 1 ---\nsay hi   \n\tindented with a tab\t\n\n   \nlast line, no newline  ";
     let (saved, language) = save_exactly(cx, "prompts.txt", text).await;
     assert_eq!(language, "Prompts");
     assert_eq!(saved, text);

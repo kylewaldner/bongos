@@ -7,9 +7,9 @@ use std::any::TypeId;
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::{Action, App, Context, Window};
 use settings::{Settings as _, SettingsStore};
+use workspace::Toast;
 use workspace::Workspace;
 use workspace::notifications::NotificationId;
-use workspace::Toast;
 
 use crate::PromptsSettings;
 
