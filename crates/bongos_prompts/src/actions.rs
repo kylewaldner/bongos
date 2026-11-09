@@ -1,7 +1,7 @@
 //! The `prompts` actions, hidden from the command palette while `prompts.enabled` is false, and
-//! their handlers. While it is false each handler only says that the prompts mode is off. Until
-//! the later steps give them behavior, the others do nothing while on. No key is bound to any of
-//! them.
+//! their handlers. While it is false each handler only says that the prompts mode is off. The
+//! navigation, new and copy commands live in [`crate::commands`]; until the later steps give them
+//! behavior, the others do nothing while on. No key is bound to any of them.
 
 use std::any::TypeId;
 
@@ -14,7 +14,7 @@ use workspace::notifications::NotificationId;
 
 use editor::Editor;
 
-use crate::{LANGUAGE_NAME, PromptsSettings};
+use crate::{LANGUAGE_NAME, PromptsSettings, commands};
 
 /// Actions in the `prompts` namespace.
 pub mod prompts {
@@ -31,10 +31,6 @@ pub mod prompts {
             SendRegion,
             /// Adds a new prompt.
             New,
-            /// Moves to the previous prompt.
-            Previous,
-            /// Moves to the next prompt.
-            Next,
             /// Moves to the next prompt that was not sent.
             NextPending,
             /// Copies the prompt at point.
@@ -51,6 +47,26 @@ pub mod prompts {
             Mode,
         ]
     );
+
+    /// Moves to the previous prompt, or back by `count` prompts.
+    #[derive(PartialEq, Clone, Default, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+    #[action(namespace = prompts)]
+    #[serde(deny_unknown_fields)]
+    pub struct Previous {
+        /// How many prompts to move; 1 when absent. Feature 09's prefix argument fills it.
+        #[serde(default)]
+        pub count: Option<u32>,
+    }
+
+    /// Moves to the next prompt, or forward by `count` prompts.
+    #[derive(PartialEq, Clone, Default, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+    #[action(namespace = prompts)]
+    #[serde(deny_unknown_fields)]
+    pub struct Next {
+        /// How many prompts to move; 1 when absent. Feature 09's prefix argument fills it.
+        #[serde(default)]
+        pub count: Option<u32>,
+    }
 
     #[cfg(debug_assertions)]
     actions!(
@@ -132,6 +148,20 @@ fn register_gated<A: Action>(
     });
 }
 
+/// Registers `handler` for `A`, which reads the action, behind the off toast.
+fn register_gated_with<A: Action>(
+    workspace: &mut Workspace,
+    handler: fn(&mut Workspace, &A, &mut Window, &mut Context<Workspace>),
+) {
+    workspace.register_action(move |workspace, action: &A, window: &mut Window, cx| {
+        if PromptsSettings::get_global(cx).enabled {
+            handler(workspace, action, window, cx);
+        } else {
+            show_toast(workspace, OFF_MESSAGE.to_string(), cx);
+        }
+    });
+}
+
 /// Registers an action that later steps give behavior to: only the off toast for now.
 fn register_one<A: Action>(workspace: &mut Workspace) {
     register_gated::<A>(workspace, |_, _, _| {});
@@ -142,11 +172,11 @@ pub fn register(workspace: &mut Workspace) {
     register_one::<prompts::Send>(workspace);
     register_one::<prompts::SendWithoutMarking>(workspace);
     register_one::<prompts::SendRegion>(workspace);
-    register_one::<prompts::New>(workspace);
-    register_one::<prompts::Previous>(workspace);
-    register_one::<prompts::Next>(workspace);
-    register_one::<prompts::NextPending>(workspace);
-    register_one::<prompts::Copy>(workspace);
+    register_gated::<prompts::New>(workspace, commands::new);
+    register_gated_with::<prompts::Previous>(workspace, commands::previous);
+    register_gated_with::<prompts::Next>(workspace, commands::next);
+    register_gated::<prompts::NextPending>(workspace, commands::next_pending);
+    register_gated::<prompts::Copy>(workspace, commands::copy);
     register_one::<prompts::UseFile>(workspace);
     register_one::<prompts::UseDefault>(workspace);
     register_one::<prompts::ToggleAutoSubmit>(workspace);
