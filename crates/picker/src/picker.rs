@@ -1136,6 +1136,12 @@ impl<D: PickerDelegate> Picker<D> {
         }
     }
 
+    /// Whether the picker shows a preview beside its results, for tests in other crates.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_preview(&self) -> bool {
+        self.preview.is_some()
+    }
+
     pub fn is_scrolled_to_end(&self) -> Option<bool> {
         match &self.element_container {
             ElementContainer::List(state) => state.is_scrolled_to_end(),

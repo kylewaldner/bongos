@@ -175,6 +175,8 @@ fn register_actions(cx: &mut App) {
 #[cfg(test)]
 mod echo_tests;
 #[cfg(test)]
+mod finder_tests;
+#[cfg(test)]
 mod focus_tests;
 #[cfg(test)]
 mod hint_tests;

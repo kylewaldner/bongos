@@ -54,9 +54,18 @@ actions!(
 pub struct TabSwitcher {
     picker: Entity<Picker<TabSwitcherDelegate>>,
     init_modifiers: Option<Modifiers>,
+    /// Whether the switcher is hosted by the minibuffer strip, which sets its own width.
+    routed: bool,
 }
 
-impl ModalView for TabSwitcher {}
+/// The name the tab switcher is routed by in `minibuffer.enabled_for`.
+pub const MINIBUFFER_NAME: &str = "tab_switcher";
+
+impl ModalView for TabSwitcher {
+    fn minibuffer_name(&self) -> Option<&'static str> {
+        Some(MINIBUFFER_NAME)
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(TabSwitcher::register).detach();
@@ -164,22 +173,34 @@ impl TabSwitcher {
         is_global: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Releasing the modifiers confirms only when the switcher was opened with one held
+        // (ctrl-tab), never when it was opened by a chord (C-x b).
         let init_modifiers = if is_global {
             None
         } else {
             window.modifiers().modified().then_some(window.modifiers())
         };
+        let routed = workspace::routes_to_minibuffer(MINIBUFFER_NAME, cx);
         Self {
             picker: cx.new(|cx| {
-                if is_global {
+                // In the strip there is always an input, so that a partial name narrows.
+                if is_global || routed {
                     Picker::list(delegate, window, cx)
                 } else {
                     Picker::nonsearchable_list(delegate, window, cx)
                 }
                 .initial_width(rems(PANEL_WIDTH_REMS))
+                .minibuffer(MINIBUFFER_NAME, cx)
             }),
             init_modifiers,
+            routed,
         }
+    }
+
+    /// The picker the switcher shows, for tests in other crates.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn picker(&self) -> &Entity<Picker<TabSwitcherDelegate>> {
+        &self.picker
     }
 
     fn handle_modifiers_changed(
@@ -227,7 +248,7 @@ impl Render for TabSwitcher {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("TabSwitcher")
-            .w(rems(PANEL_WIDTH_REMS))
+            .when(!self.routed, |this| this.w(rems(PANEL_WIDTH_REMS)))
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed))
             .on_action(cx.listener(Self::handle_close_selected_item))
             .child(self.picker.clone())
@@ -241,6 +262,8 @@ struct TabMatch {
     item: Box<dyn ItemHandle>,
     detail: usize,
     preview: bool,
+    /// The title the query is matched against.
+    text: String,
 }
 
 pub struct TabSwitcherDelegate {
@@ -421,6 +444,7 @@ impl TabSwitcherDelegate {
                     item: item.clone(),
                     detail,
                     preview: pane.is_active_preview_item(item.item_id()),
+                    text: item.tab_content_text(0, cx).to_string(),
                 });
                 item_index += 1;
             }
@@ -435,12 +459,7 @@ impl TabSwitcherDelegate {
             let candidates = all_items
                 .iter()
                 .enumerate()
-                .flat_map(|(ix, tab_match)| {
-                    Some(StringMatchCandidate::new(
-                        ix,
-                        &tab_match.item.tab_content_text(0, cx),
-                    ))
-                })
+                .map(|(ix, tab_match)| StringMatchCandidate::new(ix, &tab_match.text))
                 .collect::<Vec<_>>();
             fuzzy_nucleo::match_strings(
                 &candidates,
@@ -516,6 +535,7 @@ impl TabSwitcherDelegate {
                 item: item.boxed_clone(),
                 detail,
                 preview: pane.is_active_preview_item(item.item_id()),
+                text: item.tab_content_text(0, cx).to_string(),
             })
             .for_each(|tab_match| self.matches.push(tab_match));
 
@@ -529,6 +549,27 @@ impl TabSwitcherDelegate {
                 .unwrap_or(&(b.item_index + non_history_base));
             a_score.cmp(&b_score)
         });
+
+        // Only the strip has an input here, so the query is empty everywhere else.
+        if !query.is_empty() {
+            let candidates = self
+                .matches
+                .iter()
+                .enumerate()
+                .map(|(ix, tab_match)| StringMatchCandidate::new(ix, &tab_match.text))
+                .collect::<Vec<_>>();
+            let matched = fuzzy_nucleo::match_strings(
+                &candidates,
+                &query,
+                fuzzy_nucleo::Case::Smart,
+                fuzzy_nucleo::LengthPenalty::On,
+                10000,
+            );
+            self.matches = matched
+                .into_iter()
+                .map(|m| self.matches[m.candidate_id].clone())
+                .collect();
+        }
 
         self.selected_index = if query.is_empty() {
             self.compute_selected_index(selected_item_id, window, cx)
@@ -730,6 +771,14 @@ impl PickerDelegate for TabSwitcherDelegate {
         Some("No tabs".into())
     }
 
+    fn prompt_label(&self, _cx: &App) -> Option<SharedString> {
+        Some("Switch to buffer: ".into())
+    }
+
+    fn match_text(&self, ix: usize) -> Option<String> {
+        self.matches.get(ix).map(|tab_match| tab_match.text.clone())
+    }
+
     fn match_count(&self) -> usize {
         self.matches.len()
     }
@@ -805,6 +854,12 @@ impl PickerDelegate for TabSwitcherDelegate {
                 })
                 .ok();
         }
+
+        // The strip stays up until it is told to close; a centered modal also closes when focus
+        // moves to the tab.
+        self.tab_switcher
+            .update(cx, |_, cx| cx.emit(DismissEvent))
+            .log_err();
     }
 
     fn dismissed(&mut self, window: &mut Window, cx: &mut Context<Picker<TabSwitcherDelegate>>) {

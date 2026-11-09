@@ -9,9 +9,9 @@ use editor::Editor;
 use file_icons::FileIcons;
 use fuzzy_nucleo::{PathMatch, PathMatchCandidate};
 use gpui::{
-    Action, AnyElement, App, Context, DismissEvent, Empty, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyContext, Modifiers, ModifiersChangedEvent, ParentElement, Render, Styled, Task,
-    TaskExt, WeakEntity, Window, actions, rems,
+    Action, AnyElement, App, ClipboardItem, Context, DismissEvent, Empty, Entity, EventEmitter,
+    FocusHandle, Focusable, KeyContext, Modifiers, ModifiersChangedEvent, ParentElement, Render,
+    Styled, Task, TaskExt, WeakEntity, Window, actions, rems,
 };
 use language::{BufferSnapshot, Point};
 use open_path_prompt::{
@@ -55,11 +55,20 @@ actions!(
         SelectPrevious,
         /// Opens the selected file in the editor without dismissing the file finder,
         /// so additional files can be opened in sequence.
-        OpenWithoutDismiss
+        OpenWithoutDismiss,
+        /// Copies the path of the selected file to the clipboard and closes the file finder.
+        CopySelectedPath
     ]
 );
 
-impl ModalView for FileFinder {}
+/// The name the file finder is routed by in `minibuffer.enabled_for`.
+pub const MINIBUFFER_NAME: &str = "file_finder";
+
+impl ModalView for FileFinder {
+    fn minibuffer_name(&self) -> Option<&'static str> {
+        Some(MINIBUFFER_NAME)
+    }
+}
 
 pub struct FileFinder {
     picker: Entity<Picker<FileFinderDelegate>>,
@@ -167,9 +176,15 @@ impl FileFinder {
 
         let project = delegate.project.clone();
         let modal_max_width = Self::modal_max_width(modal_max_width_setting, window);
+        let routed = workspace::routes_to_minibuffer(MINIBUFFER_NAME, cx);
         let picker = cx.new(|cx| {
-            Picker::uniform_list_with_preview(delegate, project, window, cx)
-                .initial_width(Rems::from_pixels(modal_max_width, window))
+            if routed {
+                // The strip has no preview and a width of its own.
+                Picker::uniform_list(delegate, window, cx).minibuffer(MINIBUFFER_NAME, cx)
+            } else {
+                Picker::uniform_list_with_preview(delegate, project, window, cx)
+                    .initial_width(Rems::from_pixels(modal_max_width, window))
+            }
         });
         let picker_focus_handle = picker.focus_handle(cx);
         picker.update(cx, |picker, _| {
@@ -294,6 +309,37 @@ impl FileFinder {
         })
     }
 
+    /// The picker the file finder shows, for tests in other crates.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn picker(&self) -> &Entity<Picker<FileFinderDelegate>> {
+        &self.picker
+    }
+
+    fn copy_selected_path(&mut self, _: &CopySelectedPath, _: &mut Window, cx: &mut Context<Self>) {
+        let path = {
+            let delegate = &self.picker.read(cx).delegate;
+            delegate
+                .matches
+                .get(delegate.selected_index())
+                .and_then(|m| match m.abs_path(&delegate.project, cx) {
+                    Some(abs_path) => Some(abs_path.to_string_lossy().into_owned()),
+                    None => match m {
+                        Match::CreateNew(project_path) => Some(
+                            project_path
+                                .path
+                                .display(delegate.project.read(cx).path_style(cx))
+                                .into_owned(),
+                        ),
+                        _ => None,
+                    },
+                })
+        };
+        if let Some(path) = path {
+            cx.write_to_clipboard(ClipboardItem::new_string(path));
+            cx.emit(DismissEvent);
+        }
+    }
+
     fn open_without_dismiss(
         &mut self,
         _: &OpenWithoutDismiss,
@@ -341,6 +387,7 @@ impl Render for FileFinder {
             .on_action(cx.listener(Self::go_to_file_split_up))
             .on_action(cx.listener(Self::go_to_file_split_down))
             .on_action(cx.listener(Self::open_without_dismiss))
+            .on_action(cx.listener(Self::copy_selected_path))
             .child(self.picker.clone())
     }
 }
@@ -1517,6 +1564,17 @@ impl PickerDelegate for FileFinderDelegate {
         "Search project files...".into()
     }
 
+    fn prompt_label(&self, _cx: &App) -> Option<SharedString> {
+        Some("Find file: ".into())
+    }
+
+    fn match_text(&self, ix: usize) -> Option<String> {
+        match self.matches.get(ix)? {
+            Match::CreateNew(project_path) => Some(project_path.path.as_unix_str().to_string()),
+            m => Some(m.relative_path()?.as_unix_str().to_string()),
+        }
+    }
+
     fn searchbar_trailer(
         &self,
         _window: &mut Window,
@@ -1806,6 +1864,7 @@ impl PickerDelegate for FileFinderDelegate {
             picker::PickerAction::button("Down", pane::SplitDown::default().boxed_clone()),
             picker::PickerAction::separator(),
             picker::PickerAction::button("Open File", menu::Confirm.boxed_clone()),
+            picker::PickerAction::button("Copy path", CopySelectedPath.boxed_clone()),
         ]
     }
 }
