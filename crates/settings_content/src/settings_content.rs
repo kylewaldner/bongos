@@ -257,6 +257,9 @@ pub struct SettingsContent {
     /// `chats/` directory.
     pub chats: Option<ChatsSettingsContent>,
 
+    /// Settings for the prompts editor: the major mode of `prompts.txt` files.
+    pub prompts: Option<PromptsSettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -1384,6 +1387,17 @@ pub struct WorkSettingsContent {
     ///
     /// Default: []
     pub repositories: Option<Vec<WorkRepositoryContent>>,
+}
+
+/// Settings for the prompts editor.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct PromptsSettingsContent {
+    /// Whether the prompts editor is on. While it is off, `prompts.txt` files open as plain
+    /// text and the prompts commands are hidden.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
 }
 
 /// Settings for chat sessions.

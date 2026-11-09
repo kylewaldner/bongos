@@ -2050,6 +2050,7 @@ dependencies = [
  "bongos_kotlin",
  "bongos_languages",
  "bongos_net",
+ "bongos_prompts",
  "bongos_version",
  "bongos_work",
  "breadcrumbs",
@@ -2325,6 +2326,25 @@ dependencies = [
  "http_client",
  "log",
  "smol",
+]
+
+[[package]]
+name = "bongos_prompts"
+version = "0.1.0"
+dependencies = [
+ "bongos_prompts_model",
+ "command_palette_hooks",
+ "fs",
+ "gpui",
+ "language",
+ "project",
+ "release_channel",
+ "remote",
+ "rpc",
+ "semver",
+ "serde_json",
+ "settings",
+ "workspace",
 ]
 
 [[package]]

@@ -514,6 +514,7 @@ fn main() {
         debug_adapter_extension::init(extension_host_proxy.clone(), cx);
         languages::init(languages.clone(), fs.clone(), node_runtime.clone(), cx);
         bongos_languages::init(&languages);
+        bongos_prompts::register_language(&languages);
         bongos_kotlin::init(
             &languages,
             bongos_kotlin::KotlinDirs {
@@ -532,6 +533,7 @@ fn main() {
             bongos_chat::ChatDirs::new(util::paths::home_dir(), paths::data_dir()),
             cx,
         );
+        bongos_prompts::init(cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 
@@ -625,6 +627,7 @@ fn main() {
         command_palette::init(cx);
         bongos_work::init_palette(cx);
         bongos_chat::init_palette(cx);
+        bongos_prompts::init_palette(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: language::language_settings::all_language_settings(None, cx)
                 .edit_predictions
