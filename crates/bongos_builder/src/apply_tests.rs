@@ -24,7 +24,7 @@ use workspace::Workspace;
 use crate::actions::{LastToast, OFF_MESSAGE};
 use crate::apply::{
     already_applied_message, apply_command, confirm_prompt, conflict_message, errors_message,
-    nothing_message, rejected_message,
+    nothing_message, reject_applied_message, reject_command, rejected_message,
 };
 use crate::view_tests::{
     BROKEN, LAYERS, dispatch, harness, has_modal, open_editor, proposal, set_settings_in, snapshot,
@@ -363,13 +363,6 @@ async fn a_live_chat_keeps_running_after_an_apply_that_tried_to_drop_its_task(
 ) {
     let (h, workspace, cx) = harness(cx, true, Some("b"), &[proposal(1, DROP_RATES, false)]).await;
     let chats = FakeChats::install(cx);
-    // The chat's process: anything that runs until it is stopped. Spawning it once, before the
-    // apply, blocks nothing the test waits on.
-    #[allow(clippy::disallowed_methods)]
-    let mut process = std::process::Command::new("sleep")
-        .arg("60")
-        .spawn()
-        .unwrap();
     chats.open("r", cx);
     let rates = h.billing.join("tasks/engine/tasks/rates/task.toml");
     let rates_before = std::fs::read(&rates).unwrap();
@@ -383,12 +376,10 @@ async fn a_live_chat_keeps_running_after_an_apply_that_tried_to_drop_its_task(
 
     assert_eq!(std::fs::read(&rates).unwrap(), rates_before);
     assert_eq!(task_file(cx, "r").status, Status::Open);
-    assert!(
-        process.try_wait().unwrap().is_none(),
-        "the chat's process stopped"
-    );
-    process.kill().ok();
-    process.wait().ok();
+    // The chat is still open on the task: the apply closed nothing in the chats' registry.
+    assert!(chats.0.borrow().contains("r"), "the chat was closed");
+    let modes = cx.update(|_, cx| LiveModesRegistry::live_modes("r", cx));
+    assert_eq!(modes.open_chats, 1, "the chat no longer counts as open");
 }
 
 #[gpui::test]
@@ -554,6 +545,32 @@ async fn reject_keeps_the_file_and_the_tree(cx: &mut gpui::TestAppContext) {
         },
         billing_before
     );
+}
+
+#[gpui::test]
+async fn a_reject_of_an_applied_proposal_is_refused_even_after_its_file_was_edited(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, _workspace, cx) = harness(cx, true, Some("b"), &[proposal(1, LAYERS, true)]).await;
+    let edited = LAYERS.replace("why ", "why edited after the apply: ");
+    assert_ne!(edited, LAYERS);
+    h.put(1, &edited).await;
+
+    // The writer's command refuses on the tree as it is, whatever the file's bytes.
+    let tree = snapshot(cx);
+    let refused = reject_command("b", 1, &tree, &WorkContext::kyle(), edited.as_bytes());
+    assert_eq!(refused.unwrap_err(), reject_applied_message(1));
+
+    // And so does the command, which leaves the applied record in place.
+    let before = files(&root_of(&h.billing));
+    clear_toast(cx);
+    dispatch(cx, "task::RejectProposal");
+    wait_for_toast(cx, &reject_applied_message(1)).await;
+    assert_eq!(files(&root_of(&h.billing)), before);
+    let billing = task_file(cx, "b");
+    assert_eq!(billing.proposals.len(), 1);
+    assert_eq!(billing.proposals[0].state, ProposalState::Applied);
+    assert_eq!(billing.proposals[0].hash, file_hash(LAYERS.as_bytes()));
 }
 
 #[gpui::test]

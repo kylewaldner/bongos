@@ -3,11 +3,12 @@
 //! `task` and `proposal` actions of the builder, hidden while `task_builder.enabled` is false, and
 //! the format reference written to `~/.bongos/task-builder/format.txt`, the plan todo of a new task,
 //! the plan chat, what every chat is told about proposals, the proposal view, and the preview,
-//! apply and reject of a proposal. The proposal format and
-//! its pure rules live in `bongos_builder_model`, which has no UI dependency.
+//! apply and reject of a proposal, `task: propose` and the switches of the automatic apply. The
+//! proposal format and its pure rules live in `bongos_builder_model`, which has no UI dependency.
 
 mod actions;
 mod apply;
+mod auto_apply;
 mod choose;
 mod context;
 #[cfg(debug_assertions)]
@@ -17,6 +18,7 @@ mod language;
 mod live;
 mod plan;
 mod preview_view;
+mod propose;
 mod settings;
 mod view;
 
@@ -27,11 +29,13 @@ use fs::Fs;
 use gpui::App;
 
 pub use actions::{BuilderToast, action_types, init_palette, proposal, register, task};
+pub use auto_apply::{auto_apply_allowed, effective_auto_apply};
 pub use bongos_builder_model as model;
 pub use context::{MAX_PRINTED_LINES, PLAN_TYPE, plan_section, pointer_section};
 pub use format_file::{BuilderDirs, FORMAT_FILE_NAME};
 pub use language::{FILE_SUFFIX, NAME as LANGUAGE_NAME, register_language};
 pub use plan::plan_todos;
+pub use propose::is_untouched;
 pub use settings::TaskBuilderSettings;
 pub use view::{Mark, ProposalView};
 
@@ -52,5 +56,7 @@ mod apply_tests;
 mod builder_tests;
 #[cfg(test)]
 mod plan_tests;
+#[cfg(test)]
+mod propose_tests;
 #[cfg(test)]
 mod view_tests;

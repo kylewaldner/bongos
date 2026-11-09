@@ -104,8 +104,25 @@ pub(crate) fn apply_command(
     request.run(tree, ctx, live, bytes)
 }
 
+/// Whether the task `root` records proposal `number` as applied, whatever the file's hash.
+pub(crate) fn ever_applied(tree: &WorkTree, root: &str, number: u32) -> bool {
+    tree.task_by_id(root)
+        .and_then(|task| task.file.as_ref())
+        .is_some_and(|file| {
+            file.proposals
+                .iter()
+                .any(|record| record.number == number && record.state == ProposalState::Applied)
+        })
+}
+
+/// The refusal of a reject of an applied proposal.
+pub(crate) fn reject_applied_message(number: u32) -> String {
+    format!("Proposal {number} is applied; a reject cannot take it back")
+}
+
 /// The writer's command of a reject: the record of proposal `number` on the task `root`, with
-/// the hash of `bytes`. An applied proposal is not rejected: the tree already holds it.
+/// the hash of `bytes`. A proposal applied once is never rejected, even after its file was
+/// edited: the tree already holds it, and the reject would replace its applied record.
 pub(crate) fn reject_command(
     root: &str,
     number: u32,
@@ -113,13 +130,10 @@ pub(crate) fn reject_command(
     ctx: &WorkContext,
     bytes: &[u8],
 ) -> Outcome {
-    let hash = file_hash(bytes);
-    if applied_as_is(tree, root, number, &hash) {
-        return Err(format!(
-            "Proposal {number} is applied; a reject cannot take it back"
-        ));
+    if ever_applied(tree, root, number) {
+        return Err(reject_applied_message(number));
     }
-    reject(tree, ctx, root, number, &hash)
+    reject(tree, ctx, root, number, &file_hash(bytes))
 }
 
 /// `task: apply proposal`.
@@ -439,12 +453,9 @@ fn queue(
         show_toast(workspace, WriteError::Off.to_string(), cx);
         return;
     };
-    let Some(now) = ready(workspace, cx) else {
+    if ready(workspace, cx).is_none() {
         return;
-    };
-    // The running work now, never the previewed set: a chat started since the preview changes
-    // the diff, and the writer refuses.
-    let live = live::collect(&now, cx);
+    }
     let request = Request {
         parsed: (*pending.parsed).clone(),
         choices: pending.choices.clone(),
@@ -475,6 +486,11 @@ fn queue(
             }
         };
         let Ok(write) = workspace.update(cx, |_, cx| {
+            // The running work now, right before the write is queued, never the previewed set:
+            // a chat started since the preview (or during the read above) changes the diff, and
+            // the writer refuses.
+            let now = store.read(cx).snapshot();
+            let live = now.map(|now| live::collect(&now, cx)).unwrap_or_default();
             store.update(cx, |store, cx| {
                 store.write(
                     WorkContext::kyle(),

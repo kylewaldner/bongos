@@ -3,8 +3,9 @@
 //! that the task builder is off. While it is true `task: plan` and `task: new without plan` work
 //! (see [`crate::plan`]), `task: show proposal`, `task: edit proposal` and the proposal view's
 //! actions work (see [`crate::view`] and [`crate::choose`]), `task: apply proposal` and `task:
-//! reject proposal` work (see [`crate::apply`]) and the others do nothing yet: their commands
-//! arrive in later steps. The keys are bound in the Emacs keymaps, not here.
+//! reject proposal` work (see [`crate::apply`]), and `task: propose` and `task: toggle auto
+//! apply` work (see [`crate::propose`] and [`crate::auto_apply`]). The keys are bound in the
+//! Emacs keymaps, not here.
 
 use std::any::TypeId;
 
@@ -17,7 +18,7 @@ use workspace::notifications::NotificationId;
 
 #[cfg(debug_assertions)]
 use crate::dump;
-use crate::{TaskBuilderSettings, apply, choose, plan, view};
+use crate::{TaskBuilderSettings, apply, auto_apply, choose, plan, propose, view};
 
 /// New actions in the `task` namespace, shared with the work tree's and Zed's task runner; no
 /// name collides.
@@ -139,12 +140,6 @@ pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Co
     );
 }
 
-/// Registers the handler of `A`: the off toast while `task_builder.enabled` is false, nothing yet
-/// while it is true.
-fn register_action<A: Action>(workspace: &mut Workspace) {
-    register_with::<A>(workspace, |_, _, _| {});
-}
-
 /// Registers the handler of `A`: the off toast while `task_builder.enabled` is false, `run` while
 /// it is true.
 fn register_with<A: Action>(
@@ -163,13 +158,13 @@ fn register_with<A: Action>(
 /// Registers the handlers of the builder's actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
     register_with::<task::Plan>(workspace, plan::plan);
-    register_action::<task::Propose>(workspace);
+    register_with::<task::Propose>(workspace, propose::propose);
     register_with::<task::ShowProposal>(workspace, view::show_proposal);
     register_with::<task::EditProposal>(workspace, choose::edit_proposal);
     register_with::<task::ApplyProposal>(workspace, apply::apply_proposal);
     register_with::<task::RejectProposal>(workspace, apply::reject_proposal);
     register_with::<task::NewWithoutPlan>(workspace, plan::new_without_plan);
-    register_action::<task::ToggleAutoApply>(workspace);
+    register_with::<task::ToggleAutoApply>(workspace, auto_apply::toggle_auto_apply);
     register_with::<proposal::Descend>(workspace, view::descend_active);
     register_with::<proposal::Up>(workspace, view::up_active);
     #[cfg(debug_assertions)]
