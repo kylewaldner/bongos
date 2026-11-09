@@ -126,10 +126,17 @@ pub fn init(dirs: ChatDirs, cx: &mut App) {
 
 /// On quit every running chat is ended and its `last_active` written (design D18).
 fn end_chats_on_quit(runtime: &Entity<ChatRuntime>, cx: &mut App) {
-    let runtime = runtime.clone();
+    // Weak, so the hook does not keep the runtime alive.
+    let runtime = runtime.downgrade();
     cx.on_app_quit(move |cx| {
-        let end = runtime.update(cx, |runtime, cx| runtime.end_for_quit(cx));
-        async move { end.await }
+        let end = runtime
+            .update(cx, |runtime, cx| runtime.end_for_quit(cx))
+            .ok();
+        async move {
+            if let Some(end) = end {
+                end.await;
+            }
+        }
     })
     .detach();
 }
