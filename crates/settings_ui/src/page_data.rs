@@ -389,7 +389,10 @@ fn chats_page() -> SettingsPage {
                         settings_content.prompts.as_ref()?.marker_close.as_ref()
                     },
                     write: |settings_content, value, _| {
-                        settings_content.prompts.get_or_insert_default().marker_close = value;
+                        settings_content
+                            .prompts
+                            .get_or_insert_default()
+                            .marker_close = value;
                     },
                 }),
                 metadata: None,
