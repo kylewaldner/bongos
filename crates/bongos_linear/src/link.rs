@@ -88,7 +88,7 @@ pub(crate) fn choices(
 pub(crate) fn confirm_prompt(goal: &str, issue: &Issue) -> String {
     format!(
         "Link {goal} to {id} '{title}'? The task takes Linear's title, and bongos will move {id} \
-         to started when its plan begins and ask before cancelling it. (y or n) ",
+         to started when its plan begins and ask before cancelling it.",
         id = issue.identifier,
         title = issue.title.trim(),
     )
@@ -302,11 +302,7 @@ fn ask_ticket(
         Box::new(
             move |text, workspace, window, cx| match parse_typed(&text) {
                 Some(reference) => chosen(workspace, task_id, reference, window, cx),
-                None => show_toast(
-                    workspace,
-                    format!("'{text}' is not a Linear identifier or URL"),
-                    cx,
-                ),
+                None => show_toast(workspace, "Not a Linear identifier or URL".to_string(), cx),
             },
         ),
         window,
