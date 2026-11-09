@@ -82,6 +82,17 @@ ckeys() {
   wait_for_settled
 }
 
+# Types text that has newlines: xdotool type drops them here, so each line is typed and Return is
+# pressed between lines. Each line is typed only when it is not empty.
+type_lines() {
+  local text="$1" line first=1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$first" = 1 ] || keys Return
+    first=0
+    [ -z "$line" ] || type_text "$line"
+  done <<<"$text"
+}
+
 # Types into the open picker or prompt and confirms. A picker keeps the first row that contains every
 # word typed.
 choose() {
@@ -376,7 +387,7 @@ say "smoke: implement chat in the worktree with the task's id; layout dual (term
 # ---------------------------------------------------------------------------------------------
 step "Chats 2: chat: send region pastes the three paragraphs once and presses Enter once"
 ckeys e
-type_text "$PROMPT"
+type_lines "$PROMPT"
 palette "chat: send region"
 poll 15 "one bracketed paste of the prompt and one Enter" pastes_ok 1 "$PROMPT"
 wait_toml "$CLAUDE_REC" 'd["name"]' "$PROMPT_NAME"
@@ -387,7 +398,7 @@ say "smoke: one paste and one Enter; the chat is named '$PROMPT_NAME'"
 step "Chats 3: C-c c p twice toggles the layout in the record and keeps unsaved prompt text"
 # Typed after the send and never saved: if the toggle rebuilt the editor from prompts.txt it is gone.
 ckeys e
-type_text "$UNSAVED"
+type_lines "$UNSAVED"
 ckeys p
 wait_toml "$CLAUDE_REC" 'd["layout"]' chat-only
 ckeys p
@@ -493,6 +504,10 @@ wait_toml "$FORK_REC" 'd["archived"]' True
 [ -f "$FORK_REC" ] || fail "chat: archive removed the record"
 dump_list archived
 expect_section "$FORK_NAME" archived
+# chat: restore lists the archived chats of the focused task, and the project is focused since step 5.
+wkeys f
+choose prorate
+focus_editor
 cpick u
 choose "$FORK_NAME"
 wait_toml "$FORK_REC" 'd["archived"]' False
