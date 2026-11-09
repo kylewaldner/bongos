@@ -137,9 +137,9 @@ Finish with unit tests.
   marker. The stamps are `YYYY-MM-DD HH:MM`; once the block is sent the marker reads
   `=== prompt <created> | sent <sent> ===`, and a later send updates the sent stamp. Text before the
   first marker is a block without one, and a send inserts the marker above it. Only a line that is
-  exactly a marker counts; anything else is prompt text. The editor draws each marker as a rule
+  exactly a marker counts; anything else is prompt text. `prompts.marker_open` and `prompts.marker_close` change the marker text (the default syntax is always recognized too). The editor draws each marker as a rule
   with its stamps, dims the bodies of sent blocks and brightens the current one; the mode line
-  shows `prompt 3/7 - pending - auto-submit on` (or `sent 14:02`).
+  shows `prompt 3/7 · pending · auto-submit on` (or `sent 14:02`).
 - **Keys (Emacs keymap only, in the prompts editor).** `C-c C-c` sends the prompt at point (it asks
   first when the block was sent before), `C-c C-r` sends the selection exactly and marks nothing (with no selection it is `C-c C-c`),
   `C-c C-n` starts a new prompt, `C-c C-p` and `C-c C-f` go to the previous and next prompt,
