@@ -448,3 +448,26 @@ async fn actions_are_hidden_while_disabled(cx: &mut TestAppContext) {
     assert_eq!(hidden(cx), [true; 4]);
     drop(setup);
 }
+
+/// Chats are on in the default settings, so nothing needs to set `chats.enabled` and the actions
+/// are shown; only a user who sets it false hides them.
+#[gpui::test]
+async fn chats_are_enabled_by_default(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let settings = SettingsStore::test(cx);
+        cx.set_global(settings);
+        ChatsSettings::register(cx);
+        command_palette_hooks::init(cx);
+        init_palette(cx);
+        assert!(ChatsSettings::get_global(cx).enabled);
+        let filter = CommandPaletteFilter::try_global(cx).unwrap();
+        assert!(!filter.is_hidden(&chat::New));
+        assert!(!filter.is_hidden(&chat::TogglePanel));
+    });
+    set_chats_enabled(cx, false);
+    cx.update(|cx| {
+        assert!(!ChatsSettings::get_global(cx).enabled);
+        let filter = CommandPaletteFilter::try_global(cx).unwrap();
+        assert!(filter.is_hidden(&chat::New));
+    });
+}

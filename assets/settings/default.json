@@ -2618,7 +2618,7 @@
     // Whether chat sessions are on. While they are off, bongos neither indexes
     // chat records nor seeds the session types, and the chat commands are hidden.
     // Chats also need the Work view ("work.enabled").
-    "enabled": false,
+    "enabled": true,
     // Where the chat panel docks: "left", "bottom" or "right".
     "dock": "right",
     // Default width of the chat panel, in pixels.

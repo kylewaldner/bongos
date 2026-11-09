@@ -79,6 +79,7 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         ai_page(cx),
         network_page(),
         work_page(),
+        chats_page(),
         developer_page(cx),
     ]
 }
@@ -217,6 +218,92 @@ fn work_page() -> SettingsPage {
     SettingsPage {
         title: "Work",
         items: concat_sections![work_section(), thresholds_and_repositories_section()],
+    }
+}
+
+fn chats_page() -> SettingsPage {
+    fn chats_section() -> [SettingsPageItem; 6] {
+        [
+            SettingsPageItem::SectionHeader("Chats"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Chats",
+                description: "Whether chat sessions are on. While they are off, bongos neither indexes chat records nor seeds the session types, and the chat commands are hidden. Chats also need the Work view.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("chats.enabled"),
+                    pick: |settings_content| settings_content.chats.as_ref()?.enabled.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.chats.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Prompt Pane",
+                description: "Whether a dual-layout chat shows the prompts pane beside its terminal.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("chats.prompt_pane"),
+                    pick: |settings_content| settings_content.chats.as_ref()?.prompt_pane.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.chats.get_or_insert_default().prompt_pane = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Idle After Seconds",
+                description: "Seconds without output after which a running chat counts as idle.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("chats.idle_after_secs"),
+                    pick: |settings_content| settings_content.chats.as_ref()?.idle_after_secs.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.chats.get_or_insert_default().idle_after_secs = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Submit Delay",
+                description: "Milliseconds between pasting a prompt into a chat and submitting it.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("chats.submit_delay_ms"),
+                    pick: |settings_content| settings_content.chats.as_ref()?.submit_delay_ms.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.chats.get_or_insert_default().submit_delay_ms = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agents",
+                description: "The agent CLIs: the program to run and the arguments added to every launch. Edit in settings.json.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("chats.agents"),
+                        pick: |settings_content| settings_content.chats.as_ref()?.agents.as_ref(),
+                        write: |settings_content, value, _| {
+                            settings_content.chats.get_or_insert_default().agents = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    SettingsPage {
+        title: "Chats",
+        items: concat_sections![chats_section()],
     }
 }
 
@@ -10325,5 +10412,29 @@ mod tests {
         ] {
             assert!(titles.iter().any(|title| title == expected), "{titles:?}");
         }
+    }
+
+    #[test]
+    fn test_chats_page_lists_the_chat_settings() {
+        let page = chats_page();
+        assert_eq!(page.title, "Chats");
+        let paths: Vec<&str> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "chats.enabled",
+                "chats.prompt_pane",
+                "chats.idle_after_secs",
+                "chats.submit_delay_ms",
+                "chats.agents",
+            ]
+        );
     }
 }
