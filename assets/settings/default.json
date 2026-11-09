@@ -2704,10 +2704,11 @@
     "marker_close": "===",
   },
   "task_builder": {
-    // Whether the task builder is on. While it is off, its commands are hidden and each
-    // one only says so. The `Proposal` language, which saves `*.proposal.txt` files exactly
-    // as typed, applies either way.
-    "enabled": false,
+    // Whether the task builder is on. It gives each new task a plan todo and adds the
+    // plan, propose and apply commands. While it is off, every task builder command is hidden
+    // and `task: new` creates tasks as before. The `Proposal` language, which saves
+    // `*.proposal.txt` files exactly as typed, applies either way.
+    "enabled": true,
     // Whether a valid proposal written by a chat applies on its own. A project can
     // override it for itself.
     "auto_apply": true,

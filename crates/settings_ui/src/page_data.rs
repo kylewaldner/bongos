@@ -215,9 +215,80 @@ fn work_page() -> SettingsPage {
         ]
     }
 
+    fn task_builder_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Task Builder"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Task Builder",
+                description: "Whether the task builder is on. It gives each new task a plan todo and adds the plan, propose and apply commands. While it is off, every task builder command is hidden and new tasks are created as before.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_builder.enabled"),
+                    pick: |settings_content| {
+                        settings_content.task_builder.as_ref()?.enabled.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_builder
+                            .get_or_insert_default()
+                            .enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Auto Apply",
+                description: "Whether a valid proposal written by a chat applies on its own. A project can override this for itself.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_builder.auto_apply"),
+                    pick: |settings_content| {
+                        settings_content.task_builder.as_ref()?.auto_apply.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_builder
+                            .get_or_insert_default()
+                            .auto_apply = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Todo Warning",
+                description: "The number of todos on a task after which the builder suggests splitting it.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_builder.todo_warning"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_builder
+                            .as_ref()?
+                            .todo_warning
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_builder
+                            .get_or_insert_default()
+                            .todo_warning = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: "Work",
-        items: concat_sections![work_section(), thresholds_and_repositories_section()],
+        items: concat_sections![
+            work_section(),
+            thresholds_and_repositories_section(),
+            task_builder_section()
+        ],
     }
 }
 
@@ -10483,6 +10554,7 @@ mod tests {
                 SettingsPageItem::SettingItem(item) => item.field.json_path(),
                 _ => None,
             })
+            .filter(|path| path.starts_with("work."))
             .collect();
         for key in &keys {
             let path = format!("work.{key}");
@@ -10512,6 +10584,33 @@ mod tests {
         ] {
             assert!(titles.iter().any(|title| title == expected), "{titles:?}");
         }
+    }
+
+    #[test]
+    fn test_work_page_lists_the_task_builder_settings() {
+        let page = work_page();
+        let paths: Vec<&str> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                _ => None,
+            })
+            .filter(|path| path.starts_with("task_builder."))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "task_builder.enabled",
+                "task_builder.auto_apply",
+                "task_builder.todo_warning"
+            ]
+        );
+        assert!(
+            page.items
+                .iter()
+                .any(|item| matches!(item, SettingsPageItem::SectionHeader("Task Builder")))
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use settings::SettingsStore;
 
 use crate::actions::LastToast;
 use crate::auto_apply::toggled_message;
-use crate::later::{ChatOwner, FailAutoApply, Later, Status, TestChats, agent_line};
+use crate::later::{ChatOwner, FailAutoApply, Later, Status, TestChats, agent_line, finish_apply};
 use crate::propose::{is_untouched, prefilled};
 use crate::view_tests::{
     Harness, dispatch, harness, set_settings_in, snapshot, task_toml, wait_for_in, write,
@@ -422,6 +422,31 @@ async fn a_failed_auto_apply_is_not_retried_until_the_file_changes(cx: &mut Test
             && toast.ends_with("(chat billing chat): second"),
         "{toast}"
     );
+}
+
+#[gpui::test]
+async fn a_refused_second_run_on_applied_content_is_settled_not_failed(cx: &mut TestAppContext) {
+    let (h, _workspace, cx) = harness(cx, true, Some("b"), &[]).await;
+    set_chats(cx, &[("c1", "b", "helper chat")]);
+    let path = h.file(2);
+    write(&path, &helper(2, "by chat c1", "rounding needs a helper"));
+    wait_for_in(cx, "the new task", |cx| has_goal(cx, "Rounding helper")).await;
+    settled(cx, &path).await;
+    assert_eq!(status(cx, &path), Some(Status::Settled));
+
+    // The file was queued twice: the second run is refused, and the tree records the hash.
+    let refused = "not applied on its own: it is not pending".to_string();
+    cx.update(|_, cx| finish_apply(path.clone(), Err(refused.clone()), cx));
+    assert_eq!(status(cx, &path), Some(Status::Settled));
+
+    // A refusal on content the tree does not record is still a failure.
+    cx.update(|_, cx| {
+        cx.global_mut::<Later>()
+            .judged
+            .insert(path.clone(), "another hash".to_string());
+        finish_apply(path.clone(), Err(refused.clone()), cx);
+    });
+    assert_eq!(status(cx, &path), Some(Status::Failed(refused)));
 }
 
 #[gpui::test]

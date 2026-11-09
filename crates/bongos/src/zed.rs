@@ -2,6 +2,8 @@ mod app_menus;
 #[cfg(test)]
 mod bongos_tests;
 #[cfg(test)]
+mod builder_keymap_tests;
+#[cfg(test)]
 mod chat_keymap_tests;
 pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
