@@ -2,9 +2,13 @@
 # All heavy output lives in the workspace, so the machine's main disk is never used.
 # The workspace is, in order: $BONGOS_WORKSPACE, else the first line of ~/.config/bongos-dev/workspace.
 # There is no other default: a wrong guess would put 100 GB in the wrong place.
-# Optional, so temp and scratch files can live on another disk (a value already set wins):
-#   BONGOS_TMPDIR         becomes TMPDIR (default $BONGOS_WORKSPACE/scratch/tmp)
-#   BONGOS_SMOKE_SCRATCH  holds the per-run smoke directories (default $BONGOS_WORKSPACE/scratch/smoke)
+# Optional, so temp and scratch files can live on another disk. A value already set wins, else the
+# first line of the config file, else the default. A configured directory that is missing or not
+# writable is an error, never a silent fallback:
+#   BONGOS_TMPDIR         becomes TMPDIR (~/.config/bongos-dev/tmpdir; default $BONGOS_WORKSPACE/scratch/tmp)
+#   BONGOS_SMOKE_SCRATCH  holds the per-run smoke directories (~/.config/bongos-dev/smoke-scratch;
+#                         default $BONGOS_WORKSPACE/scratch/smoke)
+#   BONGOS_LOG_DIR        holds the script logs (see lib.sh; default $BONGOS_WORKSPACE/scratch/logs)
 if [ -z "${BONGOS_WORKSPACE:-}" ] && [ -f "$HOME/.config/bongos-dev/workspace" ]; then
   IFS= read -r BONGOS_WORKSPACE <"$HOME/.config/bongos-dev/workspace" || true
 fi
@@ -24,6 +28,26 @@ export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup"
 export CARGO_HOME="$BONGOS_WORKSPACE/cargo"
 # A CARGO_TARGET_DIR already set in the environment wins over the workspace default.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BONGOS_WORKSPACE/target}"
+if [ -z "${BONGOS_TMPDIR:-}" ] && [ -f "$HOME/.config/bongos-dev/tmpdir" ]; then
+  IFS= read -r BONGOS_TMPDIR <"$HOME/.config/bongos-dev/tmpdir" || true
+fi
+if [ -z "${BONGOS_SMOKE_SCRATCH:-}" ] && [ -f "$HOME/.config/bongos-dev/smoke-scratch" ]; then
+  IFS= read -r BONGOS_SMOKE_SCRATCH <"$HOME/.config/bongos-dev/smoke-scratch" || true
+fi
+# A directory chosen by the environment or a config file must already exist (the drive may be unmounted).
+_bongos_need_dir() {
+  if [ ! -d "$2" ] || [ ! -w "$2" ]; then
+    echo "bongos: $1 $2 is not available or not writable; is the drive mounted?" >&2
+    return 1
+  fi
+}
+if [ -n "${BONGOS_TMPDIR:-}" ]; then
+  _bongos_need_dir "temp directory" "$BONGOS_TMPDIR" || { unset -f _bongos_need_dir; return 1 2>/dev/null || exit 1; }
+fi
+if [ -n "${BONGOS_SMOKE_SCRATCH:-}" ]; then
+  _bongos_need_dir "smoke scratch directory" "$BONGOS_SMOKE_SCRATCH" || { unset -f _bongos_need_dir; return 1 2>/dev/null || exit 1; }
+fi
+unset -f _bongos_need_dir
 export BONGOS_TMPDIR="${BONGOS_TMPDIR:-$BONGOS_WORKSPACE/scratch/tmp}"
 export BONGOS_SMOKE_SCRATCH="${BONGOS_SMOKE_SCRATCH:-$BONGOS_WORKSPACE/scratch/smoke}"
 export TMPDIR="$BONGOS_TMPDIR"
