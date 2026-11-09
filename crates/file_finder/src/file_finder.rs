@@ -321,18 +321,15 @@ impl FileFinder {
             delegate
                 .matches
                 .get(delegate.selected_index())
-                .and_then(|m| match m.abs_path(&delegate.project, cx) {
-                    Some(abs_path) => Some(abs_path.to_string_lossy().into_owned()),
-                    None => match m {
-                        Match::CreateNew(project_path) => Some(
-                            project_path
-                                .path
-                                .display(delegate.project.read(cx).path_style(cx))
-                                .into_owned(),
-                        ),
-                        _ => None,
-                    },
+                .and_then(|m| match m {
+                    Match::CreateNew(project_path) => {
+                        let project = delegate.project.read(cx);
+                        let worktree = project.worktree_for_id(project_path.worktree_id, cx)?;
+                        Some(worktree.read(cx).absolutize(&project_path.path))
+                    }
+                    _ => m.abs_path(&delegate.project, cx),
                 })
+                .map(|abs_path| abs_path.to_string_lossy().into_owned())
         };
         if let Some(path) = path {
             cx.write_to_clipboard(ClipboardItem::new_string(path));
@@ -1854,9 +1851,9 @@ impl PickerDelegate for FileFinderDelegate {
     fn actions_menu(
         &self,
         _window: &mut Window,
-        _cx: &mut Context<Picker<Self>>,
+        cx: &mut Context<Picker<Self>>,
     ) -> Vec<picker::PickerAction> {
-        vec![
+        let mut actions = vec![
             picker::PickerAction::header("Split…"),
             picker::PickerAction::button("Left", pane::SplitLeft::default().boxed_clone()),
             picker::PickerAction::button("Right", pane::SplitRight::default().boxed_clone()),
@@ -1864,8 +1861,14 @@ impl PickerDelegate for FileFinderDelegate {
             picker::PickerAction::button("Down", pane::SplitDown::default().boxed_clone()),
             picker::PickerAction::separator(),
             picker::PickerAction::button("Open File", menu::Confirm.boxed_clone()),
-            picker::PickerAction::button("Copy path", CopySelectedPath.boxed_clone()),
-        ]
+        ];
+        if workspace::routes_to_minibuffer(MINIBUFFER_NAME, cx) {
+            actions.push(picker::PickerAction::button(
+                "Copy path",
+                CopySelectedPath.boxed_clone(),
+            ));
+        }
+        actions
     }
 }
 

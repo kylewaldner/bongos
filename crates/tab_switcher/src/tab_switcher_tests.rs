@@ -52,8 +52,8 @@ async fn test_open_with_prev_tab_selected_and_cycle_on_toggle_action(
         assert_match_at_position(tab_switcher, 3, tab_1.boxed_clone());
     });
 
-    cx.dispatch_action(Toggle { select_last: false });
-    cx.dispatch_action(Toggle { select_last: false });
+    cx.dispatch_action(Toggle::default());
+    cx.dispatch_action(Toggle::default());
     tab_switcher.update(cx, |tab_switcher, _| {
         assert_eq!(tab_switcher.delegate.matches.len(), 4);
         assert_match_at_position(tab_switcher, 0, tab_4.boxed_clone());
@@ -271,7 +271,10 @@ fn open_tab_switcher(
     workspace: &Entity<Workspace>,
     cx: &mut VisualTestContext,
 ) -> Entity<Picker<TabSwitcherDelegate>> {
-    cx.dispatch_action(Toggle { select_last });
+    cx.dispatch_action(Toggle {
+        select_last,
+        ..Toggle::default()
+    });
     get_active_tab_switcher(workspace, cx)
 }
 

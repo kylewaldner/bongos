@@ -126,6 +126,16 @@ fn open_tab_switcher(
     switcher.read_with(cx, |switcher, _| switcher.picker().clone())
 }
 
+fn open_chord_tab_switcher(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    // What `ctrl-x ctrl-b` is bound to.
+    cx.dispatch_action(tab_switcher::Toggle {
+        select_last: false,
+        confirm_on_release: false,
+    });
+    cx.run_until_parked();
+    assert!(tab_switcher_open(workspace, cx));
+}
+
 fn type_in_file_finder(cx: &mut VisualTestContext, input: &str) {
     cx.simulate_input(input);
     cx.executor().advance_clock(SEARCH_DEBOUNCE);
@@ -320,6 +330,22 @@ async fn tab_switcher_opened_by_a_chord_does_not_confirm_on_modifier_release(
 }
 
 #[gpui::test]
+async fn tab_switcher_chord_opened_with_control_held_waits_for_input(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &["tab_switcher"]).await;
+    let cx = &mut cx;
+    open_buffer("src/alpha.rs", &workspace, cx).await;
+    open_buffer("src/beta.rs", &workspace, cx).await;
+
+    // C-x C-b: control is still held when the switcher opens, and `confirm_on_release` is false.
+    cx.simulate_modifiers_change(Modifiers::control());
+    open_chord_tab_switcher(&workspace, cx);
+    cx.simulate_modifiers_change(Modifiers::none());
+    cx.run_until_parked();
+    assert!(tab_switcher_open(&workspace, cx), "still waiting for input");
+    assert!(in_strip(&workspace, cx));
+}
+
+#[gpui::test]
 async fn tab_switcher_opened_with_a_held_modifier_confirms_on_release(cx: &mut TestAppContext) {
     let (workspace, mut cx) = window(cx, &["tab_switcher"]).await;
     let cx = &mut cx;
@@ -365,5 +391,34 @@ async fn tab_switcher_unrouted_is_centered_and_has_no_input(cx: &mut TestAppCont
     assert!(centered_modal(&workspace, cx), "a centered modal");
     assert!(!in_strip(&workspace, cx));
     assert!(cx.debug_bounds("minibuffer-input").is_none());
-    picker.read_with(cx, |picker, _| assert_eq!(picker.delegate.match_count(), 2));
+    picker.read_with(cx, |picker, _| {
+        assert_eq!(picker.delegate.match_count(), 2);
+        assert!(!picker.has_input(), "still the nonsearchable list");
+    });
+}
+
+#[gpui::test]
+async fn file_finder_unrouted_menu_has_no_copy_path(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &[]).await;
+    let cx = &mut cx;
+    let picker = open_file_finder(&workspace, cx);
+    let labels = picker.update_in(cx, |picker, window, cx| {
+        picker
+            .delegate
+            .actions_menu(window, cx)
+            .into_iter()
+            .filter_map(|action| match action {
+                picker::PickerAction::Entry { label, .. } => Some(label.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        labels.iter().any(|label| label == "Open File"),
+        "the menu is listed in {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label == "Copy path"),
+        "no Copy path outside the strip: {labels:?}"
+    );
 }

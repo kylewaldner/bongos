@@ -31,12 +31,29 @@ use workspace::{
 const PANEL_WIDTH_REMS: f32 = 28.;
 
 /// Toggles the tab switcher interface.
-#[derive(PartialEq, Clone, Deserialize, JsonSchema, Default, Action)]
+#[derive(PartialEq, Clone, Deserialize, JsonSchema, Action)]
 #[action(namespace = tab_switcher)]
 #[serde(deny_unknown_fields)]
 pub struct Toggle {
     #[serde(default)]
     pub select_last: bool,
+    /// Whether releasing the modifiers held when the switcher opened confirms the selection.
+    /// Bind it to `false` for a chord such as `ctrl-x ctrl-b`, which opens with control held.
+    #[serde(default = "default_confirm_on_release")]
+    pub confirm_on_release: bool,
+}
+
+fn default_confirm_on_release() -> bool {
+    true
+}
+
+impl Default for Toggle {
+    fn default() -> Self {
+        Self {
+            select_last: false,
+            confirm_on_release: true,
+        }
+    }
 }
 actions!(
     tab_switcher,
@@ -79,7 +96,15 @@ impl TabSwitcher {
     ) {
         workspace.register_action(|workspace, action: &Toggle, window, cx| {
             let Some(tab_switcher) = workspace.active_modal::<Self>(cx) else {
-                Self::open(workspace, action.select_last, false, false, window, cx);
+                Self::open(
+                    workspace,
+                    action.select_last,
+                    action.confirm_on_release,
+                    false,
+                    false,
+                    window,
+                    cx,
+                );
                 return;
             };
 
@@ -91,7 +116,7 @@ impl TabSwitcher {
         });
         workspace.register_action(|workspace, _action: &ToggleAll, window, cx| {
             let Some(tab_switcher) = workspace.active_modal::<Self>(cx) else {
-                Self::open(workspace, false, true, false, window, cx);
+                Self::open(workspace, false, true, true, false, window, cx);
                 return;
             };
 
@@ -103,7 +128,7 @@ impl TabSwitcher {
         });
         workspace.register_action(|workspace, _action: &OpenInActivePane, window, cx| {
             let Some(tab_switcher) = workspace.active_modal::<Self>(cx) else {
-                Self::open(workspace, false, true, true, window, cx);
+                Self::open(workspace, false, true, true, true, window, cx);
                 return;
             };
 
@@ -118,6 +143,7 @@ impl TabSwitcher {
     fn open(
         workspace: &mut Workspace,
         select_last: bool,
+        confirm_on_release: bool,
         is_global: bool,
         open_in_active_pane: bool,
         window: &mut Window,
@@ -163,7 +189,7 @@ impl TabSwitcher {
                 cx,
                 original_items,
             );
-            TabSwitcher::new(delegate, window, is_global, cx)
+            TabSwitcher::new(delegate, window, is_global, confirm_on_release, cx)
         });
     }
 
@@ -171,11 +197,13 @@ impl TabSwitcher {
         delegate: TabSwitcherDelegate,
         window: &mut Window,
         is_global: bool,
+        confirm_on_release: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         // Releasing the modifiers confirms only when the switcher was opened with one held
-        // (ctrl-tab), never when it was opened by a chord (C-x b).
-        let init_modifiers = if is_global {
+        // (ctrl-tab), never when it was opened by a chord (C-x b, C-x C-b), which binds
+        // `confirm_on_release` to false.
+        let init_modifiers = if is_global || !confirm_on_release {
             None
         } else {
             window.modifiers().modified().then_some(window.modifiers())
