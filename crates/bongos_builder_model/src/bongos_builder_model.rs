@@ -7,6 +7,7 @@ pub mod grammar;
 pub mod help;
 pub mod parse;
 pub mod print;
+pub mod validate;
 
 pub use grammar::{
     By, Edge, FORMAT_VERSION, Header, Located, Node, Parsed, Problem, Severity, TaskAttributes,
@@ -14,6 +15,7 @@ pub use grammar::{
 };
 pub use parse::parse;
 pub use print::{LiveSet, print};
+pub use validate::{Checks, ProposalFile, validate};
 
 #[cfg(test)]
 mod grammar_tests;
@@ -23,3 +25,5 @@ mod parse_tests;
 mod print_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod validate_tests;
