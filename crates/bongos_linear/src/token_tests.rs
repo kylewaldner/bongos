@@ -17,12 +17,13 @@ use workspace::Workspace;
 
 use crate::actions::{LastToast, OFF_MESSAGE};
 use crate::actions_tests::{dispatch, set_enabled_in, toast_shown, workspace_with_actions};
+use crate::dump::install_logs_dir;
 use crate::token::{
     CREDENTIAL_URL, CREDENTIAL_USER, ENV_VAR, NO_TOKEN_MESSAGE, Token, TokenModal,
     install_client_factory, install_credentials_provider, install_env, with_token,
 };
 
-const SECRET: &str = "lin_api_TESTSECRET0123456789abcdef";
+pub(crate) const SECRET: &str = "lin_api_TESTSECRET0123456789abcdef";
 
 type Entries = HashMap<String, (String, Vec<u8>)>;
 
@@ -34,7 +35,7 @@ pub(crate) struct FakeCredentials {
 }
 
 impl FakeCredentials {
-    fn stored(&self) -> Option<(String, Vec<u8>)> {
+    pub(crate) fn stored(&self) -> Option<(String, Vec<u8>)> {
         self.entries.lock().unwrap().get(CREDENTIAL_URL).cloned()
     }
 
@@ -81,16 +82,16 @@ impl CredentialsProvider for FakeCredentials {
     }
 }
 
-struct Fixture {
-    workspace: Entity<Workspace>,
-    credentials: Arc<FakeCredentials>,
-    fake: FakeLinear,
+pub(crate) struct Fixture {
+    pub(crate) workspace: Entity<Workspace>,
+    pub(crate) credentials: Arc<FakeCredentials>,
+    pub(crate) fake: FakeLinear,
     /// How many clients the factory built, and whether each was built with the secret.
     built_with_secret: Arc<Mutex<Vec<bool>>>,
-    env: Arc<Mutex<Option<String>>>,
+    pub(crate) env: Arc<Mutex<Option<String>>>,
 }
 
-async fn fixture(cx: &mut TestAppContext) -> (Fixture, &mut VisualTestContext) {
+pub(crate) async fn fixture(cx: &mut TestAppContext) -> (Fixture, &mut VisualTestContext) {
     let (workspace, cx) = workspace_with_actions(cx).await;
     let credentials = Arc::new(FakeCredentials::default());
     let fake = FakeLinear::new("acme");
@@ -137,7 +138,7 @@ fn open_modal(fixture: &Fixture, cx: &mut VisualTestContext) -> Entity<TokenModa
         .expect("the token modal is open")
 }
 
-fn enter_token(fixture: &Fixture, text: &str, cx: &mut VisualTestContext) {
+pub(crate) fn enter_token(fixture: &Fixture, text: &str, cx: &mut VisualTestContext) {
     let modal = open_modal(fixture, cx);
     let editor = modal.read_with(cx, |modal, _| modal.editor().clone());
     editor.update_in(cx, |editor, window, cx| editor.set_text(text, window, cx));
@@ -145,7 +146,7 @@ fn enter_token(fixture: &Fixture, text: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn last_toast(cx: &mut VisualTestContext) -> String {
+pub(crate) fn last_toast(cx: &mut VisualTestContext) -> String {
     cx.update(|_, cx| cx.global::<LastToast>().0.clone())
 }
 
@@ -237,7 +238,10 @@ async fn clear_token_removes_it(cx: &mut TestAppContext) {
     assert!(toast_shown(&fixture.workspace, cx));
 }
 
-async fn read_with_fixture(fixture: &Fixture, cx: &mut VisualTestContext) -> Option<Token> {
+pub(crate) async fn read_with_fixture(
+    fixture: &Fixture,
+    cx: &mut VisualTestContext,
+) -> Option<Token> {
     let found = Arc::new(Mutex::new(None));
     let sink = found.clone();
     fixture.workspace.update(cx, |_, cx| {
@@ -337,7 +341,7 @@ async fn token_commands_only_say_so_while_off(cx: &mut TestAppContext) {
 }
 
 /// Records every log line of the process.
-struct CaptureLog(Mutex<Vec<String>>);
+pub(crate) struct CaptureLog(pub(crate) Mutex<Vec<String>>);
 
 impl log::Log for CaptureLog {
     fn enabled(&self, _: &log::Metadata) -> bool {
@@ -354,7 +358,7 @@ impl log::Log for CaptureLog {
     fn flush(&self) {}
 }
 
-fn capture_log() -> &'static CaptureLog {
+pub(crate) fn capture_log() -> &'static CaptureLog {
     static LOG: OnceLock<CaptureLog> = OnceLock::new();
     let capture = LOG.get_or_init(|| CaptureLog(Mutex::new(Vec::new())));
     // Another logger installed first only makes the capture empty, never wrong.
@@ -364,7 +368,7 @@ fn capture_log() -> &'static CaptureLog {
     capture
 }
 
-fn files_holding(dir: &Path, needle: &[u8]) -> usize {
+pub(crate) fn files_holding(dir: &Path, needle: &[u8]) -> usize {
     let mut found = 0;
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -381,15 +385,38 @@ fn files_holding(dir: &Path, needle: &[u8]) -> usize {
     found
 }
 
+/// Every file under `dir`.
+fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
 #[gpui::test]
 async fn the_token_is_in_the_store_only(cx: &mut TestAppContext) {
     let log = capture_log();
     // The temp home stands for `~/.bongos`, the chats runtime directory and the logs directory:
-    // nothing in this feature writes there.
+    // the state dump is the one thing this feature writes there.
     let home = tempfile::tempdir().unwrap();
     let (fixture, cx) = fixture(cx).await;
+    cx.update(|_, cx| install_logs_dir(home.path().join("logs"), cx));
 
     enter_token(&fixture, SECRET, cx);
+    assert!(
+        log.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("stored the Linear token")),
+        "the capture sees the log line of a stored token"
+    );
     fixture
         .fake
         .fail_next(ApiError::Server(format!("echo {SECRET}")));
@@ -398,6 +425,13 @@ async fn the_token_is_in_the_store_only(cx: &mut TestAppContext) {
     *fixture.env.lock().unwrap() = Some(SECRET.to_string());
     assert!(read_with_fixture(&fixture, cx).await.is_some());
 
+    // With a token in use, the dump says so and holds nothing of it.
+    dispatch("linear::DumpState", cx);
+    let files = files_under(home.path());
+    assert!(files.len() == 1, "the dump is the one file written");
+    let dump = std::fs::read_to_string(&files[0]).unwrap();
+    assert!(dump.contains("token present: true"));
+    assert!(!dump.contains("lin_api_"), "not even a prefix");
     assert!(files_holding(home.path(), SECRET.as_bytes()) == 0);
     assert!(
         log.0
@@ -414,6 +448,55 @@ async fn the_token_is_in_the_store_only(cx: &mut TestAppContext) {
     assert!(format!("{token:?}") == "Token(<redacted>)");
     assert!(!format!("{:?}", Some(&token)).contains(SECRET));
     assert!(token.redact(&format!("a {SECRET} b {SECRET}")) == "a [redacted] b [redacted]");
+}
+
+#[gpui::test]
+async fn the_masked_modal_copies_and_kills_nothing(cx: &mut TestAppContext) {
+    use editor::actions::{Copy, CopyAndTrim, Cut, CutToEndOfLine, KillRingCut};
+
+    let (fixture, cx) = fixture(cx).await;
+    let modal = open_modal(&fixture, cx);
+    let editor = modal.read_with(cx, |modal, _| modal.editor().clone());
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".to_string()));
+
+    macro_rules! blocked {
+        ($action:expr) => {{
+            editor.update_in(cx, |editor, window, cx| {
+                editor.set_text(SECRET, window, cx);
+                editor.select_all(&editor::actions::SelectAll, window, cx);
+            });
+            cx.dispatch_action($action);
+            cx.run_until_parked();
+            let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+            assert!(
+                clipboard.as_deref() == Some("before"),
+                "{} left the clipboard alone",
+                stringify!($action)
+            );
+            assert!(
+                editor.read_with(cx, |editor, cx| editor.text(cx)) == SECRET,
+                "{} left the text alone",
+                stringify!($action)
+            );
+        }};
+    }
+    blocked!(Copy);
+    blocked!(CopyAndTrim);
+    blocked!(Cut);
+    blocked!(CutToEndOfLine {
+        stop_at_newlines: false
+    });
+    blocked!(KillRingCut);
+
+    // The kill ring received nothing either: a yank brings back no token.
+    editor.update_in(cx, |editor, window, cx| editor.set_text("", window, cx));
+    cx.dispatch_action(editor::actions::KillRingYank);
+    cx.run_until_parked();
+    assert!(
+        editor
+            .read_with(cx, |editor, cx| editor.text(cx))
+            .is_empty()
+    );
 }
 
 #[test]

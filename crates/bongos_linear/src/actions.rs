@@ -1,8 +1,10 @@
 //! The `task` and `linear` actions of the Linear sync, hidden from the command palette while
 //! `linear.enabled` is false, and their handlers. While it is false each handler only says that
 //! the sync is off. While it is true each handler passes its [`Command`] to the installed
-//! [`LinearRequests`]; none is installed yet, so nothing happens. The two token commands do not go
-//! through it: they open the token modal and clear the stored token (see `token`). No keys are
+//! [`LinearRequests`]; none is installed yet, so nothing happens. A command that sends requests
+//! reads the token first (see [`Command::needs_token`]) and toasts when there is none. The two
+//! token commands do not go through it: they open the token modal and clear the stored token (see
+//! `token`); `linear: dump state` writes the state of the sync (see `dump`). No keys are
 //! bound to these actions yet; they are reached from the command palette.
 
 use std::any::TypeId;
@@ -16,6 +18,7 @@ use workspace::Workspace;
 use workspace::notifications::NotificationId;
 
 use crate::LinearSettings;
+use crate::dump;
 use crate::token;
 
 /// New actions in the `task` namespace, shared with the work tree's, the builder's and Zed's task
@@ -57,8 +60,25 @@ pub mod linear {
             SetToken,
             /// Removes the stored Linear token.
             ClearToken,
+            /// Writes the state of the Linear sync to a file in the logs directory.
+            DumpState,
         ]
     );
+}
+
+impl Command {
+    /// Whether the command sends requests to Linear, and so needs a token. The others work on
+    /// what is already stored in the task.
+    pub fn needs_token(self) -> bool {
+        match self {
+            Command::NewFromLinear
+            | Command::LinkToLinear
+            | Command::CreateMissingSubtickets
+            | Command::RefreshFromLinear
+            | Command::ShowLinearSuggestions => true,
+            Command::UnlinkFromLinear | Command::OpenInLinear | Command::CopyPrTitle => false,
+        }
+    }
 }
 
 /// What a handler asks the Linear sync to do while `linear.enabled` is true.
@@ -103,6 +123,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<task::CopyPrTitle>(),
         TypeId::of::<linear::SetToken>(),
         TypeId::of::<linear::ClearToken>(),
+        TypeId::of::<linear::DumpState>(),
     ]
 }
 
@@ -155,10 +176,24 @@ fn register_with<A: Action>(workspace: &mut Workspace, command: Command) {
             show_toast(workspace, OFF_MESSAGE.to_string(), cx);
             return;
         }
-        if let Some(requests) = cx.try_global::<InstalledRequests>().map(|r| r.0.clone()) {
-            requests.run(command, cx);
+        if !command.needs_token() {
+            run_installed(command, cx);
+            return;
         }
+        // The command sends requests: it reads the token first, and no token means a toast.
+        token::with_token(cx, move |_, _, cx| {
+            // The setting may have changed while the token was read.
+            if LinearSettings::get_global(cx).enabled {
+                run_installed(command, cx);
+            }
+        });
     });
+}
+
+fn run_installed(command: Command, cx: &mut App) {
+    if let Some(requests) = cx.try_global::<InstalledRequests>().map(|r| r.0.clone()) {
+        requests.run(command, cx);
+    }
 }
 
 /// Registers the handler of `A` that runs `handler` while `linear.enabled` is true and shows the
@@ -188,4 +223,5 @@ pub fn register(workspace: &mut Workspace) {
     register_with::<task::CopyPrTitle>(workspace, Command::CopyPrTitle);
     register_direct::<linear::SetToken>(workspace, token::set_token);
     register_direct::<linear::ClearToken>(workspace, token::clear_token);
+    register_direct::<linear::DumpState>(workspace, dump::dump_state);
 }

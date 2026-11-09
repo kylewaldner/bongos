@@ -25,6 +25,7 @@ const NAMES: &[&str] = &[
     "task::CopyPrTitle",
     "linear::SetToken",
     "linear::ClearToken",
+    "linear::DumpState",
 ];
 
 /// The actions that go through the requests seam; the token actions open the modal and clear the
@@ -52,7 +53,7 @@ impl LinearRequests for CountingRequests {
     }
 }
 
-fn use_default_settings(cx: &mut TestAppContext) {
+pub(crate) fn use_default_settings(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let store = SettingsStore::new(cx, &settings::default_settings());
         cx.set_global(store);
@@ -61,7 +62,7 @@ fn use_default_settings(cx: &mut TestAppContext) {
     });
 }
 
-fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
+pub(crate) fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
     cx.update(|cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
@@ -186,6 +187,7 @@ async fn while_on_each_action_reaches_the_seam_without_a_toast(cx: &mut TestAppC
     let (workspace, cx) = workspace_with_actions(cx).await;
     let requests = Arc::new(CountingRequests::default());
     cx.update(|_, cx| crate::install_requests(requests.clone(), cx));
+    install_env_token(cx);
     set_enabled_in(cx, true);
     for (index, name) in SEAM_NAMES.iter().enumerate() {
         dispatch(name, cx);
@@ -202,11 +204,60 @@ async fn while_on_each_action_reaches_the_seam_without_a_toast(cx: &mut TestAppC
 #[gpui::test]
 async fn while_on_without_a_sink_nothing_happens(cx: &mut TestAppContext) {
     let (workspace, cx) = workspace_with_actions(cx).await;
+    install_env_token(cx);
     set_enabled_in(cx, true);
     for name in SEAM_NAMES {
         dispatch(name, cx);
     }
     assert!(!toast_shown(&workspace, cx));
+}
+
+/// A token in `LINEAR_API_KEY`, so the commands that send find one.
+fn install_env_token(cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        crate::token::install_env(
+            |name| (name == crate::token::ENV_VAR).then(|| "lin_api_ENVTOKEN".to_string()),
+            cx,
+        )
+    });
+}
+
+#[gpui::test]
+async fn only_the_commands_that_send_need_a_token(cx: &mut TestAppContext) {
+    let (workspace, cx) = workspace_with_actions(cx).await;
+    let requests = Arc::new(CountingRequests::default());
+    cx.update(|_, cx| crate::install_requests(requests.clone(), cx));
+    cx.update(|_, cx| crate::token::install_env(|_| None, cx));
+    set_enabled_in(cx, true);
+
+    let sending = SEAM_NAMES.iter().filter(|name| {
+        !matches!(
+            **name,
+            "task::UnlinkFromLinear" | "task::OpenInLinear" | "task::CopyPrTitle"
+        )
+    });
+    for name in sending {
+        workspace.update(cx, |workspace, cx| {
+            workspace.dismiss_notification(&NotificationId::unique::<LinearToast>(), cx)
+        });
+        dispatch(name, cx);
+        assert!(toast_shown(&workspace, cx), "{name} says there is no token");
+        cx.update(|_, cx| {
+            assert_eq!(cx.global::<LastToast>().0, crate::token::NO_TOKEN_MESSAGE);
+        });
+    }
+    assert_eq!(requests.count.load(Ordering::SeqCst), 0);
+
+    for name in [
+        "task::UnlinkFromLinear",
+        "task::OpenInLinear",
+        "task::CopyPrTitle",
+    ] {
+        dispatch(name, cx);
+    }
+    assert_eq!(requests.count.load(Ordering::SeqCst), 3);
+    assert!(Command::NewFromLinear.needs_token());
+    assert!(!Command::CopyPrTitle.needs_token());
 }
 
 #[test]

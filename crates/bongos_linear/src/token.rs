@@ -5,9 +5,12 @@
 //! [`CREDENTIAL_URL`]. `linear: clear token` deletes it. [`read_token`] reads the store first and
 //! then the `LINEAR_API_KEY` environment variable.
 //!
-//! The token never reaches a file bongos writes, a log line or a toast: [`Token`] has no `Display`
-//! and a redacted `Debug`, and every message built from an error passes through [`Token::redact`].
-//! The only place the bytes are kept at rest is the credential store.
+//! The token never reaches a file bongos writes, a log line, a toast, the clipboard or the kill
+//! ring: [`Token`] has no `Display` and a redacted `Debug`, every message built from an error
+//! passes through [`Token::redact`] (the HTTP client scrubs its own errors by construction, see
+//! `client`), and the modal blocks copy, cut and kill while it is masked. The only place the
+//! bytes are kept at rest is the credential store. Every command reads the token through
+//! [`with_token`]; the sync learns from there whether one exists.
 
 use std::fmt;
 use std::sync::Arc;
@@ -15,6 +18,7 @@ use std::sync::Arc;
 use bongos_linear_model::LinearApi;
 use credentials_provider::CredentialsProvider;
 use editor::Editor;
+use editor::actions::{Copy, CopyAndTrim, Cut, CutToEndOfLine, KillRingCut};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
     Focusable, Global, IntoElement, Render, Styled, WeakEntity, Window,
@@ -27,6 +31,7 @@ use ui::{
 use workspace::{ModalView, Workspace};
 
 use crate::actions::show_toast;
+use crate::sync;
 
 /// The url the token is stored under in the credential store.
 pub const CREDENTIAL_URL: &str = "https://api.linear.app";
@@ -129,49 +134,88 @@ pub async fn read_token(
     env(ENV_VAR).and_then(|value| Token::new(&value))
 }
 
-/// Reads the token and hands it to `then`, or toasts [`NO_TOKEN_MESSAGE`] and does nothing else.
-/// Every Linear command that sends a request goes through this.
-pub fn with_token(
+/// Hands the current token, or `None`, to `then`, and tells the sync whether one exists and the
+/// client that uses it. The one place the token is read for a command.
+fn read_current(
     cx: &mut Context<Workspace>,
-    then: impl FnOnce(&mut Workspace, Token, &mut Context<Workspace>) + 'static,
+    then: impl FnOnce(&mut Workspace, Option<Token>, &mut Context<Workspace>) + 'static,
 ) {
     let provider = credentials(cx);
     let env = env_reader(cx);
     cx.spawn(async move |workspace, cx| {
         let token = read_token(&*provider, &*env, cx).await;
         workspace
-            .update(cx, |workspace, cx| match token {
-                Some(token) => then(workspace, token, cx),
-                None => show_toast(workspace, NO_TOKEN_MESSAGE.to_string(), cx),
+            .update(cx, |workspace, cx| {
+                connect(token.as_ref(), cx);
+                then(workspace, token, cx)
             })
             .ok();
     })
     .detach();
 }
 
-/// Checks `token` with one `viewer()` request and stores it when Linear accepts it, then toasts
-/// the outcome. A rejected token stores nothing.
+/// Tells the sync about `token`: that one exists, and the client built with it.
+fn connect(token: Option<&Token>, cx: &mut App) {
+    let client = token.and_then(|token| installed_factory(cx).map(|factory| factory(token)));
+    if let Some(sync) = sync::global(cx) {
+        sync.update(cx, |sync, _| sync.set_token(token.is_some(), client));
+    }
+}
+
+fn installed_factory(cx: &App) -> Option<ClientFactory> {
+    cx.try_global::<InstalledClientFactory>()
+        .map(|installed| installed.0.clone())
+}
+
+/// Reads the token and hands it to `then`, or toasts [`NO_TOKEN_MESSAGE`] and does nothing else.
+/// Every Linear command that sends a request goes through this.
+pub fn with_token(
+    cx: &mut Context<Workspace>,
+    then: impl FnOnce(&mut Workspace, Token, &mut Context<Workspace>) + 'static,
+) {
+    read_current(cx, |workspace, token, cx| match token {
+        Some(token) => then(workspace, token, cx),
+        None => show_toast(workspace, NO_TOKEN_MESSAGE.to_string(), cx),
+    });
+}
+
+/// Hands `then` whether a token exists, and nothing else about it.
+pub(crate) fn with_token_state(
+    cx: &mut Context<Workspace>,
+    then: impl FnOnce(&mut Workspace, bool, &mut Context<Workspace>) + 'static,
+) {
+    read_current(cx, |workspace, token, cx| {
+        then(workspace, token.is_some(), cx)
+    });
+}
+
+/// Checks `token` with one `viewer()` request, through the sync's gate, and stores it when Linear
+/// accepts it, then toasts the outcome. A rejected token stores nothing.
 fn check_and_store(workspace: WeakEntity<Workspace>, token: Token, cx: &mut App) {
     let provider = credentials(cx);
-    let Some(factory) = cx
-        .try_global::<InstalledClientFactory>()
-        .map(|installed| installed.0.clone())
-    else {
+    let toast = |message: String, cx: &mut App| {
         workspace
-            .update(cx, |workspace, cx| {
-                show_toast(
-                    workspace,
-                    "The Linear client is not available, so the token was not checked or saved"
-                        .to_string(),
-                    cx,
-                )
-            })
+            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
             .ok();
+    };
+    let (Some(factory), Some(sync)) = (installed_factory(cx), sync::global(cx)) else {
+        toast(
+            "The Linear client is not available, so the token was not checked or saved".to_string(),
+            cx,
+        );
         return;
     };
     let client = factory(&token);
+    let started = sync.update(cx, |sync, cx| sync.verify_token(&*client, cx));
+    let check = match started {
+        Ok(check) => check,
+        Err(refusal) => {
+            toast(refusal.to_string(), cx);
+            return;
+        }
+    };
     cx.spawn(async move |cx| {
-        let message = match client.viewer().await {
+        let message = match check.await {
             Ok(organization) => {
                 let stored = provider
                     .write_credentials(
@@ -184,6 +228,7 @@ fn check_and_store(workspace: WeakEntity<Workspace>, token: Token, cx: &mut App)
                 match stored {
                     Ok(()) => {
                         log::info!("stored the Linear token");
+                        sync.update(cx, |sync, _| sync.set_token(true, Some(client)));
                         format!("Linear token saved ({organization})")
                     }
                     Err(error) => {
@@ -214,15 +259,22 @@ pub(crate) fn set_token(
 pub(crate) fn clear_token(_: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>) {
     let provider = credentials(cx);
     cx.spawn(async move |workspace, cx| {
-        let message = match provider.delete_credentials(CREDENTIAL_URL, cx).await {
-            Ok(()) => {
-                log::info!("removed the Linear token");
-                "Linear token removed".to_string()
-            }
-            Err(error) => format!("Could not remove the Linear token: {error}"),
-        };
+        let deleted = provider.delete_credentials(CREDENTIAL_URL, cx).await;
         workspace
-            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+            .update(cx, |workspace, cx| {
+                let message = match deleted {
+                    Ok(()) => {
+                        log::info!("removed the Linear token");
+                        // The next command reads the environment again and connects if it has one.
+                        if let Some(sync) = sync::global(cx) {
+                            sync.update(cx, |sync, _| sync.set_token(false, None));
+                        }
+                        "Linear token removed".to_string()
+                    }
+                    Err(error) => format!("Could not remove the Linear token: {error}"),
+                };
+                show_toast(workspace, message, cx)
+            })
             .ok();
     })
     .detach();
@@ -282,6 +334,14 @@ impl Render for TokenModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("LinearTokenPrompt")
+            // The editor masks what it shows, not what it copies: while the token is typed, the
+            // copy, cut and Emacs kill commands do nothing, so neither the clipboard nor the kill
+            // ring can receive it. Capture runs before the editor's own handlers.
+            .capture_action(|_: &Copy, _, cx| cx.stop_propagation())
+            .capture_action(|_: &CopyAndTrim, _, cx| cx.stop_propagation())
+            .capture_action(|_: &Cut, _, cx| cx.stop_propagation())
+            .capture_action(|_: &CutToEndOfLine, _, cx| cx.stop_propagation())
+            .capture_action(|_: &KillRingCut, _, cx| cx.stop_propagation())
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::confirm))
             .elevation_2(cx)
