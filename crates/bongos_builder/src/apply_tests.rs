@@ -363,7 +363,9 @@ async fn a_live_chat_keeps_running_after_an_apply_that_tried_to_drop_its_task(
 ) {
     let (h, workspace, cx) = harness(cx, true, Some("b"), &[proposal(1, DROP_RATES, false)]).await;
     let chats = FakeChats::install(cx);
-    // The chat's process: anything that runs until it is stopped.
+    // The chat's process: anything that runs until it is stopped. Spawning it once, before the
+    // apply, blocks nothing the test waits on.
+    #[allow(clippy::disallowed_methods)]
     let mut process = std::process::Command::new("sleep")
         .arg("60")
         .spawn()

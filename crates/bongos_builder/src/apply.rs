@@ -451,9 +451,9 @@ fn queue(
         fingerprint: fingerprint(&previewed, &pending.choices, &pending.hash),
     };
     let summary = applied_summary(number, &previewed);
-    let root = previewed.root.clone();
+    let root = previewed.root;
     let fs = store.read(cx).fs();
-    let path = pending.chosen.path.clone();
+    let path = pending.chosen.path;
     cx.spawn_in(window, async move |workspace, cx| {
         // The file as it is now, never the previewed bytes: an edit since the preview changes
         // the hash, and the writer refuses.
