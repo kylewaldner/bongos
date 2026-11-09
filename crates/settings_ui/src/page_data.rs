@@ -311,7 +311,7 @@ fn chats_page() -> SettingsPage {
         ]
     }
 
-    fn prompts_section() -> [SettingsPageItem; 4] {
+    fn prompts_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Prompts"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -358,6 +358,38 @@ fn chats_page() -> SettingsPage {
                             .prompts
                             .get_or_insert_default()
                             .save_on_send = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Marker Open",
+                description: "The text a marker line starts with. Markers in the default syntax are always recognized as well.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("prompts.marker_open"),
+                    pick: |settings_content| {
+                        settings_content.prompts.as_ref()?.marker_open.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.prompts.get_or_insert_default().marker_open = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Marker Close",
+                description: "The text a marker line ends with.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("prompts.marker_close"),
+                    pick: |settings_content| {
+                        settings_content.prompts.as_ref()?.marker_close.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.prompts.get_or_insert_default().marker_close = value;
                     },
                 }),
                 metadata: None,
@@ -10502,6 +10534,8 @@ mod tests {
                 "prompts.enabled",
                 "prompts.auto_submit",
                 "prompts.save_on_send",
+                "prompts.marker_open",
+                "prompts.marker_close",
             ]
         );
     }
@@ -10532,7 +10566,9 @@ mod tests {
             [
                 "prompts.enabled",
                 "prompts.auto_submit",
-                "prompts.save_on_send"
+                "prompts.save_on_send",
+                "prompts.marker_open",
+                "prompts.marker_close"
             ]
         );
     }

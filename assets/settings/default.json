@@ -2664,6 +2664,11 @@
     // Whether sending a prompt saves the prompts file right after marking it sent. A
     // file that changed on disk since it was opened is left unsaved.
     "save_on_send": true,
+    // The text a marker line starts with. Markers in the default syntax are always
+    // recognized as well, so changing this never orphans old files.
+    "marker_open": "=== prompt",
+    // The text a marker line ends with.
+    "marker_close": "===",
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
