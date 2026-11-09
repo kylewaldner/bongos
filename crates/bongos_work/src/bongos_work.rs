@@ -101,6 +101,8 @@ mod command_tests_more;
 #[cfg(test)]
 mod focus_tests;
 #[cfg(test)]
+mod modal_route_tests;
+#[cfg(test)]
 mod mode_tests;
 #[cfg(test)]
 mod panel_tests;

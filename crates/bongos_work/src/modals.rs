@@ -1,9 +1,11 @@
 //! The two modals the commands chain: a list to pick from and a line of text to type. Each calls
 //! its continuation after it has closed itself, so a continuation may open the next modal of
-//! either kind.
+//! either kind. When `work` is listed in `minibuffer.enabled_for`, both open in the minibuffer
+//! strip as a completing read and a string read instead, with the same continuation.
 
 use std::sync::Arc;
 
+use bongos_minibuffer::{Candidate, Outcome, Session, Source};
 use editor::Editor;
 use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString, Task,
@@ -16,6 +18,22 @@ use workspace::{ModalView, Workspace};
 /// What runs once a choice or a line is made, on the workspace and after the modal has closed.
 pub type Then<T> =
     Box<dyn FnOnce(T, &mut Workspace, &mut Window, &mut Context<Workspace>) + 'static>;
+
+/// The name the work prompts are routed by (`minibuffer.enabled_for`).
+pub(crate) const MINIBUFFER_NAME: &str = "work";
+
+/// Runs `then` on the workspace once a minibuffer session has answered (and closed).
+fn run_then<T>(
+    workspace: &WeakEntity<Workspace>,
+    value: T,
+    then: Then<T>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    workspace
+        .update(cx, |workspace, cx| then(value, workspace, window, cx))
+        .ok();
+}
 
 /// Closes the active modal, then runs `then`.
 fn finish<T: 'static>(
@@ -62,6 +80,30 @@ pub fn pick(
 ) {
     let weak = cx.entity().downgrade();
     let placeholder = placeholder.into();
+    if workspace::routes_to_minibuffer(MINIBUFFER_NAME, cx) {
+        let candidates = choices
+            .iter()
+            .enumerate()
+            .map(|(index, label)| Candidate::new(label.clone(), index))
+            .collect();
+        let mut session = Session::completing_read(MINIBUFFER_NAME, format!("{placeholder}: "))
+            .source(Source::Fixed(candidates))
+            .history(format!("{MINIBUFFER_NAME} {placeholder}"))
+            .on_confirm(move |outcome, window, cx| {
+                if let Outcome::Candidate(value) = outcome
+                    && let Some(&index) = value.downcast_ref::<usize>()
+                {
+                    run_then(&weak, index, then, window, cx);
+                }
+            });
+        if selected > 0
+            && let Some(label) = choices.get(selected)
+        {
+            session = session.default(label.clone());
+        }
+        bongos_minibuffer::open(workspace, session, window, cx);
+        return;
+    }
     show(workspace, window, cx, |window, cx| {
         let delegate = ChoiceDelegate {
             matches: (0..choices.len()).collect(),
@@ -204,6 +246,22 @@ pub fn ask(
 ) {
     let weak = cx.entity().downgrade();
     let title = title.into();
+    if workspace::routes_to_minibuffer(MINIBUFFER_NAME, cx) {
+        let session = Session::string(MINIBUFFER_NAME, format!("{title}: "))
+            .initial_input(initial)
+            .history(format!("{MINIBUFFER_NAME} {title}"))
+            .accept(
+                move |text| allow_empty || !text.trim().is_empty(),
+                "Type something, or press C-g to cancel",
+            )
+            .on_confirm(move |outcome, window, cx| {
+                if let Outcome::Input(text) = outcome {
+                    run_then(&weak, text.trim().to_string(), then, window, cx);
+                }
+            });
+        bongos_minibuffer::open(workspace, session, window, cx);
+        return;
+    }
     show(workspace, window, cx, |window, cx| {
         let editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
