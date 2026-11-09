@@ -98,7 +98,7 @@ async fn registering_the_language_twice_keeps_one(cx: &mut TestAppContext) {
 async fn default_settings_parse(cx: &mut TestAppContext) {
     use_default_settings(cx);
     cx.update(|cx| {
-        assert!(!PromptsSettings::get_global(cx).enabled);
+        assert!(PromptsSettings::get_global(cx).enabled, "on by default");
 
         let language = LanguageName::new("Prompts");
         let prompts = AllLanguageSettings::get_global(cx).language(None, Some(&language), cx);
@@ -203,6 +203,7 @@ fn palette_hidden(name: &str, cx: &mut TestAppContext) -> bool {
 async fn actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext) {
     cx.update(|cx| command_palette_hooks::init(cx));
     use_default_settings(cx);
+    set_enabled(cx, false);
     cx.update(crate::init_palette);
 
     let mut names: Vec<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
@@ -267,6 +268,13 @@ fn toast_shown(workspace: &gpui::Entity<Workspace>, cx: &mut VisualTestContext) 
 #[gpui::test]
 async fn dispatch_by_name_shows_the_off_toast(cx: &mut TestAppContext) {
     let (workspace, cx) = workspace_with_actions(cx).await;
+    cx.update(|_, cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.prompts.get_or_insert_default().enabled = Some(false);
+            });
+        });
+    });
     let mut commands: Vec<(&str, &str)> = COMMANDS.to_vec();
     #[cfg(debug_assertions)]
     commands.push(("prompts::DumpView", "prompts: dump view"));
