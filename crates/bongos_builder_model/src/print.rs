@@ -140,7 +140,7 @@ pub fn print(tree: &WorkTree, root_id: &str, live: &LiveSet) -> Option<String> {
 }
 
 /// One more than the highest proposal number of the task, recorded or on disk.
-fn next_number(task: &Task) -> u32 {
+pub fn next_number(task: &Task) -> u32 {
     let recorded = task
         .file
         .iter()

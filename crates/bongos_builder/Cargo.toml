@@ -15,6 +15,9 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 bongos_builder_model.workspace = true
+bongos_chat.workspace = true
+bongos_prompts.workspace = true
+bongos_work.workspace = true
 command_palette_hooks.workspace = true
 fs.workspace = true
 gpui.workspace = true
@@ -24,13 +27,21 @@ settings.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
+editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
+menu.workspace = true
 # Like bongos_prompts: `project` and `workspace` are only lint-clean together under test-support.
 project = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true
+remote = { workspace = true, features = ["test-support"] }
+rpc = { workspace = true, features = ["test-support"] }
 semver.workspace = true
 serde_json.workspace = true
 settings = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+terminal = { workspace = true, features = ["test-support"] }
+terminal_view = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }

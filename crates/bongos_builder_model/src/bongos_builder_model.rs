@@ -23,7 +23,7 @@ pub use grammar::{
 };
 pub use parse::parse;
 pub use preview::{applied_summary, preview};
-pub use print::{LiveSet, LiveSource, print};
+pub use print::{LiveSet, LiveSource, next_number, print};
 pub use validate::{Checks, ProposalFile, validate};
 
 #[cfg(test)]
