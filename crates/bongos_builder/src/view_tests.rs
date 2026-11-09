@@ -27,12 +27,17 @@ use crate::{BuilderDirs, BuilderToast, ProposalView};
 
 const STARTUP: Duration = Duration::from_secs(10);
 
-fn write(path: &Path, text: &str) {
+pub(crate) fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
 }
 
-fn task_toml(id: &str, goal: &str, todos: &[(&str, Option<&str>)], extra: &str) -> String {
+pub(crate) fn task_toml(
+    id: &str,
+    goal: &str,
+    todos: &[(&str, Option<&str>)],
+    extra: &str,
+) -> String {
     let mut text = format!(
         "schema = 1\nid = \"{id}\"\ngoal = \"{goal}\"\nkind = \"pr-ship\"\nstatus = \"open\"\n\
          created = 2020-01-01T10:00:00Z\n"
@@ -50,13 +55,13 @@ fn task_toml(id: &str, goal: &str, todos: &[(&str, Option<&str>)], extra: &str) 
 }
 
 /// A proposal file of the test task and whether it was applied as it is.
-struct Proposal {
-    number: u32,
-    text: String,
-    applied: bool,
+pub(crate) struct Proposal {
+    pub(crate) number: u32,
+    pub(crate) text: String,
+    pub(crate) applied: bool,
 }
 
-fn proposal(number: u32, text: &str, applied: bool) -> Proposal {
+pub(crate) fn proposal(number: u32, text: &str, applied: bool) -> Proposal {
     Proposal {
         number,
         text: text.to_string(),
@@ -66,7 +71,7 @@ fn proposal(number: u32, text: &str, applied: bool) -> Proposal {
 
 /// A valid proposal for the group `billing`: a renamed leaf, a group with two leaves under it,
 /// and a new leaf.
-const LAYERS: &str = "\
+pub(crate) const LAYERS: &str = "\
 proposal 1
 for b
 by kyle
@@ -89,7 +94,7 @@ task billing: Billing | id b
 ";
 
 /// A proposal with a cycle on line 10 and an edge across levels on line 13.
-const BROKEN: &str = "\
+pub(crate) const BROKEN: &str = "\
 proposal 2
 for b
 by kyle
@@ -107,7 +112,7 @@ task billing: Billing | id b
 ";
 
 /// `LAYERS` as proposal `number`.
-fn layers(number: u32) -> String {
+pub(crate) fn layers(number: u32) -> String {
     LAYERS.replace("proposal 1", &format!("proposal {number}"))
 }
 
@@ -178,21 +183,21 @@ fn seed_tree(root: &Path, proposals: &[Proposal]) -> PathBuf {
     billing
 }
 
-struct Harness {
+pub(crate) struct Harness {
     _temp: TempDir,
-    fs: Arc<FakeFs>,
+    pub(crate) fs: Arc<FakeFs>,
     /// The directory of the group `billing`.
-    billing: PathBuf,
+    pub(crate) billing: PathBuf,
 }
 
 impl Harness {
-    fn file(&self, number: u32) -> PathBuf {
+    pub(crate) fn file(&self, number: u32) -> PathBuf {
         self.billing
             .join(format!("proposals/{number}.proposal.txt"))
     }
 
     /// Writes the proposal file on disk and in the window's file system.
-    async fn put(&self, number: u32, text: &str) {
+    pub(crate) async fn put(&self, number: u32, text: &str) {
         write(&self.file(number), text);
         self.fs
             .create_dir(self.file(number).parent().unwrap())
@@ -217,7 +222,7 @@ fn set_settings(cx: &mut TestAppContext, builder: bool) {
 
 /// The app's wiring over a temporary work tree with the task `billing` focused, and a window
 /// whose project holds `/code` only, so a proposal file opens in an invisible worktree.
-async fn harness<'a>(
+pub(crate) async fn harness<'a>(
     cx: &'a mut TestAppContext,
     builder: bool,
     focused: Option<&str>,
@@ -312,7 +317,7 @@ async fn wait_for(
     }
 }
 
-async fn wait_for_in(
+pub(crate) async fn wait_for_in(
     cx: &mut VisualTestContext,
     what: &str,
     check: impl Fn(&mut VisualTestContext) -> bool,
@@ -331,7 +336,7 @@ async fn wait_for_in(
     }
 }
 
-fn dispatch(cx: &mut VisualTestContext, name: &str) {
+pub(crate) fn dispatch(cx: &mut VisualTestContext, name: &str) {
     let action = cx.update(|_, cx| {
         cx.build_action(name, None)
             .unwrap_or_else(|_| panic!("{name} is registered"))
@@ -340,7 +345,7 @@ fn dispatch(cx: &mut VisualTestContext, name: &str) {
     cx.run_until_parked();
 }
 
-fn the_view(
+pub(crate) fn the_view(
     workspace: &Entity<Workspace>,
     cx: &mut VisualTestContext,
 ) -> Option<Entity<ProposalView>> {
@@ -350,7 +355,10 @@ fn the_view(
 }
 
 /// Dispatches `task::ShowProposal` and waits for the view to read its file.
-async fn show(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<ProposalView> {
+pub(crate) async fn show(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<ProposalView> {
     dispatch(cx, "task::ShowProposal");
     let ws = workspace.clone();
     wait_for_in(cx, "the proposal view", |cx| {
@@ -360,33 +368,33 @@ async fn show(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Enti
     the_view(workspace, cx).unwrap()
 }
 
-fn lines(view: &Entity<ProposalView>, cx: &mut VisualTestContext) -> Vec<String> {
+pub(crate) fn lines(view: &Entity<ProposalView>, cx: &mut VisualTestContext) -> Vec<String> {
     view.read_with(cx, |view, _| view.lines())
 }
 
-fn text(view: &Entity<ProposalView>, cx: &mut VisualTestContext) -> String {
+pub(crate) fn text(view: &Entity<ProposalView>, cx: &mut VisualTestContext) -> String {
     view.read_with(cx, |view, _| view.view_text())
 }
 
 /// The first line of the view that has `needle`.
-fn row(view: &Entity<ProposalView>, needle: &str, cx: &mut VisualTestContext) -> String {
+pub(crate) fn row(view: &Entity<ProposalView>, needle: &str, cx: &mut VisualTestContext) -> String {
     lines(view, cx)
         .into_iter()
         .find(|line| line.contains(needle))
         .unwrap_or_else(|| panic!("no line with `{needle}` in\n{}", text(view, cx)))
 }
 
-fn snapshot(cx: &mut VisualTestContext) -> Arc<WorkTree> {
+pub(crate) fn snapshot(cx: &mut VisualTestContext) -> Arc<WorkTree> {
     cx.update(|_, cx| WorkStore::global(cx).unwrap().read(cx).snapshot().unwrap())
 }
 
-fn has_modal(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+pub(crate) fn has_modal(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.has_active_modal(window, cx)
     })
 }
 
-fn toast_shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+pub(crate) fn toast_shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
     workspace.read_with(cx, |workspace, _| {
         workspace
             .notification_ids()
@@ -519,7 +527,10 @@ async fn the_problems_line_lists_a_cycle_and_a_cross_level_edge_and_ret_opens_th
 }
 
 /// Waits for an editor to be the active item and returns it.
-async fn open_editor(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<Editor> {
+pub(crate) async fn open_editor(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<Editor> {
     let ws = workspace.clone();
     wait_for_in(cx, "an editor", |cx| {
         ws.read_with(cx, |workspace, cx| {
@@ -761,7 +772,7 @@ async fn dispatch_by_name_works_while_on_and_says_so_while_off(cx: &mut TestAppC
     wait_for_in(cx, "the view", |cx| the_view(&ws, cx).is_some()).await;
 }
 
-fn set_settings_in(cx: &mut VisualTestContext, builder: bool) {
+pub(crate) fn set_settings_in(cx: &mut VisualTestContext, builder: bool) {
     cx.update(|_, cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
