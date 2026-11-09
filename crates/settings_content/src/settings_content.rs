@@ -1370,10 +1370,10 @@ pub struct WhichKeySettingsContent {
 pub struct MinibufferSettingsContent {
     /// The prompts that open in the minibuffer at the bottom of the window instead of a centered
     /// modal. Names: `command_palette`, `file_finder`, `tab_switcher`, `work`, `messages`,
-    /// `key_hint`. While the list is empty there is no minibuffer, nothing is routed to it and
-    /// its commands are hidden.
+    /// `key_hint`. Remove a name to bring that prompt back as a centered modal. While the list
+    /// is empty there is no minibuffer, nothing is routed to it and its commands are hidden.
     ///
-    /// Default: []
+    /// Default: ["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint"]
     pub enabled_for: Option<Vec<String>>,
     /// The most candidate rows the minibuffer shows at once.
     ///
