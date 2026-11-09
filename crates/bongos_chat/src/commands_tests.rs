@@ -1300,6 +1300,59 @@ async fn test_a_new_chat_gets_the_context_extension_section(cx: &mut TestAppCont
     }
 }
 
+#[gpui::test]
+async fn test_several_context_extensions_append_in_registration_order(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    wait_for_probe(cx).await;
+    cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
+    add_tasks(&h, cx).await;
+    let projects = vec![h.project.clone()];
+    let context_of = |id: &str| {
+        std::fs::read_to_string(h.runtime_root.join(id).join(crate::CONTEXT_FILE)).unwrap()
+    };
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let extension = |section| TestExtension {
+        asked: asked.clone(),
+        section,
+    };
+
+    let plan = plan_for("t1", "plan", Agent::Claude, cx);
+    let id = cx
+        .update(|cx| start_chat(plan, projects.clone(), cx))
+        .await
+        .unwrap();
+    let plain = context_of(&id);
+
+    // The builder's section is installed first, a later one is added after it, and a silent
+    // extension adds nothing.
+    cx.update(|cx| {
+        crate::set_context_extension(extension(Some("## First")), cx);
+        crate::add_context_extension("linear", extension(Some("## Second")), cx);
+        crate::add_context_extension("quiet", extension(None), cx);
+    });
+    let plan = plan_for("t1", "plan", Agent::Claude, cx);
+    let id = cx
+        .update(|cx| start_chat(plan, projects.clone(), cx))
+        .await
+        .unwrap();
+    assert_eq!(context_of(&id), format!("{plain}\n## First\n## Second\n"));
+
+    // Replacing the builder's extension keeps its place; adding a name again replaces that one.
+    cx.update(|cx| {
+        crate::set_context_extension(extension(Some("## First again")), cx);
+        crate::add_context_extension("linear", extension(Some("## Second again")), cx);
+    });
+    let plan = plan_for("t1", "plan", Agent::Claude, cx);
+    let id = cx
+        .update(|cx| start_chat(plan, projects.clone(), cx))
+        .await
+        .unwrap();
+    assert_eq!(
+        context_of(&id),
+        format!("{plain}\n## First again\n## Second again\n")
+    );
+}
+
 /// Every command of this step, dispatched by name while chats are off, only says so.
 #[gpui::test]
 async fn test_the_commands_dispatch_by_name_and_say_when_off(cx: &mut TestAppContext) {

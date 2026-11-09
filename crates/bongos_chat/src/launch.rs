@@ -61,7 +61,7 @@ pub struct LaunchRequest {
     pub caps: Option<Capabilities>,
     /// Fallbacks already known to be needed (see `LaunchPlan::force`).
     pub force: Vec<Fallback>,
-    /// A section the context extension (see [`set_context_extension`]) adds at the end of the
+    /// A section the context extension (see [`add_context_extension`]) adds at the end of the
     /// context; `None` without an extension.
     pub extra_context: Option<String>,
 }
@@ -74,23 +74,52 @@ pub trait ContextExtension {
     fn section(&self, chat_type: &str, task_id: Option<&str>, cx: &App) -> Option<String>;
 }
 
-struct GlobalContextExtension(Rc<dyn ContextExtension>);
+/// The name [`set_context_extension`] installs its extension under.
+const TASK_BUILDER_EXTENSION: &str = "task-builder";
 
-impl Global for GlobalContextExtension {}
+#[derive(Default)]
+struct GlobalContextExtensions(Vec<(String, Rc<dyn ContextExtension>)>);
 
-/// Installs the context extension. Replaces an earlier one.
-pub fn set_context_extension(ext: impl ContextExtension + 'static, cx: &mut App) {
-    cx.set_global(GlobalContextExtension(Rc::new(ext)));
+impl Global for GlobalContextExtensions {}
+
+/// Adds the context extension `name`. An earlier one of the same name is replaced where it stood;
+/// otherwise the extension goes last, and sections are written in registration order.
+pub fn add_context_extension(name: &str, ext: impl ContextExtension + 'static, cx: &mut App) {
+    let extensions = cx.default_global::<GlobalContextExtensions>();
+    let ext: Rc<dyn ContextExtension> = Rc::new(ext);
+    match extensions
+        .0
+        .iter_mut()
+        .find(|(existing, _)| existing == name)
+    {
+        Some(slot) => slot.1 = ext,
+        None => extensions.0.push((name.to_string(), ext)),
+    }
 }
 
-/// The installed extension's section for a launch, `None` without an extension.
+/// Installs the task builder's context extension. Replaces an earlier one.
+pub fn set_context_extension(ext: impl ContextExtension + 'static, cx: &mut App) {
+    add_context_extension(TASK_BUILDER_EXTENSION, ext, cx);
+}
+
+/// The installed extensions' sections for a launch, one per line break in registration order;
+/// `None` when there is none.
 pub(crate) fn extension_section(
     chat_type: &str,
     task_id: Option<&str>,
     cx: &App,
 ) -> Option<String> {
-    let ext = cx.try_global::<GlobalContextExtension>()?.0.clone();
-    ext.section(chat_type, task_id, cx)
+    let extensions: Vec<_> = cx
+        .try_global::<GlobalContextExtensions>()?
+        .0
+        .iter()
+        .map(|(_, ext)| ext.clone())
+        .collect();
+    let sections: Vec<String> = extensions
+        .iter()
+        .filter_map(|ext| ext.section(chat_type, task_id, cx))
+        .collect();
+    (!sections.is_empty()).then(|| sections.join("\n"))
 }
 
 /// Why a launch did not start.
