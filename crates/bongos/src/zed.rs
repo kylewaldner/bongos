@@ -653,6 +653,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         bongos_chat::register(workspace);
         bongos_prompts::register(workspace);
         bongos_builder::register(workspace);
+        bongos_linear::register(workspace);
         let work_focus = cx.new(bongos_work::FocusStatus::new);
         let prompts_mode_line = cx.new(|_| bongos_prompts::PromptsModeLine::new());
 
@@ -5480,6 +5481,7 @@ mod tests {
                 "kotlin",
                 "language_selector",
                 "line_ending_selector",
+                "linear",
                 "lsp_tool",
                 "markdown",
                 "menu",
