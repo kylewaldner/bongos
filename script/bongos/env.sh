@@ -2,6 +2,9 @@
 # All heavy output lives in the workspace, so the machine's main disk is never used.
 # The workspace is, in order: $BONGOS_WORKSPACE, else the first line of ~/.config/bongos-dev/workspace.
 # There is no other default: a wrong guess would put 100 GB in the wrong place.
+# Optional, so temp and scratch files can live on another disk (a value already set wins):
+#   BONGOS_TMPDIR         becomes TMPDIR (default $BONGOS_WORKSPACE/scratch/tmp)
+#   BONGOS_SMOKE_SCRATCH  holds the per-run smoke directories (default $BONGOS_WORKSPACE/scratch/smoke)
 if [ -z "${BONGOS_WORKSPACE:-}" ] && [ -f "$HOME/.config/bongos-dev/workspace" ]; then
   IFS= read -r BONGOS_WORKSPACE <"$HOME/.config/bongos-dev/workspace" || true
 fi
@@ -21,7 +24,9 @@ export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup"
 export CARGO_HOME="$BONGOS_WORKSPACE/cargo"
 # A CARGO_TARGET_DIR already set in the environment wins over the workspace default.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BONGOS_WORKSPACE/target}"
-export TMPDIR="$BONGOS_WORKSPACE/scratch/tmp"
+export BONGOS_TMPDIR="${BONGOS_TMPDIR:-$BONGOS_WORKSPACE/scratch/tmp}"
+export BONGOS_SMOKE_SCRATCH="${BONGOS_SMOKE_SCRATCH:-$BONGOS_WORKSPACE/scratch/smoke}"
+export TMPDIR="$BONGOS_TMPDIR"
 export GH_CONFIG_DIR="${GH_CONFIG_DIR:-$HOME/.config/gh}"
 mkdir -p "$RUSTUP_HOME" "$CARGO_HOME" "$CARGO_TARGET_DIR" "$TMPDIR"
 

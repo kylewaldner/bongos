@@ -33,7 +33,7 @@ fi
 
 feature=${1:-}
 stock=${BONGOS_STOCK:-}
-RUN="$BONGOS_WORKSPACE/scratch/smoke/$(date +%Y%m%d-%H%M%S)${stock:+-stock}"
+RUN="${BONGOS_SMOKE_SCRATCH:-$BONGOS_WORKSPACE/scratch/smoke}/$(date +%Y%m%d-%H%M%S)${stock:+-stock}"
 mkdir -p "$RUN"
 log_init smoke
 sandbox_env
