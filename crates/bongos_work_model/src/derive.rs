@@ -159,8 +159,17 @@ fn todo_started(todo: &Todo) -> bool {
     todo.started.is_some() || todo.state == TodoState::Done
 }
 
+/// Whether `file` has begun. A `plans` todo counts only while it is open and started: planning
+/// done does not make the leaf In Progress, so the implement todo can still be Ready.
 fn leaf_started(file: &TaskFile) -> bool {
-    file.worktree.is_some() || file.todos.iter().any(todo_started)
+    file.worktree.is_some()
+        || file.todos.iter().any(|todo| {
+            if todo.role == Some(TodoRole::Plans) {
+                todo.state == TodoState::Open && todo.started.is_some()
+            } else {
+                todo_started(todo)
+            }
+        })
 }
 
 fn result_merged(file: &TaskFile) -> bool {

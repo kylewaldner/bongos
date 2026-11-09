@@ -18,6 +18,8 @@ pub const PROMPTS_FILE: &str = "prompts.txt";
 pub const TASKS_DIR: &str = "tasks";
 pub const CHATS_DIR: &str = "chats";
 pub const RUNS_DIR: &str = "runs";
+/// The directory of a task's proposal files, `<n>.proposal.txt`.
+pub const PROPOSALS_DIR: &str = "proposals";
 pub const PROJECTS_DIR: &str = "projects";
 pub const ONEOFFS_DIR: &str = "oneoffs";
 /// The suffix of a link file such as `design.link.toml`.
@@ -113,4 +115,9 @@ pub fn chats_dir(task_dir: &Path) -> PathBuf {
 
 pub fn runs_dir(task_dir: &Path) -> PathBuf {
     task_dir.join(RUNS_DIR)
+}
+
+/// `<dir>/proposals/<n>.proposal.txt`.
+pub fn proposal_file(dir: &Path, n: u32) -> PathBuf {
+    dir.join(PROPOSALS_DIR).join(format!("{n}.proposal.txt"))
 }

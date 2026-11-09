@@ -36,12 +36,54 @@ pub fn split(tree: &WorkTree, ctx: &Context, id: &str, goal: Option<&str>) -> Ou
     let mut child = TaskFile::new(goal.as_str(), parent.kind);
     child.created = ctx.at;
     child.default_visibility = parent.default_visibility;
+    let (moved, moves) = split_work(&mut parent, &mut child, place.task, &child_dir);
+
+    child
+        .history
+        .push(ctx.entry("created", Some(format!("split from {}", place.slug()))));
+    let detail = if moved.is_empty() {
+        slug
+    } else {
+        format!("{slug}; moved: {}", moved.join(", "))
+    };
+    let entry = ctx.entry("split", Some(detail));
+    parent.history.push(entry.clone());
+    let dir = place.task.dir.clone();
+    Ok(Change {
+        dir: dir.clone(),
+        writes: vec![
+            Write::Task { dir, file: parent },
+            Write::Task {
+                dir: child_dir,
+                file: child,
+            },
+        ],
+        entry,
+        moves,
+    })
+}
+
+/// The work of `split`: moves the todos, result, planned result, worktree, branch (with its base
+/// and rebase marks), ship marker and merge override from `parent` to `child`, and returns what
+/// moved, by label, with the renames of `chats/` and `runs/` into `child_dir`.
+pub fn split_work(
+    parent: &mut TaskFile,
+    child: &mut TaskFile,
+    task: &Task,
+    child_dir: &Path,
+) -> (Vec<&'static str>, Vec<Move>) {
     let mut moved = Vec::new();
     if !parent.todos.is_empty() {
         moved.push("todos");
     }
     child.todos = std::mem::take(&mut parent.todos);
     take(&mut parent.result, &mut child.result, "result", &mut moved);
+    take(
+        &mut parent.planned_result,
+        &mut child.planned_result,
+        "planned result",
+        &mut moved,
+    );
     take(
         &mut parent.worktree,
         &mut child.worktree,
@@ -78,38 +120,15 @@ pub fn split(tree: &WorkTree, ctx: &Context, id: &str, goal: Option<&str>) -> Ou
     // Always renamed: a directory that is gone by then is skipped, and an empty one still moves.
     let mut moves = Vec::new();
     for (name, label) in [(CHATS_DIR, "chats/"), (RUNS_DIR, "runs/")] {
-        if place.task.files.keys().any(|path| path.starts_with(name)) {
+        if task.files.keys().any(|path| path.starts_with(name)) {
             moved.push(label);
         }
         moves.push(Move {
-            from: place.task.dir.join(name),
+            from: task.dir.join(name),
             to: child_dir.join(name),
         });
     }
-
-    child
-        .history
-        .push(ctx.entry("created", Some(format!("split from {}", place.slug()))));
-    let detail = if moved.is_empty() {
-        slug
-    } else {
-        format!("{slug}; moved: {}", moved.join(", "))
-    };
-    let entry = ctx.entry("split", Some(detail));
-    parent.history.push(entry.clone());
-    let dir = place.task.dir.clone();
-    Ok(Change {
-        dir: dir.clone(),
-        writes: vec![
-            Write::Task { dir, file: parent },
-            Write::Task {
-                dir: child_dir,
-                file: child,
-            },
-        ],
-        entry,
-        moves,
-    })
+    (moved, moves)
 }
 
 /// Moves `from` into `to`, noting `name` in `moved` when there was something to move.

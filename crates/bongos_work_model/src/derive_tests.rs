@@ -671,3 +671,80 @@ fn derived_values_are_not_part_of_the_file() {
     assert_eq!(before, after_text);
     assert!(!after_text.contains("implemented"));
 }
+
+/// A leaf of `kind` whose todos are a plan (role `plans`) and then `implement`.
+fn planned_leaf(kind: Kind, plan: TodoState, plan_started: bool) -> Task {
+    let mut file = TaskFile::new("p", kind);
+    let produces = matches!(kind, Kind::PrShip | Kind::PrMerge).then_some(TodoRole::ProducesBranch);
+    file.todos = vec![
+        todo("plan", Some(TodoRole::Plans), plan, plan_started),
+        todo("implement", produces, TodoState::Open, false),
+    ];
+    task("p", file)
+}
+
+const ALL_KINDS: [Kind; 6] = [
+    Kind::PrShip,
+    Kind::PrMerge,
+    Kind::Document,
+    Kind::Spike,
+    Kind::Babysit,
+    Kind::Other,
+];
+
+#[test]
+fn a_done_plans_todo_leaves_the_leaf_ready() {
+    for kind in ALL_KINDS {
+        // Done, with and without a start time.
+        for started in [false, true] {
+            let leaf = planned_leaf(kind, TodoState::Done, started);
+            assert_eq!(state_of(&tree(vec![leaf]), "p"), State::Ready, "{kind:?}");
+        }
+        // Planning skipped or cancelled does not start the leaf either.
+        for plan in [TodoState::Skipped, TodoState::Cancelled] {
+            let leaf = planned_leaf(kind, plan, true);
+            assert_eq!(state_of(&tree(vec![leaf]), "p"), State::Ready, "{kind:?}");
+        }
+    }
+}
+
+#[test]
+fn an_open_plans_todo_is_in_progress_only_once_started() {
+    for kind in ALL_KINDS {
+        let not_started = planned_leaf(kind, TodoState::Open, false);
+        assert_eq!(
+            state_of(&tree(vec![not_started]), "p"),
+            State::Ready,
+            "{kind:?}"
+        );
+        let started = planned_leaf(kind, TodoState::Open, true);
+        assert_eq!(
+            state_of(&tree(vec![started]), "p"),
+            State::InProgress,
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn work_after_a_done_plans_todo_still_starts_the_leaf() {
+    for kind in ALL_KINDS {
+        let mut leaf = planned_leaf(kind, TodoState::Done, true);
+        file_mut(&mut leaf).todos[1].started = Some(AT.parse().unwrap());
+        assert_eq!(
+            state_of(&tree(vec![leaf]), "p"),
+            State::InProgress,
+            "{kind:?}"
+        );
+    }
+    let mut leaf = planned_leaf(Kind::PrShip, TodoState::Done, true);
+    file_mut(&mut leaf).worktree = Some("/wt".to_string());
+    assert_eq!(state_of(&tree(vec![leaf]), "p"), State::InProgress);
+}
+
+#[test]
+fn a_group_with_only_planned_leaves_is_ready() {
+    let leaf = planned_leaf(Kind::PrShip, TodoState::Done, true);
+    let t = tree(vec![group("g", vec![leaf])]);
+    assert_eq!(state_of(&t, "g"), State::Ready);
+}
