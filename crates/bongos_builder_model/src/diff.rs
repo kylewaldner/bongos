@@ -5,7 +5,9 @@
 //!
 //! The safety rules come first. A done or cancelled task, and everything under it, is never
 //! changed. A live task (a worktree, a branch, an open PR, a running chat or run, on it or under it)
-//! may be renamed and may gain todos and `after` edges, and nothing else. A frozen todo (closed,
+//! may be renamed, gain todos and `after` edges, change its planned result, and have its open
+//! unstarted todos renamed, removed or given another role. It is never cancelled, moved, given
+//! another kind, stripped of an edge or given a `stacked on` edge. A frozen todo (closed,
 //! started, or the current todo of a running chat or run) is never renamed, edited, removed or
 //! reordered. A task the proposal does not mention is untouched; only a `drop` line cancels.
 //!
@@ -1036,12 +1038,15 @@ impl<'a> Differ<'a> {
                 );
             }
         } else {
-            let proposed = node.results.first().map(|result| result.value.as_str());
-            if !same_opt(proposed, file.planned_result.as_deref()) {
+            // A line with no `result` keeps the planned result on disk, as one with no todos keeps
+            // the todos: a terse rename must not clear it.
+            if let Some(result) = node.results.first()
+                && !same_opt(Some(result.value.as_str()), file.planned_result.as_deref())
+            {
                 self.ops.push(Op::SetPlannedResult {
-                    line: node.results.first().map_or(line, |result| result.line),
+                    line: result.line,
                     id: id.to_string(),
-                    text: proposed.map(str::to_string),
+                    text: Some(result.value.clone()),
                 });
             }
             let todos = if node.todos.is_empty() {
@@ -1806,7 +1811,10 @@ impl<'a> Differ<'a> {
     }
 
     /// The edges of a task line at its proposal place: removals and changes now, additions as
-    /// candidates for the cycle and stack checks.
+    /// candidates for the cycle and stack checks. An edge on disk that the line does not list is
+    /// removed, unless the task is live (the proposal is a printed tree, so a missing edge is a
+    /// deleted one); unlike the planned result and the todos, a line cannot leave edges out for
+    /// brevity.
     fn reconcile_edges(&mut self, index: usize, candidates: &mut Vec<Candidate>) {
         let entry = self.entries[index];
         let node = entry.node;

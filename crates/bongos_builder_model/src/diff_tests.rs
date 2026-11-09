@@ -645,6 +645,41 @@ fn a_live_task_may_be_renamed_and_gain_todos_and_after_edges_only() {
 }
 
 #[test]
+fn a_line_without_a_result_keeps_the_planned_result_and_a_different_one_replaces_it() {
+    let planned = |file: &mut bongos_work_model::TaskFile| {
+        file.planned_result = Some("a PR with the engine".to_string());
+    };
+    let mut live = LiveSet::default();
+    live.add_run(id_of("engine"));
+    for live in [LiveSet::default(), live] {
+        let tree = live_leaf(planned);
+        let header = "task billing: proration | id id-billing\n  task schema: schema | id \
+                      id-schema\n  task engine: ";
+        let tail = " | id id-engine\n    after schema\n";
+        let rename = doc("billing", &format!("{header}the engine{tail}"));
+        let diff = run_with(&tree, &rename, &live, &Choices::default());
+        assert_eq!(changes(&diff, &tree), ["rename engine to the engine"]);
+
+        let same = doc(
+            "billing",
+            &format!("{header}engine{tail}    result a PR with the engine\n"),
+        );
+        let diff = run_with(&tree, &same, &live, &Choices::default());
+        assert!(diff.is_empty(), "{:?}", diff.ops);
+
+        let other = doc(
+            "billing",
+            &format!("{header}engine{tail}    result a PR with the new engine\n"),
+        );
+        let diff = run_with(&tree, &other, &live, &Choices::default());
+        assert_eq!(
+            changes(&diff, &tree),
+            ["result engine Some(\"a PR with the new engine\")"]
+        );
+    }
+}
+
+#[test]
 fn done_and_cancelled_tasks_are_never_touched() {
     let done = with_file(
         after(
