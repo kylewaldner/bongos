@@ -33,7 +33,7 @@ use futures::channel::oneshot;
 use futures::future::{self, Shared};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task};
 use project::Project;
-use settings::Settings as _;
+use settings::{Settings as _, SettingsStore};
 use terminal::{Event as TerminalEvent, Terminal};
 
 use crate::cleanup::{Cleanup, cleanup_verdict};
@@ -108,6 +108,7 @@ pub struct LiveChat {
     started: SystemTime,
     given: Vec<SharedArtifact>,
     fallbacks: Vec<Fallback>,
+    missing_skills: Vec<String>,
     record_path: PathBuf,
     cwd: PathBuf,
     command: String,
@@ -160,6 +161,11 @@ impl LiveChat {
     /// The fallbacks the launch used, for the row.
     pub fn fallbacks(&self) -> &[Fallback] {
         &self.fallbacks
+    }
+
+    /// The skills of the session type that were not found at launch, for the row.
+    pub fn missing_skills(&self) -> &[String] {
+        &self.missing_skills
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -226,6 +232,7 @@ pub struct ChatRuntime {
     /// The agent of the last chat `chat: new` started, offered first next time.
     last_agent: Option<Agent>,
     stats: RuntimeStats,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<ChatRuntimeEvent> for ChatRuntime {}
@@ -236,7 +243,7 @@ impl Global for GlobalChatRuntime {}
 
 impl ChatRuntime {
     /// `home` is where `~/.bongos` and the agents' own session files are.
-    pub fn new(store: Entity<ChatStore>, home: PathBuf) -> Self {
+    pub fn new(store: Entity<ChatStore>, home: PathBuf, cx: &mut Context<Self>) -> Self {
         Self {
             store,
             home,
@@ -250,7 +257,26 @@ impl ChatRuntime {
             next_send: 0,
             last_agent: None,
             stats: RuntimeStats::default(),
+            _subscriptions: vec![
+                cx.observe_global::<SettingsStore>(|this, cx| this.end_when_disabled(cx)),
+            ],
         }
+    }
+
+    /// Ends every running chat once `chats.enabled` is false (design D24). The store no longer
+    /// writes by then, so nothing is written: the records stay as they were, and a later enabled
+    /// period lists them again.
+    fn end_when_disabled(&mut self, cx: &mut Context<Self>) {
+        if ChatsSettings::get_global(cx).enabled || self.live.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = self.live.keys().cloned().collect();
+        for id in ids {
+            self.kill(&id, cx);
+            self.live.remove(&id);
+            cx.emit(ChatRuntimeEvent::Changed(id));
+        }
+        cx.notify();
     }
 
     /// The global runtime, once [`crate::init`] has run.
@@ -325,8 +351,15 @@ impl ChatRuntime {
         self.last_agent
     }
 
-    pub(crate) fn set_last_agent(&mut self, agent: Agent) {
+    /// Remembers `agent` as the last one `chat: new` started, in memory and in the key value
+    /// store, so the next run offers it first too.
+    pub(crate) fn set_last_agent(&mut self, agent: Agent, cx: &mut Context<Self>) {
         self.last_agent = Some(agent);
+        crate::view_state::write(
+            crate::view_state::LAST_AGENT_KEY,
+            Some(agent.as_str().to_string()),
+            cx,
+        );
     }
 
     /// The live chat with `chat_id`, running or exited.
@@ -620,6 +653,7 @@ impl ChatRuntime {
             started,
             given: prepared.given,
             fallbacks: prepared.spec.fallbacks,
+            missing_skills: prepared.missing_skills,
             record_path,
             cwd: prepared.spec.cwd,
             command,

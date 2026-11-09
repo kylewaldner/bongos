@@ -363,7 +363,7 @@ fn fork_to_task(
 }
 
 /// Asks which task, and with `ask_type` which session type, then forks `chat_id` into it.
-fn pick_task_and_fork(
+pub(crate) fn pick_task_and_fork(
     chat_id: String,
     ask_type: bool,
     workspace: &mut Workspace,

@@ -77,11 +77,22 @@ pub mod chat {
             ToggleAllTasks,
         ]
     );
+
+    #[cfg(debug_assertions)]
+    actions!(
+        chat,
+        [
+            /// Debug builds only: writes the text of the view the Chats panel shows to
+            /// `chat-view.txt` in the logs directory.
+            DumpView,
+        ]
+    );
 }
 
 /// Every `chat` action, for hiding them from the command palette.
 pub fn action_types() -> Vec<TypeId> {
-    vec![
+    #[allow(unused_mut)]
+    let mut types = vec![
         TypeId::of::<chat::New>(),
         TypeId::of::<chat::NewWithOptions>(),
         TypeId::of::<chat::NewPlan>(),
@@ -111,7 +122,10 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<chat::SendRegion>(),
         TypeId::of::<chat::Filter>(),
         TypeId::of::<chat::ToggleAllTasks>(),
-    ]
+    ];
+    #[cfg(debug_assertions)]
+    types.push(TypeId::of::<chat::DumpView>());
+    types
 }
 
 /// Hides the `chat` actions from the command palette while `chats.enabled` is false and shows

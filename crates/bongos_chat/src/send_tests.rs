@@ -273,7 +273,8 @@ async fn test_empty_text_and_chats_off_are_refused(cx: &mut TestAppContext) {
     );
     crate::runtime_tests::set_chat_settings(cx, false, 60);
     assert_eq!(send_text(&id, PROMPT, true, cx).await, Err(SendError::Off));
-    assert!(written(&h, &id, cx).is_empty());
+    // Turning chats off ended the chat, so nothing could be written to it.
+    assert_eq!(h.state(&id, cx), crate::ChatState::Closed);
 }
 
 #[gpui::test]

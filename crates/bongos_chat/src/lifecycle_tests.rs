@@ -278,9 +278,7 @@ async fn test_a_renamed_chat_keeps_its_name_after_a_send(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-async fn test_restore_and_show_archive_list_the_archived_and_restore_the_pick(
-    cx: &mut TestAppContext,
-) {
+async fn test_restore_lists_the_archived_and_restores_the_pick(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
     let (workspace, cx) = command_window(&h, cx).await;
     dispatch(cx, "chat::Restore");
@@ -295,7 +293,7 @@ async fn test_restore_and_show_archive_list_the_archived_and_restore_the_pick(
     });
     wait_indexed(&h, &[&open.id, &archived.id], cx).await;
     let before = on_disk(&h.scope, &archived.id);
-    dispatch(cx, "chat::ShowArchive");
+    dispatch(cx, "chat::Restore");
     // Only the archived chat is listed.
     answer(&workspace, "Old audit", cx).await;
     wait_for(cx, "the restore", STARTUP, |_| {

@@ -143,7 +143,12 @@ pub(super) async fn harness(
     idle_after_secs: u64,
     env: &[(&str, &str)],
 ) -> Harness {
-    harness_with(cx, enabled, idle_after_secs, env, false).await
+    harness_with(cx, enabled, idle_after_secs, env, false, None).await
+}
+
+/// `harness`, with the task `t1` focused, as the Work view leaves it in the key value store.
+pub(super) async fn harness_focused(cx: &mut TestAppContext) -> Harness {
+    harness_with(cx, true, 60, &[], false, Some("t1")).await
 }
 
 /// `harness`, with todos on the test task when `todos` (none of them started).
@@ -153,6 +158,7 @@ async fn harness_with(
     idle_after_secs: u64,
     env: &[(&str, &str)],
     todos: bool,
+    focus: Option<&str>,
 ) -> Harness {
     cx.executor().allow_parking();
     let temp = TempDir::new().unwrap();
@@ -185,12 +191,21 @@ async fn harness_with(
 
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
+        // Saved panel state (the key value store) belongs to this test alone.
+        cx.set_global(db::AppDatabase::test_new());
         WorkSettings::register(cx);
         ChatsSettings::register(cx);
         app_state
     });
     set_chat_settings(cx, enabled, idle_after_secs);
 
+    if let Some(task) = focus {
+        let db = cx.update(|cx| db::kvp::KeyValueStore::global(cx));
+        db.scoped(bongos_work::KVP_NAMESPACE)
+            .write(bongos_work::FOCUS_KEY.to_string(), format!("\"{task}\""))
+            .await
+            .unwrap();
+    }
     // The work store is the global one, as in the app, so the commands find it.
     let fs = Arc::new(RealFs::new(None, cx.executor()));
     let work = cx.update(|cx| {
@@ -212,7 +227,7 @@ async fn harness_with(
     health_env.insert("FAKE_CLI_HOME".into(), home.to_string_lossy().into_owned());
     let health = cx.new(|cx| ChatHealth::new(health_env, cx));
     cx.update(|cx| ChatHealth::set_global(health, cx));
-    let runtime = cx.new(|_| ChatRuntime::new(store, home.clone()));
+    let runtime = cx.new(|cx| ChatRuntime::new(store, home.clone(), cx));
     let project = Project::test(app_state.fs.clone(), [], cx).await;
     Harness {
         _temp: temp,
@@ -776,6 +791,7 @@ async fn test_last_active_writes_are_debounced(cx: &mut TestAppContext) {
     };
 
     let before = writes(cx);
+    let burst_started = std::time::Instant::now();
     for name in ["one", "two", "three", "four"] {
         h.type_line(&id, &format!("title {name}"), cx);
         wait_for(cx, "the title", WITHIN, |cx| {
@@ -784,9 +800,14 @@ async fn test_last_active_writes_are_debounced(cx: &mut TestAppContext) {
         .await;
     }
     let during = writes(cx);
+    // Four changes inside one debounce window write once. A slow machine can stretch the burst
+    // over more windows, so each full window it took allows one more write: the assertion
+    // depends on the time measured, not on the machine's speed.
+    let windows = (burst_started.elapsed().as_millis() / debounce.as_millis()) as usize;
     assert!(
-        during - before <= 1,
-        "four changes inside the debounce wrote {} times",
+        during - before <= 1 + windows,
+        "four changes in {:?} wrote {} times",
+        burst_started.elapsed(),
         during - before
     );
     cx.executor()
@@ -794,7 +815,7 @@ async fn test_last_active_writes_are_debounced(cx: &mut TestAppContext) {
         .await;
     cx.run_until_parked();
     let after = writes(cx);
-    assert!(after - before <= 2, "{} writes", after - before);
+    assert!(after - before <= 2 + windows, "{} writes", after - before);
     assert!(after > before, "the changes were written");
 }
 
@@ -956,7 +977,7 @@ async fn test_the_work_store_reports_the_open_chat_until_it_ends(cx: &mut TestAp
 
 #[gpui::test]
 async fn test_a_chat_start_starts_the_current_todo_once(cx: &mut TestAppContext) {
-    let h = harness_with(cx, true, 60, &[], true).await;
+    let h = harness_with(cx, true, 60, &[], true, None).await;
     wait_for_task(&h, cx).await;
     assert_eq!(todo_starts(&h, cx), vec![None, None]);
 
@@ -996,7 +1017,7 @@ async fn test_a_chat_start_starts_the_current_todo_once(cx: &mut TestAppContext)
 
 #[gpui::test]
 async fn test_start_current_todo_writes_once_and_ignores_other_tasks(cx: &mut TestAppContext) {
-    let h = harness_with(cx, true, 60, &[], true).await;
+    let h = harness_with(cx, true, 60, &[], true, None).await;
     wait_for_task(&h, cx).await;
     // A group and an unknown task have no todo to start.
     for id in ["top", "nope"] {

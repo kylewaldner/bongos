@@ -18,6 +18,7 @@ mod health;
 mod launch;
 mod layout;
 mod lifecycle;
+mod list_view;
 mod live_modes;
 mod panel;
 mod runtime;
@@ -27,6 +28,7 @@ mod session_view;
 mod settings;
 mod store;
 mod types_cmd;
+mod view_state;
 
 use std::path::{Path, PathBuf};
 
@@ -115,7 +117,7 @@ pub fn init(dirs: ChatDirs, cx: &mut App) {
     };
     let store = cx.new(|cx| ChatStore::new(work, dirs, cx));
     cx.set_global(GlobalChatStore(store.clone()));
-    let runtime = cx.new(|_| ChatRuntime::new(store.clone(), util::paths::home_dir().clone()));
+    let runtime = cx.new(|cx| ChatRuntime::new(store.clone(), util::paths::home_dir().clone(), cx));
     live_modes::init(&runtime, &store, cx);
     lifecycle::init(&store, cx);
     ChatRuntime::set_global(runtime, cx);
@@ -140,6 +142,9 @@ mod facts_tests;
 
 #[cfg(test)]
 mod lifecycle_tests;
+
+#[cfg(test)]
+mod list_tests;
 
 #[cfg(test)]
 mod panel_tests;
