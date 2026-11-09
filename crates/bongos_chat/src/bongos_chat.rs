@@ -42,6 +42,7 @@ pub use artifacts_view::{ROW_NOTE, STALE_LINE, artifacts_text, is_stale, stale_c
 pub use cleanup::{Cleanup, KeepReason, cleanup_verdict};
 pub use commands::{
     agent_choices, list_types, offer_resume_and_send, open_chat, start_chat_on_task,
+    start_chat_on_task_of_type,
 };
 pub use facts::task_facts;
 pub use health::{
@@ -50,8 +51,8 @@ pub use health::{
     fix_not_probed,
 };
 pub use launch::{
-    CLAUDE_SETTINGS_FILE, CODEX_INSTRUCTIONS_FILE, CONTEXT_FILE, LaunchError, LaunchRequest,
-    PLUGIN_DIR, SYSTEM_FILE,
+    CLAUDE_SETTINGS_FILE, CODEX_INSTRUCTIONS_FILE, CONTEXT_FILE, ContextExtension, LaunchError,
+    LaunchRequest, PLUGIN_DIR, SYSTEM_FILE, set_context_extension,
 };
 pub use layout::PROMPT_PANE_OFF;
 pub use live_modes::{SOURCE_NAME, start_current_todo};

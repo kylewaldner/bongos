@@ -11,7 +11,7 @@ use workspace::Workspace;
 
 use crate::DEFAULT_ACTIVITY;
 use crate::actions::task;
-use crate::commands::{ready, show_toast, submit, with_project, with_task};
+use crate::commands::{new_task_todos, ready, show_toast, submit, with_project, with_task};
 use crate::modals;
 
 pub fn register(workspace: &mut Workspace) {
@@ -39,16 +39,13 @@ fn new_one_off(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
                 "",
                 false,
                 Box::new(move |goal, workspace, _, cx| {
+                    let new = NewTask {
+                        goal,
+                        todos: new_task_todos(cx),
+                        ..NewTask::default()
+                    };
                     submit(workspace, cx, move |tree, ctx| {
-                        model::new_oneoff(
-                            tree,
-                            ctx,
-                            &activity,
-                            NewTask {
-                                goal: goal.clone(),
-                                ..NewTask::default()
-                            },
-                        )
+                        model::new_oneoff(tree, ctx, &activity, new.clone())
                     })
                 }),
                 window,

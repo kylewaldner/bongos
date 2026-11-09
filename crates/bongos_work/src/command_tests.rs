@@ -296,6 +296,54 @@ async fn new_with_only_a_goal_creates_a_leaf_with_kind_todos_and_state(cx: &mut 
     assert!(!harness.has_toast(cx));
 }
 
+/// The todos the test hook hands to a new task.
+fn hook_todos() -> Vec<bongos_work_model::Todo> {
+    ["plan it", "build it"]
+        .into_iter()
+        .map(|name| bongos_work_model::Todo {
+            name: name.to_string(),
+            role: None,
+            workflow: None,
+            state: TodoState::Open,
+            started: None,
+            extra: bongos_work_model::Extra::new(),
+        })
+        .collect()
+}
+
+#[gpui::test]
+async fn a_todos_hook_fills_new_and_new_one_off(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    cx.update(|_, cx| crate::set_new_task_todos(|_| Some(hook_todos()), cx));
+    harness
+        .run_and_wait(cx, "task::New", &[Input::Text("Hooked task")])
+        .await;
+    harness
+        .run_and_wait(
+            cx,
+            "task::NewOneOff",
+            &[Input::Text("Research"), Input::Text("Hooked one off")],
+        )
+        .await;
+
+    let tree = harness.tree(cx);
+    for goal in ["Hooked task", "Hooked one off"] {
+        let file = find(&tree, goal).file.as_ref().unwrap();
+        let names: Vec<&str> = file.todos.iter().map(|todo| todo.name.as_str()).collect();
+        assert_eq!(names, ["plan it", "build it"], "{goal}");
+    }
+
+    // A hook with nothing to say leaves the kind's todos.
+    cx.update(|_, cx| crate::set_new_task_todos(|_| None, cx));
+    harness
+        .run_and_wait(cx, "task::New", &[Input::Text("Plain task")])
+        .await;
+    let tree = harness.tree(cx);
+    let file = find(&tree, "Plain task").file.as_ref().unwrap();
+    let names: Vec<&str> = file.todos.iter().map(|todo| todo.name.as_str()).collect();
+    assert_eq!(names, ["explore", "write up"]);
+}
+
 #[gpui::test]
 async fn an_empty_goal_keeps_the_prompt_open(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx, true, true).await;

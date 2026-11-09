@@ -13,6 +13,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use bongos_chat_model::{
     Agent, Capabilities, ChatRecord, Fallback, GeneratedFiles, HandoffParent, LaunchKind,
@@ -20,6 +21,7 @@ use bongos_chat_model::{
     render_codex_instructions, render_context, render_env, render_settings, render_system,
 };
 use bongos_work_model::{SessionContext, SharedArtifact};
+use gpui::{App, Global};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 
 use crate::{AgentCommand, ChatWriteError};
@@ -59,6 +61,36 @@ pub struct LaunchRequest {
     pub caps: Option<Capabilities>,
     /// Fallbacks already known to be needed (see `LaunchPlan::force`).
     pub force: Vec<Fallback>,
+    /// A section the context extension (see [`set_context_extension`]) adds at the end of the
+    /// context; `None` without an extension.
+    pub extra_context: Option<String>,
+}
+
+/// Adds a section to the end of the context of a chat, after the shared artifacts. It never sees
+/// the artifacts: hidden ones stay out of the context whatever an extension writes.
+pub trait ContextExtension {
+    /// The section for a `chat_type` chat, or `None` for no section. `task_id` is the top task for
+    /// a project chat; it is `None` only when the index has no task.
+    fn section(&self, chat_type: &str, task_id: Option<&str>, cx: &App) -> Option<String>;
+}
+
+struct GlobalContextExtension(Rc<dyn ContextExtension>);
+
+impl Global for GlobalContextExtension {}
+
+/// Installs the context extension. Replaces an earlier one.
+pub fn set_context_extension(ext: impl ContextExtension + 'static, cx: &mut App) {
+    cx.set_global(GlobalContextExtension(Rc::new(ext)));
+}
+
+/// The installed extension's section for a launch, `None` without an extension.
+pub(crate) fn extension_section(
+    chat_type: &str,
+    task_id: Option<&str>,
+    cx: &App,
+) -> Option<String> {
+    let ext = cx.try_global::<GlobalContextExtension>()?.0.clone();
+    ext.section(chat_type, task_id, cx)
 }
 
 /// Why a launch did not start.
@@ -175,6 +207,7 @@ pub(crate) fn prepare(
         bongos_root: Some(&bongos_root),
         skills_as_plugin,
         handoff: request.handoff.as_ref(),
+        extra_context: request.extra_context.as_deref(),
     };
 
     let context_text = render_context(&input);

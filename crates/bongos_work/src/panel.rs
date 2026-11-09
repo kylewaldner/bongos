@@ -68,13 +68,22 @@ pub struct WorkPanel {
 impl EventEmitter<PanelEvent> for WorkPanel {}
 
 impl WorkPanel {
+    /// The id of the selected row when it is a task.
+    pub(crate) fn task_at_selection(&self) -> Option<&str> {
+        match &self.selected {
+            Some(Key::Task(id)) => Some(id),
+            _ => None,
+        }
+    }
+
     pub fn new(
         workspace: WeakEntity<Workspace>,
         fs: Arc<dyn Fs>,
-        _window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut subscriptions = Vec::new();
+        let focus_handle = cx.focus_handle();
         if let Some(store) = WorkStore::global(cx) {
             subscriptions.push(cx.subscribe(&store, |this, _, _, cx| this.rebuild(cx)));
         }
@@ -83,7 +92,7 @@ impl WorkPanel {
         let mut this = Self {
             workspace,
             fs,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             scroll_handle: UniformListScrollHandle::new(),
             path: saved.path.clone(),
             expanded: saved.expanded.iter().cloned().collect(),
@@ -650,6 +659,19 @@ impl Panel for WorkPanel {
     fn activation_priority(&self) -> u32 {
         7
     }
+}
+
+/// The task id a command acts on without asking: the selected row of the Work panel while the
+/// panel has focus and the row is a task, else the focused task when it names a task in the tree.
+pub fn task_at_point(workspace: &Workspace, window: &Window, cx: &App) -> Option<String> {
+    let tree = WorkStore::global(cx)?.read(cx).snapshot()?;
+    let selected = workspace
+        .panel::<WorkPanel>(cx)
+        .filter(|panel| panel.focus_handle(cx).contains_focused(window, cx))
+        .and_then(|panel| panel.read(cx).task_at_selection().map(str::to_string));
+    selected
+        .or_else(|| crate::focused(&tree, cx))
+        .filter(|id| tree.task_by_id(id).is_some())
 }
 
 /// Adds the Work panel to `workspace` while `work.enabled` is true and removes it while false,

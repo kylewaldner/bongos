@@ -50,6 +50,7 @@ use workspace::{MultiWorkspace, Workspace};
 use crate::actions::chat;
 use crate::cleanup::{Cleanup, cleanup_verdict};
 use crate::health::agent_title;
+use crate::launch::extension_section;
 use crate::live_modes::is_open;
 use crate::panel::{NO_CHAT, enabled_panel};
 use crate::scope::{ChatScope, project_repositories, resolve_scope};
@@ -200,10 +201,32 @@ pub fn start_chat_on_task(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    start_chat_on_task_with(task_id, NewChat::asking(), workspace, window, cx)
+}
+
+/// `chat: new` on the task `task_id` for a `chat_type` chat, whatever has focus: the session
+/// type is not asked. Only says so while chats are off.
+pub fn start_chat_on_task_of_type(
+    task_id: String,
+    chat_type: &str,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    start_chat_on_task_with(task_id, NewChat::of(chat_type), workspace, window, cx)
+}
+
+fn start_chat_on_task_with(
+    task_id: String,
+    spec: NewChat,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     if !chats_on(workspace, cx) {
         return;
     }
-    new_chat_on(task_id, NewChat::asking(), workspace, window, cx)
+    new_chat_on(task_id, spec, workspace, window, cx)
 }
 
 /// The scope of a new `chat_type` chat on `task_id`, from the Work snapshot and settings.
@@ -616,6 +639,7 @@ pub(crate) fn start_chat(
         .ok()
         .and_then(|tree| task_facts(&tree, &plan.scope.task_id))
         .unwrap_or_default();
+    let extra_context = extension_section(&plan.chat_type, Some(&plan.scope.task_id), cx);
     cx.spawn(async move |cx| {
         let chat_type = plan.chat_type.clone();
         let agent = plan.agent;
@@ -656,6 +680,7 @@ pub(crate) fn start_chat(
             handoff: None,
             caps: None,
             force: Vec::new(),
+            extra_context,
         };
         let launch = runtime.update(cx, |runtime, cx| runtime.launch(request, &projects, cx));
         if let Err(error) = launch.await {
@@ -753,6 +778,8 @@ pub(crate) fn resume_chat(
             })
             .await?;
 
+        let extra_context =
+            cx.update(|cx| extension_section(&record.chat_type, indexed.task_id.as_deref(), cx));
         let launch = runtime.update(cx, |runtime, cx| {
             // An exited chat the panel still shows gives way to the resumed one.
             if runtime.live(&chat_id).is_some() {
@@ -770,6 +797,7 @@ pub(crate) fn resume_chat(
                 handoff: None,
                 caps: None,
                 force: Vec::new(),
+                extra_context,
             };
             runtime.launch(request, &projects, cx)
         });

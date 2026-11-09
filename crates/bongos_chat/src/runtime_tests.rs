@@ -25,8 +25,8 @@ use tempfile::TempDir;
 use workspace::{AppState, MultiWorkspace};
 
 use crate::{
-    CLAUDE_SETTINGS_FILE, CONTEXT_FILE, ChatDirs, ChatHealth, ChatRuntime, ChatState, ChatStore,
-    ChatsSettings, LaunchError, LaunchRequest, PLUGIN_DIR, SYSTEM_FILE,
+    CLAUDE_SETTINGS_FILE, CODEX_INSTRUCTIONS_FILE, CONTEXT_FILE, ChatDirs, ChatHealth, ChatRuntime,
+    ChatState, ChatStore, ChatsSettings, LaunchError, LaunchRequest, PLUGIN_DIR, SYSTEM_FILE,
 };
 
 /// What a test allows for a state change to reach the runtime.
@@ -282,6 +282,7 @@ impl Harness {
                 Agent::Codex => codex_caps(),
             }),
             force: vec![],
+            extra_context: None,
         }
     }
 
@@ -585,6 +586,44 @@ async fn test_generated_files_hold_no_human_only_path(cx: &mut TestAppContext) {
     });
     assert_eq!(given.len(), 1);
     assert!(given[0].path.ends_with("docs/design.md"));
+}
+
+#[gpui::test]
+async fn test_extra_context_ends_the_context_files_and_leaks_nothing(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let section = "## Extra section\nPlan with proposals.";
+    let mut outputs: Vec<String> = Vec::new();
+    for agent in [Agent::Claude, Agent::Codex] {
+        let mut request = h.request(agent, "implement");
+        request.extra_context = Some(section.to_string());
+        let id = request.record.id.clone();
+        h.launch(request, &h.project, cx).await.unwrap();
+        wait_for(cx, "the fake to start", STARTUP, |_| {
+            h.log_lines(agent.as_str())
+                .iter()
+                .any(|line| line == "start")
+        })
+        .await;
+        let dir = h.runtime_root.join(&id);
+        let context = std::fs::read_to_string(dir.join(CONTEXT_FILE)).unwrap();
+        assert!(context.ends_with(&format!("{section}\n")), "{context}");
+        assert!(context.contains("docs/design.md"), "the shared file stays");
+        if agent == Agent::Codex {
+            let codex = std::fs::read_to_string(dir.join(CODEX_INSTRUCTIONS_FILE)).unwrap();
+            assert!(codex.ends_with(&format!("{section}\n")), "{codex}");
+        }
+        for file in files_under(&dir) {
+            outputs.push(std::fs::read_to_string(file).unwrap());
+        }
+    }
+    for output in &outputs {
+        for (path, description) in SECRETS {
+            let file_name = Path::new(path).file_name().unwrap().to_str().unwrap();
+            for needle in [path, file_name, description] {
+                assert!(!output.contains(needle), "{needle} found in:\n{output}");
+            }
+        }
+    }
 }
 
 #[gpui::test]

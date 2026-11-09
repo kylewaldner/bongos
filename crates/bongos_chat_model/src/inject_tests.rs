@@ -78,6 +78,7 @@ struct Fixture {
     resolved: ResolvedType,
     handoff: Option<HandoffParent>,
     skills_as_plugin: bool,
+    extra_context: Option<String>,
 }
 
 impl Fixture {
@@ -89,6 +90,7 @@ impl Fixture {
             resolved: resolved(root, chat_type, agent),
             handoff: None,
             skills_as_plugin: false,
+            extra_context: None,
         }
     }
 
@@ -105,6 +107,7 @@ impl Fixture {
             bongos_root: Some(Path::new("/home/kyle/.bongos")),
             skills_as_plugin: self.skills_as_plugin,
             handoff: self.handoff.as_ref(),
+            extra_context: self.extra_context.as_deref(),
         }
     }
 }
@@ -447,6 +450,15 @@ fn task_on_disk(temp: &TempDir, break_manifest: bool) -> PathBuf {
 }
 
 fn every_output_for(root: &TempDir, task_dir: &Path, context: SessionContext) -> Vec<String> {
+    every_output_with_extra(root, task_dir, context, None)
+}
+
+fn every_output_with_extra(
+    root: &TempDir,
+    task_dir: &Path,
+    context: SessionContext,
+    extra: Option<&str>,
+) -> Vec<String> {
     let mut all = Vec::new();
     for (chat_type, agent) in [
         ("plan", Agent::Claude),
@@ -458,6 +470,7 @@ fn every_output_for(root: &TempDir, task_dir: &Path, context: SessionContext) ->
     ] {
         let mut fixture = Fixture::new(root, chat_type, agent, vec![]);
         fixture.context = context.clone();
+        fixture.extra_context = extra.map(str::to_string);
         // The record and the facts point at the scope directory the way a real launch does,
         // and the record names the human-only prompts file.
         fixture.record.prompts_file = Some(task_dir.join("prompts.txt"));
@@ -595,4 +608,56 @@ fn codex_instructions_carry_the_chat_id() {
     let root = types_root();
     let fixture = Fixture::new(&root, "implement", Agent::Claude, vec![]);
     assert!(!render_system(&fixture.input()).contains(CHAT_ID_LABEL));
+}
+
+#[test]
+fn no_extra_context_leaves_the_context_unchanged() {
+    let root = types_root();
+    let mut fixture = Fixture::new(
+        &root,
+        "implement",
+        Agent::Claude,
+        vec![artifact("/t/a.md", "A")],
+    );
+    let plain = render_context(&fixture.input());
+    fixture.extra_context = None;
+    assert_eq!(render_context(&fixture.input()), plain);
+    // Blank text adds nothing either.
+    fixture.extra_context = Some("  \n".to_string());
+    assert_eq!(render_context(&fixture.input()), plain);
+    assert!(plain.ends_with("- /t/a.md: A\n"));
+}
+
+#[test]
+fn extra_context_ends_context_and_codex_instructions() {
+    let root = types_root();
+    for chat_type in ["plan", "implement"] {
+        let mut fixture = Fixture::new(
+            &root,
+            chat_type,
+            Agent::Codex,
+            vec![artifact("/t/a.md", "A")],
+        );
+        let plain_context = render_context(&fixture.input());
+        let plain_codex = render_codex_instructions(&fixture.input());
+        fixture.extra_context = Some("## Extra section\nPlan like this.\n".to_string());
+        let context = render_context(&fixture.input());
+        let codex = render_codex_instructions(&fixture.input());
+        let tail = "\n## Extra section\nPlan like this.\n";
+        assert_eq!(context, format!("{plain_context}{tail}"));
+        assert_eq!(codex, format!("{plain_codex}{tail}"));
+        // The shared artifacts come first.
+        assert!(context.find("/t/a.md").unwrap() < context.find("## Extra section").unwrap());
+    }
+}
+
+#[test]
+fn an_extension_never_changes_what_stays_hidden() {
+    let temp = TempDir::new().unwrap();
+    let task_dir = task_on_disk(&temp, false);
+    let root = types_root();
+    let context = bongos_work_model::session_context(&task_dir).unwrap();
+    let outputs = every_output_with_extra(&root, &task_dir, context, Some("## Extra\nplan text"));
+    assert!(outputs.iter().any(|output| output.ends_with("plan text\n")));
+    assert_no_secret(&outputs);
 }

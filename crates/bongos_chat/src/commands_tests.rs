@@ -1181,6 +1181,112 @@ async fn test_start_chat_on_a_task_that_is_not_focused(cx: &mut TestAppContext) 
     assert!(!toast_shown(&workspace, cx));
 }
 
+#[gpui::test]
+async fn test_start_chat_on_task_of_type_does_not_ask_the_type(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    let (workspace, cx) = command_window(&h, cx).await;
+    // Nothing is focused, and no task or type is asked; only the agent is.
+    workspace.update_in(cx, |workspace, window, cx| {
+        crate::start_chat_on_task_of_type("t1".to_string(), "plan", workspace, window, cx)
+    });
+    answer(&workspace, "claude:", cx).await;
+    wait_for(cx, "the chat in the panel", STARTUP, |cx| {
+        shown(&workspace, cx).is_some()
+    })
+    .await;
+    assert!(!has_modal(&workspace, cx), "the type was not asked");
+    let id = shown(&workspace, cx).unwrap();
+    let record = read_record(&record_path(&h.scope, &id)).unwrap();
+    assert_eq!(record.chat_type, "plan");
+    assert_eq!(record.agent, "claude");
+    assert!(!toast_shown(&workspace, cx));
+}
+
+/// The context extension the tests install: records what it was asked and answers with `section`.
+struct TestExtension {
+    asked: Rc<RefCell<Vec<(String, Option<String>)>>>,
+    section: Option<&'static str>,
+}
+
+impl crate::ContextExtension for TestExtension {
+    fn section(&self, chat_type: &str, task_id: Option<&str>, _: &gpui::App) -> Option<String> {
+        self.asked
+            .borrow_mut()
+            .push((chat_type.to_string(), task_id.map(str::to_string)));
+        self.section.map(str::to_string)
+    }
+}
+
+#[gpui::test]
+async fn test_a_new_chat_gets_the_context_extension_section(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    cx.update(|cx| ChatRuntime::set_global(h.runtime.clone(), cx));
+    add_tasks(&h, cx).await;
+    let projects = vec![h.project.clone()];
+    let context_of = |id: &str| {
+        std::fs::read_to_string(h.runtime_root.join(id).join(crate::CONTEXT_FILE)).unwrap()
+    };
+
+    // No extension: the context is the plain one.
+    let plan = plan_for("t1", "plan", Agent::Claude, cx);
+    let id = cx
+        .update(|cx| start_chat(plan, projects.clone(), cx))
+        .await
+        .unwrap();
+    let plain = context_of(&id);
+
+    // An extension with nothing to say changes nothing.
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|cx| {
+        crate::set_context_extension(
+            TestExtension {
+                asked: asked.clone(),
+                section: None,
+            },
+            cx,
+        )
+    });
+    let plan = plan_for("t1", "plan", Agent::Claude, cx);
+    let id = cx
+        .update(|cx| start_chat(plan, projects.clone(), cx))
+        .await
+        .unwrap();
+    assert_eq!(context_of(&id), plain);
+    assert_eq!(
+        *asked.borrow(),
+        [("plan".to_string(), Some("t1".to_string()))]
+    );
+
+    // A section ends context.md, and codex-instructions.md for Codex.
+    let section = "## Extra section\nPlan with proposals.";
+    cx.update(|cx| {
+        crate::set_context_extension(
+            TestExtension {
+                asked: asked.clone(),
+                section: Some(section),
+            },
+            cx,
+        )
+    });
+    for agent in [Agent::Claude, Agent::Codex] {
+        let plan = plan_for("t1", "plan", agent, cx);
+        let id = cx
+            .update(|cx| start_chat(plan, projects.clone(), cx))
+            .await
+            .unwrap();
+        assert_eq!(context_of(&id), format!("{plain}\n{section}\n"));
+        if agent == Agent::Codex {
+            let codex = std::fs::read_to_string(
+                h.runtime_root
+                    .join(&id)
+                    .join(crate::CODEX_INSTRUCTIONS_FILE),
+            )
+            .unwrap();
+            assert!(codex.ends_with(&format!("\n{section}\n")), "{codex}");
+        }
+    }
+}
+
 /// Every command of this step, dispatched by name while chats are off, only says so.
 #[gpui::test]
 async fn test_the_commands_dispatch_by_name_and_say_when_off(cx: &mut TestAppContext) {

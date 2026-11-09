@@ -16,9 +16,9 @@ use bongos_work_model::derive::{self, Shape};
 use bongos_work_model::graph::state_label;
 use bongos_work_model::rules::{self, Place};
 use bongos_work_model::store::{Task, WorkTree};
-use bongos_work_model::{Kind, Status, TodoRole, TodoState};
+use bongos_work_model::{Kind, Status, Todo, TodoRole, TodoState};
 use command_palette_hooks::CommandPaletteFilter;
-use gpui::{App, Context, Window};
+use gpui::{App, Context, Global, Window};
 use settings::{Settings as _, SettingsStore};
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
@@ -423,12 +423,32 @@ pub(crate) fn has_status(task: &Task, keep: impl Fn(Status) -> bool) -> bool {
 
 // Tasks.
 
+type NewTaskTodos = Box<dyn Fn(&App) -> Option<Vec<Todo>>>;
+
+struct GlobalNewTaskTodos(NewTaskTodos);
+
+impl Global for GlobalNewTaskTodos {}
+
+/// Installs a hook that supplies the todo list of every task made with `task: new`, `task: new
+/// child` and `task: new one off`. A hook that returns `None`, or no hook, leaves the kind's
+/// default todos. Replaces an earlier hook.
+pub fn set_new_task_todos(hook: impl Fn(&App) -> Option<Vec<Todo>> + 'static, cx: &mut App) {
+    cx.set_global(GlobalNewTaskTodos(Box::new(hook)));
+}
+
+/// The todos the installed hook gives a new task, if any.
+pub(crate) fn new_task_todos(cx: &App) -> Option<Vec<Todo>> {
+    cx.try_global::<GlobalNewTaskTodos>()
+        .and_then(|hook| (hook.0)(cx))
+}
+
 /// The request for a new task with `goal` at `placement`. Its kind is the model's default,
 /// except `pr-merge` in a repository without deployments (see
 /// [`default_kind`](crate::repositories::default_kind)).
 pub(crate) fn new_task_with_default_kind(placement: &Placement, goal: String, cx: &App) -> NewTask {
     let mut new = NewTask {
         goal,
+        todos: new_task_todos(cx),
         ..NewTask::default()
     };
     if let Some(tree) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()) {

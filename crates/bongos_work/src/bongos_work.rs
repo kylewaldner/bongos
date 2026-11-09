@@ -37,10 +37,10 @@ pub use actions::{artifact, project, task, todo, work};
 pub use artifacts::focused;
 pub use changes::CHANGES_INTERVAL;
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
-pub use commands::{ready, show_toast, with_task};
+pub use commands::{ready, set_new_task_todos, show_toast, with_task};
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, is_project_top, target};
 pub use modals::{Then, ask, pick};
-pub use panel::{WorkPanel, init_panel};
+pub use panel::{WorkPanel, init_panel, task_at_point};
 pub use rebase::{CHECK_INTERVAL, RebaseState};
 pub use registry::{
     ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
