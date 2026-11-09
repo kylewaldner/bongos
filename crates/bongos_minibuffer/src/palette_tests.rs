@@ -249,3 +249,38 @@ async fn palette_not_in_enabled_for_stays_centered_while_others_are_routed(
 ) {
     unrouted(cx, &["something_else"]).await;
 }
+
+#[gpui::test]
+async fn open_with_no_session_opens_the_palette_in_the_strip(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = window(cx, &["command_palette"]).await;
+    let cx = &mut cx;
+    add_editor(&workspace, cx);
+    assert!(!palette_open(&workspace, cx));
+
+    cx.dispatch_action(minibuffer::Open);
+    cx.run_until_parked();
+    assert!(palette_open(&workspace, cx));
+    assert!(in_strip(&workspace, cx), "the palette is hosted by the strip");
+}
+
+#[gpui::test]
+async fn open_while_the_palette_is_open_keeps_one_palette_and_says_so(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = window(cx, &["command_palette", "messages"]).await;
+    let cx = &mut cx;
+    add_editor(&workspace, cx);
+    open_palette(&workspace, cx);
+
+    cx.dispatch_action(minibuffer::Open);
+    cx.run_until_parked();
+    assert!(palette_open(&workspace, cx), "the palette is still open");
+    assert!(in_strip(&workspace, cx));
+    let strip = cx
+        .update(|window, cx| crate::minibuffer_for_window(window.window_handle(), cx))
+        .expect("the window has a strip");
+    let said = strip.read_with(cx, |strip, _| strip.messages());
+    assert!(
+        said.iter()
+            .any(|line| line.text.as_ref() == crate::MINIBUFFER_IN_MINIBUFFER),
+        "the strip says a command used the minibuffer while in it"
+    );
+}
