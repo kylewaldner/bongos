@@ -2922,10 +2922,9 @@ impl Workspace {
     ) {
         let cleared = item.is_none() && self.bottom_item.is_some();
         self.bottom_item = item;
-        if cleared {
-            self.modal_layer.update(cx, |modal_layer, cx| {
-                modal_layer.hide_bottom_modal(window, cx)
-            });
+        // Through `hide_modal`, which restores the prompt's origin while this is being updated.
+        if cleared && self.modal_layer.read(cx).bottom_modal().is_some() {
+            self.hide_modal(window, cx);
         }
         cx.notify();
     }
@@ -7418,18 +7417,123 @@ impl Workspace {
     /// If closing the current modal fails (e.g., due to `on_before_dismiss` returning
     /// `DismissDecision::Dismiss(false)` or `DismissDecision::Pending`), the new modal
     /// will not be shown.
+    ///
+    /// A modal placed in the minibuffer strip records where focus was (a [`ModalOrigin`]) and
+    /// hiding it puts focus back there (see [`Self::restore_modal_origin`]). Nothing changes for
+    /// a centered modal, or while nothing is routed to the minibuffer.
     pub fn toggle_modal<V: ModalView, B>(&mut self, window: &mut Window, cx: &mut App, build: B)
     where
         B: FnOnce(&mut Window, &mut Context<V>) -> V,
     {
+        // The modal layer cannot restore an origin while this workspace is being updated, so a
+        // modal with one is hidden here first, as the layer would have hidden it.
+        if self.modal_layer.read(cx).has_origin() {
+            let same_type = self.modal_layer.read(cx).active_modal::<V>().is_some();
+            let did_close = self.hide_modal(window, cx);
+            if same_type || !did_close {
+                return;
+            }
+        }
+        let origin = self.modal_origin(window, cx);
         self.modal_layer.update(cx, |modal_layer, cx| {
-            modal_layer.toggle_modal(window, cx, build)
+            modal_layer.toggle_modal_with_origin(origin, window, cx, build)
         })
     }
 
     pub fn hide_modal(&mut self, window: &mut Window, cx: &mut App) -> bool {
-        self.modal_layer
-            .update(cx, |modal_layer, cx| modal_layer.hide_modal(window, cx))
+        let (hidden, origin) = self.modal_layer.update(cx, |modal_layer, cx| {
+            modal_layer.hide_modal_keeping_origin(window, cx)
+        });
+        if let Some(origin) = origin {
+            self.restore_modal_origin(origin, window, cx);
+        }
+        hidden
+    }
+
+    /// Where focus is now, for a modal that may be placed in the minibuffer strip: the focused
+    /// handle, the dock and pane that contain it and that pane's active item. `None` while
+    /// nothing is routed to the minibuffer, so that no other modal pays for it.
+    fn modal_origin(&self, window: &Window, cx: &App) -> Option<ModalOrigin> {
+        if cx
+            .try_global::<MinibufferRouting>()
+            .is_none_or(|routing| routing.routes().is_empty())
+        {
+            return None;
+        }
+        let focus = window.focused(cx)?;
+        let dock = self.all_docks().into_iter().find(|dock| {
+            let dock = dock.read(cx);
+            dock.is_open() && dock.focus_handle(cx).contains_focused(window, cx)
+        });
+        let pane = match dock {
+            Some(dock) => dock
+                .read(cx)
+                .active_panel()
+                .and_then(|panel| panel.pane(cx))
+                .filter(|pane| pane.focus_handle(cx).contains_focused(window, cx)),
+            None => self
+                .panes
+                .iter()
+                .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+                .cloned(),
+        };
+        let item = pane
+            .as_ref()
+            .and_then(|pane| pane.read(cx).active_item())
+            .map(|item| item.item_id());
+        Some(ModalOrigin {
+            focus,
+            pane: pane.map(|pane| pane.downgrade()),
+            item,
+            dock: dock.map(|dock| dock.read(cx).position()),
+            workspace: self.weak_handle(),
+        })
+    }
+
+    /// Puts focus back where a prompt in the minibuffer strip found it:
+    /// 1. the pane is alive, still in the workspace (or its dock) and still holds the item: the
+    ///    handle that was focused (after a split, the original side);
+    /// 2. the pane is alive but the item is gone: the pane's active item;
+    /// 3. the pane is gone: the active pane (removing a pane makes a neighbour active);
+    /// 4. the dock was closed: the active center pane.
+    pub fn restore_modal_origin(&self, origin: ModalOrigin, window: &mut Window, cx: &mut App) {
+        let focus_pane = |pane: &Entity<Pane>, window: &mut Window, cx: &mut App| {
+            pane.update(cx, |pane, cx| {
+                if pane.active_item().is_some() {
+                    pane.focus_active_item(window, cx);
+                } else {
+                    window.focus(&pane.focus_handle(cx), cx);
+                }
+            })
+        };
+        if let Some(position) = origin.dock
+            && !self.dock_at_position(position).read(cx).is_open()
+        {
+            focus_pane(&self.active_pane, window, cx);
+            return;
+        }
+        let Some(pane) = origin.pane else {
+            window.focus(&origin.focus, cx);
+            return;
+        };
+        let pane = pane
+            .upgrade()
+            .filter(|pane| origin.dock.is_some() || self.panes.contains(pane));
+        match pane {
+            Some(pane) => {
+                let holds_item = origin.item.is_none_or(|item| {
+                    pane.read(cx)
+                        .items()
+                        .any(|candidate| candidate.item_id() == item)
+                });
+                if holds_item {
+                    window.focus(&origin.focus, cx);
+                } else {
+                    focus_pane(&pane, window, cx);
+                }
+            }
+            None => focus_pane(&self.active_pane, window, cx),
+        }
     }
 
     pub fn toggle_status_toast<V: ToastView>(&mut self, entity: Entity<V>, cx: &mut App) {

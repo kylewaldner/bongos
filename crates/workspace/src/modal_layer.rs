@@ -1,11 +1,11 @@
 use gpui::{
-    AnyView, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable as _, Global, ManagedView,
-    MouseButton, Subscription,
+    AnyView, DismissEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable as _, Global,
+    ManagedView, MouseButton, Subscription, WeakEntity,
 };
 use std::rc::Rc;
 use ui::prelude::*;
 
-use crate::Toast;
+use crate::{DockPosition, Pane, Toast, Workspace};
 
 #[derive(Debug)]
 pub enum DismissDecision {
@@ -171,6 +171,34 @@ pub fn routes_to_minibuffer(name: &str, cx: &App) -> bool {
         .is_some_and(|routing| routing.is_routed(name))
 }
 
+/// Where focus was when a prompt opened in the minibuffer strip: the focused handle, the pane it
+/// was in (center or dock), that pane's active item and the dock it was in. Hiding the prompt
+/// puts focus back from it even when the pane, the item or the dock changed meanwhile (see
+/// [`Workspace::restore_modal_origin`]). Only `Bottom` modals record one, and only while
+/// something is routed to the minibuffer.
+#[derive(Clone)]
+pub struct ModalOrigin {
+    pub focus: FocusHandle,
+    /// `None` when focus was in no pane (a dock panel without panes, the workspace itself).
+    pub pane: Option<WeakEntity<Pane>>,
+    pub item: Option<EntityId>,
+    pub dock: Option<DockPosition>,
+    pub(crate) workspace: WeakEntity<Workspace>,
+}
+
+impl ModalOrigin {
+    /// Puts focus back through the workspace's fallbacks. The workspace must not be in an
+    /// update; inside one, use [`Workspace::restore_modal_origin`].
+    fn restore(self, window: &mut Window, cx: &mut App) {
+        match self.workspace.upgrade() {
+            Some(workspace) => workspace.update(cx, |workspace, cx| {
+                workspace.restore_modal_origin(self, window, cx)
+            }),
+            None => window.focus(&self.focus, cx),
+        }
+    }
+}
+
 /// Where an active modal is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Placement {
@@ -217,6 +245,8 @@ pub struct ActiveModal {
     previous_focus_handle: Option<FocusHandle>,
     focus_handle: FocusHandle,
     placement: Placement,
+    /// Recorded for `Bottom` modals only; it takes the place of `previous_focus_handle`.
+    origin: Option<ModalOrigin>,
 }
 
 pub struct ModalLayer {
@@ -254,22 +284,48 @@ impl ModalLayer {
         V: ModalView,
         B: FnOnce(&mut Window, &mut Context<V>) -> V,
     {
+        self.toggle_modal_with_origin(None, window, cx, build_view)
+    }
+
+    /// [`Self::toggle_modal`], with the origin the workspace recorded for the new modal, which
+    /// is kept only when the modal is placed in the minibuffer strip.
+    pub(crate) fn toggle_modal_with_origin<V, B>(
+        &mut self,
+        origin: Option<ModalOrigin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        build_view: B,
+    ) where
+        V: ModalView,
+        B: FnOnce(&mut Window, &mut Context<V>) -> V,
+    {
         if let Some(active_modal) = &self.active_modal {
             let should_close = active_modal.modal.view().downcast::<V>().is_ok();
-            let did_close = self.hide_modal(window, cx);
+            // The workspace hides a modal with an origin itself before it gets here, so this
+            // one has none; should one slip through, its handle is all that can be restored
+            // while the workspace is being updated.
+            let (did_close, origin) = self.hide_modal_keeping_origin(window, cx);
+            if let Some(origin) = origin {
+                window.focus(&origin.focus, cx);
+            }
             if should_close || !did_close {
                 return;
             }
         }
         let new_modal = cx.new(|cx| build_view(window, cx));
-        self.show_modal(new_modal, window, cx);
+        self.show_modal(new_modal, origin, window, cx);
         cx.emit(ModalOpenedEvent);
     }
 
     /// Shows a modal and sets up subscriptions for dismiss events and focus tracking.
     /// The modal is automatically focused after being shown.
-    fn show_modal<V>(&mut self, new_modal: Entity<V>, window: &mut Window, cx: &mut Context<Self>)
-    where
+    fn show_modal<V>(
+        &mut self,
+        new_modal: Entity<V>,
+        origin: Option<ModalOrigin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
         V: ModalView,
     {
         let focus_handle = cx.focus_handle();
@@ -296,6 +352,7 @@ impl ModalLayer {
             previous_focus_handle: window.focused(cx),
             focus_handle,
             placement,
+            origin: origin.filter(|_| placement == Placement::Bottom),
         });
         cx.defer_in(window, move |_, window, cx| {
             window.focus(&new_modal.focus_handle(cx), cx);
@@ -311,34 +368,65 @@ impl ModalLayer {
     ///
     /// Returns `true` if the modal was successfully hidden, `false` otherwise.
     pub fn hide_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (hidden, origin) = self.hide_modal_keeping_origin(window, cx);
+        if let Some(origin) = origin {
+            origin.restore(window, cx);
+        }
+        hidden
+    }
+
+    /// The origin the active modal restores when it hides, if it recorded one.
+    pub fn modal_origin(&self) -> Option<ModalOrigin> {
+        self.active_modal.as_ref()?.origin.clone()
+    }
+
+    /// Whether the active modal has an origin to restore when it hides.
+    pub(crate) fn has_origin(&self) -> bool {
+        self.active_modal
+            .as_ref()
+            .is_some_and(|active_modal| active_modal.origin.is_some())
+    }
+
+    /// [`Self::hide_modal`], except that the origin of a `Bottom` modal is handed back to the
+    /// caller to restore instead of restored, so that a caller inside an update of the workspace
+    /// can restore it. It is handed back only when focus is still inside the modal: a click
+    /// outside the strip cancels it and leaves focus where the click put it.
+    pub(crate) fn hide_modal_keeping_origin(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (bool, Option<ModalOrigin>) {
         let Some(active_modal) = self.active_modal.as_mut() else {
             self.dismiss_on_focus_lost = false;
-            return false;
+            return (false, None);
         };
 
         match active_modal.modal.on_before_dismiss(window, cx) {
             DismissDecision::Dismiss(should_dismiss) => {
                 if !should_dismiss {
                     self.dismiss_on_focus_lost = !should_dismiss;
-                    return false;
+                    return (false, None);
                 }
             }
             DismissDecision::Pending => {
                 self.dismiss_on_focus_lost = false;
-                return false;
+                return (false, None);
             }
         }
 
+        let mut restore = None;
         if let Some(active_modal) = self.active_modal.take() {
-            if let Some(previous_focus) = active_modal.previous_focus_handle
-                && active_modal.focus_handle.contains_focused(window, cx)
-            {
-                previous_focus.focus(window, cx);
+            if active_modal.focus_handle.contains_focused(window, cx) {
+                if let Some(origin) = active_modal.origin {
+                    restore = Some(origin);
+                } else if let Some(previous_focus) = active_modal.previous_focus_handle {
+                    previous_focus.focus(window, cx);
+                }
             }
             cx.notify();
         }
         self.dismiss_on_focus_lost = false;
-        true
+        (true, restore)
     }
 
     /// Returns the currently active modal if it is of type `V`.
