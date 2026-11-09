@@ -1,8 +1,9 @@
 //! The `task` and `proposal` actions of the task builder, hidden from the command palette while
 //! `task_builder.enabled` is false, and their handlers. While it is false each handler only says
 //! that the task builder is off. While it is true `task: plan` and `task: new without plan` work
-//! (see [`crate::plan`]) and the others do nothing yet: their commands arrive in later steps. The
-//! keys are bound in the Emacs keymaps, not here.
+//! (see [`crate::plan`]), `task: show proposal`, `task: edit proposal` and the proposal view's
+//! actions work (see [`crate::view`] and [`crate::choose`]) and the others do nothing yet: their
+//! commands arrive in later steps. The keys are bound in the Emacs keymaps, not here.
 
 use std::any::TypeId;
 
@@ -13,7 +14,9 @@ use workspace::Toast;
 use workspace::Workspace;
 use workspace::notifications::NotificationId;
 
-use crate::{TaskBuilderSettings, plan};
+#[cfg(debug_assertions)]
+use crate::dump;
+use crate::{TaskBuilderSettings, choose, plan, view};
 
 /// New actions in the `task` namespace, shared with the work tree's and Zed's task runner; no
 /// name collides.
@@ -151,17 +154,17 @@ fn register_with<A: Action>(
 pub fn register(workspace: &mut Workspace) {
     register_with::<task::Plan>(workspace, plan::plan);
     register_action::<task::Propose>(workspace);
-    register_action::<task::ShowProposal>(workspace);
-    register_action::<task::EditProposal>(workspace);
+    register_with::<task::ShowProposal>(workspace, view::show_proposal);
+    register_with::<task::EditProposal>(workspace, choose::edit_proposal);
     register_action::<task::ApplyProposal>(workspace);
     register_action::<task::RejectProposal>(workspace);
     register_with::<task::NewWithoutPlan>(workspace, plan::new_without_plan);
     register_action::<task::ToggleAutoApply>(workspace);
-    register_action::<proposal::Descend>(workspace);
-    register_action::<proposal::Up>(workspace);
+    register_with::<proposal::Descend>(workspace, view::descend_active);
+    register_with::<proposal::Up>(workspace, view::up_active);
     #[cfg(debug_assertions)]
     {
-        register_action::<proposal::DumpView>(workspace);
+        register_with::<proposal::DumpView>(workspace, dump::dump_view);
         register_action::<proposal::DumpPreview>(workspace);
     }
 }

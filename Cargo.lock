@@ -2230,6 +2230,7 @@ dependencies = [
  "language",
  "log",
  "menu",
+ "paths",
  "project",
  "release_channel",
  "remote",
@@ -2240,6 +2241,7 @@ dependencies = [
  "tempfile",
  "terminal",
  "terminal_view",
+ "ui",
  "workspace",
 ]
 
