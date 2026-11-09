@@ -2657,7 +2657,7 @@
     // Whether the prompts mode is on. While it is off, no editor gets the mode (rules,
     // current block, mode line) and the prompts commands are hidden. The `Prompts`
     // language, which saves `prompts.txt` exactly as typed, applies either way.
-    "enabled": false,
+    "enabled": true,
     // Whether sending a prompt also submits it (presses Enter in the chat). A chat can
     // override it for itself.
     "auto_submit": true,

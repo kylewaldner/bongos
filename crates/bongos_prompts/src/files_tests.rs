@@ -200,6 +200,23 @@ async fn text_typed_while_the_picker_is_open_is_not_dropped(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+async fn a_refused_switch_leaves_no_new_file_behind(cx: &mut TestAppContext) {
+    let (workspace, editor, fake, cx) = with_chat(cx).await;
+    dispatch("prompts::UseFile", cx);
+    answer(&workspace, ANOTHER_FILE, cx).await;
+    editor.update_in(cx, |editor, window, cx| {
+        editor.insert("typed meanwhile ", window, cx)
+    });
+    toasts();
+    answer(&workspace, "notes/never.txt", cx).await;
+    assert_eq!(toasts(), vec![SAVE_FIRST_MESSAGE.to_string()]);
+    assert!(fake.file_writes.borrow().is_empty());
+    let fs = workspace.read_with(cx, |workspace, _| workspace.app_state().fs.clone());
+    assert!(!fs.is_file("/dir/notes/never.txt".as_ref()).await);
+    assert!(!fs.is_dir("/dir/notes".as_ref()).await);
+}
+
+#[gpui::test]
 async fn a_saved_buffer_may_switch(cx: &mut TestAppContext) {
     let (workspace, editor, fake, cx) = with_chat(cx).await;
     editor.update_in(cx, |editor, window, cx| {

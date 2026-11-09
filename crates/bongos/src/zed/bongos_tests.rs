@@ -309,6 +309,50 @@ const CHAT_ACTIONS: [(&str, &str); 17] = [
     ("chat::Delete", "chat: delete"),
 ];
 
+/// The `prompts` commands, with the palette text of each.
+const PROMPTS_ACTIONS: [(&str, &str); 13] = [
+    ("prompts::Send", "prompts: send"),
+    (
+        "prompts::SendWithoutMarking",
+        "prompts: send without marking",
+    ),
+    ("prompts::SendRegion", "prompts: send region"),
+    ("prompts::New", "prompts: new"),
+    ("prompts::Previous", "prompts: previous"),
+    ("prompts::Next", "prompts: next"),
+    ("prompts::NextPending", "prompts: next pending"),
+    ("prompts::Copy", "prompts: copy"),
+    ("prompts::UseFile", "prompts: use file"),
+    ("prompts::UseDefault", "prompts: use default"),
+    ("prompts::ToggleAutoSubmit", "prompts: toggle auto submit"),
+    ("prompts::Open", "prompts: open"),
+    ("prompts::Mode", "prompts: mode"),
+];
+
+#[gpui::test]
+async fn prompts_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in PROMPTS_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        assert!(
+            cx.build_action("prompts::Send", None)
+                .unwrap()
+                .partial_eq(&bongos_prompts::prompts::Send)
+        );
+        assert!(
+            cx.build_action("prompts::Next", None)
+                .unwrap()
+                .partial_eq(&bongos_prompts::prompts::Next::default())
+        );
+    });
+}
+
 #[gpui::test]
 async fn chat_commands_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);

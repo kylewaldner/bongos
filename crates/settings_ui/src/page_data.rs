@@ -311,9 +311,64 @@ fn chats_page() -> SettingsPage {
         ]
     }
 
+    fn prompts_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Prompts"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Prompts",
+                description: "Whether the prompt editor is on. While it is off, no file gets the prompts mode and the prompts commands are hidden.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("prompts.enabled"),
+                    pick: |settings_content| settings_content.prompts.as_ref()?.enabled.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.prompts.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Auto Submit",
+                description: "Whether sending a prompt also submits it in the chat. A chat can override this for itself.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("prompts.auto_submit"),
+                    pick: |settings_content| {
+                        settings_content.prompts.as_ref()?.auto_submit.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.prompts.get_or_insert_default().auto_submit = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Save On Send",
+                description: "Whether sending a prompt saves the prompts file right after marking it sent. A file that changed on disk is left unsaved.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("prompts.save_on_send"),
+                    pick: |settings_content| {
+                        settings_content.prompts.as_ref()?.save_on_send.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .prompts
+                            .get_or_insert_default()
+                            .save_on_send = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: "Chats",
-        items: concat_sections![chats_section()],
+        items: concat_sections![chats_section(), prompts_section()],
     }
 }
 
@@ -10444,6 +10499,40 @@ mod tests {
                 "chats.idle_after_secs",
                 "chats.submit_delay_ms",
                 "chats.agents",
+                "prompts.enabled",
+                "prompts.auto_submit",
+                "prompts.save_on_send",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_chats_page_lists_the_prompts_settings() {
+        let page = chats_page();
+        let titles: Vec<&str> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::SectionHeader(title) => Some(*title),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["Chats", "Prompts"]);
+        let paths: Vec<&str> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                _ => None,
+            })
+            .filter(|path| path.starts_with("prompts."))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "prompts.enabled",
+                "prompts.auto_submit",
+                "prompts.save_on_send"
             ]
         );
     }

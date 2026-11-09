@@ -83,6 +83,24 @@
     },
   },
   {
+    // Prompts mode (feature 25). `ctrl-c` is already a prefix here (C-c w, C-c c). Keep this
+    // block after every `Editor`-level `ctrl-c ctrl-<letter>` binding. `prompts: open` and
+    // `prompts: mode` stay unbound; `C-c c e` (chat::FocusPrompts) still works.
+    "context": "Editor && prompts",
+    "bindings": {
+      "ctrl-c ctrl-c": "prompts::Send", // send the prompt at point
+      "ctrl-c ctrl-r": "prompts::SendRegion", // send the selection exactly
+      "ctrl-c ctrl-n": "prompts::New", // new prompt
+      "ctrl-c ctrl-p": "prompts::Previous", // previous prompt
+      "ctrl-c ctrl-f": "prompts::Next", // next prompt
+      "ctrl-c ctrl-j": "prompts::NextPending", // next prompt not sent yet
+      "ctrl-c ctrl-w": "prompts::Copy", // copy the prompt at point
+      "ctrl-c ctrl-u": "prompts::UseFile", // use another prompts file
+      "ctrl-c ctrl-d": "prompts::UseDefault", // back to the default prompts file
+      "ctrl-c ctrl-a": "prompts::ToggleAutoSubmit", // turn auto-submit on or off
+    },
+  },
+  {
     "context": "Editor && selection_mode", // region selection
     "bindings": {
       "right": "editor::SelectRight",

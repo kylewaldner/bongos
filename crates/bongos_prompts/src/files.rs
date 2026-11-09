@@ -33,6 +33,8 @@ pub(crate) const WHICH_FILE_QUESTION: &str = "Use which prompts file?";
 pub(crate) const ANOTHER_FILE: &str = "Another file...";
 /// The title of the line that asks for a path.
 pub(crate) const PATH_QUESTION: &str = "Prompts file";
+/// The toast when a relative path is typed and the chat has no directory to start from.
+pub(crate) const RELATIVE_PATH_MESSAGE: &str = "Type an absolute path, or one starting with ~";
 /// The toast after `prompts: use default`.
 pub(crate) const DEFAULT_MESSAGE: &str = "Using the default prompts file";
 
@@ -177,6 +179,11 @@ pub(crate) fn use_file(
                         false,
                         Box::new(move |text, workspace, window, cx| {
                             let path = typed_path(&text, scope.as_deref());
+                            if path.is_relative() {
+                                // No scope directory to start from: never the process directory.
+                                show_toast(workspace, RELATIVE_PATH_MESSAGE.to_string(), cx);
+                                return;
+                            }
                             switch(editor, chat_id, Some(path), workspace, window, cx);
                         }),
                         window,
@@ -226,6 +233,12 @@ fn switch(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    // An edit made while the picker was open is caught before the file is created, so a refused
+    // switch leaves no empty file behind. The check after creating covers a later edit.
+    if dirty(&editor, cx) {
+        show_toast(workspace, SAVE_FIRST_MESSAGE.to_string(), cx);
+        return;
+    }
     let fs = workspace.app_state().fs.clone();
     cx.spawn_in(window, async move |workspace, cx| {
         let created = match &path {
