@@ -203,6 +203,7 @@ members = [
     "crates/x_ai",
     "crates/bongos",
     "crates/bongos_app",
+    "crates/bongos_builder_model",
     "crates/bongos_chat",
     "crates/bongos_chat_model",
     "crates/bongos_kotlin",
@@ -453,6 +454,7 @@ worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
 bongos = { path = "crates/bongos" }
 bongos_app = { path = "crates/bongos_app" }
+bongos_builder_model = { path = "crates/bongos_builder_model" }
 bongos_chat = { path = "crates/bongos_chat" }
 bongos_chat_model = { path = "crates/bongos_chat_model" }
 bongos_kotlin = { path = "crates/bongos_kotlin" }

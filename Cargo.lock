@@ -2212,6 +2212,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_builder_model"
+version = "0.1.0"
+dependencies = [
+ "bongos_work_model",
+]
+
+[[package]]
 name = "bongos_chat"
 version = "0.1.0"
 dependencies = [
