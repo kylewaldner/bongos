@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+bongos_minibuffer.workspace = true
 bongos_work_model.workspace = true
 chrono.workspace = true
 command_palette_hooks.workspace = true
@@ -47,3 +48,4 @@ project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 workspace = { workspace = true, features = ["test-support"] }
+zed_actions.workspace = true

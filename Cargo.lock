@@ -2457,6 +2457,7 @@ name = "bongos_work"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_minibuffer",
  "bongos_work_model",
  "chrono",
  "command_palette_hooks",
@@ -2481,6 +2482,7 @@ dependencies = [
  "util",
  "which 6.0.3",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]
