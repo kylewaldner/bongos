@@ -16,7 +16,11 @@ doctest = false
 test-support = []
 
 [dependencies]
+bongos_work_model.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
