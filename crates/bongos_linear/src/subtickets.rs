@@ -250,7 +250,8 @@ pub(crate) fn install(cx: &mut App) {
 }
 
 fn global(cx: &App) -> Option<Entity<Watcher>> {
-    cx.try_global::<GlobalWatcher>().map(|global| global.0.clone())
+    cx.try_global::<GlobalWatcher>()
+        .map(|global| global.0.clone())
 }
 
 /// Attaches to the work store when it exists and is not attached yet.
@@ -321,7 +322,10 @@ impl Watcher {
         if let Some(tree) = tree {
             let mut groups: BTreeMap<TaskId, Vec<Unoffered>> = BTreeMap::new();
             for offer in unoffered(&tree) {
-                groups.entry(offer.group_id.clone()).or_default().push(offer);
+                groups
+                    .entry(offer.group_id.clone())
+                    .or_default()
+                    .push(offer);
             }
             for (group_id, offers) in groups {
                 if self.busy.contains(&group_id) {
@@ -512,13 +516,15 @@ fn ask_confirm(
         question,
         false,
         move |yes, window, cx| {
-            weak.update(cx, |workspace, cx| match confirm::answer(yes, &offer, chosen) {
-                Some(confirmed) => {
-                    preview::close(workspace, item, window, cx);
-                    record(workspace, &offer, declined, cx);
-                    create_after_token(confirmed, cx);
+            weak.update(cx, |workspace, cx| {
+                match confirm::answer(yes, &offer, chosen) {
+                    Some(confirmed) => {
+                        preview::close(workspace, item, window, cx);
+                        record(workspace, &offer, declined, cx);
+                        create_after_token(confirmed, cx);
+                    }
+                    None => not_now(workspace, offer, item, window, cx),
                 }
-                None => not_now(workspace, offer, item, window, cx),
             })
             .ok();
         },
@@ -586,7 +592,11 @@ mod confirm {
     }
 
     /// The answer of the confirm question: `Some` only for a yes.
-    pub(super) fn answer(yes: bool, offer: &super::Offer, items: Vec<Missing>) -> Option<Confirmed> {
+    pub(super) fn answer(
+        yes: bool,
+        offer: &super::Offer,
+        items: Vec<Missing>,
+    ) -> Option<Confirmed> {
         yes.then(|| Confirmed {
             group_id: offer.group_id.clone(),
             identifier: offer.identifier.clone(),
@@ -644,7 +654,9 @@ async fn write(
 ) -> Result<Change, String> {
     let task = cx.update(|cx| {
         WorkStore::global(cx).map(|store| {
-            store.update(cx, |store, cx| store.write(WorkContext::kyle(), command, cx))
+            store.update(cx, |store, cx| {
+                store.write(WorkContext::kyle(), command, cx)
+            })
         })
     });
     match task {
@@ -662,7 +674,8 @@ fn send<T>(
     request: impl FnOnce(&dyn bongos_linear_model::LinearApi) -> Pending<T>,
 ) -> Result<Pending<T>, String> {
     cx.update(|cx| {
-        let linear = sync::global(cx).ok_or_else(|| "The Linear sync is not available".to_string())?;
+        let linear =
+            sync::global(cx).ok_or_else(|| "The Linear sync is not available".to_string())?;
         linear
             .update(cx, |linear, cx| {
                 linear.call(Scope::LinkedTask(group_id), cx, request)
@@ -699,7 +712,10 @@ async fn create(confirmed: Confirmed, cx: &mut AsyncApp) -> String {
         let Some(tree) = cx.update(|cx| snapshot(cx)) else {
             return stopped(&created, &item.title, &WriteError::Off.to_string());
         };
-        let Some(file) = tree.task_by_id(&item.task_id).and_then(|task| task.file.as_ref()) else {
+        let Some(file) = tree
+            .task_by_id(&item.task_id)
+            .and_then(|task| task.file.as_ref())
+        else {
             return stopped(&created, &item.title, "the task is gone");
         };
         if linked_identifier(file).is_some() {
@@ -713,7 +729,9 @@ async fn create(confirmed: Confirmed, cx: &mut AsyncApp) -> String {
             .map(Uuid::parse_str);
         let id = match pending {
             Some(Ok(id)) => id,
-            Some(Err(_)) => return stopped(&created, &item.title, "its pending create is not a UUID"),
+            Some(Err(_)) => {
+                return stopped(&created, &item.title, "its pending create is not a UUID");
+            }
             None => {
                 let id = Uuid::new_v4();
                 let task_id = item.task_id.clone();
@@ -779,8 +797,8 @@ pub(crate) fn create_missing_subtickets(
     let Some(tree) = bongos_work::ready(workspace, cx) else {
         return;
     };
-    let group_id = bongos_work::task_at_point(workspace, window, cx)
-        .and_then(|id| group_for(&tree, &id));
+    let group_id =
+        bongos_work::task_at_point(workspace, window, cx).and_then(|id| group_for(&tree, &id));
     let Some(group_id) = group_id else {
         show_toast(workspace, NO_GROUP.to_string(), cx);
         return;

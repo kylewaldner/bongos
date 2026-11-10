@@ -121,7 +121,12 @@ impl Checklist {
         }
     }
 
-    fn select_previous(&mut self, _: &menu::SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_previous(
+        &mut self,
+        _: &menu::SelectPrevious,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected > 0 {
             self.selected -= 1;
             cx.notify();

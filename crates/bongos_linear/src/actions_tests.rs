@@ -33,10 +33,7 @@ const NAMES: &[&str] = &[
 /// `link_tests`), the import command in `import` (see `import_tests`), the refresh command in
 /// `refresh` (see `refresh_tests`) and the subtickets command in `subtickets` (see
 /// `subtickets_tests`).
-const SEAM_NAMES: &[&str] = &[
-    "task::ShowLinearSuggestions",
-    "task::CopyPrTitle",
-];
+const SEAM_NAMES: &[&str] = &["task::ShowLinearSuggestions", "task::CopyPrTitle"];
 
 /// Counts the commands that reach the seam.
 #[derive(Default)]

@@ -212,16 +212,31 @@ async fn kyles_apply_opens_the_offer_and_sends_nothing(cx: &mut TestAppContext) 
     assert!(text.contains("- Sub\n"), "{text}");
     // Every row starts checked.
     let list = checklist(&env, cx).unwrap();
-    assert_eq!(list.read_with(cx, |list, _| list.checked().to_vec()), [true]);
+    assert_eq!(
+        list.read_with(cx, |list, _| list.checked().to_vec()),
+        [true]
+    );
     // Space toggles the selected row.
     cx.simulate_keystrokes("space");
-    assert_eq!(list.read_with(cx, |list, _| list.checked().to_vec()), [false]);
+    assert_eq!(
+        list.read_with(cx, |list, _| list.checked().to_vec()),
+        [false]
+    );
     cx.simulate_keystrokes("space");
-    assert_eq!(list.read_with(cx, |list, _| list.checked().to_vec()), [true]);
+    assert_eq!(
+        list.read_with(cx, |list, _| list.checked().to_vec()),
+        [true]
+    );
 
-    assert!(env.fake.calls().is_empty(), "nothing is sent before the confirm");
+    assert!(
+        env.fake.calls().is_empty(),
+        "nothing is sent before the confirm"
+    );
     assert_eq!(requests(cx), 0);
-    assert!(offered(&env, cx).is_empty(), "nothing is recorded before an answer");
+    assert!(
+        offered(&env, cx).is_empty(),
+        "nothing is recorded before an answer"
+    );
 }
 
 #[gpui::test]
@@ -230,7 +245,10 @@ async fn not_now_records_declined_and_creates_nothing(cx: &mut TestAppContext) {
     add_leaves(&env, cx).await;
     apply(&env, GROUP, 1, "kyle", cx).await;
     let (title, labels) = wait_checklist(&env, cx).await;
-    assert_eq!(title, "3 leaves have no subticket. Create them under SEQ-100?");
+    assert_eq!(
+        title,
+        "3 leaves have no subticket. Create them under SEQ-100?"
+    );
     assert_eq!(labels.len(), 3);
     confirm_checklist(&env, cx).await;
     assert!(env.fake.calls().is_empty());
@@ -246,7 +264,10 @@ async fn not_now_records_declined_and_creates_nothing(cx: &mut TestAppContext) {
     assert_eq!(requests(cx), 0);
     for slug in ["sub", "sub2", "sub3"] {
         let file = env.file(slug, cx);
-        assert!(file.linear.is_none() && file.linear_state.is_none(), "{slug}");
+        assert!(
+            file.linear.is_none() && file.linear_state.is_none(),
+            "{slug}"
+        );
     }
 }
 
@@ -275,11 +296,17 @@ async fn confirming_two_of_three_creates_two_under_the_parent_and_links_them(
     cx.simulate_keystrokes("space");
     let unchecked = labels[1].clone();
     confirm_checklist(&env, cx).await;
-    assert!(env.fake.calls().is_empty(), "nothing is sent before the yes");
+    assert!(
+        env.fake.calls().is_empty(),
+        "nothing is sent before the yes"
+    );
     assert_eq!(requests(cx), 0);
     env.clear_toast(cx);
     cx.simulate_keystrokes("y");
-    wait_until(cx, "the creation", |cx| env.last_toast(cx).starts_with("Created")).await;
+    wait_until(cx, "the creation", |cx| {
+        env.last_toast(cx).starts_with("Created")
+    })
+    .await;
     settle(cx).await;
     assert_eq!(env.last_toast(cx), "Created SEQ-122, SEQ-123 under SEQ-100");
 
@@ -299,13 +326,19 @@ async fn confirming_two_of_three_creates_two_under_the_parent_and_links_them(
     for slug in ["sub", "sub2", "sub3"] {
         let file = env.file(slug, cx);
         if file.goal == unchecked {
-            assert!(file.linear.is_none() && file.linear_state.is_none(), "{slug}");
+            assert!(
+                file.linear.is_none() && file.linear_state.is_none(),
+                "{slug}"
+            );
             continue;
         }
         linked += 1;
         let identifier = file.linear.clone().expect("linked");
         let state = file.linear_state.clone().unwrap();
-        assert!(state.pending_create.is_none(), "the pending create is cleared");
+        assert!(
+            state.pending_create.is_none(),
+            "the pending create is cleared"
+        );
         let ticket = env.fake.issue(&identifier).unwrap();
         assert_eq!(state.issue_id, ticket.id);
         assert_eq!(ticket.parent.unwrap().id, PARENT_ID);
@@ -347,7 +380,10 @@ async fn an_agents_apply_shows_the_chip_and_no_modal(cx: &mut TestAppContext) {
     );
     assert!(env.fake.calls().is_empty());
     assert_eq!(requests(cx), 0);
-    assert!(offered(&env, cx).is_empty(), "the chip stays until the command");
+    assert!(
+        offered(&env, cx).is_empty(),
+        "the chip stays until the command"
+    );
 
     // The command lists them; its answer clears the chip and the reason.
     env.focus(GROUP, cx);
@@ -356,7 +392,8 @@ async fn an_agents_apply_shows_the_chip_and_no_modal(cx: &mut TestAppContext) {
     assert_eq!(labels.len(), 3);
     dispatch("menu::Cancel", cx);
     wait_until(cx, "the chip to go", |cx| {
-        cx.update(|_, cx| RowChipsRegistry::chips(GROUP, cx)).is_empty()
+        cx.update(|_, cx| RowChipsRegistry::chips(GROUP, cx))
+            .is_empty()
     })
     .await;
     assert_eq!(offered(&env, cx), vec![(GROUP.to_string(), 1)]);
@@ -395,19 +432,28 @@ async fn a_crash_between_create_and_write_ends_with_one_ticket(cx: &mut TestAppC
     assert!(env.fake.calls().is_empty());
     env.clear_toast(cx);
     cx.simulate_keystrokes("y");
-    wait_until(cx, "the retry", |cx| env.last_toast(cx).starts_with("Created")).await;
+    wait_until(cx, "the retry", |cx| {
+        env.last_toast(cx).starts_with("Created")
+    })
+    .await;
 
     assert_eq!(children(), 1, "no second ticket");
     let hyphenated = id.hyphenated().to_string();
     let calls = env.fake.calls();
-    assert!(matches!(&calls[0], Call::Create { id: sent, .. } if *sent == id), "{calls:?}");
+    assert!(
+        matches!(&calls[0], Call::Create { id: sent, .. } if *sent == id),
+        "{calls:?}"
+    );
     assert_eq!(calls[1], Call::Issues(vec![hyphenated.clone()]));
     assert_eq!(calls.len(), 2);
     let file = env.file("sub", cx);
     let state = file.linear_state.unwrap();
     assert_eq!(state.issue_id, hyphenated);
     assert!(state.pending_create.is_none());
-    assert_eq!(file.linear, Some(env.fake.issue(&hyphenated).unwrap().identifier));
+    assert_eq!(
+        file.linear,
+        Some(env.fake.issue(&hyphenated).unwrap().identifier)
+    );
 }
 
 #[gpui::test]
@@ -455,7 +501,10 @@ async fn the_pending_create_state_is_not_a_link(cx: &mut TestAppContext) {
         })
     });
     assert_eq!(refused, Some(Refusal::NotLinked));
-    assert!(cx.update(|_, cx| RowChipsRegistry::chips(SUB, cx)).is_empty());
+    assert!(
+        cx.update(|_, cx| RowChipsRegistry::chips(SUB, cx))
+            .is_empty()
+    );
     assert!(env.fake.calls().is_empty());
 }
 
