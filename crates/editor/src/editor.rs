@@ -3084,6 +3084,19 @@ impl Editor {
         self.read_only = read_only;
     }
 
+    /// Whether mark mode (`editor::SetMark`, the `selection_mode` key context) is on.
+    pub fn selection_mark_mode(&self) -> bool {
+        self.selection_mark_mode
+    }
+
+    /// Turns mark mode on or off, as an edit that deactivates the mark does.
+    pub fn set_selection_mark_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.selection_mark_mode != on {
+            self.selection_mark_mode = on;
+            cx.notify();
+        }
+    }
+
     pub fn set_use_selection_highlight(&mut self, highlight: bool) {
         self.use_selection_highlight = highlight;
     }
