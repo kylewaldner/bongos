@@ -14526,6 +14526,7 @@ dependencies = [
  "agent_skills",
  "anyhow",
  "audio",
+ "bongos_linear",
  "cloud_api_types",
  "codestral",
  "collections",

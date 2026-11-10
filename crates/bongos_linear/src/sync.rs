@@ -152,6 +152,11 @@ pub fn global(cx: &App) -> Option<Entity<LinearSync>> {
     cx.try_global::<GlobalSync>().map(|global| global.0.clone())
 }
 
+/// Whether a token is known to exist, for the settings page. Never the token itself.
+pub fn token_is_set(cx: &App) -> bool {
+    global(cx).is_some_and(|sync| sync.read(cx).token_present())
+}
+
 impl LinearSync {
     /// Records what is known about the token: `None` for no token, else the client built with it.
     /// `present` without a client is a token the factory could not use.

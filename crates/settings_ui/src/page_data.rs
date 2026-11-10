@@ -1,4 +1,4 @@
-use gpui::{Action as _, App};
+use gpui::{Action as _, App, Window};
 use itertools::Itertools as _;
 use settings::{
     AudioInputDeviceName, AudioOutputDeviceName, LanguageSettingsContent, SemanticTokens,
@@ -11,7 +11,8 @@ use ui::IntoElement;
 
 use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
-    SettingsPage, SettingsPageItem, SubPageLink, USER, active_language, all_language_names,
+    SettingsPage, SettingsPageItem, SettingsWindow, SubPageLink, USER, active_language,
+    all_language_names,
     pages::{
         open_audio_test_window, render_edit_prediction_setup_page, render_external_agents_page,
         render_llm_providers_page, render_mcp_servers_page, render_sandbox_settings_page,
@@ -78,13 +79,13 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         collaboration_page(),
         ai_page(cx),
         network_page(),
-        work_page(),
+        work_page(bongos_linear::sync::token_is_set(cx)),
         chats_page(),
         developer_page(cx),
     ]
 }
 
-fn work_page() -> SettingsPage {
+fn work_page(token_set: bool) -> SettingsPage {
     fn work_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SectionHeader("Work"),
@@ -282,12 +283,58 @@ fn work_page() -> SettingsPage {
         ]
     }
 
+    fn linear_section(token_set: bool) -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Linear"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Linear",
+                description: "Whether the Linear sync is on. While it is off, bongos sends no request to Linear and every Linear command is hidden.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("linear.enabled"),
+                    pick: |settings_content| settings_content.linear.as_ref()?.enabled.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.linear.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "Linear Token".into(),
+                description: Some(
+                    if token_set {
+                        "Token: set"
+                    } else {
+                        "Token: not set"
+                    }
+                    .into(),
+                ),
+                button_text: "Set token".into(),
+                on_click: Arc::new(|settings_window, window, cx| {
+                    run_in_original_window(settings_window, window, cx, LINEAR_SET_TOKEN)
+                }),
+                files: USER,
+            }),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "Clear Linear Token".into(),
+                description: Some("Remove the stored token.".into()),
+                button_text: "Clear token".into(),
+                on_click: Arc::new(|settings_window, window, cx| {
+                    run_in_original_window(settings_window, window, cx, LINEAR_CLEAR_TOKEN)
+                }),
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: "Work",
         items: concat_sections![
             work_section(),
             thresholds_and_repositories_section(),
-            task_builder_section()
+            task_builder_section(),
+            linear_section(token_set)
         ],
     }
 }
@@ -481,6 +528,31 @@ fn chats_page() -> SettingsPage {
 /// The name of the `work: add repository` action. The page runs it by name, so the settings UI
 /// does not depend on the crate that defines it.
 const WORK_ADD_REPOSITORY: &str = "work::AddRepository";
+
+/// The names of the Linear token actions, run by name like `work::AddRepository`.
+const LINEAR_SET_TOKEN: &str = "linear::SetToken";
+const LINEAR_CLEAR_TOKEN: &str = "linear::ClearToken";
+
+/// Runs the action `name` in the window the settings were opened from and closes the settings.
+fn run_in_original_window(
+    settings_window: &mut SettingsWindow,
+    window: &mut Window,
+    cx: &mut App,
+    name: &'static str,
+) {
+    let Some(original_window) = settings_window.original_window else {
+        return;
+    };
+    original_window
+        .update(cx, |_workspace, original_window, cx| {
+            if let Ok(action) = cx.build_action(name, None) {
+                original_window.dispatch_action(action, cx);
+            }
+            original_window.activate_window();
+        })
+        .ok();
+    window.remove_window();
+}
 
 fn developer_page(cx: &App) -> SettingsPage {
     use feature_flags::FeatureFlagAppExt as _;
@@ -10546,7 +10618,7 @@ mod tests {
         let (content, _) = settings::parse_json::<SettingsContent>(&settings::default_settings());
         let default = serde_json::to_value(content.expect("default.json parses")).unwrap();
         let keys: Vec<&String> = default["work"].as_object().unwrap().keys().collect();
-        let page = work_page();
+        let page = work_page(false);
         let paths: Vec<&str> = page
             .items
             .iter()
@@ -10565,7 +10637,7 @@ mod tests {
 
     #[test]
     fn test_work_page_lists_repositories_and_add_repository() {
-        let page = work_page();
+        let page = work_page(false);
         assert_eq!(page.title, "Work");
         let titles: Vec<String> = page
             .items
@@ -10588,7 +10660,7 @@ mod tests {
 
     #[test]
     fn test_work_page_lists_the_task_builder_settings() {
-        let page = work_page();
+        let page = work_page(false);
         let paths: Vec<&str> = page
             .items
             .iter()
@@ -10611,6 +10683,49 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item, SettingsPageItem::SectionHeader("Task Builder")))
         );
+    }
+
+    #[test]
+    fn test_work_page_lists_the_linear_items_and_never_a_token() {
+        let titles = |page: &SettingsPage| -> Vec<String> {
+            page.items
+                .iter()
+                .filter_map(|item| match item {
+                    SettingsPageItem::ActionLink(link) => Some(format!(
+                        "{} {} {}",
+                        link.title,
+                        link.description.clone().unwrap_or_default(),
+                        link.button_text
+                    )),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (set, text) in [(false, "Token: not set"), (true, "Token: set")] {
+            let page = work_page(set);
+            let paths: Vec<&str> = page
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                    _ => None,
+                })
+                .filter(|path| path.starts_with("linear."))
+                .collect();
+            assert_eq!(paths, ["linear.enabled"]);
+            assert!(
+                page.items
+                    .iter()
+                    .any(|item| matches!(item, SettingsPageItem::SectionHeader("Linear")))
+            );
+            let links = titles(&page);
+            assert!(links.iter().any(|link| link.contains(text)), "{links:?}");
+            assert!(links.iter().any(|link| link.contains("Set token")));
+            assert!(links.iter().any(|link| link.contains("Clear token")));
+            for link in &links {
+                assert!(!link.contains("lin_api_"), "{link}");
+            }
+        }
     }
 
     #[test]
