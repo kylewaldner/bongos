@@ -5,19 +5,23 @@
 //! this step installs none, so they do nothing yet; the link, unlink and open commands are handled
 //! in `link` instead, `task: new from linear` in `import` (with its preview in `preview`), and
 //! `task: refresh from linear` in `refresh`, which also refreshes on opening the Work view and on
-//! focusing a task. `linear: set token` and `linear: clear token`
+//! focusing a task, and `task: create missing subtickets` in `subtickets`, which also offers the
+//! missing subtickets after a proposal is applied under a linked group. `linear: set token` and `linear: clear token`
 //! open the masked token modal and clear the stored token instead (see [`token`]). No keys are
 //! bound to these actions yet; they are reached from the command palette.
 
 mod actions;
+mod checklist;
 mod chips;
 pub(crate) mod client;
 pub mod dump;
 mod import;
 mod link;
+mod needs_you;
 mod preview;
 mod refresh;
 mod settings;
+mod subtickets;
 pub mod sync;
 pub mod token;
 
@@ -30,14 +34,15 @@ pub use actions::{
 };
 pub use settings::LinearSettings;
 
-/// Registers the `linear` settings and creates the sync, the refresh triggers and the row chips.
-/// Call before [`init_palette`], and after `bongos_work::init`, whose store and focus the
-/// triggers attach to.
+/// Registers the `linear` settings and creates the sync, the refresh triggers, the row chips and
+/// the subtickets watcher with its needs-you source. Call before [`init_palette`], and after
+/// `bongos_work::init`, whose store and focus the triggers and the watcher attach to.
 pub fn init(cx: &mut App) {
     LinearSettings::register(cx);
     sync::install(cx);
     refresh::install(cx);
     chips::install(cx);
+    subtickets::install(cx);
 }
 
 /// Installs the client that talks to Linear over the application's HTTP client. Call once the
@@ -63,6 +68,8 @@ mod import_tests;
 mod link_tests;
 #[cfg(test)]
 mod refresh_tests;
+#[cfg(test)]
+mod subtickets_tests;
 #[cfg(test)]
 mod sync_tests;
 #[cfg(test)]
