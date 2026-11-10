@@ -234,6 +234,60 @@ task billing: implement proration for billing | id 0196f1c2-7c1e-7a8b-9d55-2f6c0
 - **Not there yet.** Named workflows are not checked (a warning), because there is no workflow
   engine yet.
 
+## Linear sync
+
+Link tasks to Linear tickets, import a ticket with its subtickets, and let a few writes go back.
+It is on by default and does nothing until you link or import a ticket and set a token: a task that
+is not linked is never touched or requested. `linear.enabled` set to `false` hides the commands and
+stops every request. The keys are for the Emacs keymap; every command is also in the palette.
+
+- **Linking.** `C-c w L l` links the task at point to a ticket (the subtickets of the nearest
+  linked group first, then your recent tickets, or type an identifier or URL) after a question,
+  `C-c w L u` removes the link and `C-c w L o` opens the ticket in the browser. A linked task shows
+  its identifier on its row. Unlinking and opening send nothing.
+- **Import.** `C-c w L L` (`task: new from linear`) picks a ticket, then where it goes, and
+  shows a preview: a ticket with subtickets becomes a group and each one a leaf with one `plan`
+  todo, down four levels (a ticket with more than 200 subtickets imports as a leaf). Nothing is
+  written before you confirm, and a ticket a task already links focuses that task instead.
+  Relations (`blocks`) show as hints and never become edges.
+- **Ownership.** Linear owns the title and the description: a linked task takes them from Linear
+  and its goal cannot be edited here (a rename in a proposal is kept, not applied), and an edit
+  made outside bongos is overwritten by the next refresh. Bongos owns the structure, todos,
+  artifacts, edges, chats and workflows, and never edits a ticket's title or description.
+- **Refresh.** Linear is read when the Work view opens, when you focus a linked task (not again
+  within a minute) and on `C-c w L R`. There is no polling. A failed read shows `linear
+  unreachable`, `linear rate limited` or `linear: not found` on the row and never blocks work.
+- **Suggestions.** A ticket under a linked group's ticket that no task links is a suggestion.
+  `C-c w L s` lists them: `enter` makes a linked leaf (or links a leaf of the same title), `d`
+  dismisses one for good. A suggestion never becomes a task on its own, and accepting writes
+  nothing to Linear.
+- **Three writes.** Bongos writes to Linear in three cases only, never a status that a pull request
+  sets (opened, review, merged) and never completed. Moving a ticket to the team's first `started`
+  state, once, when its leaf's plan todo starts, only from backlog, unstarted or triage (a group's
+  ticket moves when its first leaf does). Creating subtickets: after you apply a proposal under a
+  linked group, and on `C-c w L C`, a preview, a checklist and a question come first; a proposal an
+  agent applied only marks the group `N need tickets` until you run it. Cancelling a ticket when you
+  drop its task and answer yes (a group asks: leave all, cancel leaves only, cancel all).
+- **Branches and pull requests.** A linked leaf's branch carries the lowercase identifier
+  (`seq-121-proration-engine` from `{slug}`; `{linear}` in a branch template places it yourself) and
+  its PR title starts with `SEQ-121 ` so Linear's GitHub integration links the PR with no magic
+  words. A chat on a linked leaf is told both in its context, and `task: copy pr title` copies the
+  title. Bongos opens no PRs.
+- **Stacked leaves.** Linear may mark a ticket Done when its PR merges into the parent's branch,
+  which is not the default branch. Bongos writes no status for a stacked leaf, tells you once, and
+  marks the row `stacked: check Linear rule`: add a 'no action' rule for target branches matching
+  `^[a-z]+-[0-9]+-` in Linear's GitHub settings. When a stack ships as one PR, add `Closes <id>` to its
+  description for each stacked ticket (the chat's context says so). The result of a real stacked
+  pair against a team's rules is not recorded yet; until it is, treat the rule as a recommendation.
+- **Token.** `linear: set token` asks for a Linear personal API key in a masked box, checks it with
+  one request and keeps it in the system credential store; `linear: clear token` removes it. The
+  `LINEAR_API_KEY` environment variable is the fallback when the store has none (bongos neither adds
+  it to nor removes it from what a terminal inherits). The token is never written to a task file,
+  proposal, log, dump, toast or clipboard, and bongos does not hand it to chats. With none set, the link and
+  import commands say how to add one and everything else works.
+- **Not there yet.** Todos are not synced, a ticket's status is not mirrored back, and there are no
+  webhooks.
+
 ## Minibuffer
 
 As in Emacs, prompts open in a one-line strip at the bottom of the window, below the status bar,
@@ -261,6 +315,10 @@ bongos's own code, and the telemetry and update checks of the language servers i
 no host beyond what a feature needs (the JetBrains license check for the IntelliJ server). A
 project's own Gradle build is exempt: it may contact its hosts, such as services.gradle.org,
 plugins.gradle.org, Maven repositories and Artifact Registry.
+
+Linear (`api.linear.app`) is contacted only when `linear.enabled` is on (the default) and a token
+is set, for a linked task or a Linear command. The token is stored in the credential store and
+never written to a log or a file.
 
 kotlin-lsp builds are early access and expire about 29 days after build, so bongos pins one
 build per release and releases roughly monthly. If the pinned build has expired, update bongos.
