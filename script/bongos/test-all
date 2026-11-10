@@ -5,6 +5,7 @@
 #   test-all [crate...]   named crates only, replacing --workspace; for a cheap trial of the script
 #   BONGOS_TEST_FILTER=s  only tests whose name contains s (a positional nextest filter)
 #   BONGOS_TEST_NO_NET=1  cargo runs offline (CARGO_NET_OFFLINE=true)
+#   BONGOS_TEST_PARTITION=K/N  run only slice K of N of the tests (nextest --partition hash:K/N)
 # The extension_host dev-extension test (test_extension_store_with_test_extension) expects a wasi-sdk
 # in the repository's own target/wasi-sdk and tries to download one when it is missing; in a fresh
 # worktree that failed on 2026-11-07 (the test's HTTP client is a fake), so a failure of that one
@@ -57,4 +58,14 @@ fi
 filter=()
 [ -n "${BONGOS_TEST_FILTER:-}" ] && filter=("$BONGOS_TEST_FILTER")
 
-cargo_limited nextest run "${scope[@]}" "${filter[@]}" --lib --bins --tests --locked --no-fail-fast --color never
+# BONGOS_TEST_PARTITION=K/N runs only slice K of N (nextest --partition hash:K/N), so a long run can be
+# split across several calls; every slice together is the whole suite.
+partition=()
+if [ -n "${BONGOS_TEST_PARTITION:-}" ]; then
+  case "$BONGOS_TEST_PARTITION" in
+    [1-9]*/[1-9]*) partition=(--partition "hash:$BONGOS_TEST_PARTITION") ;;
+    *) echo "bongos: BONGOS_TEST_PARTITION must look like 1/2, got '$BONGOS_TEST_PARTITION'" >&2; exit 1 ;;
+  esac
+fi
+
+cargo_limited nextest run "${scope[@]}" "${filter[@]}" ${partition[@]+"${partition[@]}"} --lib --bins --tests --locked --no-fail-fast --color never

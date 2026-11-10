@@ -6,6 +6,7 @@
 # is in the log.
 #   test [crate...]       BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
 #   BONGOS_TEST_NO_NET=1  cargo runs offline (CARGO_NET_OFFLINE=true)
+#   BONGOS_TEST_PARTITION=K/N  run only slice K of N of the tests (nextest --partition hash:K/N)
 # Prefer running it with no crate names, which tests the crates changed on this branch, and narrow
 # the run with BONGOS_TEST_FILTER. Every distinct set of -p flags makes cargo unify features
 # differently and build another full set of dependency artifacts, so name crates only when the
@@ -64,6 +65,16 @@ require_space
 filter=()
 [ -n "${BONGOS_TEST_FILTER:-}" ] && filter=("$BONGOS_TEST_FILTER")
 
+# BONGOS_TEST_PARTITION=K/N runs only slice K of N (nextest --partition hash:K/N), so a long run can be
+# split across several calls; every slice together is the whole suite.
+partition=()
+if [ -n "${BONGOS_TEST_PARTITION:-}" ]; then
+  case "$BONGOS_TEST_PARTITION" in
+    [1-9]*/[1-9]*) partition=(--partition "hash:$BONGOS_TEST_PARTITION") ;;
+    *) echo "bongos: BONGOS_TEST_PARTITION must look like 1/2, got '$BONGOS_TEST_PARTITION'" >&2; exit 1 ;;
+  esac
+fi
+
 # Offline cargo, so a missing dependency fails the run instead of fetching it.
 if [ "${BONGOS_TEST_NO_NET:-}" = 1 ]; then
   export CARGO_NET_OFFLINE=true
@@ -71,4 +82,4 @@ fi
 
 # No --lib: a package without a library target (the bongos binary crate) makes cargo fail. --tests
 # still runs every library's unit tests.
-cargo_limited nextest run "${crates[@]}" ${filter[@]+"${filter[@]}"} --bins --tests --locked --no-fail-fast --no-tests=pass --color never
+cargo_limited nextest run "${crates[@]}" ${filter[@]+"${filter[@]}"} ${partition[@]+"${partition[@]}"} --bins --tests --locked --no-fail-fast --no-tests=pass --color never
