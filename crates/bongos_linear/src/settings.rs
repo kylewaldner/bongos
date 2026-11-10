@@ -3,8 +3,9 @@ use settings::{RegisterSetting, Settings, SettingsContent};
 /// The `linear` settings (user level only: the Linear token and sync belong to the machine).
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
 pub struct LinearSettings {
-    /// While false, bongos makes no request to Linear and every Linear command is hidden and only
-    /// says so.
+    /// Whether the Linear sync is on (the default). A task that is not linked to Linear is never
+    /// touched or requested. While false, bongos makes no request to Linear and every Linear
+    /// command is hidden and only says "Linear sync is off (linear.enabled)".
     pub enabled: bool,
 }
 
