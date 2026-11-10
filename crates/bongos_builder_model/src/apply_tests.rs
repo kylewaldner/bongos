@@ -1074,3 +1074,49 @@ fn a_leaf_split_inside_a_moved_group_takes_its_chats_along() {
     let redo = diff(&again, &after, &LiveSet::default(), &Choices::default());
     assert!(redo.is_empty(), "{:#?}", redo.ops);
 }
+
+#[test]
+fn a_locked_goal_is_never_written() {
+    // The diff comes from an unlinked `tidy`, so it renames it; the apply runs on a tree where
+    // `tidy` is synced with Linear, and refuses without writing anything.
+    let unlinked = billing_fixture();
+    let text = billing_text();
+    let parsed = checked_parse(&unlinked.tree, &text);
+    let diff = diff(
+        &parsed,
+        &unlinked.tree,
+        &LiveSet::default(),
+        &Choices::default(),
+    );
+    assert!(
+        diff.ops
+            .iter()
+            .any(|op| matches!(op, Op::Rename { id, .. } if *id == id_of("tidy"))),
+        "{:?}",
+        diff.ops
+    );
+
+    let locked_root = TempDir::new().unwrap();
+    materialize(&billing_tree(), locked_root.path(), &[]);
+    let mut locked = file(&unlinked.tree, &id_of("tidy")).clone();
+    locked.linear = Some("SEQ-121".to_string());
+    locked.linear_state = Some(bongos_work_model::LinearState {
+        issue_id: "6f0c".to_string(),
+        ..Default::default()
+    });
+    fs::write(
+        layout::task_file(&locked_root.path().join("projects/billing/tasks/tidy")),
+        serialize_task(&locked).unwrap(),
+    )
+    .unwrap();
+    let tree = load(locked_root.path());
+    let before = snapshot(locked_root.path());
+    let refused = applied(&parsed, &tree, &diff, &ctx(), &file_hash(text.as_bytes()));
+    assert_eq!(
+        refused.err().as_deref(),
+        Some(
+            "tidy: the title comes from Linear (SEQ-121); change it there or run task: open in linear"
+        )
+    );
+    assert_eq!(snapshot(locked_root.path()), before);
+}

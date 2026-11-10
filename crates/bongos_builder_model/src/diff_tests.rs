@@ -329,6 +329,11 @@ fn scenario_2_a_plan_makes_a_group_of_five_leaves() {
 // Scenario 4: done and live tasks untouched; a drop of a live leaf kept; a todo rename.
 
 fn scenario_4_tree() -> WorkTree {
+    scenario_4_tree_with(|_| {})
+}
+
+/// The scenario 4 tree with `edit` applied to the file of `engine`.
+fn scenario_4_tree_with(edit: impl FnOnce(&mut bongos_work_model::TaskFile)) -> WorkTree {
     let schema = with_file(
         planned(
             leaf("schema", "add proration columns", Kind::PrShip),
@@ -339,7 +344,10 @@ fn scenario_4_tree() -> WorkTree {
             file.branch = Some("schema".to_string());
         },
     );
-    let engine = planned(leaf("engine", "proration engine", Kind::PrShip), "engine");
+    let engine = with_file(
+        planned(leaf("engine", "proration engine", Kind::PrShip), "engine"),
+        edit,
+    );
     let integration = planned(
         finished(leaf(
             "integration",
@@ -400,6 +408,67 @@ fn a_printed_tree_diffs_to_nothing() {
         let printed = print(&tree, &id_of(root), &live).expect("prints");
         let diff = run_with(&tree, &printed, &live, &Choices::default());
         assert!(diff.is_empty(), "{printed}\n{:?}", diff.ops);
+    }
+}
+
+/// The billing tree with `engine` linked to Linear as `linear` / `state` say.
+fn linked_engine_tree(
+    linear: Option<&str>,
+    state: Option<bongos_work_model::LinearState>,
+) -> WorkTree {
+    scenario_4_tree_with(|file| {
+        file.linear = linear.map(str::to_string);
+        file.linear_state = state;
+    })
+}
+
+fn synced() -> Option<bongos_work_model::LinearState> {
+    Some(bongos_work_model::LinearState {
+        issue_id: "6f0c".to_string(),
+        ..Default::default()
+    })
+}
+
+fn rename_engine(tree: &WorkTree) -> (Diff, String) {
+    let live = LiveSet::default();
+    let printed = print(tree, &id_of("billing"), &live).expect("prints");
+    let text = printed.replace(
+        "task engine: proration engine",
+        "task engine: the proration engine",
+    );
+    assert_ne!(text, printed);
+    (run_with(tree, &text, &live, &Choices::default()), text)
+}
+
+#[test]
+fn renaming_a_task_linked_to_linear_is_kept() {
+    let tree = linked_engine_tree(Some("SEQ-121"), synced());
+    let (diff, text) = rename_engine(&tree);
+    assert_eq!(changes(&diff, &tree), Vec::<String>::new());
+    assert_eq!(
+        kept(&diff, &tree),
+        [
+            "engine: not renamed: the title comes from Linear (SEQ-121); change it there or run task: open in linear"
+        ]
+    );
+    assert!(matches!(
+        diff.ops.iter().find(|op| matches!(op, Op::Kept { .. })),
+        Some(Op::Kept { line, .. }) if *line == line_of(&text, "task engine:")
+    ));
+}
+
+#[test]
+fn a_hand_set_linear_task_and_an_unlinked_task_still_rename() {
+    for tree in [
+        linked_engine_tree(Some("SEQ-121"), None),
+        linked_engine_tree(None, None),
+    ] {
+        let (diff, _) = rename_engine(&tree);
+        assert_eq!(
+            changes(&diff, &tree),
+            ["rename engine to the proration engine"]
+        );
+        assert_eq!(kept(&diff, &tree), Vec::<String>::new());
     }
 }
 

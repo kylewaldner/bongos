@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use bongos_work_model::commands::{default_todos, default_unblock};
 use bongos_work_model::derive::{self, Shape, State};
 use bongos_work_model::layout::{CHATS_DIR, RUNS_DIR};
-use bongos_work_model::rules::{EdgeKind, Place, check_split, open_descendants, role_name};
+use bongos_work_model::rules::{
+    EdgeKind, Place, check_split, goal_locked, open_descendants, role_name,
+};
 use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{Extra, Kind, Status, TaskId, Todo, TodoRole, TodoState, UnblockPoint};
 use sha2::{Digest, Sha256};
@@ -987,12 +989,16 @@ impl<'a> Differ<'a> {
         }
 
         if !same(&node.goal, &file.goal) {
-            self.ops.push(Op::Rename {
-                line,
-                id: id.to_string(),
-                from: file.goal.clone(),
-                to: node.goal.clone(),
-            });
+            // A task linked to Linear takes its title from there: the rename is shown, not done.
+            match goal_locked(file) {
+                None => self.ops.push(Op::Rename {
+                    line,
+                    id: id.to_string(),
+                    from: file.goal.clone(),
+                    to: node.goal.clone(),
+                }),
+                Some(reason) => self.kept(id, line, "not renamed", reason),
+            }
         }
 
         if let Some(kind) = node.attributes.kind
