@@ -650,7 +650,8 @@ async fn emacs_line_kills_in_a_read_only_editor(cx: &mut TestAppContext) {
     assert_eq!(clipboard_text(cx).as_deref(), Some("kept"));
 }
 
-/// C-w on a sent block in a prompts buffer changes nothing: the prompts guard reverts it.
+/// C-w on the marker line of a sent block in a prompts buffer changes nothing: the prompts
+/// guard reverts the kill, as the one transaction `apply::run` makes reaches it.
 #[gpui::test]
 async fn emacs_kill_on_a_sent_prompt_block_changes_nothing(cx: &mut TestAppContext) {
     use std::path::PathBuf;
@@ -711,16 +712,10 @@ async fn emacs_kill_on_a_sent_prompt_block_changes_nothing(cx: &mut TestAppConte
             buffer.set_group_interval(std::time::Duration::ZERO)
         });
     });
-    // The caret is on "first, sent", the body of the sent block.
-    select_offsets(&editor, &[70..70], cx);
-    assert!(
-        editor.update(cx, |editor, cx| editor.text(cx)).starts_with(
-            "preamble\n=== prompt 2026-11-05 13:40 | sent 2026-11-05 14:02 ===\nfirst"
-        )
-    );
-
+    // The caret is on the marker line of the sent block: C-w would kill the line, marker
+    // included, so the guard reverts it.
+    select_offsets(&editor, &[20..20], cx);
     run_emacs("emacs::KillRegionOrLine", serde_json::json!({}), cx);
-    run_emacs("emacs::KillLine", serde_json::json!({}), cx);
     assert_eq!(editor.update(cx, |editor, cx| editor.text(cx)), PROMPTS);
 }
 
