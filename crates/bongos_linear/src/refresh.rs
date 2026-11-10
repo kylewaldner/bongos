@@ -272,12 +272,12 @@ pub(crate) fn sync_linked(cx: &mut App) {
     }
 }
 
-fn enabled(cx: &App) -> bool {
+pub(crate) fn enabled(cx: &App) -> bool {
     LinearSettings::get_global(cx).enabled
 }
 
 /// The tree of an enabled, loaded store.
-fn snapshot(cx: &App) -> Option<std::sync::Arc<WorkTree>> {
+pub(crate) fn snapshot(cx: &App) -> Option<std::sync::Arc<WorkTree>> {
     let store = WorkStore::global(cx)?;
     let store = store.read(cx);
     store.is_enabled().then(|| store.snapshot()).flatten()
@@ -372,6 +372,8 @@ impl Refresher {
         self.in_flight = true;
         cx.spawn(async move |this, cx| {
             let outcome = cycle(&this, queued, cx).await;
+            // A started write that failed is tried again after each refresh.
+            cx.update(crate::status::refreshed);
             this.update(cx, |this, cx| {
                 this.in_flight = false;
                 if let Some(next) = this.pending.take() {
@@ -611,7 +613,7 @@ pub(crate) fn apply_changes(
 }
 
 /// Shows `message` in the active window's workspace.
-fn toast_active(message: String, cx: &mut App) {
+pub(crate) fn toast_active(message: String, cx: &mut App) {
     let window = cx
         .active_window()
         .into_iter()
