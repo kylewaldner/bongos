@@ -96,14 +96,6 @@ fn preview(env: &Env, cx: &mut VisualTestContext) -> Option<(String, String)> {
     })
 }
 
-fn identifiers(env: &Env, cx: &mut VisualTestContext) -> Vec<String> {
-    env.tree(cx)
-        .tasks()
-        .into_iter()
-        .filter_map(|task| task.file.as_ref()?.linear.clone())
-        .collect()
-}
-
 #[gpui::test]
 async fn cancel_writes_nothing(cx: &mut TestAppContext) {
     let (env, cx) = env(cx, true, true).await;
