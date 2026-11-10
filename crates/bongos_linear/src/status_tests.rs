@@ -140,12 +140,18 @@ async fn run(
 /// Starts the first todo (the plan, for a leaf with no `plans` todo).
 async fn begin(env: &Env, id: &str, cx: &mut VisualTestContext) {
     let id = id.to_string();
-    run(env, cx, move |tree, ctx| todo_start(tree, ctx, &id, Some(0))).await;
+    run(env, cx, move |tree, ctx| {
+        todo_start(tree, ctx, &id, Some(0))
+    })
+    .await;
 }
 
 async fn drop_it(env: &Env, id: &str, confirmed: bool, cx: &mut VisualTestContext) {
     let id = id.to_string();
-    run(env, cx, move |tree, ctx| drop_task(tree, ctx, &id, confirmed)).await;
+    run(env, cx, move |tree, ctx| {
+        drop_task(tree, ctx, &id, confirmed)
+    })
+    .await;
 }
 
 async fn settle(cx: &mut VisualTestContext) {
@@ -333,7 +339,10 @@ async fn a_group_moves_with_its_first_leaf(cx: &mut TestAppContext) {
     settle(cx).await;
     assert_eq!(sets(&env).len(), 3);
     assert_eq!(
-        sets(&env).iter().filter(|(issue, _)| issue == "uuid-SEQ-101").count(),
+        sets(&env)
+            .iter()
+            .filter(|(issue, _)| issue == "uuid-SEQ-101")
+            .count(),
         1
     );
 }
@@ -434,13 +443,21 @@ async fn a_failed_write_records_nothing_and_is_retried_by_the_next_refresh(
     settle(cx).await;
     assert!(!started(&env, "beta", cx), "nothing is recorded");
     assert_eq!(env.fake.issue("SEQ-5").unwrap().state.id, "backlog");
-    assert_eq!(attempts.load(Ordering::SeqCst), 1, "a change does not retry");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a change does not retry"
+    );
 
     dispatch("task::RefreshFromLinear", cx);
     wait_until(cx, "started_sent", |cx| started(&env, "beta", cx)).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(env.fake.issue("SEQ-5").unwrap().state.id, "doing");
-    assert_eq!(sets(&env).len(), 1, "the fake saw only the write that worked");
+    assert_eq!(
+        sets(&env).len(),
+        1,
+        "the fake saw only the write that worked"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -452,8 +469,14 @@ async fn a_dropped_leaf_asks_and_leave_writes_nothing(cx: &mut TestAppContext) {
     drop_it(&env, "l2", false, cx).await;
     wait_question(&env, cx).await;
     cx.simulate_keystrokes("l");
-    wait_until(cx, "the answer", |cx| cancel_record(&env, "beta", cx).is_some()).await;
-    assert_eq!(cancel_record(&env, "beta", cx), Some(LinearCancel::Declined));
+    wait_until(cx, "the answer", |cx| {
+        cancel_record(&env, "beta", cx).is_some()
+    })
+    .await;
+    assert_eq!(
+        cancel_record(&env, "beta", cx),
+        Some(LinearCancel::Declined)
+    );
     settle(cx).await;
     assert!(sets(&env).is_empty());
     assert!(!asking(&env, cx), "asked once");
@@ -466,8 +489,14 @@ async fn cancel_writes_once_and_is_not_asked_again(cx: &mut TestAppContext) {
     drop_it(&env, "l2", false, cx).await;
     wait_question(&env, cx).await;
     cx.simulate_keystrokes("c");
-    wait_until(cx, "the answer", |cx| cancel_record(&env, "beta", cx).is_some()).await;
-    assert_eq!(cancel_record(&env, "beta", cx), Some(LinearCancel::Cancelled));
+    wait_until(cx, "the answer", |cx| {
+        cancel_record(&env, "beta", cx).is_some()
+    })
+    .await;
+    assert_eq!(
+        cancel_record(&env, "beta", cx),
+        Some(LinearCancel::Cancelled)
+    );
     assert_eq!(
         sets(&env),
         vec![("uuid-SEQ-5".to_string(), "canceled".to_string())],
@@ -485,7 +514,10 @@ async fn reopen_clears_the_answer_and_writes_nothing(cx: &mut TestAppContext) {
     drop_it(&env, "l2", false, cx).await;
     wait_question(&env, cx).await;
     cx.simulate_keystrokes("l");
-    wait_until(cx, "the answer", |cx| cancel_record(&env, "beta", cx).is_some()).await;
+    wait_until(cx, "the answer", |cx| {
+        cancel_record(&env, "beta", cx).is_some()
+    })
+    .await;
     run(&env, cx, |tree, ctx| reopen(tree, ctx, "l2")).await;
     wait_until(cx, "the cleared record", |cx| {
         cancel_record(&env, "beta", cx).is_none()
@@ -511,7 +543,11 @@ async fn a_dropped_stacked_leaf_is_not_asked_and_says_so(cx: &mut TestAppContext
     add(&env, None, "stk", "l12", Some(6), true, Some("beta"), cx).await;
     drop_it(&env, "l12", false, cx).await;
     wait_until(cx, "the toast", |cx| env.last_toast(cx).contains("stacked")).await;
-    assert!(env.last_toast(cx).contains("SEQ-6"), "{}", env.last_toast(cx));
+    assert!(
+        env.last_toast(cx).contains("SEQ-6"),
+        "{}",
+        env.last_toast(cx)
+    );
     assert!(!asking(&env, cx));
     assert!(cancel_record(&env, "stk", cx).is_none());
     assert!(env.fake.calls().is_empty());
@@ -539,7 +575,10 @@ async fn group_answer(
     settle(cx).await;
     let written: Vec<String> = sets(&env).into_iter().map(|(issue, _)| issue).collect();
     assert_eq!(written, expected, "answer {key}");
-    assert!(!asking(&env, cx), "one question for the group and its leaves");
+    assert!(
+        !asking(&env, cx),
+        "one question for the group and its leaves"
+    );
     assert_eq!(cancel_record(&env, "phase", cx), Some(records.0));
     assert_eq!(cancel_record(&env, "one", cx), Some(records.1));
     assert_eq!(cancel_record(&env, "two", cx), Some(records.1));
@@ -587,7 +626,10 @@ async fn a_group_with_an_open_leaf_is_never_cancelled(cx: &mut TestAppContext) {
     assert_eq!(env.fake.issue("SEQ-101").unwrap().state.id, "backlog");
     assert_eq!(env.fake.issue("SEQ-103").unwrap().state.id, "backlog");
     assert!(cancel_record(&env, "two", cx).is_none());
-    assert!(cancel_record(&env, "phase", cx).is_none(), "not answered while a leaf is open");
+    assert!(
+        cancel_record(&env, "phase", cx).is_none(),
+        "not answered while a leaf is open"
+    );
     assert!(!asking(&env, cx));
 }
 

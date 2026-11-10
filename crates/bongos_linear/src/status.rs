@@ -323,10 +323,11 @@ impl Watcher {
             .collect();
         fresh.retain(|id, _| {
             Place::locate(tree, id).ok().is_none_or(|place| {
-                !place
-                    .ancestors
-                    .iter()
-                    .any(|ancestor| ancestor.id().is_some_and(|ancestor| groups.contains(ancestor)))
+                !place.ancestors.iter().any(|ancestor| {
+                    ancestor
+                        .id()
+                        .is_some_and(|ancestor| groups.contains(ancestor))
+                })
             })
         });
         // The question being asked stays as it is.
@@ -443,7 +444,8 @@ async fn write(
 
 /// Reads the token when the sync does not know about one yet.
 async fn ensure_token(cx: &mut AsyncApp) -> Result<(), String> {
-    let present = cx.update(|cx| sync::global(cx).is_some_and(|sync| sync.read(cx).token_present()));
+    let present =
+        cx.update(|cx| sync::global(cx).is_some_and(|sync| sync.read(cx).token_present()));
     if present || token::load(cx).await {
         Ok(())
     } else {
@@ -459,7 +461,8 @@ fn call<T>(
     request: impl FnOnce(&dyn LinearApi) -> BoxFuture<'static, Result<T, ApiError>>,
 ) -> Result<BoxFuture<'static, Result<T, ApiError>>, String> {
     cx.update(|cx| {
-        let linear = sync::global(cx).ok_or_else(|| "the Linear sync is not available".to_string())?;
+        let linear =
+            sync::global(cx).ok_or_else(|| "the Linear sync is not available".to_string())?;
         linear
             .update(cx, |linear, cx| {
                 linear.call(Scope::LinkedTask(task_id), cx, request)
@@ -505,18 +508,14 @@ async fn read_ticket(task_id: &str, cx: &mut AsyncApp) -> Result<Ticket, String>
         .map(IssueRef::from)
         .ok_or_else(|| format!("{identifier} is not an identifier"))?;
     let read = call(task_id, cx, |client| client.issues(vec![reference]))?;
-    let issues = read
-        .await
-        .map_err(|error| failed_request(&error, cx))?;
+    let issues = read.await.map_err(|error| failed_request(&error, cx))?;
     let issue = issues
         .into_iter()
         .find(|issue| issue.id == issue_id || issue.identifier.eq_ignore_ascii_case(&identifier))
         .ok_or_else(|| format!("{identifier} not found in Linear"))?;
     let team_id = issue.team_id.clone();
     let states = call(task_id, cx, |client| client.team_states(&team_id))?;
-    let team_states = states
-        .await
-        .map_err(|error| failed_request(&error, cx))?;
+    let team_states = states.await.map_err(|error| failed_request(&error, cx))?;
     Ok(Ticket {
         issue_id: issue.id,
         team_id: issue.team_id,
@@ -532,9 +531,7 @@ async fn write_state(write: &StateWrite, cx: &mut AsyncApp) -> Result<(), String
     let request = call(&write.task_id, cx, |client| {
         client.set_state(&write.issue_id, &write.state_id)
     })?;
-    request
-        .await
-        .map_err(|error| failed_request(&error, cx))
+    request.await.map_err(|error| failed_request(&error, cx))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -712,8 +709,8 @@ async fn apply_answer(
         .update(|cx| snapshot(cx))
         .ok_or_else(|| "the work tree is not loaded".to_string())?;
     for target in &targets {
-        let handled = plan.declined.contains(&target.task_id)
-            || plan.cancelled.contains(&target.task_id);
+        let handled =
+            plan.declined.contains(&target.task_id) || plan.cancelled.contains(&target.task_id);
         let still_cancelled = tree.task_by_id(&target.task_id).is_some_and(|task| {
             task.file
                 .as_ref()
@@ -765,5 +762,8 @@ fn targets_of(
 
 async fn record(id: &str, answer: LinearCancel, cx: &mut AsyncApp) -> Result<(), String> {
     let target = id.to_string();
-    write(cx, move |tree, ctx| record_cancel(tree, ctx, &target, answer)).await
+    write(cx, move |tree, ctx| {
+        record_cancel(tree, ctx, &target, answer)
+    })
+    .await
 }
