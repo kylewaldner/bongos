@@ -128,7 +128,12 @@ async fn accepting_makes_a_linked_leaf_with_a_plan_todo_in_one_write(cx: &mut Te
     // Under the group, and the leaf `sub` is untouched.
     let tree = env.tree(cx);
     let group = tree.task_by_id(GROUP).unwrap();
-    assert!(group.children.iter().any(|child| child.slug == "handle-refunds"));
+    assert!(
+        group
+            .children
+            .iter()
+            .any(|child| child.slug == "handle-refunds")
+    );
     assert!(env.file("sub", cx).linear.is_none());
     assert_eq!(writes_to_linear(&env), 0, "nothing is written to Linear");
 

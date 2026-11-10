@@ -184,8 +184,8 @@ fn accept(
         }
     };
     let kind = leaf_kind(&tree, &group_id, cx);
-    let linked_to = model::matching_leaf(&tree, &group_id, &suggestion)
-        .map(|leaf| leaf.goal().to_string());
+    let linked_to =
+        model::matching_leaf(&tree, &group_id, &suggestion).map(|leaf| leaf.goal().to_string());
     cx.spawn_in(window, async move |workspace, cx| {
         let result = read.await;
         workspace

@@ -224,10 +224,7 @@ pub fn register(workspace: &mut Workspace) {
         subtickets::create_missing_subtickets,
     );
     register_direct::<task::RefreshFromLinear>(workspace, refresh::refresh_from_linear);
-    register_direct::<task::ShowLinearSuggestions>(
-        workspace,
-        suggestions::show_linear_suggestions,
-    );
+    register_direct::<task::ShowLinearSuggestions>(workspace, suggestions::show_linear_suggestions);
     register_with::<task::CopyPrTitle>(workspace, Command::CopyPrTitle);
     register_direct::<linear::SetToken>(workspace, token::set_token);
     register_direct::<linear::ClearToken>(workspace, token::clear_token);
