@@ -2314,6 +2314,7 @@ dependencies = [
  "collections",
  "editor",
  "gpui",
+ "language",
  "multi_buffer",
  "schemars 1.0.4",
  "serde",
@@ -2321,6 +2322,7 @@ dependencies = [
  "text",
  "theme",
  "theme_settings",
+ "workspace",
 ]
 
 [[package]]

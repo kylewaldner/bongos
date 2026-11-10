@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod apply;
+mod comments;
 mod kill;
 pub mod kill_sink;
 pub mod last_command;
@@ -18,6 +19,8 @@ mod words;
 
 #[cfg(test)]
 mod apply_tests;
+#[cfg(test)]
+mod comments_tests;
 #[cfg(test)]
 mod kill_sink_tests;
 #[cfg(test)]
@@ -71,6 +74,8 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, lines::move_line_down_command);
         register(editor, &weak, lines::duplicate_line_command);
         register(editor, &weak, lines::copy_from_above_command);
+        register(editor, &weak, comments::comment_dwim_command);
+        register(editor, &weak, comments::duplicate_and_comment_command);
     })
     .detach();
 }
