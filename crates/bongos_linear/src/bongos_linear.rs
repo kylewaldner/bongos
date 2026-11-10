@@ -3,14 +3,17 @@
 //! is false each handler only says that the sync is off, and nothing here reaches the network.
 //! While it is true the handlers hand their command to the installed [`LinearRequests`], of which
 //! this step installs none, so they do nothing yet; the link, unlink and open commands are handled
-//! in `link` instead. `linear: set token` and `linear: clear token`
+//! in `link` instead, and `task: refresh from linear` in `refresh`, which also refreshes on
+//! opening the Work view and on focusing a task. `linear: set token` and `linear: clear token`
 //! open the masked token modal and clear the stored token instead (see [`token`]). No keys are
 //! bound to these actions yet; they are reached from the command palette.
 
 mod actions;
+mod chips;
 pub(crate) mod client;
 pub mod dump;
 mod link;
+mod refresh;
 mod settings;
 pub mod sync;
 pub mod token;
@@ -24,10 +27,14 @@ pub use actions::{
 };
 pub use settings::LinearSettings;
 
-/// Registers the `linear` settings and creates the sync. Call before [`init_palette`].
+/// Registers the `linear` settings and creates the sync, the refresh triggers and the row chips.
+/// Call before [`init_palette`], and after `bongos_work::init`, whose store and focus the
+/// triggers attach to.
 pub fn init(cx: &mut App) {
     LinearSettings::register(cx);
     sync::install(cx);
+    refresh::install(cx);
+    chips::install(cx);
 }
 
 /// Installs the client that talks to Linear over the application's HTTP client. Call once the
@@ -42,11 +49,15 @@ pub fn init_client(cx: &mut App) {
 #[cfg(test)]
 mod actions_tests;
 #[cfg(test)]
+mod chips_tests;
+#[cfg(test)]
 mod client_tests;
 #[cfg(test)]
 mod dump_tests;
 #[cfg(test)]
 mod link_tests;
+#[cfg(test)]
+mod refresh_tests;
 #[cfg(test)]
 mod sync_tests;
 #[cfg(test)]

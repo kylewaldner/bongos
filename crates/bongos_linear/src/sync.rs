@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
-use bongos_linear_model::{ApiError, LinearApi};
+use bongos_linear_model::{ApiError, IssueSummary, LinearApi};
 use futures::future::BoxFuture;
 use gpui::{App, AppContext as _, Entity, Global};
 use settings::Settings as _;
@@ -27,6 +27,8 @@ use crate::LinearSettings;
 pub enum Scope<'a> {
     /// A read or write about a task that is linked to a ticket, by the task's id.
     LinkedTask(&'a str),
+    /// One read of several linked tasks' tickets, by the tasks' ids: a refresh batch.
+    LinkedTasks(&'a [String]),
     /// `task: new from linear`.
     NewFromLinear,
     /// `task: link to linear`.
@@ -46,6 +48,8 @@ pub enum Refusal {
     NotLinked,
     /// A token exists but no client was built for it.
     NoClient,
+    /// Linear rejected the token earlier in this session; nothing is sent until a token is set.
+    Rejected,
 }
 
 impl fmt::Display for Refusal {
@@ -55,6 +59,7 @@ impl fmt::Display for Refusal {
             Refusal::NoToken => "No Linear token: run linear: set token, or set LINEAR_API_KEY",
             Refusal::NotLinked => "This task is not linked to a Linear ticket",
             Refusal::NoClient => "The Linear client is not available",
+            Refusal::Rejected => "Linear rejected the token; run linear: set token",
         })
     }
 }
@@ -107,12 +112,27 @@ pub struct Snapshot {
     pub reads: Vec<(String, ReadState)>,
 }
 
+/// Why automatic reads are paused after a rate limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Limit {
+    /// Unix time in milliseconds when Linear lets requests through again, when it said.
+    reset_at: Option<u64>,
+}
+
 #[derive(Default)]
 pub struct LinearSync {
     client: Option<Arc<dyn LinearApi>>,
     token_present: bool,
+    /// Linear answered `Unauthorized`: nothing more is sent until a token is set.
+    rejected: bool,
+    limit: Option<Limit>,
     linked: BTreeSet<String>,
     reads: BTreeMap<String, ReadState>,
+    /// When Linear last answered for the task's ticket (found or not), Unix milliseconds. A failed
+    /// read leaves it alone.
+    answered: BTreeMap<String, u64>,
+    /// Per linked group, the tickets under its ticket that no task links (D12).
+    suggestions: BTreeMap<String, Vec<IssueSummary>>,
     allowed: u64,
     refused: u64,
 }
@@ -138,6 +158,48 @@ impl LinearSync {
     pub fn set_token(&mut self, present: bool, client: Option<Arc<dyn LinearApi>>) {
         self.token_present = present;
         self.client = if present { client } else { None };
+        if !present {
+            self.rejected = false;
+        }
+    }
+
+    /// A token Linear accepted was just stored: requests may go out again.
+    pub fn accept_token(&mut self, client: Arc<dyn LinearApi>) {
+        self.set_token(true, Some(client));
+        self.rejected = false;
+        self.limit = None;
+    }
+
+    /// Notes that Linear rejected the token. Returns true the first time, for the one toast.
+    pub fn mark_rejected(&mut self) -> bool {
+        !std::mem::replace(&mut self.rejected, true)
+    }
+
+    /// Notes a rate limit, with the reset time (Unix milliseconds) when Linear sent one.
+    pub fn mark_limited(&mut self, reset_at: Option<u64>) {
+        self.limit = Some(Limit { reset_at });
+    }
+
+    /// A read went through: the limit, if any, is over.
+    pub fn clear_limit(&mut self) {
+        self.limit = None;
+    }
+
+    /// When the current rate limit ends, if one is in force and Linear said when.
+    pub fn limit_reset(&self) -> Option<u64> {
+        self.limit.and_then(|limit| limit.reset_at)
+    }
+
+    /// Whether an automatic refresh may run now: not after a rejected token, and not while a
+    /// rate limit is in force (only an explicit command tries then).
+    pub fn auto_allowed(&self, now_ms: u64) -> bool {
+        if self.rejected {
+            return false;
+        }
+        match self.limit {
+            None => true,
+            Some(Limit { reset_at }) => reset_at.is_some_and(|reset| now_ms >= reset),
+        }
     }
 
     pub fn token_present(&self) -> bool {
@@ -148,6 +210,54 @@ impl LinearSync {
     pub fn set_linked(&mut self, ids: impl IntoIterator<Item = String>) {
         self.linked = ids.into_iter().collect();
         self.reads.retain(|id, _| self.linked.contains(id));
+        self.answered.retain(|id, _| self.linked.contains(id));
+        self.suggestions.retain(|id, _| self.linked.contains(id));
+    }
+
+    /// Whether `task_id` is a linked task.
+    pub fn is_linked(&self, task_id: &str) -> bool {
+        self.linked.contains(task_id)
+    }
+
+    /// Sets how the read of `task_id`'s ticket went at `now_ms`. Ignored for a task that is not
+    /// linked.
+    pub fn set_read(&mut self, task_id: &str, state: ReadState, now_ms: u64) {
+        if !self.linked.contains(task_id) {
+            return;
+        }
+        self.reads.insert(task_id.to_string(), state);
+        if matches!(state, ReadState::Fresh { .. } | ReadState::NotFound) {
+            self.answered.insert(task_id.to_string(), now_ms);
+        }
+    }
+
+    /// When Linear last answered for `task_id`'s ticket, found or not.
+    pub fn answered_at(&self, task_id: &str) -> Option<u64> {
+        self.answered.get(task_id).copied()
+    }
+
+    /// The suggestions of the linked group `group_id`: tickets under its ticket that no task links.
+    pub fn suggestions(&self, group_id: &str) -> &[IssueSummary] {
+        self.suggestions.get(group_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Replaces the suggestions of the groups in `scope` with `found` (a group in `scope` that
+    /// is not in `found` has none).
+    pub fn replace_suggestions(
+        &mut self,
+        scope: &[String],
+        mut found: BTreeMap<String, Vec<IssueSummary>>,
+    ) {
+        for id in scope {
+            match found.remove(id).filter(|_| self.linked.contains(id)) {
+                Some(list) => {
+                    self.suggestions.insert(id.clone(), list);
+                }
+                None => {
+                    self.suggestions.remove(id);
+                }
+            }
+        }
     }
 
     pub fn read_state(&self, task_id: &str) -> Option<ReadState> {
@@ -161,6 +271,9 @@ impl LinearSync {
             Err(error) => ReadState::from_error(error),
         };
         self.reads.insert(task_id.to_string(), state);
+        if matches!(state, ReadState::Fresh { .. } | ReadState::NotFound) {
+            self.answered.insert(task_id.to_string(), now_ms);
+        }
     }
 
     pub fn snapshot(&self, cx: &App) -> Snapshot {
@@ -180,9 +293,17 @@ impl LinearSync {
             Err(Refusal::Disabled)
         } else if !self.token_present && !candidate {
             Err(Refusal::NoToken)
+        } else if self.rejected && !candidate {
+            Err(Refusal::Rejected)
         } else if !candidate && self.client.is_none() {
             Err(Refusal::NoClient)
-        } else if matches!(scope, Scope::LinkedTask(id) if !self.linked.contains(id)) {
+        } else if match scope {
+            Scope::LinkedTask(id) => !self.linked.contains(id),
+            Scope::LinkedTasks(ids) => {
+                ids.is_empty() || ids.iter().any(|id| !self.linked.contains(id))
+            }
+            _ => false,
+        } {
             Err(Refusal::NotLinked)
         } else {
             Ok(())

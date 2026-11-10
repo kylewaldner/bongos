@@ -22,6 +22,7 @@ use workspace::notifications::NotificationId;
 use crate::LinearSettings;
 use crate::dump;
 use crate::link;
+use crate::refresh;
 use crate::token;
 
 /// New actions in the `task` namespace, shared with the work tree's, the builder's and Zed's task
@@ -217,7 +218,7 @@ pub fn register(workspace: &mut Workspace) {
     register_direct::<task::UnlinkFromLinear>(workspace, link::unlink_from_linear);
     register_direct::<task::OpenInLinear>(workspace, link::open_in_linear);
     register_with::<task::CreateMissingSubtickets>(workspace, Command::CreateMissingSubtickets);
-    register_with::<task::RefreshFromLinear>(workspace, Command::RefreshFromLinear);
+    register_direct::<task::RefreshFromLinear>(workspace, refresh::refresh_from_linear);
     register_with::<task::ShowLinearSuggestions>(workspace, Command::ShowLinearSuggestions);
     register_with::<task::CopyPrTitle>(workspace, Command::CopyPrTitle);
     register_direct::<linear::SetToken>(workspace, token::set_token);

@@ -29,12 +29,11 @@ const NAMES: &[&str] = &[
 ];
 
 /// The actions that go through the requests seam; the token actions open the modal and clear the
-/// store instead (see `token_tests`), and the three link commands are handled in `link` (see
-/// `link_tests`).
+/// store instead (see `token_tests`), the three link commands are handled in `link` (see
+/// `link_tests`) and the refresh command in `refresh` (see `refresh_tests`).
 const SEAM_NAMES: &[&str] = &[
     "task::NewFromLinear",
     "task::CreateMissingSubtickets",
-    "task::RefreshFromLinear",
     "task::ShowLinearSuggestions",
     "task::CopyPrTitle",
 ];
