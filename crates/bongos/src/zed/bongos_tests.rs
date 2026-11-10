@@ -634,6 +634,66 @@ async fn emacs_line_kills_at_three_carets_are_one_undo_step(cx: &mut TestAppCont
     assert_eq!(text(cx), "aa\nbb\ncc\ndd");
 }
 
+/// The whitespace commands run on an editor when dispatched by name with their count argument,
+/// as the palette and a keymap entry reach them; two carets are one undo step.
+#[gpui::test]
+async fn emacs_whitespace_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("a  b\nc  d\n\n\ne f", cx).await;
+    let text = |cx: &mut gpui::VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+    let undo = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| window.dispatch_action(Box::new(editor::actions::Undo), cx));
+        cx.run_until_parked();
+    };
+
+    select_offsets(&editor, &[2..2, 7..7], cx);
+    run_emacs("emacs::DeleteHorizontalSpace", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "ab\ncd\n\n\ne f");
+    undo(cx);
+    assert_eq!(text(cx), "a  b\nc  d\n\n\ne f");
+
+    select_offsets(&editor, &[2..2], cx);
+    run_emacs("emacs::JustOneSpace", serde_json::json!({ "count": 3 }), cx);
+    assert_eq!(text(cx), "a   b\nc  d\n\n\ne f");
+    undo(cx);
+
+    select_offsets(&editor, &[10..10], cx);
+    run_emacs("emacs::DeleteBlankLines", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "a  b\nc  d\n\ne f");
+}
+
+/// The transpose commands run on an editor when dispatched by name with their count argument;
+/// two carets are one undo step.
+#[gpui::test]
+async fn emacs_transpose_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("one two three\nfour five six", cx).await;
+    let text = |cx: &mut gpui::VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+    let undo = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| window.dispatch_action(Box::new(editor::actions::Undo), cx));
+        cx.run_until_parked();
+    };
+
+    select_offsets(&editor, &[7..7, 23..23], cx);
+    run_emacs("emacs::TransposeWords", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one three two\nfour six five");
+    undo(cx);
+    assert_eq!(text(cx), "one two three\nfour five six");
+
+    select_offsets(&editor, &[13..13, 27..27], cx);
+    run_emacs("emacs::TransposeWordsReverse", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one three two\nfour six five");
+    undo(cx);
+
+    select_offsets(&editor, &[2..2, 16..16], cx);
+    run_emacs(
+        "emacs::TransposeChars",
+        serde_json::json!({ "count": 2 }),
+        cx,
+    );
+    assert_eq!(text(cx), "oe ntwo three\nfuro five six");
+    undo(cx);
+    assert_eq!(text(cx), "one two three\nfour five six");
+}
+
 /// An editor that cannot be edited still copies, and C-w and C-k do nothing.
 #[gpui::test]
 async fn emacs_line_kills_in_a_read_only_editor(cx: &mut TestAppContext) {
