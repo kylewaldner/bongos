@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use bongos_work_model::commands::{Change, Context, Move, Outcome, Write, free_slug, split_work};
 use bongos_work_model::derive::{self, State};
 use bongos_work_model::layout;
-use bongos_work_model::rules::{EdgeKind, Place, Refusal, role_name};
+use bongos_work_model::rules::{EdgeKind, Place, Refusal, goal_locked, role_name};
 use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{
     Edge, Extra, HistoryEntry, ProposalRecord, ProposalState, StackedOn, Status, TaskFile, TaskId,
@@ -516,6 +516,10 @@ impl<'a> Builder<'a> {
             match op {
                 Op::Rename { id, from, to, .. } => {
                     let edited = self.edit(id)?;
+                    // The diff keeps a locked goal; never write one even from a stale diff.
+                    if let Some(reason) = goal_locked(&edited.file) {
+                        return Err(format!("{}: {reason}", edited.task.slug));
+                    }
                     edited.file.goal = to.clone();
                     edited.parts.push(format!("renamed \"{from}\" -> \"{to}\""));
                 }
