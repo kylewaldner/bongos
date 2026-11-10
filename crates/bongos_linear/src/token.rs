@@ -163,6 +163,15 @@ fn connect(token: Option<&Token>, cx: &mut App) {
     }
 }
 
+/// Reads the token without a workspace and tells the sync about it, for a refresh that starts
+/// before any command ran. Returns whether a token exists. Nothing is sent.
+pub(crate) async fn load(cx: &mut gpui::AsyncApp) -> bool {
+    let (provider, env) = cx.update(|cx| (credentials(cx), env_reader(cx)));
+    let token = read_token(&*provider, &*env, cx).await;
+    cx.update(|cx| connect(token.as_ref(), cx));
+    token.is_some()
+}
+
 fn installed_factory(cx: &App) -> Option<ClientFactory> {
     cx.try_global::<InstalledClientFactory>()
         .map(|installed| installed.0.clone())
@@ -229,7 +238,7 @@ fn check_and_store(workspace: WeakEntity<Workspace>, token: Token, cx: &mut App)
                 match stored {
                     Ok(()) => {
                         log::info!("stored the Linear token");
-                        sync.update(cx, |sync, _| sync.set_token(true, Some(client)));
+                        sync.update(cx, |sync, _| sync.accept_token(client));
                         format!("Linear token saved ({organization})")
                     }
                     Err(error) => {

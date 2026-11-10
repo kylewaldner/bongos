@@ -27,6 +27,7 @@ use workspace::Workspace;
 
 use crate::LinearSettings;
 use crate::actions::show_toast;
+use crate::refresh;
 use crate::sync::{self, Scope};
 use crate::token;
 
@@ -417,7 +418,11 @@ pub(crate) fn finish_link(
             Err(error) => error.to_string(),
         };
         workspace
-            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+            .update(cx, |workspace, cx| {
+                // The store has the new link: the sync's linked set follows it.
+                refresh::sync_linked(cx);
+                show_toast(workspace, message, cx)
+            })
             .ok();
     })
     .detach();
@@ -467,7 +472,10 @@ pub(crate) fn unlink_from_linear(
             (Err(error), _) => error.to_string(),
         };
         workspace
-            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+            .update(cx, |workspace, cx| {
+                refresh::sync_linked(cx);
+                show_toast(workspace, message, cx)
+            })
             .ok();
     })
     .detach();
