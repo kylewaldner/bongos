@@ -71,8 +71,9 @@ impl Command {
 /// 2. does nothing when the plan is empty (a zap that found nothing keeps the region), or when
 ///    the command edits and the editor is read-only (nothing is killed either);
 /// 3. hands the killed text to the kill sink before touching the buffer;
-/// 4. applies all edits and the new carets in one transaction, ends mark mode, and finalizes
-///    the transaction so the next command is a separate undo step.
+/// 4. finalizes the open undo group (so earlier typing stays its own step), applies all edits and
+///    the new carets in one transaction, ends mark mode, and finalizes the transaction so the
+///    next command is a separate undo step.
 ///
 /// Returns whether the plan was applied.
 pub fn run(
@@ -170,6 +171,8 @@ pub fn run(
                     )
                 })
                 .collect::<Vec<_>>();
+            // Text typed just before the command must not merge into the command's undo step.
+            editor.finalize_last_transaction(cx);
             editor.transact(window, cx, |editor, window, cx| {
                 editor.buffer().update(cx, |buffer, cx| {
                     buffer.edit(buffer_edits, None, cx);

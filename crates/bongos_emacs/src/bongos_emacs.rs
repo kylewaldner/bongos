@@ -10,6 +10,7 @@ mod motion;
 pub mod quit;
 pub mod region;
 pub mod snapshot_text;
+mod words;
 
 #[cfg(test)]
 mod apply_tests;
@@ -19,6 +20,8 @@ mod kill_sink_tests;
 mod last_command_tests;
 #[cfg(test)]
 mod motion_tests;
+#[cfg(test)]
+mod words_tests;
 
 use editor::Editor;
 use gpui::{Action, App, Entity, Window};
@@ -34,6 +37,14 @@ pub fn init(cx: &mut App) {
         let weak = cx.entity().downgrade();
         register(editor, &weak, motion::forward_word);
         register(editor, &weak, motion::backward_word);
+        register(editor, &weak, words::kill_word_command);
+        register(editor, &weak, words::backward_kill_word_command);
+        register(editor, &weak, words::upcase_word_command);
+        register(editor, &weak, words::downcase_word_command);
+        register(editor, &weak, words::capitalize_word_command);
+        register(editor, &weak, words::upcase_previous_word_command);
+        register(editor, &weak, words::downcase_previous_word_command);
+        register(editor, &weak, words::capitalize_previous_word_command);
     })
     .detach();
 }
