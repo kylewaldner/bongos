@@ -218,7 +218,8 @@ fn kill_metadata(
             });
             let start = start.min(text.len());
             let end = (start + piece.text.len()).min(text.len());
-            let is_entire_line = command.whole_lines && piece.whole_line && piece.text.ends_with('\n');
+            let is_entire_line =
+                command.whole_lines && piece.whole_line && piece.text.ends_with('\n');
             let range = snapshot.offset_to_point(MultiBufferOffset(start))
                 ..snapshot.offset_to_point(MultiBufferOffset(end));
             (piece.text.len(), is_entire_line, range)
