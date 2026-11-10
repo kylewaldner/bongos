@@ -315,6 +315,7 @@ git -C "$REPO" "${GIT_ID[@]}" commit -qm "first commit"
 MAIN_SHA=$(git -C "$REPO" rev-parse main)
 printf '%s\n' '{
   "base_keymap": "Emacs",
+  "task_builder": { "enabled": false },
   "work": {
     "repositories": [
       { "name": "invoicing", "path": "~/src/invoicing", "deployments": true, "merge_is_ship": true, "branch_template": "{slug}" }
