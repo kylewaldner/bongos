@@ -1,5 +1,5 @@
-//! Tests of the `task` and `linear` actions: hidden and toasting while `linear.enabled` is false,
-//! and never reaching a handler then.
+//! Tests of the `task` and `linear` actions: shown by default (`linear.enabled` is true), and
+//! hidden and toasting while it is false, never reaching a handler then.
 
 use std::sync::Arc;
 
@@ -58,30 +58,30 @@ fn palette_hidden(name: &str, cx: &mut TestAppContext) -> bool {
 }
 
 #[gpui::test]
-fn default_settings_are_off(cx: &mut TestAppContext) {
+fn default_settings_are_on(cx: &mut TestAppContext) {
     use_default_settings(cx);
-    cx.update(|cx| assert!(!LinearSettings::get_global(cx).enabled));
+    cx.update(|cx| assert!(LinearSettings::get_global(cx).enabled));
 }
 
 #[gpui::test]
-async fn actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext) {
+async fn actions_are_shown_by_default_and_hidden_while_off(cx: &mut TestAppContext) {
     cx.update(|cx| command_palette_hooks::init(cx));
     use_default_settings(cx);
     cx.update(crate::init_palette);
 
     assert_eq!(NAMES.len(), action_types().len(), "every action is listed");
     for name in NAMES {
-        assert!(palette_hidden(name, cx), "{name} is hidden by default");
-    }
-
-    set_enabled(cx, true);
-    for name in NAMES {
-        assert!(!palette_hidden(name, cx), "{name} shows while on");
+        assert!(!palette_hidden(name, cx), "{name} shows by default");
     }
 
     set_enabled(cx, false);
     for name in NAMES {
-        assert!(palette_hidden(name, cx), "{name} is hidden again");
+        assert!(palette_hidden(name, cx), "{name} is hidden while off");
+    }
+
+    set_enabled(cx, true);
+    for name in NAMES {
+        assert!(!palette_hidden(name, cx), "{name} shows again while on");
     }
 }
 
@@ -139,7 +139,7 @@ pub(crate) fn set_enabled_in(cx: &mut VisualTestContext, enabled: bool) {
 #[gpui::test]
 async fn dispatch_by_name_shows_the_off_toast(cx: &mut TestAppContext) {
     let (workspace, cx) = workspace_with_actions(cx).await;
-    // The default settings leave the sync off.
+    set_enabled_in(cx, false);
     for name in NAMES {
         workspace.update(cx, |workspace, cx| {
             workspace.dismiss_notification(&NotificationId::unique::<LinearToast>(), cx)

@@ -1486,10 +1486,11 @@ pub struct TaskBuilderSettingsContent {
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct LinearSettingsContent {
-    /// Whether the Linear sync is on. While it is off, bongos makes no request to Linear and
-    /// every Linear command is hidden and only says so.
+    /// Whether the Linear sync is on. It is on by default, and a task that is not linked to
+    /// Linear is never touched or requested. While it is off, bongos makes no request to Linear
+    /// and every Linear command is hidden and only says "Linear sync is off (linear.enabled)".
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
 }
 

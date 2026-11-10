@@ -21,10 +21,12 @@ multi_buffer.workspace = true
 schemars.workspace = true
 serde.workspace = true
 text.workspace = true
+workspace.workspace = true
 
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+language = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 theme.workspace = true
 theme_settings.workspace = true

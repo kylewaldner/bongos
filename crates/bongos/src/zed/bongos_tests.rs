@@ -737,6 +737,56 @@ async fn emacs_line_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
     assert_eq!(text(cx), "one\ntwo\nthree\nfour");
 }
 
+/// The comment commands run on an editor with comment syntax when dispatched by name; each is
+/// one undo step, and comment-dwim toggles.
+#[gpui::test]
+async fn emacs_comment_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    use language::{BlockCommentConfig, Language, LanguageConfig};
+
+    let (editor, cx) = emacs_editor("one\ntwo\nthree", cx).await;
+    let language = std::sync::Arc::new(Language::new(
+        LanguageConfig {
+            name: "Slashes".into(),
+            line_comments: vec!["// ".into()],
+            block_comment: Some(BlockCommentConfig {
+                start: "/* ".into(),
+                end: " */".into(),
+                prefix: "".into(),
+                tab_size: 0,
+            }),
+            ..Default::default()
+        },
+        None,
+    ));
+    editor.update(cx, |editor, cx| {
+        let buffer = editor.buffer().read(cx).as_singleton().unwrap();
+        buffer.update(cx, |buffer, cx| buffer.set_language(Some(language), cx));
+    });
+    let text = |cx: &mut gpui::VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+    let undo = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| window.dispatch_action(Box::new(editor::actions::Undo), cx));
+        cx.run_until_parked();
+    };
+
+    select_offsets(&editor, &[5..5], cx);
+    run_emacs("emacs::CommentDwim", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one\n// two\nthree");
+    run_emacs("emacs::CommentDwim", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one\ntwo\nthree");
+
+    select_offsets(&editor, &[1..2], cx);
+    run_emacs("emacs::CommentDwim", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "o/* n */e\ntwo\nthree");
+    undo(cx);
+    assert_eq!(text(cx), "one\ntwo\nthree");
+
+    select_offsets(&editor, &[5..5], cx);
+    run_emacs("emacs::DuplicateAndComment", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one\n// two\ntwo\nthree");
+    undo(cx);
+    assert_eq!(text(cx), "one\ntwo\nthree");
+}
+
 /// An editor that cannot be edited still copies, and C-w and C-k do nothing.
 #[gpui::test]
 async fn emacs_line_kills_in_a_read_only_editor(cx: &mut TestAppContext) {
