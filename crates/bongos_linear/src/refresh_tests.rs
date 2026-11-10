@@ -501,6 +501,11 @@ async fn nothing_is_sent_without_a_token(cx: &mut TestAppContext) {
         !toast_shown(&env.workspace, cx),
         "an automatic refresh is quiet"
     );
+    assert_eq!(
+        env.chips("l2", cx),
+        vec!["linear unreachable".to_string()],
+        "without a token the linked rows show the quiet unreachable state"
+    );
     dispatch("task::RefreshFromLinear", cx);
     env.settle(cx).await;
     assert_eq!(env.last_toast(cx), NO_TOKEN_MESSAGE);

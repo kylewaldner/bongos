@@ -39,7 +39,10 @@ pub(crate) const CANCEL: &str = "Cancel";
 
 /// The question of the confirm for the ticket `identifier`.
 pub(crate) fn confirm_prompt(identifier: &str) -> String {
-    format!("Import {identifier}?")
+    format!(
+        "Import {identifier}? Importing links the tasks to their tickets, and bongos will move \
+         each ticket to started when its plan begins and ask before cancelling it."
+    )
 }
 
 /// Why a read of the ticket tree stopped.

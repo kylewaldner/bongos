@@ -352,3 +352,13 @@ fn read_levels_stops_on_a_failed_read() {
     assert!(matches!(result, Err(ReadError::Api(ApiError::Network(_)))));
     assert_eq!(fake.calls().len(), 1, "the read stopped at the failure");
 }
+
+#[test]
+fn the_import_confirm_names_the_automatic_started_write() {
+    let prompt = crate::import::confirm_prompt("SEQ-200");
+    assert!(prompt.starts_with("Import SEQ-200?"));
+    assert!(
+        prompt.contains("move each ticket to started when its plan begins"),
+        "{prompt}"
+    );
+}

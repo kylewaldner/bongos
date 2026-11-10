@@ -5,8 +5,8 @@
 //! of the sync (see `dump`). The three link commands (`task: link to linear`, `unlink from
 //! linear`, `open in linear`) act on the task at point and are handled in `link`, `task: create
 //! missing subtickets` in `subtickets`, `task: show linear suggestions` in `suggestions` and
-//! `task: copy pr title` in `conventions`. No keys are bound to these actions yet; they are
-//! reached from the command palette.
+//! `task: copy pr title` in `conventions`. Most are reached from the command palette; the key
+//! bindings that exist live in the default keymap. `linear: dump state` exists in debug builds only.
 
 use std::any::TypeId;
 
@@ -21,6 +21,7 @@ use workspace::notifications::NotificationId;
 
 use crate::LinearSettings;
 use crate::conventions;
+#[cfg(debug_assertions)]
 use crate::dump;
 use crate::import;
 use crate::link;
@@ -69,6 +70,7 @@ pub mod linear {
             /// Removes the stored Linear token.
             ClearToken,
             /// Writes the state of the Linear sync to a file in the logs directory.
+            #[cfg(debug_assertions)]
             DumpState,
         ]
     );
@@ -76,7 +78,8 @@ pub mod linear {
 
 /// Every action of the sync, for hiding them from the command palette.
 pub fn action_types() -> Vec<TypeId> {
-    vec![
+    #[allow(unused_mut)]
+    let mut types = vec![
         TypeId::of::<task::NewFromLinear>(),
         TypeId::of::<task::LinkToLinear>(),
         TypeId::of::<task::UnlinkFromLinear>(),
@@ -87,8 +90,10 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<task::CopyPrTitle>(),
         TypeId::of::<linear::SetToken>(),
         TypeId::of::<linear::ClearToken>(),
-        TypeId::of::<linear::DumpState>(),
-    ]
+    ];
+    #[cfg(debug_assertions)]
+    types.push(TypeId::of::<linear::DumpState>());
+    types
 }
 
 /// Hides the sync's actions from the command palette while `linear.enabled` is false and shows
@@ -162,5 +167,6 @@ pub fn register(workspace: &mut Workspace) {
     register_direct::<task::CopyPrTitle>(workspace, conventions::copy_pr_title);
     register_direct::<linear::SetToken>(workspace, token::set_token);
     register_direct::<linear::ClearToken>(workspace, token::clear_token);
+    #[cfg(debug_assertions)]
     register_direct::<linear::DumpState>(workspace, dump::dump_state);
 }

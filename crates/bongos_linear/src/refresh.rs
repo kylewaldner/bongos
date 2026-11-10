@@ -440,6 +440,25 @@ async fn cycle(this: &WeakEntity<Refresher>, queued: Queued, cx: &mut AsyncApp) 
     let plan = this.update(cx, |this, cx| this.plan(queued, cx)).ok()??;
     if !plan.token_present && !token::load(cx).await {
         // No token: the explicit command already said so, and an automatic refresh stays quiet.
+        // No request goes out, but the linked rows show the quiet unreachable state.
+        let ids: Vec<String> = plan
+            .batches
+            .iter()
+            .flatten()
+            .map(|(id, _)| id.clone())
+            .collect();
+        this.update(cx, |this, cx| {
+            let now = this.now();
+            if let Some(linear) = sync::global(cx) {
+                linear.update(cx, |linear, _| {
+                    for id in &ids {
+                        linear.set_read(id, ReadState::Unreachable, now);
+                    }
+                });
+                crate::chips::changed(cx);
+            }
+        })
+        .ok();
         return None;
     }
     let explicit = plan.explicit;
