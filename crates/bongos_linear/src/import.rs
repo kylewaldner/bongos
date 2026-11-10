@@ -200,7 +200,7 @@ pub(crate) fn already_imported(tree: &WorkTree, issue: &Issue) -> Option<(Option
 }
 
 /// The default kind of the leaves made under `placement`.
-fn leaf_kind(tree: &WorkTree, placement: &str, cx: &App) -> Kind {
+pub(crate) fn leaf_kind(tree: &WorkTree, placement: &str, cx: &App) -> Kind {
     bongos_work::default_kind(
         tree,
         &Placement::Under(placement.to_string()),

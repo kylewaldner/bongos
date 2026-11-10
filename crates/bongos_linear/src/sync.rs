@@ -260,6 +260,17 @@ impl LinearSync {
         }
     }
 
+    /// Drops the suggestion `identifier` of the group `group_id`, after it was accepted or
+    /// dismissed, so its chip and list shrink before the next refresh.
+    pub fn remove_suggestion(&mut self, group_id: &str, identifier: &str) {
+        if let Some(list) = self.suggestions.get_mut(group_id) {
+            list.retain(|summary| !summary.identifier.eq_ignore_ascii_case(identifier));
+            if list.is_empty() {
+                self.suggestions.remove(group_id);
+            }
+        }
+    }
+
     pub fn read_state(&self, task_id: &str) -> Option<ReadState> {
         self.reads.get(task_id).copied()
     }

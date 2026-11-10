@@ -6,7 +6,8 @@
 //! in `link` instead, `task: new from linear` in `import` (with its preview in `preview`), and
 //! `task: refresh from linear` in `refresh`, which also refreshes on opening the Work view and on
 //! focusing a task, and `task: create missing subtickets` in `subtickets`, which also offers the
-//! missing subtickets after a proposal is applied under a linked group. `linear: set token` and `linear: clear token`
+//! missing subtickets after a proposal is applied under a linked group, and
+//! `task: show linear suggestions` in `suggestions`. `linear: set token` and `linear: clear token`
 //! open the masked token modal and clear the stored token instead (see [`token`]). No keys are
 //! bound to these actions yet; they are reached from the command palette.
 
@@ -22,6 +23,7 @@ mod preview;
 mod refresh;
 mod settings;
 mod subtickets;
+mod suggestions;
 pub mod sync;
 pub mod token;
 
@@ -70,6 +72,8 @@ mod link_tests;
 mod refresh_tests;
 #[cfg(test)]
 mod subtickets_tests;
+#[cfg(test)]
+mod suggestions_tests;
 #[cfg(test)]
 mod sync_tests;
 #[cfg(test)]
