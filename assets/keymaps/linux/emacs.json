@@ -224,6 +224,13 @@
       "ctrl-c w V": "task::EditProposal",
       "ctrl-c w A": "task::ApplyProposal",
       "ctrl-c w X": "task::RejectProposal",
+      "ctrl-c w L L": "task::NewFromLinear",
+      "ctrl-c w L l": "task::LinkToLinear",
+      "ctrl-c w L u": "task::UnlinkFromLinear",
+      "ctrl-c w L o": "task::OpenInLinear",
+      "ctrl-c w L C": "task::CreateMissingSubtickets",
+      "ctrl-c w L R": "task::RefreshFromLinear",
+      "ctrl-c w L s": "task::ShowLinearSuggestions",
       // Chats (C-c c): chat sessions. The unbound commands are in the command palette.
       "ctrl-c c n": "chat::New",
       "ctrl-c c P": "chat::TogglePanel",
