@@ -240,6 +240,25 @@ async fn a_mixed_region_and_no_region_kill_labels_each_piece_on_its_own(cx: &mut
 }
 
 #[gpui::test]
+async fn copy_labels_pieces_after_overlapping_carets_merge(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    let kills = capture_kills(&mut cx);
+
+    // Two plain carets on one line merge into one piece, so the region piece is second.
+    cx.set_state("ˇaˇa\nbb\nc«c\nˇ»dd");
+    cx.dispatch_action(CopyRegionOrLine { count: None });
+    let kills = kills.borrow();
+    assert_eq!(kills[0].pieces, vec!["aa\n".to_string(), "c\n".to_string()]);
+    let labels = kills[0]
+        .metadata
+        .iter()
+        .map(|selection| selection.is_entire_line)
+        .collect::<Vec<_>>();
+    assert_eq!(labels, vec![true, false]);
+}
+
+#[gpui::test]
 async fn copy_region_or_line_leaves_the_caret_and_the_text(cx: &mut TestAppContext) {
     init_test(cx);
     let mut cx = EditorTestContext::new(cx).await;

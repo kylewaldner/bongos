@@ -102,6 +102,8 @@ async fn read_only_buffer_is_unchanged_and_nothing_is_killed(cx: &mut TestAppCon
         killed: vec![KilledPiece {
             text: "two".into(),
             backward: false,
+            source_start: None,
+            whole_line: false,
         }],
         ..kill_regions(carets)
     });
@@ -137,10 +139,14 @@ async fn the_kill_is_saved_before_the_text_is_deleted(cx: &mut TestAppContext) {
                 KilledPiece {
                     text: "two".into(),
                     backward: false,
+                    source_start: None,
+                    whole_line: false,
                 },
                 KilledPiece {
                     text: "four".into(),
                     backward: false,
+                    source_start: None,
+                    whole_line: false,
                 },
             ],
             ..kill_regions(carets)
@@ -193,6 +199,8 @@ async fn an_edit_ends_mark_mode_and_a_motion_does_not(cx: &mut TestAppContext) {
             killed: vec![KilledPiece {
                 text: "one".into(),
                 backward: false,
+                source_start: None,
+                whole_line: false,
             }],
             ..kill_regions(carets)
         }
@@ -243,10 +251,14 @@ async fn whole_line_labels_are_per_piece_not_per_command(cx: &mut TestAppContext
                 KilledPiece {
                     text: "one\n".into(),
                     backward: false,
+                    source_start: None,
+                    whole_line: false,
                 },
                 KilledPiece {
                     text: "three\n".into(),
                     backward: false,
+                    source_start: None,
+                    whole_line: true,
                 },
             ],
         }

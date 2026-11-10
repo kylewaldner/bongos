@@ -199,7 +199,9 @@ fn zap_kills_into_the_ring_with_direction() {
         plan.killed,
         vec![KilledPiece {
             text: "foo ba".into(),
-            backward: false
+            backward: false,
+            source_start: None,
+            whole_line: false
         }]
     );
     let (_, plan) = run("foo barˇ", None, zbt);
@@ -207,7 +209,9 @@ fn zap_kills_into_the_ring_with_direction() {
         plan.killed,
         vec![KilledPiece {
             text: "ar".into(),
-            backward: true
+            backward: true,
+            source_start: None,
+            whole_line: false
         }]
     );
 }

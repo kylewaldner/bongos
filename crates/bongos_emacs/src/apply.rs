@@ -109,7 +109,7 @@ pub fn run(
             return None;
         }
         let kill = (!plan.killed.is_empty()).then(|| {
-            let metadata = kill_metadata(&plan, &carets, &snapshot, command)
+            let metadata = kill_metadata(&plan, &snapshot, command)
                 .into_iter()
                 .map(|(len, is_entire_line, range)| {
                     ClipboardSelection::for_buffer(
@@ -197,55 +197,28 @@ pub fn run(
 /// from (for the first line's indent and the file location `editor::Paste` reads).
 fn kill_metadata(
     plan: &Plan,
-    carets: &[Caret],
     snapshot: &MultiBufferSnapshot,
     command: Command,
 ) -> Vec<(usize, bool, std::ops::Range<text::Point>)> {
     let text = SnapshotText::new(snapshot);
     let deletes_each_piece =
         plan.edits.len() == plan.killed.len() && plan.edits.iter().all(|(_, new)| new.is_empty());
-    let mut sorted_carets = carets.to_vec();
-    sorted_carets.sort_by_key(|caret| caret.region().start);
     plan.killed
         .iter()
         .enumerate()
         .map(|(ix, piece)| {
-            // A piece taken from a region is never a whole line, even when it ends in a
-            // newline; only carets without a region take whole lines.
-            let from_region;
-            let start = if deletes_each_piece {
-                from_region = sorted_carets
-                    .iter()
-                    .any(|caret| caret.has_region() && caret.region() == plan.edits[ix].0);
-                let range = &plan.edits[ix].0;
-                // A last line killed with the newline before it: the piece is the line and a
-                // newline, so it starts one byte into the deleted range.
-                if !piece.text.starts_with('\n') && text.chars_at(range.start).next() == Some('\n')
-                {
-                    range.start + 1
+            // The model says where each piece came from and whether it is whole lines; a piece
+            // from a region is never a whole line, even when it ends in a newline.
+            let start = piece.source_start.unwrap_or_else(|| {
+                if deletes_each_piece {
+                    plan.edits[ix].0.start
                 } else {
-                    range.start
+                    0
                 }
-            } else {
-                let caret = sorted_carets.get(ix).or(sorted_carets.last());
-                from_region = caret.is_some_and(|caret| caret.has_region());
-                caret.map_or(0, |caret| {
-                    if command.whole_lines && !caret.has_region() {
-                        // A whole-line copy starts at its line start.
-                        let column = text
-                            .reversed_chars_at(caret.head)
-                            .take_while(|&c| c != '\n')
-                            .map(char::len_utf8)
-                            .sum::<usize>();
-                        caret.head - column
-                    } else {
-                        caret.region().start
-                    }
-                })
-            };
+            });
             let start = start.min(text.len());
             let end = (start + piece.text.len()).min(text.len());
-            let is_entire_line = command.whole_lines && !from_region && piece.text.ends_with('\n');
+            let is_entire_line = command.whole_lines && piece.whole_line && piece.text.ends_with('\n');
             let range = snapshot.offset_to_point(MultiBufferOffset(start))
                 ..snapshot.offset_to_point(MultiBufferOffset(end));
             (piece.text.len(), is_entire_line, range)

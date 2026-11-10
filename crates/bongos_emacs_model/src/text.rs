@@ -64,6 +64,12 @@ impl Caret {
 pub struct KilledPiece {
     pub text: String,
     pub backward: bool,
+    /// Offset in the old text where the piece's first character came from,
+    /// when the command knows it.
+    pub source_start: Option<usize>,
+    /// The piece is whole lines taken by a caret with no region, not merely
+    /// text that ends in a newline.
+    pub whole_line: bool,
 }
 
 /// The result of a command: edits against the old text, the carets in the
@@ -153,6 +159,8 @@ pub fn build_plan<T: TextSource + ?Sized>(
             plan.killed.push(KilledPiece {
                 text: old.clone(),
                 backward: target.backward,
+                source_start: None,
+                whole_line: false,
             });
             String::new()
         } else {

@@ -388,3 +388,31 @@ fn randomized_kills_match_removed_text() {
         assert_eq!(copy.killed, plan.killed);
     }
 }
+
+#[test]
+fn pieces_carry_their_source_start_and_whole_line_flag() {
+    let text = "aa\nbb\ncc\ndd";
+    let c = vec![Caret::point(0), Caret::point(1), Caret { tail: 7, head: 9 }];
+    let plan = cr(text, &c, None);
+    let pieces: Vec<_> = plan
+        .killed
+        .iter()
+        .map(|k| (k.text.as_str(), k.source_start, k.whole_line))
+        .collect();
+    assert_eq!(
+        pieces,
+        vec![("aa\n", Some(0), true), ("c\n", Some(7), false)]
+    );
+
+    // A region merged with a whole-line item is not a whole line.
+    let c = vec![Caret { tail: 1, head: 5 }, Caret::point(4)];
+    let plan = cr(text, &c, None);
+    assert_eq!(plan.killed.len(), 1);
+    assert_eq!(plan.killed[0].source_start, Some(1));
+    assert!(!plan.killed[0].whole_line);
+
+    // A negative count starts at the line above.
+    let plan = cr(text, &[Caret::point(7)], Some(-1));
+    assert_eq!(plan.killed[0].source_start, Some(3));
+    assert!(plan.killed[0].whole_line);
+}
