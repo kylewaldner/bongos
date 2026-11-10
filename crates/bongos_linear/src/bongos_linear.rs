@@ -22,6 +22,7 @@ mod needs_you;
 mod preview;
 mod refresh;
 mod settings;
+mod status;
 mod subtickets;
 mod suggestions;
 pub mod sync;
@@ -37,14 +38,16 @@ pub use actions::{
 pub use settings::LinearSettings;
 
 /// Registers the `linear` settings and creates the sync, the refresh triggers, the row chips and
-/// the subtickets watcher with its needs-you source. Call before [`init_palette`], and after
-/// `bongos_work::init`, whose store and focus the triggers and the watcher attach to.
+/// the subtickets watcher with its needs-you source, and the status watcher (started, and a
+/// cancel Kyle approved). Call before [`init_palette`], and after `bongos_work::init`, whose store
+/// and focus the triggers and the watchers attach to.
 pub fn init(cx: &mut App) {
     LinearSettings::register(cx);
     sync::install(cx);
     refresh::install(cx);
     chips::install(cx);
     subtickets::install(cx);
+    status::install(cx);
 }
 
 /// Installs the client that talks to Linear over the application's HTTP client. Call once the
@@ -70,6 +73,8 @@ mod import_tests;
 mod link_tests;
 #[cfg(test)]
 mod refresh_tests;
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod subtickets_tests;
 #[cfg(test)]
