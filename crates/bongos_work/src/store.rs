@@ -507,6 +507,13 @@ impl Disk {
             if !event.path.starts_with(&self.root) {
                 return false;
             }
+            let in_git = event
+                .path
+                .strip_prefix(&self.root)
+                .is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == ".git"));
+            if in_git {
+                return false;
+            }
             let ignored_name = event
                 .path
                 .file_name()

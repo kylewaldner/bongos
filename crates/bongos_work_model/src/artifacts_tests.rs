@@ -388,11 +388,12 @@ fn a_users_own_git_directory_is_never_an_artifact() {
     write(&backfill.join(".git/config"), "[core]\n");
     let file = read_task_artifacts(&backfill).unwrap();
     assert!(file.artifacts.iter().all(|a| !a.path.starts_with(".git")));
-    assert!(
-        shared_paths(&backfill)
-            .iter()
-            .all(|p| !p.starts_with(".git"))
-    );
+    assert!(shared_paths(&backfill).iter().all(|p| {
+        p.strip_prefix(&backfill)
+            .unwrap_or(p)
+            .components()
+            .all(|c| c.as_os_str() != ".git")
+    }));
 }
 
 #[test]

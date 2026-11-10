@@ -424,11 +424,27 @@ async fn a_users_own_git_directory_never_reloads(cx: &mut TestAppContext) {
     let task = store
         .read_with(cx, |store, _| snapshot_task(store, &backfill))
         .unwrap();
-    assert!(
-        artifacts(&task)
-            .iter()
-            .all(|path| !path.starts_with(".git"))
-    );
+    assert!(task.files.keys().all(|path| !path.starts_with(".git")));
+}
+
+#[gpui::test]
+async fn creating_a_git_directory_in_a_task_never_reloads(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp);
+    let backfill = seed(&root);
+    let store = new_store(cx, &root, true);
+    wait_loaded(cx, &store).await;
+    let before = stats(cx, &store);
+
+    write(&backfill.join(".git/HEAD"), "ref: refs/heads/main\n");
+    settle(cx).await;
+    let after = stats(cx, &store);
+    assert_eq!(after.event_reloads, before.event_reloads);
+    assert!(after.ignored_batches > before.ignored_batches);
+
+    std::fs::remove_dir_all(backfill.join(".git")).unwrap();
+    settle(cx).await;
+    assert_eq!(stats(cx, &store).event_reloads, before.event_reloads);
 }
 
 #[gpui::test]
