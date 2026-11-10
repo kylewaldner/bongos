@@ -126,7 +126,7 @@ pub(crate) fn state(id: &str, kind: StateKind) -> WorkflowState {
     }
 }
 
-fn issue(number: u32) -> Issue {
+pub(crate) fn issue(number: u32) -> Issue {
     Issue {
         id: format!("uuid-SEQ-{number}"),
         identifier: format!("SEQ-{number}"),
@@ -142,11 +142,13 @@ fn issue(number: u32) -> Issue {
     }
 }
 
-struct Env {
-    workspace: Entity<Workspace>,
-    store: Entity<WorkStore>,
-    fake: FakeLinear,
-    app: TestAppContext,
+pub(crate) struct Env {
+    pub(crate) workspace: Entity<Workspace>,
+    pub(crate) store: Entity<WorkStore>,
+    pub(crate) fake: FakeLinear,
+    pub(crate) app: TestAppContext,
+    /// The work root.
+    pub(crate) root: PathBuf,
     _temp: TempDir,
 }
 
@@ -154,7 +156,7 @@ fn canonical(temp: &TempDir) -> PathBuf {
     std::fs::canonicalize(temp.path()).unwrap()
 }
 
-async fn wait_until(
+pub(crate) async fn wait_until(
     cx: &mut VisualTestContext,
     what: &str,
     mut done: impl FnMut(&mut VisualTestContext) -> bool,
@@ -173,7 +175,7 @@ async fn wait_until(
 
 /// A store over the seeded tree, a workspace with the sync's actions registered, a fake client
 /// and, when `token`, a token (`SECRET`) in the environment. Tickets 5, 100, 101 and 121 exist.
-async fn env(
+pub(crate) async fn env(
     cx: &mut TestAppContext,
     linear_on: bool,
     token: bool,
@@ -183,6 +185,7 @@ async fn env(
     let temp = TempDir::new().unwrap();
     let root = canonical(&temp).join("work");
     seed(&root);
+    let work_root = root.clone();
     let fake = FakeLinear::new("acme");
     fake.add_team("team", "SEQ", vec![state("backlog", StateKind::Backlog)]);
     for number in [5, 100, 101, 121] {
@@ -251,6 +254,7 @@ async fn env(
             store,
             fake,
             app,
+            root: work_root,
             _temp: temp,
         },
         cx,
@@ -258,12 +262,12 @@ async fn env(
 }
 
 impl Env {
-    fn tree(&self, cx: &mut VisualTestContext) -> Arc<WorkTree> {
+    pub(crate) fn tree(&self, cx: &mut VisualTestContext) -> Arc<WorkTree> {
         self.store
             .read_with(cx, |store, _| store.snapshot().unwrap())
     }
 
-    fn file(&self, slug: &str, cx: &mut VisualTestContext) -> TaskFile {
+    pub(crate) fn file(&self, slug: &str, cx: &mut VisualTestContext) -> TaskFile {
         let tree = self.tree(cx);
         tree.tasks()
             .into_iter()
@@ -274,11 +278,11 @@ impl Env {
             .unwrap()
     }
 
-    fn writes(&self, cx: &mut VisualTestContext) -> usize {
+    pub(crate) fn writes(&self, cx: &mut VisualTestContext) -> usize {
         self.store.read_with(cx, |store, _| store.stats().writes)
     }
 
-    fn focus(&self, id: &str, cx: &mut VisualTestContext) {
+    pub(crate) fn focus(&self, id: &str, cx: &mut VisualTestContext) {
         cx.update(|_, cx| {
             Focus::global(cx)
                 .unwrap()
@@ -286,7 +290,7 @@ impl Env {
         });
     }
 
-    fn last_toast(&self, cx: &mut VisualTestContext) -> String {
+    pub(crate) fn last_toast(&self, cx: &mut VisualTestContext) -> String {
         cx.update(|_, cx| {
             cx.try_global::<LastToast>()
                 .map(|t| t.0.clone())
@@ -294,7 +298,7 @@ impl Env {
         })
     }
 
-    fn clear_toast(&self, cx: &mut VisualTestContext) {
+    pub(crate) fn clear_toast(&self, cx: &mut VisualTestContext) {
         self.workspace.update(cx, |workspace, cx| {
             workspace.dismiss_notification(&NotificationId::unique::<LinearToast>(), cx)
         });

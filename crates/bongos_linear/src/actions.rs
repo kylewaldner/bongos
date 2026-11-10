@@ -21,6 +21,7 @@ use workspace::notifications::NotificationId;
 
 use crate::LinearSettings;
 use crate::dump;
+use crate::import;
 use crate::link;
 use crate::refresh;
 use crate::token;
@@ -213,7 +214,7 @@ fn register_direct<A: Action>(
 
 /// Registers the handlers of the sync's actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
-    register_with::<task::NewFromLinear>(workspace, Command::NewFromLinear);
+    register_direct::<task::NewFromLinear>(workspace, import::new_from_linear);
     register_direct::<task::LinkToLinear>(workspace, link::link_to_linear);
     register_direct::<task::UnlinkFromLinear>(workspace, link::unlink_from_linear);
     register_direct::<task::OpenInLinear>(workspace, link::open_in_linear);

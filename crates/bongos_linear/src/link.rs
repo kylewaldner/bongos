@@ -429,7 +429,7 @@ pub(crate) fn finish_link(
 }
 
 /// Queues `command` on the store's writer; `None`, after a toast, when there is no store.
-fn queue(
+pub(crate) fn queue(
     workspace: &mut Workspace,
     cx: &mut Context<Workspace>,
     command: impl Fn(&WorkTree, &WorkContext) -> Outcome + Send + 'static,
