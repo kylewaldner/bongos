@@ -3,8 +3,9 @@
 //! is false each handler only says that the sync is off, and nothing here reaches the network.
 //! While it is true the handlers hand their command to the installed [`LinearRequests`], of which
 //! this step installs none, so they do nothing yet; the link, unlink and open commands are handled
-//! in `link` instead, and `task: refresh from linear` in `refresh`, which also refreshes on
-//! opening the Work view and on focusing a task. `linear: set token` and `linear: clear token`
+//! in `link` instead, `task: new from linear` in `import` (with its preview in `preview`), and
+//! `task: refresh from linear` in `refresh`, which also refreshes on opening the Work view and on
+//! focusing a task. `linear: set token` and `linear: clear token`
 //! open the masked token modal and clear the stored token instead (see [`token`]). No keys are
 //! bound to these actions yet; they are reached from the command palette.
 
@@ -12,7 +13,9 @@ mod actions;
 mod chips;
 pub(crate) mod client;
 pub mod dump;
+mod import;
 mod link;
+mod preview;
 mod refresh;
 mod settings;
 pub mod sync;
@@ -54,6 +57,8 @@ mod chips_tests;
 mod client_tests;
 #[cfg(test)]
 mod dump_tests;
+#[cfg(test)]
+mod import_tests;
 #[cfg(test)]
 mod link_tests;
 #[cfg(test)]

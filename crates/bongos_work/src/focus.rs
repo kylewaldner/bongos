@@ -277,7 +277,7 @@ pub(crate) type AfterFocus =
 
 /// Focuses the task `id`: switches the window to its [`target`], and records the focus once that
 /// has worked (a failed open leaves the focus as it was).
-pub(crate) fn focus_task(
+pub fn focus_task(
     id: &str,
     workspace: &mut Workspace,
     window: &mut Window,
