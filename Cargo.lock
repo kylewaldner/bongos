@@ -2388,6 +2388,7 @@ name = "bongos_linear"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_chat",
  "bongos_linear_model",
  "bongos_minibuffer",
  "bongos_work",
