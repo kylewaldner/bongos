@@ -107,7 +107,7 @@ pub(crate) fn parse_typed(text: &str) -> Option<IssueRef> {
     parse_issue_ref(text)
 }
 
-fn selected_task(
+pub(crate) fn selected_task(
     workspace: &mut Workspace,
     window: &Window,
     cx: &mut Context<Workspace>,

@@ -51,7 +51,7 @@ fn team() -> Vec<WorkflowState> {
 
 /// The env of the link tests with a full team and the watcher attached (the test creates the
 /// store after the sync). Tickets 5, 100, 101 and 121 exist, and 6, 102 and 103 are added.
-async fn start(cx: &mut TestAppContext) -> (Env, &mut VisualTestContext) {
+pub(crate) async fn start(cx: &mut TestAppContext) -> (Env, &mut VisualTestContext) {
     let (env, cx) = env(cx, true, true).await;
     prepare(&env, cx);
     (env, cx)
@@ -81,7 +81,7 @@ fn linked(file: &mut TaskFile, number: u32) {
 
 /// Adds a task file on disk under the task `parent` (the project when `None`) and waits for the
 /// store to load it. A leaf has the default todos, a group none.
-async fn add(
+pub(crate) async fn add(
     env: &Env,
     parent: Option<&str>,
     slug: &str,
@@ -138,7 +138,7 @@ async fn run(
 }
 
 /// Starts the first todo (the plan, for a leaf with no `plans` todo).
-async fn begin(env: &Env, id: &str, cx: &mut VisualTestContext) {
+pub(crate) async fn begin(env: &Env, id: &str, cx: &mut VisualTestContext) {
     let id = id.to_string();
     run(env, cx, move |tree, ctx| {
         todo_start(tree, ctx, &id, Some(0))
@@ -154,7 +154,7 @@ async fn drop_it(env: &Env, id: &str, confirmed: bool, cx: &mut VisualTestContex
     .await;
 }
 
-async fn settle(cx: &mut VisualTestContext) {
+pub(crate) async fn settle(cx: &mut VisualTestContext) {
     cx.background_executor
         .timer(Duration::from_millis(500))
         .await;
