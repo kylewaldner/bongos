@@ -126,7 +126,7 @@ async fn the_kill_is_saved_before_the_text_is_deleted(cx: &mut TestAppContext) {
     cx.update(|_, cx| {
         set_kill_sink(cx, move |kill, _, cx| {
             let text = editor.read(cx).buffer().read(cx).snapshot(cx).text();
-            sink_seen.borrow_mut().push((kill.pieces.clone(), text));
+            sink_seen.borrow_mut().push((kill.pieces, text));
         })
     });
     cx.set_state("one «twoˇ» three «fourˇ»");
