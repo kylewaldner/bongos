@@ -2048,6 +2048,7 @@ dependencies = [
  "bongos_app",
  "bongos_builder",
  "bongos_chat",
+ "bongos_emacs",
  "bongos_kotlin",
  "bongos_languages",
  "bongos_linear",
@@ -2303,6 +2304,23 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "bongos_emacs"
+version = "0.1.0"
+dependencies = [
+ "bongos_emacs_model",
+ "collections",
+ "editor",
+ "gpui",
+ "multi_buffer",
+ "schemars 1.0.4",
+ "serde",
+ "settings",
+ "text",
+ "theme",
+ "theme_settings",
 ]
 
 [[package]]

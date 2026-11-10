@@ -5465,6 +5465,7 @@ mod tests {
                 "diagnostics",
                 "edit_prediction",
                 "editor",
+                "emacs",
                 "encoding_selector",
                 "file_finder",
                 "git",

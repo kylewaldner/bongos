@@ -369,6 +369,111 @@ async fn minibuffer_commands_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+/// The `emacs` commands, with the palette text of each.
+const EMACS_ACTIONS: [(&str, &str); 36] = [
+    ("emacs::KeyboardQuit", "emacs: keyboard quit"),
+    ("emacs::ForwardWord", "emacs: forward word"),
+    ("emacs::BackwardWord", "emacs: backward word"),
+    ("emacs::KillWord", "emacs: kill word"),
+    ("emacs::BackwardKillWord", "emacs: backward kill word"),
+    ("emacs::UpcaseWord", "emacs: upcase word"),
+    ("emacs::DowncaseWord", "emacs: downcase word"),
+    ("emacs::CapitalizeWord", "emacs: capitalize word"),
+    ("emacs::UpcasePreviousWord", "emacs: upcase previous word"),
+    (
+        "emacs::DowncasePreviousWord",
+        "emacs: downcase previous word",
+    ),
+    (
+        "emacs::CapitalizePreviousWord",
+        "emacs: capitalize previous word",
+    ),
+    ("emacs::TransposeWords", "emacs: transpose words"),
+    (
+        "emacs::TransposeWordsReverse",
+        "emacs: transpose words reverse",
+    ),
+    ("emacs::TransposeChars", "emacs: transpose chars"),
+    ("emacs::TransposeLines", "emacs: transpose lines"),
+    ("emacs::MoveLineUp", "emacs: move line up"),
+    ("emacs::MoveLineDown", "emacs: move line down"),
+    ("emacs::DuplicateLine", "emacs: duplicate line"),
+    ("emacs::DuplicateAndComment", "emacs: duplicate and comment"),
+    ("emacs::CommentDwim", "emacs: comment dwim"),
+    ("emacs::CopyFromAbove", "emacs: copy from above"),
+    (
+        "emacs::DeleteHorizontalSpace",
+        "emacs: delete horizontal space",
+    ),
+    ("emacs::JustOneSpace", "emacs: just one space"),
+    ("emacs::DeleteBlankLines", "emacs: delete blank lines"),
+    ("emacs::ZapToChar", "emacs: zap to char"),
+    ("emacs::ZapUpToChar", "emacs: zap up to char"),
+    ("emacs::ZapBackToChar", "emacs: zap back to char"),
+    ("emacs::ZapBackUpToChar", "emacs: zap back up to char"),
+    ("emacs::KillLine", "emacs: kill line"),
+    ("emacs::KillRegionOrLine", "emacs: kill region or line"),
+    ("emacs::CopyRegionOrLine", "emacs: copy region or line"),
+    ("emacs::Recenter", "emacs: recenter"),
+    ("emacs::Reposition", "emacs: reposition"),
+    ("emacs::GotoLine", "emacs: goto line"),
+    ("emacs::ExpandRegion", "emacs: expand region"),
+    ("emacs::ContractRegion", "emacs: contract region"),
+];
+
+#[gpui::test]
+async fn emacs_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in EMACS_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        let emacs_names = cx
+            .all_action_names()
+            .iter()
+            .filter(|name| name.starts_with("emacs::"))
+            .count();
+        assert_eq!(emacs_names, EMACS_ACTIONS.len());
+
+        // The count and select arguments, as feature keymaps and the prefix argument pass them.
+        assert!(
+            cx.build_action(
+                "emacs::ForwardWord",
+                Some(serde_json::json!({ "count": 3, "select": true }))
+            )
+            .unwrap()
+            .partial_eq(&bongos_emacs::actions::ForwardWord {
+                count: Some(3),
+                select: true,
+            })
+        );
+        assert!(
+            cx.build_action("emacs::KillWord", Some(serde_json::json!({ "count": -2 })))
+                .unwrap()
+                .partial_eq(&bongos_emacs::actions::KillWord { count: Some(-2) })
+        );
+        assert!(
+            cx.build_action(
+                "emacs::ZapToChar",
+                Some(serde_json::json!({ "count": 2, "char": "x" }))
+            )
+            .unwrap()
+            .partial_eq(&bongos_emacs::actions::ZapToChar {
+                count: Some(2),
+                char: Some('x'),
+            })
+        );
+        assert!(
+            cx.build_action("emacs::KillWord", Some(serde_json::json!({ "cnt": 1 })))
+                .is_err()
+        );
+    });
+}
+
 #[gpui::test]
 async fn prompts_commands_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
