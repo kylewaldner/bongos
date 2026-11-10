@@ -19,7 +19,7 @@ use db::AppDatabase;
 use fs::RealFs;
 use gpui::{BorrowAppContext as _, Entity, TestAppContext, VisualTestContext};
 use project::Project;
-use settings::SettingsStore;
+use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
 use workspace::notifications::NotificationId;
 use workspace::{AppState, MultiWorkspace, Workspace};
@@ -165,6 +165,16 @@ async fn env(
     linear_on: bool,
     token: bool,
 ) -> (Env, &mut VisualTestContext) {
+    env_with(cx, linked, Some(linear_on), token).await
+}
+
+/// [`env`] with `linear.enabled` left at its default when `linear_on` is `None`.
+async fn env_with(
+    cx: &mut TestAppContext,
+    linked: bool,
+    linear_on: Option<bool>,
+    token: bool,
+) -> (Env, &mut VisualTestContext) {
     cx.executor().allow_parking();
     let temp = TempDir::new().unwrap();
     let root = canonical(&temp).join("work");
@@ -242,7 +252,9 @@ async fn env(
     cx.background_executor
         .timer(Duration::from_millis(1000))
         .await;
-    set_enabled_in(cx, linear_on);
+    if let Some(linear_on) = linear_on {
+        set_enabled_in(cx, linear_on);
+    }
     (
         Env {
             workspace,
@@ -406,6 +418,66 @@ async fn opening_the_view_with_only_unlinked_tasks_makes_no_call(cx: &mut TestAp
         .linear
         .read_with(cx, |linear, cx| linear.snapshot(cx).requests_allowed);
     assert_eq!(allowed, 0);
+}
+
+/// Every task of the tree with its file, and what the sync adds to it: its context section, its
+/// branch name and its row chips.
+fn unlinked_view(
+    env: &Env,
+    cx: &mut VisualTestContext,
+) -> Vec<(
+    String,
+    TaskFile,
+    Option<String>,
+    Option<String>,
+    Vec<String>,
+)> {
+    let tree = env.tree(cx);
+    let mut view = Vec::new();
+    for id in ["l1", "l2", "l3", "l4", "g1", "l5"] {
+        let task = tree.task_by_id(id).unwrap();
+        let file = task.file.clone().unwrap();
+        let section = crate::conventions::section_for(&tree, id);
+        let branch = bongos_linear_model::conventions::branch_name(&file, "{slug}", &task.slug);
+        let chips = env.chips(id, cx);
+        view.push((task.slug.clone(), file, section, branch, chips));
+    }
+    view
+}
+
+#[gpui::test]
+async fn a_default_workspace_leaves_unlinked_tasks_alone(cx: &mut TestAppContext) {
+    // The default settings: `linear.enabled` is true, with a token, and no task is linked.
+    let (on, cx) = env_with(cx, false, None, true).await;
+    cx.update(|_, cx| assert!(crate::LinearSettings::get_global(cx).enabled));
+    on.open_view(cx).await;
+    for id in ["l1", "l2", "l3", "l4", "g1", "l5"] {
+        on.focus(id, cx);
+        on.settle(cx).await;
+    }
+    dispatch("task::RefreshFromLinear", cx);
+    on.settle(cx).await;
+    assert!(on.calls().is_empty(), "{:?}", on.calls());
+    let allowed = on
+        .linear
+        .read_with(cx, |linear, cx| linear.snapshot(cx).requests_allowed);
+    assert_eq!(allowed, 0);
+    assert_eq!(on.writes(cx), 0, "nothing is written");
+    let with_sync = unlinked_view(&on, cx);
+
+    // The same tasks with the sync off: rows, branch names and context text are the same.
+    set_enabled_in(cx, false);
+    on.open_view(cx).await;
+    on.focus("l1", cx);
+    on.settle(cx).await;
+    assert_eq!(unlinked_view(&on, cx), with_sync);
+    for (slug, file, section, branch, chips) in &with_sync {
+        assert_eq!(file.linear, None, "{slug}");
+        assert_eq!(file.linear_state, None, "{slug}");
+        assert_eq!(*section, None, "{slug}");
+        assert_eq!(*branch, None, "{slug}");
+        assert!(chips.is_empty(), "{slug}");
+    }
 }
 
 #[gpui::test]

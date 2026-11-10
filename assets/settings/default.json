@@ -2723,9 +2723,11 @@
     "todo_warning": 8,
   },
   "linear": {
-    // Whether the Linear sync is on. While it is off, bongos makes no request to Linear
-    // and every Linear command is hidden and only says so.
-    "enabled": false,
+    // Whether the Linear sync is on. It is on by default, and a task that is not linked to
+    // Linear is never touched or requested. While it is off, bongos makes no request to
+    // Linear and every Linear command is hidden and only says "Linear sync is off
+    // (linear.enabled)".
+    "enabled": true,
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
