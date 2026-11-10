@@ -6,7 +6,8 @@
 //! token commands do not go through it: they open the token modal and clear the stored token (see
 //! `token`); `linear: dump state` writes the state of the sync (see `dump`). The three link
 //! commands (`task: link to linear`, `unlink from linear`, `open in linear`) act on the task at
-//! point and are handled in `link`, not through the seam. No keys are
+//! point and are handled in `link`, not through the seam, and `task: create missing subtickets`
+//! in `subtickets`. No keys are
 //! bound to these actions yet; they are reached from the command palette.
 
 use std::any::TypeId;
@@ -24,6 +25,7 @@ use crate::dump;
 use crate::import;
 use crate::link;
 use crate::refresh;
+use crate::subtickets;
 use crate::token;
 
 /// New actions in the `task` namespace, shared with the work tree's, the builder's and Zed's task
@@ -218,7 +220,10 @@ pub fn register(workspace: &mut Workspace) {
     register_direct::<task::LinkToLinear>(workspace, link::link_to_linear);
     register_direct::<task::UnlinkFromLinear>(workspace, link::unlink_from_linear);
     register_direct::<task::OpenInLinear>(workspace, link::open_in_linear);
-    register_with::<task::CreateMissingSubtickets>(workspace, Command::CreateMissingSubtickets);
+    register_direct::<task::CreateMissingSubtickets>(
+        workspace,
+        subtickets::create_missing_subtickets,
+    );
     register_direct::<task::RefreshFromLinear>(workspace, refresh::refresh_from_linear);
     register_with::<task::ShowLinearSuggestions>(workspace, Command::ShowLinearSuggestions);
     register_with::<task::CopyPrTitle>(workspace, Command::CopyPrTitle);

@@ -473,7 +473,7 @@ pub(crate) fn planned(
             let identifier = plan.root.identifier.clone();
             let text = plan.preview();
             preview::open(
-                &identifier,
+                preview::title(&identifier),
                 text,
                 workspace,
                 window,

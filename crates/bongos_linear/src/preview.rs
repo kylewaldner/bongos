@@ -1,5 +1,6 @@
 //! The preview of an import (D20 step 5): the text of `ImportPlan::preview` in a read-only buffer
-//! titled `Import SEQ-120`, opened in the active pane, as `proposal: apply` opens its preview.
+//! titled `Import SEQ-120`, opened in the active pane, as `proposal: apply` opens its preview. The
+//! subtickets offer opens its list of tickets to create the same way.
 //!
 //! The buffer is in memory only: it has no path, so opening it creates no file and no journal
 //! entry, and closing it asks nothing. Nothing of the import exists before Kyle confirms.
@@ -20,17 +21,16 @@ pub(crate) fn title(identifier: &str) -> String {
     format!("Import {identifier}")
 }
 
-/// Opens `text`, the preview of the import of `identifier`, in a read-only buffer, then calls
-/// `then`. When the buffer cannot be made, a toast says so and `then` is not called.
+/// Opens `text` in a read-only buffer titled `title`, then calls `then`. When the buffer cannot
+/// be made, a toast says so and `then` is not called.
 pub(crate) fn open(
-    identifier: &str,
+    title: String,
     text: String,
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
     then: Opened,
 ) {
-    let title = title(identifier);
     let project = workspace.project().clone();
     let buffer = project.update(cx, |project, cx| project.create_buffer(None, false, cx));
     cx.spawn_in(window, async move |workspace, cx| {

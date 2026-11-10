@@ -1,5 +1,6 @@
 //! The chips of a linked task's row: `1 suggestion`, `linear unreachable`, `linear rate limited`
-//! and `linear: not found`, from what the sync knows about the last read of its ticket. They show
+//! and `linear: not found`, from what the sync knows about the last read of its ticket, and
+//! `3 need tickets` on a linked group an agent's apply added tasks to (see `subtickets`). They show
 //! through `RowChipsRegistry`, after the identifier, and only while `linear.enabled` is true.
 
 use std::rc::Rc;
@@ -42,10 +43,12 @@ impl RowChipsSource for LinearChips {
             return Vec::new();
         };
         let linear = linear.read(cx);
-        chips_for(
+        let mut chips = chips_for(
             linear.read_state(task_id),
             linear.suggestions(task_id).len(),
-        )
+        );
+        chips.extend(crate::subtickets::need_chip(task_id, cx).map(SharedString::from));
+        chips
     }
 }
 

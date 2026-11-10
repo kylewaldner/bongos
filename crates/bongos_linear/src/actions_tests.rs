@@ -30,10 +30,10 @@ const NAMES: &[&str] = &[
 
 /// The actions that go through the requests seam; the token actions open the modal and clear the
 /// store instead (see `token_tests`), the three link commands are handled in `link` (see
-/// `link_tests`), the import command in `import` (see `import_tests`) and the refresh command in
-/// `refresh` (see `refresh_tests`).
+/// `link_tests`), the import command in `import` (see `import_tests`), the refresh command in
+/// `refresh` (see `refresh_tests`) and the subtickets command in `subtickets` (see
+/// `subtickets_tests`).
 const SEAM_NAMES: &[&str] = &[
-    "task::CreateMissingSubtickets",
     "task::ShowLinearSuggestions",
     "task::CopyPrTitle",
 ];
@@ -193,7 +193,7 @@ async fn while_on_each_action_reaches_the_seam_without_a_toast(cx: &mut TestAppC
     assert!(!toast_shown(&workspace, cx));
 
     set_enabled_in(cx, false);
-    dispatch("task::CreateMissingSubtickets", cx);
+    dispatch("task::ShowLinearSuggestions", cx);
     assert_eq!(requests.count.load(Ordering::SeqCst), SEAM_NAMES.len());
     assert!(toast_shown(&workspace, cx));
 }
