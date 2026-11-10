@@ -850,8 +850,3 @@ pub(crate) fn create_missing_subtickets(
         });
     });
 }
-
-#[cfg(test)]
-pub(crate) fn busy(group_id: &str, cx: &App) -> bool {
-    global(cx).is_some_and(|watcher| watcher.read(cx).busy.contains(group_id))
-}
