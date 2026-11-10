@@ -10,7 +10,7 @@ use crate::actions::{CopyFromAbove, DuplicateLine, MoveLineDown, MoveLineUp};
 use crate::apply::{self, Command};
 
 /// Whether the key was passed on to the next handler because the editor has one line.
-fn propagate_in_single_line(editor: &Entity<Editor>, cx: &mut App) -> bool {
+pub(crate) fn propagate_in_single_line(editor: &Entity<Editor>, cx: &mut App) -> bool {
     let single_line = editor.read(cx).mode().is_single_line();
     if single_line {
         cx.propagate();

@@ -50,6 +50,8 @@
       "ctrl-t": "editor::Transpose", // transpose-chars
       "alt-;": ["editor::ToggleComments", { "advance_downwards": false }],
       "ctrl-x ctrl-;": "editor::ToggleComments",
+      "ctrl-c ;": "emacs::CommentDwim", // comment-dwim
+      "ctrl-c Y": "emacs::DuplicateAndComment", // duplicate-and-comment
       "alt-.": "editor::GoToDefinition", // xref-find-definitions
       "alt-?": "editor::FindAllReferences", // xref-find-references
       "alt-,": "pane::GoBack", // xref-pop-marker-stack
