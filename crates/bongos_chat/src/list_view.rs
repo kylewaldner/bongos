@@ -25,6 +25,7 @@ use std::path::Path;
 use bongos_chat_model::{ChatEntry, ChatRecord, Fork, Layout, timestamp_utc};
 use bongos_work::{Focus, WorkStore, WorkStoreEvent, ask, focused};
 use bongos_work_model::Timestamp;
+use bongos_work_model::store::WorkTree;
 use gpui::{
     AnyElement, App, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, WeakEntity, Window,
@@ -171,6 +172,11 @@ fn time_text(timestamp: &Timestamp) -> String {
     timestamp_utc(timestamp)
         .map(|time| format!("{}Z", time.format("%Y-%m-%d %H:%M")))
         .unwrap_or_else(|| timestamp.to_string())
+}
+
+/// How the list names the task `id`: its goal, with its Linear identifier when it has one.
+pub(crate) fn task_name(tree: &WorkTree, id: &str) -> Option<String> {
+    Some(tree.task_by_id(id)?.named_goal())
 }
 
 /// Newest last activity first, ties by id. A file that could not be read has no time: it comes
@@ -329,7 +335,7 @@ impl ChatListView {
         let scope_task = focused_task.filter(|_| !self.all_tasks);
         let scope = scope_task
             .as_deref()
-            .and_then(|id| Some(tree.as_ref()?.task_by_id(id)?.goal().to_string()))
+            .and_then(|id| task_name(tree.as_deref()?, id))
             .unwrap_or_else(|| ALL_TASKS.to_string());
         let mut listing = Listing {
             health,
@@ -374,8 +380,7 @@ impl ChatListView {
                 let goal = chat
                     .task_id
                     .as_deref()
-                    .and_then(|id| tree.as_ref()?.task_by_id(id))
-                    .map(|task| task.goal().to_string());
+                    .and_then(|id| task_name(tree.as_deref()?, id));
                 goal.unwrap_or_else(|| "no task".to_string())
             });
             let row = match chat.entry.record() {

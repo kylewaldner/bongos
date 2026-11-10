@@ -287,17 +287,17 @@ pub(crate) fn task_choices(
         .filter(|task| keep(task, tree))
         .filter_map(|task| {
             let id = task.id()?.to_string();
-            let mut path: Vec<&str> = Place::locate(tree, &id)
+            let mut path: Vec<String> = Place::locate(tree, &id)
                 .map(|place| {
                     place
                         .ancestors
                         .iter()
                         .rev()
-                        .map(|task| task.goal())
+                        .map(|task| task.named_goal())
                         .collect()
                 })
                 .unwrap_or_default();
-            path.push(task.goal());
+            path.push(task.named_goal());
             let label = format!(
                 "{}  [{}]",
                 path.join(" / "),
@@ -668,6 +668,11 @@ fn edit(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspa
             let Some(file) = tree.task_by_id(&id).and_then(|task| task.file.clone()) else {
                 return;
             };
+            // A goal that comes from Linear is not asked for: the edit goes straight to the kind.
+            if rules::goal_locked(&file).is_some() {
+                edit_kind(workspace, window, cx, id, file.kind, None);
+                return;
+            }
             let current = file.kind;
             modals::ask(
                 workspace,
@@ -675,46 +680,59 @@ fn edit(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspa
                 &file.goal,
                 false,
                 Box::new(move |goal, workspace, window, cx| {
-                    let labels = KINDS
-                        .iter()
-                        .map(|kind| {
-                            if *kind == current {
-                                format!("{} (current)", model::kind_name(*kind))
-                            } else {
-                                model::kind_name(*kind).to_string()
-                            }
-                        })
-                        .collect();
-                    let selected = KINDS.iter().position(|kind| *kind == current).unwrap_or(0);
-                    modals::pick(
-                        workspace,
-                        "Kind",
-                        labels,
-                        selected,
-                        Box::new(move |choice, workspace, _, cx| {
-                            let kind = KINDS[choice];
-                            submit(workspace, cx, move |tree, ctx| {
-                                model::edit(
-                                    tree,
-                                    ctx,
-                                    &id,
-                                    TaskEdit {
-                                        goal: Some(goal.clone()),
-                                        kind: Some(kind),
-                                        repository: None,
-                                    },
-                                )
-                            })
-                        }),
-                        window,
-                        cx,
-                    )
+                    edit_kind(workspace, window, cx, id, current, Some(goal))
                 }),
                 window,
                 cx,
             )
         }),
     );
+}
+
+/// Asks for the kind of the task `id` (now `current`), then edits it with `goal` (`None` leaves
+/// the goal alone).
+fn edit_kind(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    id: String,
+    current: Kind,
+    goal: Option<String>,
+) {
+    let labels = KINDS
+        .iter()
+        .map(|kind| {
+            if *kind == current {
+                format!("{} (current)", model::kind_name(*kind))
+            } else {
+                model::kind_name(*kind).to_string()
+            }
+        })
+        .collect();
+    let selected = KINDS.iter().position(|kind| *kind == current).unwrap_or(0);
+    modals::pick(
+        workspace,
+        "Kind",
+        labels,
+        selected,
+        Box::new(move |choice, workspace, _, cx| {
+            let kind = KINDS[choice];
+            submit(workspace, cx, move |tree, ctx| {
+                model::edit(
+                    tree,
+                    ctx,
+                    &id,
+                    TaskEdit {
+                        goal: goal.clone(),
+                        kind: Some(kind),
+                        repository: None,
+                    },
+                )
+            })
+        }),
+        window,
+        cx,
+    )
 }
 
 // Todos.

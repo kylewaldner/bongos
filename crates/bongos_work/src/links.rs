@@ -82,7 +82,7 @@ fn with_sibling(
         .filter_map(|sibling| {
             let label = format!(
                 "{} ({})  [{}]",
-                sibling.goal(),
+                sibling.named_goal(),
                 sibling.slug,
                 state_label(derive::state(sibling, &tree))
             );

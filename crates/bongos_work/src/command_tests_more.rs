@@ -5,6 +5,7 @@
 use bongos_work_model::activity::to_utc;
 use bongos_work_model::layout;
 use bongos_work_model::slug::oneoff_dir_name;
+use bongos_work_model::store::WorkTree;
 use bongos_work_model::{ResultKind, ResultState, Status, UnblockPoint};
 use gpui::TestAppContext;
 
@@ -496,4 +497,128 @@ async fn projects_are_archived_unarchived_and_opened_as_folders(cx: &mut TestApp
     })
     .await;
     assert_eq!(harness.file(cx, &[]).status, Status::Open);
+}
+
+/// A tree of one-offs `hand` (hand-set `linear`), `synced` (`linear` and `linear_state`) and
+/// `plain` (no link), loaded as the store loads it.
+fn linked_tree() -> (tempfile::TempDir, WorkTree) {
+    use bongos_work_model::{Kind, LinearState, TaskFile, serialize_task};
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store_tests::canonical(&temp);
+    for (id, goal, linear, synced) in [
+        ("hand", "Hand linked", Some("SEQ-7"), false),
+        ("synced", "Synced task", Some("SEQ-121"), true),
+        ("plain", "Plain task", None, false),
+    ] {
+        let mut file = TaskFile::new(goal, Kind::Other);
+        file.id = id.to_string();
+        file.linear = linear.map(str::to_string);
+        file.linear_state = synced.then(LinearState::default);
+        crate::store_tests::write(
+            &root.join(format!("oneoffs/misc/2020-01-02-{id}/task.toml")),
+            &serialize_task(&file).unwrap(),
+        );
+    }
+    let tree = bongos_work_model::store::load(&root);
+    assert!(tree.errors.is_empty(), "{:?}", tree.errors);
+    (temp, tree)
+}
+
+fn choice_labels(tree: &WorkTree) -> Vec<String> {
+    let mut labels: Vec<String> = crate::commands::task_choices(tree, |_, _| true)
+        .into_iter()
+        .map(|(_, label)| label)
+        .collect();
+    labels.sort();
+    labels
+}
+
+#[test]
+fn task_pickers_name_a_linked_task_with_its_identifier() {
+    let (_temp, tree) = linked_tree();
+    let labels = choice_labels(&tree);
+    // A hand-set `linear` without `linear_state` shows its identifier, as the row does.
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.starts_with("Hand linked (SEQ-7)  ["))
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.starts_with("Synced task (SEQ-121)  ["))
+    );
+}
+
+#[test]
+fn task_pickers_leave_an_unlinked_task_alone() {
+    let (_temp, tree) = linked_tree();
+    let plain: Vec<String> = choice_labels(&tree)
+        .into_iter()
+        .filter(|label| label.starts_with("Plain task"))
+        .collect();
+    assert_eq!(plain.len(), 1);
+    assert!(plain[0].starts_with("Plain task  ["), "{plain:?}");
+}
+
+#[gpui::test]
+async fn edit_skips_the_goal_prompt_when_the_goal_is_locked(cx: &mut TestAppContext) {
+    use bongos_work_model::{Kind, LinearState, TaskFile, serialize_task};
+    let (harness, cx) = harness(cx, true, true).await;
+    let mut file = TaskFile::new("From Linear", Kind::PrShip);
+    file.id = "l9".to_string();
+    file.linear = Some("SEQ-121".to_string());
+    file.linear_state = Some(LinearState::default());
+    crate::store_tests::write(
+        &layout::task_file(&harness.task_dir(&["backfill"])),
+        &serialize_task(&file).unwrap(),
+    );
+    wait_until(cx, "the synced link", |cx| {
+        harness
+            .tree(cx)
+            .task_by_id("l9")
+            .is_some_and(|task| task.file.as_ref().is_some_and(|f| f.linear_state.is_some()))
+    })
+    .await;
+
+    // Picking the task opens the kind picker at once; no goal prompt comes first.
+    harness
+        .run(cx, "task::Edit", &[Input::Pick("From Linear")])
+        .await;
+    assert!(harness.prompt(cx).is_none());
+    assert!(
+        harness
+            .choices(cx)
+            .iter()
+            .any(|row| row.starts_with("pr-ship (current)"))
+    );
+    harness.answer(cx, &Input::Pick("document")).await;
+    wait_until(cx, "the kind to be written", |cx| {
+        harness.file(cx, &["backfill"]).kind == Kind::Document
+    })
+    .await;
+    let file = harness.file(cx, &["backfill"]);
+    assert_eq!(file.goal, "From Linear");
+    assert!(!harness.has_toast(cx));
+}
+
+#[gpui::test]
+async fn edit_still_asks_for_the_goal_of_a_hand_set_link(cx: &mut TestAppContext) {
+    use bongos_work_model::{Kind, TaskFile, serialize_task};
+    let (harness, cx) = harness(cx, true, true).await;
+    let mut file = TaskFile::new("Hand set", Kind::PrShip);
+    file.id = "l9".to_string();
+    file.linear = Some("SEQ-7".to_string());
+    crate::store_tests::write(
+        &layout::task_file(&harness.task_dir(&["backfill"])),
+        &serialize_task(&file).unwrap(),
+    );
+    wait_until(cx, "the hand-set link", |cx| {
+        harness.tree(cx).task_by_id("l9").is_some()
+    })
+    .await;
+    harness
+        .run(cx, "task::Edit", &[Input::Pick("Hand set")])
+        .await;
+    assert!(harness.prompt(cx).is_some());
 }
