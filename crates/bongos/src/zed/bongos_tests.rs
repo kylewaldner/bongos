@@ -694,6 +694,49 @@ async fn emacs_transpose_commands_run_on_an_editor_by_name(cx: &mut TestAppConte
     assert_eq!(text(cx), "one two three\nfour five six");
 }
 
+/// The line commands run on an editor when dispatched by name with their count argument; a
+/// moved block and a duplicate are each one undo step.
+#[gpui::test]
+async fn emacs_line_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("one\ntwo\nthree\nfour", cx).await;
+    let text = |cx: &mut gpui::VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+    let undo = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| window.dispatch_action(Box::new(editor::actions::Undo), cx));
+        cx.run_until_parked();
+    };
+
+    select_offsets(&editor, &[1..1], cx);
+    run_emacs("emacs::MoveLineDown", serde_json::json!({ "count": 3 }), cx);
+    assert_eq!(text(cx), "two\nthree\nfour\none");
+    undo(cx);
+    assert_eq!(text(cx), "one\ntwo\nthree\nfour");
+
+    select_offsets(&editor, &[14..14], cx);
+    run_emacs("emacs::MoveLineUp", serde_json::json!({ "count": 2 }), cx);
+    assert_eq!(text(cx), "one\nfour\ntwo\nthree");
+    undo(cx);
+
+    select_offsets(&editor, &[5..5], cx);
+    run_emacs(
+        "emacs::DuplicateLine",
+        serde_json::json!({ "count": 2 }),
+        cx,
+    );
+    assert_eq!(text(cx), "one\ntwo\ntwo\ntwo\nthree\nfour");
+    undo(cx);
+    assert_eq!(text(cx), "one\ntwo\nthree\nfour");
+
+    select_offsets(&editor, &[4..4], cx);
+    run_emacs(
+        "emacs::CopyFromAbove",
+        serde_json::json!({ "count": 2 }),
+        cx,
+    );
+    assert_eq!(text(cx), "one\nontwo\nthree\nfour");
+    undo(cx);
+    assert_eq!(text(cx), "one\ntwo\nthree\nfour");
+}
+
 /// An editor that cannot be edited still copies, and C-w and C-k do nothing.
 #[gpui::test]
 async fn emacs_line_kills_in_a_read_only_editor(cx: &mut TestAppContext) {
