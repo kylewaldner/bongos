@@ -15,3 +15,5 @@ perf-timing = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = "package(bongos_minibuffer_model) & test(perf_tests::)"
 test-group = "perf-timing"
+# Wall-clock budgets flake on a loaded machine; a real regression fails all 4 attempts.
+retries = 3
