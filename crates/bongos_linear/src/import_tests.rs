@@ -188,7 +188,10 @@ async fn four_subtickets_make_one_group_and_four_leaves_with_a_plan_todo(cx: &mu
         assert_eq!(file.todos.len(), 1, "{identifier}");
         assert_eq!(file.todos[0].name, "plan");
         assert_eq!(file.todos[0].role, Some(TodoRole::Plans));
-        assert!(file.after.is_empty() && file.stacked_on.is_none(), "no edges");
+        assert!(
+            file.after.is_empty() && file.stacked_on.is_none(),
+            "no edges"
+        );
         let state = file.linear_state.as_ref().unwrap();
         assert_eq!(state.issue_id, format!("uuid-SEQ-{number}"));
         assert!(state.offered.is_empty());
@@ -303,9 +306,7 @@ async fn a_second_import_focuses_the_task_and_creates_nothing(cx: &mut TestAppCo
     assert_eq!(files(&env.root), before);
     assert!(!has_modal(&env.workspace, cx), "no placement is asked");
     wait_until(cx, "the focus", |cx| {
-        cx.update(|_, cx| {
-            Focus::global(cx).unwrap().read(cx).task_id() == Some(group_id.as_str())
-        })
+        cx.update(|_, cx| Focus::global(cx).unwrap().read(cx).task_id() == Some(group_id.as_str()))
     })
     .await;
 }
@@ -314,9 +315,7 @@ async fn a_second_import_focuses_the_task_and_creates_nothing(cx: &mut TestAppCo
 async fn placements_list_the_group_at_point_then_the_focused_project(cx: &mut TestAppContext) {
     let (env, cx) = env(cx, true, true).await;
     let tree = env.tree(cx);
-    let rows = |at_point, focused| {
-        placements(&tree, at_point, focused)
-    };
+    let rows = |at_point, focused| placements(&tree, at_point, focused);
     assert_eq!(
         rows(None, None),
         vec![("top".to_string(), "P (project)".to_string())]

@@ -179,7 +179,10 @@ pub(crate) fn placements(
         if project.file.as_ref().is_some_and(|file| file.archived) {
             continue;
         }
-        add(&project.task, format!("{} (project)", project_title(project)));
+        add(
+            &project.task,
+            format!("{} (project)", project_title(project)),
+        );
     }
     rows
 }
@@ -385,7 +388,12 @@ fn focus_existing(
 }
 
 /// A ticket no task links goes on to the placement picker; one a task links is focused.
-fn found(workspace: &mut Workspace, issue: Issue, window: &mut Window, cx: &mut Context<Workspace>) {
+fn found(
+    workspace: &mut Workspace,
+    issue: Issue,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let Some(tree) = bongos_work::ready(workspace, cx) else {
         return;
     };
@@ -400,7 +408,11 @@ fn found(workspace: &mut Workspace, issue: Issue, window: &mut Window, cx: &mut 
             .into_iter()
             .unzip();
     if ids.is_empty() {
-        show_toast(workspace, "There is no project to import into".to_string(), cx);
+        show_toast(
+            workspace,
+            "There is no project to import into".to_string(),
+            cx,
+        );
         return;
     }
     bongos_work::pick(
