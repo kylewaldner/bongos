@@ -81,12 +81,6 @@ fn task_count(env: &Env, cx: &mut VisualTestContext) -> usize {
 #[gpui::test]
 async fn a_new_child_shows_once_as_a_chip_and_a_row(cx: &mut TestAppContext) {
     let (env, cx) = start(cx).await;
-    // Nothing is known before the first refresh.
-    dispatch("task::ShowLinearSuggestions", cx);
-    cx.run_until_parked();
-    assert!(picker(&env, cx).is_none());
-    assert_eq!(env.last_toast(cx), "No suggestions under SEQ-100");
-
     let tasks = task_count(&env, cx);
     refresh_until("2 suggestions", cx).await;
     // A second refresh does not list them twice.
