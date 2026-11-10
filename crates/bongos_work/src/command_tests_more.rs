@@ -394,13 +394,17 @@ async fn a_task_moves_to_another_project_and_back_with_its_files_and_history(
 ) {
     let (harness, cx) = harness(cx, true, true).await;
 
-    // `project: new` makes the project and runs git init in its directory.
+    // `project: new` makes the project without a repository in its directory.
     harness
         .run_and_wait(cx, "project::New", &[Input::Text("Billing")])
         .await;
     let billing = layout::project_dir(&harness.root, "billing");
-    wait_until(cx, "git init", |_| billing.join(".git").exists()).await;
-    assert!(layout::project_file(&billing).exists());
+    wait_until(cx, "project.toml", |_| {
+        layout::project_file(&billing).exists()
+    })
+    .await;
+    assert!(!billing.join(".git").exists());
+    assert!(!harness.has_toast(cx));
 
     let backfill = harness.task_dir(&["backfill"]);
     std::fs::write(backfill.join("notes.md"), "keep me").unwrap();
