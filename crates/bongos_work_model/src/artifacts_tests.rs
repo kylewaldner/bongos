@@ -381,6 +381,21 @@ fn a_manifest_that_does_not_parse_shares_nothing() {
 }
 
 #[test]
+fn a_users_own_git_directory_is_never_an_artifact() {
+    let temp = TempDir::new().unwrap();
+    let (_root, backfill) = seed(&temp);
+    write(&backfill.join(".git/HEAD"), "ref: refs/heads/main\n");
+    write(&backfill.join(".git/config"), "[core]\n");
+    let file = read_task_artifacts(&backfill).unwrap();
+    assert!(file.artifacts.iter().all(|a| !a.path.starts_with(".git")));
+    assert!(
+        shared_paths(&backfill)
+            .iter()
+            .all(|p| !p.starts_with(".git"))
+    );
+}
+
+#[test]
 fn every_new_task_and_project_gets_a_shared_prompts_file() {
     let temp = TempDir::new().unwrap();
     let (root, backfill) = seed(&temp);

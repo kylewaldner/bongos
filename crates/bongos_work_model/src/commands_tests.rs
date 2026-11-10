@@ -479,6 +479,7 @@ fn project_commands_on_disk() {
     let dir = layout::project_dir(root, "invoicing");
     assert_eq!(names_in(&dir), ["project.toml", "prompts.txt", "task.toml"]);
     assert_eq!(names_in(root), ["projects"]);
+    assert!(!dir.join(".git").exists());
 
     let tree = reload(root, &tree);
     let project = &tree.projects[0];

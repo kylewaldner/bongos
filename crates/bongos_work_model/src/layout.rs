@@ -34,6 +34,7 @@ const RESERVED: &[&str] = &[
     TASKS_DIR,
     CHATS_DIR,
     RUNS_DIR,
+    // A user's own repository in a task directory: guarded, never an artifact.
     ".git",
 ];
 
