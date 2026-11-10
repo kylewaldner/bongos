@@ -474,6 +474,54 @@ async fn emacs_commands_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+/// The word commands run on an editor when dispatched by name with their count argument, as
+/// the palette and a keymap entry reach them.
+#[gpui::test]
+async fn emacs_word_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    use gpui::{Action as _, Focusable as _, VisualTestContext};
+
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        editor::init(cx);
+        bongos_emacs::init(cx);
+    });
+    let window = cx.add_window(|window, cx| {
+        let mut editor = editor::Editor::single_line(window, cx);
+        editor.set_text("one two three four", window, cx);
+        editor
+    });
+    let editor = window.root(cx).unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    let run = |name: &str, args: serde_json::Value, cx: &mut VisualTestContext| {
+        let action = cx.update(|_, cx| cx.build_action(name, Some(args)).unwrap());
+        cx.update(|window, cx| window.dispatch_action(action, cx));
+        cx.run_until_parked();
+    };
+    let to_start = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            window.dispatch_action(
+                editor::actions::MoveToBeginningOfLine::default().boxed_clone(),
+                cx,
+            )
+        });
+    };
+    let text = |cx: &mut VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+
+    to_start(cx);
+    run("emacs::KillWord", serde_json::json!({ "count": 2 }), cx);
+    assert_eq!(text(cx), " three four");
+    let clipboard = cx.update(|_, cx| cx.read_from_clipboard()).unwrap();
+    assert_eq!(clipboard.text().as_deref(), Some("one two"));
+
+    to_start(cx);
+    run("emacs::UpcaseWord", serde_json::json!({ "count": 2 }), cx);
+    assert_eq!(text(cx), " THREE FOUR");
+
+    run("emacs::DowncasePreviousWord", serde_json::json!({}), cx);
+    assert_eq!(text(cx), " THREE four");
+}
+
 #[gpui::test]
 async fn prompts_commands_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
