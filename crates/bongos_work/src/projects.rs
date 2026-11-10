@@ -1,16 +1,12 @@
-//! The handlers of the `project` actions: `new` (which also runs `git init` in the new project's
-//! directory, so its plans and notes have history), `archive`, `unarchive` and `open folder`.
+//! The handlers of the `project` actions: `new`, `archive`, `unarchive` and `open folder`.
 
 use bongos_work_model::commands::{self as model, NewProject};
 use gpui::{Context, Window};
 use workspace::Workspace;
 
 use crate::actions::project;
-use crate::commands::{queue, ready, show_toast, submit, with_project};
-use crate::{WorkStore, modals};
-
-/// The branch `git init` falls back to when the user's git configuration names none.
-const FALLBACK_BRANCH: &str = "main";
+use crate::commands::{ready, show_toast, submit, with_project};
+use crate::modals;
 
 pub fn register(workspace: &mut Workspace) {
     workspace
@@ -30,10 +26,7 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         "",
         false,
         Box::new(|title, workspace, _, cx| {
-            let Some(fs) = WorkStore::global(cx).map(|store| store.read(cx).fs()) else {
-                return;
-            };
-            let Some(write) = queue(workspace, cx, move |tree, ctx| {
+            submit(workspace, cx, move |tree, ctx| {
                 model::project_new(
                     tree,
                     ctx,
@@ -42,27 +35,7 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
                         ..NewProject::default()
                     },
                 )
-            }) else {
-                return;
-            };
-            cx.spawn(async move |workspace, cx| {
-                let failure = match write.await {
-                    Err(error) => Some(error.to_string()),
-                    Ok(change) => fs
-                        .git_init(&change.dir, FALLBACK_BRANCH.to_string())
-                        .await
-                        .err()
-                        .map(|error| {
-                            format!("The project was created, but git init failed: {error}")
-                        }),
-                };
-                if let Some(message) = failure {
-                    workspace
-                        .update(cx, |workspace, cx| show_toast(workspace, message, cx))
-                        .ok();
-                }
             })
-            .detach();
         }),
         window,
         cx,

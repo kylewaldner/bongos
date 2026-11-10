@@ -127,7 +127,7 @@ pub mod project {
     actions!(
         project,
         [
-            /// Asks for a name, creates the project and runs `git init` in its directory.
+            /// Asks for a name and creates the project.
             New,
             /// Picks a project and archives it.
             Archive,

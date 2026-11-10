@@ -304,7 +304,7 @@ focus_editor
 wkeys p n
 choose Billing
 assert_file "$PROJECT_DIR/task.toml"
-poll 10 "git init in $PROJECT_DIR" test -d "$PROJECT_DIR/.git"
+[ ! -e "$PROJECT_DIR/.git" ] || fail "project: new made $PROJECT_DIR/.git"
 python3 -I -c 'import re, sys
 p = sys.argv[1]
 t = open(p).read()

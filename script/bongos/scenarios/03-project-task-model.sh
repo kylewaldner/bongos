@@ -315,6 +315,7 @@ git -C "$REPO" "${GIT_ID[@]}" commit -qm "first commit"
 MAIN_SHA=$(git -C "$REPO" rev-parse main)
 printf '%s\n' '{
   "base_keymap": "Emacs",
+  "task_builder": { "enabled": false },
   "work": {
     "repositories": [
       { "name": "invoicing", "path": "~/src/invoicing", "deployments": true, "merge_is_ship": true, "branch_template": "{slug}" }
@@ -336,7 +337,7 @@ wkeys p n
 choose Invoicing
 assert_file "$PROJECT_DIR/project.toml"
 assert_file "$PROJECT_DIR/task.toml"
-poll 10 "git init in $PROJECT_DIR" test -d "$PROJECT_DIR/.git"
+[ ! -e "$PROJECT_DIR/.git" ] || fail "project: new made $PROJECT_DIR/.git"
 # No command names a project's repository; edit project.toml in place, as Kyle or an agent would.
 python3 -I -c 'import re, sys
 p = sys.argv[1]
