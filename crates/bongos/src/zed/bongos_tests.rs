@@ -523,10 +523,13 @@ async fn emacs_word_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
 }
 
 /// An editor in a window, focused, the way a keymap entry reaches it.
-async fn emacs_editor(
+async fn emacs_editor<'a>(
     text: &str,
-    cx: &mut TestAppContext,
-) -> (gpui::Entity<editor::Editor>, &mut gpui::VisualTestContext) {
+    cx: &'a mut TestAppContext,
+) -> (
+    gpui::Entity<editor::Editor>,
+    &'a mut gpui::VisualTestContext,
+) {
     use gpui::{Focusable as _, VisualTestContext};
 
     init_keymap_test(cx);
