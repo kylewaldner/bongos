@@ -7,6 +7,7 @@ pub mod apply;
 mod kill;
 pub mod kill_sink;
 pub mod last_command;
+mod lines;
 mod motion;
 pub mod quit;
 pub mod region;
@@ -23,6 +24,8 @@ mod kill_sink_tests;
 mod kill_tests;
 #[cfg(test)]
 mod last_command_tests;
+#[cfg(test)]
+mod lines_tests;
 #[cfg(test)]
 mod motion_tests;
 #[cfg(test)]
@@ -64,6 +67,10 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, transpose::transpose_words_command);
         register(editor, &weak, transpose::transpose_words_reverse_command);
         register(editor, &weak, transpose::transpose_lines_command);
+        register(editor, &weak, lines::move_line_up_command);
+        register(editor, &weak, lines::move_line_down_command);
+        register(editor, &weak, lines::duplicate_line_command);
+        register(editor, &weak, lines::copy_from_above_command);
     })
     .detach();
 }
