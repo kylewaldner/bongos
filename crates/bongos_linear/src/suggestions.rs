@@ -224,7 +224,6 @@ fn accept(
                     return;
                 };
                 finish(
-                    workspace,
                     group_id,
                     suggestion.identifier,
                     write,
@@ -267,7 +266,7 @@ fn ask_dismiss(
                     return;
                 };
                 let message = format!("Dismissed {identifier}");
-                finish(workspace, group_id, identifier, write, message, window, cx);
+                finish(group_id, identifier, write, message, window, cx);
             })
             .ok();
         },
@@ -279,7 +278,6 @@ fn ask_dismiss(
 /// Waits for the write, then drops the suggestion from the sync, toasts and opens the picker on
 /// what is left.
 fn finish(
-    workspace: &mut Workspace,
     group_id: String,
     identifier: String,
     write: Task<Result<Change, WriteError>>,
