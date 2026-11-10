@@ -712,10 +712,14 @@ async fn emacs_kill_on_a_sent_prompt_block_changes_nothing(cx: &mut TestAppConte
             buffer.set_group_interval(std::time::Duration::ZERO)
         });
     });
-    // The caret is on the marker line of the sent block: C-w would kill the line, marker
-    // included, so the guard reverts it.
-    select_offsets(&editor, &[20..20], cx);
-    run_emacs("emacs::KillRegionOrLine", serde_json::json!({}), cx);
+    // C-w on the line above the sent block's marker, with a count that takes the marker line
+    // too: the guard reverts the whole kill.
+    select_offsets(&editor, &[3..3], cx);
+    run_emacs(
+        "emacs::KillRegionOrLine",
+        serde_json::json!({ "count": 2 }),
+        cx,
+    );
     assert_eq!(editor.update(cx, |editor, cx| editor.text(cx)), PROMPTS);
 }
 
