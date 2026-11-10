@@ -113,6 +113,17 @@ impl Task {
         self.file.as_ref().map_or("", |file| file.goal.as_str())
     }
 
+    /// The goal as lists and headers name the task: `Goal (SEQ-121)` for a task with a `linear`
+    /// identifier (synced or hand-set, as the row shows it), the bare goal otherwise.
+    pub fn named_goal(&self) -> String {
+        let goal = self.goal();
+        match self.file.as_ref().and_then(|file| file.linear.as_deref()) {
+            Some(identifier) if goal.is_empty() => identifier.to_string(),
+            Some(identifier) => format!("{goal} ({identifier})"),
+            None => goal.to_string(),
+        }
+    }
+
     /// The write guard every command calls before changing this task's files.
     pub fn check_writable(&self) -> Result<(), WriteRefused> {
         if self.errors.is_empty() {

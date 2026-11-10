@@ -982,8 +982,7 @@ fn open_chats(
                 && let Some(goal) = chat
                     .task_id
                     .as_deref()
-                    .and_then(|id| tree?.task_by_id(id))
-                    .map(|task| task.goal())
+                    .and_then(|id| crate::list_view::task_name(tree?, id))
             {
                 label = format!("{goal} / {label}");
             }

@@ -195,3 +195,51 @@ fn test_facts_hold_no_artifact_path() {
         }
     }
 }
+
+/// A tree of one-offs `hand` (hand-set `linear`), `synced` (`linear` and `linear_state`) and
+/// `plain` (no link), loaded as the Work store loads it.
+fn linked_tree() -> (TempDir, WorkTree) {
+    use bongos_work_model::{Kind, LinearState, TaskFile, serialize_task};
+    let temp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    for (id, goal, linear, synced) in [
+        ("hand", "Hand linked", Some("SEQ-7"), false),
+        ("synced", "Synced task", Some("SEQ-121"), true),
+        ("plain", "Plain task", None, false),
+    ] {
+        let mut file = TaskFile::new(goal, Kind::Other);
+        file.id = id.to_string();
+        file.linear = linear.map(str::to_string);
+        file.linear_state = synced.then(LinearState::default);
+        write(
+            &root.join(format!("oneoffs/misc/2020-01-02-{id}/task.toml")),
+            &serialize_task(&file).unwrap(),
+        );
+    }
+    let tree = load(&root);
+    assert!(tree.errors.is_empty(), "{:?}", tree.errors);
+    (temp, tree)
+}
+
+#[test]
+fn test_the_list_names_a_linked_task_with_its_identifier() {
+    use crate::list_view::task_name;
+    let (_temp, tree) = linked_tree();
+    assert_eq!(
+        task_name(&tree, "synced").as_deref(),
+        Some("Synced task (SEQ-121)")
+    );
+    // A hand-set `linear` without `linear_state` shows its identifier, as the Work row does.
+    assert_eq!(
+        task_name(&tree, "hand").as_deref(),
+        Some("Hand linked (SEQ-7)")
+    );
+}
+
+#[test]
+fn test_the_list_names_an_unlinked_task_by_its_goal_alone() {
+    use crate::list_view::task_name;
+    let (_temp, tree) = linked_tree();
+    assert_eq!(task_name(&tree, "plain").as_deref(), Some("Plain task"));
+    assert_eq!(task_name(&tree, "missing"), None);
+}
