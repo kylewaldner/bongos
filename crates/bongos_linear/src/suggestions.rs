@@ -223,14 +223,7 @@ fn accept(
                 }) else {
                     return;
                 };
-                finish(
-                    group_id,
-                    suggestion.identifier,
-                    write,
-                    message,
-                    window,
-                    cx,
-                );
+                finish(group_id, suggestion.identifier, write, message, window, cx);
             })
             .ok();
     })
