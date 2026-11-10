@@ -190,7 +190,7 @@ pub(crate) fn group_for(tree: &WorkTree, task_id: &str) -> Option<TaskId> {
     own.or_else(|| nearest_linked_ancestor(&place)?.id().map(str::to_string))
 }
 
-fn identifier_of(tree: &WorkTree, group_id: &str) -> Option<String> {
+pub(crate) fn identifier_of(tree: &WorkTree, group_id: &str) -> Option<String> {
     let file = tree.task_by_id(group_id)?.file.as_ref()?;
     linked_identifier(file).map(str::to_string)
 }

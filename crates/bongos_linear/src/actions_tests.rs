@@ -32,8 +32,8 @@ const NAMES: &[&str] = &[
 /// store instead (see `token_tests`), the three link commands are handled in `link` (see
 /// `link_tests`), the import command in `import` (see `import_tests`), the refresh command in
 /// `refresh` (see `refresh_tests`) and the subtickets command in `subtickets` (see
-/// `subtickets_tests`).
-const SEAM_NAMES: &[&str] = &["task::ShowLinearSuggestions", "task::CopyPrTitle"];
+/// `subtickets_tests`) and the suggestions command in `suggestions` (see `suggestions_tests`).
+const SEAM_NAMES: &[&str] = &["task::CopyPrTitle"];
 
 /// Counts the commands that reach the seam.
 #[derive(Default)]
@@ -190,7 +190,7 @@ async fn while_on_each_action_reaches_the_seam_without_a_toast(cx: &mut TestAppC
     assert!(!toast_shown(&workspace, cx));
 
     set_enabled_in(cx, false);
-    dispatch("task::ShowLinearSuggestions", cx);
+    dispatch("task::CopyPrTitle", cx);
     assert_eq!(requests.count.load(Ordering::SeqCst), SEAM_NAMES.len());
     assert!(toast_shown(&workspace, cx));
 }
