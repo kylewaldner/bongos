@@ -2,6 +2,7 @@
 //! offer after Kyle's apply, the chip after an agent's, the command, the creation with client ids
 //! and its retry, and that nothing reaches Linear before the confirm.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bongos_linear_model::fake::Call;
@@ -493,6 +494,9 @@ async fn the_pending_create_state_is_not_a_link(cx: &mut TestAppContext) {
     assert!(!refresh::linked_ids(&tree).contains(&SUB.to_string()));
     cx.update(|_, cx| refresh::sync_linked(cx));
     let linear = cx.update(|_, cx| sync::global(cx).unwrap());
+    // A token and a client, so that only the link decides.
+    let client: Arc<dyn LinearApi> = Arc::new(env.fake.clone());
+    linear.update(cx, |linear, _| linear.set_token(true, Some(client)));
     let refused = cx.update(|_, cx| {
         linear.update(cx, |linear, cx| {
             linear
