@@ -200,3 +200,27 @@ async fn an_edit_ends_mark_mode_and_a_motion_does_not(cx: &mut TestAppContext) {
     cx.assert_editor_state("ˇ two");
     cx.update_editor(|editor, _, _| assert!(!editor.selection_mark_mode()));
 }
+
+#[gpui::test]
+async fn typing_before_a_command_is_a_separate_undo_step(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state("ˇ");
+    // Tests do not group transactions unless asked; the real interval merges quick edits.
+    cx.update_buffer(|buffer, _| buffer.set_group_interval(std::time::Duration::from_secs(60)));
+
+    cx.simulate_input("a");
+    cx.assert_editor_state("aˇ");
+    assert!(run_plan(
+        &mut cx,
+        Command::edit("test::InsertX"),
+        |carets| { insert_at_carets(carets, "X") }
+    ));
+    cx.assert_editor_state("aXˇ");
+
+    // Undo removes only the command's effect; the typed text stays.
+    cx.dispatch_action(editor::actions::Undo);
+    assert_eq!(cx.buffer_text(), "a");
+    cx.dispatch_action(editor::actions::Undo);
+    assert_eq!(cx.buffer_text(), "");
+}
