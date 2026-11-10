@@ -5,7 +5,7 @@
 //! entry, and closing it asks nothing. Nothing of the import exists before Kyle confirms.
 
 use editor::{Editor, MultiBuffer};
-use gpui::{AppContext as _, Context, EntityId, Window};
+use gpui::{AppContext as _, Context, EntityId, TaskExt as _, Window};
 use language::Capability;
 use workspace::{SaveIntent, Workspace};
 
