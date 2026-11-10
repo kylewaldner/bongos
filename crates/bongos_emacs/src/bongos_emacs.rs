@@ -11,6 +11,8 @@ mod motion;
 pub mod quit;
 pub mod region;
 pub mod snapshot_text;
+mod space;
+mod transpose;
 mod words;
 
 #[cfg(test)]
@@ -23,6 +25,10 @@ mod kill_tests;
 mod last_command_tests;
 #[cfg(test)]
 mod motion_tests;
+#[cfg(test)]
+mod space_tests;
+#[cfg(test)]
+mod transpose_tests;
 #[cfg(test)]
 mod words_tests;
 
@@ -51,6 +57,13 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, kill::kill_line_command);
         register(editor, &weak, kill::kill_region_or_line_command);
         register(editor, &weak, kill::copy_region_or_line_command);
+        register(editor, &weak, space::delete_horizontal_space_command);
+        register(editor, &weak, space::just_one_space_command);
+        register(editor, &weak, space::delete_blank_lines_command);
+        register(editor, &weak, transpose::transpose_chars_command);
+        register(editor, &weak, transpose::transpose_words_command);
+        register(editor, &weak, transpose::transpose_words_reverse_command);
+        register(editor, &weak, transpose::transpose_lines_command);
     })
     .detach();
 }
