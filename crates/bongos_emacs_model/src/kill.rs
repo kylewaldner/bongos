@@ -99,6 +99,8 @@ struct Item {
     /// The range was widened to include the newline before the last line;
     /// the piece moves that newline to its end.
     widened_at: Option<usize>,
+    /// Taken by a caret with no region, and merged only with such items.
+    whole_line: bool,
 }
 
 fn whole_lines<T: TextSource + ?Sized>(text: &T, point: usize, n: i32) -> Item {
@@ -109,6 +111,7 @@ fn whole_lines<T: TextSource + ?Sized>(text: &T, point: usize, n: i32) -> Item {
         backward: false,
         needs_newline: false,
         widened_at: None,
+        whole_line: true,
     };
     if n > 0 {
         let end = past_nth_newline(text, start, n.unsigned_abs());
@@ -144,6 +147,7 @@ fn items<T: TextSource + ?Sized>(text: &T, carets: &[Caret], count: Option<i32>)
                     backward: false,
                     needs_newline: false,
                     widened_at: None,
+                    whole_line: false,
                 }
             } else {
                 whole_lines(text, caret.head, n)
@@ -160,6 +164,7 @@ fn items<T: TextSource + ?Sized>(text: &T, carets: &[Caret], count: Option<i32>)
                 last.range.end = last.range.end.max(item.range.end);
                 last.needs_newline |= item.needs_newline;
                 last.widened_at = last.widened_at.or(item.widened_at);
+                last.whole_line &= item.whole_line;
             }
             _ => merged.push(item),
         }
@@ -169,9 +174,11 @@ fn items<T: TextSource + ?Sized>(text: &T, carets: &[Caret], count: Option<i32>)
 
 fn piece<T: TextSource + ?Sized>(text: &T, item: &Item) -> KilledPiece {
     let mut text = slice(text, &item.range);
+    let mut source_start = item.range.start;
     if item.needs_newline {
         if item.widened_at == Some(item.range.start) && text.starts_with('\n') {
             text.remove(0);
+            source_start += 1;
         }
         if !text.ends_with('\n') {
             text.push('\n');
@@ -180,6 +187,8 @@ fn piece<T: TextSource + ?Sized>(text: &T, item: &Item) -> KilledPiece {
     KilledPiece {
         text,
         backward: item.backward,
+        source_start: Some(source_start),
+        whole_line: item.whole_line,
     }
 }
 

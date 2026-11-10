@@ -522,6 +522,207 @@ async fn emacs_word_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
     assert_eq!(text(cx), " THREE four");
 }
 
+/// An editor in a window, focused, the way a keymap entry reaches it.
+async fn emacs_editor<'a>(
+    text: &str,
+    cx: &'a mut TestAppContext,
+) -> (
+    gpui::Entity<editor::Editor>,
+    &'a mut gpui::VisualTestContext,
+) {
+    use gpui::{Focusable as _, VisualTestContext};
+
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        editor::init(cx);
+        bongos_emacs::init(cx);
+    });
+    let window = cx.add_window(|window, cx| {
+        let mut editor = editor::Editor::multi_line(window, cx);
+        editor.set_text(text, window, cx);
+        editor
+    });
+    let editor = window.root(cx).unwrap();
+    let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    editor.update(cx, |editor, cx| {
+        let buffer = editor.buffer().read(cx).as_singleton().unwrap();
+        buffer.update(cx, |buffer, _| {
+            buffer.set_group_interval(std::time::Duration::ZERO)
+        });
+    });
+    (editor, cx)
+}
+
+fn run_emacs(name: &str, args: serde_json::Value, cx: &mut gpui::VisualTestContext) {
+    let action = cx.update(|_, cx| cx.build_action(name, Some(args)).unwrap());
+    cx.update(|window, cx| window.dispatch_action(action, cx));
+    cx.run_until_parked();
+}
+
+fn select_offsets(
+    editor: &gpui::Entity<editor::Editor>,
+    ranges: &[std::ops::Range<usize>],
+    cx: &mut gpui::VisualTestContext,
+) {
+    editor.update_in(cx, |editor, window, cx| {
+        editor.change_selections(editor::SelectionEffects::no_scroll(), window, cx, |s| {
+            s.select_ranges(ranges.iter().map(|range| {
+                editor::MultiBufferOffset(range.start)..editor::MultiBufferOffset(range.end)
+            }))
+        })
+    });
+    cx.run_until_parked();
+}
+
+fn clipboard_text(cx: &mut gpui::VisualTestContext) -> Option<String> {
+    cx.update(|_, cx| cx.read_from_clipboard())
+        .and_then(|item| item.text())
+}
+
+/// C-w with no region kills the line and `editor::Paste` puts it back as a line; M-w copies
+/// the line and changes nothing; C-k kills to the line end. Reached by action name with a
+/// count argument, with the default clipboard kill sink.
+#[gpui::test]
+async fn emacs_line_kills_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("one\ntwo\nthree", cx).await;
+    let text = |cx: &mut gpui::VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+
+    select_offsets(&editor, &[5..5], cx);
+    run_emacs("emacs::CopyRegionOrLine", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one\ntwo\nthree");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("two\n"));
+
+    run_emacs("emacs::KillRegionOrLine", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one\nthree");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("two\n"));
+
+    // Paste restores the whole line above the caret's line, not at the caret.
+    select_offsets(&editor, &[6..6], cx);
+    cx.update(|window, cx| window.dispatch_action(Box::new(editor::actions::Paste), cx));
+    cx.run_until_parked();
+    assert_eq!(text(cx), "one\ntwo\nthree");
+
+    // The last line without a newline: the line and the newline before it go.
+    select_offsets(&editor, &[12..12], cx);
+    run_emacs("emacs::KillRegionOrLine", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one\ntwo");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("three\n"));
+
+    // C-k with a count: through two line ends; then at the end of the buffer, nothing.
+    select_offsets(&editor, &[1..1], cx);
+    run_emacs("emacs::KillLine", serde_json::json!({ "count": 2 }), cx);
+    assert_eq!(text(cx), "o");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("ne\ntwo"));
+    run_emacs("emacs::KillLine", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "o");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("ne\ntwo"));
+}
+
+/// Three carets give three pieces, one undo step, and Paste at three carets restores each.
+#[gpui::test]
+async fn emacs_line_kills_at_three_carets_are_one_undo_step(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("aa\nbb\ncc\ndd", cx).await;
+    let text = |cx: &mut gpui::VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+
+    select_offsets(&editor, &[1..1, 4..4, 7..7], cx);
+    run_emacs("emacs::KillRegionOrLine", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "dd");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("aa\nbb\ncc\n"));
+    cx.update(|window, cx| window.dispatch_action(Box::new(editor::actions::Undo), cx));
+    cx.run_until_parked();
+    assert_eq!(text(cx), "aa\nbb\ncc\ndd");
+}
+
+/// An editor that cannot be edited still copies, and C-w and C-k do nothing.
+#[gpui::test]
+async fn emacs_line_kills_in_a_read_only_editor(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("one\ntwo", cx).await;
+    editor.update(cx, |editor, _| editor.set_read_only(true));
+    select_offsets(&editor, &[5..5], cx);
+
+    run_emacs("emacs::CopyRegionOrLine", serde_json::json!({}), cx);
+    assert_eq!(clipboard_text(cx).as_deref(), Some("two\n"));
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("kept".into())));
+    run_emacs("emacs::KillRegionOrLine", serde_json::json!({}), cx);
+    run_emacs("emacs::KillLine", serde_json::json!({}), cx);
+    assert_eq!(editor.update(cx, |editor, cx| editor.text(cx)), "one\ntwo");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("kept"));
+}
+
+/// C-w on the marker line of a sent block in a prompts buffer changes nothing: the prompts
+/// guard reverts the kill, as the one transaction `apply::run` makes reaches it.
+#[gpui::test]
+async fn emacs_kill_on_a_sent_prompt_block_changes_nothing(cx: &mut TestAppContext) {
+    use std::path::PathBuf;
+
+    use gpui::{BorrowAppContext as _, VisualTestContext};
+    use project::Project;
+    use settings::SettingsStore;
+    use workspace::{MultiWorkspace, OpenOptions};
+
+    const PROMPTS: &str = "preamble\n=== prompt 2026-11-05 13:40 | sent 2026-11-05 14:02 ===\nfirst, sent\n=== prompt 2026-11-05 14:10 ===\nsecond\n";
+
+    let app_state = init_keymap_test(cx);
+    cx.update(|cx| {
+        editor::init(cx);
+        bongos_prompts::init(cx);
+        bongos_emacs::init(cx);
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.prompts.get_or_insert_default().enabled = Some(true);
+            });
+        });
+    });
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree("/dir", serde_json::json!({ "prompts.txt": PROMPTS }))
+        .await;
+    let project = Project::test(app_state.fs.clone(), ["/dir".as_ref()], cx).await;
+    bongos_prompts::register_language(
+        &project.read_with(cx, |project, _| project.languages().clone()),
+    );
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |multi, _| multi.workspace().clone())
+        .unwrap();
+    let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+    workspace.update(cx, |workspace, _| bongos_prompts::register(workspace));
+    let item = workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.open_abs_path(
+                PathBuf::from("/dir/prompts.txt"),
+                OpenOptions::default(),
+                window,
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let editor = cx
+        .update(|_, cx| item.act_as::<editor::Editor>(cx))
+        .unwrap();
+    editor.update_in(cx, |editor, window, cx| {
+        use gpui::Focusable as _;
+        editor.focus_handle(cx).focus(window, cx);
+        let buffer = editor.buffer().read(cx).as_singleton().unwrap();
+        buffer.update(cx, |buffer, _| {
+            buffer.set_group_interval(std::time::Duration::ZERO)
+        });
+    });
+    // C-w on the line above the sent block's marker, with a count that takes the marker line
+    // too: the guard reverts the whole kill.
+    select_offsets(&editor, &[3..3], cx);
+    run_emacs(
+        "emacs::KillRegionOrLine",
+        serde_json::json!({ "count": 2 }),
+        cx,
+    );
+    assert_eq!(editor.update(cx, |editor, cx| editor.text(cx)), PROMPTS);
+}
+
 #[gpui::test]
 async fn prompts_commands_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);

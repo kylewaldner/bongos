@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod apply;
+mod kill;
 pub mod kill_sink;
 pub mod last_command;
 mod motion;
@@ -16,6 +17,8 @@ mod words;
 mod apply_tests;
 #[cfg(test)]
 mod kill_sink_tests;
+#[cfg(test)]
+mod kill_tests;
 #[cfg(test)]
 mod last_command_tests;
 #[cfg(test)]
@@ -45,6 +48,9 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, words::upcase_previous_word_command);
         register(editor, &weak, words::downcase_previous_word_command);
         register(editor, &weak, words::capitalize_previous_word_command);
+        register(editor, &weak, kill::kill_line_command);
+        register(editor, &weak, kill::kill_region_or_line_command);
+        register(editor, &weak, kill::copy_region_or_line_command);
     })
     .detach();
 }

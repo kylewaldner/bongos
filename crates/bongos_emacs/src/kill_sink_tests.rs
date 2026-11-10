@@ -29,6 +29,8 @@ fn kill_lines(carets: &[Caret], lines: &[&str]) -> Plan {
         plan.killed.push(KilledPiece {
             text: line.to_string(),
             backward: false,
+            source_start: None,
+            whole_line: true,
         });
         start += line.len();
     }
@@ -88,6 +90,8 @@ async fn default_sink_gives_each_caret_its_piece_back(cx: &mut TestAppContext) {
                 .map(|text| KilledPiece {
                     text: text.to_string(),
                     backward: false,
+                    source_start: None,
+                    whole_line: false,
                 })
                 .collect();
             plan
@@ -122,6 +126,8 @@ async fn a_replaced_sink_receives_the_kill_instead_of_the_clipboard(cx: &mut Tes
                 killed: vec![KilledPiece {
                     text: "two".into(),
                     backward: true,
+                    source_start: None,
+                    whole_line: false,
                 }],
             }
         }
@@ -155,6 +161,8 @@ async fn a_copy_runs_in_a_read_only_buffer(cx: &mut TestAppContext) {
             killed: vec![KilledPiece {
                 text: "two".into(),
                 backward: false,
+                source_start: None,
+                whole_line: false,
             }],
         }
     ));

@@ -102,6 +102,8 @@ async fn read_only_buffer_is_unchanged_and_nothing_is_killed(cx: &mut TestAppCon
         killed: vec![KilledPiece {
             text: "two".into(),
             backward: false,
+            source_start: None,
+            whole_line: false,
         }],
         ..kill_regions(carets)
     });
@@ -137,10 +139,14 @@ async fn the_kill_is_saved_before_the_text_is_deleted(cx: &mut TestAppContext) {
                 KilledPiece {
                     text: "two".into(),
                     backward: false,
+                    source_start: None,
+                    whole_line: false,
                 },
                 KilledPiece {
                     text: "four".into(),
                     backward: false,
+                    source_start: None,
+                    whole_line: false,
                 },
             ],
             ..kill_regions(carets)
@@ -193,6 +199,8 @@ async fn an_edit_ends_mark_mode_and_a_motion_does_not(cx: &mut TestAppContext) {
             killed: vec![KilledPiece {
                 text: "one".into(),
                 backward: false,
+                source_start: None,
+                whole_line: false,
             }],
             ..kill_regions(carets)
         }
@@ -223,4 +231,44 @@ async fn typing_before_a_command_is_a_separate_undo_step(cx: &mut TestAppContext
     assert_eq!(cx.buffer_text(), "a");
     cx.dispatch_action(editor::actions::Undo);
     assert_eq!(cx.buffer_text(), "");
+}
+
+#[gpui::test]
+async fn whole_line_labels_are_per_piece_not_per_command(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    let kills = capture_kills(&mut cx);
+    cx.set_state("«one\nˇ»two\nthree");
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    // A second caret kills the line "three" (no region) in a command that takes whole lines.
+    assert!(run_plan(
+        &mut cx,
+        Command::edit("test::Kill").with_whole_lines(),
+        |_| Plan {
+            edits: vec![(0..4, String::new()), (8..13, String::new())],
+            carets: vec![Caret::point(0), Caret::point(4)],
+            killed: vec![
+                KilledPiece {
+                    text: "one\n".into(),
+                    backward: false,
+                    source_start: None,
+                    whole_line: false,
+                },
+                KilledPiece {
+                    text: "three\n".into(),
+                    backward: false,
+                    source_start: None,
+                    whole_line: true,
+                },
+            ],
+        }
+    ));
+    let kills = kills.borrow();
+    let labels: Vec<bool> = kills[0]
+        .metadata
+        .iter()
+        .map(|selection| selection.is_entire_line)
+        .collect();
+    // Only the first caret had a region, so only the second piece is a whole line.
+    assert_eq!(labels, vec![false, true]);
 }

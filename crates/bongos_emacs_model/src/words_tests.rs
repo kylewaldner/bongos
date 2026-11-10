@@ -128,7 +128,9 @@ fn killed_text_and_direction() {
         plan.killed,
         vec![KilledPiece {
             text: "bar baz".into(),
-            backward: false
+            backward: false,
+            source_start: None,
+            whole_line: false
         }]
     );
     let (_, plan) = run("foo bar bazˇ", Some(2), bkw);
@@ -136,7 +138,9 @@ fn killed_text_and_direction() {
         plan.killed,
         vec![KilledPiece {
             text: "bar baz".into(),
-            backward: true
+            backward: true,
+            source_start: None,
+            whole_line: false
         }]
     );
 }
