@@ -22,7 +22,7 @@ async fn test_context(cx: &mut TestAppContext) -> EditorTestContext {
         .map(|ix| format!("line {ix}"))
         .collect::<Vec<_>>()
         .join("\n");
-    cx.set_state(&text);
+    cx.set_state(&format!("ˇ{text}"));
     cx.update_editor(|editor, window, cx| {
         editor.set_vertical_scroll_margin(2, cx);
         eprintln!("VISIBLE {:?}", editor.visible_line_count());
