@@ -115,8 +115,16 @@ pub async fn merge(git: &Git, request: &MergeRequest) -> Result<Merged, MergeRef
     let fast_forward = can_fast_forward(git, worktree, &request.run_branch).await?;
     match (request.style, fast_forward) {
         (MergeStyle::FfOrMerge | MergeStyle::FfOnly, true) => {
-            git.run(worktree, &["merge", "--ff-only", &request.run_branch])
-                .await?;
+            git.run(
+                worktree,
+                &[
+                    "merge",
+                    "--ff-only",
+                    "--end-of-options",
+                    &request.run_branch,
+                ],
+            )
+            .await?;
             Ok(Merged::FastForward {
                 head: head(git, worktree).await?,
             })
@@ -125,7 +133,16 @@ pub async fn merge(git: &Git, request: &MergeRequest) -> Result<Merged, MergeRef
         (MergeStyle::FfOrMerge | MergeStyle::MergeCommit, _) => {
             let message = request.commit_message();
             match git
-                .merge_or_abort(worktree, &["--no-ff", "-m", &message, &request.run_branch])
+                .merge_or_abort(
+                    worktree,
+                    &[
+                        "--no-ff",
+                        "-m",
+                        &message,
+                        "--end-of-options",
+                        &request.run_branch,
+                    ],
+                )
                 .await
             {
                 Ok(()) => Ok(Merged::MergeCommit {

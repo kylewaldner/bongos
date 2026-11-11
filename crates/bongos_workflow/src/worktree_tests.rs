@@ -191,6 +191,14 @@ fn branch_and_path_names() {
         runs_dir(Path::new("/repo"), Some(Path::new("/elsewhere"))),
         Path::new("/elsewhere")
     );
+    assert_eq!(
+        runs_dir(Path::new("/repo"), Some(Path::new("runs/here"))),
+        Path::new("/repo/runs/here")
+    );
+    assert_eq!(
+        runs_dir(Path::new("/repo"), Some(Path::new("~/runs"))),
+        paths::home_dir().join("runs")
+    );
     let dir = run_dir(&runs, "add-login", RUN_ID, 2);
     assert_eq!(
         dir,
@@ -582,4 +590,37 @@ async fn clear_finished_skips_a_dirty_worktree(cx: &mut TestAppContext) {
     assert!(branch_exists(git, &fixture.repository, &dirty_branch.branch).await);
     assert!(recent.path.exists());
     assert!(failed.path.exists());
+}
+
+#[gpui::test]
+async fn clear_finished_keeps_a_worktree_switched_to_a_user_branch(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let old = SystemTime::now() - Duration::from_secs(20 * 24 * 60 * 60);
+    let run = fixture.create_run(RUN_ID).await;
+    let branch = create_branch(git, &run, "build", 0).await.unwrap();
+    git_out(git, &branch.path, &["switch", "-c", "my-work"]).await;
+    commit_file(git, &branch.path, "mine.txt", "mine\n").await;
+    let finished = vec![FinishedRun {
+        run_id: RUN_ID.to_string(),
+        lifecycle: Lifecycle::Ended(EndState::Succeeded),
+        finished: old,
+        worktree: run.clone(),
+    }];
+    let plan = plan_clear(git, &finished, 14, SystemTime::now())
+        .await
+        .unwrap();
+    let skipped: Vec<&PathBuf> = plan.skipped().map(|item| &item.path).collect();
+    assert_eq!(skipped, vec![&branch.path]);
+    assert!(
+        plan.summary().contains("on branch my-work"),
+        "{}",
+        plan.summary()
+    );
+
+    let report = apply_clear(git, &fixture.repository, &plan).await;
+    assert_eq!(report.skipped.len(), 1);
+    assert!(branch.path.exists());
+    assert!(branch_exists(git, &fixture.repository, "my-work").await);
 }

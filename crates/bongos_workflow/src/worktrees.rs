@@ -217,10 +217,18 @@ pub fn fan_out_branch_name(run_branch: &str, node: &str, index: u32) -> String {
 }
 
 /// The directory holding run worktrees: `workflows.worktrees_dir`, else
-/// `<repo>/.bongos-worktrees/.runs`.
+/// `<repo>/.bongos-worktrees/.runs`. `~` expands to the home directory and a relative path is
+/// resolved against `repository`.
 pub fn runs_dir(repository: &Path, worktrees_dir: Option<&Path>) -> PathBuf {
     match worktrees_dir {
-        Some(dir) => dir.to_path_buf(),
+        Some(dir) => {
+            // A leading `~` is the home directory; a relative path is relative to the repository.
+            let expanded = match dir.strip_prefix("~") {
+                Ok(rest) => paths::home_dir().join(rest),
+                Err(_) => dir.to_path_buf(),
+            };
+            repository.join(expanded)
+        }
         None => repository.join(DEFAULT_RUNS_DIR),
     }
 }
@@ -376,7 +384,15 @@ async fn add_worktree(
     let path = worktree.path.to_string_lossy();
     git.run(
         from,
-        &["worktree", "add", "-b", &worktree.branch, &path, head],
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &worktree.branch,
+            "--end-of-options",
+            &path,
+            head,
+        ],
     )
     .await?;
     Ok(())
@@ -409,7 +425,10 @@ pub async fn join(
         let branch = fan_out_branch_name(&run.branch, node, index);
         let message = format!("Join {node} branch {index}");
         match git
-            .merge_or_abort(&run.path, &["--no-ff", "-m", &message, &branch])
+            .merge_or_abort(
+                &run.path,
+                &["--no-ff", "-m", &message, "--end-of-options", &branch],
+            )
             .await
         {
             Ok(()) => outcome.merged.push(index),
@@ -439,6 +458,10 @@ pub struct FinishedRun {
 pub struct ClearItem {
     pub path: PathBuf,
     pub branch: String,
+    /// Why the item is kept, for a skipped item.
+    pub reason: Option<String>,
+    /// For a fan-out branch, the commits on it that are not on the run branch, when known.
+    pub unmerged: Option<u32>,
 }
 
 /// The worktrees of one run that `clear finished` would remove.
@@ -464,13 +487,22 @@ impl ClearPlan {
         let mut lines = Vec::new();
         for run in &self.runs {
             for item in &run.remove {
-                lines.push(format!("remove {} ({})", item.path.display(), item.branch));
+                let unmerged = match item.unmerged {
+                    Some(count) if count > 0 => format!(", {count} unmerged commits"),
+                    _ => String::new(),
+                };
+                lines.push(format!(
+                    "remove {} ({}{unmerged})",
+                    item.path.display(),
+                    item.branch
+                ));
             }
             for item in &run.skipped {
                 lines.push(format!(
-                    "skip {} ({}): uncommitted changes",
+                    "skip {} ({}): {}",
                     item.path.display(),
-                    item.branch
+                    item.branch,
+                    item.reason.as_deref().unwrap_or("uncommitted changes")
                 ));
             }
         }
@@ -508,8 +540,15 @@ pub async fn plan_clear(
             remove: Vec::new(),
             skipped: Vec::new(),
         };
-        for item in run_worktrees(git, &run.worktree).await? {
-            if item.path.is_dir() && git.is_dirty(&item.path).await? {
+        for mut item in run_worktrees(git, &run.worktree).await {
+            if item.reason.is_none() && item.path.is_dir() {
+                match git.is_dirty(&item.path).await {
+                    Ok(false) => {}
+                    Ok(true) => item.reason = Some("uncommitted changes".to_string()),
+                    Err(error) => item.reason = Some(format!("git failed: {}", error.message)),
+                }
+            }
+            if item.reason.is_some() {
                 clear.skipped.push(item);
             } else {
                 clear.remove.push(item);
@@ -521,7 +560,7 @@ pub async fn plan_clear(
 }
 
 /// The run worktree and its fan-out worktrees (`b-*` beside it), with their branches.
-async fn run_worktrees(git: &Git, run: &RunWorktree) -> Result<Vec<ClearItem>, GitError> {
+async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<ClearItem> {
     let mut items = Vec::new();
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&run.run_dir)
         .map(|entries| {
@@ -539,14 +578,41 @@ async fn run_worktrees(git: &Git, run: &RunWorktree) -> Result<Vec<ClearItem>, G
         .unwrap_or_default();
     entries.sort();
     for path in entries {
-        let branch = git.run(&path, &["symbolic-ref", "--short", "HEAD"]).await?;
-        items.push(ClearItem { path, branch });
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let branch = format!(
+            "{}-{}",
+            run.branch,
+            name.strip_prefix("b-").unwrap_or(&name)
+        );
+        // Only a worktree still on its own fan-out branch is removed with that branch.
+        let reason = match git.run(&path, &["symbolic-ref", "--short", "HEAD"]).await {
+            Ok(head) if head == branch => None,
+            Ok(head) => Some(format!("on branch {head}, not {branch}")),
+            Err(_) => Some("HEAD is detached or unreadable".to_string()),
+        };
+        let unmerged = if reason.is_none() {
+            let range = format!("{}..{branch}", run.branch);
+            git.run(&path, &["rev-list", "--count", "--end-of-options", &range])
+                .await
+                .ok()
+                .and_then(|count| count.parse().ok())
+        } else {
+            None
+        };
+        items.push(ClearItem {
+            path,
+            branch,
+            reason,
+            unmerged,
+        });
     }
     items.push(ClearItem {
         path: run.path.clone(),
         branch: run.branch.clone(),
+        reason: None,
+        unmerged: None,
     });
-    Ok(items)
+    items
 }
 
 /// What `clear finished` did.
@@ -574,20 +640,35 @@ pub async fn apply_clear(git: &Git, repository: &Path, plan: &ClearPlan) -> Clea
     for run in &plan.runs {
         let mut all_removed = run.skipped.is_empty();
         for item in &run.skipped {
-            report
-                .skipped
-                .push((item.clone(), "uncommitted changes".to_string()));
+            report.skipped.push((
+                item.clone(),
+                item.reason
+                    .clone()
+                    .unwrap_or_else(|| "uncommitted changes".to_string()),
+            ));
         }
         for item in &run.remove {
             if item.path.exists() {
                 let path = item.path.to_string_lossy();
-                if let Err(error) = git.run(repository, &["worktree", "remove", &path]).await {
+                if let Err(error) = git
+                    .run(
+                        repository,
+                        &["worktree", "remove", "--end-of-options", &path],
+                    )
+                    .await
+                {
                     all_removed = false;
                     report.skipped.push((item.clone(), error.message));
                     continue;
                 }
             }
-            if let Err(error) = git.run(repository, &["branch", "-D", &item.branch]).await {
+            if let Err(error) = git
+                .run(
+                    repository,
+                    &["branch", "-D", "--end-of-options", &item.branch],
+                )
+                .await
+            {
                 log::warn!("removing branch {}: {error}", item.branch);
             }
             report.removed.push(item.clone());
