@@ -711,7 +711,8 @@ wkeys s
 choose "SEQ-121"
 START_SLUG=$(basename "$START_DIR")
 poll 20 "the branch of SEQ-121" toml_is "$START_DIR/task.toml" 'd.get("branch")' "seq-121-$START_SLUG"
-poll 10 "the worktree of SEQ-121" test -d "$REPO/.bongos-worktrees/$START_SLUG"
+wait_worktree_line "$START_DIR" || fail "SEQ-121 has no worktree line: $(cat "$START_DIR/task.toml")"
+poll 10 "the worktree of SEQ-121" test -d "$(worktree_of "$START_DIR")"
 focus_task "SEQ-121"
 wkeys b
 choose claude
