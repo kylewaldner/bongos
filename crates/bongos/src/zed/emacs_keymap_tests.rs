@@ -594,6 +594,8 @@ async fn reserved_keys_carry_only_the_interim_rows(cx: &mut gpui::TestAppContext
 
 #[gpui::test]
 async fn another_base_keymap_has_no_emacs_binding(cx: &mut gpui::TestAppContext) {
+    use gpui::BorrowAppContext as _;
+
     super::tests::init_keymap_test(cx);
     let default_only = Keymap::new(load_all(&LINUX, false, cx));
     let keymap = cx.update(|cx| {
