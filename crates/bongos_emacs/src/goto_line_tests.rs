@@ -59,9 +59,9 @@ async fn workspace_editor(
         let editor = cx.new(|cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx));
         workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
         editor.update(cx, |editor, cx| {
-            // "line 1\n" .. "line 9\n" is 56 bytes: line 10 starts there.
+            // "line 1\n" .. "line 9\n" is 63 bytes: line 10 starts there.
             editor.change_selections(Default::default(), window, cx, |s| {
-                s.select_ranges([MultiBufferOffset(56)..MultiBufferOffset(56)])
+                s.select_ranges([MultiBufferOffset(63)..MultiBufferOffset(63)])
             })
         });
         window.focus(&editor.focus_handle(cx), cx);
@@ -117,6 +117,20 @@ fn scroll_top(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> f64 {
     editor.update(cx, |editor, cx| editor.scroll_position(cx).y)
 }
 
+/// Presses a prompt key by the action it is bound to: the keymap is not loaded here, so C-g
+/// and Escape (both `Cancel`) and RET (`Confirm`) reach the prompt as their actions.
+fn press(routed: bool, key: &str, cx: &mut VisualTestContext) {
+    let name = match (routed, key) {
+        (true, "cancel") => "minibuffer::Cancel",
+        (true, _) => "minibuffer::Confirm",
+        (false, "cancel") => "menu::Cancel",
+        (false, _) => "menu::Confirm",
+    };
+    let action = cx.update(|_, cx| cx.build_action(name, None).unwrap());
+    cx.update(|window, cx| window.dispatch_action(action, cx));
+    cx.run_until_parked();
+}
+
 fn open_prompt(
     workspace: &Entity<Workspace>,
     cx: &mut VisualTestContext,
@@ -144,8 +158,7 @@ async fn types_a_line_previews_it_and_enter_goes_there(routed: bool, cx: &mut Te
     assert_eq!(status(&workspace, cx), "");
     let _ = top;
 
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    press(routed, "confirm", cx);
     assert!(session(&workspace, cx).is_none());
     assert_eq!(caret_row(&editor, cx), 41);
     assert_eq!(selections(&editor, cx), 1);
@@ -163,8 +176,7 @@ async fn cancel_restores_caret_and_scroll(routed: bool, key: &str, cx: &mut Test
     assert_eq!(highlighted(&editor, cx), vec![89]);
     assert!(scroll_top(&editor, cx) != top, "the preview scrolled");
 
-    cx.simulate_keystrokes(key);
-    cx.run_until_parked();
+    press(routed, key, cx);
     assert!(session(&workspace, cx).is_none());
     assert!(highlighted(&editor, cx).is_empty());
     assert_eq!(caret_row(&editor, cx), 9);
@@ -180,12 +192,12 @@ async fn invalid_text_says_no_line(routed: bool, cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(status(&workspace, cx), "no line");
     assert!(highlighted(&editor, cx).is_empty());
-    cx.simulate_keystrokes("backspace 3");
+    cx.dispatch_action(editor::actions::Backspace);
+    cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert_eq!(status(&workspace, cx), "");
     assert_eq!(highlighted(&editor, cx), vec![2]);
-    cx.simulate_keystrokes("ctrl-g");
-    cx.run_until_parked();
+    press(routed, "cancel", cx);
 }
 
 #[gpui::test]
@@ -200,22 +212,22 @@ async fn goto_line_routed_previews_and_enter_goes_there(cx: &mut TestAppContext)
 
 #[gpui::test]
 async fn goto_line_ctrl_g_restores_caret_and_scroll(cx: &mut TestAppContext) {
-    cancel_restores_caret_and_scroll(false, "ctrl-g", cx).await;
+    cancel_restores_caret_and_scroll(false, "cancel", cx).await;
 }
 
 #[gpui::test]
 async fn goto_line_routed_ctrl_g_restores_caret_and_scroll(cx: &mut TestAppContext) {
-    cancel_restores_caret_and_scroll(true, "ctrl-g", cx).await;
+    cancel_restores_caret_and_scroll(true, "cancel", cx).await;
 }
 
 #[gpui::test]
 async fn goto_line_escape_restores_caret_and_scroll(cx: &mut TestAppContext) {
-    cancel_restores_caret_and_scroll(false, "escape", cx).await;
+    cancel_restores_caret_and_scroll(false, "cancel", cx).await;
 }
 
 #[gpui::test]
 async fn goto_line_routed_escape_restores_caret_and_scroll(cx: &mut TestAppContext) {
-    cancel_restores_caret_and_scroll(true, "escape", cx).await;
+    cancel_restores_caret_and_scroll(true, "cancel", cx).await;
 }
 
 #[gpui::test]
@@ -259,8 +271,9 @@ async fn goto_line_with_a_column_and_a_region(cx: &mut TestAppContext) {
     });
 
     open_prompt(&workspace, cx);
-    cx.simulate_keystrokes("5 : 3 enter");
+    cx.simulate_keystrokes("5 : 3");
     cx.run_until_parked();
+    press(false, "confirm", cx);
     assert_eq!(caret_row(&editor, cx), 4);
     editor.update(cx, |editor, cx| {
         let display = editor.display_snapshot(cx);
