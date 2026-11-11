@@ -175,7 +175,7 @@ impl FakeRunner {
                     comment: None,
                 });
             }
-            Command::MergeBranch { join, branch } => self.events.push(Event::BranchMerged {
+            Command::MergeBranch { join, branch, .. } => self.events.push(Event::BranchMerged {
                 join: join.clone(),
                 branch: branch.clone(),
                 sha: "0000000".to_string(),

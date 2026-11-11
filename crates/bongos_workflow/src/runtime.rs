@@ -8,8 +8,12 @@
 //!
 //! Limits ([`Limits`], from the `workflows` settings):
 //! - Runs: at most `max_concurrent_runs` execute at once. The rest wait Queued in start order (a
-//!   `Queued` event) and start when a slot frees. A run holds its slot until it ends, is cancelled,
-//!   halted or interrupted; a run waiting on a gate keeps it.
+//!   `Queued` event) and start when a slot frees. A run holds its slot while it has a process
+//!   running or something to do now; gates, sleeping polls and Queued nodes hold no slot (D12), so
+//!   a run whose only live work waits on those is parked and frees its slot. A parked run that has
+//!   work again (a gate closed, a poll is due) waits for a slot behind the runs already queued,
+//!   without a new `Queued` event. A run held for Kyle (ended, cancelled, halted, interrupted)
+//!   holds none either.
 //! - Sessions: the processes executing across all runs never exceed the session limit; the free
 //!   count is the `free` of [`scheduler::step`]. Gates, sleeping polls and Queued runs hold none.
 //! - Branches: the scheduler keeps a run's executing branches within `max_parallel_branches`.
@@ -25,7 +29,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use bongos_workflow_model::record::{EndState, RunningNode};
+use bongos_workflow_model::record::RunningNode;
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
     Command, Definition, Event, Failure, FailureReason, Limits, NodeKey, RunState, record, replay,
@@ -34,7 +38,7 @@ use bongos_workflow_model::{
 use serde_json::Value;
 
 use crate::WorkflowsSettings;
-use crate::process::{OrphanOutcome, ProcessRecord, kill_orphan};
+use crate::process::{OrphanOutcome, ProcessRecord, kill_orphans};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError};
 
 /// The name of the checkpoint log in an attempt directory (D5).
@@ -130,6 +134,9 @@ enum Status {
     Queued,
     /// Holding a run slot: the scheduler is asked what it does next.
     Executing,
+    /// Holding no slot: nothing runs and the scheduler had nothing to do (the run waits on gates
+    /// or sleeping polls). Checked each tick; once it has work it is queued for a slot again.
+    Parked,
     /// Waiting for Kyle or done: halted, interrupted, ended or cancelled. Gets no command.
     Held,
 }
@@ -160,6 +167,27 @@ impl LiveRun {
             );
         }
         self.events.push(event);
+    }
+
+    /// The number of the next try of `key`: one more than its `NodeStarted` events.
+    fn next_try(&self, key: &NodeKey) -> u32 {
+        self.events
+            .iter()
+            .filter(
+                |event| matches!(event, Event::NodeStarted { key: started, .. } if started == key),
+            )
+            .count() as u32
+            + 1
+    }
+
+    /// Whether the run has started anything: a try or a gate.
+    fn has_begun(&self) -> bool {
+        self.events.iter().any(|event| {
+            matches!(
+                event,
+                Event::NodeStarted { .. } | Event::GateOpened { .. } | Event::BranchMerged { .. }
+            )
+        })
     }
 
     /// Whether the run waits for Kyle or is done, so it gets no command and holds no run slot.
@@ -279,16 +307,19 @@ impl<R: Runner> Runtime<R> {
         }
         let mut run = open_run(spec)?;
         let state = run.state();
-        let mut orphans = Vec::new();
-        let recorded = state.running.iter().chain(
-            state
-                .interrupted
-                .iter()
-                .filter_map(|(key, running)| running.as_ref().map(|running| (key, running))),
-        );
-        for (key, running) in recorded {
-            orphans.push((key.clone(), kill_orphan(process_record(running))));
-        }
+        let (keys, records): (Vec<NodeKey>, Vec<ProcessRecord>) = state
+            .running
+            .iter()
+            .chain(
+                state
+                    .interrupted
+                    .iter()
+                    .filter_map(|(key, running)| running.as_ref().map(|running| (key, running))),
+            )
+            .map(|(key, running)| (key.clone(), process_record(running)))
+            .unzip();
+        let orphans: Vec<(NodeKey, OrphanOutcome)> =
+            keys.into_iter().zip(kill_orphans(&records)).collect();
         if !state.running.is_empty() && !state.halted && !state.is_over() {
             let keys: Vec<NodeKey> = state.running.keys().cloned().collect();
             run.append(Event::Interrupted { keys });
@@ -313,9 +344,10 @@ impl<R: Runner> Runtime<R> {
         }
         let mut changed = self.take_finishes();
         for _ in 0..MAX_ROUNDS {
+            let woken = self.wake_parked();
             let admitted = self.admit_queued();
             let stepped = self.step_runs();
-            if !admitted && !stepped {
+            if !woken && !admitted && !stepped {
                 return changed;
             }
             changed = true;
@@ -454,8 +486,11 @@ impl<R: Runner> Runtime<R> {
             }
         }
         for id in &self.queue {
+            // A parked run queued again has already started; `Queued` marks only a run that
+            // waits to begin.
             if let Some(run) = self.runs.iter_mut().find(|run| &run.id == id)
                 && !run.state().queued
+                && !run.has_begun()
             {
                 run.append(Event::Queued);
                 changed = true;
@@ -464,7 +499,34 @@ impl<R: Runner> Runtime<R> {
         changed
     }
 
-    /// Carries out one [`scheduler::step`] for each executing run, in start order.
+    /// Queues each parked run that has work again (the scheduler gives it a command), so it waits
+    /// for a run slot behind the runs already queued; drops a parked run that became held.
+    fn wake_parked(&mut self) -> bool {
+        let mut changed = false;
+        for index in 0..self.runs.len() {
+            if self.runs[index].status != Status::Parked {
+                continue;
+            }
+            let state = self.runs[index].state();
+            if LiveRun::is_held(&state) {
+                self.hold(index);
+                changed = true;
+                continue;
+            }
+            let free = self.limits.free_sessions(self.sessions_in_flight());
+            if !scheduler::step(&self.runs[index].definition, &state, &self.limits, free).is_empty()
+            {
+                let run = &mut self.runs[index];
+                run.status = Status::Queued;
+                self.queue.push_back(run.id.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Carries out one [`scheduler::step`] for each executing run, in start order. A run with
+    /// nothing running and nothing to do is parked and frees its slot.
     fn step_runs(&mut self) -> bool {
         let mut changed = false;
         for index in 0..self.runs.len() {
@@ -480,9 +542,23 @@ impl<R: Runner> Runtime<R> {
             let free = self.limits.free_sessions(self.sessions_in_flight());
             let commands =
                 scheduler::step(&self.runs[index].definition, &state, &self.limits, free);
+            if commands.is_empty() {
+                if state.running.is_empty() && self.runs[index].in_flight.is_empty() {
+                    self.runs[index].status = Status::Parked;
+                    changed = true;
+                }
+                continue;
+            }
             for command in commands {
-                self.apply(index, command);
                 changed = true;
+                if !self.apply(index, command) {
+                    // A merge failed: the rest of this step (more merges, starts) was planned
+                    // before it, so it is dropped; the next round asks the scheduler again.
+                    break;
+                }
+                if LiveRun::is_held(&self.runs[index].state()) {
+                    break;
+                }
             }
             if LiveRun::is_held(&self.runs[index].state()) {
                 self.hold(index);
@@ -491,7 +567,8 @@ impl<R: Runner> Runtime<R> {
         changed
     }
 
-    fn apply(&mut self, index: usize, command: Command) {
+    /// Carries out one command; whether the rest of the step may still be carried out.
+    fn apply(&mut self, index: usize, command: Command) -> bool {
         match command {
             Command::Start(key) => self.start(index, key),
             Command::OpenGate(key) => {
@@ -505,23 +582,38 @@ impl<R: Runner> Runtime<R> {
                     .unwrap_or_default();
                 self.runs[index].append(Event::GateOpened { key, question });
             }
-            Command::MergeBranch { join, branch } => {
+            Command::MergeBranch { join, branch, key } => {
                 let run = &mut self.runs[index];
                 match self.runner.merge_branch(&run.id, &join, &branch) {
                     Ok(sha) => run.append(Event::BranchMerged { join, branch, sha }),
                     Err(failure) => {
-                        // The branches stay as they are; the run ends Failed on the join, which a
-                        // retry step can rerun once the conflict is resolved.
-                        let failure = Failure {
-                            node: failure
-                                .node
-                                .or_else(|| Some(join_key(&run.state(), &join, &branch))),
-                            ..failure
-                        };
-                        run.append(Event::Ended {
-                            state: EndState::Failed,
-                            failure: Some(failure),
+                        // The branches stay as they are. The conflict is a failed try of the
+                        // join's key (scheduler.rs, `Command::MergeBranch`): the scheduler fails
+                        // the branch, lets running keys finish and ends the run Failed once
+                        // nothing runs. A retry step can rerun the merge once it is resolved.
+                        let failure = Failure::new(
+                            FailureReason::MergeConflict,
+                            Some(key.clone()),
+                            failure.detail,
+                        );
+                        let try_number = run.next_try(&key);
+                        run.append(Event::NodeStarted {
+                            key: key.clone(),
+                            try_number,
+                            pid: 0,
+                            pid_start_time: 0,
                         });
+                        run.append(Event::NodeFinished {
+                            key,
+                            try_number,
+                            result: None,
+                            failure: Some(failure),
+                            cost_usd: 0.0,
+                            turns: None,
+                            elapsed_ms: 0,
+                            session_id: None,
+                        });
+                        return false;
                     }
                 }
             }
@@ -530,18 +622,17 @@ impl<R: Runner> Runtime<R> {
                 self.runs[index].append(Event::Ended { state, failure });
             }
         }
+        true
     }
 
+    /// Starts a try of `key`. The process is spawned before its `NodeStarted` is appended, since
+    /// the event records the pid: a crash between the two leaves a process no log names, which
+    /// the next load cannot find (an orphan until it exits), and the key is not marked
+    /// interrupted. The window is one `fork`/`exec` and one fsynced line; closing it would take a
+    /// record written before the spawn (an intent line) and is not done in v1.
     fn start(&mut self, index: usize, key: NodeKey) {
         let run = &mut self.runs[index];
-        let try_number = run
-            .events
-            .iter()
-            .filter(
-                |event| matches!(event, Event::NodeStarted { key: started, .. } if *started == key),
-            )
-            .count() as u32
-            + 1;
+        let try_number = run.next_try(&key);
         match self
             .runner
             .start(&run.id, &run.definition, &key, try_number)
@@ -622,16 +713,6 @@ fn process_record(running: &RunningNode) -> ProcessRecord {
     }
 }
 
-/// The key the join `join` runs as once `branch` is merged: the fan's branch, next pass.
-fn join_key(state: &RunState, join: &str, branch: &Branch) -> NodeKey {
-    let pass = state.passes.get(join).copied().unwrap_or(0) + 1;
-    NodeKey {
-        node: join.to_string(),
-        branch: branch[..branch.len().saturating_sub(1)].to_vec(),
-        pass,
-    }
-}
-
 /// Opens (or creates) the attempt's `events.jsonl`, repairs a tail cut by a crash, and reads it.
 fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
     std::fs::create_dir_all(&spec.attempt_dir)
@@ -671,7 +752,7 @@ pub(crate) mod fake {
     use std::collections::BTreeMap;
     use std::process::{Command, Stdio};
 
-    use bongos_workflow_model::{Definition, Failure, NodeKey};
+    use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey};
     use serde_json::{Value, json};
 
     use super::{Finish, Runner};
@@ -700,6 +781,10 @@ pub(crate) mod fake {
         pub stopped_processes: Vec<NodeProcess>,
         /// The most tries in flight at once, across runs.
         pub max_in_flight: usize,
+        /// Every merge fails `merge conflict` when set.
+        pub merge_conflicts: bool,
+        /// Every merge asked for, as `(run, join, branch)`.
+        pub merges: Vec<(String, String, Branch)>,
         results: BTreeMap<String, Value>,
         running: Vec<Try>,
     }
@@ -821,10 +906,19 @@ pub(crate) mod fake {
 
         fn merge_branch(
             &mut self,
-            _run: &str,
-            _join: &str,
-            _branch: &Branch,
+            run: &str,
+            join: &str,
+            branch: &Branch,
         ) -> Result<String, Failure> {
+            self.merges
+                .push((run.to_string(), join.to_string(), branch.clone()));
+            if self.merge_conflicts {
+                return Err(Failure::new(
+                    FailureReason::MergeConflict,
+                    None,
+                    "conflict in src/lib.rs",
+                ));
+            }
             Ok("0000000".to_string())
         }
     }

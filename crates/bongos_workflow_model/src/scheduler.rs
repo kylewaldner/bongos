@@ -113,9 +113,15 @@ pub enum Command {
     Start(NodeKey),
     /// Open the key's gate (`GateOpened`) with the node's question.
     OpenGate(NodeKey),
-    /// Merge a finished branch into the run branch (`BranchMerged`) before `join` runs. A
-    /// conflict is recorded as a `NodeFinished` of the join's key failed `merge conflict`.
-    MergeBranch { join: String, branch: Branch },
+    /// Merge a finished branch into the run branch (`BranchMerged`) before `join` runs as `key`.
+    /// A conflict is recorded as a `NodeFinished` of `key` failed `merge conflict` (after a
+    /// `NodeStarted` with no process); the branch then fails, no further merge of the join is
+    /// asked for, and the run ends Failed once nothing runs.
+    MergeBranch {
+        join: String,
+        branch: Branch,
+        key: NodeKey,
+    },
     /// Stop every running key of the branch: a join `any` took another branch. Whatever the
     /// stopped tries record is ignored, since the branch no longer counts.
     CancelBranch { join: String, branch: Branch },
@@ -179,8 +185,8 @@ pub struct Plan {
     pub sleeping: Vec<NodeKey>,
     /// Keys interrupted and not started again: the run waits for a resume.
     pub interrupted: Vec<NodeKey>,
-    /// Branches to merge before their join runs, as `(join node, branch)`.
-    pub merges: Vec<(String, Branch)>,
+    /// Branches to merge before their join runs, as `(join node, branch, the join's key)`.
+    pub merges: Vec<(String, Branch, NodeKey)>,
     /// Cancelled branches that still have running keys, as `(join node, branch)`.
     pub cancels: Vec<(String, Branch)>,
     /// Running keys of cancelled branches.
@@ -277,9 +283,10 @@ pub fn step(
         commands.extend(
             plan.merges
                 .iter()
-                .map(|(join, branch)| Command::MergeBranch {
+                .map(|(join, branch, key)| Command::MergeBranch {
                     join: join.clone(),
                     branch: branch.clone(),
+                    key: key.clone(),
                 }),
         );
         commands.extend(plan.gates_to_open.iter().cloned().map(Command::OpenGate));
@@ -520,7 +527,7 @@ enum Item {
     Gated(NodeKey),
     Sleeping(NodeKey),
     Interrupted(NodeKey),
-    Merge(String, Branch),
+    Merge(String, Branch, NodeKey),
     Failed(usize, Failed),
     End(ReachedEnd),
     Delivered(Vec<Outcome>),
@@ -1082,8 +1089,12 @@ impl<'a> Walk<'a> {
     }
 
     /// Merges the branches not yet merged; once all are, the join's key runs in the fan's branch.
+    /// A merge that conflicted is recorded as a failed try of the join's key: the key is then
+    /// walked (and fails) instead of asking for the merges again.
     fn continue_at_join(&mut self, id: usize, join: &str, merge: Vec<usize>) {
         let scope = self.fans[id].scope.clone();
+        let key = self.next_key(join, self.fans[id].key.branch.clone());
+        let conflicted = self.merge_conflicted(&key);
         let mut pending = false;
         let mut time = self.fans[id].time;
         for index in merge {
@@ -1103,16 +1114,31 @@ impl<'a> Walk<'a> {
                 .iter()
                 .filter(|merged| merged.join == join && merged.branch == branch)
                 .count();
-            if merged < needed {
-                self.push(&scope, Item::Merge(join.to_string(), branch));
+            if merged < needed && !conflicted {
+                self.push(&scope, Item::Merge(join.to_string(), branch, key.clone()));
                 pending = true;
             }
         }
         if !pending {
-            let branch = self.fans[id].key.branch.clone();
-            let key = self.next_key(join, branch);
             self.queue.push_back(Chain { key, scope, time });
         }
+    }
+
+    /// Whether the last try of the join's `key` since its last retry step is a merge conflict.
+    fn merge_conflicted(&self, key: &NodeKey) -> bool {
+        let indices = self.finishes.get(key).map(Vec::as_slice).unwrap_or(&[]);
+        let floor = self.state.retry_floors.get(key).copied().unwrap_or(0);
+        let failures = indices
+            .iter()
+            .filter(|index| self.state.finished[**index].failure.is_some())
+            .count();
+        failures > floor
+            && indices.last().is_some_and(|last| {
+                self.state.finished[*last]
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.reason == FailureReason::MergeConflict)
+            })
     }
 
     fn finish(self) -> Plan {
@@ -1136,7 +1162,7 @@ impl<'a> Walk<'a> {
                 Item::Gated(key) => plan.open_gates.push(key),
                 Item::Sleeping(key) => plan.sleeping.push(key),
                 Item::Interrupted(key) => plan.interrupted.push(key),
-                Item::Merge(join, branch) => plan.merges.push((join, branch)),
+                Item::Merge(join, branch, key) => plan.merges.push((join, branch, key)),
                 Item::Failed(time, failure) => failed.push((time, failure)),
                 Item::End(end) => plan.ends.push(end),
                 Item::Delivered(outcomes) => {

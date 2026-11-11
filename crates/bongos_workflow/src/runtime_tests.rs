@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use bongos_workflow_model::record::{EndState, Lifecycle};
-use bongos_workflow_model::{Definition, Event, Limits, NodeKey, parse};
+use bongos_workflow_model::{Definition, Event, FailureReason, Limits, NodeKey, parse};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -474,4 +474,141 @@ fn scripted_results_route() {
         state.last_finish(&key("work")).unwrap().result,
         Some(json!({ "summary": "done" }))
     );
+}
+
+#[test]
+fn a_merge_conflict_fails_the_join_and_starts_nothing_after() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.auto_finish = true;
+    runner.merge_conflicts = true;
+    let mut runtime = runtime(runner);
+    runtime.add(spec(temp.path(), 1, FAN)).unwrap();
+    for _ in 0..5 {
+        runtime.tick();
+    }
+
+    let state = runtime.state(&run_id(1)).unwrap();
+    let (end, failure) = state.ended.clone().unwrap();
+    assert_eq!(end, EndState::Failed);
+    let failure = failure.unwrap();
+    assert_eq!(failure.reason, FailureReason::MergeConflict);
+    assert_eq!(failure.node, Some(key("gather")));
+    // The first conflict stopped the step: no other merge was tried and the join never ran.
+    let runner = runtime.runner();
+    assert_eq!(runner.merges.len(), 1);
+    let started: Vec<&str> = runner
+        .started
+        .iter()
+        .map(|(_, key)| key.node.as_str())
+        .collect();
+    assert_eq!(started, vec!["split", "a", "b", "c"]);
+    // The conflict is recorded as a failed try of the join's key, with no process.
+    let finish = state.last_finish(&key("gather")).unwrap();
+    assert_eq!(
+        finish.failure.as_ref().unwrap().reason,
+        FailureReason::MergeConflict
+    );
+    assert!(finish.had_start);
+    assert!(state.running.is_empty());
+}
+
+#[test]
+fn runs_waiting_at_gates_hold_no_run_slot() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = runtime(FakeRunner::new());
+    for n in 1..=3 {
+        runtime.add(spec(temp.path(), n, GATED)).unwrap();
+    }
+    runtime.add(spec(temp.path(), 4, SINGLE)).unwrap();
+    runtime.tick();
+
+    for n in 1..=3 {
+        let state = runtime.state(&run_id(n)).unwrap();
+        assert!(state.open_gates.contains_key(&key("work")));
+    }
+    // The three gated runs freed their slots, so the fourth started.
+    assert_eq!(runtime.runner().started, vec![(run_id(4), key("work"))]);
+    assert_eq!(lifecycle(&runtime, 4), Lifecycle::Running);
+    assert!(!runtime.is_queued(&run_id(4)));
+
+    // A fifth run starts too while the gated runs wait.
+    runtime.add(spec(temp.path(), 5, SINGLE)).unwrap();
+    runtime.tick();
+    assert_eq!(runtime.runner().started.len(), 2);
+    assert_eq!(runtime.runner().started[1].0, run_id(5));
+}
+
+/// A leader that exits on SIGTERM after starting a child that ignores it and stays in the group;
+/// the child's pid is written to `$1`.
+fn leader_leaving_a_child(pid_file: &Path) -> Command {
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        "(trap '' TERM; exec sleep 60) & echo $! > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; wait",
+        "sh",
+    ]);
+    command.arg(pid_file);
+    command
+}
+
+fn spawn_leader_leaving_a_child(temp: &TempDir) -> (NodeProcess, u32) {
+    let pid_file = temp.path().join("child");
+    let leader = NodeProcess::spawn(
+        leader_leaving_a_child(&pid_file),
+        Stdio::null(),
+        Stdio::null(),
+        Stdio::null(),
+    )
+    .unwrap();
+    wait_until(Duration::from_secs(5), || pid_file.exists());
+    let child: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    wait_until(Duration::from_secs(5), || {
+        process::start_time(leader.record().pid).is_some()
+    });
+    (leader, child)
+}
+
+#[test]
+fn stop_kills_a_child_left_in_the_group_when_the_leader_exits_on_sigterm() {
+    let temp = TempDir::new().unwrap();
+    let (mut leader, child) = spawn_leader_leaving_a_child(&temp);
+    let group = leader.record().pid;
+    assert!(process::group_alive(group));
+    assert!(process::start_time(child).is_some());
+
+    let started = Instant::now();
+    leader.stop();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(5), "stop took {elapsed:?}");
+    // The child ignored SIGTERM, so it lived through the grace and only SIGKILL ended it.
+    assert!(elapsed >= STOP_GRACE, "stop took {elapsed:?}");
+    assert!(leader.has_exited());
+    assert!(!process::group_alive(group), "the child outlived the stop");
+}
+
+#[test]
+fn an_orphan_group_is_killed_even_when_its_leader_exits_on_sigterm() {
+    let temp = TempDir::new().unwrap();
+    let (mut leader, _child) = spawn_leader_leaving_a_child(&temp);
+    let mut sleeping = sleeper();
+    wait_until(Duration::from_secs(5), || {
+        process::start_time(sleeping.record().pid).is_some()
+    });
+    let records = [leader.record(), sleeping.record()];
+
+    let started = Instant::now();
+    let outcomes = process::kill_orphans(&records);
+    let elapsed = started.elapsed();
+    assert_eq!(outcomes, vec![OrphanOutcome::Killed, OrphanOutcome::Killed]);
+    // Both share one grace period.
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    assert!(!process::group_alive(records[0].pid));
+    assert!(!process::group_alive(records[1].pid));
+    assert!(leader.has_exited());
+    assert!(sleeping.has_exited());
 }
