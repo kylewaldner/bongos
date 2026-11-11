@@ -519,6 +519,40 @@ fn a_merge_conflict_fails_the_join_and_starts_nothing_after() {
 }
 
 #[test]
+fn a_merge_conflict_keeps_the_branches_merged_before_it() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.auto_finish = true;
+    runner.merge_conflicts = true;
+    runner.clean_merges = 1;
+    let mut runtime = runtime(runner);
+    runtime.add(spec(temp.path(), 1, FAN)).unwrap();
+    for _ in 0..5 {
+        runtime.tick();
+    }
+
+    let state = runtime.state(&run_id(1)).unwrap();
+    let (end, failure) = state.ended.unwrap();
+    assert_eq!(end, EndState::Failed);
+    assert_eq!(failure.unwrap().reason, FailureReason::MergeConflict);
+    // The first branch was merged into the run branch before the second conflicted, and the log
+    // says so; the conflict stopped the third merge.
+    let merged: Vec<_> = runtime
+        .events(&run_id(1))
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::BranchMerged { join, branch, .. } => Some((join.clone(), branch.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].0, "gather");
+    assert_eq!(runtime.runner().merges.len(), 2);
+    assert_eq!(merged[0].1, runtime.runner().merges[0].2);
+}
+
+#[test]
 fn runs_waiting_at_gates_hold_no_run_slot() {
     let temp = TempDir::new().unwrap();
     let mut runtime = runtime(FakeRunner::new());

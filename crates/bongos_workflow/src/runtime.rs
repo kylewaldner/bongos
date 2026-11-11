@@ -809,8 +809,10 @@ pub(crate) mod fake {
         pub stopped_processes: Vec<NodeProcess>,
         /// The most tries in flight at once, across runs.
         pub max_in_flight: usize,
-        /// Every merge fails `merge conflict` when set.
+        /// Every merge fails `merge conflict` when set, after the first `clean_merges` merges.
         pub merge_conflicts: bool,
+        /// How many merges succeed before `merge_conflicts` takes effect.
+        pub clean_merges: usize,
         /// Every merge asked for, as `(run, join, branch)`.
         pub merges: Vec<(String, String, Branch)>,
         results: BTreeMap<String, Value>,
@@ -940,7 +942,7 @@ pub(crate) mod fake {
         ) -> Result<String, Failure> {
             self.merges
                 .push((run.to_string(), join.to_string(), branch.clone()));
-            if self.merge_conflicts {
+            if self.merge_conflicts && self.merges.len() > self.clean_merges {
                 return Err(Failure::new(
                     FailureReason::MergeConflict,
                     None,
