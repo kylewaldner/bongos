@@ -22,6 +22,14 @@ actions!(
     ]
 );
 
+actions!(
+    cursor,
+    [
+        /// Flips the cursor between a block and a bar for this session.
+        ToggleStyle,
+    ]
+);
+
 macro_rules! count_action {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*

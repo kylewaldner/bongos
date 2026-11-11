@@ -183,6 +183,7 @@ impl VsCodeSettings {
             debugger: None,
             diagnostics: None,
             editor: self.editor_settings_content(),
+            emacs: None,
             extension: ExtensionSettingsContent::default(),
             file_finder: None,
             git: self.git_settings_content(),

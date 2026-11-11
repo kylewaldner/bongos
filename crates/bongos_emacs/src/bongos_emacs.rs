@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod apply;
 mod comments;
+mod cursor;
 mod goto_line;
 mod kill;
 pub mod kill_sink;
@@ -25,6 +26,8 @@ mod zap;
 mod apply_tests;
 #[cfg(test)]
 mod comments_tests;
+#[cfg(test)]
+mod cursor_tests;
 #[cfg(test)]
 mod goto_line_tests;
 #[cfg(test)]
@@ -63,6 +66,7 @@ pub use last_command::last_command;
 pub fn init(cx: &mut App) {
     last_command::init(cx);
     quit::init(cx);
+    cursor::init(cx);
     cx.observe_new(|editor: &mut Editor, _window, cx| {
         let weak = cx.entity().downgrade();
         register(editor, &weak, motion::forward_word);

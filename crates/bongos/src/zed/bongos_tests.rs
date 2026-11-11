@@ -217,6 +217,21 @@ async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+async fn cursor_toggle_style_dispatches_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let action = cx
+            .build_action("cursor::ToggleStyle", None)
+            .expect("cursor::ToggleStyle is registered");
+        assert!(action.partial_eq(&bongos_emacs::actions::ToggleStyle));
+        assert_eq!(
+            command_palette::humanize_action_name("cursor::ToggleStyle"),
+            "cursor: toggle style"
+        );
+    });
+}
+
 /// The `task` and `todo` actions that name a task or todo, with the palette text of each.
 const WORK_ACTIONS: [(&str, &str); 16] = [
     ("task::New", "task: new"),

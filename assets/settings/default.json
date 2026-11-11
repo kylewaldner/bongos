@@ -23,6 +23,12 @@
   // 5. "SublimeText"
   // 6. "TextMate"
   "base_keymap": "VSCode",
+  // Settings of the Emacs mode.
+  "emacs": {
+    // The cursor shape: "auto" is a block while `base_keymap` is "Emacs" and `cursor_shape`
+    // otherwise; "emacs" is always a block; "modern" is always a bar.
+    "cursor_style": "auto"
+  },
   // The name of a font to use for rendering text in the editor
   // ".ZedMono" currently aliases to Lilex
   // but this may change in the future.
