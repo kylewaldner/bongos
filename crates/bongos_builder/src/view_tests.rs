@@ -804,3 +804,68 @@ async fn the_dump_writes_the_breadcrumb_the_problems_and_the_rows(cx: &mut TestA
     assert!(written.contains("schema: Schema"), "{written}");
     assert!(written.contains("api: Api"), "{written}");
 }
+
+const WITH_WORKFLOW: &str = "\
+proposal 1
+for b
+by kyle
+
+task billing: Billing | id b
+  task api: Api
+    result a PR
+    todo review | workflow review-pr
+";
+
+#[gpui::test]
+async fn an_unknown_workflow_is_a_warning_until_names_are_set_and_an_error_after(
+    cx: &mut TestAppContext,
+) {
+    let (_h, workspace, cx) =
+        harness(cx, true, Some("b"), &[proposal(1, WITH_WORKFLOW, false)]).await;
+    // No source of names: the name is not checked.
+    let view = show(&workspace, cx).await;
+    let all = text(&view, cx);
+    assert!(
+        row(&view, "workflow", cx).contains("warning: workflow 'review-pr' is not checked"),
+        "{all}"
+    );
+    assert!(!all.contains("unknown workflow"), "{all}");
+
+    // Names that do not include it: an error, listing the known names.
+    cx.update(|_, cx| crate::set_workflow_names(|_| Some(["ship-pr".to_string()].into()), cx));
+    let view = show_again(&workspace, &view, cx).await;
+    assert!(
+        row(&view, "unknown workflow", cx)
+            .contains("error: unknown workflow 'review-pr': the known workflows are ship-pr"),
+        "{}",
+        text(&view, cx)
+    );
+
+    // Names that include it: no problem about it.
+    cx.update(|_, cx| crate::set_workflow_names(|_| Some(["review-pr".to_string()].into()), cx));
+    let view = show_again(&workspace, &view, cx).await;
+    let all = text(&view, cx);
+    assert!(all.contains("problems: none"), "{all}");
+
+    // A source that answers `None` is an unset source.
+    cx.update(|_, cx| crate::set_workflow_names(|_| None, cx));
+    let view = show_again(&workspace, &view, cx).await;
+    assert!(row(&view, "workflow", cx).contains("is not checked"));
+}
+
+/// Closes `view` and opens the proposal view again, so it analyzes with the names now set.
+async fn show_again(
+    workspace: &Entity<Workspace>,
+    view: &Entity<ProposalView>,
+    cx: &mut VisualTestContext,
+) -> Entity<ProposalView> {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let pane = workspace.active_pane().clone();
+        pane.update(cx, |pane, cx| {
+            pane.close_item_by_id(view.entity_id(), workspace::SaveIntent::Skip, window, cx)
+                .detach()
+        });
+    });
+    cx.run_until_parked();
+    show(workspace, cx).await
+}

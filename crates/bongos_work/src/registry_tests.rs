@@ -212,11 +212,11 @@ async fn advance_skip_and_remove_are_refused_while_the_task_has_a_run(cx: &mut T
         ("task::Advance", vec![Input::Pick("backfill")]),
         (
             "todo::Skip",
-            vec![Input::Pick("backfill"), Input::Pick("qa")],
+            vec![Input::Pick("backfill"), Input::Pick("implement")],
         ),
         (
             "todo::Remove",
-            vec![Input::Pick("backfill"), Input::Pick("qa")],
+            vec![Input::Pick("backfill"), Input::Pick("implement")],
         ),
     ] {
         harness.clear_toasts(cx);
