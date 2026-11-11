@@ -43,7 +43,6 @@ PROJECT_DIR="$WORK_ROOT/projects/billing"
 TASK_DIR="$PROJECT_DIR/tasks/prorate-invoices"
 TASK_PROMPTS="$TASK_DIR/prompts.txt"
 PROJECT_PROMPTS="$PROJECT_DIR/prompts.txt"
-WORKTREE="$REPO/.bongos-worktrees/prorate-invoices"
 FIXTURES="$BONGOS_ROOT/crates/bongos_chat/test-fixtures"
 CHAT_BIN="$RUN/chat-bin"
 FAKE_CLAUDE_INPUT="$RUN/fake-claude-input.txt"
@@ -322,6 +321,8 @@ assert_file "$TASK_DIR/task.toml"
 TASK_ID=$(toml "$TASK_DIR/task.toml" 'd["id"]')
 wkeys s
 choose prorate
+wait_worktree_line "$TASK_DIR" || fail "no worktree line: $(cat "$TASK_DIR/task.toml")"
+WORKTREE=$(worktree_of "$TASK_DIR")
 poll 10 "the worktree $WORKTREE within ten seconds" test -d "$WORKTREE"
 wkeys f
 choose prorate

@@ -373,9 +373,10 @@ choose backfill
 choose stacked
 act keys Return
 wait_toml "$SECOND_DIR/task.toml" 'd["stacked_on"]["task"] + " " + d["stacked_on"]["unblock"]' "backfill-usage-events review"
-FIRST_WT="$REPO/.bongos-worktrees/backfill-usage-events"
 wkeys s
 choose backfill
+wait_worktree_line "$FIRST_DIR" || fail "the first task has no worktree line: $(cat "$FIRST_DIR/task.toml")"
+FIRST_WT=$(worktree_of "$FIRST_DIR")
 poll 10 "the worktree $FIRST_WT within ten seconds" test -d "$FIRST_WT"
 git -C "$REPO" worktree list --porcelain | grep -qE '^worktree .*/\.bongos-worktrees/backfill-usage-events$' ||
   fail "git worktree list does not show $FIRST_WT: $(git -C "$REPO" worktree list)"
@@ -412,9 +413,10 @@ git -C "$FIRST_WT" add backfill.txt
 git -C "$FIRST_WT" "${GIT_ID[@]}" commit -qm "backfill usage events"
 FIRST_SHA=$(git -C "$REPO" rev-parse backfill-usage-events)
 [ "$FIRST_SHA" != "$MAIN_SHA" ] || fail "the commit on backfill-usage-events did not land"
-SECOND_WT="$REPO/.bongos-worktrees/bill-usage-events"
 wkeys s
 choose "bill usage"
+wait_worktree_line "$SECOND_DIR" || fail "the second task has no worktree line: $(cat "$SECOND_DIR/task.toml")"
+SECOND_WT=$(worktree_of "$SECOND_DIR")
 poll 10 "the worktree $SECOND_WT within ten seconds" test -d "$SECOND_WT"
 wait_toml "$SECOND_DIR/task.toml" 'd.get("base")' backfill-usage-events
 [ "$(git -C "$REPO" merge-base bill-usage-events backfill-usage-events)" = "$FIRST_SHA" ] ||
