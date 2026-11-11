@@ -47,8 +47,9 @@ fi
 echo "Generating cargo licenses"
 if [ -z "${ALLOW_MISSING_LICENSES-}" ]; then FAIL_FLAG=--fail; else FAIL_FLAG=""; fi
 if [ -z "${ALLOW_MISSING_LICENSES-}" ]; then WRAPPER=fail_on_stderr; else WRAPPER=""; fi
+# The license list describes the app as it ships, so run without unified features.
 set -x
-$WRAPPER cargo about generate \
+$WRAPPER env -u CARGO_UNSTABLE_FEATURE_UNIFICATION -u CARGO_RESOLVER_FEATURE_UNIFICATION cargo about generate \
     $FAIL_FLAG \
     -c script/licenses/zed-licenses.toml \
     "$TEMPLATE_FILE" >>"$OUTPUT_FILE"
