@@ -572,7 +572,7 @@ fn exit_detail(exit: Exit, stderr: &str) -> String {
 
 fn minutes(duration: Duration) -> String {
     let seconds = duration.as_secs();
-    if seconds >= 60 && seconds % 60 == 0 {
+    if seconds >= 60 && seconds.is_multiple_of(60) {
         format!("{} min", seconds / 60)
     } else {
         format!("{} s", duration.as_secs_f64())

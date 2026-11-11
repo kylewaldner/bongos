@@ -82,6 +82,8 @@ fn definition() -> Definition {
     parse(TRIAGE).unwrap()
 }
 
+// A test reads the fake's `--version` and `--help` once; blocking the thread is fine here.
+#[allow(clippy::disallowed_methods)]
 fn help_of_fake() -> (String, String) {
     let run = |arg: &str| {
         String::from_utf8(Command::new(FAKE).arg(arg).output().unwrap().stdout).unwrap()
