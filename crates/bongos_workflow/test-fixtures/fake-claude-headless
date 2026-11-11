@@ -1,0 +1,107 @@
+#!/bin/sh
+# A stand-in for `claude -p --output-format stream-json` in tests. It prints recorded stream
+# events and exits like the real CLI would. Knobs come as extra arguments, since the runner clears
+# the environment:
+#   --fake-scenario NAME  success (default), permission-denied, max-turns, max-budget, invalid,
+#                         missing, logged-out, crash, sleep
+#   --fake-log DIR        writes DIR/argv (one argument per line), DIR/env and DIR/stdin
+# `--version` and `--help` answer like Claude Code 2.1.322.
+
+here=$(cd "$(dirname "$0")" && pwd)
+
+case "$1" in
+--version)
+    echo "2.1.322 (Claude Code)"
+    exit 0
+    ;;
+--help)
+    cat <<'EOF'
+Usage: claude [options] [command] [prompt]
+
+Options:
+  --allowedTools, --allowed-tools <tools...>
+  --append-system-prompt <prompt>       Append a system prompt
+  --disallowedTools, --disallowed-tools <tools...>
+  --json-schema <schema>                JSON Schema for structured output
+  --max-budget-usd <amount>             Maximum dollar amount to spend
+  --model <model>                       Model for the current session
+  --output-format <format>              Output format
+  --permission-mode <mode>              Permission mode to use for the session
+  --permission-prompts <target>         Who answers permission prompts
+  -p, --print                           Print response and exit
+  --session-id <uuid>                   Use a specific session ID
+  --verbose                             Override verbose mode setting
+EOF
+    exit 0
+    ;;
+esac
+
+scenario=success
+log=
+for arg in "$@"; do
+    case "$want" in
+    scenario) scenario=$arg ;;
+    log) log=$arg ;;
+    esac
+    want=
+    case "$arg" in
+    --fake-scenario) want=scenario ;;
+    --fake-log) want=log ;;
+    esac
+done
+
+if [ -n "$log" ]; then
+    mkdir -p "$log"
+    : > "$log/argv"
+    for arg in "$@"; do
+        printf '%s\n' "$arg" >> "$log/argv"
+    done
+    env > "$log/env"
+    cat > "$log/stdin"
+else
+    cat > /dev/null
+fi
+
+init='{"type":"system","subtype":"init","cwd":"/work/node","session_id":"00000000-0000-4000-8000-000900000001","tools":["Read","StructuredOutput"],"mcp_servers":[],"model":"claude-haiku-5-5","permissionMode":"acceptEdits","claude_code_version":"2.1.322"}'
+
+case "$scenario" in
+success)
+    cat "$here/claude-success.jsonl"
+    ;;
+permission-denied)
+    cat "$here/claude-permission-denied.jsonl"
+    ;;
+max-turns)
+    cat "$here/claude-max-turns.jsonl"
+    exit 1
+    ;;
+max-budget)
+    cat "$here/claude-max-budget.jsonl"
+    exit 1
+    ;;
+invalid)
+    echo "$init"
+    echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.01,"session_id":"00000000-0000-4000-8000-000900000001","permission_denials":[],"result":"{\"mode\":\"maybe\",\"why\":\"x\"}","structured_output":{"mode":"maybe","why":"x"}}'
+    ;;
+missing)
+    echo "$init"
+    echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.01,"session_id":"00000000-0000-4000-8000-000900000001","permission_denials":[],"result":"{\"mode\":\"one-shot\",\"why\":\"from the text\"}","structured_output":null}'
+    ;;
+logged-out)
+    echo "$init"
+    echo '{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0,"session_id":"00000000-0000-4000-8000-000900000001","permission_denials":[],"result":"Invalid API key · Please run /login"}'
+    exit 1
+    ;;
+crash)
+    echo "boom: the fake crashed" >&2
+    exit 3
+    ;;
+sleep)
+    echo "$init"
+    sleep 600
+    ;;
+*)
+    echo "unknown fake scenario: $scenario" >&2
+    exit 2
+    ;;
+esac
