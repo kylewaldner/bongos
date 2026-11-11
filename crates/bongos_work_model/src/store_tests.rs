@@ -683,6 +683,11 @@ fn a_child_slugged_workflows_still_loads_and_a_workflows_directory_is_no_artifac
     expect_ids(&tree, &["g1", "l1"]);
     let project = &tree.projects[0];
     assert_eq!(project.task.children[0].slug, "workflows");
-    let files: Vec<&Path> = project.task.files.keys().map(PathBuf::as_path).collect();
-    assert_eq!(files, [Path::new("notes/n.md")]);
+    let artifacts: Vec<String> = project
+        .task
+        .files
+        .keys()
+        .filter_map(|path| crate::artifacts::artifact_key(path))
+        .collect();
+    assert_eq!(artifacts, ["notes/n.md"]);
 }
