@@ -1,0 +1,83 @@
+schema = 1
+name = "implement PR"
+description = "Triage, plan, fan out over work items, test and review"
+start = "triage"
+
+[inputs]
+goal = { type = "text", from = "task.goal" }
+plan = { type = "path", from = "task.plan", required = false }
+
+[defaults]
+agent = "claude"
+model = "sonnet"
+permission_mode = "acceptEdits"
+allowed_tools = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(cargo test:*)", "mcp__github__*"]
+max_turns = 40
+max_cost_usd = 5.0
+max_minutes = 30
+retries = 2
+
+[nodes.triage]
+kind = "agent"
+purpose = "Decide one-shot or planned"
+prompt = "triage.md"
+output = { mode = { type = "choice", values = ["one-shot", "planned"] }, why = { type = "text" } }
+routes = [
+  { when = { mode = "one-shot" }, to = "implement_item" },
+  { when = { mode = "planned" }, to = "plan" },
+]
+
+[nodes.plan]
+kind = "agent"
+prompt = "plan.md"
+output = { items = { type = "list", of = "text" }, design = { type = "path", outcome = "document" } }
+routes = [{ fan_out = { over = "items", to = "implement_item", width = 8 } }]
+
+[nodes.implement_item]
+kind = "agent"
+prompt = "implement_item.md"
+output = { summary = { type = "text" } }
+routes = [{ to = "test" }]
+
+[nodes.test]
+kind = "program"
+join = { wait = "all" }
+script = "run_tests.py"
+language = "python"
+permissions = { commands = ["cargo"], network = [], mcp = [] }
+output = { status = { type = "choice", values = ["pass", "fail"] } }
+routes = [
+  { when = { status = "pass" }, to = "review" },
+  { when = { status = "fail" }, to = "fix", max_passes = 3, on_bound = "stuck" },
+]
+
+[nodes.fix]
+kind = "agent"
+prompt = "fix.md"
+output = { notes = { type = "text" } }
+routes = [{ to = "test" }]
+
+[nodes.review]
+kind = "agent"
+prompt = "review.md"
+gate = { when = "after", question = "Ship this?" }
+output = { verdict = { type = "choice", values = ["approve", "changes"] }, pr = { type = "text", outcome = "pr" } }
+routes = [
+  { when = { verdict = "approve" }, to = "merge" },
+  { when = { verdict = "changes" }, to = "fix", max_passes = 3 },
+]
+
+[nodes.merge]
+kind = "program"
+use = "merge"
+with = { style = "ff-or-merge" }
+output = { result = { type = "choice", values = ["merged", "conflict"] } }
+routes = [{ when = { result = "merged" }, to = "done" }, { when = { result = "conflict" }, to = "stuck" }]
+
+[ends.done]
+kind = "success"
+outcomes = ["pr"]
+
+[ends.stuck]
+kind = "failure"
+reason = "merge conflict needs a hand"

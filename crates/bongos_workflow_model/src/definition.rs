@@ -133,7 +133,7 @@ pub enum InputType {
     Number,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
@@ -151,6 +151,21 @@ pub struct Settings {
     pub max_cost_usd: Option<f64>,
     pub max_minutes: Option<u32>,
     pub retries: Option<u32>,
+    /// The line each key was written on, for diagnostics.
+    pub lines: SettingLines,
+}
+
+/// The line of each key of [`Settings`] that was set; `allowed_tools` has one line per entry.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SettingLines {
+    pub agent: Option<usize>,
+    pub model: Option<usize>,
+    pub permission_mode: Option<usize>,
+    pub allowed_tools: Vec<usize>,
+    pub max_turns: Option<usize>,
+    pub max_cost_usd: Option<usize>,
+    pub max_minutes: Option<usize>,
+    pub retries: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -187,12 +202,18 @@ pub struct Permissions {
     pub commands: Vec<String>,
     pub network: Vec<String>,
     pub mcp: Vec<String>,
+    /// The line `permissions` was written on.
+    #[serde(skip)]
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Join {
     pub wait: JoinWait,
+    /// The line `join` was written on.
+    #[serde(skip)]
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -337,27 +358,62 @@ fn default_true() -> bool {
 
 #[derive(Default, Deserialize)]
 struct RawSettings {
-    agent: Option<AgentKind>,
-    model: Option<String>,
-    permission_mode: Option<String>,
-    allowed_tools: Option<Vec<String>>,
-    max_turns: Option<u32>,
-    max_cost_usd: Option<f64>,
-    max_minutes: Option<u32>,
-    retries: Option<u32>,
+    agent: Option<Spanned<AgentKind>>,
+    model: Option<Spanned<String>>,
+    permission_mode: Option<Spanned<String>>,
+    allowed_tools: Option<Vec<Spanned<String>>>,
+    max_turns: Option<Spanned<u32>>,
+    max_cost_usd: Option<Spanned<f64>>,
+    max_minutes: Option<Spanned<u32>>,
+    retries: Option<Spanned<u32>>,
 }
 
-impl From<RawSettings> for Settings {
-    fn from(raw: RawSettings) -> Self {
-        Self {
-            agent: raw.agent,
-            model: raw.model,
-            permission_mode: raw.permission_mode,
-            allowed_tools: raw.allowed_tools,
-            max_turns: raw.max_turns,
-            max_cost_usd: raw.max_cost_usd,
-            max_minutes: raw.max_minutes,
-            retries: raw.retries,
+impl RawSettings {
+    fn convert(self, lines: &LineIndex) -> Settings {
+        fn split<T>(value: Option<Spanned<T>>, lines: &LineIndex) -> (Option<T>, Option<usize>) {
+            match value {
+                Some(value) => {
+                    let line = lines.line_of(&value);
+                    (Some(value.into_inner()), Some(line))
+                }
+                None => (None, None),
+            }
+        }
+        let (agent, agent_line) = split(self.agent, lines);
+        let (model, model_line) = split(self.model, lines);
+        let (permission_mode, permission_mode_line) = split(self.permission_mode, lines);
+        let (max_turns, max_turns_line) = split(self.max_turns, lines);
+        let (max_cost_usd, max_cost_usd_line) = split(self.max_cost_usd, lines);
+        let (max_minutes, max_minutes_line) = split(self.max_minutes, lines);
+        let (retries, retries_line) = split(self.retries, lines);
+        let tool_lines = self
+            .allowed_tools
+            .iter()
+            .flatten()
+            .map(|tool| lines.line_of(tool))
+            .collect();
+        let allowed_tools = self
+            .allowed_tools
+            .map(|tools| tools.into_iter().map(Spanned::into_inner).collect());
+        Settings {
+            agent,
+            model,
+            permission_mode,
+            allowed_tools,
+            max_turns,
+            max_cost_usd,
+            max_minutes,
+            retries,
+            lines: SettingLines {
+                agent: agent_line,
+                model: model_line,
+                permission_mode: permission_mode_line,
+                allowed_tools: tool_lines,
+                max_turns: max_turns_line,
+                max_cost_usd: max_cost_usd_line,
+                max_minutes: max_minutes_line,
+                retries: retries_line,
+            },
         }
     }
 }
@@ -373,22 +429,22 @@ struct RawNode {
     use_node: Option<Spanned<String>>,
     #[serde(default)]
     with: toml::Table,
-    permissions: Option<Permissions>,
+    permissions: Option<Spanned<Permissions>>,
     #[serde(default)]
     output: HashMap<String, Spanned<RawField>>,
     #[serde(default)]
     routes: Vec<Spanned<RawRoute>>,
-    join: Option<Join>,
+    join: Option<Spanned<Join>>,
     gate: Option<Spanned<RawGate>>,
     polls: Option<Polls>,
-    agent: Option<AgentKind>,
-    model: Option<String>,
-    permission_mode: Option<String>,
-    allowed_tools: Option<Vec<String>>,
-    max_turns: Option<u32>,
-    max_cost_usd: Option<f64>,
-    max_minutes: Option<u32>,
-    retries: Option<u32>,
+    agent: Option<Spanned<AgentKind>>,
+    model: Option<Spanned<String>>,
+    permission_mode: Option<Spanned<String>>,
+    allowed_tools: Option<Vec<Spanned<String>>>,
+    max_turns: Option<Spanned<u32>>,
+    max_cost_usd: Option<Spanned<f64>>,
+    max_minutes: Option<Spanned<u32>>,
+    retries: Option<Spanned<u32>>,
 }
 
 #[derive(Deserialize)]
@@ -544,7 +600,7 @@ pub fn parse(text: &str) -> Result<Definition, ParseError> {
             value: raw.start.into_inner(),
         },
         inputs: inputs.into_iter().map(|(_, input)| input).collect(),
-        defaults: raw.defaults.into(),
+        defaults: raw.defaults.convert(&lines),
         nodes: nodes.into_iter().map(|(_, node)| node).collect(),
         ends: ends.into_iter().map(|(_, end)| end).collect(),
         unknown_keys,
@@ -608,10 +664,22 @@ fn convert_node(
         language: raw.language,
         use_node: raw.use_node.map(|use_node| located(use_node, lines)),
         with: raw.with,
-        permissions: raw.permissions,
+        permissions: raw.permissions.map(|permissions| {
+            let line = lines.line_of(&permissions);
+            Permissions {
+                line,
+                ..permissions.into_inner()
+            }
+        }),
         output: output.into_iter().map(|(_, field)| field).collect(),
         routes,
-        join: raw.join,
+        join: raw.join.map(|join| {
+            let line = lines.line_of(&join);
+            Join {
+                line,
+                ..join.into_inner()
+            }
+        }),
         gate: raw.gate.map(|gate| {
             let line = lines.line_of(&gate);
             let gate = gate.into_inner();
@@ -622,7 +690,7 @@ fn convert_node(
             }
         }),
         polls: raw.polls,
-        settings: Settings {
+        settings: RawSettings {
             agent: raw.agent,
             model: raw.model,
             permission_mode: raw.permission_mode,
@@ -631,7 +699,8 @@ fn convert_node(
             max_cost_usd: raw.max_cost_usd,
             max_minutes: raw.max_minutes,
             retries: raw.retries,
-        },
+        }
+        .convert(lines),
     })
 }
 
