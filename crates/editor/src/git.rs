@@ -199,6 +199,20 @@ impl Editor {
         self.show_git_blame_gutter
     }
 
+    /// Hides the blame gutter; true when it was shown.
+    pub fn hide_git_blame_gutter(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_shown = std::mem::take(&mut self.show_git_blame_gutter);
+        if was_shown {
+            cx.notify();
+        }
+        was_shown
+    }
+
+    /// Collapses every expanded diff hunk; true when any was expanded.
+    pub fn collapse_expanded_diff_hunks(&mut self, cx: &mut Context<Self>) -> bool {
+        self.clear_expanded_diff_hunks(cx)
+    }
+
     pub fn expand_selected_diff_hunks(&mut self, cx: &mut Context<Self>) {
         let ranges: Vec<_> = self
             .selections

@@ -27,9 +27,11 @@ workspace.workspace = true
 
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }
+git.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 theme_settings.workspace = true
+tree-sitter-rust.workspace = true
 workspace = { workspace = true, features = ["test-support"] }

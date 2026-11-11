@@ -7406,6 +7406,11 @@ impl Workspace {
         self.modal_layer.read(cx).has_active_modal()
     }
 
+    /// Whether focus is inside the active modal; false when there is none.
+    pub fn focus_in_modal(&self, window: &Window, cx: &App) -> bool {
+        self.modal_layer.read(cx).focus_in_active_modal(window, cx)
+    }
+
     pub fn active_modal<V: ManagedView + 'static>(&self, cx: &App) -> Option<Entity<V>> {
         self.modal_layer.read(cx).active_modal()
     }

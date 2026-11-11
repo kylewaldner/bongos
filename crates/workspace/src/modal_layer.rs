@@ -215,6 +215,7 @@ trait ModalViewHandle {
     fn fade_out_background(&self, cx: &mut App) -> bool;
     fn render_bare(&self, cx: &mut App) -> bool;
     fn focus(&self, window: &mut Window, cx: &mut App);
+    fn contains_focused(&self, window: &Window, cx: &App) -> bool;
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -237,6 +238,10 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
     fn focus(&self, window: &mut Window, cx: &mut App) {
         let focus_handle = self.focus_handle(cx);
         window.focus(&focus_handle, cx);
+    }
+
+    fn contains_focused(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle(cx).contains_focused(window, cx)
     }
 }
 
@@ -441,6 +446,13 @@ impl ModalLayer {
 
     pub fn has_active_modal(&self) -> bool {
         self.active_modal.is_some()
+    }
+
+    /// Whether focus is inside the active modal; false when there is none.
+    pub fn focus_in_active_modal(&self, window: &Window, cx: &App) -> bool {
+        self.active_modal
+            .as_ref()
+            .is_some_and(|active| active.modal.contains_focused(window, cx))
     }
 
     /// The active modal and the layer's focus handle when it is placed in the minibuffer strip,
