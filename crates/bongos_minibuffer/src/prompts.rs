@@ -33,6 +33,7 @@ pub struct ReadKey {
     prompt: SharedString,
     keys: Vec<(char, SharedString)>,
     default: Option<char>,
+    any_char: bool,
     on_answer: Option<Box<dyn FnOnce(char, &mut Window, &mut App)>>,
     on_cancel: Option<Box<dyn FnOnce(&mut Window, &mut App)>>,
 }
@@ -44,6 +45,7 @@ impl ReadKey {
             prompt: prompt.into(),
             keys: Vec::new(),
             default: None,
+            any_char: false,
             on_answer: None,
             on_cancel: None,
         }
@@ -58,6 +60,14 @@ impl ReadKey {
     /// The declared key that RET answers, and C-g too (so the prompt never needs a cancel).
     pub fn default(mut self, key: char) -> Self {
         self.default = Some(key);
+        self
+    }
+
+    /// Lets any single printable character answer, with or without Shift, whether or not it is
+    /// a declared key (zap-to-char's `)` or `Z`). C-g and Escape still cancel; keys with Ctrl,
+    /// Alt, the platform key or Fn are ignored.
+    pub fn any_char(mut self) -> Self {
+        self.any_char = true;
         self
     }
 
@@ -84,6 +94,7 @@ pub struct ReadKeyView {
     prompt: SharedString,
     keys: Vec<(char, SharedString)>,
     default: Option<char>,
+    any_char: bool,
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
     done: bool,
@@ -104,6 +115,7 @@ pub fn read_key(
         prompt,
         keys,
         default,
+        any_char,
         on_answer,
         on_cancel,
     } = prompt;
@@ -117,6 +129,7 @@ pub fn read_key(
             prompt,
             keys,
             default,
+            any_char,
             focus_handle: cx.focus_handle(),
             workspace: weak,
             done: false,
@@ -246,8 +259,14 @@ impl ReadKeyView {
             let typed = keystroke.key_char.as_deref().unwrap_or(&keystroke.key);
             let mut chars = typed.chars();
             let key = chars.next().filter(|_| chars.next().is_none());
-            let declared = key.filter(|key| self.keys.iter().any(|(declared, _)| declared == key));
-            let Some(key) = declared else {
+            let answers = key.filter(|key| {
+                if self.any_char {
+                    !key.is_control()
+                } else {
+                    self.keys.iter().any(|(declared, _)| declared == key)
+                }
+            });
+            let Some(key) = answers else {
                 // An undeclared key is not an answer, and does not reach the editor behind.
                 cx.stop_propagation();
                 return;

@@ -634,6 +634,35 @@ async fn emacs_line_kills_at_three_carets_are_one_undo_step(cx: &mut TestAppCont
     assert_eq!(text(cx), "aa\nbb\ncc\ndd");
 }
 
+/// The zap commands run on an editor when dispatched by name with their count and character
+/// arguments; a character that is not there leaves the text and the clipboard alone.
+#[gpui::test]
+async fn emacs_zap_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("foo(bar) baz(qux) end", cx).await;
+    let text = |cx: &mut gpui::VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+
+    select_offsets(&editor, &[0..0], cx);
+    run_emacs(
+        "emacs::ZapToChar",
+        serde_json::json!({ "count": 2, "char": ")" }),
+        cx,
+    );
+    assert_eq!(text(cx), " end");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("foo(bar) baz(qux)"));
+
+    select_offsets(&editor, &[4..4], cx);
+    run_emacs(
+        "emacs::ZapBackUpToChar",
+        serde_json::json!({ "char": "e" }),
+        cx,
+    );
+    assert_eq!(text(cx), " e");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("nd"));
+    run_emacs("emacs::ZapToChar", serde_json::json!({ "char": "z" }), cx);
+    assert_eq!(text(cx), " e");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("nd"));
+}
+
 /// The whitespace commands run on an editor when dispatched by name with their count argument,
 /// as the palette and a keymap entry reach them; two carets are one undo step.
 #[gpui::test]

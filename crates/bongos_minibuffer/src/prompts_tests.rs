@@ -291,6 +291,71 @@ async fn minibuffer_read_key_ret_and_c_g_answer_the_default(cx: &mut TestAppCont
     assert_eq!(log.borrow().len(), 4);
 }
 
+/// Opens a read-key that any single printable character answers, logging what happened.
+fn open_any_char(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, log: &Log) {
+    let answered = log.clone();
+    let cancelled = log.clone();
+    let prompt = ReadKey::new(HOST, "Zap to char: ")
+        .any_char()
+        .on_answer(move |key, _, _| answered.borrow_mut().push(format!("answer:{key}")))
+        .on_cancel(move |_, _| cancelled.borrow_mut().push("cancelled".to_string()));
+    workspace.update_in(cx, |workspace, window, cx| {
+        read_key(workspace, prompt, window, cx)
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn minibuffer_read_key_any_char_answers_with_undeclared_characters(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Log::default();
+    let cx = &mut cx;
+
+    open_any_char(&workspace, cx, &log);
+    cx.simulate_keystrokes(")");
+    cx.run_until_parked();
+    assert_eq!(*log.borrow(), ["answer:)"]);
+    assert!(key_view(&workspace, cx).is_none());
+
+    open_any_char(&workspace, cx, &log);
+    cx.simulate_keystrokes("shift-z");
+    cx.run_until_parked();
+    assert_eq!(log.borrow()[1], "answer:Z");
+
+    open_any_char(&workspace, cx, &log);
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    assert_eq!(log.borrow()[2], "answer:x");
+    assert_eq!(log.borrow().len(), 3);
+}
+
+#[gpui::test]
+async fn minibuffer_read_key_any_char_cancels_on_c_g_and_escape_and_ignores_modified_keys(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Log::default();
+    let cx = &mut cx;
+
+    open_any_char(&workspace, cx, &log);
+    cx.simulate_keystrokes("ctrl-x alt-x enter");
+    cx.run_until_parked();
+    assert!(
+        log.borrow().is_empty(),
+        "modified keys and RET are not answers"
+    );
+    assert!(key_view(&workspace, cx).is_some());
+    cx.simulate_keystrokes("ctrl-g");
+    cx.run_until_parked();
+    assert_eq!(*log.borrow(), ["cancelled"]);
+    assert!(key_view(&workspace, cx).is_none());
+
+    open_any_char(&workspace, cx, &log);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(*log.borrow(), ["cancelled", "cancelled"]);
+}
+
 #[gpui::test]
 async fn minibuffer_yes_or_no_is_a_read_key_over_y_and_n(cx: &mut TestAppContext) {
     let (workspace, mut cx) = window(cx, &[HOST]).await;
