@@ -271,6 +271,8 @@ pub struct SettingsContent {
 
     /// Settings for the Linear sync of tasks.
     pub linear: Option<LinearSettingsContent>,
+    /// Settings for workflows: runs of node graphs on a task.
+    pub workflows: Option<WorkflowsSettingsContent>,
 
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
@@ -1494,6 +1496,18 @@ pub struct LinearSettingsContent {
     /// and every Linear command is hidden and only says "Linear sync is off (linear.enabled)".
     ///
     /// Default: true
+    pub enabled: Option<bool>,
+}
+
+/// Settings for workflows.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowsSettingsContent {
+    /// Whether workflows are on. While they are off, bongos starts no run, loads no definition
+    /// and every workflow command is hidden and only says "Workflows are off
+    /// (workflows.enabled)".
+    ///
+    /// Default: false
     pub enabled: Option<bool>,
 }
 

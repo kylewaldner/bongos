@@ -251,13 +251,13 @@ fn load_with(root: &Path, previous: Option<&WorkTree>) -> WorkTree {
         errors,
     };
 
-    for (slug, dir) in subdirs(&layout::projects_dir(root), &mut tree.errors) {
+    for (slug, dir) in subdirs(&layout::projects_dir(root), false, &mut tree.errors) {
         tree.projects
             .push(load_project(slug, dir, &previous, &mut tree.errors));
     }
-    for (slug, dir) in subdirs(&layout::oneoffs_dir(root), &mut tree.errors) {
+    for (slug, dir) in subdirs(&layout::oneoffs_dir(root), false, &mut tree.errors) {
         let mut oneoffs = Vec::new();
-        for (name, oneoff_dir) in subdirs(&dir, &mut tree.errors) {
+        for (name, oneoff_dir) in subdirs(&dir, false, &mut tree.errors) {
             oneoffs.push(load_task(name, oneoff_dir, &previous, &mut tree.errors));
         }
         check_siblings(&mut oneoffs, &previous);
@@ -358,14 +358,14 @@ fn journal_dirs(root: &Path) -> Vec<PathBuf> {
     visit(root, &mut found);
     let projects = layout::projects_dir(root);
     visit(&projects, &mut found);
-    for (_, project) in subdirs(&projects, &mut ignored) {
+    for (_, project) in subdirs(&projects, false, &mut ignored) {
         task_journal_dirs(&project, &mut found, &mut visit);
     }
     let oneoffs = layout::oneoffs_dir(root);
     visit(&oneoffs, &mut found);
-    for (_, activity) in subdirs(&oneoffs, &mut ignored) {
+    for (_, activity) in subdirs(&oneoffs, false, &mut ignored) {
         visit(&activity, &mut found);
-        for (_, oneoff) in subdirs(&activity, &mut ignored) {
+        for (_, oneoff) in subdirs(&activity, false, &mut ignored) {
             task_journal_dirs(&oneoff, &mut found, &mut visit);
         }
     }
@@ -380,14 +380,16 @@ fn task_journal_dirs(
     visit(task_dir, found);
     let children = layout::children_dir(task_dir);
     visit(&children, found);
-    for (_, child) in subdirs(&children, &mut Vec::new()) {
+    for (_, child) in subdirs(&children, true, &mut Vec::new()) {
         task_journal_dirs(&child, found, visit);
     }
 }
 
 /// The subdirectories of `dir` that can be projects, activities or tasks, sorted by name: not
-/// hidden, not temporary, not reserved. A missing `dir` has none.
-fn subdirs(dir: &Path, errors: &mut Vec<FileError>) -> Vec<(String, PathBuf)> {
+/// hidden, not temporary, not reserved. A missing `dir` has none. In a task's `tasks/` directory
+/// (`children`) a child slugged `workflows` is still a task: the name was reserved only after tasks
+/// could have it.
+fn subdirs(dir: &Path, children: bool, errors: &mut Vec<FileError>) -> Vec<(String, PathBuf)> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -401,7 +403,8 @@ fn subdirs(dir: &Path, errors: &mut Vec<FileError>) -> Vec<(String, PathBuf)> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if name.starts_with('.') || layout::is_reserved(&name) {
+        let kept_child = children && name == layout::WORKFLOWS_DIR;
+        if name.starts_with('.') || (layout::is_reserved(&name) && !kept_child) {
             continue;
         }
         if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
@@ -521,7 +524,7 @@ fn load_task(slug: String, dir: PathBuf, previous: &Previous, errors: &mut Vec<F
     collect_files(&dir, Path::new(""), &mut files, errors);
 
     let mut children = Vec::new();
-    for (child_slug, child_dir) in subdirs(&layout::children_dir(&dir), errors) {
+    for (child_slug, child_dir) in subdirs(&layout::children_dir(&dir), true, errors) {
         children.push(load_task(child_slug, child_dir, previous, errors));
     }
     check_siblings(&mut children, previous);
