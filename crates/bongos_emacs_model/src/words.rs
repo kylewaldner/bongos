@@ -77,10 +77,7 @@ fn move_carets<T: TextSource + ?Sized>(
             } else {
                 forward_word_target(text, caret.head, count)
             };
-            Caret {
-                head,
-                tail: if select { caret.tail } else { head },
-            }
+            Caret::new(head, if select { caret.tail } else { head })
         })
         .collect();
     moved.sort_by_key(|c| (c.head, c.tail));

@@ -149,6 +149,15 @@ fn items<T: TextSource + ?Sized>(text: &T, carets: &[Caret], count: Option<i32>)
                     widened_at: None,
                     whole_line: false,
                 }
+            } else if caret.is_active() {
+                // An active empty region (mark just set) kills nothing, never the line.
+                Item {
+                    range: caret.head..caret.head,
+                    backward: false,
+                    needs_newline: false,
+                    widened_at: None,
+                    whole_line: false,
+                }
             } else {
                 whole_lines(text, caret.head, n)
             }
@@ -193,7 +202,7 @@ fn piece<T: TextSource + ?Sized>(text: &T, item: &Item) -> KilledPiece {
 }
 
 /// kill-region-or-line: a caret with a region kills it (the count is
-/// ignored); otherwise it kills N whole lines (`None` is 1) from its line
+/// ignored); an active empty region kills nothing; otherwise it kills N whole lines (`None` is 1) from its line
 /// start, newline included. On a last line without a newline it kills the line
 /// and the newline before it, and the piece still ends in a newline. A
 /// negative count kills the N lines above the caret's line; 0 kills nothing.

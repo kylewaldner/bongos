@@ -46,9 +46,11 @@ fn insert_plan(mut inserts: Vec<Insert>, others: &[Caret]) -> Plan {
         delta += insert.text.len();
         plan.edits.push((insert.at..insert.at, insert.text));
     }
-    carets.extend(others.iter().map(|c| Caret {
-        head: map_offset(&plan.edits, c.head),
-        tail: map_offset(&plan.edits, c.tail),
+    carets.extend(others.iter().map(|c| {
+        Caret::new(
+            map_offset(&plan.edits, c.head),
+            map_offset(&plan.edits, c.tail),
+        )
     }));
     carets.sort_by_key(|c| (c.head, c.tail));
     carets.dedup();
