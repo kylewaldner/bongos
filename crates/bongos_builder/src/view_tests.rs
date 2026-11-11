@@ -253,7 +253,7 @@ pub(crate) async fn harness<'a>(
     }
     let real = Arc::new(RealFs::new(None, cx.executor()));
     cx.update(|cx| {
-        bongos_work::init(real.clone(), WorkDirs { root }, cx);
+        bongos_work::init(real.clone(), WorkDirs::for_test(root), cx);
         crate::init(real.clone(), BuilderDirs::new(&home), cx);
     });
     let store = cx.update(|cx| WorkStore::global(cx).unwrap());

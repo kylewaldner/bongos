@@ -59,15 +59,30 @@ pub use worktrees::expand_home;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkDirs {
     pub root: PathBuf,
+    /// The central directory for worktrees: `<data_dir>/worktrees`.
+    pub worktrees: PathBuf,
 }
 
 impl WorkDirs {
-    /// The directory names under `home`: `<home>/.bongos`.
-    pub fn new(home: &Path) -> Self {
+    /// `<home>/.bongos` and `<data_dir>/worktrees`.
+    pub fn new(home: &Path, data_dir: &Path) -> Self {
         Self {
             root: home.join(".bongos"),
+            worktrees: data_dir.join("worktrees"),
         }
     }
+
+    /// Dirs for a test: `worktrees` is a sibling of `root` named `central-worktrees`, outside it.
+    pub fn for_test(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let worktrees = root.with_file_name("central-worktrees");
+        Self { root, worktrees }
+    }
+}
+
+/// The central worktrees directory of the global store, once [`init`] has run.
+pub fn central_worktrees_dir(cx: &App) -> Option<PathBuf> {
+    WorkStore::global(cx).map(|store| store.read(cx).worktrees().to_path_buf())
 }
 
 struct GlobalWorkStore(Entity<WorkStore>);

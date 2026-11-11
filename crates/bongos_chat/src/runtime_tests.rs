@@ -209,7 +209,7 @@ async fn harness_with(
     // The work store is the global one, as in the app, so the commands find it.
     let fs = Arc::new(RealFs::new(None, cx.executor()));
     let work = cx.update(|cx| {
-        bongos_work::init(fs, WorkDirs { root }, cx);
+        bongos_work::init(fs, WorkDirs::for_test(root), cx);
         WorkStore::global(cx).unwrap()
     });
     let work_store = work.clone();
@@ -967,9 +967,7 @@ async fn test_the_work_store_reports_the_open_chat_until_it_ends(cx: &mut TestAp
     cx.update(|cx| {
         bongos_work::init(
             Arc::new(RealFs::new(None, cx.background_executor().clone())),
-            WorkDirs {
-                root: h.base.join("work"),
-            },
+            WorkDirs::for_test(h.base.join("work")),
             cx,
         );
         crate::live_modes::init(&h.runtime, &h.store, cx);

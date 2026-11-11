@@ -184,6 +184,11 @@ impl WorkStore {
         &self.dirs.root
     }
 
+    /// The central directory for worktrees.
+    pub fn worktrees(&self) -> &Path {
+        &self.dirs.worktrees
+    }
+
     /// The file system the store reads and writes through.
     pub fn fs(&self) -> Arc<dyn Fs> {
         self.fs.clone()

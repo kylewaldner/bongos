@@ -201,7 +201,7 @@ pub(crate) async fn env(
     cx.update(|cx| {
         bongos_work::init(
             Arc::new(RealFs::new(None, cx.background_executor().clone())),
-            WorkDirs { root },
+            WorkDirs::for_test(root),
             cx,
         );
         cx.update_global::<SettingsStore, _>(|store, cx| {
