@@ -46,7 +46,8 @@ fn put_caret(cx: &mut EditorTestContext, row: u32) {
             s.select_display_ranges([editor::display_map::DisplayPoint::new(
                 editor::display_map::DisplayRow(row),
                 0,
-            )..editor::display_map::DisplayPoint::new(editor::display_map::DisplayRow(row), 0)])
+            )
+                ..editor::display_map::DisplayPoint::new(editor::display_map::DisplayRow(row), 0)])
         })
     });
 }
@@ -68,7 +69,9 @@ async fn recenter_cycles_middle_top_bottom_middle(cx: &mut TestAppContext) {
 async fn recenter_with_a_region_clears_it_and_still_starts_the_cycle(cx: &mut TestAppContext) {
     let mut cx = test_context(cx).await;
     cx.update_editor(|editor, window, cx| {
-        editor.change_selections(Default::default(), window, cx, |s| s.select_ranges([MultiBufferOffset(300)..MultiBufferOffset(310)]))
+        editor.change_selections(Default::default(), window, cx, |s| {
+            s.select_ranges([MultiBufferOffset(300)..MultiBufferOffset(310)])
+        })
     });
     cx.simulate_keystrokes("ctrl-l");
     cx.update_editor(|editor, _, cx| {

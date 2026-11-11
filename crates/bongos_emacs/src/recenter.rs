@@ -34,7 +34,8 @@ pub(crate) fn init_editor(cx: &mut Context<Editor>) {
         let id = cx.entity_id();
         let moved = cx.try_global::<CycleState>().is_some_and(|state| {
             state.0.as_ref().is_some_and(|stored| {
-                stored.editor == id && stored.selections.as_slice() != editor.selections.disjoint_anchors()
+                stored.editor == id
+                    && stored.selections.as_slice() != editor.selections.disjoint_anchors()
             })
         });
         if moved {
@@ -119,7 +120,11 @@ pub(crate) fn recenter_command(
             s.select_display_ranges(heads.iter().map(|head| *head..*head));
         });
         editor.set_selection_mark_mode(false, cx);
-        editor.set_scroll_position(gpui::point(editor.scroll_position(cx).x, top as f64), window, cx);
+        editor.set_scroll_position(
+            gpui::point(editor.scroll_position(cx).x, top as f64),
+            window,
+            cx,
+        );
         if count.is_none() {
             store(editor, id, cycle, cx);
         } else {
