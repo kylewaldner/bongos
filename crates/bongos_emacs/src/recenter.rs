@@ -90,9 +90,6 @@ pub(crate) fn recenter_command(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if propagate_in_single_line(editor, cx) {
-        return;
-    }
     let name = action.name();
     let id = editor.entity_id();
     let count = action.count;
