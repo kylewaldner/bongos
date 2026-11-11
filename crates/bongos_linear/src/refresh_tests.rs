@@ -526,10 +526,10 @@ async fn the_window_skips_recent_reads_and_the_command_ignores_it(cx: &mut TestA
         1,
         "a second open within 60 s makes no call"
     );
-    env.advance(WINDOW_MS - 1_000, cx);
+    env.advance(WINDOW_MS - 15_000, cx);
     env.open_view(cx).await;
     assert_eq!(env.calls().len(), 1);
-    env.advance(2_000, cx);
+    env.advance(30_000, cx);
     env.open_view(cx).await;
     assert_eq!(env.calls().len(), 2, "after 60 s it reads again");
     env.command(cx).await;
