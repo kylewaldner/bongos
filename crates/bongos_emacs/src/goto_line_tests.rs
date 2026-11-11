@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use bongos_minibuffer::SessionView;
 use editor::{Editor, MultiBufferOffset, ToPoint as _};
-use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle};
+use gpui::{
+    AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle,
+};
 use project::Project;
 use workspace::{AppState, MinibufferRouting, MultiWorkspace, Workspace};
 
@@ -67,8 +69,13 @@ async fn workspace_editor(
     (workspace, editor, cx)
 }
 
-fn session(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<Entity<SessionView>> {
-    workspace.read_with(cx, |workspace, cx| workspace.active_modal::<SessionView>(cx))
+fn session(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<Entity<SessionView>> {
+    workspace.read_with(cx, |workspace, cx| {
+        workspace.active_modal::<SessionView>(cx)
+    })
 }
 
 fn status(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {

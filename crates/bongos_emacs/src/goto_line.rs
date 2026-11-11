@@ -28,8 +28,12 @@ pub(crate) enum GotoLinePreview {}
 /// The point a 1-based line (and column) stands for, clamped to the buffer: a line below 1 is
 /// line 1 and a line past the end is the last one.
 fn target(snapshot: &MultiBufferSnapshot, line: usize, column: Option<usize>) -> Point {
-    let row = line.saturating_sub(1).min(snapshot.max_point().row as usize) as u32;
-    let column = column.map_or(0, |column| column.saturating_sub(1).min(u32::MAX as usize) as u32);
+    let row = line
+        .saturating_sub(1)
+        .min(snapshot.max_point().row as usize) as u32;
+    let column = column.map_or(0, |column| {
+        column.saturating_sub(1).min(u32::MAX as usize) as u32
+    });
     snapshot.clip_point(Point::new(row, column), Bias::Left)
 }
 
@@ -152,12 +156,7 @@ fn ask(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
 }
 
 /// Clears the preview and puts the scroll back where the prompt found it.
-fn restore(
-    editor: &Entity<Editor>,
-    scroll: gpui::Point<f64>,
-    window: &mut Window,
-    cx: &mut App,
-) {
+fn restore(editor: &Entity<Editor>, scroll: gpui::Point<f64>, window: &mut Window, cx: &mut App) {
     editor.update(cx, |editor, cx| {
         editor.clear_row_highlights::<GotoLinePreview>();
         editor.set_scroll_position(scroll, window, cx);
