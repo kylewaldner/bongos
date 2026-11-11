@@ -2324,6 +2324,7 @@ dependencies = [
  "text",
  "theme",
  "theme_settings",
+ "tree-sitter-rust",
  "workspace",
 ]
 
