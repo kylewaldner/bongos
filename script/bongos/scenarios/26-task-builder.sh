@@ -591,7 +591,8 @@ step "Builder 4: a worktree, a done leaf and a running chat are left alone by an
 focus_editor
 wkeys s
 choose "add proration columns"
-SCHEMA_WT="$REPO/.bongos-worktrees/schema"
+wait_worktree_line "$ROOT_DIR/tasks/schema" || fail "schema has no worktree line: $(cat "$ROOT_DIR/tasks/schema/task.toml")"
+SCHEMA_WT=$(worktree_of "$ROOT_DIR/tasks/schema")
 poll 10 "the worktree $SCHEMA_WT within ten seconds" test -d "$SCHEMA_WT"
 wait_toml "$ROOT_DIR/tasks/schema/task.toml" 'd.get("branch")' schema
 # Another leaf done, written as a file: integration.
@@ -695,7 +696,8 @@ step "Builder 6: a leaf with a worktree and a branch is split; the keeper gets b
 focus_editor
 wkeys s
 choose "proration endpoint"
-API_WT="$REPO/.bongos-worktrees/api"
+wait_worktree_line "$ROOT_DIR/tasks/api" || fail "api has no worktree line: $(cat "$ROOT_DIR/tasks/api/task.toml")"
+API_WT=$(worktree_of "$ROOT_DIR/tasks/api")
 poll 10 "the worktree $API_WT within ten seconds" test -d "$API_WT"
 wait_toml "$ROOT_DIR/tasks/api/task.toml" 'd.get("branch")' api
 {

@@ -50,10 +50,11 @@ pub fn run_hooks_once(window: &mut Window, cx: &mut App) {
 }
 
 /// C-g in an editor. Never edits text. Runs the hooks, then does the first thing that applies
-/// (as `Editor::cancel` does, one per press): ends mark mode, dismisses menus and popups,
-/// collapses expanded diff hunks, hides the blame gutter, clears the region on every caret
-/// (full editors only), or collapses several carets to the oldest. With nothing to cancel the
-/// key propagates, so a picker's query editor reaches `menu::Cancel`.
+/// (as `Editor::cancel` does, one per press). Ending mark mode always happens and the press goes
+/// on: it dismisses menus and popups, collapses expanded diff hunks, hides the blame gutter,
+/// clears the region on every caret (full editors only), or collapses several carets to the
+/// oldest. The key is consumed when mark mode was on or one of those applied; otherwise it
+/// propagates, so a picker's query editor reaches `menu::Cancel`.
 pub(crate) fn keyboard_quit_command(
     _: &KeyboardQuit,
     editor: &Entity<Editor>,

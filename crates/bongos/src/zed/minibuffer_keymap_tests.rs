@@ -297,11 +297,11 @@ async fn the_routed_file_finder_strip_has_no_split_keys(cx: &mut TestAppContext)
     let keymap = Keymap::new(load_all(&LINUX, true, cx));
     assert_eq!(
         first(&keymap, "ctrl-k", &STRIP_FILE_FINDER),
-        Some("editor::KillRingCut")
+        Some("emacs::KillLine")
     );
     assert_eq!(
         first(&keymap, "ctrl-l", &STRIP_FILE_FINDER),
-        Some("editor::ScrollCursorCenterTopBottom")
+        Some("emacs::Recenter")
     );
     // ctrl-h is not a split and stays the prefix of `ctrl-h e`.
     let (names, pending) = resolve(&keymap, "ctrl-h", &STRIP_FILE_FINDER);

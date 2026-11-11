@@ -256,6 +256,9 @@
   //  4. A box drawn around the following character
   //     "hollow"
   //
+  // Under the Emacs keymap the automatic Emacs cursor style gives a block and takes
+  // precedence over this setting (see `emacs.cursor_style`).
+  //
   // Default: "bar"
   "cursor_shape": "bar",
   // Determines when the mouse cursor should be hidden in response to keyboard
@@ -2623,7 +2626,8 @@
       "normal": "block",
       "replace": "underline",
       "visual": "block",
-      // Set to "inherit" to use the editor's cursor_shape.
+      // Set to "inherit" to use the editor's cursor_shape. Under the Emacs keymap the
+      // automatic Emacs cursor style gives a block and takes precedence over cursor_shape.
       "insert": "inherit",
     },
   },

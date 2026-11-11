@@ -1593,7 +1593,7 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
-    fn cursor_section() -> [SettingsPageItem; 5] {
+    fn cursor_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Cursor"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -1626,13 +1626,27 @@ fn appearance_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Cursor Shape",
-                description: "Cursor shape for the editor.",
+                description: "Cursor shape for the editor. Ignored while the Emacs cursor style is auto under the Emacs keymap, which gives a block.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("cursor_shape"),
                     pick: |settings_content| settings_content.editor.cursor_shape.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.editor.cursor_shape = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Emacs Cursor Style",
+                description: "Cursor shape of the Emacs mode. Auto is a block under the Emacs keymap and the cursor shape setting otherwise; Emacs is always a block and Modern is always a bar.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("emacs.cursor_style"),
+                    pick: |settings_content| settings_content.emacs.as_ref()?.cursor_style.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.emacs.get_or_insert_default().cursor_style = value;
                     },
                 }),
                 metadata: None,
