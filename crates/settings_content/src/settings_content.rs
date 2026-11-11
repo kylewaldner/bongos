@@ -1509,6 +1509,20 @@ pub struct WorkflowsSettingsContent {
     ///
     /// Default: false
     pub enabled: Option<bool>,
+    /// The directory that holds run and branch worktrees. Null means
+    /// `<repo>/.bongos-worktrees/.runs/`.
+    ///
+    /// Default: null
+    pub worktrees_dir: Option<String>,
+    /// The least free space, in MB, on the disk holding the run worktrees for a run to start.
+    ///
+    /// Default: 2048
+    pub min_free_disk_mb: Option<u64>,
+    /// Days after which `workflow: clear finished` offers to remove the worktrees and branches
+    /// of succeeded and cancelled runs.
+    ///
+    /// Default: 14
+    pub keep_finished_days: Option<u64>,
 }
 
 /// Settings for chat sessions.
