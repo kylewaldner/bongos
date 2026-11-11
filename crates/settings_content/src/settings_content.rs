@@ -155,10 +155,10 @@ pub struct SettingsContent {
     pub auto_update: Option<bool>,
 
     /// This base keymap settings adjusts the default keybindings in bongos to be similar
-    /// to other common code editors. By default, bongos's keymap closely follows VSCode's
-    /// keymap, with minor adjustments, this corresponds to the "VSCode" setting.
+    /// to other common code editors. By default, bongos uses the Emacs keymap; the "VSCode"
+    /// setting gives a keymap that closely follows VSCode's, with minor adjustments.
     ///
-    /// Default: VSCode
+    /// Default: Emacs
     pub base_keymap: Option<BaseKeymapContent>,
 
     /// Settings of the Emacs mode.
@@ -468,12 +468,12 @@ pub struct ExtensionsSettingsContent {
     strum::VariantArray,
 )]
 pub enum BaseKeymapContent {
-    #[default]
     VSCode,
     JetBrains,
     SublimeText,
     Atom,
     TextMate,
+    #[default]
     Emacs,
     Cursor,
     None,

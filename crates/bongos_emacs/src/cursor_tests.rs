@@ -44,7 +44,7 @@ fn settings_shape(cx: &mut EditorTestContext) -> Option<CursorShape> {
 }
 
 #[gpui::test]
-async fn defaults_parse_and_leave_the_settings_shape(cx: &mut TestAppContext) {
+async fn defaults_are_the_emacs_base_and_a_block(cx: &mut TestAppContext) {
     init_test(cx);
     let mut cx = EditorTestContext::new(cx).await;
     cx.update(|_, cx| {
@@ -53,10 +53,12 @@ async fn defaults_parse_and_leave_the_settings_shape(cx: &mut TestAppContext) {
             content.emacs.as_ref().and_then(|emacs| emacs.cursor_style),
             Some(EmacsCursorStyle::Auto)
         );
-        assert_eq!(content.base_keymap, Some(BaseKeymapContent::VSCode));
+        assert_eq!(content.base_keymap, Some(BaseKeymapContent::Emacs));
         assert_eq!(CursorStyleOverride::get(cx), None);
     });
-    assert_eq!(settings_shape(&mut cx), Some(CursorShape::Bar));
+    assert_eq!(settings_shape(&mut cx), Some(CursorShape::Block));
+    assert_eq!(shape(&mut cx), CursorShape::Block);
+    set_keymap(&mut cx, BaseKeymapContent::VSCode);
     assert_eq!(shape(&mut cx), CursorShape::Bar);
 }
 
@@ -97,6 +99,7 @@ async fn the_toggle_flips_every_editor_and_survives_a_reload(cx: &mut TestAppCon
     init_test(cx);
     let mut first = EditorTestContext::new(cx).await;
     let second = add_editor(&mut first);
+    set_keymap(&mut first, BaseKeymapContent::VSCode);
     assert_eq!(shape(&mut first), CursorShape::Bar);
 
     first.dispatch_action(ToggleStyle);
@@ -117,6 +120,7 @@ async fn the_toggle_flips_every_editor_and_survives_a_reload(cx: &mut TestAppCon
 async fn a_new_editor_starts_with_the_toggled_shape(cx: &mut TestAppContext) {
     init_test(cx);
     let mut first = EditorTestContext::new(cx).await;
+    set_keymap(&mut first, BaseKeymapContent::VSCode);
     first.dispatch_action(ToggleStyle);
     let second = add_editor(&mut first);
     assert_eq!(second_shape(&mut first, &second), CursorShape::Block);
@@ -127,6 +131,7 @@ async fn the_editor_override_beats_the_toggle(cx: &mut TestAppContext) {
     init_test(cx);
     let mut first = EditorTestContext::new(cx).await;
     let second = add_editor(&mut first);
+    set_keymap(&mut first, BaseKeymapContent::VSCode);
     first.update_editor(|editor, _, cx| {
         editor.set_cursor_shape_override(Some(CursorShape::Bar), cx);
     });

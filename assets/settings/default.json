@@ -13,16 +13,18 @@
   },
   "icon_theme": "Zed (Default)",
   // The name of a base set of key bindings to use.
-  // This setting can take six values, each named after another
+  // This setting can take these values, most named after another
   // text editor:
   //
-  // 1. "VSCode"
-  // 2. "Atom"
-  // 3. "JetBrains"
-  // 4. "None"
-  // 5. "SublimeText"
-  // 6. "TextMate"
-  "base_keymap": "VSCode",
+  // 1. "Emacs" (the default)
+  // 2. "VSCode"
+  // 3. "Atom"
+  // 4. "JetBrains"
+  // 5. "Cursor"
+  // 6. "None"
+  // 7. "SublimeText"
+  // 8. "TextMate"
+  "base_keymap": "Emacs",
   // Settings of the Emacs mode.
   "emacs": {
     // The cursor shape: "auto" is a block while `base_keymap` is "Emacs" and `cursor_shape`
@@ -2644,7 +2646,9 @@
       "tab_switcher",
       "work",
       "messages",
-      "key_hint"
+      "key_hint",
+      "goto_line",
+      "zap"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,

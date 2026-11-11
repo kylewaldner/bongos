@@ -2970,6 +2970,7 @@ async fn test_deactivate(cx: &mut gpui::TestAppContext) {
 
     cx.update_global(|store: &mut SettingsStore, cx| {
         store.update_user_settings(cx, |settings| {
+            settings.base_keymap = Some(settings::BaseKeymapContent::VSCode);
             settings.editor.cursor_shape = Some(settings::CursorShape::Underline);
         });
     });
