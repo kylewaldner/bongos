@@ -1,7 +1,7 @@
 use editor::Editor;
 use editor::test::editor_test_context::EditorTestContext;
 use editor::{CursorStyleOverride, EditorSettings};
-use gpui::{AppContext as _, Entity, TestAppContext};
+use gpui::{AppContext as _, BorrowAppContext as _, Entity, TestAppContext};
 use language::CursorShape;
 use settings::{BaseKeymapContent, EmacsCursorStyle, Settings as _, SettingsStore};
 
@@ -48,7 +48,7 @@ async fn defaults_parse_and_leave_the_settings_shape(cx: &mut TestAppContext) {
     init_test(cx);
     let mut cx = EditorTestContext::new(cx).await;
     cx.update(|_, cx| {
-        let content = SettingsStore::global(cx).merged_settings();
+        let content = cx.global::<SettingsStore>().merged_settings();
         assert_eq!(
             content.emacs.as_ref().and_then(|emacs| emacs.cursor_style),
             Some(EmacsCursorStyle::Auto)
