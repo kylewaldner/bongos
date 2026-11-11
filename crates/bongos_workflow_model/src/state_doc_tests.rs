@@ -119,9 +119,17 @@ fn the_state_document_has_every_field() {
     );
 }
 
+/// The document has no run record field. The record's path is still derivable from `task_dir`
+/// and the run id; what protects it is that it is never among the writable paths.
 #[test]
-fn the_state_document_never_names_the_run_record() {
-    let text = doc().to_json();
+fn the_state_document_has_no_run_record_field_and_never_makes_it_writable() {
+    let doc = doc();
+    let text = doc.to_json();
+    for writable in [&doc.paths.worktree, &doc.paths.scratch] {
+        // Neither inside the record nor containing it.
+        assert!(!writable.starts_with(RUN_DIR));
+        assert!(!std::path::Path::new(RUN_DIR).starts_with(writable));
+    }
     assert!(!text.contains(RUN_DIR));
     assert!(!text.contains("/runs/"));
     assert!(!text.contains("events.jsonl"));

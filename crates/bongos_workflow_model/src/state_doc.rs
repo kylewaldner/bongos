@@ -1,8 +1,10 @@
 //! The state document a program node reads (`$BONGOS_STATE`): the run's inputs, the results of the
 //! nodes that finished, the run's identity, the node's settings and its writable paths.
 //!
-//! It never names the run record directory: nothing in [`build`]'s arguments carries it, so a
-//! script cannot learn where the run record lives from here.
+//! It has no field for the run record directory and [`build`] takes no argument carrying it. That
+//! is not secrecy: the record sits at `<task_dir>/runs/<id>/`, which a script could derive from
+//! `task_dir` and the run id. What keeps the record safe is that it is never in the node's
+//! writable paths.
 
 use std::collections::BTreeMap;
 use std::io;

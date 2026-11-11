@@ -4,12 +4,13 @@
 //! The run state is never stored: [`replay`] rebuilds it from the events, so it cannot disagree with
 //! the log. [`append`] writes each event with one `write_all` followed by `sync_data`, so a node
 //! that finished is on disk before anything routes on it. A crash mid-write leaves at most a
-//! truncated last line, which [`parse_log`] drops and reports.
+//! truncated last line, which [`parse_log`] drops and reports and [`repair`] cuts off before the
+//! next append.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -222,30 +223,74 @@ pub struct LogError {
     pub message: String,
 }
 
-/// Parses `events.jsonl`. Blank lines are skipped. A last line that does not parse (a crash
-/// mid-write) is dropped, and the second value says so; a bad line before it is an error, because
-/// the log was written one whole line at a time and something else damaged it.
-pub fn parse_log(text: &str) -> Result<(Vec<Event>, bool), LogError> {
-    let lines: Vec<(usize, &str)> = text
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty())
-        .map(|(index, line)| (index + 1, line))
-        .collect();
-    let mut events = Vec::with_capacity(lines.len());
-    for (position, (number, line)) in lines.iter().enumerate() {
-        match serde_json::from_str::<Event>(line) {
+/// A parsed `events.jsonl`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedLog {
+    pub events: Vec<Event>,
+    /// Whether the log ended in an unterminated line (a crash mid-write), which was dropped.
+    pub dropped_tail: bool,
+    /// The byte length of the newline-terminated prefix the events came from. [`repair`]
+    /// truncates the file to it so the next append starts on a fresh line.
+    pub valid_len: usize,
+}
+
+/// Parses `events.jsonl`. An event counts only once its line, newline included, is in the file:
+/// [`append`] writes the newline last, so an unterminated last line is a crash mid-write and is
+/// dropped (`dropped_tail`), even when its JSON happens to be complete; nothing acted on it,
+/// because `append` had not returned. Blank lines are skipped. A terminated line that does not
+/// parse is an error wherever it is, because the log was written one whole line at a time and
+/// something else damaged it.
+pub fn parse_log(bytes: impl AsRef<[u8]>) -> Result<ParsedLog, LogError> {
+    let bytes = bytes.as_ref();
+    let valid_len = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    let tail = &bytes[valid_len..];
+    let mut events = Vec::new();
+    for (index, line) in bytes[..valid_len].split(|byte| *byte == b'\n').enumerate() {
+        if line.trim_ascii().is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<Event>(line) {
             Ok(event) => events.push(event),
-            Err(_) if position + 1 == lines.len() => return Ok((events, true)),
             Err(error) => {
                 return Err(LogError {
-                    line: *number,
+                    line: index + 1,
                     message: error.to_string(),
                 });
             }
         }
     }
-    Ok((events, false))
+    Ok(ParsedLog {
+        events,
+        dropped_tail: !tail.trim_ascii().is_empty(),
+        valid_len,
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RepairError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Log(#[from] LogError),
+}
+
+/// Reads the open log from its start, truncates an unterminated tail left by a crash (see
+/// [`parse_log`]) and syncs, then leaves the cursor at the end, ready for [`append`]. A damaged
+/// log is returned as an error and left untouched.
+pub fn repair(file: &mut File) -> Result<ParsedLog, RepairError> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let parsed = parse_log(&bytes)?;
+    if parsed.valid_len < bytes.len() {
+        file.set_len(parsed.valid_len as u64)?;
+        file.sync_data()?;
+    }
+    file.seek(SeekFrom::End(0))?;
+    Ok(parsed)
 }
 
 /// Who started a run.
@@ -440,11 +485,14 @@ pub struct RunState {
     pub interrupted: BTreeMap<NodeKey, Option<RunningNode>>,
     /// The definition revision in use: `None` until a `DefinitionReloaded`, meaning revision 0.
     pub definition_rev: Option<u32>,
+    /// How the attempt ended. A failed end is not final: retry step reruns the failed key in the
+    /// same attempt, so a later `NodeStarted` or `DefinitionReloaded` clears it.
     pub ended: Option<(EndState, Option<Failure>)>,
     pub cancelled: bool,
-    /// Events after `Ended` or `Cancelled`. They are not applied: an attempt is over once it
-    /// ends (a restart is a new attempt with its own log), so these can only be damage; the count
-    /// lets the caller flag them.
+    /// Events after the attempt closed (`Cancelled`, or `Ended` succeeded) that were not applied:
+    /// a closed attempt never runs again (a restart is a new attempt with its own log), so they
+    /// can only be damage; the count lets the caller flag them. A `NodeFinished` after the close
+    /// is still applied (a try cancelled mid-run reports its cost) and not counted here.
     pub ignored_after_end: usize,
 }
 
@@ -469,8 +517,10 @@ impl RunState {
         }
     }
 
+    /// Whether the attempt is closed for good: cancelled, or ended succeeded. A failed run is not
+    /// over; it stays active until a retry or a cancel (Cancel on a Failed run closes it out).
     pub fn is_over(&self) -> bool {
-        self.cancelled || self.ended.is_some()
+        self.cancelled || matches!(self.ended, Some((EndState::Succeeded, _)))
     }
 
     /// The last finished try of `key`.
@@ -483,12 +533,30 @@ impl RunState {
 }
 
 /// Rebuilds the run state from its events. Pure: the same events always give the same state.
+///
+/// After a failed `Ended` every event still applies, and a `NodeStarted` (retry step) or
+/// `DefinitionReloaded` (retry step fresh) makes the run live again; a `Cancelled` closes it.
+/// Once the attempt is over ([`RunState::is_over`]) only `NodeFinished` still applies, so a
+/// try's cost is never lost; the lifecycle stays as it closed, and every other event is counted
+/// in `ignored_after_end`.
 pub fn replay(events: &[Event]) -> RunState {
     let mut state = RunState::default();
     for event in events {
         if state.is_over() {
-            state.ignored_after_end += 1;
+            // A finish touches only the running, finished and cost fields, never the lifecycle.
+            match event {
+                Event::NodeFinished { .. } => apply(&mut state, event),
+                _ => state.ignored_after_end += 1,
+            }
             continue;
+        }
+        if state.ended.is_some()
+            && matches!(
+                event,
+                Event::NodeStarted { .. } | Event::DefinitionReloaded { .. }
+            )
+        {
+            state.ended = None;
         }
         apply(&mut state, event);
     }

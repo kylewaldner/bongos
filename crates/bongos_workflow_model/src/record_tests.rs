@@ -205,13 +205,22 @@ fn append_to_a_real_file_reads_back() {
     file.rewind().unwrap();
     let mut text = String::new();
     file.read_to_string(&mut text).unwrap();
-    let (events, dropped) = parse_log(&text).unwrap();
-    assert!(!dropped);
-    assert_eq!(events, every_event());
+    let parsed = parse_log(&text).unwrap();
+    assert!(!parsed.dropped_tail);
+    assert_eq!(parsed.valid_len, text.len());
+    assert_eq!(parsed.events, every_event());
 }
 
 fn log(events: &[Event]) -> String {
     events.iter().map(Event::to_line).collect()
+}
+
+fn parsed(events: Vec<Event>, dropped_tail: bool, valid_len: usize) -> ParsedLog {
+    ParsedLog {
+        events,
+        dropped_tail,
+        valid_len,
+    }
 }
 
 #[test]
@@ -220,11 +229,26 @@ fn a_truncated_last_line_is_dropped_and_reported() {
     let full = log(&events);
     let tail = finished(&key("plan"), 1, json!({}), 0.0).to_line();
     let text = format!("{full}{}", &tail[..tail.len() / 2]);
-    assert_eq!(parse_log(&text).unwrap(), (events.clone(), true));
-    // A complete log, with or without its final newline, drops nothing.
-    assert_eq!(parse_log(&full).unwrap(), (events.clone(), false));
-    assert_eq!(parse_log(full.trim_end()).unwrap(), (events, false));
-    assert_eq!(parse_log("").unwrap(), (Vec::new(), false));
+    assert_eq!(
+        parse_log(&text).unwrap(),
+        parsed(events.clone(), true, full.len())
+    );
+    // A complete log drops nothing.
+    assert_eq!(
+        parse_log(&full).unwrap(),
+        parsed(events.clone(), false, full.len())
+    );
+    assert_eq!(parse_log("").unwrap(), parsed(Vec::new(), false, 0));
+    // A last line with complete JSON but no newline is still an unfinished write: dropped.
+    let unterminated = full.trim_end();
+    assert_eq!(
+        parse_log(unterminated).unwrap(),
+        parsed(vec![Event::Created], true, Event::Created.to_line().len())
+    );
+    // A crash inside a multi-byte character leaves bytes that are not UTF-8; still just a tail.
+    let mut bytes = full.clone().into_bytes();
+    bytes.extend_from_slice(&"{\"event\":\"é".as_bytes()[..11]);
+    assert_eq!(parse_log(&bytes).unwrap(), parsed(events, true, full.len()));
 }
 
 #[test]
@@ -236,6 +260,58 @@ fn a_bad_middle_line_is_an_error() {
     );
     let error = parse_log(&text).unwrap_err();
     assert_eq!(error.line, 2);
+}
+
+#[test]
+fn a_bad_terminated_last_line_is_an_error() {
+    let text = format!("{}{{\"event\": \"Nope\"}}\n", Event::Created.to_line());
+    let error = parse_log(&text).unwrap_err();
+    assert_eq!(error.line, 2);
+    // Half a line followed by a newline is damage too, not a crash tail.
+    let tail = Event::Queued.to_line();
+    let text = format!("{}{}\n", Event::Created.to_line(), &tail[..tail.len() / 2]);
+    assert_eq!(parse_log(&text).unwrap_err().line, 2);
+}
+
+#[test]
+fn repair_after_a_crash_mid_line_lets_appends_continue() {
+    let mut file = tempfile::tempfile().unwrap();
+    append(&mut file, &Event::Created).unwrap();
+    append(&mut file, &Event::Queued).unwrap();
+    let tail = finished(&key("plan"), 1, json!({}), 0.0).to_line();
+    file.write_all(&tail.as_bytes()[..tail.len() / 2]).unwrap();
+
+    let repaired = repair(&mut file).unwrap();
+    assert_eq!(repaired.events, vec![Event::Created, Event::Queued]);
+    assert!(repaired.dropped_tail);
+    assert_eq!(file.metadata().unwrap().len(), repaired.valid_len as u64);
+
+    let plan = key("plan");
+    append(&mut file, &started(&plan, 1)).unwrap();
+    file.rewind().unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(
+        parse_log(&bytes).unwrap(),
+        parsed(
+            vec![Event::Created, Event::Queued, started(&plan, 1)],
+            false,
+            bytes.len()
+        )
+    );
+    // A second repair of a clean log changes nothing.
+    let again = repair(&mut file).unwrap();
+    assert!(!again.dropped_tail);
+    assert_eq!(file.metadata().unwrap().len(), bytes.len() as u64);
+}
+
+#[test]
+fn repair_leaves_a_damaged_log_alone() {
+    let mut file = tempfile::tempfile().unwrap();
+    let text = format!("{{\"event\": \"Nope\"}}\n{}half", Event::Created.to_line());
+    file.write_all(text.as_bytes()).unwrap();
+    assert!(matches!(repair(&mut file), Err(RepairError::Log(_))));
+    assert_eq!(file.metadata().unwrap().len(), text.len() as u64);
 }
 
 #[test]
@@ -452,24 +528,115 @@ fn replay_of_interrupted_then_resumed() {
     assert_eq!(resumed.running[&a].try_number, 2);
 }
 
+fn ended(end: EndState, failure: Option<Failure>) -> Event {
+    Event::Ended {
+        state: end,
+        failure,
+    }
+}
+
+fn run_failure(key: &NodeKey) -> Failure {
+    Failure::new(
+        FailureReason::AgentExitedNonzero,
+        Some(key.clone()),
+        "exit 2",
+    )
+}
+
 #[test]
-fn replay_of_a_cancelled_run_ignores_later_events() {
+fn replay_of_a_cancelled_run_keeps_costs_and_ignores_the_rest() {
     let plan = key("plan");
+    let write = key("write");
     let state = replay(&[
         Event::Created,
         started(&plan, 1),
         Event::Cancelled,
+        // The cancelled try reports its cost: applied, lifecycle unchanged.
         finished(&plan, 1, json!({}), 9.0),
-        Event::Ended {
-            state: EndState::Succeeded,
-            failure: None,
-        },
+        ended(EndState::Succeeded, None),
+        started(&write, 1),
+        Event::Resumed,
     ]);
     assert_eq!(state.lifecycle(), Lifecycle::Cancelled);
-    assert!(state.finished.is_empty());
-    assert_eq!(state.cost_usd, 0.0);
+    assert_eq!(state.finished.len(), 1);
+    assert!(state.finished[0].had_start);
+    assert!(state.running.is_empty());
+    assert_eq!(state.cost_usd, 9.0);
     assert!(state.ended.is_none());
+    assert_eq!(state.ignored_after_end, 3);
+}
+
+#[test]
+fn replay_of_a_succeeded_run_keeps_late_costs_and_ignores_the_rest() {
+    let plan = key("plan");
+    let state = replay(&[
+        Event::Created,
+        started(&plan, 1),
+        finished(&plan, 1, json!({}), 1.0),
+        ended(EndState::Succeeded, None),
+        finished(&plan, 2, json!({}), 0.5),
+        Event::Cancelled,
+        started(&plan, 3),
+    ]);
+    assert_eq!(state.lifecycle(), Lifecycle::Ended(EndState::Succeeded));
+    assert_eq!(state.cost_usd, 1.5);
+    assert!(!state.cancelled);
+    assert!(state.running.is_empty());
     assert_eq!(state.ignored_after_end, 2);
+}
+
+#[test]
+fn replay_of_a_failed_run_then_retry_step_then_success() {
+    let plan = key("plan");
+    let events = [
+        Event::Created,
+        started(&plan, 1),
+        failed(&plan, 1, FailureReason::AgentExitedNonzero),
+        ended(EndState::Failed, Some(run_failure(&plan))),
+    ];
+    let failed_state = replay(&events);
+    assert_eq!(failed_state.lifecycle(), Lifecycle::Ended(EndState::Failed));
+    assert!(!failed_state.is_over(), "a failed run stays active");
+
+    // Retry step reruns the failed key in the same attempt: the run is live again.
+    let mut retried = events.to_vec();
+    retried.push(started(&plan, 2));
+    let state = replay(&retried);
+    assert_eq!(state.lifecycle(), Lifecycle::Running);
+    assert!(state.ended.is_none());
+    assert_eq!(state.running[&plan].try_number, 2);
+
+    retried.push(finished(&plan, 2, json!({ "ok": true }), 1.0));
+    retried.push(ended(EndState::Succeeded, None));
+    let state = replay(&retried);
+    assert_eq!(state.lifecycle(), Lifecycle::Ended(EndState::Succeeded));
+    assert!(state.last_finish(&plan).unwrap().succeeded());
+    assert_eq!(state.cost_usd, 1.25);
+    assert_eq!(state.ignored_after_end, 0);
+
+    // Retry step fresh reloads the definition first, which also makes the run live.
+    let mut fresh = events.to_vec();
+    fresh.push(Event::DefinitionReloaded { rev: 1 });
+    let state = replay(&fresh);
+    assert!(state.ended.is_none());
+    assert_eq!(state.definition_rev, Some(1));
+}
+
+#[test]
+fn replay_of_a_failed_run_then_cancelled_closes_it_out() {
+    let plan = key("plan");
+    let state = replay(&[
+        Event::Created,
+        started(&plan, 1),
+        failed(&plan, 1, FailureReason::AgentExitedNonzero),
+        ended(EndState::Failed, Some(run_failure(&plan))),
+        Event::Cancelled,
+        started(&plan, 2),
+    ]);
+    assert_eq!(state.lifecycle(), Lifecycle::Cancelled);
+    assert!(state.is_over());
+    assert!(state.running.is_empty());
+    assert_eq!(state.ignored_after_end, 1);
 }
 
 #[test]

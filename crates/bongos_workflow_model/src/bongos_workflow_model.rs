@@ -20,7 +20,7 @@ pub use definition::{Definition, ParseError, Warning, parse};
 pub use failure::{Failure, FailureClass, FailureReason};
 pub use inputs::{InputValue, resolve};
 pub use layers::{Layer, LayerDirs, Resolution, Resolved};
-pub use record::{Event, NodeKey, RunState, RunToml, append, parse_log, replay};
+pub use record::{Event, NodeKey, ParsedLog, RunState, RunToml, append, parse_log, repair, replay};
 pub use schema::{TypedField, TypedResult, TypedValue, check, json_schema};
 pub use state_doc::StateDoc;
 pub use template::{Scope, TemplateError};
