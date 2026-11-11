@@ -20,7 +20,7 @@ async fn run_by_name_is_handled_and_says_workflows_are_off(cx: &mut TestAppConte
         .insert_tree(path!("/root"), json!({ "a": null }))
         .await;
     cx.update(|cx| {
-        crate::zed::open_paths(
+        workspace::open_paths(
             &[path!("/root/a").into()],
             app_state.clone(),
             workspace::OpenOptions::default(),
