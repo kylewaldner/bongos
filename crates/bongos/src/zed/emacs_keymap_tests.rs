@@ -648,12 +648,17 @@ fn cursor_shape(cx: &mut gpui::TestAppContext) -> Option<language::CursorShape> 
 }
 
 #[gpui::test]
-async fn the_default_settings_give_the_emacs_base_and_a_block_cursor(cx: &mut gpui::TestAppContext) {
+async fn the_default_settings_give_the_emacs_base_and_a_block_cursor(
+    cx: &mut gpui::TestAppContext,
+) {
     use settings::Settings as _;
 
     super::tests::init_keymap_test(cx);
     cx.update(|cx| {
-        assert_eq!(*settings::BaseKeymap::get_global(cx), settings::BaseKeymap::Emacs);
+        assert_eq!(
+            *settings::BaseKeymap::get_global(cx),
+            settings::BaseKeymap::Emacs
+        );
     });
     assert_eq!(cursor_shape(cx), Some(language::CursorShape::Block));
 
@@ -664,7 +669,10 @@ async fn the_default_settings_give_the_emacs_base_and_a_block_cursor(cx: &mut gp
     let keymap = Keymap::new(keymap);
     #[cfg(not(target_os = "macos"))]
     {
-        assert_eq!(first(&keymap, "alt-x", &PANE), Some("command_palette::Toggle"));
+        assert_eq!(
+            first(&keymap, "alt-x", &PANE),
+            Some("command_palette::Toggle")
+        );
         assert_eq!(first(&keymap, "ctrl-k", &EDITOR), Some("emacs::KillLine"));
     }
 }
@@ -691,7 +699,10 @@ async fn switching_the_base_keymap_off_restores_zeds_keys_and_cursor(
     #[cfg(not(target_os = "macos"))]
     {
         assert_ne!(first(&keymap, "ctrl-k", &EDITOR), Some("emacs::KillLine"));
-        assert_ne!(first(&keymap, "alt-x", &PANE), Some("command_palette::Toggle"));
+        assert_ne!(
+            first(&keymap, "alt-x", &PANE),
+            Some("command_palette::Toggle")
+        );
         assert_eq!(
             resolve(&keymap, "ctrl-k", &EDITOR),
             resolve(&default_only, "ctrl-k", &EDITOR)
