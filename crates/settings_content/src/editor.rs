@@ -784,6 +784,43 @@ pub enum ScrollBeyondLastLine {
     VerticalScrollMargin,
 }
 
+/// Settings of the Emacs mode.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct EmacsSettingsContent {
+    /// The shape of the cursor: "emacs" is a block, "modern" is a bar, and "auto" is a block
+    /// while the base keymap is Emacs and the `cursor_shape` setting otherwise.
+    ///
+    /// Default: auto
+    pub cursor_style: Option<EmacsCursorStyle>,
+}
+
+/// Which cursor shape the Emacs mode asks for.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EmacsCursorStyle {
+    /// A block while the base keymap is Emacs, the `cursor_shape` setting otherwise
+    #[default]
+    Auto,
+    /// A block
+    Emacs,
+    /// A vertical bar
+    Modern,
+}
+
 /// The shape of a selection cursor.
 #[derive(
     Copy,
