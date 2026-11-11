@@ -16,7 +16,7 @@
     // Unbind so bongos ignores these keys and lets emacs handle them.
     // NOTE: must be declared before the `Editor` override.
     "context": "Editor",
-    // Zed binds ctrl-g to `go_to_line::Toggle` in full editors; emacs::KeyboardQuit propagates
+    // The default keymap binds ctrl-g to `go_to_line::Toggle` in full editors; emacs::KeyboardQuit propagates
     // when there is nothing to cancel, so that binding is removed here.
     "unbind": { "ctrl-g": "go_to_line::Toggle" },
   },

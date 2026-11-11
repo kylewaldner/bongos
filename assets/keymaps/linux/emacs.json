@@ -16,7 +16,7 @@
     // NOTE: must be declared before the `Editor` override.
     // NOTE: in macos the 'ctrl-x' 'ctrl-p' and 'ctrl-n' rebindings are not needed, since they default to 'cmd'.
     "context": "Editor",
-    // Zed binds ctrl-g to `go_to_line::Toggle` in full editors; emacs::KeyboardQuit propagates
+    // The default keymap binds ctrl-g to `go_to_line::Toggle` in full editors; emacs::KeyboardQuit propagates
     // when there is nothing to cancel, so that binding is removed here.
     "unbind": { "ctrl-g": "go_to_line::Toggle" },
     "bindings": {
