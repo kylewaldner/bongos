@@ -212,6 +212,14 @@ async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
             assert!(action.partial_eq(expected.as_ref()), "{name}");
             assert_eq!(command_palette::humanize_action_name(name), humanized);
         }
+        let toggle = cx
+            .build_action("cursor::ToggleStyle", None)
+            .expect("cursor::ToggleStyle is registered");
+        assert!(toggle.partial_eq(&bongos_emacs::actions::ToggleStyle));
+        assert_eq!(
+            command_palette::humanize_action_name("cursor::ToggleStyle"),
+            "cursor: toggle style"
+        );
         // The menu's "Open protocol log" entry builds this action by name.
         assert!(cx.build_action("dev::OpenLanguageServerLogs", None).is_ok());
     });
