@@ -497,8 +497,8 @@ impl Disk {
         self.tree = Some(Arc::new(tree));
     }
 
-    /// Whether `events` name anything other than temporary files, journals and echoes of the
-    /// store's own writes.
+    /// Whether `events` name anything other than temporary files, journals, echoes of the
+    /// store's own writes, and anything under a `.git`.
     fn needs_reload(&self, events: &[PathEvent]) -> bool {
         events.iter().any(|event| {
             if event.kind == Some(PathEventKind::Rescan) {
