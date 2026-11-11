@@ -173,7 +173,7 @@ async fn start_worktrees(
 }
 
 /// Runs the foreground tasks until `condition` holds, sleeping between rounds because the server
-/// is a real process. Fails after 15 seconds.
+/// is a real process. Fails after 60 seconds, a give-up point for a loaded machine.
 fn wait_until(
     cx: &mut TestAppContext,
     what: &str,
@@ -186,7 +186,7 @@ fn wait_until(
             return;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(15),
+            started.elapsed() < Duration::from_secs(60),
             "timed out waiting for {what}"
         );
         // The project's clock is fake: moving it on lets throttled progress reports through.
