@@ -36,6 +36,8 @@ struct Setup {
     worktree_ids: Vec<WorktreeId>,
     dirs: KotlinDirs,
     pids: PathBuf,
+    /// The fake server's progress gates (`BONGOS_FAKE_LSP_GATES`).
+    gates: PathBuf,
     _temp: tempfile::TempDir,
     _buffers: Vec<Entity<language::Buffer>>,
     _handles: Vec<project::lsp_store::OpenLspBufferHandle>,
@@ -59,8 +61,35 @@ impl Setup {
             .read_with(cx, |manager, _| manager.status(self.worktree_id).cloned())
     }
 
+    /// Lets the fake server send the report of the progress step titled `title`.
+    fn open_gate(&self, title: &str) {
+        fs::write(self.gates.join(title), "").unwrap();
+    }
+
     fn log(&self) -> String {
         fs::read_to_string(KotlinLog::new(&self.dirs.logs_dir).path()).unwrap_or_default()
+    }
+
+    /// `wait_until` for a state a failed server never reaches: a failed status ends the wait at
+    /// once, with the log, instead of at the give-up point.
+    fn wait_until(
+        &self,
+        cx: &mut TestAppContext,
+        what: &str,
+        mut condition: impl FnMut(&mut TestAppContext) -> bool,
+    ) {
+        wait_until(cx, what, |cx| {
+            let status = self.status(cx);
+            assert!(
+                !matches!(
+                    status,
+                    Some(ServerStatus::Failed { .. } | ServerStatus::BothFailed { .. })
+                ),
+                "the server failed while waiting for {what}: {status:?}\n{}",
+                self.log()
+            );
+            condition(cx)
+        });
     }
 }
 
@@ -93,6 +122,8 @@ async fn start_worktrees(
     let temp = tempfile::tempdir().unwrap();
     let pids = temp.path().join("pids");
     fs::create_dir_all(&pids).unwrap();
+    let gates = temp.path().join("gates");
+    fs::create_dir_all(&gates).unwrap();
     let roots: Vec<PathBuf> = (0..count)
         .map(|index| temp.path().join(format!("project{index}")))
         .collect();
@@ -116,7 +147,11 @@ async fn start_worktrees(
         let settings = serde_json::json!({
             "lsp": { "kotlin": { "binary": {
                 "path": binary,
-                "env": { "BONGOS_FAKE_LSP_PIDS": pids, "BONGOS_FAKE_LSP_MODE": mode },
+                "env": {
+                    "BONGOS_FAKE_LSP_PIDS": pids,
+                    "BONGOS_FAKE_LSP_MODE": mode,
+                    "BONGOS_FAKE_LSP_GATES": gates,
+                },
             } } }
         });
         cx.update_global::<SettingsStore, _>(|store, cx| {
@@ -166,6 +201,7 @@ async fn start_worktrees(
         worktree_ids,
         dirs,
         pids,
+        gates,
         _temp: temp,
         _buffers: buffers,
         _handles: handles,
@@ -173,25 +209,30 @@ async fn start_worktrees(
 }
 
 /// Runs the foreground tasks until `condition` holds, sleeping between rounds because the server
-/// is a real process. Fails after 15 seconds.
+/// is a real process. Fails after 60 seconds, a give-up point for a loaded machine.
 fn wait_until(
     cx: &mut TestAppContext,
     what: &str,
     mut condition: impl FnMut(&mut TestAppContext) -> bool,
 ) {
     let started = Instant::now();
+    let mut clock_moved_at = started;
     loop {
         cx.run_until_parked();
         if condition(cx) {
             return;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(15),
+            started.elapsed() < Duration::from_secs(60),
             "timed out waiting for {what}"
         );
-        // The project's clock is fake: moving it on lets throttled progress reports through.
-        cx.executor().advance_clock(Duration::from_millis(200));
         std::thread::sleep(Duration::from_millis(20));
+        // The project's clock is fake. Moving it on by the real time that passed lets throttled
+        // progress reports through and keeps its timeouts (120 s for `initialize`) at real pace,
+        // so none of them can fire inside this wait.
+        let now = Instant::now();
+        cx.executor().advance_clock(now - clock_moved_at);
+        clock_moved_at = now;
     }
 }
 
@@ -208,7 +249,7 @@ fn is_gone(pid: u32) -> bool {
 #[gpui::test]
 async fn test_restart_leaves_one_live_pid_and_reaps_the_old_one(cx: &mut TestAppContext) {
     let setup = start(cx, Path::new(FAKE_SERVER), "").await;
-    wait_until(cx, "the first server to be ready", |cx| {
+    setup.wait_until(cx, "the first server to be ready", |cx| {
         setup.pid_files().len() == 1 && setup.status(cx) == Some(ServerStatus::Ready)
     });
     let first = setup.pid_files()[0];
@@ -226,7 +267,7 @@ async fn test_restart_leaves_one_live_pid_and_reaps_the_old_one(cx: &mut TestApp
             })
             .unwrap();
         let mut most_at_once = 0;
-        wait_until(cx, "the replacement server to be ready", |cx| {
+        setup.wait_until(cx, "the replacement server to be ready", |cx| {
             let pids = setup.pid_files();
             most_at_once = most_at_once.max(pids.len());
             pids.len() == 1 && pids[0] != previous && setup.status(cx) == Some(ServerStatus::Ready)
@@ -246,10 +287,24 @@ async fn test_restart_leaves_one_live_pid_and_reaps_the_old_one(cx: &mut TestApp
 #[gpui::test]
 async fn test_progress_drives_indexing_then_ready(cx: &mut TestAppContext) {
     let setup = start(cx, Path::new(FAKE_SERVER), "progress").await;
-    wait_until(cx, "indexing to be logged", |_| {
+    setup.open_gate("Importing");
+    // `LspStore` drops a report that comes less than `SERVER_PROGRESS_THROTTLE_TIMEOUT` after its
+    // begin on the project's fake clock. A slow test thread can handle both in one round, at one
+    // fake instant, so the server holds the report until the begin has been handled and the clock
+    // has moved past the throttle.
+    setup.wait_until(cx, "indexing to begin", |cx| {
+        setup.status(cx)
+            == Some(ServerStatus::Indexing {
+                label: "Indexing".into(),
+            })
+    });
+    cx.executor()
+        .advance_clock(project::SERVER_PROGRESS_THROTTLE_TIMEOUT);
+    setup.open_gate("Indexing");
+    setup.wait_until(cx, "indexing to be logged", |_| {
         setup.log().contains("indexing 3/5 modules")
     });
-    wait_until(cx, "the server to be ready again", |cx| {
+    setup.wait_until(cx, "the server to be ready again", |cx| {
         setup.status(cx) == Some(ServerStatus::Ready) && setup.pid_files().len() == 1
     });
     let log = setup.log();
@@ -303,14 +358,14 @@ async fn test_startup_stderr_event_and_log(cx: &mut TestAppContext) {
     setup.manager.update(cx, |manager, cx| {
         manager.restart_server(setup.worktree_id, cx)
     });
-    wait_until(cx, "the startup stderr event", |_| {
+    setup.wait_until(cx, "the startup stderr event", |_| {
         !seen.borrow().is_empty()
     });
     let (name, worktree_id, text) = seen.borrow()[0].clone();
     assert_eq!(name, "kotlin");
     assert_eq!(worktree_id, setup.worktree_id);
     assert!(text.contains("fake server starting up"), "{text}");
-    wait_until(cx, "the stderr line in kotlin.log", |_| {
+    setup.wait_until(cx, "the stderr line in kotlin.log", |_| {
         setup.log().contains("stderr fake server starting up")
     });
 }
@@ -342,7 +397,7 @@ async fn test_switching_one_worktree_leaves_the_others_server_alone(cx: &mut Tes
                 .and_then(|(_, status)| status.process_id)
         })
     };
-    wait_until(cx, "both servers to be ready", |cx| {
+    setup.wait_until(cx, "both servers to be ready", |cx| {
         setup.pid_files().len() == 2
             && process_of(cx, first).is_some()
             && process_of(cx, second).is_some()
@@ -360,7 +415,7 @@ async fn test_switching_one_worktree_leaves_the_others_server_alone(cx: &mut Tes
             manager.switch_server(first, Some(KotlinServerKind::Intellij), cx)
         })
         .unwrap();
-    wait_until(cx, "the first worktree's server to be replaced", |cx| {
+    setup.wait_until(cx, "the first worktree's server to be replaced", |cx| {
         process_of(cx, first).is_some_and(|pid| pid != old_first) && setup.pid_files().len() == 2
     });
     assert!(
@@ -403,7 +458,7 @@ async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppCon
         .unwrap()
         .downcast::<Editor>()
         .unwrap();
-    wait_until(cx, "kotlin-lsp to be ready", |cx| {
+    setup.wait_until(cx, "kotlin-lsp to be ready", |cx| {
         setup.status(cx) == Some(ServerStatus::Ready)
     });
 
@@ -431,14 +486,14 @@ async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppCon
                 .map(|fallback| fallback.kind)
         })
     };
-    wait_until(cx, "the fallback to kotlin-lsp to be ready", |cx| {
+    setup.wait_until(cx, "the fallback to kotlin-lsp to be ready", |cx| {
         fallback(cx) == Some(FallbackReason::LicenseLost)
             && setup.status(cx) == Some(ServerStatus::Ready)
             && setup.pid_files().len() == 1
     });
     // kotlin-lsp sends the same text again later; nothing retries IntelliJ.
     let settle = Instant::now();
-    wait_until(cx, "a while on kotlin-lsp", |_| {
+    setup.wait_until(cx, "a while on kotlin-lsp", |_| {
         settle.elapsed() > Duration::from_millis(800)
     });
     let log = setup.log();
