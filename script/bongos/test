@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Gate 3: unit and UI tests for the named crates, else the crates changed on this branch, run with
-# cargo-nextest: one process per test, and a hung test is killed after the per-test timeout in
-# .config/nextest.toml (the same one test-all uses) and reported as TIMEOUT. Doctests are not run.
+# Gate 3: unit and UI tests for the crates changed on this branch, run with cargo-nextest: one
+# process per test, and a hung test is killed after the per-test timeout in .config/nextest.toml (the
+# same one test-all uses) and reported as TIMEOUT. Doctests are not run.
 # Prints pass and fail counts, and the name and failure text of each failing test; the full output
 # is in the log.
-#   test [crate...]       BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
+#   test [crate...]       named crates select which tests run; BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
 #   BONGOS_TEST_NO_NET=1  cargo runs offline (CARGO_NET_OFFLINE=true)
 #   BONGOS_TEST_PARTITION=K/N  run only slice K of N of the tests (nextest --partition hash:K/N)
-# Prefer running it with no crate names, which tests the crates changed on this branch, and narrow
-# the run with BONGOS_TEST_FILTER. Every distinct set of -p flags makes cargo unify features
-# differently and build another full set of dependency artifacts, so name crates only when the
-# branch's set is wrong. The whole suite is script/bongos/test-all.
+# Every distinct set of -p flags makes cargo unify features differently and build another full set
+# of dependency artifacts, so the -p set is always the branch's changed crates (sorted), and named
+# crates only select tests through a nextest filterset (package(=name)). A named crate that is not
+# changed on the branch is added to the -p set, which builds a different set; a line says so.
+# Narrow a run with crate names or BONGOS_TEST_FILTER (an intersection with the named crates). The
+# whole suite is script/bongos/test-all.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
@@ -43,19 +45,42 @@ summary_hook() {
   }' <<<"$line")
 }
 
+# The -p set is the branch's changed crates, plus any named crate that is not among them. Named
+# crates select tests through a filterset, so naming a changed crate never changes what is built.
+changed=()
+while IFS= read -r c; do
+  [ -n "$c" ] && changed+=("$c")
+done < <(changed_crates)
+named=()
+[ "$#" -gt 0 ] && named=("$@")
+extra=()
+for c in ${named[@]+"${named[@]}"}; do
+  found=0
+  for d in ${changed[@]+"${changed[@]}"}; do [ "$c" = "$d" ] && found=1; done
+  [ "$found" -eq 0 ] && extra+=("$c")
+done
 crates=()
-if [ "$#" -gt 0 ]; then
-  for c in "$@"; do crates+=(-p "$c"); done
-else
-  while IFS= read -r c; do
-    [ -n "$c" ] && crates+=(-p "$c")
-  done < <(changed_crates)
-fi
+while IFS= read -r c; do
+  [ -n "$c" ] && crates+=(-p "$c")
+done < <(printf '%s\n' ${changed[@]+"${changed[@]}"} ${extra[@]+"${extra[@]}"} | sort -u)
 if [ "${#crates[@]}" -eq 0 ]; then
   echo "no crates named and none changed on this branch; nothing to run"
   SUMMARY="nothing to run"
   summary_hook() { :; }
   exit 0
+fi
+if [ "${#extra[@]}" -gt 0 ]; then
+  echo "bongos: not changed on this branch, added to the build (a different package set, so cargo rebuilds): $(printf '%s\n' "${extra[@]}" | sort -u | tr '\n' ' ')"
+fi
+# nextest intersects -E with the positional name filter below, so BONGOS_TEST_FILTER still narrows
+# within the named crates.
+selection=()
+if [ "${#named[@]}" -gt 0 ]; then
+  expression=""
+  while IFS= read -r c; do
+    expression="${expression:+$expression | }package(=$c)"
+  done < <(printf '%s\n' "${named[@]}" | sort -u)
+  selection=(-E "$expression")
 fi
 
 require_space
@@ -84,4 +109,4 @@ fi
 
 # No --lib: a package without a library target (the bongos binary crate) makes cargo fail. --tests
 # still runs every library's unit tests.
-cargo_limited nextest run "${crates[@]}" ${filter[@]+"${filter[@]}"} ${partition[@]+"${partition[@]}"} --bins --tests --locked --no-fail-fast --no-tests=pass --color never
+cargo_limited nextest run "${crates[@]}" ${selection[@]+"${selection[@]}"} ${filter[@]+"${filter[@]}"} ${partition[@]+"${partition[@]}"} --bins --tests --locked --no-fail-fast --no-tests=pass --color never
