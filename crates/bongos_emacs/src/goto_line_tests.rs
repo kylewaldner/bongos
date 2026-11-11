@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bongos_minibuffer::SessionView;
 use editor::{Editor, MultiBufferOffset, ToPoint as _};
-use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle};
+use gpui::{AppContext as _, BorrowAppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle};
 use project::Project;
 use settings::SettingsStore;
 use workspace::{AppState, MultiWorkspace, Workspace};
@@ -129,7 +129,7 @@ fn open_prompt(
 async fn types_a_line_previews_it_and_enter_goes_there(routed: bool, cx: &mut TestAppContext) {
     let (workspace, editor, mut cx) = workspace_editor(routed, cx).await;
     let cx = &mut cx;
-    let caret = editor.update(cx, |editor, cx| editor.selections.newest::<usize>(&editor.display_snapshot(cx)).head());
+    let caret = caret_row(&editor, cx);
     let top = scroll_top(&editor, cx);
 
     open_prompt(&workspace, cx);
@@ -139,7 +139,7 @@ async fn types_a_line_previews_it_and_enter_goes_there(routed: bool, cx: &mut Te
     cx.run_until_parked();
     assert_eq!(highlighted(&editor, cx), vec![41]);
     assert_eq!(caret_row(&editor, cx), 9);
-    let now = editor.update(cx, |editor, cx| editor.selections.newest::<usize>(&editor.display_snapshot(cx)).head());
+    let now = caret_row(&editor, cx);
     assert_eq!(now, caret, "the caret did not move");
     assert_eq!(status(&workspace, cx), "");
     let _ = top;
