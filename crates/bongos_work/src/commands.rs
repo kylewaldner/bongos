@@ -25,6 +25,7 @@ use workspace::{Toast, Workspace};
 
 use crate::actions::{artifact, project, task, todo, work};
 use crate::modals::{self, Then};
+use crate::registry::LiveModesRegistry;
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
 use crate::{
@@ -225,6 +226,22 @@ pub(crate) fn submit(
         }
     })
     .detach();
+}
+
+/// Shows why the todos of task `id` cannot change while a source reports a run on it, and says
+/// whether it did. Nothing is written for a refused command.
+fn refuse_active_run(id: &str, workspace: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
+    let start = LiveModesRegistry::can_start_run(id, cx);
+    let Some(chip) = start.chip.filter(|_| !start.allowed) else {
+        return false;
+    };
+    show_toast(workspace, run_refusal(&chip), cx);
+    true
+}
+
+/// What the refusal of a todo command says about the run `chip` describes.
+pub(crate) fn run_refusal(chip: &str) -> String {
+    format!("{chip}; cancel the run first (workflow: cancel)")
 }
 
 /// Asks which project, among those that pass `keep`, then calls `then` with its slug. With none,
@@ -539,6 +556,9 @@ fn advance(
             !override_ship || ship_waits(task, tree)
         },
         Box::new(move |id, workspace, _, cx| {
+            if refuse_active_run(&id, workspace, cx) {
+                return;
+            }
             submit(workspace, cx, move |tree, ctx| {
                 model::advance(tree, ctx, &id, override_ship)
             })
@@ -819,6 +839,9 @@ fn todo_remove(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         |task, tree| is_leaf_with(task, tree, |_| true),
         |_, _| true,
         |id, index, workspace, _, cx| {
+            if refuse_active_run(&id, workspace, cx) {
+                return;
+            }
             submit(workspace, cx, move |tree, ctx| {
                 model::todo_remove(tree, ctx, &id, index)
             })
@@ -839,6 +862,9 @@ fn todo_skip(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
         |task, tree| is_open_leaf(task, tree) && is_leaf_with(task, tree, is_open),
         |_, todo| is_open(todo),
         |id, index, workspace, _, cx| {
+            if refuse_active_run(&id, workspace, cx) {
+                return;
+            }
             submit(workspace, cx, move |tree, ctx| {
                 model::todo_skip(tree, ctx, &id, Some(index))
             })

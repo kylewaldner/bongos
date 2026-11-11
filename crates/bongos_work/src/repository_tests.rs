@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use crate::command_tests::{Input, dispatch, harness, wait_until};
 use crate::store_tests::{canonical, write};
-use crate::{Repository, WorkSettings, find_repository, resolve_repository};
+use crate::{Repository, WorkSettings, find_repository, merge_is_ship, resolve_repository};
 
 fn repository(name: &str, deployments: bool) -> Repository {
     Repository {
@@ -267,4 +267,49 @@ async fn add_repository_refuses_a_name_in_use_and_cancelling_adds_nothing(cx: &m
     cx.run_until_parked();
     assert!(harness.prompt(cx).is_none());
     assert!(!harness.has_toast(cx));
+}
+
+fn set_merge_is_ship(cx: &mut gpui::VisualTestContext, value: Option<bool>) {
+    cx.update(|_, cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.work.get_or_insert_default().repositories =
+                    Some(vec![WorkRepositoryContent {
+                        name: "invoicing".to_string(),
+                        path: "~/src/invoicing".to_string(),
+                        setup_command: None,
+                        merge_is_ship: value,
+                        deployments: None,
+                        branch_template: None,
+                    }]);
+            });
+        });
+    });
+}
+
+#[gpui::test]
+async fn merge_is_ship_is_the_task_override_then_the_repository_then_true(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    let task = harness.tree(cx).task_by_id("l1").unwrap().clone();
+    let mut overridden = task.clone();
+    let ask = |task: &bongos_work_model::store::Task, cx: &mut gpui::VisualTestContext| {
+        cx.update(|_, cx| merge_is_ship(task, cx))
+    };
+
+    // No repository listed: the default.
+    assert!(ask(&task, cx));
+
+    // The repository the project names says false; true with no value.
+    set_merge_is_ship(cx, Some(false));
+    assert!(!ask(&task, cx));
+    set_merge_is_ship(cx, None);
+    assert!(ask(&task, cx));
+
+    // The task's own setting wins over the repository's, both ways.
+    set_merge_is_ship(cx, Some(false));
+    overridden.file.as_mut().unwrap().merge_is_ship = Some(true);
+    assert!(ask(&overridden, cx));
+    set_merge_is_ship(cx, Some(true));
+    overridden.file.as_mut().unwrap().merge_is_ship = Some(false);
+    assert!(!ask(&overridden, cx));
 }
