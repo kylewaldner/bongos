@@ -121,11 +121,10 @@ fn scroll_top(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> f64 {
 /// Presses a prompt key by the action it is bound to: the keymap is not loaded here, so C-g
 /// and Escape (both `Cancel`) and RET (`Confirm`) reach the prompt as their actions.
 fn press(routed: bool, key: &str, cx: &mut VisualTestContext) {
-    let name = match (routed, key) {
-        (true, "cancel") => "minibuffer::Cancel",
-        (true, _) => "minibuffer::Confirm",
-        (false, "cancel") => "menu::Cancel",
-        (false, _) => "menu::Confirm",
+    let _ = routed;
+    let name = match key {
+        "cancel" => "menu::Cancel",
+        _ => "menu::Confirm",
     };
     let action = cx.update(|_, cx| cx.build_action(name, None).unwrap());
     cx.update(|window, cx| window.dispatch_action(action, cx));
