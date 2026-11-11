@@ -3,7 +3,13 @@
 
 use std::rc::Rc;
 
-use gpui::{App, Global, Window};
+use editor::Editor;
+use gpui::{App, Entity, Global, Window};
+use text::SelectionGoal;
+use workspace::Workspace;
+
+use crate::actions::KeyboardQuit;
+use crate::last_command;
 
 type Hook = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -41,4 +47,82 @@ pub fn run_hooks_once(window: &mut Window, cx: &mut App) {
     for hook in hooks {
         hook(window, cx);
     }
+}
+
+/// C-g in an editor. Never edits text. Runs the hooks, then does the first thing that applies
+/// (as `Editor::cancel` does, one per press): ends mark mode, dismisses menus and popups,
+/// collapses expanded diff hunks, hides the blame gutter, clears the region on every caret
+/// (full editors only), or collapses several carets to the oldest. With nothing to cancel the
+/// key propagates, so a picker's query editor reaches `menu::Cancel`.
+pub(crate) fn keyboard_quit_command(
+    _: &KeyboardQuit,
+    editor: &Entity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    run_hooks_once(window, cx);
+    let cancelled = editor.update(cx, |editor, cx| {
+        let mark_was_on = editor.selection_mark_mode();
+        editor.set_selection_mark_mode(false, cx);
+        if editor.dismiss_menus_and_popups(true, window, cx)
+            || editor.collapse_expanded_diff_hunks(cx)
+            || editor.hide_git_blame_gutter(cx)
+        {
+            cx.notify();
+            return true;
+        }
+        if editor.mode().is_full() {
+            let has_region = editor
+                .selections
+                .disjoint_anchors()
+                .iter()
+                .any(|selection| selection.start != selection.end);
+            let changed = if has_region {
+                editor.change_selections(Default::default(), window, cx, |s| {
+                    s.move_with(&mut |_, selection| {
+                        if selection.start != selection.end {
+                            selection.collapse_to(selection.head(), SelectionGoal::None);
+                        }
+                    });
+                });
+                true
+            } else {
+                editor.change_selections(Default::default(), window, cx, |s| s.try_cancel())
+            };
+            if changed {
+                cx.notify();
+                return true;
+            }
+        }
+        mark_was_on
+    });
+    if !cancelled {
+        cx.propagate();
+    }
+}
+
+/// C-g at `Workspace` depth (focus in a panel): hides the active modal unless focus is inside
+/// it, and propagates otherwise, so the modal's own `menu::Cancel` and any other panel's key
+/// handling still run.
+fn workspace_quit(
+    workspace: &mut Workspace,
+    _: &KeyboardQuit,
+    window: &mut Window,
+    cx: &mut gpui::Context<Workspace>,
+) {
+    run_hooks_once(window, cx);
+    last_command::record(window, Some("emacs::KeyboardQuit"), cx);
+    if workspace.has_active_modal(window, cx) && !workspace.focus_in_modal(window, cx) {
+        workspace.hide_modal(window, cx);
+    } else {
+        cx.propagate();
+    }
+}
+
+/// Registers the `Workspace` handler on every workspace.
+pub(crate) fn init(cx: &mut App) {
+    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+        workspace.register_action(workspace_quit);
+    })
+    .detach();
 }
