@@ -22,7 +22,7 @@
   // 4. "None"
   // 5. "SublimeText"
   // 6. "TextMate"
-  "base_keymap": "VSCode",
+  "base_keymap": "Emacs",
   // Settings of the Emacs mode.
   "emacs": {
     // The cursor shape: "auto" is a block while `base_keymap` is "Emacs" and `cursor_shape`
@@ -2644,7 +2644,9 @@
       "tab_switcher",
       "work",
       "messages",
-      "key_hint"
+      "key_hint",
+      "goto_line",
+      "zap"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,

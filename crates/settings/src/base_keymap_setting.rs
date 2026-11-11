@@ -7,17 +7,17 @@ use settings::{RegisterSetting, Settings};
 
 /// Base key bindings scheme. Base keymaps can be overridden with user keymaps.
 ///
-/// Default: VSCode
+/// Default: Emacs
 #[derive(
     Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default, RegisterSetting,
 )]
 pub enum BaseKeymap {
-    #[default]
     VSCode,
     JetBrains,
     SublimeText,
     Atom,
     TextMate,
+    #[default]
     Emacs,
     Cursor,
     None,
@@ -60,7 +60,7 @@ impl Display for BaseKeymap {
             BaseKeymap::SublimeText => write!(f, "Sublime Text"),
             BaseKeymap::Atom => write!(f, "Atom"),
             BaseKeymap::TextMate => write!(f, "TextMate"),
-            BaseKeymap::Emacs => write!(f, "Emacs (beta)"),
+            BaseKeymap::Emacs => write!(f, "Emacs"),
             BaseKeymap::Cursor => write!(f, "Cursor (beta)"),
             BaseKeymap::None => write!(f, "None"),
         }
@@ -70,22 +70,22 @@ impl Display for BaseKeymap {
 impl BaseKeymap {
     #[cfg(target_os = "macos")]
     pub const OPTIONS: [(&'static str, Self); 7] = [
-        ("VS Code (Default)", Self::VSCode),
+        ("VS Code", Self::VSCode),
         ("Atom", Self::Atom),
         ("JetBrains", Self::JetBrains),
         ("Sublime Text", Self::SublimeText),
-        ("Emacs (beta)", Self::Emacs),
+        ("Emacs (Default)", Self::Emacs),
         ("TextMate", Self::TextMate),
         ("Cursor", Self::Cursor),
     ];
 
     #[cfg(not(target_os = "macos"))]
     pub const OPTIONS: [(&'static str, Self); 6] = [
-        ("VS Code (Default)", Self::VSCode),
+        ("VS Code", Self::VSCode),
         ("Atom", Self::Atom),
         ("JetBrains", Self::JetBrains),
         ("Sublime Text", Self::SublimeText),
-        ("Emacs (beta)", Self::Emacs),
+        ("Emacs (Default)", Self::Emacs),
         ("Cursor", Self::Cursor),
     ];
 
