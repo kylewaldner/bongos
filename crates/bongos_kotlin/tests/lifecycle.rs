@@ -180,6 +180,7 @@ fn wait_until(
     mut condition: impl FnMut(&mut TestAppContext) -> bool,
 ) {
     let started = Instant::now();
+    let mut clock_moved_at = started;
     loop {
         cx.run_until_parked();
         if condition(cx) {
@@ -189,9 +190,13 @@ fn wait_until(
             started.elapsed() < Duration::from_secs(60),
             "timed out waiting for {what}"
         );
-        // The project's clock is fake: moving it on lets throttled progress reports through.
-        cx.executor().advance_clock(Duration::from_millis(200));
         std::thread::sleep(Duration::from_millis(20));
+        // The project's clock is fake. Moving it on by the real time that passed lets throttled
+        // progress reports through and keeps its timeouts (120 s for `initialize`) at real pace,
+        // so none of them can fire inside this wait.
+        let now = Instant::now();
+        cx.executor().advance_clock(now - clock_moved_at);
+        clock_moved_at = now;
     }
 }
 
