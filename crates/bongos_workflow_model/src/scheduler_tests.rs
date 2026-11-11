@@ -560,9 +560,15 @@ outcomes = ["pr"]
 fn success_needs_every_promised_outcome() {
     let mut run = runner(PROMISE);
     run.script("review", [ok(json!({ "verdict": "fine" }))]);
-    let failure = failure_of(&run.run());
+    let state = run.run();
+    let failure = failure_of(&state);
     assert_eq!(failure.reason, FailureReason::OutcomePromisedNotDelivered);
     assert!(failure.detail.contains("promises pr"), "{}", failure.detail);
+    assert_eq!(
+        retry_set(&run.definition, &state, &run.limits),
+        vec![key("review", 1)],
+        "no branch failed, so the retry falls back to the key the end names"
+    );
 
     let mut run = runner(PROMISE);
     run.script(
@@ -591,7 +597,14 @@ fn a_failure_end_fails_the_run() {
     let mut run = runner(&text);
     run.script("triage", [ok(json!({ "mode": "unsure" }))]);
     let state = run.run();
-    assert_eq!(state.ended, Some((EndState::Failed, None)));
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::FailureEndReached);
+    assert_eq!(failure.node, Some(key("triage", 1)));
+    assert_eq!(failure.detail, "stuck: needs a hand");
+    assert_eq!(
+        retry_set(&run.definition, &state, &run.limits),
+        vec![key("triage", 1)]
+    );
     let plan = plan(&run.definition, &state, &run.limits);
     assert_eq!(
         plan.failure().and_then(|failed| failed.key().cloned()),

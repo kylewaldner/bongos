@@ -171,6 +171,17 @@ pub(crate) fn outcome_name(outcome: Outcome) -> &'static str {
     }
 }
 
+/// Whether a node name is safe in a git branch name and a directory name: lowercase ASCII
+/// letters, digits, `-` and `_`, starting with a letter or digit.
+fn is_safe_node_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
 fn agent_name(agent: AgentKind) -> &'static str {
     match agent {
         AgentKind::Claude => "claude",
@@ -308,6 +319,16 @@ impl<'a> Validator<'a> {
 
     fn check_node(&mut self, node: &'a Node) {
         let name = node.name.as_str();
+        if !is_safe_node_name(name) {
+            self.error(
+                Some(name),
+                node.line,
+                format!(
+                    "node name '{name}' may use only lowercase letters, digits, '-' and '_', \
+                     starting with a letter or digit (it names branches and directories)"
+                ),
+            );
+        }
         match node.kind.value {
             NodeKind::Agent => self.check_agent(node),
             NodeKind::Program => self.check_program(node),

@@ -125,8 +125,8 @@ pub enum Command {
     /// Stop every running key of the branch: a join `any` took another branch. Whatever the
     /// stopped tries record is ignored, since the branch no longer counts.
     CancelBranch { join: String, branch: Branch },
-    /// Append `Ended`. A failure end of the definition ends with `failure: None`; the end and the
-    /// key that reached it are in [`Plan::failed`].
+    /// Append `Ended`. A failure end of the definition ends with a `failure end reached` failure
+    /// at the key that routed to it ([`Failed::failure`]).
     End {
         state: EndState,
         failure: Option<Failure>,
@@ -138,16 +138,32 @@ pub enum Command {
 pub enum Failed {
     /// A node failed for good, or routing from its result failed.
     Node(Failure),
-    /// The branch reached a failure end of the definition.
-    End { end: String, from: NodeKey },
+    /// The branch reached a failure end of the definition, from key `from`; `reason` is the
+    /// end's own text.
+    End {
+        end: String,
+        from: NodeKey,
+        reason: Option<String>,
+    },
 }
 
 impl Failed {
-    /// The failure the `Ended` event records.
+    /// The failure the `Ended` event records; a failure end of the definition gives `failure end
+    /// reached` at the key that routed to it, with the end's name and reason as its detail.
     pub fn failure(&self) -> Option<Failure> {
         match self {
             Failed::Node(failure) => Some(failure.clone()),
-            Failed::End { .. } => None,
+            Failed::End { end, from, reason } => {
+                let detail = match reason {
+                    Some(reason) if !reason.is_empty() => format!("{end}: {reason}"),
+                    _ => end.clone(),
+                };
+                Some(Failure::new(
+                    FailureReason::FailureEndReached,
+                    Some(from.clone()),
+                    detail,
+                ))
+            }
         }
     }
 
@@ -386,6 +402,9 @@ pub fn resume_set(state: &RunState) -> Vec<NodeKey> {
 /// several failed) by starting it; that start reopens the failed run and gives the key its
 /// retries again ([`RunState::retry_floors`]).
 ///
+/// When no branch failed but the run ended Failed (a promised outcome not delivered), it is the
+/// key the `Ended` failure names.
+///
 /// A join whose merge conflicted is never in it: a conflict is terminal for the run, and only a
 /// fresh run recovers (rerunning the join would start it without its branches merged).
 pub fn retry_set(definition: &Definition, state: &RunState, limits: &Limits) -> Vec<NodeKey> {
@@ -401,6 +420,15 @@ pub fn retry_set(definition: &Definition, state: &RunState, limits: &Limits) -> 
         {
             keys.push(key.clone());
         }
+    }
+    // A run that ended Failed with no failed branch (a promised outcome not delivered) names the
+    // key in its `Ended` failure.
+    if keys.is_empty()
+        && let Some((EndState::Failed, Some(failure))) = &state.ended
+        && failure.reason != FailureReason::MergeConflict
+        && let Some(key) = &failure.node
+    {
+        keys.push(key.clone());
     }
     keys
 }
@@ -907,6 +935,7 @@ impl<'a> Walk<'a> {
                 let failed = Failed::End {
                     end: end.name.clone(),
                     from,
+                    reason: end.reason.clone(),
                 };
                 self.push(&scope, Item::Failed(time, failed));
             }
