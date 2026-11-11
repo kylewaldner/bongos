@@ -621,25 +621,105 @@ async fn reserved_keys_carry_only_the_interim_rows(cx: &mut gpui::TestAppContext
     }
 }
 
-#[gpui::test]
-async fn another_base_keymap_has_no_emacs_binding(cx: &mut gpui::TestAppContext) {
-    use gpui::BorrowAppContext as _;
-
-    super::tests::init_keymap_test(cx);
-    let default_only = Keymap::new(load_all(&LINUX, false, cx));
-    let keymap = cx.update(|cx| {
-        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
-            store.update_user_settings(cx, |settings| {
-                settings.base_keymap = Some(settings::BaseKeymapContent::VSCode);
-            });
-        });
+/// The bindings the app loads for the current settings, as `load_default_keymap` binds them.
+fn reload_keymap(cx: &mut gpui::TestAppContext) -> Vec<KeyBinding> {
+    cx.update(|cx| {
         cx.clear_key_bindings();
         super::load_default_keymap(cx);
         let bindings: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
         bindings
+    })
+}
+
+fn set_base_keymap(cx: &mut gpui::TestAppContext, keymap: settings::BaseKeymapContent) {
+    use gpui::BorrowAppContext as _;
+
+    cx.update(|cx| {
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| settings.base_keymap = Some(keymap));
+        });
     });
-    assert!(!keymap.is_empty());
+}
+
+fn cursor_shape(cx: &mut gpui::TestAppContext) -> Option<language::CursorShape> {
+    use settings::Settings as _;
+
+    cx.update(|cx| editor::EditorSettings::get_global(cx).cursor_shape)
+}
+
+#[gpui::test]
+async fn the_default_settings_give_the_emacs_base_and_a_block_cursor(cx: &mut gpui::TestAppContext) {
+    use settings::Settings as _;
+
+    super::tests::init_keymap_test(cx);
+    cx.update(|cx| {
+        assert_eq!(*settings::BaseKeymap::get_global(cx), settings::BaseKeymap::Emacs);
+    });
+    assert_eq!(cursor_shape(cx), Some(language::CursorShape::Block));
+
+    // No setting is written, and the keymap has the Emacs keys.
+    let keymap = reload_keymap(cx);
     let base = settings::KeybindSource::Base.meta();
+    assert!(keymap.iter().any(|binding| binding.meta() == Some(base)));
+    let keymap = Keymap::new(keymap);
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert_eq!(first(&keymap, "alt-x", &PANE), Some("command_palette::Toggle"));
+        assert_eq!(first(&keymap, "ctrl-k", &EDITOR), Some("emacs::KillLine"));
+    }
+}
+
+#[gpui::test]
+async fn switching_the_base_keymap_off_restores_zeds_keys_and_cursor(
+    cx: &mut gpui::TestAppContext,
+) {
+    super::tests::init_keymap_test(cx);
+    let default_only = Keymap::new(load_all(&LINUX, false, cx));
+    assert_eq!(cursor_shape(cx), Some(language::CursorShape::Block));
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(
+        first(&Keymap::new(reload_keymap(cx)), "ctrl-k", &EDITOR),
+        Some("emacs::KillLine")
+    );
+
+    set_base_keymap(cx, settings::BaseKeymapContent::VSCode);
+    assert_eq!(cursor_shape(cx), Some(language::CursorShape::Bar));
+    let keymap = reload_keymap(cx);
+    let base = settings::KeybindSource::Base.meta();
+    assert!(keymap.iter().all(|binding| binding.meta() != Some(base)));
+    let keymap = Keymap::new(keymap);
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert_ne!(first(&keymap, "ctrl-k", &EDITOR), Some("emacs::KillLine"));
+        assert_ne!(first(&keymap, "alt-x", &PANE), Some("command_palette::Toggle"));
+        assert_eq!(
+            resolve(&keymap, "ctrl-k", &EDITOR),
+            resolve(&default_only, "ctrl-k", &EDITOR)
+        );
+    }
+    let _ = default_only;
+}
+
+#[gpui::test]
+async fn another_base_keymap_has_no_emacs_binding(cx: &mut gpui::TestAppContext) {
+    super::tests::init_keymap_test(cx);
+    let default_only = Keymap::new(load_all(&LINUX, false, cx));
+    // Start from Emacs: the base keymap has bindings, then none remain after the switch.
+    set_base_keymap(cx, settings::BaseKeymapContent::Emacs);
+    let emacs = reload_keymap(cx);
+    let base = settings::KeybindSource::Base.meta();
+    assert!(
+        emacs.iter().any(|binding| binding.meta() == Some(base)),
+        "the Emacs base has no Base-source binding"
+    );
+    assert!(
+        emacs
+            .iter()
+            .any(|binding| binding.action().name().starts_with("emacs::"))
+    );
+    set_base_keymap(cx, settings::BaseKeymapContent::VSCode);
+    let keymap = reload_keymap(cx);
+    assert!(!keymap.is_empty());
     for binding in &keymap {
         assert_ne!(binding.meta(), Some(base), "{}", binding.action().name());
         assert!(
