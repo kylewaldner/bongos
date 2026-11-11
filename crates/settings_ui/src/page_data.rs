@@ -1644,14 +1644,9 @@ fn appearance_page() -> SettingsPage {
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("emacs.cursor_style"),
-                    pick: |settings_content| {
-                        settings_content.emacs.as_ref()?.cursor_style.as_ref()
-                    },
+                    pick: |settings_content| settings_content.emacs.as_ref()?.cursor_style.as_ref(),
                     write: |settings_content, value, _| {
-                        settings_content
-                            .emacs
-                            .get_or_insert_default()
-                            .cursor_style = value;
+                        settings_content.emacs.get_or_insert_default().cursor_style = value;
                     },
                 }),
                 metadata: None,

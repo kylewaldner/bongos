@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use db::kvp::KeyValueStore;
 use gpui::{
-    BorrowAppContext as _, Entity, Focusable as _, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, WindowHandle,
+    BorrowAppContext as _, Entity, Focusable as _, KeyDownEvent, Keystroke, Modifiers,
+    TestAppContext, VisualTestContext, WindowHandle,
 };
 use project::Project;
 use settings::SettingsStore;

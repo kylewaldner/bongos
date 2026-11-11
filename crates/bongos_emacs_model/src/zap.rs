@@ -64,7 +64,9 @@ fn zap<T: TextSource + ?Sized>(
             } else if forward {
                 text.chars_at(point).next().map(|c| point + c.len_utf8())
             } else {
-                text.reversed_chars_at(point).next().map(|c| point - c.len_utf8())
+                text.reversed_chars_at(point)
+                    .next()
+                    .map(|c| point - c.len_utf8())
             };
             let found_at = from.and_then(|from| find(text, from, ch, n.unsigned_abs(), forward));
             let range = match found_at {
