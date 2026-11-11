@@ -11,6 +11,7 @@ mod kill;
 pub mod kill_sink;
 pub mod last_command;
 mod lines;
+pub mod mark;
 mod motion;
 pub mod quit;
 mod recenter;
@@ -38,6 +39,8 @@ mod kill_tests;
 mod last_command_tests;
 #[cfg(test)]
 mod lines_tests;
+#[cfg(test)]
+mod mark_tests;
 #[cfg(test)]
 mod motion_tests;
 #[cfg(test)]
@@ -106,6 +109,7 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, region_commands::contract_region_command);
         register(editor, &weak, quit::keyboard_quit_command);
         recenter::init_editor(cx);
+        mark::init_editor(cx);
     })
     .detach();
 }
