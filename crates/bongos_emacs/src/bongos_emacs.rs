@@ -110,6 +110,7 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, quit::keyboard_quit_command);
         register(editor, &weak, mark::set_mark_command);
         register(editor, &weak, mark::exchange_point_and_mark_command);
+        register(editor, &weak, mark::pop_mark_command);
         recenter::init_editor(cx);
         mark::init_editor(cx);
     })
