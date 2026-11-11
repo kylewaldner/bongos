@@ -33,6 +33,7 @@ async fn workspace_editor(
     });
     if routed {
         cx.update(|cx| {
+            bongos_minibuffer::init(cx);
             cx.update_global::<SettingsStore, _>(|store, cx| {
                 store.update_user_settings(cx, |content| {
                     content.minibuffer.get_or_insert_default().enabled_for =
