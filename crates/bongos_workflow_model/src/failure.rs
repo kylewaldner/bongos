@@ -45,10 +45,13 @@ pub enum FailureReason {
     GateCancelled,
     OutcomePromisedNotDelivered,
     InterruptedNotResumed,
+    /// The run reached a failure end of its definition (the workflow itself chose to fail). Not
+    /// in the product's list: the engine names it so a failed run always records why.
+    FailureEndReached,
 }
 
 impl FailureReason {
-    pub const ALL: [FailureReason; 21] = [
+    pub const ALL: [FailureReason; 22] = [
         Self::NodeOutputInvalid,
         Self::AgentExitedNonzero,
         Self::ProgramExitedNonzero,
@@ -70,6 +73,7 @@ impl FailureReason {
         Self::GateCancelled,
         Self::OutcomePromisedNotDelivered,
         Self::InterruptedNotResumed,
+        Self::FailureEndReached,
     ];
 
     /// The text the run view and the run record show.
@@ -96,6 +100,7 @@ impl FailureReason {
             Self::GateCancelled => "gate cancelled",
             Self::OutcomePromisedNotDelivered => "outcome promised but not delivered",
             Self::InterruptedNotResumed => "interrupted and not resumed",
+            Self::FailureEndReached => "failure end reached",
         }
     }
 
@@ -128,7 +133,8 @@ impl FailureReason {
             | Self::LoopBoundReached
             | Self::WaitTimedOut
             | Self::GateCancelled
-            | Self::InterruptedNotResumed => FailureClass::Task,
+            | Self::InterruptedNotResumed
+            | Self::FailureEndReached => FailureClass::Task,
         }
     }
 

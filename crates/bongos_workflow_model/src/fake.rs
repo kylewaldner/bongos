@@ -49,6 +49,9 @@ pub struct FakeRunner {
     pub max_branches: usize,
     /// Free session slots taken by other runs, subtracted from the session limit.
     pub other_sessions: usize,
+    /// Joins whose merges conflict: the merge records a failed try of the join's key, as the
+    /// engine does, and the rest of that step is dropped.
+    pub conflicting_joins: BTreeSet<String>,
     by_key: BTreeMap<NodeKey, VecDeque<Scripted>>,
     by_node: BTreeMap<String, VecDeque<Scripted>>,
     /// Running keys in start order.
@@ -72,6 +75,7 @@ impl FakeRunner {
             max_running: 0,
             max_branches: 0,
             other_sessions: 0,
+            conflicting_joins: BTreeSet::new(),
             by_key: BTreeMap::new(),
             by_node: BTreeMap::new(),
             running,
@@ -138,8 +142,11 @@ impl FakeRunner {
             return false;
         }
         for command in commands {
-            self.apply(&command);
+            let carry_on = self.apply(&command);
             self.commands.push(command);
+            if !carry_on {
+                break;
+            }
         }
         true
     }
@@ -160,7 +167,8 @@ impl FakeRunner {
         self.start(key);
     }
 
-    fn apply(&mut self, command: &Command) {
+    /// Applies one command; whether the rest of the step may still be applied.
+    fn apply(&mut self, command: &Command) -> bool {
         match command {
             Command::Start(key) => self.start(key.clone()),
             Command::OpenGate(key) => {
@@ -175,7 +183,17 @@ impl FakeRunner {
                     comment: None,
                 });
             }
-            Command::MergeBranch { join, branch } => self.events.push(Event::BranchMerged {
+            Command::MergeBranch { join, key, .. } if self.conflicting_joins.contains(join) => {
+                let failure = Failure::new(
+                    FailureReason::MergeConflict,
+                    Some(key.clone()),
+                    "fake merge conflict",
+                );
+                self.start(key.clone());
+                self.finish(key.clone(), Scripted::Fail(failure.reason), Some(failure));
+                return false;
+            }
+            Command::MergeBranch { join, branch, .. } => self.events.push(Event::BranchMerged {
                 join: join.clone(),
                 branch: branch.clone(),
                 sha: "0000000".to_string(),
@@ -186,6 +204,7 @@ impl FakeRunner {
                 failure: failure.clone(),
             }),
         }
+        true
     }
 
     fn start(&mut self, key: NodeKey) {

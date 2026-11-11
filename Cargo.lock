@@ -2579,6 +2579,7 @@ dependencies = [
 name = "bongos_workflow"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bongos_work_model",
  "bongos_workflow_model",
  "command_palette_hooks",
@@ -2586,11 +2587,13 @@ dependencies = [
  "fs",
  "gpui",
  "language",
+ "libc",
  "log",
  "paths",
  "project",
  "release_channel",
  "semver",
+ "serde_json",
  "settings",
  "sysinfo 0.37.2",
  "tempfile",

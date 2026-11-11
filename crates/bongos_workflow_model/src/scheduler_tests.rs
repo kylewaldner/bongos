@@ -351,6 +351,55 @@ fn join_any_merges_the_first_and_cancels_the_rest() {
     assert_eq!(run.tries(&key("gather", 1)), 1);
 }
 
+/// How many merges the scheduler asked for.
+fn merges_asked(run: &FakeRunner) -> usize {
+    run.commands
+        .iter()
+        .filter(|command| matches!(command, Command::MergeBranch { .. }))
+        .count()
+}
+
+#[test]
+fn a_merge_conflict_ends_the_run_failed() {
+    let mut run = fan_runner("all", 3);
+    run.conflicting_joins.insert("gather".to_string());
+    let state = run.run();
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::MergeConflict);
+    assert_eq!(failure.node, Some(key("gather", 1)));
+    assert!(state.merged.is_empty());
+    assert_eq!(merges_asked(&run), 1, "the conflict is not merged again");
+    assert_eq!(run.tries(&key("gather", 1)), 1, "only the conflicted try");
+}
+
+#[test]
+fn retry_set_excludes_a_join_whose_merge_conflicted() {
+    let mut run = fan_runner("all", 3);
+    run.conflicting_joins.insert("gather".to_string());
+    let state = run.run();
+    assert_eq!(failure_of(&state).reason, FailureReason::MergeConflict);
+    assert_eq!(
+        retry_set(&run.definition, &state, &run.limits),
+        Vec::new(),
+        "a conflict is terminal for the run"
+    );
+}
+
+#[test]
+fn a_merge_conflict_on_an_any_join_ends_the_run_failed() {
+    let mut run = fan_runner("any", 5);
+    run.conflicting_joins.insert("gather".to_string());
+    let state = run.run();
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::MergeConflict);
+    assert_eq!(failure.node, Some(key("gather", 1)));
+    assert!(state.merged.is_empty());
+    assert_eq!(merges_asked(&run), 1, "the conflict is not merged again");
+    assert_eq!(run.tries(&key("gather", 1)), 1, "the join never runs");
+    assert!(state.running.is_empty(), "running branches finish first");
+    assert_eq!(retry_set(&run.definition, &state, &run.limits), Vec::new());
+}
+
 const LOOP: &str = r#"
 schema = 1
 name = "loop"
@@ -511,9 +560,15 @@ outcomes = ["pr"]
 fn success_needs_every_promised_outcome() {
     let mut run = runner(PROMISE);
     run.script("review", [ok(json!({ "verdict": "fine" }))]);
-    let failure = failure_of(&run.run());
+    let state = run.run();
+    let failure = failure_of(&state);
     assert_eq!(failure.reason, FailureReason::OutcomePromisedNotDelivered);
     assert!(failure.detail.contains("promises pr"), "{}", failure.detail);
+    assert_eq!(
+        retry_set(&run.definition, &state, &run.limits),
+        vec![key("review", 1)],
+        "no branch failed, so the retry falls back to the key the end names"
+    );
 
     let mut run = runner(PROMISE);
     run.script(
@@ -542,7 +597,14 @@ fn a_failure_end_fails_the_run() {
     let mut run = runner(&text);
     run.script("triage", [ok(json!({ "mode": "unsure" }))]);
     let state = run.run();
-    assert_eq!(state.ended, Some((EndState::Failed, None)));
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::FailureEndReached);
+    assert_eq!(failure.node, Some(key("triage", 1)));
+    assert_eq!(failure.detail, "stuck: needs a hand");
+    assert_eq!(
+        retry_set(&run.definition, &state, &run.limits),
+        vec![key("triage", 1)]
+    );
     let plan = plan(&run.definition, &state, &run.limits);
     assert_eq!(
         plan.failure().and_then(|failed| failed.key().cloned()),
