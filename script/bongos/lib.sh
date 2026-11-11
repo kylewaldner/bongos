@@ -138,10 +138,28 @@ run_check() {
   return "$rc"
 }
 
+# Run a command with unified features off (see env.sh), for inspections of the dependency graph: they
+# must describe the app as it ships, not the workspace-wide feature set. A RUSTC_BOOTSTRAP the caller
+# set stays; only the one env.sh set is removed.
+cargo_plain() {
+  (
+    unset CARGO_UNSTABLE_FEATURE_UNIFICATION CARGO_RESOLVER_FEATURE_UNIFICATION
+    if [ -n "${BONGOS_SET_RUSTC_BOOTSTRAP:-}" ]; then unset RUSTC_BOOTSTRAP; fi
+    "$@"
+  )
+}
+
+# One line in the log and on the terminal when the unified-features switch is on (see env.sh).
+say_unified_features() {
+  if [ "${BONGOS_UNIFIED_FEATURES:-}" = 1 ]; then
+    say "bongos: unified features on (BONGOS_UNIFIED_FEATURES=1); the first build after a change recompiles everything"
+  fi
+}
+
 # Cached cargo metadata for this run; the file is removed by finish_report.
 cargo_meta_file() {
   local f="$TMPDIR/meta.$$.json"
-  [ -s "$f" ] || (cd "$BONGOS_ROOT" && cargo metadata --no-deps --format-version 1 --locked >"$f")
+  [ -s "$f" ] || (cd "$BONGOS_ROOT" && cargo_plain cargo metadata --no-deps --format-version 1 --locked >"$f")
   echo "$f"
 }
 

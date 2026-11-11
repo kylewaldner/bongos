@@ -66,6 +66,6 @@ set_lock bongos
 set_lock bongos_version
 
 [ "$(current_version)" = "$new" ] || die "manifests do not read $new after the edit"
-cargo metadata --offline --format-version 1 >/dev/null || die "cargo metadata --offline failed; the lockfile does not match the manifests"
+env -u CARGO_UNSTABLE_FEATURE_UNIFICATION -u CARGO_RESOLVER_FEATURE_UNIFICATION cargo metadata --offline --format-version 1 >/dev/null || die "cargo metadata --offline failed; the lockfile does not match the manifests"
 
 echo "$new"

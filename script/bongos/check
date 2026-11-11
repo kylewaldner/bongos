@@ -9,9 +9,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
 log_init check
+say_unified_features
 LOG_NO_EXCERPT=1  # run_check prints the failing part of the check that failed
 
-# The tree rule below is on by default since step 22, when webrtc and livekit left the build.
+# The tree rule below (run with unified features off, so it sees only what the app enables) is on by default since step 22, when webrtc and livekit left the build.
 # BONGOS_CHECK_NO_WEBRTC=0 turns it off.
 BONGOS_CHECK_NO_WEBRTC=${BONGOS_CHECK_NO_WEBRTC:-1}
 
@@ -71,7 +72,7 @@ run_check ".github allowlist" no_github
 
 no_webrtc() {
   local tree
-  tree=$(cargo tree -p bongos --target all -e normal,build --locked) || {
+  tree=$(cargo_plain cargo tree -p bongos --target all -e normal,build --locked) || {
     echo "bongos: cargo tree failed"
     return 1
   }

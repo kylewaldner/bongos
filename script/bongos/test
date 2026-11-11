@@ -7,10 +7,11 @@
 #   test [crate...]       named crates select which tests run; BONGOS_TEST_FILTER=<name> passes a name filter, for the slow zed binary
 #   BONGOS_TEST_NO_NET=1  cargo runs offline (CARGO_NET_OFFLINE=true)
 #   BONGOS_TEST_PARTITION=K/N  run only slice K of N of the tests (nextest --partition hash:K/N)
-# Every distinct set of -p flags makes cargo unify features differently and build another full set
-# of dependency artifacts, so the -p set is always the branch's changed crates (sorted), and named
-# crates only select tests through a nextest filterset (package(=name)). A named crate that is not
-# changed on the branch is added to the -p set, which builds a different set; a line says so.
+# Unless BONGOS_UNIFIED_FEATURES=1, every distinct set of -p flags makes cargo unify features
+# differently and build another full set of dependency artifacts, so the -p set is always the
+# branch's changed crates (sorted), and named crates only select tests through a nextest filterset
+# (package(=name)). A named crate that is not changed on the branch is added to the -p set, which
+# builds a different set; a line says so.
 # Narrow a run with crate names or BONGOS_TEST_FILTER (an intersection with the named crates). The
 # whole suite is script/bongos/test-all.
 set -euo pipefail
@@ -19,6 +20,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
 log_init test
+say_unified_features
 
 if ! cargo nextest --version >/dev/null 2>&1; then
   echo "bongos: cargo-nextest is missing; install it with: cargo install cargo-nextest --locked (or the distro package)" >&2
@@ -70,7 +72,7 @@ if [ "${#crates[@]}" -eq 0 ]; then
   exit 0
 fi
 if [ "${#extra[@]}" -gt 0 ]; then
-  echo "bongos: not changed on this branch, added to the build (a different package set, so cargo rebuilds): $(printf '%s\n' "${extra[@]}" | sort -u | tr '\n' ' ')"
+  echo "bongos: not changed on this branch, added to the build (a different package set; cargo rebuilds unless unified features are on): $(printf '%s\n' "${extra[@]}" | sort -u | tr '\n' ' ')"
 fi
 # nextest intersects -E with the positional name filter below, so BONGOS_TEST_FILTER still narrows
 # within the named crates.

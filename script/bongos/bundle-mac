@@ -23,6 +23,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd -P)"
 cd "$root"
 
+# Release builds never use unified features (see env.sh), whatever the caller exported. This script
+# does not source env.sh, so it clears the settings itself.
+unset CARGO_UNSTABLE_FEATURE_UNIFICATION CARGO_RESOLVER_FEATURE_UNIFICATION
+if [ -n "${BONGOS_SET_RUSTC_BOOTSTRAP:-}" ]; then unset RUSTC_BOOTSTRAP BONGOS_SET_RUSTC_BOOTSTRAP; fi
+
 die() { echo "bundle-mac: $*" >&2; exit 1; }
 
 # hdiutil_retry <hdiutil args...>: hdiutil sometimes fails with "Resource busy" on a freshly started
