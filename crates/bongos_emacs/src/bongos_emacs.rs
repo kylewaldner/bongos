@@ -16,6 +16,7 @@ pub mod snapshot_text;
 mod space;
 mod transpose;
 mod words;
+mod zap;
 
 #[cfg(test)]
 mod apply_tests;
@@ -37,6 +38,8 @@ mod space_tests;
 mod transpose_tests;
 #[cfg(test)]
 mod words_tests;
+#[cfg(test)]
+mod zap_tests;
 
 use editor::Editor;
 use gpui::{Action, App, Entity, Window};
@@ -76,6 +79,10 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, lines::copy_from_above_command);
         register(editor, &weak, comments::comment_dwim_command);
         register(editor, &weak, comments::duplicate_and_comment_command);
+        register(editor, &weak, zap::zap_to_char_command);
+        register(editor, &weak, zap::zap_up_to_char_command);
+        register(editor, &weak, zap::zap_back_to_char_command);
+        register(editor, &weak, zap::zap_back_up_to_char_command);
     })
     .detach();
 }

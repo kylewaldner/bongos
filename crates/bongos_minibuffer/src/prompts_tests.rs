@@ -340,7 +340,10 @@ async fn minibuffer_read_key_any_char_cancels_on_c_g_and_escape_and_ignores_modi
     open_any_char(&workspace, cx, &log);
     cx.simulate_keystrokes("ctrl-x alt-x enter");
     cx.run_until_parked();
-    assert!(log.borrow().is_empty(), "modified keys and RET are not answers");
+    assert!(
+        log.borrow().is_empty(),
+        "modified keys and RET are not answers"
+    );
     assert!(key_view(&workspace, cx).is_some());
     cx.simulate_keystrokes("ctrl-g");
     cx.run_until_parked();
