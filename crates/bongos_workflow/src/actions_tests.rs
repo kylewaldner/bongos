@@ -93,7 +93,7 @@ async fn actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext
     }
 }
 
-async fn workspace_with_actions(
+pub(crate) async fn workspace_with_actions(
     cx: &mut TestAppContext,
 ) -> (
     gpui::Entity<Workspace>,

@@ -2579,13 +2579,23 @@ dependencies = [
 name = "bongos_workflow"
 version = "0.1.0"
 dependencies = [
+ "bongos_work_model",
+ "bongos_workflow_model",
  "command_palette_hooks",
+ "editor",
  "fs",
  "gpui",
+ "language",
+ "log",
+ "paths",
  "project",
  "release_channel",
  "semver",
  "settings",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "util",
  "workspace",
 ]
 
