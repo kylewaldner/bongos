@@ -387,8 +387,9 @@ async fn terminals_keep_their_keys_and_get_ctrl_g(cx: &mut gpui::TestAppContext)
                 "{}",
                 platform.emacs
             );
-            // No editing command of the Emacs base reaches a terminal.
-            for (input, _) in EDITOR_KEYS {
+            // No editing command of the Emacs base reaches a terminal. (The `Workspace` ctrl-g
+            // comes after the terminal's own binding above, which handles the key first.)
+            for (input, _) in EDITOR_KEYS.iter().filter(|(input, _)| *input != "ctrl-g") {
                 let (names, _) = resolve(&keymap, input, contexts);
                 assert!(
                     !names.iter().any(|name| name.starts_with("emacs::")),
