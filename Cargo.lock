@@ -2057,6 +2057,7 @@ dependencies = [
  "bongos_prompts",
  "bongos_version",
  "bongos_work",
+ "bongos_workflow",
  "breadcrumbs",
  "chrono",
  "clap",
@@ -2572,6 +2573,20 @@ dependencies = [
  "thiserror 2.0.17",
  "toml 0.8.23",
  "uuid",
+]
+
+[[package]]
+name = "bongos_workflow"
+version = "0.1.0"
+dependencies = [
+ "command_palette_hooks",
+ "fs",
+ "gpui",
+ "project",
+ "release_channel",
+ "semver",
+ "settings",
+ "workspace",
 ]
 
 [[package]]

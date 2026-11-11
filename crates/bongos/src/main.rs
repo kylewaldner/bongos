@@ -542,6 +542,7 @@ fn main() {
         );
         bongos_linear::init(cx);
         bongos_linear::init_client(cx);
+        bongos_workflow::init(cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 
@@ -638,6 +639,7 @@ fn main() {
         bongos_prompts::init_palette(cx);
         bongos_builder::init_palette(cx);
         bongos_linear::init_palette(cx);
+        bongos_workflow::init_palette(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: language::language_settings::all_language_settings(None, cx)
                 .edit_predictions
