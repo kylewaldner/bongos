@@ -1432,6 +1432,13 @@ pub struct WorkSettingsContent {
     ///
     /// Default: []
     pub repositories: Option<Vec<WorkRepositoryContent>>,
+    /// Where the worktrees of tasks go when a repository names no `worktree_root` of its own. A
+    /// path template: `{repo}` is the repository's name and `{slug}` the task's slug (appended
+    /// when missing), `~` is the home directory, and a relative path is relative to the parent
+    /// of the repository's checkout.
+    ///
+    /// Default: null, the central directory
+    pub default_worktree_root: Option<String>,
 }
 
 /// Settings for the prompts editor.
@@ -1610,6 +1617,11 @@ pub struct WorkRepositoryContent {
     ///
     /// Default: "{slug}"
     pub branch_template: Option<String>,
+    /// Where the worktrees of this repository's tasks go, as a path template like
+    /// `work.default_worktree_root`.
+    ///
+    /// Default: null, which uses `work.default_worktree_root`
+    pub worktree_root: Option<String>,
 }
 
 // An ExtendingVec in the settings can only accumulate new values.

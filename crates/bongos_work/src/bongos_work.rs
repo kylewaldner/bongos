@@ -132,4 +132,6 @@ mod store_tests;
 #[cfg(test)]
 mod top_level_tests;
 #[cfg(test)]
+mod worktree_root_tests;
+#[cfg(test)]
 mod worktree_tests;

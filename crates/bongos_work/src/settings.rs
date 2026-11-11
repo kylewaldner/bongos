@@ -18,6 +18,9 @@ pub struct WorkSettings {
     pub stale_after_days: f64,
     /// The repositories tasks can name.
     pub repositories: Vec<Repository>,
+    /// The worktree root template of repositories without their own; `None` is the central
+    /// directory.
+    pub default_worktree_root: Option<String>,
 }
 
 /// One entry of `work.repositories`, with its defaults filled in.
@@ -34,6 +37,9 @@ pub struct Repository {
     pub deployments: bool,
     /// The branch name of a task; `{slug}` stands for its slug.
     pub branch_template: String,
+    /// The worktree root template of the repository's tasks; `None` uses
+    /// [`WorkSettings::default_worktree_root`].
+    pub worktree_root: Option<String>,
 }
 
 impl From<&WorkRepositoryContent> for Repository {
@@ -48,6 +54,7 @@ impl From<&WorkRepositoryContent> for Repository {
                 .branch_template
                 .clone()
                 .unwrap_or_else(|| DEFAULT_BRANCH_TEMPLATE.to_string()),
+            worktree_root: template(content.worktree_root.as_deref()),
         }
     }
 }
@@ -73,6 +80,13 @@ impl Settings for WorkSettings {
                 .iter()
                 .map(Repository::from)
                 .collect(),
+            default_worktree_root: template(work.default_worktree_root.as_deref()),
         }
     }
+}
+
+/// A worktree root template as set; an empty or blank one counts as unset.
+fn template(text: Option<&str>) -> Option<String> {
+    text.filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
 }

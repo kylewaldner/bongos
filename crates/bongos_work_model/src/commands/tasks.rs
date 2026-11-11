@@ -361,6 +361,9 @@ pub struct StartedWorktree {
     pub base_sha: Option<String>,
     /// The absolute path of the worktree.
     pub worktree: String,
+    /// The parent the worktree was meant for, when it was not writable and the worktree went to
+    /// the central directory instead.
+    pub fallback: Option<String>,
 }
 
 /// `task: start`: record the worktree just created for an open leaf and mark its current todo
@@ -393,9 +396,18 @@ pub fn record_worktree(
         {
             todo.started = Some(ctx.at);
         }
-        Ok((
-            "worktree created",
-            Some(format!("{} at {}", started.branch, started.worktree)),
-        ))
+        Ok(match &started.fallback {
+            Some(parent) => (
+                "worktree created in the central directory",
+                Some(format!(
+                    "{} at {}; {parent} is not writable",
+                    started.branch, started.worktree
+                )),
+            ),
+            None => (
+                "worktree created",
+                Some(format!("{} at {}", started.branch, started.worktree)),
+            ),
+        })
     })
 }

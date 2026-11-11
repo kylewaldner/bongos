@@ -8,8 +8,10 @@
 # keys exist only there) and `work.repositories` naming it. Files are the model, so most checks read
 # task.toml, artifacts.toml and git; the rows of the panel come from the dump.
 #   1. C-c w p n project, C-c w N group and two pr-ship leaves (C-c w n makes a one-off, not a
-#      child), C-c w e stacked edge, C-c w s on the first: worktree, `git worktree list`,
-#      info/exclude within ten seconds; the second's row is Blocked.
+#      child), C-c w e stacked edge, C-c w s on the first: the worktree under the central
+#      directory (<data dir>/worktrees/invoicing), none in the checkout, `git worktree list`, the
+#      legacy info/exclude line, a clean `git status`, within ten seconds; the second's row is
+#      Blocked.
 #   2. C-c w a and C-c w d b on the first: the second's task.toml is unchanged and its row Ready;
 #      C-c w s on it cuts its branch from the first's branch.
 #   3. Advancing the second to its ships todo is refused while the first is not Done.
@@ -34,6 +36,7 @@ LOGS_DIR="$HOME/${BONGOS_LOG_PATH%/*}"
 VIEW_FILE="$LOGS_DIR/work-view.txt"
 CONTEXT_FILE="$LOGS_DIR/work-session-context.json"
 REPO="$HOME/src/invoicing"
+CENTRAL_WT="$HOME/${BONGOS_LOG_PATH%/logs/*}/worktrees/invoicing"
 WORK_ROOT="$HOME/.bongos"
 PROJECT_DIR="$WORK_ROOT/projects/invoicing"
 GROUP_DIR="$PROJECT_DIR/tasks/usage-events"
@@ -378,8 +381,12 @@ choose backfill
 wait_worktree_line "$FIRST_DIR" || fail "the first task has no worktree line: $(cat "$FIRST_DIR/task.toml")"
 FIRST_WT=$(worktree_of "$FIRST_DIR")
 poll 10 "the worktree $FIRST_WT within ten seconds" test -d "$FIRST_WT"
-git -C "$REPO" worktree list --porcelain | grep -qE '^worktree .*/\.bongos-worktrees/backfill-usage-events$' ||
+# A new worktree goes to the central directory under the data dir, never into the checkout.
+[ "$FIRST_WT" = "$CENTRAL_WT/backfill-usage-events" ] || fail "the first worktree is $FIRST_WT, not under $CENTRAL_WT"
+[ ! -e "$REPO/.bongos-worktrees" ] || fail "a .bongos-worktrees directory appeared in the checkout: $(ls -la "$REPO/.bongos-worktrees")"
+git -C "$REPO" worktree list --porcelain | grep -qxF "worktree $FIRST_WT" ||
   fail "git worktree list does not show $FIRST_WT: $(git -C "$REPO" worktree list)"
+# The legacy line is still written, for worktrees older versions put under .bongos-worktrees.
 grep -qxF '/.bongos-worktrees/' "$REPO/.git/info/exclude" || fail "info/exclude lacks /.bongos-worktrees/: $(cat "$REPO/.git/info/exclude")"
 [ "$(grep -cxF '/.bongos-worktrees/' "$REPO/.git/info/exclude")" = 1 ] || fail "info/exclude has the line more than once"
 wait_toml "$FIRST_DIR/task.toml" 'd.get("branch")' backfill-usage-events
@@ -418,6 +425,9 @@ choose "bill usage"
 wait_worktree_line "$SECOND_DIR" || fail "the second task has no worktree line: $(cat "$SECOND_DIR/task.toml")"
 SECOND_WT=$(worktree_of "$SECOND_DIR")
 poll 10 "the worktree $SECOND_WT within ten seconds" test -d "$SECOND_WT"
+[ "$SECOND_WT" = "$CENTRAL_WT/bill-usage-events" ] || fail "the second worktree is $SECOND_WT, not under $CENTRAL_WT"
+[ ! -e "$REPO/.bongos-worktrees" ] || fail "a .bongos-worktrees directory appeared in the checkout"
+[ -z "$(git -C "$REPO" status --porcelain)" ] || fail "the repository is not clean with two worktrees: $(git -C "$REPO" status --porcelain)"
 wait_toml "$SECOND_DIR/task.toml" 'd.get("base")' backfill-usage-events
 [ "$(git -C "$REPO" merge-base bill-usage-events backfill-usage-events)" = "$FIRST_SHA" ] ||
   fail "bill-usage-events does not start on backfill-usage-events (merge-base $(git -C "$REPO" merge-base bill-usage-events backfill-usage-events), want $FIRST_SHA)"
