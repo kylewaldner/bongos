@@ -53,6 +53,43 @@ async fn quit_ends_mark_mode_and_never_edits(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn quit_with_mark_mode_on_and_a_region_ends_both_in_one_press(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state("«oneˇ» two");
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    cx.dispatch_action(KeyboardQuit);
+    cx.update_editor(|editor, _, _| assert!(!editor.selection_mark_mode()));
+    cx.assert_editor_state("oneˇ two");
+}
+
+#[gpui::test]
+async fn quit_in_a_single_line_editor_keeps_its_selection(cx: &mut TestAppContext) {
+    init_test(cx);
+    let window = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("one two", window, cx);
+        editor
+    });
+    let editor = window.root(cx).unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    editor.update_in(cx, |editor, window, cx| {
+        editor.select_all(&editor::actions::SelectAll, window, cx)
+    });
+    cx.dispatch_action(KeyboardQuit);
+    editor.update(cx, |editor, _| {
+        assert!(
+            editor
+                .selections
+                .disjoint_anchors()
+                .iter()
+                .any(|selection| selection.start != selection.end)
+        );
+    });
+}
+
+#[gpui::test]
 async fn quit_runs_a_hook_once_per_keystroke(cx: &mut TestAppContext) {
     init_test(cx);
     let mut cx = EditorTestContext::new(cx).await;

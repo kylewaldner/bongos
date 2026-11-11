@@ -166,6 +166,7 @@ const EDITOR_KEYS: &[(&str, &str)] = &[
     ("alt-b", "emacs::BackwardWord"),
     ("alt-d", "emacs::KillWord"),
     ("alt-backspace", "emacs::BackwardKillWord"),
+    ("alt-delete", "emacs::BackwardKillWord"),
     ("alt-u", "emacs::UpcaseWord"),
     ("alt-l", "emacs::DowncaseWord"),
     ("alt-c", "emacs::CapitalizeWord"),
@@ -682,6 +683,7 @@ async fn switching_the_base_keymap_off_restores_zeds_keys_and_cursor(
     cx: &mut gpui::TestAppContext,
 ) {
     super::tests::init_keymap_test(cx);
+    #[cfg(not(target_os = "macos"))]
     let default_only = Keymap::new(load_all(&LINUX, false, cx));
     assert_eq!(cursor_shape(cx), Some(language::CursorShape::Block));
     #[cfg(not(target_os = "macos"))]
@@ -708,12 +710,12 @@ async fn switching_the_base_keymap_off_restores_zeds_keys_and_cursor(
             resolve(&default_only, "ctrl-k", &EDITOR)
         );
     }
-    let _ = default_only;
 }
 
 #[gpui::test]
 async fn another_base_keymap_has_no_emacs_binding(cx: &mut gpui::TestAppContext) {
     super::tests::init_keymap_test(cx);
+    #[cfg(not(target_os = "macos"))]
     let default_only = Keymap::new(load_all(&LINUX, false, cx));
     // Start from Emacs: the base keymap has bindings, then none remain after the switch.
     set_base_keymap(cx, settings::BaseKeymapContent::Emacs);
@@ -752,5 +754,4 @@ async fn another_base_keymap_has_no_emacs_binding(cx: &mut gpui::TestAppContext)
             }
         }
     }
-    let _ = default_only;
 }

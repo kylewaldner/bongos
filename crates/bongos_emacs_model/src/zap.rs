@@ -57,7 +57,19 @@ fn zap<T: TextSource + ?Sized>(
         .iter()
         .map(|caret| {
             let point = caret.head;
-            let range = match find(text, point, ch, n.unsigned_abs(), forward) {
+            // The up-to forms start one character past point, as Emacs does, so the
+            // target right next to point is skipped and repeating the command advances.
+            let from = if inclusive {
+                Some(point)
+            } else if forward {
+                text.chars_at(point).next().map(|c| point + c.len_utf8())
+            } else {
+                text.reversed_chars_at(point)
+                    .next()
+                    .map(|c| point - c.len_utf8())
+            };
+            let found_at = from.and_then(|from| find(text, from, ch, n.unsigned_abs(), forward));
+            let range = match found_at {
                 Some((start, end)) => {
                     found = true;
                     match (forward, inclusive) {
@@ -94,7 +106,8 @@ pub fn zap_to_char<T: TextSource + ?Sized>(
     zap(text, carets, count.unwrap_or(1), ch, true)
 }
 
-/// zap-up-to-char: like [`zap_to_char`] but stops before the occurrence.
+/// zap-up-to-char: like [`zap_to_char`] but stops before the occurrence, and the search
+/// starts one character past point (as in Emacs), so a target right after point is skipped.
 pub fn zap_up_to_char<T: TextSource + ?Sized>(
     text: &T,
     carets: &[Caret],

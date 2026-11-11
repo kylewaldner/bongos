@@ -73,9 +73,9 @@
   {
     "context": "Minibuffer > FileFinder > Picker > Editor",
     "bindings": {
-      "ctrl-k": "editor::KillRingCut",
+      "ctrl-k": ["zed::Unbind", "pane::SplitUp"],
       "ctrl-h": ["zed::Unbind", "pane::SplitLeft"],
-      "ctrl-l": "editor::ScrollCursorCenterTopBottom",
+      "ctrl-l": ["zed::Unbind", "pane::SplitRight"],
     },
   },
   {

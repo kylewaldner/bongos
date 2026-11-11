@@ -7,6 +7,7 @@ use editor::actions::{SelectLargerSyntaxNode, SelectSmallerSyntaxNode};
 use gpui::{App, Entity, Window};
 
 use crate::actions::{ContractRegion, ExpandRegion};
+use crate::lines::propagate_in_single_line;
 
 /// Steps `count` times in one editor update; `larger` picks the direction.
 fn step(
@@ -16,6 +17,9 @@ fn step(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if propagate_in_single_line(editor, cx) {
+        return;
+    }
     let count = count.unwrap_or(1);
     let larger = larger == (count >= 0);
     editor.update(cx, |editor, cx| {
