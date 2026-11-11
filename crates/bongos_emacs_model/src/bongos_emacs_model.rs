@@ -6,6 +6,7 @@ pub mod comment;
 pub mod goto;
 mod kill;
 mod lines;
+pub mod mark_ring;
 pub mod recenter;
 mod space;
 mod text;
@@ -23,6 +24,8 @@ mod goto_tests;
 mod kill_tests;
 #[cfg(test)]
 mod lines_tests;
+#[cfg(test)]
+mod mark_ring_tests;
 #[cfg(test)]
 mod recenter_tests;
 #[cfg(test)]
