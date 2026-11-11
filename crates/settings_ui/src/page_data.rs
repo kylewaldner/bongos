@@ -1593,7 +1593,7 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
-    fn cursor_section() -> [SettingsPageItem; 5] {
+    fn cursor_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Cursor"),
             SettingsPageItem::SettingItem(SettingItem {
