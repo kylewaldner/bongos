@@ -41,15 +41,30 @@ pub fn goal_locked(file: &TaskFile) -> Option<Refusal> {
 /// and `{slug}` as given.
 pub fn linear_branch_segment(identifier: &str, template: &str, slug: &str) -> String {
     let identifier = identifier.to_lowercase();
-    if template.contains("{linear}") {
-        return template
+    let template = template.trim();
+    // An empty template, or one ending in `/`, takes `{slug}` as its last segment (they would
+    // otherwise give `seq-121-` or `kyle/seq-121-`).
+    let template = if template.is_empty() || template.ends_with('/') {
+        format!("{template}{{slug}}")
+    } else {
+        template.to_string()
+    };
+    let segment = if template.contains("{linear}") {
+        template
             .replace("{slug}", slug)
-            .replace("{linear}", &identifier);
-    }
-    let expanded = template.replace("{slug}", slug);
-    match expanded.rsplit_once('/') {
-        Some((head, last)) => format!("{head}/{identifier}-{last}"),
-        None => format!("{identifier}-{expanded}"),
+            .replace("{linear}", &identifier)
+    } else {
+        let expanded = template.replace("{slug}", slug);
+        match expanded.rsplit_once('/') {
+            Some((head, last)) => format!("{head}/{identifier}-{last}"),
+            None => format!("{identifier}-{expanded}"),
+        }
+    };
+    // An empty slug leaves the identifier alone.
+    if slug.is_empty() {
+        segment.trim_end_matches('-').to_string()
+    } else {
+        segment
     }
 }
 

@@ -210,7 +210,12 @@ pub struct ResponseMeta {
     pub requests_reset_ms: Option<u64>,
     /// `X-Complexity`: the server's cost for the query.
     pub complexity: Option<u32>,
+    /// `X-RateLimit-Requests-Remaining`: requests left in the current window.
+    pub requests_remaining: Option<u32>,
 }
+
+/// Automatic refreshes pause when fewer requests than this remain in the window.
+pub const LOW_REQUESTS: u32 = 20;
 
 impl ResponseMeta {
     /// Reads the relevant headers through `header`, which looks one up by lowercase name.
@@ -221,7 +226,14 @@ impl ResponseMeta {
             retry_after_secs: number("retry-after"),
             requests_reset_ms: number("x-ratelimit-requests-reset"),
             complexity: number("x-complexity").and_then(|v| u32::try_from(v).ok()),
+            requests_remaining: number("x-ratelimit-requests-remaining")
+                .and_then(|v| u32::try_from(v).ok()),
         }
+    }
+
+    /// Whether the window is nearly used up ([`LOW_REQUESTS`]).
+    pub fn requests_low(&self) -> bool {
+        self.requests_remaining.is_some_and(|n| n < LOW_REQUESTS)
     }
 
     /// When the limit lifts, as Unix milliseconds: the later of the reset header and

@@ -10,8 +10,8 @@
 //! `conventions` (the PR title of a linked task goes to the clipboard), which also adds the PR
 //! conventions of a linked leaf to its chats' context; `stacks` tells Kyle what a linked stacked
 //! leaf needs in Linear and adds its row chip. `linear: set token` and `linear: clear token`
-//! open the masked token modal and clear the stored token instead (see [`token`]). No keys are
-//! bound to these actions yet; they are reached from the command palette.
+//! open the masked token modal and clear the stored token instead (see [`token`]). The
+//! actions are bound under `C-c w L` (see the emacs keymap) and reachable from the command palette.
 
 mod actions;
 mod checklist;

@@ -185,6 +185,18 @@ impl LinearSync {
         self.limit = Some(Limit { reset_at });
     }
 
+    /// Pauses automatic refreshes when the client's last response said the window is nearly used
+    /// up, until its reset time (none known: until a command's read finds room again).
+    pub fn note_low_requests(&mut self) {
+        if let Some(reset_at) = self
+            .client
+            .as_ref()
+            .and_then(|client| client.low_requests())
+        {
+            self.mark_limited(reset_at);
+        }
+    }
+
     /// A read went through: the limit, if any, is over.
     pub fn clear_limit(&mut self) {
         self.limit = None;

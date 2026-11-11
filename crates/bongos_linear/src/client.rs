@@ -110,6 +110,8 @@ struct Inner {
     /// The `Authorization` value, marked sensitive. `None` when the token cannot be a header
     /// value; then nothing is sent.
     authorization: Option<HeaderValue>,
+    /// What the last response said about the request window; see [`LinearApi::low_requests`].
+    low_requests: std::sync::Mutex<Option<Option<u64>>>,
 }
 
 /// The Linear API over HTTP. `Debug` shows the endpoint only.
@@ -145,6 +147,7 @@ impl HttpLinear {
                 endpoint,
                 token,
                 authorization,
+                low_requests: Default::default(),
             }),
         }
     }
@@ -244,6 +247,10 @@ async fn exchange_unbounded(
         .map_err(|_| network("the request failed"))?;
     let status = response.status().as_u16();
     let meta = meta_of(status, response.headers());
+    if meta.requests_remaining.is_some() {
+        *inner.low_requests.lock().unwrap_or_else(|e| e.into_inner()) =
+            meta.requests_low().then(|| meta.requests_reset_ms);
+    }
     let mut reader = response.into_body().take(MAX_RESPONSE_BYTES as u64 + 1);
     let mut buffer = Vec::new();
     reader
@@ -330,6 +337,14 @@ async fn read_issues(inner: &Inner, refs: Vec<IssueRef>) -> Result<Vec<Issue>, A
 }
 
 impl LinearApi for HttpLinear {
+    fn low_requests(&self) -> Option<Option<u64>> {
+        *self
+            .inner
+            .low_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     fn issues(&self, ids: Vec<IssueRef>) -> BoxFuture<'static, Result<Vec<Issue>, ApiError>> {
         let inner = self.inner.clone();
         async move { read_issues(&inner, ids).await }.boxed()

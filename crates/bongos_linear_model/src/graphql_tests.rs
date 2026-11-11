@@ -359,6 +359,7 @@ fn rate_limit_by_http_429_honors_retry_after() {
         retry_after_secs: Some(1),
         requests_reset_ms: Some(90_000),
         complexity: None,
+        requests_remaining: None,
     };
     assert_eq!(both.reset_at(1_000), Some(90_000));
 }
@@ -465,4 +466,18 @@ fn headers_parse_case_by_lowercase_name() {
     });
     assert_eq!(meta.complexity, Some(421));
     assert_eq!(meta.retry_after_secs, None);
+}
+
+#[test]
+fn remaining_requests_are_read_and_low_below_twenty() {
+    let at = |value: &'static str| {
+        ResponseMeta::from_headers(200, move |name| {
+            (name == "x-ratelimit-requests-remaining").then(|| value.to_string())
+        })
+    };
+    assert_eq!(at(" 19 ").requests_remaining, Some(19));
+    assert!(at("19").requests_low());
+    assert!(!at("20").requests_low());
+    assert_eq!(at("many").requests_remaining, None);
+    assert!(!at("many").requests_low());
 }

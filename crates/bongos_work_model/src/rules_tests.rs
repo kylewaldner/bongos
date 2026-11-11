@@ -475,4 +475,13 @@ fn linear_branch_segment_follows_the_template() {
         rules::linear_branch_segment("SEQ-1", "team/fixed", "x"),
         "team/seq-1-fixed"
     );
+    // A template ending in `/` or empty takes `{slug}` last.
+    assert_eq!(
+        rules::linear_branch_segment("SEQ-121", "kyle/", "x"),
+        "kyle/seq-121-x"
+    );
+    assert_eq!(
+        rules::linear_branch_segment("SEQ-121", "", "x"),
+        "seq-121-x"
+    );
 }

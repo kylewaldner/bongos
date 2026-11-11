@@ -5,8 +5,8 @@
 //! of the sync (see `dump`). The three link commands (`task: link to linear`, `unlink from
 //! linear`, `open in linear`) act on the task at point and are handled in `link`, `task: create
 //! missing subtickets` in `subtickets`, `task: show linear suggestions` in `suggestions` and
-//! `task: copy pr title` in `conventions`. No keys are bound to these actions yet; they are
-//! reached from the command palette.
+//! `task: copy pr title` in `conventions`. The actions are bound under `C-c w L` (see
+//! the emacs keymap) and reachable from the command palette.
 
 use std::any::TypeId;
 
