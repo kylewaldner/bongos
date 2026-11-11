@@ -29,7 +29,10 @@
   "emacs": {
     // The cursor shape: "auto" is a block while `base_keymap` is "Emacs" and `cursor_shape`
     // otherwise; "emacs" is always a block; "modern" is always a bar.
-    "cursor_style": "auto"
+    "cursor_style": "auto",
+    // Whether typing over an active region replaces the selected text. While false and
+    // `base_keymap` is "Emacs", typing inserts at point and keeps the selected text.
+    "delete_selection": false
   },
   // The name of a font to use for rendering text in the editor
   // ".ZedMono" currently aliases to Lilex

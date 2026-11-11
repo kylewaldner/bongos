@@ -573,3 +573,134 @@ async fn pop_without_a_mark_says_so_and_a_following_set_mark_sets(cx: &mut TestA
     assert_eq!(messages.borrow().last().unwrap(), "Mark set");
     assert!(mark_mode(&mut cx));
 }
+
+fn type_into(cx: &mut EditorTestContext, range: Option<std::ops::Range<usize>>, text: &str) {
+    use gpui::EntityInputHandler as _;
+    cx.update_editor(|editor, window, cx| editor.replace_text_in_range(range, text, window, cx));
+}
+
+fn set_user_settings(
+    cx: &mut EditorTestContext,
+    change: impl FnOnce(&mut settings::SettingsContent),
+) {
+    use gpui::BorrowAppContext as _;
+    cx.update(|_, cx| {
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, change)
+        });
+    });
+}
+
+#[gpui::test]
+async fn typing_over_a_region_inserts_at_point_and_keeps_the_text(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one «twoˇ» three").await;
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    type_into(&mut cx, None, "X");
+    cx.assert_editor_state("one twoXˇ three");
+    assert!(!cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+}
+
+#[gpui::test]
+async fn typing_over_a_backwards_region_inserts_at_point(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one «ˇtwo» three").await;
+    type_into(&mut cx, Some(5..5), "X");
+    cx.assert_editor_state("one Xˇtwo three");
+}
+
+#[gpui::test]
+async fn delete_selection_setting_makes_typing_replace(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one «twoˇ» three").await;
+    set_user_settings(&mut cx, |content| {
+        content.emacs.get_or_insert_default().delete_selection = Some(true);
+    });
+    type_into(&mut cx, None, "X");
+    cx.assert_editor_state("one Xˇ three");
+}
+
+#[gpui::test]
+async fn a_non_emacs_base_keymap_makes_typing_replace(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one «twoˇ» three").await;
+    set_user_settings(&mut cx, |content| {
+        content.base_keymap = Some(settings::BaseKeymapContent::VSCode);
+    });
+    type_into(&mut cx, None, "X");
+    cx.assert_editor_state("one Xˇ three");
+}
+
+#[gpui::test]
+async fn a_single_line_editor_replaces_the_selection(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    let editor = cx.update(|window, cx| cx.new(|cx| Editor::single_line(window, cx)));
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            use gpui::EntityInputHandler as _;
+            editor.set_text("hello", window, cx);
+            editor.select_all(&SelectAll, window, cx);
+            editor.replace_text_in_range(None, "X", window, cx);
+            assert_eq!(editor.text(cx), "X");
+        });
+    });
+}
+
+#[gpui::test]
+async fn ime_composition_gives_zeds_result(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let mut cx = test_context(cx, "one «twoˇ» three").await;
+    cx.update_editor(|editor, window, cx| {
+        editor.replace_and_mark_text_in_range(None, "a", None, window, cx)
+    });
+    cx.assert_editor_state("one aˇ three");
+    cx.update_editor(|editor, window, cx| editor.replace_text_in_range(None, "b", window, cx));
+    cx.assert_editor_state("one bˇ three");
+}
+
+#[gpui::test]
+async fn an_explicit_non_empty_range_replaces_as_zed_does(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one two ˇthree").await;
+    type_into(&mut cx, Some(4..7), "X");
+    cx.assert_editor_state("one X ˇthree");
+}
+
+#[gpui::test]
+async fn an_empty_explicit_range_collapses_like_none(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one «twoˇ» three").await;
+    type_into(&mut cx, Some(2..2), "X");
+    cx.assert_editor_state("one twoXˇ three");
+}
+
+#[gpui::test]
+async fn typing_tab_and_undo_end_mark_mode(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one «twoˇ» three").await;
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    type_into(&mut cx, None, "X");
+    assert!(!cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+
+    cx.set_state("one «twoˇ» three");
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    cx.dispatch_action(editor::actions::Tab);
+    assert!(!cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+
+    cx.set_state("one «twoˇ» three");
+    type_into(&mut cx, None, "Y");
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    cx.dispatch_action(editor::actions::Undo);
+    assert!(!cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+}
+
+#[gpui::test]
+async fn an_edit_in_a_second_editor_leaves_the_first_region(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one «twoˇ» three").await;
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    let buffer = cx.multibuffer(|multibuffer, _| multibuffer.as_singleton().unwrap());
+    let second = cx.update(|window, cx| {
+        let multibuffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        cx.new(|cx| Editor::new(EditorMode::full(), multibuffer, None, window, cx))
+    });
+    cx.update(|window, cx| {
+        second.update(cx, |editor, cx| {
+            editor.insert("ZZ", window, cx);
+        });
+    });
+    assert!(cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+}

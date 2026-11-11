@@ -793,6 +793,11 @@ pub struct EmacsSettingsContent {
     ///
     /// Default: auto
     pub cursor_style: Option<EmacsCursorStyle>,
+    /// Whether typing over an active region replaces the selected text, as in other editors.
+    /// While false and the base keymap is Emacs, typing inserts at point and keeps the text.
+    ///
+    /// Default: false
+    pub delete_selection: Option<bool>,
 }
 
 /// Which cursor shape the Emacs mode asks for.

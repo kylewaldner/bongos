@@ -70,7 +70,7 @@ pub fn init(cx: &mut App) {
     last_command::init(cx);
     quit::init(cx);
     cursor::init(cx);
-    cx.observe_new(|editor: &mut Editor, _window, cx| {
+    cx.observe_new(|editor: &mut Editor, window, cx| {
         let weak = cx.entity().downgrade();
         register(editor, &weak, motion::forward_word);
         register(editor, &weak, motion::backward_word);
@@ -112,7 +112,7 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, mark::exchange_point_and_mark_command);
         register(editor, &weak, mark::pop_mark_command);
         recenter::init_editor(cx);
-        mark::init_editor(cx);
+        mark::init_editor(window, cx);
     })
     .detach();
 }
