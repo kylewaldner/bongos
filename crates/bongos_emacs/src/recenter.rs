@@ -11,6 +11,7 @@ use text::{Bias, Selection};
 
 use crate::actions::{Recenter, Reposition};
 use crate::last_command;
+use crate::lines::propagate_in_single_line;
 
 /// The cycle position the last recenter or reposition took, and the carets it left behind. A
 /// selection change that leaves other carets than these resets the cycle.
@@ -89,6 +90,9 @@ pub(crate) fn recenter_command(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if propagate_in_single_line(editor, cx) {
+        return;
+    }
     let name = action.name();
     let id = editor.entity_id();
     let count = action.count;
@@ -139,6 +143,9 @@ pub(crate) fn reposition_command(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if propagate_in_single_line(editor, cx) {
+        return;
+    }
     let name = action.name();
     let id = editor.entity_id();
     let cycle = position(name, editor.read(cx), id, window, cx);

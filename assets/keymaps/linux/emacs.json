@@ -79,7 +79,7 @@
       "ctrl-d": "editor::Delete", // delete-char
       "alt-d": "emacs::KillWord", // kill-word
       "alt-backspace": "emacs::BackwardKillWord", // backward-kill-word
-      "alt-delete": "editor::DeleteToPreviousWordStart", // backward-kill-word
+      "alt-delete": "emacs::BackwardKillWord", // backward-kill-word
       "ctrl-k": "emacs::KillLine", // kill-line
       "ctrl-w": "emacs::KillRegionOrLine", // kill-region-or-line
       "alt-w": "emacs::CopyRegionOrLine", // copy-region-or-line

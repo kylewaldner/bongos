@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use db::kvp::KeyValueStore;
 use gpui::{
-    BorrowAppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle,
+    BorrowAppContext as _, Entity, Focusable as _, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, WindowHandle,
 };
 use project::Project;
 use settings::SettingsStore;
@@ -327,6 +327,30 @@ async fn minibuffer_read_key_any_char_answers_with_undeclared_characters(cx: &mu
     cx.run_until_parked();
     assert_eq!(log.borrow()[2], "answer:x");
     assert_eq!(log.borrow().len(), 3);
+}
+
+#[gpui::test]
+async fn minibuffer_read_key_any_char_uppercases_a_shifted_key_without_a_typed_character(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Log::default();
+    let cx = &mut cx;
+
+    for key_char in [None, Some(String::new())] {
+        open_any_char(&workspace, cx, &log);
+        cx.simulate_event(KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Modifiers::shift(),
+                key: "z".to_string(),
+                key_char,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.run_until_parked();
+    }
+    assert_eq!(*log.borrow(), ["answer:Z", "answer:Z"]);
 }
 
 #[gpui::test]

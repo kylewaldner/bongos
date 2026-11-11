@@ -256,7 +256,12 @@ impl ReadKeyView {
             self.answer_default(window, cx);
         } else if !modifiers.control && !modifiers.alt && !modifiers.platform && !modifiers.function
         {
-            let typed = keystroke.key_char.as_deref().unwrap_or(&keystroke.key);
+            // Without a typed character, the shifted key is the uppercase of the key.
+            let typed = match keystroke.key_char.as_deref() {
+                Some(typed) if !typed.is_empty() => typed.to_string(),
+                _ if modifiers.shift => keystroke.key.to_uppercase(),
+                _ => keystroke.key.clone(),
+            };
             let mut chars = typed.chars();
             let key = chars.next().filter(|_| chars.next().is_none());
             let answers = key.filter(|key| {

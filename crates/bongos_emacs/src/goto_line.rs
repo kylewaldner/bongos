@@ -15,6 +15,7 @@ use text::{Bias, Point};
 use theme::ActiveTheme as _;
 
 use crate::actions::GotoLine;
+use crate::lines::propagate_in_single_line;
 
 /// The name the prompt is routed under (`minibuffer.enabled_for`).
 const MINIBUFFER_NAME: &str = "goto_line";
@@ -43,6 +44,9 @@ pub(crate) fn goto_line_command(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if propagate_in_single_line(editor, cx) {
+        return;
+    }
     match action.count {
         Some(count) => {
             let line = count.max(1) as usize;

@@ -136,9 +136,14 @@ fn zap_to_char_forward() {
 fn zap_up_to_char_forward() {
     assert_eq!(run("ˇfoo bar baz", None, zu).0, "ˇar baz");
     assert_eq!(run("ˇfoo bar baz", Some(2), zu).0, "ˇaz");
-    let (out, plan) = run("ˇaab", None, zu);
-    assert_eq!(out, "ˇaab");
+    // The search starts one character past point, so a target right after point is skipped
+    // and repeating the command advances.
+    assert_eq!(run("ˇaab", None, zu).0, "ˇab");
+    assert_eq!(run("ˇaaab", None, zu).0, "ˇaab");
+    let (out, plan) = run("ˇab", None, zu);
+    assert_eq!(out, "ˇab");
     assert!(plan.edits.is_empty() && plan.killed.is_empty());
+    assert_eq!(run("ˇ", None, zu).1, Plan::default());
 }
 
 #[test]
