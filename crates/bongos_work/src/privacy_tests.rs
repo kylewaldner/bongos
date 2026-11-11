@@ -2,15 +2,18 @@
 //! own file, the journals and git's own records, and into no file an agent reads. Each layout (the
 //! central directory, a sibling directory and the fallback when the sibling is not writable)
 //! starts a task and walks every file the start could have touched.
+//!
+//! The guard drives `task::Start` only, not the other commands. The real `HOME` is not redirected
+//! in the tests, so it is not walked; only the temporary trees of the test are.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use gpui::TestAppContext;
 
 use crate::command_tests::Input;
-use crate::worktree_tests::{Setup, central, set_repository_root, setup};
+use crate::worktree_tests::{Setup, central, git, set_repository_root, setup};
 
 /// The files that tell an agent about a project, relative to a checkout.
 const INSTRUCTION_FILES: [&str; 7] = [
@@ -26,10 +29,26 @@ const INSTRUCTION_FILES: [&str; 7] = [
 /// Names of directories an agent keeps its memory in.
 const MEMORY_DIRECTORIES: [&str; 2] = ["memory", ".claude"];
 
+/// The instruction files committed to the fixture repository, so the checked-out copies in the
+/// worktree give the "unchanged" half of the check something to compare.
+const COMMITTED: [(&str, &str); 2] = [
+    ("CLAUDE.md", "Use tabs.\n"),
+    ("AGENTS.md", "Run the tests.\n"),
+];
+
 /// What the test tree held before the start.
 struct Before {
-    instructions: Vec<Option<Vec<u8>>>,
+    /// Every instruction file of every walked root, by path.
+    instructions: BTreeMap<PathBuf, Vec<u8>>,
     memory: BTreeSet<PathBuf>,
+}
+
+fn commit_instruction_files(setup: &Setup) {
+    for (name, text) in COMMITTED {
+        std::fs::write(setup.real.join(name), text).unwrap();
+    }
+    git(&setup.real, &["add", "CLAUDE.md", "AGENTS.md"]);
+    git(&setup.real, &["commit", "-m", "add the instruction files"]);
 }
 
 /// Every directory of the walked trees: the harness's store and central directory, and the
@@ -74,17 +93,33 @@ fn memory_directories(roots: &[PathBuf]) -> BTreeSet<PathBuf> {
     found
 }
 
-fn instruction_files(checkout: &Path) -> Vec<Option<Vec<u8>>> {
+fn is_instruction_file(path: &Path) -> bool {
     INSTRUCTION_FILES
         .iter()
-        .map(|name| std::fs::read(checkout.join(name)).ok())
-        .collect()
+        .any(|name| path.ends_with(Path::new(name)))
+}
+
+/// The instruction files below the roots with their bytes, by path.
+fn instruction_files(roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    for root in roots {
+        walk(root, &mut |path, kind| {
+            if kind.is_file()
+                && is_instruction_file(path)
+                && let Ok(bytes) = std::fs::read(path)
+            {
+                found.insert(path.to_path_buf(), bytes);
+            }
+        });
+    }
+    found
 }
 
 fn before(setup: &Setup) -> Before {
+    let roots = roots(setup);
     Before {
-        instructions: instruction_files(&setup.real),
-        memory: memory_directories(&roots(setup)),
+        instructions: instruction_files(&roots),
+        memory: memory_directories(&roots),
     }
 }
 
@@ -95,15 +130,16 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
-/// Whether `path` is a file bongos or git writes the worktree path into on purpose: a task file,
-/// a journal, git's record of a linked worktree and the linked worktree's own `.git` file.
-fn allowed(path: &Path) -> bool {
+/// Whether `path` is a file bongos or git writes the worktree path into on purpose: a task file
+/// or a journal in the store, and git's record of a linked worktree. The linked worktree's own
+/// `.git` file does not hold the worktree path, so it is not allowed.
+fn allowed(setup: &Setup, path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    if name == "task.toml" || name.ends_with(".op.toml") || name == ".git" {
-        return true;
+    if path.starts_with(&setup.harness.root) {
+        return name == "task.toml" || name.ends_with(".op.toml");
     }
     let parts: Vec<_> = path.components().rev().take(4).collect();
     name == "gitdir"
@@ -135,7 +171,7 @@ fn assert_no_path_leaks(setup: &Setup, worktree: &Path, before: &Before) {
             if !needles.iter().any(|needle| contains(&bytes, needle)) {
                 return;
             }
-            if allowed(path) {
+            if allowed(setup, path) {
                 if path.file_name().is_some_and(|name| name == "task.toml") {
                     task_files_with_path += 1;
                 }
@@ -154,9 +190,28 @@ fn assert_no_path_leaks(setup: &Setup, worktree: &Path, before: &Before) {
         "the walk found no task file with the worktree path, so it proves nothing"
     );
 
-    // Neither checkout gained an instruction file or changed one.
-    assert_eq!(instruction_files(&setup.real), before.instructions);
-    assert_eq!(instruction_files(worktree), before.instructions);
+    // No walked root gained an instruction file or changed one, except the worktree's checked-out
+    // copies, which must equal the repository's.
+    let mut after = BTreeMap::new();
+    let mut copies = BTreeMap::new();
+    for (path, bytes) in instruction_files(&roots) {
+        match path.strip_prefix(worktree) {
+            Ok(relative) => copies.insert(relative.to_path_buf(), bytes),
+            Err(_) => after.insert(path, bytes),
+        };
+    }
+    assert_eq!(
+        after, before.instructions,
+        "an instruction file appeared or changed"
+    );
+    let committed: BTreeMap<PathBuf, Vec<u8>> = COMMITTED
+        .iter()
+        .map(|(name, text)| (PathBuf::from(name), text.as_bytes().to_vec()))
+        .collect();
+    assert_eq!(
+        copies, committed,
+        "the worktree's instruction files differ from the repository's"
+    );
     assert_eq!(memory_directories(&roots), before.memory);
 }
 
@@ -175,6 +230,7 @@ impl Drop for Restore {
 async fn a_central_worktree_path_stays_out_of_agent_files(cx: &mut TestAppContext) {
     let (setup, cx) = setup(cx, None).await;
     let harness = &setup.harness;
+    commit_instruction_files(&setup);
     let before = before(&setup);
     harness
         .run_and_wait(cx, "task::Start", &[Input::Pick("backfill")])
@@ -192,6 +248,7 @@ async fn a_sibling_worktree_path_stays_out_of_agent_files(cx: &mut TestAppContex
     let (setup, cx) = setup(cx, None).await;
     let harness = &setup.harness;
     set_repository_root(cx, &setup.repository, None, Some("{repo}-worktrees"));
+    commit_instruction_files(&setup);
     let before = before(&setup);
     harness
         .run_and_wait(cx, "task::Start", &[Input::Pick("backfill")])
@@ -226,6 +283,7 @@ async fn a_fallback_worktree_path_stays_out_of_agent_files(cx: &mut TestAppConte
         return;
     }
     set_repository_root(cx, &setup.repository, None, Some("{repo}-worktrees"));
+    commit_instruction_files(&setup);
     let before = before(&setup);
     harness
         .run_and_wait(cx, "task::Start", &[Input::Pick("backfill")])
