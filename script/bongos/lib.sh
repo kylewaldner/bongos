@@ -453,6 +453,22 @@ zed_hosts() {
   awk '{print $2}' "$RUN/proxy.log" | grep -E '(^|\.)(zed\.dev|zed\.industries)$' | sort -u
 }
 
+# Prints the worktree path a task records in its task.toml (`worktree = "..."`), with a leading ~
+# expanded to $HOME. Fails with a message on stderr when the file or the line is missing, so use it
+# after wait_worktree_line, which waits for the app to write the line.
+worktree_of() {
+  local file="$1/task.toml" path
+  [ -f "$file" ] || { echo "worktree_of: no task.toml in $1" >&2; return 1; }
+  path=$(python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb")).get("worktree", ""))' "$file" 2>/dev/null) ||
+    { echo "worktree_of: cannot read $file" >&2; return 1; }
+  [ -n "$path" ] || { echo "worktree_of: $file has no worktree line" >&2; return 1; }
+  case "$path" in "~"/*) path="$HOME/${path#"~/"}" ;; esac
+  printf '%s\n' "$path"
+}
+
+# Waits up to 10 seconds for the task's worktree line; the caller fails the scenario if it never comes.
+wait_worktree_line() { poll 10 "the worktree line in $1/task.toml" worktree_of "$1" >/dev/null 2>&1; }
+
 # Fails when bongos reached a Zed host or made a blocked request. Not for stock, which does.
 assert_no_zed_hosts() {
   local hosts blocked

@@ -47,7 +47,6 @@ REPO=/tmp/chat-src/billing
 WORK_ROOT="$HOME/.bongos"
 PROJECT_DIR="$WORK_ROOT/projects/billing"
 TASK_DIR="$PROJECT_DIR/tasks/prorate-invoices"
-WORKTREE="$REPO/.bongos-worktrees/prorate-invoices"
 FIXTURES="$BONGOS_ROOT/crates/bongos_chat/test-fixtures"
 CHAT_BIN="$RUN/chat-bin"
 FAKE_CLAUDE_INPUT="$RUN/fake-claude-input.txt"
@@ -354,6 +353,8 @@ printf '# ledger draft\n' >"$TASK_DIR/ledger-draft.md"
 printf '# design notes\n' >"$TASK_DIR/design-notes.md"
 wkeys s
 choose prorate
+wait_worktree_line "$TASK_DIR" || fail "no worktree line: $(cat "$TASK_DIR/task.toml")"
+WORKTREE=$(worktree_of "$TASK_DIR")
 poll 10 "the worktree $WORKTREE within ten seconds" test -d "$WORKTREE"
 wkeys f
 choose prorate
