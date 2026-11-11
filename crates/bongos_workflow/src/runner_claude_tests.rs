@@ -253,6 +253,14 @@ fn argv_for_a_node() {
     assert!(!args.contains(&"--max-budget-usd".to_string()));
     assert!(!args.contains(&"--permission-prompts".to_string()));
     assert!(!args.contains(&"--disallowedTools".to_string()));
+
+    // A node with no allowed tools gets no bare variadic flag, which would swallow `--max-turns`.
+    claude_node.caps.allowed_tools.clear();
+    let args = cli.args(&claude_node, system);
+    assert!(!args.contains(&"--allowedTools".to_string()));
+    let turns = args.iter().position(|arg| arg == "--max-turns").unwrap();
+    assert_eq!(args[turns + 1], "3");
+    assert!(args.contains(&"--json-schema".to_string()));
 }
 
 #[test]

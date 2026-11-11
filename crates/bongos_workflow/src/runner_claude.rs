@@ -29,6 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -39,7 +40,7 @@ use bongos_workflow_model::definition::{Node, OutputField};
 use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey, schema};
 use serde_json::Value;
 
-use crate::process::{NodeProcess, ProcessRecord, stop_all};
+use crate::process::{NodeProcess, ProcessRecord, group_alive, stop_all};
 use crate::runtime::Finish;
 
 /// The variables taken from the base environment; everything else in it is dropped.
@@ -260,7 +261,7 @@ impl ClaudeCli {
     }
 
     /// The arguments of one try (D7), after the program: `-p --output-format stream-json
-    /// --verbose --model --permission-mode --allowedTools [--disallowedTools] --max-turns
+    /// --verbose --model --permission-mode [--allowedTools] [--disallowedTools] --max-turns
     /// [--max-budget-usd] --json-schema --append-system-prompt-file --session-id
     /// [--permission-prompts none]`, then the configured extra arguments.
     pub fn args(&self, node: &ClaudeNode, system_file: &Path) -> Vec<String> {
@@ -279,9 +280,12 @@ impl ClaudeCli {
         .map(|arg| arg.to_string())
         .collect();
         // Variadic: each tool is its own argument, so a pattern holding a comma or a space stays
-        // whole. A flag always follows.
-        args.push("--allowedTools".to_string());
-        args.extend(caps.allowed_tools.iter().cloned());
+        // whole. A flag always follows. An empty list gets no flag: the CLI would take the next
+        // flag (`--max-turns`) for a tool name.
+        if !caps.allowed_tools.is_empty() {
+            args.push("--allowedTools".to_string());
+            args.extend(caps.allowed_tools.iter().cloned());
+        }
         if !node.mcp_exclude.is_empty() {
             args.push("--disallowedTools".to_string());
             args.extend(
@@ -570,6 +574,65 @@ fn exit_detail(exit: Exit, stderr: &str) -> String {
     }
 }
 
+/// How much of the end of stderr [`classify`] gets.
+const STDERR_TAIL: u64 = 64 * 1024;
+
+/// Reads a stream file line by line and keeps only what [`classify`] looks at: the first init
+/// event and the last result event, so a long stream is never held in memory.
+fn read_stream(path: &Path) -> String {
+    let Ok(file) = File::open(path) else {
+        return String::new();
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let (mut init, mut result): (Option<String>, Option<String>) = (None, None);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&buffer);
+        let line = line.trim_end();
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match event.get("type").and_then(Value::as_str) {
+            Some("result") => result = Some(line.to_string()),
+            Some("system")
+                if init.is_none()
+                    && event.get("subtype").and_then(Value::as_str) == Some("init") =>
+            {
+                init = Some(line.to_string());
+            }
+            _ => {}
+        }
+    }
+    init.into_iter()
+        .chain(result)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The last `limit` bytes of a file (lossy UTF-8), or nothing when it cannot be read.
+fn read_tail(path: &Path, limit: u64) -> String {
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let length = file.metadata().map_or(0, |metadata| metadata.len());
+    if file
+        .seek(SeekFrom::Start(length.saturating_sub(limit)))
+        .is_err()
+    {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    if file.take(limit).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 fn minutes(duration: Duration) -> String {
     let seconds = duration.as_secs();
     if seconds >= 60 && seconds.is_multiple_of(60) {
@@ -584,7 +647,6 @@ struct Try {
     key: NodeKey,
     try_number: u32,
     node: ClaudeNode,
-    process: NodeProcess,
     started: Instant,
 }
 
@@ -594,7 +656,7 @@ struct Try {
 pub struct ClaudeRunner {
     cli: ClaudeCli,
     base_env: BTreeMap<String, String>,
-    tries: Vec<Try>,
+    tries: Vec<(Try, NodeProcess)>,
 }
 
 impl ClaudeRunner {
@@ -676,56 +738,71 @@ impl ClaudeRunner {
             }
         })?;
         let record = process.record();
-        self.tries.push(Try {
-            run: run.to_string(),
-            key: key.clone(),
-            try_number,
-            node,
+        self.tries.push((
+            Try {
+                run: run.to_string(),
+                key: key.clone(),
+                try_number,
+                node,
+                started: Instant::now(),
+            },
             process,
-            started: Instant::now(),
-        });
+        ));
         Ok(record)
     }
 
     /// The tries that ended since the last call, and those the time cap stopped.
     pub fn poll(&mut self) -> Vec<Finish> {
-        let mut finished = Vec::new();
+        let mut ended: Vec<(Try, NodeProcess, Exit)> = Vec::new();
         let mut index = 0;
         while index < self.tries.len() {
-            let entry = &mut self.tries[index];
+            let (entry, process) = &mut self.tries[index];
             let timed_out = entry.started.elapsed() >= entry.node.caps.max_time;
-            if !entry.process.has_exited() && !timed_out {
+            if !process.has_exited() && !timed_out {
                 index += 1;
                 continue;
             }
-            let mut entry = self.tries.remove(index);
-            let exit = if entry.process.has_exited() {
-                match entry.process.child().try_status() {
+            let (entry, mut process) = self.tries.remove(index);
+            let exit = if process.has_exited() {
+                match process.child().try_status() {
                     Ok(Some(status)) => status.code().map_or(Exit::Abnormal, Exit::Code),
                     _ => Exit::Abnormal,
                 }
             } else {
-                entry.process.stop();
                 Exit::TimedOut
             };
-            finished.push(self.finish(entry, exit));
+            ended.push((entry, process, exit));
         }
-        finished
+        // One shared stop for the timed-out tries and for the exited ones whose group still has a
+        // live member (background children must not outlive the node). A group with no live
+        // member is left alone: its id may be reused.
+        let mut stopping: Vec<NodeProcess> = Vec::new();
+        let mut done: Vec<(Try, Exit)> = Vec::new();
+        for (entry, process, exit) in ended {
+            if exit == Exit::TimedOut || group_alive(process.record().pid) {
+                stopping.push(process);
+            }
+            done.push((entry, exit));
+        }
+        stop_all(&mut stopping);
+        done.into_iter()
+            .map(|(entry, exit)| self.finish(entry, exit))
+            .collect()
     }
 
     /// Stops these tries (one shared grace period); they are never reported by
     /// [`ClaudeRunner::poll`].
     pub fn stop(&mut self, tries: &[(String, NodeKey)]) {
-        let (stopped, kept): (Vec<Try>, Vec<Try>) = std::mem::take(&mut self.tries)
+        let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.tries)
             .into_iter()
-            .partition(|entry| {
+            .partition(|(entry, _)| {
                 tries
                     .iter()
                     .any(|(run, key)| *run == entry.run && *key == entry.key)
             });
         self.tries = kept;
         let mut processes: Vec<NodeProcess> =
-            stopped.into_iter().map(|entry| entry.process).collect();
+            stopped.into_iter().map(|(_, process)| process).collect();
         stop_all(&mut processes);
     }
 
@@ -733,20 +810,18 @@ impl ClaudeRunner {
     pub fn in_flight(&self) -> Vec<(String, NodeKey)> {
         self.tries
             .iter()
-            .map(|entry| (entry.run.clone(), entry.key.clone()))
+            .map(|(entry, _)| (entry.run.clone(), entry.key.clone()))
             .collect()
     }
 
     fn finish(&self, entry: Try, exit: Exit) -> Finish {
-        let read =
-            |name: &str| fs::read_to_string(entry.node.try_dir.join(name)).unwrap_or_default();
         let classified = classify(
             &entry.key,
             &entry.node,
             &self.cli.command,
             self.cli.has_flag("--max-budget-usd"),
-            &read(STREAM_FILE),
-            &read(STDERR_FILE),
+            &read_stream(&entry.node.try_dir.join(STREAM_FILE)),
+            &read_tail(&entry.node.try_dir.join(STDERR_FILE), STDERR_TAIL),
             exit,
         );
         if let Ok(result) = &classified.outcome {
@@ -764,9 +839,7 @@ impl ClaudeRunner {
             cost_usd: classified.cost_usd,
             turns: classified.turns,
             elapsed_ms: entry.started.elapsed().as_millis() as u64,
-            session_id: classified
-                .session_id
-                .or(Some(entry.node.session_id.clone())),
+            session_id: classified.session_id.or(Some(entry.node.session_id)),
         }
     }
 }
