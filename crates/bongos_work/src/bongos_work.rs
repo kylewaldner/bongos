@@ -122,6 +122,8 @@ mod mode_tests;
 #[cfg(test)]
 mod panel_tests;
 #[cfg(test)]
+mod privacy_tests;
+#[cfg(test)]
 mod rebase_tests;
 #[cfg(test)]
 mod registry_tests;

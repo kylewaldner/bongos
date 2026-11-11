@@ -290,7 +290,7 @@ fn set_mode(path: &Path, mode: u32) {
 }
 
 /// Whether a file can be made in `dir` (a privileged user ignores the mode bits).
-fn writable(dir: &Path) -> bool {
+pub(crate) fn writable(dir: &Path) -> bool {
     let probe = dir.join("probe");
     let made = std::fs::write(&probe, "").is_ok();
     std::fs::remove_file(&probe).ok();
