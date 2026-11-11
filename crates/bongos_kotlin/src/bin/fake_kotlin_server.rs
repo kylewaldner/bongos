@@ -1,7 +1,7 @@
 //! A stand-in for kotlin-lsp and the IntelliJ server, used by tests and smoke scenarios. It speaks
 //! LSP over stdio with Content-Length framing. `BONGOS_FAKE_LSP_MODE` holds comma-separated modes:
-//! `progress`, `push`, `pull`, `crash-after=<ms>`, `hang-shutdown`, `license-lost-after=<ms>`,
-//! `slow-init=<ms>`, `stderr` (one line on stderr at start). `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
+//! `progress`, `push`, `pull`, `crash-after=<ms>` (exit 1 that long after `initialized`),
+//! `hang-shutdown`, `license-lost-after=<ms>`, `slow-init=<ms>`, `stderr` (one line on stderr at start). `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
 //! `license status` prints per `BONGOS_FAKE_LICENSE=licensed|unlicensed|offline`.
 
 use serde_json::{Value, json};
@@ -179,13 +179,6 @@ fn serve(modes: Modes) -> io::Result<()> {
         eprintln!("{STARTUP_STDERR}");
     }
 
-    if let Some(milliseconds) = modes.crash_after {
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(milliseconds));
-            // A crash leaves the pid file behind, as a real crash would.
-            std::process::exit(1)
-        });
-    }
     if let Some(milliseconds) = modes.license_lost_after {
         let output = output.clone();
         thread::spawn(move || {
@@ -209,6 +202,17 @@ fn serve(modes: Modes) -> io::Result<()> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        // Timed from the end of the handshake, not from the start of the process: a client that is
+        // slow to send `initialize` must not find the server already gone.
+        if method == "initialized"
+            && let Some(milliseconds) = modes.crash_after
+        {
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(milliseconds));
+                // A crash leaves the pid file behind, as a real crash would.
+                std::process::exit(1)
+            });
+        }
         let mut result = Value::Null;
         match method {
             "initialize" => {

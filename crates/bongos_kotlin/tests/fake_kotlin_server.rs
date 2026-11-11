@@ -62,9 +62,12 @@ impl Client {
     }
 
     fn next(&mut self) -> Value {
+        // Generous, because it only fires while the server is alive but silent, such as a
+        // server still starting on a starved machine. A server that exits or crashes still
+        // shows at once as a disconnect, and the test runner still ends a hung test.
         self.messages
-            .recv_timeout(Duration::from_secs(10))
-            .expect("a message within 10 s")
+            .recv_timeout(Duration::from_secs(60))
+            .expect("a message within 60 s")
     }
 
     fn next_matching(&mut self, method: &str) -> Value {

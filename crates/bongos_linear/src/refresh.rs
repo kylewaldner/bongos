@@ -220,8 +220,10 @@ struct Step {
 pub(crate) struct Refresher {
     in_flight: bool,
     pending: Option<Queued>,
-    /// Added to the clock, so a test can let a minute pass.
-    skew_ms: u64,
+    /// A test's clock: it stands still until the test advances it, so the window does not
+    /// depend on how long the test takes to run.
+    #[cfg(test)]
+    frozen_ms: Option<u64>,
     budget_override: Option<u32>,
     store_subscription: Option<Subscription>,
     focus_subscription: Option<Subscription>,
@@ -321,8 +323,12 @@ impl Refresher {
         linear.update(cx, |linear, _| linear.set_linked(ids));
     }
 
-    fn now(&self) -> u64 {
-        now_ms() + self.skew_ms
+    pub(crate) fn now(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(frozen) = self.frozen_ms {
+            return frozen;
+        }
+        now_ms()
     }
 
     fn budget(&self) -> u32 {
@@ -662,8 +668,13 @@ pub(crate) fn refresh_from_linear(
 
 #[cfg(test)]
 impl Refresher {
+    /// Stops the clock at the current time; only [`Self::advance_clock`] moves it after that.
+    pub(crate) fn freeze_clock(&mut self) {
+        self.frozen_ms = Some(now_ms());
+    }
+
     pub(crate) fn advance_clock(&mut self, ms: u64) {
-        self.skew_ms += ms;
+        self.frozen_ms = Some(self.now() + ms);
     }
 
     pub(crate) fn set_budget(&mut self, points: u32) {
