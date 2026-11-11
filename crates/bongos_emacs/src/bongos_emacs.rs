@@ -11,6 +11,7 @@ pub mod last_command;
 mod lines;
 mod motion;
 pub mod quit;
+mod recenter;
 pub mod region;
 pub mod snapshot_text;
 mod space;
@@ -32,6 +33,8 @@ mod last_command_tests;
 mod lines_tests;
 #[cfg(test)]
 mod motion_tests;
+#[cfg(test)]
+mod recenter_tests;
 #[cfg(test)]
 mod space_tests;
 #[cfg(test)]
@@ -83,6 +86,9 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, zap::zap_up_to_char_command);
         register(editor, &weak, zap::zap_back_to_char_command);
         register(editor, &weak, zap::zap_back_up_to_char_command);
+        register(editor, &weak, recenter::recenter_command);
+        register(editor, &weak, recenter::reposition_command);
+        recenter::init_editor(cx);
     })
     .detach();
 }
