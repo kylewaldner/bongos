@@ -696,6 +696,30 @@ async fn emacs_recenter_and_reposition_run_on_an_editor_by_name(cx: &mut TestApp
     assert!(selections[0].is_empty());
 }
 
+/// Goto-line runs on an editor when dispatched by name; a count jumps with no prompt and clamps
+/// to the buffer.
+#[gpui::test]
+async fn emacs_goto_line_runs_on_an_editor_by_name(cx: &mut TestAppContext) {
+    let text = (1..=20)
+        .map(|ix| format!("line {ix}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (editor, cx) = emacs_editor(&text, cx).await;
+    let row = |cx: &mut gpui::VisualTestContext| {
+        editor.update(cx, |editor, cx| {
+            let display = editor.display_snapshot(cx);
+            editor.selections.newest_display(&display).head().row().0
+        })
+    };
+
+    run_emacs("emacs::GotoLine", serde_json::json!({ "count": 7 }), cx);
+    assert_eq!(row(cx), 6);
+    run_emacs("emacs::GotoLine", serde_json::json!({ "count": 500 }), cx);
+    assert_eq!(row(cx), 19);
+    run_emacs("emacs::GotoLine", serde_json::json!({ "count": 0 }), cx);
+    assert_eq!(row(cx), 0);
+}
+
 /// The whitespace commands run on an editor when dispatched by name with their count argument,
 /// as the palette and a keymap entry reach them; two carets are one undo step.
 #[gpui::test]
