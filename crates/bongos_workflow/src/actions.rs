@@ -132,7 +132,7 @@ impl Global for LastToast {}
 /// The toast a command shows while `workflows.enabled` is false.
 pub(crate) const OFF_MESSAGE: &str = "Workflows are off (workflows.enabled)";
 
-fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
     #[cfg(test)]
     cx.set_global(LastToast(message.clone()));
     workspace.show_toast(
@@ -142,7 +142,8 @@ fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Works
 }
 
 /// Registers the handler of `A`: it shows the off toast while `workflows.enabled` is false. The
-/// engine's handlers replace the body when it is true in later steps.
+/// engine's handlers replace the body when it is true in later steps (`validate`, `new` and `edit
+/// definition` have theirs in `commands`).
 fn register_action<A: Action>(workspace: &mut Workspace) {
     workspace.register_action(move |workspace, _: &A, _: &mut Window, cx| {
         if !WorkflowsSettings::get_global(cx).enabled {
@@ -169,11 +170,9 @@ pub fn register(workspace: &mut Workspace) {
     register_action::<workflow::OpenRunWorktree>(workspace);
     register_action::<workflow::ShowRunDiff>(workspace);
     register_action::<workflow::ClearFinished>(workspace);
-    register_action::<workflow::Validate>(workspace);
-    register_action::<workflow::New>(workspace);
-    register_action::<workflow::EditDefinition>(workspace);
     register_action::<workflow::CopyResumeCommand>(workspace);
     register_action::<workflow::ToggleGraph>(workspace);
     register_action::<workflow::DumpRunView>(workspace);
     register_action::<workflow::DumpEngine>(workspace);
+    crate::commands::register(workspace);
 }
