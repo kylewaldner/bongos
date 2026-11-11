@@ -207,6 +207,17 @@ impl CursorStyleOverride {
         cx.try_global::<Self>().and_then(|style| style.0)
     }
 
+    /// Makes the shape the editors draw now (the previous toggle, else the settings) the other
+    /// of block and bar.
+    pub fn toggle(cx: &mut App) {
+        let next = if effective_cursor_shape(None, cx) == CursorShape::Block {
+            CursorShape::Bar
+        } else {
+            CursorShape::Block
+        };
+        Self::set(next, cx);
+    }
+
     /// Forces `shape` on every editor that has no override of its own.
     pub fn set(shape: CursorShape, cx: &mut App) {
         cx.set_global(Self(Some(shape)));
