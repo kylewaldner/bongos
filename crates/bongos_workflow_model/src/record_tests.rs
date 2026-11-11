@@ -345,7 +345,7 @@ fn replay_of_gates() {
             question: "Go?".to_string(),
         },
         Event::GateClosed {
-            key: plan.clone(),
+            key: plan,
             by: "kyle".to_string(),
             edit: None,
             comment: Some("fine".to_string()),
