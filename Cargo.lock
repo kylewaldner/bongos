@@ -2573,6 +2573,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_workflow_model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
 name = "borrow-or-share"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
