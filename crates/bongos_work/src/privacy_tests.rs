@@ -141,8 +141,15 @@ fn allowed(setup: &Setup, path: &Path) -> bool {
     if path.starts_with(&setup.harness.root) {
         return name == "task.toml" || name.ends_with(".op.toml");
     }
+    let git_dirs = [
+        setup.real.join(".git"),
+        std::fs::canonicalize(&setup.real)
+            .unwrap_or_else(|_| setup.real.clone())
+            .join(".git"),
+    ];
     let parts: Vec<_> = path.components().rev().take(4).collect();
-    name == "gitdir"
+    git_dirs.iter().any(|git_dir| path.starts_with(git_dir))
+        && name == "gitdir"
         && parts.len() == 4
         && parts[2].as_os_str() == "worktrees"
         && parts[3].as_os_str() == ".git"
@@ -195,7 +202,10 @@ fn assert_no_path_leaks(setup: &Setup, worktree: &Path, before: &Before) {
     let mut after = BTreeMap::new();
     let mut copies = BTreeMap::new();
     for (path, bytes) in instruction_files(&roots) {
-        match path.strip_prefix(worktree) {
+        match path
+            .strip_prefix(&canonical)
+            .or_else(|_| path.strip_prefix(worktree))
+        {
             Ok(relative) => copies.insert(relative.to_path_buf(), bytes),
             Err(_) => after.insert(path, bytes),
         };
