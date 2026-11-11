@@ -2,6 +2,8 @@
 //! LSP over stdio with Content-Length framing. `BONGOS_FAKE_LSP_MODE` holds comma-separated modes:
 //! `progress`, `push`, `pull`, `crash-after=<ms>` (exit 1 that long after `initialized`),
 //! `hang-shutdown`, `license-lost-after=<ms>`, `slow-init=<ms>`, `stderr` (one line on stderr at start). `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
+//! With `BONGOS_FAKE_LSP_GATES` set to a directory, each `progress` step holds its report until a
+//! file named after the step's title (`Importing`, `Indexing`) exists there.
 //! `license status` prints per `BONGOS_FAKE_LICENSE=licensed|unlicensed|offline`.
 
 use serde_json::{Value, json};
@@ -137,6 +139,17 @@ fn diagnostics_for(text: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Waits for the gate file of a progress step when `BONGOS_FAKE_LSP_GATES` is set.
+fn wait_for_gate(title: &str) {
+    let Some(directory) = std::env::var_os("BONGOS_FAKE_LSP_GATES") else {
+        return;
+    };
+    let gate = PathBuf::from(directory).join(title);
+    while !gate.exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn run_progress(output: Output) {
     let steps = [
         ("Importing", "importing Gradle project"),
@@ -157,6 +170,7 @@ fn run_progress(output: Output) {
         .and_then(|()| notify(json!({ "kind": "begin", "title": title, "percentage": 0 })))
         .and_then(|()| {
             thread::sleep(Duration::from_millis(250));
+            wait_for_gate(title);
             notify(json!({ "kind": "report", "message": report, "percentage": 50 }))
         })
         .and_then(|()| {

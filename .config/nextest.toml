@@ -28,8 +28,6 @@ retries = 3
 # hit the same overload) and there are 2 retries (3 attempts): a real regression fails all of them.
 # These tests are not measuring time, so they are not in the serial `perf-timing` group.
 #
-#   bongos_kotlin test_progress_drives_indexing_then_ready: polls a real subprocess with a 15 s
-#     wall-clock limit.
 #   db test_simultaneous_db_corruption: times out after 15 s while parking under load.
 #   editor test_tab_in_leading_whitespace_auto_indents_for_bash, test_markdown_indents: depend on
 #     background syntax parsing and auto-indent finishing in time.
@@ -40,8 +38,7 @@ retries = 3
 #     bounds.
 [[profile.default.overrides]]
 filter = '''
-(binary_id(=bongos_kotlin::lifecycle) & test(=test_progress_drives_indexing_then_ready))
-| (package(=db) & test(=tests::test_simultaneous_db_corruption))
+(package(=db) & test(=tests::test_simultaneous_db_corruption))
 | (package(=editor) & (test(=editor_tests::test_tab_in_leading_whitespace_auto_indents_for_bash) | test(=editor_tests::test_markdown_indents) | test(=editor_tests::test_indent_after_input_for_bash)))
 | (package(=languages) & test(=typescript::tests::test_outline_with_destructuring))
 | (package(=bongos_chat) & test(=runtime_tests::test_no_output_makes_a_chat_idle))
