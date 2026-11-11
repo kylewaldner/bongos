@@ -62,6 +62,28 @@ impl Setup {
     fn log(&self) -> String {
         fs::read_to_string(KotlinLog::new(&self.dirs.logs_dir).path()).unwrap_or_default()
     }
+
+    /// `wait_until` for a state a failed server never reaches: a failed status ends the wait at
+    /// once, with the log, instead of at the give-up point.
+    fn wait_until(
+        &self,
+        cx: &mut TestAppContext,
+        what: &str,
+        mut condition: impl FnMut(&mut TestAppContext) -> bool,
+    ) {
+        wait_until(cx, what, |cx| {
+            let status = self.status(cx);
+            assert!(
+                !matches!(
+                    status,
+                    Some(ServerStatus::Failed { .. } | ServerStatus::BothFailed { .. })
+                ),
+                "the server failed while waiting for {what}: {status:?}\n{}",
+                self.log()
+            );
+            condition(cx)
+        });
+    }
 }
 
 fn kotlin_language() -> Arc<Language> {
@@ -213,7 +235,7 @@ fn is_gone(pid: u32) -> bool {
 #[gpui::test]
 async fn test_restart_leaves_one_live_pid_and_reaps_the_old_one(cx: &mut TestAppContext) {
     let setup = start(cx, Path::new(FAKE_SERVER), "").await;
-    wait_until(cx, "the first server to be ready", |cx| {
+    setup.wait_until(cx, "the first server to be ready", |cx| {
         setup.pid_files().len() == 1 && setup.status(cx) == Some(ServerStatus::Ready)
     });
     let first = setup.pid_files()[0];
@@ -231,7 +253,7 @@ async fn test_restart_leaves_one_live_pid_and_reaps_the_old_one(cx: &mut TestApp
             })
             .unwrap();
         let mut most_at_once = 0;
-        wait_until(cx, "the replacement server to be ready", |cx| {
+        setup.wait_until(cx, "the replacement server to be ready", |cx| {
             let pids = setup.pid_files();
             most_at_once = most_at_once.max(pids.len());
             pids.len() == 1 && pids[0] != previous && setup.status(cx) == Some(ServerStatus::Ready)
@@ -251,10 +273,10 @@ async fn test_restart_leaves_one_live_pid_and_reaps_the_old_one(cx: &mut TestApp
 #[gpui::test]
 async fn test_progress_drives_indexing_then_ready(cx: &mut TestAppContext) {
     let setup = start(cx, Path::new(FAKE_SERVER), "progress").await;
-    wait_until(cx, "indexing to be logged", |_| {
+    setup.wait_until(cx, "indexing to be logged", |_| {
         setup.log().contains("indexing 3/5 modules")
     });
-    wait_until(cx, "the server to be ready again", |cx| {
+    setup.wait_until(cx, "the server to be ready again", |cx| {
         setup.status(cx) == Some(ServerStatus::Ready) && setup.pid_files().len() == 1
     });
     let log = setup.log();
@@ -308,14 +330,14 @@ async fn test_startup_stderr_event_and_log(cx: &mut TestAppContext) {
     setup.manager.update(cx, |manager, cx| {
         manager.restart_server(setup.worktree_id, cx)
     });
-    wait_until(cx, "the startup stderr event", |_| {
+    setup.wait_until(cx, "the startup stderr event", |_| {
         !seen.borrow().is_empty()
     });
     let (name, worktree_id, text) = seen.borrow()[0].clone();
     assert_eq!(name, "kotlin");
     assert_eq!(worktree_id, setup.worktree_id);
     assert!(text.contains("fake server starting up"), "{text}");
-    wait_until(cx, "the stderr line in kotlin.log", |_| {
+    setup.wait_until(cx, "the stderr line in kotlin.log", |_| {
         setup.log().contains("stderr fake server starting up")
     });
 }
@@ -347,7 +369,7 @@ async fn test_switching_one_worktree_leaves_the_others_server_alone(cx: &mut Tes
                 .and_then(|(_, status)| status.process_id)
         })
     };
-    wait_until(cx, "both servers to be ready", |cx| {
+    setup.wait_until(cx, "both servers to be ready", |cx| {
         setup.pid_files().len() == 2
             && process_of(cx, first).is_some()
             && process_of(cx, second).is_some()
@@ -365,7 +387,7 @@ async fn test_switching_one_worktree_leaves_the_others_server_alone(cx: &mut Tes
             manager.switch_server(first, Some(KotlinServerKind::Intellij), cx)
         })
         .unwrap();
-    wait_until(cx, "the first worktree's server to be replaced", |cx| {
+    setup.wait_until(cx, "the first worktree's server to be replaced", |cx| {
         process_of(cx, first).is_some_and(|pid| pid != old_first) && setup.pid_files().len() == 2
     });
     assert!(
@@ -408,7 +430,7 @@ async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppCon
         .unwrap()
         .downcast::<Editor>()
         .unwrap();
-    wait_until(cx, "kotlin-lsp to be ready", |cx| {
+    setup.wait_until(cx, "kotlin-lsp to be ready", |cx| {
         setup.status(cx) == Some(ServerStatus::Ready)
     });
 
@@ -436,14 +458,14 @@ async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppCon
                 .map(|fallback| fallback.kind)
         })
     };
-    wait_until(cx, "the fallback to kotlin-lsp to be ready", |cx| {
+    setup.wait_until(cx, "the fallback to kotlin-lsp to be ready", |cx| {
         fallback(cx) == Some(FallbackReason::LicenseLost)
             && setup.status(cx) == Some(ServerStatus::Ready)
             && setup.pid_files().len() == 1
     });
     // kotlin-lsp sends the same text again later; nothing retries IntelliJ.
     let settle = Instant::now();
-    wait_until(cx, "a while on kotlin-lsp", |_| {
+    setup.wait_until(cx, "a while on kotlin-lsp", |_| {
         settle.elapsed() > Duration::from_millis(800)
     });
     let log = setup.log();
