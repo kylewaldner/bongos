@@ -47,16 +47,24 @@ fn main() {
 /// - the loose branch ref holds the sha a branch commit moves, or `packed-refs`
 ///   when the branch exists only there.
 ///
+/// The per-worktree directory comes from `git rev-parse --git-dir`, which every
+/// git version supports and which may print a path relative to the working
+/// directory (the manifest directory, as cargo uses for relative paths), so it is
+/// made absolute here. The shared directory comes from its `commondir` file
+/// (relative to it) in a linked worktree, and is the same directory otherwise.
+/// Output that is not an existing directory is ignored.
+///
+/// If a branch exists only in `packed-refs` and `logs/HEAD` is missing
+/// (`core.logAllRefUpdates=false`), a loose ref created later by a commit is not
+/// watched until this script reruns for another reason.
+///
 /// Without git nothing git-related is watched and the build still succeeds.
 fn watch_git_head() {
+    use std::path::PathBuf;
+
     println!("cargo:rerun-if-changed=build.rs");
     let Some(output) = Command::new("git")
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-dir",
-            "--git-common-dir",
-        ])
+        .args(["rev-parse", "--git-dir"])
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -64,11 +72,16 @@ fn watch_git_head() {
         return;
     };
     let output = String::from_utf8_lossy(&output.stdout);
-    let mut lines = output.lines().map(std::path::Path::new);
-    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
+    let Ok(git_dir) = std::env::current_dir().map(|dir| dir.join(output.trim())) else {
         return;
     };
-    let watch = |path: std::path::PathBuf| {
+    if output.trim().is_empty() || !git_dir.is_dir() {
+        return;
+    }
+    let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
+        .map(|common_dir| git_dir.join(common_dir.trim()))
+        .unwrap_or_else(|_| git_dir.clone());
+    let watch = |path: PathBuf| {
         if path.exists() {
             println!("cargo:rerun-if-changed={}", path.display());
             true
