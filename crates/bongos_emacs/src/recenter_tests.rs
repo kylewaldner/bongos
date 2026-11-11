@@ -1,6 +1,7 @@
 use editor::actions::ScrollCursorCenterTopBottom;
 use editor::test::editor_test_context::EditorTestContext;
 use gpui::{KeyBinding, TestAppContext};
+use multi_buffer::MultiBufferOffset;
 
 use crate::actions::{Recenter, Reposition};
 use crate::apply_tests::init_test;
@@ -68,7 +69,7 @@ async fn recenter_cycles_middle_top_bottom_middle(cx: &mut TestAppContext) {
 async fn recenter_with_a_region_clears_it_and_still_starts_the_cycle(cx: &mut TestAppContext) {
     let mut cx = test_context(cx).await;
     cx.update_editor(|editor, window, cx| {
-        editor.change_selections(Default::default(), window, cx, |s| s.select_ranges([300..310]))
+        editor.change_selections(Default::default(), window, cx, |s| s.select_ranges([MultiBufferOffset(300)..MultiBufferOffset(310)]))
     });
     cx.simulate_keystrokes("ctrl-l");
     cx.update_editor(|editor, _, cx| {
@@ -120,7 +121,11 @@ async fn reposition_moves_the_caret_through_the_cycle_and_drops_other_carets(
     cx.update_editor(|editor, window, cx| {
         editor.set_scroll_position(gpui::point(0.0, 30.0), window, cx);
         editor.change_selections(Default::default(), window, cx, |s| {
-            s.select_ranges([2..2, 400..400, 410..420])
+            s.select_ranges([
+                MultiBufferOffset(2)..MultiBufferOffset(2),
+                MultiBufferOffset(400)..MultiBufferOffset(400),
+                MultiBufferOffset(410)..MultiBufferOffset(420),
+            ])
         });
         editor.set_scroll_position(gpui::point(0.0, 30.0), window, cx);
     });
