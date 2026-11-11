@@ -161,6 +161,9 @@ pub struct SettingsContent {
     /// Default: VSCode
     pub base_keymap: Option<BaseKeymapContent>,
 
+    /// Settings of the Emacs mode.
+    pub emacs: Option<EmacsSettingsContent>,
+
     /// Configuration for the collab panel visual settings.
     pub collaboration_panel: Option<PanelSettingsContent>,
 

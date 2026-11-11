@@ -5461,6 +5461,7 @@ mod tests {
                 "context_server",
                 "copilot",
                 "csv",
+                "cursor",
                 "debug_panel",
                 "debugger",
                 "dev",
