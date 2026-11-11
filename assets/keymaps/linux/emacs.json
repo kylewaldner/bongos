@@ -16,8 +16,10 @@
     // NOTE: must be declared before the `Editor` override.
     // NOTE: in macos the 'ctrl-x' 'ctrl-p' and 'ctrl-n' rebindings are not needed, since they default to 'cmd'.
     "context": "Editor",
+    // Zed binds ctrl-g to `go_to_line::Toggle` in full editors; emacs::KeyboardQuit propagates
+    // when there is nothing to cancel, so that binding is removed here.
+    "unbind": { "ctrl-g": "go_to_line::Toggle" },
     "bindings": {
-      "ctrl-g": null, // currently activates `go_to_line::Toggle` when there is nothing to cancel
       "ctrl-x": null, // currently activates `editor::Cut` if no following key is pressed for 1 second
       "ctrl-p": null, // currently activates `file_finder::Toggle` when the cursor is on the first character of the buffer
       "ctrl-n": null, // currently activates `workspace::NewFile` when the cursor is on the last character of the buffer
@@ -26,9 +28,8 @@
   {
     "context": "Editor",
     "bindings": {
-      "ctrl-g": "editor::Cancel",
-      "alt-g g": "go_to_line::Toggle", // goto-line
-      "alt-g alt-g": "go_to_line::Toggle", // goto-line
+      "ctrl-g": "emacs::KeyboardQuit", // keyboard-quit
+      "alt-g": "emacs::GotoLine", // goto-line
       "ctrl-space": "editor::SetMark", // set-mark
       "ctrl-@": "editor::SetMark", // set-mark
       "ctrl-x ctrl-x": "editor::SwapSelectionEnds", // exchange-point-and-mark
@@ -45,28 +46,44 @@
       "alt-m": ["editor::MoveToBeginningOfLine", { "stop_at_soft_wraps": false, "stop_at_indent": true }], // back-to-indentation
       "alt-left": "editor::MoveToPreviousWordStart", // left-word
       "alt-right": "editor::MoveToNextWordEnd", // right-word
-      "alt-f": "editor::MoveToNextWordEnd", // forward-word
-      "alt-b": "editor::MoveToPreviousWordStart", // backward-word
-      "alt-u": "editor::ConvertToUpperCase", // upcase-word
-      "alt-l": "editor::ConvertToLowerCase", // downcase-word
-      "alt-c": "editor::ConvertToUpperCamelCase", // capitalize-word
-      "ctrl-t": "editor::Transpose", // transpose-chars
-      "alt-;": ["editor::ToggleComments", { "advance_downwards": false }],
+      "alt-f": "emacs::ForwardWord", // forward-word
+      "alt-b": "emacs::BackwardWord", // backward-word
+      "alt-u": "emacs::UpcaseWord", // upcase-word
+      "alt-l": "emacs::DowncaseWord", // downcase-word
+      "alt-c": "emacs::CapitalizeWord", // capitalize-word
+      "alt-shift-u": "emacs::UpcasePreviousWord", // upcase-previous-word
+      "alt-shift-l": "emacs::DowncasePreviousWord", // downcase-previous-word
+      "alt-shift-c": "emacs::CapitalizePreviousWord", // capitalize-previous-word
+      "ctrl-t": "emacs::TransposeChars", // transpose-chars
+      "alt-t": "emacs::TransposeWords", // transpose-words
+      "alt-shift-t": "emacs::TransposeWordsReverse", // transpose-words-reverse
+      "ctrl-x ctrl-t": "emacs::TransposeLines", // transpose-lines
+      "alt-up": "emacs::MoveLineUp", // move-line-up
+      "alt-down": "emacs::MoveLineDown", // move-line-down
       "ctrl-x ctrl-;": "editor::ToggleComments",
       "ctrl-c ;": "emacs::CommentDwim", // comment-dwim
+      "ctrl-c y": "emacs::DuplicateLine", // duplicate-line
       "ctrl-c Y": "emacs::DuplicateAndComment", // duplicate-and-comment
+      "ctrl-c a": "emacs::CopyFromAbove", // copy-from-above
+      "ctrl-backspace": "emacs::DeleteHorizontalSpace", // delete-horizontal-space
+      "alt-space": "emacs::JustOneSpace", // just-one-space
+      "ctrl-x ctrl-o": "emacs::DeleteBlankLines", // delete-blank-lines
+      "alt-z": "emacs::ZapToChar", // zap-to-char
+      "alt-shift-z": "emacs::ZapUpToChar", // zap-up-to-char
+      "ctrl-alt-z": "emacs::ZapBackToChar", // zap-back-to-char
+      "ctrl-alt-shift-z": "emacs::ZapBackUpToChar", // zap-back-up-to-char
       "alt-.": "editor::GoToDefinition", // xref-find-definitions
       "alt-?": "editor::FindAllReferences", // xref-find-references
       "alt-,": "pane::GoBack", // xref-pop-marker-stack
       "ctrl-x h": "editor::SelectAll", // mark-whole-buffer
       "ctrl-d": "editor::Delete", // delete-char
-      "alt-d": ["editor::DeleteToNextWordEnd", { "ignore_newlines": false, "ignore_brackets": false }], // kill-word
-      "alt-backspace": "editor::DeleteToPreviousWordStart", // backward-kill-word
+      "alt-d": "emacs::KillWord", // kill-word
+      "alt-backspace": "emacs::BackwardKillWord", // backward-kill-word
       "alt-delete": "editor::DeleteToPreviousWordStart", // backward-kill-word
-      "ctrl-k": "editor::KillRingCut", // kill-line
-      "ctrl-w": "editor::Cut", // kill-region
-      "alt-w": "editor::Copy", // kill-ring-save
-      "ctrl-y": "editor::KillRingYank", // yank
+      "ctrl-k": "emacs::KillLine", // kill-line
+      "ctrl-w": "emacs::KillRegionOrLine", // kill-region-or-line
+      "alt-w": "emacs::CopyRegionOrLine", // copy-region-or-line
+      "ctrl-y": "editor::Paste", // yank
       "ctrl-_": "editor::Undo", // undo
       "ctrl-/": "editor::Undo", // undo
       "ctrl-x u": "editor::Undo", // undo
@@ -82,7 +99,10 @@
       "alt->": "editor::MoveToEnd", // end-of-buffer
       "ctrl-home": "editor::MoveToBeginning", // beginning-of-buffer
       "ctrl-end": "editor::MoveToEnd", // end-of-buffer
-      "ctrl-l": "editor::ScrollCursorCenterTopBottom", // recenter-top-bottom
+      "ctrl-l": "emacs::Recenter", // recenter
+      "alt-r": "emacs::Reposition", // reposition
+      "ctrl-=": "emacs::ExpandRegion", // expand-region
+      "ctrl--": "emacs::ContractRegion", // contract-region
       "ctrl-s": "buffer_search::Deploy", // isearch-forward
       "ctrl-r": "buffer_search::Deploy", // isearch-backward
       "alt-^": "editor::JoinLines", // join-line
@@ -129,8 +149,8 @@
       "ctrl-a": ["editor::SelectToBeginningOfLine", { "stop_at_soft_wraps": false }],
       "ctrl-e": ["editor::SelectToEndOfLine", { "stop_at_soft_wraps": false }],
       "alt-m": ["editor::SelectToBeginningOfLine", { "stop_at_soft_wraps": false, "stop_at_indent": true }],
-      "alt-f": "editor::SelectToNextWordEnd",
-      "alt-b": "editor::SelectToPreviousWordStart",
+      "alt-f": ["emacs::ForwardWord", { "select": true }],
+      "alt-b": ["emacs::BackwardWord", { "select": true }],
       "alt-{": "editor::SelectToStartOfParagraph",
       "alt-}": "editor::SelectToEndOfParagraph",
       "ctrl-up": "editor::SelectToStartOfParagraph",
@@ -141,7 +161,7 @@
       "alt->": "editor::SelectToEnd",
       "ctrl-home": "editor::SelectToBeginning",
       "ctrl-end": "editor::SelectToEnd",
-      "ctrl-g": "editor::Cancel",
+      "ctrl-g": "emacs::KeyboardQuit",
     },
   },
   {
@@ -250,6 +270,7 @@
       "ctrl-c c t": "chat::FocusTerminal",
       "ctrl-c c e": "chat::FocusPrompts",
       "ctrl-c c v": "chat::ShowArtifacts",
+      "ctrl-g": "emacs::KeyboardQuit", // keyboard-quit
     },
   },
   {
@@ -274,6 +295,8 @@
       // The Workspace block above makes ctrl-c a prefix (C-c w), so it is declared again here,
       // after it, to keep sending ctrl-c to the terminal.
       "ctrl-c": ["terminal::SendKeystroke", "ctrl-c"],
+      // Same for ctrl-g, which the Workspace block binds to keyboard-quit.
+      "ctrl-g": ["terminal::SendKeystroke", "ctrl-g"],
     },
   },
   {
@@ -299,6 +322,7 @@
       "ctrl-c c v": "chat::ShowArtifacts",
       "ctrl-c w B": "task::Propose",
       "ctrl-c ctrl-c": ["terminal::SendKeystroke", "ctrl-c"],
+      "ctrl-g": ["terminal::SendKeystroke", "ctrl-g"],
     },
   },
   {
