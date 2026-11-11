@@ -1,13 +1,25 @@
-//! `task: start` (D14): the branch and git worktree a leaf task's work happens in, created under
-//! `<repository>/.bongos-worktrees/`, a directory every worktree of the repository ignores
-//! through the common git dir's `info/exclude` (D15). Nothing existing is ever overwritten: a
-//! path or branch that is already taken refuses with a toast, and a task gets at most one
-//! worktree.
+//! `task: start`: the branch and git worktree a leaf task's work happens in.
+//!
+//! The worktree goes where the repository's `worktree_root` template says, else
+//! `work.default_worktree_root`, else the central directory `<data dir>/worktrees/{repo}/{slug}`
+//! (see [`bongos_work_model::worktree_path`]). When the chosen parent is not writable, the
+//! worktree is made in the central directory instead, once, and the toast and the task's history
+//! say so.
+//!
+//! Older versions put worktrees under `<repository>/.bongos-worktrees/`. Those stay where they
+//! are: a task that records a worktree is never given another one, and nothing here moves,
+//! renames or deletes a worktree, a branch or a `.git` file. The `/.bongos-worktrees/` line is
+//! still added to the common git dir's `info/exclude` of every repository a task starts in; a
+//! template that puts worktrees inside the checkout adds a line for its own top directory.
+//!
+//! Nothing existing is ever overwritten: a path or branch that is already taken refuses with a
+//! toast, and a task gets at most one worktree.
 
 use std::ffi::OsString;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use bongos_work_model::commands::{self as model, StartedWorktree};
@@ -16,6 +28,9 @@ use bongos_work_model::files::write_atomic;
 use bongos_work_model::rules::{Place, linear_branch_segment};
 use bongos_work_model::slug::oneoff_slug;
 use bongos_work_model::store::{Task, WorkTree};
+use bongos_work_model::worktree_path::{
+    Configured, ResolveError, ResolveInput, Source, TemplateLayer, resolve,
+};
 use bongos_work_model::{Kind, ResultKind, Status, TaskFile};
 use fs::Fs;
 use git::repository::{CreateWorktreeTarget, GitRepository, Worktree};
@@ -31,9 +46,15 @@ use crate::repositories::resolve_repository;
 use crate::settings::Repository;
 use crate::{WorkSettings, WorkStore, modals};
 
-/// The directory under a repository's root that holds the worktrees of its tasks.
+/// The directory under a repository's root that held the worktrees of its tasks before the
+/// worktree root settings. Worktrees already there stay there.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the tests read the old layout's name so far")
+)]
 pub const WORKTREES_DIR: &str = ".bongos-worktrees";
-/// The line in `info/exclude` that keeps [`WORKTREES_DIR`] out of `git status`.
+/// The line in `info/exclude` that keeps [`WORKTREES_DIR`] out of `git status`. It is still added
+/// for every repository a task starts in, and never removed.
 pub const EXCLUDE_LINE: &str = "/.bongos-worktrees/";
 /// The base of a new branch when the repository names no default branch.
 const FALLBACK_BASE: &str = "main";
@@ -89,7 +110,27 @@ pub(crate) struct Request {
     /// The repository's primary checkout, with `~` expanded.
     repository_path: PathBuf,
     worktree: PathBuf,
+    location: Location,
     branch: Branch,
+}
+
+/// Where the worktrees of `task: start` go besides the repository's own settings: the default
+/// template, the home directory and the central directory.
+#[derive(Clone, Debug)]
+pub(crate) struct Layout {
+    /// `work.default_worktree_root`; `None` is the central directory.
+    pub(crate) default_root: Option<String>,
+    pub(crate) home: PathBuf,
+    pub(crate) central: PathBuf,
+}
+
+/// Where a request's worktree came from, and where it goes when its parent is not writable.
+#[derive(Clone, Debug)]
+pub(crate) struct Location {
+    source: Source,
+    /// The central path to fall back to, or why there is none; `None` when the worktree is
+    /// already in the central directory.
+    central: Option<Result<PathBuf, String>>,
 }
 
 impl Request {
@@ -100,6 +141,12 @@ impl Request {
             Branch::New { name, .. } => Some(name),
             Branch::PullRequest { .. } => None,
         }
+    }
+
+    /// The path the worktree is planned at.
+    #[cfg(test)]
+    pub(crate) fn worktree(&self) -> &Path {
+        &self.worktree
     }
 }
 
@@ -119,8 +166,17 @@ fn start_task(
     let Some(tree) = ready(workspace, cx) else {
         return;
     };
-    let repositories = WorkSettings::get_global(cx).repositories.clone();
-    match plan(&tree, id, &repositories) {
+    let Some(central) = crate::central_worktrees_dir(cx) else {
+        return;
+    };
+    let settings = WorkSettings::get_global(cx);
+    let repositories = settings.repositories.clone();
+    let layout = Layout {
+        default_root: settings.default_worktree_root.clone(),
+        home: util::paths::home_dir().clone(),
+        central,
+    };
+    match plan(&tree, id, &repositories, &layout) {
         Err(message) => show_toast(workspace, message, cx),
         Ok(Plan::Ready(request)) => create(request, window, cx),
         Ok(Plan::ChoosePullRequest { request, urls }) => modals::pick(
@@ -157,7 +213,12 @@ fn start_task(
 }
 
 /// Decides what `task: start` does for the task `id`, or why it does nothing.
-pub(crate) fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Result<Plan, String> {
+pub(crate) fn plan(
+    tree: &WorkTree,
+    id: &str,
+    repositories: &[Repository],
+    layout: &Layout,
+) -> Result<Plan, String> {
     let place = Place::locate(tree, id)?;
     let slug = place.slug();
     let file = place
@@ -210,12 +271,44 @@ pub(crate) fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Re
         .filter(|task| task.dir != place.task.dir)
         .filter_map(|task| task.file.as_ref()?.worktree.as_deref().map(expand_home))
         .collect();
-    let (worktree, slug) = free_worktree_path(&repository_path, slug, &held);
+    let template = repository
+        .worktree_root
+        .as_deref()
+        .map(|text| Configured {
+            text,
+            layer: TemplateLayer::Own,
+        })
+        .or_else(|| {
+            layout.default_root.as_deref().map(|text| Configured {
+                text,
+                layer: TemplateLayer::Default,
+            })
+        });
+    let spot = |template| Spot {
+        template,
+        repository,
+        layout,
+    };
+    let (worktree, _) = worktree_spot(&spot(template), slug, id, &held)?;
+    let location = match template {
+        None => Location {
+            source: Source::Central,
+            central: None,
+        },
+        Some(configured) => Location {
+            source: match configured.layer {
+                TemplateLayer::Own => Source::Own,
+                TemplateLayer::Default => Source::Default,
+            },
+            central: Some(worktree_spot(&spot(None), slug, id, &held).map(|(path, _)| path)),
+        },
+    };
     let request = |branch| Request {
         id: id.to_string(),
         repository: repository.clone(),
         repository_path: repository_path.clone(),
         worktree: worktree.clone(),
+        location: location.clone(),
         branch,
     };
     if file.kind == Kind::Babysit {
@@ -236,7 +329,10 @@ pub(crate) fn plan(tree: &WorkTree, id: &str, repositories: &[Repository]) -> Re
             urls,
         });
     }
-    let name = start_branch_name(&repository.branch_template, &slug, file, &place.ancestors);
+    let taken = taken_names(tree, &place, repository, repositories);
+    let branch_for =
+        |slug: &str| start_branch_name(&repository.branch_template, slug, file, &place.ancestors);
+    let name = branch_for(&branch_slug(&taken, slug, branch_for));
     let base = match &file.stacked_on {
         Some(edge) => {
             let parent = place.sibling(&edge.task).and_then(parent_branch);
@@ -342,15 +438,105 @@ pub(crate) fn normalize(path: &Path) -> PathBuf {
     }
 }
 
-/// `<repository>/.bongos-worktrees/<slug>`, or with `-2`, `-3` and so on when another task's
-/// worktree is there (slugs are unique only among siblings). Also returns the slug used.
-pub(crate) fn free_worktree_path(
-    repository: &Path,
+/// Everything besides the task that decides where its worktree goes.
+pub(crate) struct Spot<'a> {
+    /// The winning template, or `None` for the central directory.
+    pub(crate) template: Option<Configured<'a>>,
+    pub(crate) repository: &'a Repository,
+    pub(crate) layout: &'a Layout,
+}
+
+/// The worktree path of the task `id` with `slug` at `spot`, with `-2`, `-3` and so on added to
+/// the slug while another task's recorded worktree is there (slugs are unique only among
+/// siblings). Also returns that number, 1 when nothing was added. Refuses with the message of
+/// the toast when the template is invalid or the path too long.
+pub(crate) fn worktree_spot(
+    spot: &Spot,
     slug: &str,
+    id: &str,
     held: &[PathBuf],
-) -> (PathBuf, String) {
+) -> Result<(PathBuf, u64), String> {
     let held: Vec<PathBuf> = held.iter().map(|path| normalize(path)).collect();
-    let dir = repository.join(WORKTREES_DIR);
+    let mut number = 1u64;
+    loop {
+        let (name, task_id) = if number == 1 {
+            (slug.to_string(), id.to_string())
+        } else {
+            // The id changes too, so a shortened slug gets another suffix as well.
+            (format!("{slug}-{number}"), format!("{id}-{number}"))
+        };
+        let resolved = resolve(&ResolveInput {
+            template: spot.template,
+            repository_name: &spot.repository.name,
+            repository_path: Path::new(&spot.repository.path),
+            slug: &name,
+            task_id: &task_id,
+            home: &spot.layout.home,
+            central_dir: &spot.layout.central,
+        })
+        .map_err(|error| match error {
+            ResolveError::Template(error) => {
+                let setting = match spot.template.map(|configured| configured.layer) {
+                    Some(TemplateLayer::Own) => {
+                        format!("work.repositories[{}].worktree_root", spot.repository.name)
+                    }
+                    _ => "work.default_worktree_root".to_string(),
+                };
+                format!("{setting}: {error}")
+            }
+            error @ ResolveError::TooLong { .. } => error.to_string(),
+        })?;
+        if !held.contains(&normalize(&resolved.path)) {
+            return Ok((resolved.path, number));
+        }
+        number += 1;
+    }
+}
+
+/// The names other tasks of a repository took: the slug and worktree folder name of each task
+/// that records a worktree, and the branch it records.
+#[derive(Default)]
+pub(crate) struct Taken {
+    names: Vec<String>,
+    branches: Vec<String>,
+}
+
+fn taken_names(
+    tree: &WorkTree,
+    place: &Place,
+    repository: &Repository,
+    repositories: &[Repository],
+) -> Taken {
+    let mut taken = Taken::default();
+    for task in tree.tasks() {
+        if task.dir == place.task.dir {
+            continue;
+        }
+        let Some(file) = task.file.as_ref() else {
+            continue;
+        };
+        let Some(worktree) = file.worktree.as_deref() else {
+            continue;
+        };
+        let same = resolve_repository(tree, &file.id, repositories)
+            .is_some_and(|other| other.name == repository.name);
+        if !same {
+            continue;
+        }
+        taken.names.push(oneoff_slug(&task.slug).to_string());
+        if let Some(name) = Path::new(worktree).file_name() {
+            taken.names.push(name.to_string_lossy().into_owned());
+        }
+        taken.branches.extend(file.branch.clone());
+    }
+    taken
+}
+
+/// The slug a new branch is named from: `slug`, or `slug-2`, `slug-3` and so on while another
+/// task of the repository took the name or the branch `branch_for` makes of it. Decided from the
+/// full slug and the recorded tasks alone, never from the worktree path, so the branch does not
+/// change with the worktree layout.
+fn branch_slug(taken: &Taken, slug: &str, branch_for: impl Fn(&str) -> String) -> String {
     let mut number = 1u64;
     loop {
         let name = if number == 1 {
@@ -358,9 +544,8 @@ pub(crate) fn free_worktree_path(
         } else {
             format!("{slug}-{number}")
         };
-        let path = dir.join(&name);
-        if !held.contains(&normalize(&path)) {
-            return (path, name);
+        if !taken.names.contains(&name) && !taken.branches.contains(&branch_for(&name)) {
+            return name;
         }
         number += 1;
     }
@@ -438,9 +623,9 @@ pub(crate) fn common_git_dir(repository: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Adds [`EXCLUDE_LINE`] to the common git dir's `info/exclude` unless it is there, creating the
-/// file and `info/` when missing. `.gitignore` is never touched.
-pub(crate) fn ensure_excluded(repository: &Path) -> Result<()> {
+/// Adds `line` to the common git dir's `info/exclude` unless it is there, creating the file and
+/// `info/` when missing. `.gitignore` is never touched.
+pub(crate) fn ensure_excluded(repository: &Path, line: &str) -> Result<()> {
     let info = common_git_dir(repository)?.join("info");
     let exclude = info.join("exclude");
     let mut text = match std::fs::read_to_string(&exclude) {
@@ -448,17 +633,59 @@ pub(crate) fn ensure_excluded(repository: &Path) -> Result<()> {
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error).with_context(|| format!("reading {}", exclude.display())),
     };
-    if text.lines().any(|line| line.trim() == EXCLUDE_LINE) {
+    if text.lines().any(|existing| existing.trim() == line) {
         return Ok(());
     }
     std::fs::create_dir_all(&info).with_context(|| format!("creating {}", info.display()))?;
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    text.push_str(EXCLUDE_LINE);
+    text.push_str(line);
     text.push('\n');
     write_atomic(&exclude, text.as_bytes())
         .with_context(|| format!("writing {}", exclude.display()))
+}
+
+/// The `info/exclude` line for a worktree inside the checkout `repository`: its top directory
+/// there, like `/worktrees/`. `None` for a worktree outside the checkout.
+pub(crate) fn inside_line(repository: &Path, worktree: &Path) -> Option<String> {
+    let inside = normalize(worktree);
+    let relative = inside.strip_prefix(normalize(repository)).ok()?;
+    match relative.components().next()? {
+        Component::Normal(first) => Some(format!("/{}/", first.to_string_lossy())),
+        _ => None,
+    }
+}
+
+/// Adds the legacy [`EXCLUDE_LINE`] for the repository, and the line of `worktree`'s top
+/// directory when it is inside the checkout.
+fn exclude_for(repository: &Path, worktree: &Path) -> Result<()> {
+    ensure_excluded(repository, EXCLUDE_LINE)?;
+    if let Some(line) = inside_line(repository, worktree) {
+        ensure_excluded(repository, &line)?;
+    }
+    Ok(())
+}
+
+/// Makes the parent of `worktree` and checks that a file can be made in it, with a probe file
+/// that is removed at once.
+pub(crate) fn prepare_parent(worktree: &Path) -> Result<()> {
+    static PROBES: AtomicU64 = AtomicU64::new(0);
+    let parent = worktree
+        .parent()
+        .with_context(|| format!("{} has no parent directory", worktree.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let probe = parent.join(format!(
+        ".bongos-probe-{}-{}",
+        std::process::id(),
+        PROBES.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .with_context(|| format!("{} is not writable", parent.display()))?;
+    std::fs::remove_file(&probe).with_context(|| format!("removing {}", probe.display()))
 }
 
 /// Makes (or finds, after a start that was not recorded) the worktree on the background
@@ -501,22 +728,30 @@ fn create(request: Request, window: &mut Window, cx: &mut Context<Workspace>) {
                 cx,
             );
         }
+        let message = started_message(&started);
         workspace
             .update(cx, |workspace, cx| {
                 workspace.show_toast(
-                    Toast::new(
-                        NotificationId::unique::<StartedToast>(),
-                        format!("Started {} in {}", started.branch, started.worktree),
-                    ),
+                    Toast::new(NotificationId::unique::<StartedToast>(), message),
                     cx,
                 )
             })
             .ok();
         if let Some(command) = request.repository.setup_command.clone() {
-            run_setup(&workspace, command, &request.worktree, cx).await;
+            run_setup(&workspace, command, Path::new(&started.worktree), cx).await;
         }
     })
     .detach();
+}
+
+/// The toast of a worktree made: where, or that it fell back to the central directory.
+pub(crate) fn started_message(started: &StartedWorktree) -> String {
+    match &started.fallback {
+        Some(parent) => {
+            format!("Worktree created in the central directory; {parent} is not writable.")
+        }
+        None => format!("Started {} in {}", started.branch, started.worktree),
+    }
 }
 
 fn toast(workspace: &WeakEntity<Workspace>, message: String, cx: &mut AsyncWindowContext) {
@@ -571,7 +806,8 @@ async fn run_setup(
 }
 
 /// Creates the worktree `request` asks for, or finds it when an earlier start made it but did
-/// not record it. Refuses a path or branch something else holds.
+/// not record it. Refuses a path or branch something else holds. When the planned parent is not
+/// writable and the plan is not already central, the worktree goes to the central path instead.
 async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWorktree> {
     let repository_path = &request.repository_path;
     let git_binary = which::which("git").ok();
@@ -585,21 +821,43 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
     let worktrees = repository.worktrees().await?;
     let on_branch =
         |worktree: &&Worktree| worktree.ref_name.as_deref() == Some(branch_ref.as_str());
-    let worktree_path = request.worktree.to_string_lossy().into_owned();
-
-    if std::fs::symlink_metadata(&request.worktree).is_ok() {
-        let target = normalize(&request.worktree);
-        let ours = worktrees
+    let ours = |path: &Path| {
+        let target = normalize(path);
+        worktrees
             .iter()
             .filter(on_branch)
-            .any(|worktree| normalize(&worktree.path) == target);
-        if !ours {
+            .any(|worktree| normalize(&worktree.path) == target)
+    };
+    let central = match &request.location.central {
+        Some(Ok(central)) => Some(central.as_path()),
+        _ => None,
+    };
+    let planned_parent = || {
+        request
+            .worktree
+            .parent()
+            .unwrap_or(&request.worktree)
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    // An earlier start made the worktree but did not record it: at the planned path, or at the
+    // central path it fell back to.
+    let found = if std::fs::symlink_metadata(&request.worktree).is_ok() {
+        if !ours(&request.worktree) {
             bail!(
-                "{worktree_path} already exists and is not a worktree of {} on {branch}; \
-                 nothing was created",
+                "{} already exists and is not a worktree of {} on {branch}; nothing was created",
+                request.worktree.display(),
                 request.repository.name
             );
         }
+        Some((request.worktree.clone(), None))
+    } else {
+        central
+            .filter(|central| std::fs::symlink_metadata(central).is_ok() && ours(central))
+            .map(|central| (central.to_path_buf(), Some(planned_parent())))
+    };
+    if let Some((worktree, fallback)) = found {
         // The base moved on since the branch was cut, perhaps; where they meet is what it was
         // cut from.
         let (base, base_sha) = match &request.branch {
@@ -623,7 +881,8 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
             branch,
             base,
             base_sha,
-            worktree: worktree_path,
+            worktree: worktree.to_string_lossy().into_owned(),
+            fallback,
         });
     }
     let exists = repository
@@ -644,6 +903,7 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
         }
     }
 
+    let (worktree, fallback) = writable_spot(request, planned_parent)?;
     match &request.branch {
         Branch::New { base, .. } => {
             let base = resolve_base(repository.as_ref(), base.clone()).await;
@@ -655,21 +915,22 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
                         request.repository.name
                     )
                 })?;
-            ensure_excluded(repository_path)?;
+            exclude_for(repository_path, &worktree)?;
             repository
                 .create_worktree(
                     CreateWorktreeTarget::NewBranch {
                         branch_name: branch.clone(),
                         base_sha: Some(base_sha.clone()),
                     },
-                    request.worktree.clone(),
+                    worktree.clone(),
                 )
                 .await?;
             Ok(StartedWorktree {
                 branch,
                 base: Some(base),
                 base_sha: Some(base_sha),
-                worktree: worktree_path,
+                worktree: worktree.to_string_lossy().into_owned(),
+                fallback,
             })
         }
         Branch::PullRequest { github, number, .. } => {
@@ -694,23 +955,53 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
             run_git(&git_binary, repository_path, &["fetch", &remote, &refspec])
                 .await
                 .with_context(|| format!("Fetching PR {number} from {remote}"))?;
-            ensure_excluded(repository_path)?;
+            exclude_for(repository_path, &worktree)?;
             repository
                 .create_worktree(
                     CreateWorktreeTarget::ExistingBranch {
                         branch_name: branch.clone(),
                     },
-                    request.worktree.clone(),
+                    worktree.clone(),
                 )
                 .await?;
             Ok(StartedWorktree {
                 branch,
                 base: None,
                 base_sha: None,
-                worktree: worktree_path,
+                worktree: worktree.to_string_lossy().into_owned(),
+                fallback,
             })
         }
     }
+}
+
+/// The path to make the worktree at: the planned one when its parent can be made and written,
+/// else the central one, with the planned parent as the fallback to report. Refuses when the
+/// planned path is already central, there is no central path, or its parent fails too.
+fn writable_spot(
+    request: &Request,
+    planned_parent: impl Fn() -> String,
+) -> Result<(PathBuf, Option<String>)> {
+    let error = match prepare_parent(&request.worktree) {
+        Ok(()) => return Ok((request.worktree.clone(), None)),
+        Err(error) => error,
+    };
+    if request.location.source == Source::Central {
+        return Err(error.context("nothing was created"));
+    }
+    let central = match &request.location.central {
+        Some(Ok(central)) => central.clone(),
+        Some(Err(message)) => bail!("{error:#}; {message}"),
+        None => return Err(error.context("nothing was created")),
+    };
+    if std::fs::symlink_metadata(&central).is_ok() {
+        bail!(
+            "{error:#}, and the central path {} already exists; nothing was created",
+            central.display()
+        );
+    }
+    prepare_parent(&central).context("nothing was created")?;
+    Ok((central, Some(planned_parent())))
 }
 
 /// `base`, else the repository's default branch, else `main`.

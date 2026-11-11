@@ -104,6 +104,7 @@ fn repository_content(base: &Path, name: &str) -> WorkRepositoryContent {
         merge_is_ship: None,
         deployments: None,
         branch_template: None,
+        worktree_root: None,
     }
 }
 

@@ -21,6 +21,7 @@ fn repository(name: &str, deployments: bool) -> Repository {
         merge_is_ship: true,
         deployments,
         branch_template: "{slug}".to_string(),
+        worktree_root: None,
     }
 }
 
@@ -116,6 +117,7 @@ fn entries_have_the_documented_defaults() {
             merge_is_ship: true,
             deployments: true,
             branch_template: "{slug}".to_string(),
+            worktree_root: None,
         }
     );
     let site = Repository::from(&entries[1]);
@@ -149,6 +151,7 @@ fn set_repositories(cx: &mut gpui::VisualTestContext, deployments: Option<bool>)
                         merge_is_ship: None,
                         deployments,
                         branch_template: None,
+                        worktree_root: None,
                     }]);
             });
         });
@@ -281,6 +284,7 @@ fn set_merge_is_ship(cx: &mut gpui::VisualTestContext, value: Option<bool>) {
                         merge_is_ship: value,
                         deployments: None,
                         branch_template: None,
+                        worktree_root: None,
                     }]);
             });
         });

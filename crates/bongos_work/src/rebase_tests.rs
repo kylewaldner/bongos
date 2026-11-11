@@ -4,6 +4,7 @@
 
 use bongos_work_model::{StackedOn, Status, UnblockPoint, layout, serialize_task};
 use gpui::{TestAppContext, VisualTestContext};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::command_tests::{Input, dispatch, wait_until};
@@ -66,7 +67,7 @@ async fn stacked(setup: &Setup, cx: &mut VisualTestContext) -> String {
     harness
         .run_and_wait(cx, "task::Start", &[Input::Pick("alpha")])
         .await;
-    commit_alpha(setup, "alpha work");
+    commit_alpha(setup, cx, "alpha work");
     harness
         .run_and_wait(cx, "task::Advance", &[Input::Pick("alpha")])
         .await;
@@ -81,8 +82,19 @@ async fn stacked(setup: &Setup, cx: &mut VisualTestContext) -> String {
     head
 }
 
-fn commit_alpha(setup: &Setup, message: &str) -> String {
-    let worktree = setup.real.join(".bongos-worktrees").join("alpha");
+/// The worktree the task at `path` records.
+fn worktree_of(setup: &Setup, cx: &mut VisualTestContext, path: &[&str]) -> PathBuf {
+    PathBuf::from(
+        setup
+            .harness
+            .file(cx, path)
+            .worktree
+            .expect("a recorded worktree"),
+    )
+}
+
+fn commit_alpha(setup: &Setup, cx: &mut VisualTestContext, message: &str) -> String {
+    let worktree = worktree_of(setup, cx, &["phase", "alpha"]);
     git(&worktree, &["commit", "-q", "--allow-empty", "-m", message]);
     git(&setup.real, &["rev-parse", "alpha"])
 }
@@ -93,14 +105,14 @@ async fn moving_the_parent_flags_the_child_and_rebasing_clears_it(cx: &mut TestA
     stacked(&setup, cx).await;
     until(&setup, cx, "no flag at first", |s| s.is_none()).await;
 
-    let moved = commit_alpha(&setup, "alpha moves");
+    let moved = commit_alpha(&setup, cx, "alpha moves");
     until(&setup, cx, "the flag", |s| s.is_some()).await;
     assert_eq!(
         state(&setup, cx),
         Some(RebaseState::RebaseNeeded { parent_head: moved })
     );
 
-    let beta_worktree = setup.real.join(".bongos-worktrees").join("beta");
+    let beta_worktree = worktree_of(&setup, cx, &["phase", "beta"]);
     git(&beta_worktree, &["rebase", "-q", "alpha"]);
     until(&setup, cx, "the flag to clear", |s| s.is_none()).await;
 }
@@ -118,7 +130,7 @@ async fn clear_rebase_holds_until_the_parent_moves_again(cx: &mut TestAppContext
     assert!(harness.has_toast(cx));
     assert_eq!(harness.writes(cx), writes);
 
-    let moved = commit_alpha(&setup, "alpha moves");
+    let moved = commit_alpha(&setup, cx, "alpha moves");
     until(&setup, cx, "the flag", |s| s.is_some()).await;
     harness
         .run_and_wait(cx, "task::ClearRebase", &[Input::Pick("beta")])
@@ -130,7 +142,7 @@ async fn clear_rebase_holds_until_the_parent_moves_again(cx: &mut TestAppContext
     until(&setup, cx, "the flag to clear", |s| s.is_none()).await;
 
     // The parent moves again: flagged again.
-    let moved_again = commit_alpha(&setup, "alpha moves again");
+    let moved_again = commit_alpha(&setup, cx, "alpha moves again");
     until(&setup, cx, "the flag again", |s| s.is_some()).await;
     assert_eq!(
         state(&setup, cx),
@@ -145,7 +157,7 @@ async fn a_cancelled_parent_shows_retarget_needed(cx: &mut TestAppContext) {
     let (setup, cx) = setup(cx, None).await;
     let harness = &setup.harness;
     stacked(&setup, cx).await;
-    commit_alpha(&setup, "alpha moves");
+    commit_alpha(&setup, cx, "alpha moves");
     until(&setup, cx, "the flag", |s| s.is_some()).await;
 
     let mut alpha = harness.file(cx, &["phase", "alpha"]);

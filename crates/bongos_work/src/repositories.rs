@@ -175,6 +175,7 @@ fn write_repository(
         merge_is_ship: None,
         deployments: None,
         branch_template: None,
+        worktree_root: None,
     };
     let written = settings::update_settings_file_with_completion(fs, cx, move |content, _| {
         append_repository(content, entry)

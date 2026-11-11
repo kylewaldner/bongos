@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use bongos_work_model::commands::default_todos;
 use bongos_work_model::store::load;
+use bongos_work_model::worktree_path::{Configured, TemplateLayer};
 use bongos_work_model::{
     Kind, LinearState, ResultKind, StackedOn, TaskFile, TaskResult, TodoState, UnblockPoint,
     layout, serialize_task,
@@ -21,8 +22,9 @@ use crate::Repository;
 use crate::command_tests::{Harness, Input, dispatch, harness, wait_until};
 use crate::store_tests::{project_toml, write};
 use crate::worktrees::{
-    EXCLUDE_LINE, Plan, branch_name, common_git_dir, default_or_fallback, ensure_excluded,
-    expand_home, free_worktree_path, plan, pull_request, remote_names,
+    EXCLUDE_LINE, Layout, Plan, Spot, WORKTREES_DIR, branch_name, common_git_dir,
+    default_or_fallback, ensure_excluded, expand_home, plan, pull_request, remote_names,
+    worktree_spot,
 };
 
 /// Runs git in `dir` with no user or system configuration, and returns its trimmed output.
@@ -46,7 +48,7 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 /// A repository on `main` with one commit.
-fn init_repository(dir: &Path) {
+pub(crate) fn init_repository(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     git(dir, &["init", "-q", "-b", "main"]);
     git(dir, &["commit", "-q", "--allow-empty", "-m", "first"]);
@@ -69,8 +71,19 @@ fn worktree_count(repository: &Path) -> usize {
 
 /// Lists the repository `invoicing` (the seeded project's) at `path`.
 fn set_repository(cx: &mut VisualTestContext, path: &Path, setup_command: Option<&str>) {
+    set_repository_root(cx, path, setup_command, None);
+}
+
+/// Lists the repository `invoicing` at `path` with the worktree root `worktree_root`.
+pub(crate) fn set_repository_root(
+    cx: &mut VisualTestContext,
+    path: &Path,
+    setup_command: Option<&str>,
+    worktree_root: Option<&str>,
+) {
     let path = path.to_string_lossy().into_owned();
     let setup_command = setup_command.map(str::to_string);
+    let worktree_root = worktree_root.map(str::to_string);
     cx.update(|_, cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
@@ -82,10 +95,31 @@ fn set_repository(cx: &mut VisualTestContext, path: &Path, setup_command: Option
                         merge_is_ship: None,
                         deployments: None,
                         branch_template: None,
+                        worktree_root,
                     }]);
             });
         });
     });
+}
+
+/// Where a task's worktree goes by default: the test store's central directory, under the
+/// repository `invoicing`.
+pub(crate) fn central(harness: &Harness, slug: &str) -> PathBuf {
+    harness
+        .root
+        .with_file_name("central-worktrees")
+        .join("invoicing")
+        .join(slug)
+}
+
+/// The lines of the repository's `info/exclude` that are not comments.
+pub(crate) fn exclude_entries(git_dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(git_dir.join("info").join("exclude"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Records every task spawned in a terminal and reports it ended with the exit status it holds
@@ -154,7 +188,7 @@ async fn start_cuts_the_branch_from_main_runs_the_setup_and_a_repeat_makes_nothi
         .run_and_wait(cx, "task::Start", &[Input::Pick("backfill")])
         .await;
 
-    let worktree = setup.repository.join(".bongos-worktrees").join("backfill");
+    let worktree = central(harness, "backfill");
     let file = harness.file(cx, &["backfill"]);
     assert_eq!(file.branch.as_deref(), Some("backfill"));
     assert_eq!(file.base.as_deref(), Some("main"));
@@ -169,7 +203,9 @@ async fn start_cuts_the_branch_from_main_runs_the_setup_and_a_repeat_makes_nothi
     // The real repository has the branch, checked out at main's commit in the worktree.
     assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), main);
     assert_eq!(git(&worktree, &["branch", "--show-current"]), "backfill");
-    assert_eq!(exclude_lines(&setup.real.join(".git")), 1);
+    // The checkout gets only the legacy exclude line and no directory of worktrees.
+    assert_eq!(exclude_entries(&setup.real.join(".git")), [EXCLUDE_LINE]);
+    assert!(!setup.real.join(WORKTREES_DIR).exists());
     assert_eq!(git(&setup.real, &["status", "--porcelain"]), "");
 
     // The setup command ran in a terminal, in the worktree.
@@ -226,13 +262,13 @@ async fn a_stacked_task_is_refused_while_blocked_then_branches_from_its_parent(
     wait_until(cx, "the refusal", |cx| harness.has_toast(cx)).await;
     assert_eq!(harness.writes(cx), writes);
     assert_eq!(harness.file(cx, &["phase", "beta"]).worktree, None);
-    assert!(!setup.real.join(".bongos-worktrees").join("beta").exists());
+    assert!(!central(harness, "beta").exists());
 
     // Alpha starts from main, gains a commit and is implemented.
     harness
         .run_and_wait(cx, "task::Start", &[Input::Pick("alpha")])
         .await;
-    let alpha_worktree = setup.real.join(".bongos-worktrees").join("alpha");
+    let alpha_worktree = central(harness, "alpha");
     git(
         &alpha_worktree,
         &["commit", "-q", "--allow-empty", "-m", "alpha work"],
@@ -252,7 +288,7 @@ async fn a_stacked_task_is_refused_while_blocked_then_branches_from_its_parent(
     assert_eq!(beta.branch.as_deref(), Some("beta"));
     assert_eq!(beta.base.as_deref(), Some("alpha"));
     assert_eq!(beta.base_sha.as_deref(), Some(alpha_head.as_str()));
-    let beta_worktree = setup.real.join(".bongos-worktrees").join("beta");
+    let beta_worktree = central(harness, "beta");
     assert_eq!(git(&beta_worktree, &["rev-parse", "HEAD"]), alpha_head);
     assert!(!harness.has_toast(cx));
 }
@@ -261,7 +297,7 @@ async fn a_stacked_task_is_refused_while_blocked_then_branches_from_its_parent(
 async fn an_occupied_path_or_a_taken_branch_is_refused_and_left_alone(cx: &mut TestAppContext) {
     let (setup, cx) = setup(cx, Some("make setup")).await;
     let harness = &setup.harness;
-    let occupied = setup.real.join(".bongos-worktrees").join("backfill");
+    let occupied = central(harness, "backfill");
     write(&occupied.join("notes.txt"), "keep me");
     git(&setup.real, &["branch", "alpha"]);
 
@@ -296,8 +332,8 @@ fn the_exclude_line_is_added_once_also_through_a_linked_worktree() {
     let git_dir = main.join(".git");
     std::fs::write(git_dir.join("info").join("exclude"), "*.log").unwrap();
 
-    ensure_excluded(&main).unwrap();
-    ensure_excluded(&main).unwrap();
+    ensure_excluded(&main, EXCLUDE_LINE).unwrap();
+    ensure_excluded(&main, EXCLUDE_LINE).unwrap();
     let text = std::fs::read_to_string(git_dir.join("info").join("exclude")).unwrap();
     assert_eq!(text, format!("*.log\n{EXCLUDE_LINE}\n"));
 
@@ -319,8 +355,8 @@ fn the_exclude_line_is_added_once_also_through_a_linked_worktree() {
         std::fs::canonicalize(common_git_dir(&linked).unwrap()).unwrap(),
         git_dir
     );
-    ensure_excluded(&linked).unwrap();
-    ensure_excluded(&linked).unwrap();
+    ensure_excluded(&linked, EXCLUDE_LINE).unwrap();
+    ensure_excluded(&linked, EXCLUDE_LINE).unwrap();
     assert_eq!(exclude_lines(&git_dir), 1);
     assert_eq!(exclude_lines(&git_dir.join("worktrees").join("linked")), 0);
     assert!(!linked.join(".gitignore").exists() && !main.join(".gitignore").exists());
@@ -344,18 +380,21 @@ fn branch_names_paths_and_pull_numbers() {
     );
     assert_eq!(branch_name("{linear}", "backfill", None), "backfill");
 
-    let repository = Path::new("/src/invoicing");
-    let held = [repository.join(".bongos-worktrees/backfill")];
+    let layout = test_layout(Path::new("/data"));
+    let repository = test_repository("invoicing", "/src/invoicing", None);
+    let spot = Spot {
+        template: None,
+        repository: &repository,
+        layout: &layout,
+    };
+    let held = [PathBuf::from("/data/worktrees/invoicing/backfill")];
     assert_eq!(
-        free_worktree_path(repository, "backfill", &held),
-        (
-            repository.join(".bongos-worktrees/backfill-2"),
-            "backfill-2".to_string()
-        )
+        worktree_spot(&spot, "backfill", "l1", &held).unwrap(),
+        (PathBuf::from("/data/worktrees/invoicing/backfill-2"), 2)
     );
     assert_eq!(
-        free_worktree_path(repository, "alpha", &held).0,
-        repository.join(".bongos-worktrees/alpha")
+        worktree_spot(&spot, "alpha", "l2", &held).unwrap(),
+        (PathBuf::from("/data/worktrees/invoicing/alpha"), 1)
     );
 
     let pull = pull_request;
@@ -425,16 +464,48 @@ fn a_path_held_through_a_symbolic_link_counts_as_held() {
     std::fs::create_dir_all(&real).unwrap();
     let link = temp.path().join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    // Neither `.bongos-worktrees` nor the worktree exists yet; the link still resolves.
-    let held = [link.join(".bongos-worktrees").join("backfill")];
-    let (path, slug) = free_worktree_path(&real, "backfill", &held);
-    assert_eq!(slug, "backfill-2");
-    assert_eq!(path, real.join(".bongos-worktrees").join("backfill-2"));
-    let (path, _) = free_worktree_path(&link, "backfill", &held);
-    assert_eq!(path, link.join(".bongos-worktrees").join("backfill-2"));
+    // Neither `trees` nor the worktree exists yet; the link still resolves.
+    let held = [link.join("trees").join("backfill")];
+    let layout = test_layout(&temp.path().join("data"));
+    for root in [&real, &link] {
+        let template = root.join("trees").to_string_lossy().into_owned();
+        let repository = test_repository("invoicing", "/src/invoicing", Some(&template));
+        let spot = Spot {
+            template: Some(Configured {
+                text: &template,
+                layer: TemplateLayer::Own,
+            }),
+            repository: &repository,
+            layout: &layout,
+        };
+        let (path, number) = worktree_spot(&spot, "backfill", "l1", &held).unwrap();
+        assert_eq!(number, 2);
+        assert_eq!(path, root.join("trees").join("backfill-2"));
+    }
 }
 
-fn leaf(dir: &Path, id: &str, kind: Kind, edit: impl FnOnce(&mut TaskFile)) {
+/// A layout with no default root, the central directory `<data>/worktrees` and the home `/home/u`.
+pub(crate) fn test_layout(data: &Path) -> Layout {
+    Layout {
+        default_root: None,
+        home: PathBuf::from("/home/u"),
+        central: data.join("worktrees"),
+    }
+}
+
+pub(crate) fn test_repository(name: &str, path: &str, worktree_root: Option<&str>) -> Repository {
+    Repository {
+        name: name.to_string(),
+        path: path.to_string(),
+        setup_command: None,
+        merge_is_ship: true,
+        deployments: true,
+        branch_template: "{slug}".to_string(),
+        worktree_root: worktree_root.map(str::to_string),
+    }
+}
+
+pub(crate) fn leaf(dir: &Path, id: &str, kind: Kind, edit: impl FnOnce(&mut TaskFile)) {
     let mut file = TaskFile::new(id, kind);
     file.id = id.to_string();
     file.todos = default_todos(kind);
@@ -442,7 +513,7 @@ fn leaf(dir: &Path, id: &str, kind: Kind, edit: impl FnOnce(&mut TaskFile)) {
     write(&layout::task_file(dir), &serialize_task(&file).unwrap());
 }
 
-fn refusal(planned: Result<Plan, String>) -> String {
+pub(crate) fn refusal(planned: Result<Plan, String>) -> String {
     match planned {
         Err(message) => message,
         Ok(_) => panic!("expected a refusal"),
@@ -503,8 +574,10 @@ fn documents_others_groups_and_gone_worktrees_are_refused() {
         merge_is_ship: true,
         deployments: true,
         branch_template: "{slug}".to_string(),
+        worktree_root: None,
     }];
-    let refused = |id: &str| refusal(plan(&tree, id, &repositories));
+    let layout = test_layout(&root.join("data"));
+    let refused = |id: &str| refusal(plan(&tree, id, &repositories, &layout));
 
     assert_eq!(
         refused("doc"),
@@ -529,7 +602,7 @@ fn documents_others_groups_and_gone_worktrees_are_refused() {
         "says what to do"
     );
     // A pr-ship leaf is planned.
-    assert!(plan(&tree, "inner", &repositories).is_ok());
+    assert!(plan(&tree, "inner", &repositories, &layout).is_ok());
 }
 
 /// How a link sits on a task: nothing, a hand-set identifier, a synced link, or a create in flight.
@@ -585,8 +658,14 @@ fn started_branch(group: Link, engine: Link, template: &str) -> String {
         merge_is_ship: true,
         deployments: true,
         branch_template: template.to_string(),
+        worktree_root: None,
     }];
-    match plan(&tree, "engine", &repositories) {
+    match plan(
+        &tree,
+        "engine",
+        &repositories,
+        &test_layout(&root.join("data")),
+    ) {
         Ok(Plan::Ready(request)) => request.new_branch_name().unwrap().to_string(),
         _ => panic!("expected a ready plan"),
     }
@@ -688,7 +767,7 @@ async fn a_failing_setup_command_shows_a_toast_and_keeps_the_worktree(cx: &mut T
         .await;
     wait_until(cx, "the failure toast", |cx| harness.has_toast(cx)).await;
     assert_eq!(failing.0.lock().len(), 1);
-    let worktree = setup.repository.join(".bongos-worktrees").join("backfill");
+    let worktree = central(harness, "backfill");
     assert!(worktree.join(".git").exists(), "the worktree stays");
     assert_eq!(
         harness.file(cx, &["backfill"]).worktree,
@@ -704,7 +783,7 @@ async fn an_unrecorded_worktree_is_adopted_with_the_merge_base_as_its_base(
     let (setup, cx) = setup(cx, None).await;
     let harness = &setup.harness;
     let cut_from = git(&setup.real, &["rev-parse", "main"]);
-    let worktree = setup.real.join(".bongos-worktrees").join("backfill");
+    let worktree = central(harness, "backfill");
     git(
         &setup.real,
         &[
@@ -790,7 +869,7 @@ async fn babysit_fetches_the_pr_head_from_the_remote_that_names_its_repository(
     wait_until(cx, "the refusal", |cx| harness.has_toast(cx)).await;
     assert_eq!(harness.writes(cx), writes);
     assert_eq!(git(real, &["branch", "--list", "pr-2"]), "");
-    assert!(!real.join(".bongos-worktrees").join("watch").exists());
+    assert!(!central(harness, "watch").exists());
 
     // acme/invoicing is `mirror`: its pull/1/head becomes `pr-1`, checked out in the worktree.
     harness.clear_toasts(cx);
@@ -802,7 +881,7 @@ async fn babysit_fetches_the_pr_head_from_the_remote_that_names_its_repository(
         )
         .await;
     let file = harness.file(cx, &["watch"]);
-    let worktree = setup.repository.join(".bongos-worktrees").join("watch");
+    let worktree = central(harness, "watch");
     assert_eq!(file.branch.as_deref(), Some("pr-1"));
     assert_eq!(file.base, None);
     assert_eq!(file.base_sha, None);

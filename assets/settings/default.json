@@ -2680,9 +2680,18 @@
     "stale_after_days": 3.0,
     // The repositories tasks can name. Each entry looks like:
     //   { "name": "invoicing", "path": "~/src/invoicing", "setup_command": null,
-    //     "merge_is_ship": true, "deployments": true, "branch_template": "{slug}" }
+    //     "merge_is_ship": true, "deployments": true, "branch_template": "{slug}",
+    //     "worktree_root": null }
     // Only "name" and "path" are required. `work: add repository` appends an entry.
+    // An entry's "worktree_root" overrides "default_worktree_root" for its tasks.
     "repositories": [],
+    // Where the worktrees of tasks go, as a path template: {repo} is the
+    // repository's name and {slug} the task's slug (appended when missing), and
+    // ~ is the home directory. A relative path is relative to the parent of the
+    // repository's checkout, so "{repo}-worktrees/{slug}" puts them beside it.
+    // null means the central directory, worktrees/{repo}/{slug} under the bongos
+    // data directory.
+    "default_worktree_root": null,
   },
   "chats": {
     // Whether chat sessions are on. While they are off, bongos neither indexes
