@@ -9,10 +9,7 @@ fn parse(marked: &str) -> (String, Vec<Caret>) {
         match c {
             'ˇ' => carets.push(Caret::point(text.len())),
             '«' => open = Some(text.len()),
-            '»' => carets.push(Caret {
-                head: text.len(),
-                tail: open.take().unwrap_or(0),
-            }),
+            '»' => carets.push(Caret::new(text.len(), open.take().unwrap_or(0))),
             _ => text.push(c),
         }
     }
@@ -81,7 +78,7 @@ fn random_carets(rng: &mut Lcg, text: &str) -> Vec<Caret> {
             } else {
                 head
             };
-            Caret { head, tail }
+            Caret::new(head, tail)
         })
         .collect()
 }

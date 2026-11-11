@@ -6,6 +6,7 @@ use language::{Language, LanguageConfig};
 
 use crate::actions::{ContractRegion, ExpandRegion};
 use crate::apply_tests::init_test;
+use crate::region;
 
 const TEXT: &str = "fn f() {\n    let x = foo(ˇbar, baz);\n}\n";
 
@@ -76,4 +77,24 @@ async fn contract_without_history_does_nothing(cx: &mut TestAppContext) {
     let mut cx = test_context(cx).await;
     contract(&mut cx, None);
     cx.assert_editor_state(TEXT);
+}
+
+#[gpui::test]
+async fn mark_mode_makes_an_empty_selection_an_active_region(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    let is_active = |cx: &mut EditorTestContext| {
+        cx.update_editor(|editor, _, cx| {
+            let display = editor.display_snapshot(cx);
+            let selection = editor
+                .selections
+                .newest::<multi_buffer::MultiBufferOffset>(&display);
+            region::is_active(editor, &selection, cx)
+        })
+    };
+    assert!(!is_active(&mut cx));
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    assert!(is_active(&mut cx));
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(false, cx));
+    expand(&mut cx, None);
+    assert!(is_active(&mut cx));
 }

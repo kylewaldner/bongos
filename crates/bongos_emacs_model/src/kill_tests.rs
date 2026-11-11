@@ -9,10 +9,7 @@ fn parse(marked: &str) -> (String, Vec<Caret>) {
         match c {
             'ˇ' => carets.push(Caret::point(text.len())),
             '«' => open = Some(text.len()),
-            '»' => carets.push(Caret {
-                head: text.len(),
-                tail: open.take().unwrap_or(0),
-            }),
+            '»' => carets.push(Caret::new(text.len(), open.take().unwrap_or(0))),
             _ => text.push(c),
         }
     }
@@ -81,7 +78,7 @@ fn random_carets(rng: &mut Lcg, text: &str) -> Vec<Caret> {
             } else {
                 head
             };
-            Caret { head, tail }
+            Caret::new(head, tail)
         })
         .collect()
 }
@@ -392,7 +389,7 @@ fn randomized_kills_match_removed_text() {
 #[test]
 fn pieces_carry_their_source_start_and_whole_line_flag() {
     let text = "aa\nbb\ncc\ndd";
-    let c = vec![Caret::point(0), Caret::point(1), Caret { tail: 7, head: 9 }];
+    let c = vec![Caret::point(0), Caret::point(1), Caret::new(9, 7)];
     let plan = cr(text, &c, None);
     let pieces: Vec<_> = plan
         .killed
@@ -405,7 +402,7 @@ fn pieces_carry_their_source_start_and_whole_line_flag() {
     );
 
     // A region merged with a whole-line item is not a whole line.
-    let c = vec![Caret { tail: 1, head: 5 }, Caret::point(4)];
+    let c = vec![Caret::new(5, 1), Caret::point(4)];
     let plan = cr(text, &c, None);
     assert_eq!(plan.killed.len(), 1);
     assert_eq!(plan.killed[0].source_start, Some(1));
@@ -415,4 +412,25 @@ fn pieces_carry_their_source_start_and_whole_line_flag() {
     let plan = cr(text, &[Caret::point(7)], Some(-1));
     assert_eq!(plan.killed[0].source_start, Some(3));
     assert!(plan.killed[0].whole_line);
+}
+
+#[test]
+fn an_active_empty_region_kills_and_copies_nothing() {
+    let text = "foo\nbar\nbaz";
+    let carets = [Caret::point(5).with_active(true)];
+    assert!(carets[0].is_active() && !carets[0].has_region());
+    for plan in [
+        kill_region_or_line(text, &carets, None),
+        kill_region_or_line(text, &carets, Some(3)),
+        copy_region_or_line(text, &carets, None),
+    ] {
+        assert!(plan.edits.is_empty() && plan.killed.is_empty());
+    }
+    // An inactive caret still takes its line.
+    let plan = kill_region_or_line(text, &[Caret::point(5)], None);
+    assert_eq!(killed(&plan), ["bar\n"]);
+    // A real region next to an active empty caret kills only the region.
+    let carets = [Caret::new(3, 0), Caret::point(9).with_active(true)];
+    let plan = kill_region_or_line(text, &carets, None);
+    assert_eq!(killed(&plan), ["foo"]);
 }
