@@ -33,23 +33,49 @@ impl TextSource for str {
     }
 }
 
-/// A caret with an optional region. `tail == head` means no region.
+/// A caret with an optional region. `tail == head` means no region. `active` is whether the
+/// caret's region is active: a non-empty region always is, and an empty one is while mark mode
+/// is on. An active empty region acts on nothing. Only the kill and copy commands
+/// (kill-region-or-line and copy-region-or-line) fall back to the caret's line when there is no
+/// region, and they do so only when the caret is not active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Caret {
     pub head: usize,
     pub tail: usize,
+    pub active: bool,
 }
 
 impl Caret {
+    /// A caret with no region and no active region.
     pub fn point(offset: usize) -> Self {
         Self {
             head: offset,
             tail: offset,
+            active: false,
         }
+    }
+
+    /// A caret that is active exactly when its region is non-empty.
+    pub fn new(head: usize, tail: usize) -> Self {
+        Self {
+            head,
+            tail,
+            active: head != tail,
+        }
+    }
+
+    /// The caret with its active flag set.
+    pub fn with_active(self, active: bool) -> Self {
+        Self { active, ..self }
     }
 
     pub fn has_region(&self) -> bool {
         self.head != self.tail
+    }
+
+    /// The caret's region is active, even when it is empty.
+    pub fn is_active(&self) -> bool {
+        self.active
     }
 
     pub fn region(&self) -> Range<usize> {
@@ -184,10 +210,10 @@ pub fn build_plan<T: TextSource + ?Sized>(
                 }
             }
         };
-        plan.carets.push(Caret {
-            head: map_offset(&plan.edits, head),
-            tail: map_offset(&plan.edits, tail),
-        });
+        plan.carets.push(Caret::new(
+            map_offset(&plan.edits, head),
+            map_offset(&plan.edits, tail),
+        ));
     }
     plan
 }
@@ -258,9 +284,11 @@ pub(crate) fn deletion_plan(
     }
     let mut carets: Vec<Caret> = carets
         .iter()
-        .map(|caret| Caret {
-            head: map_offset(&edits, caret.head),
-            tail: map_offset(&edits, caret.tail),
+        .map(|caret| {
+            Caret::new(
+                map_offset(&edits, caret.head),
+                map_offset(&edits, caret.tail),
+            )
         })
         .collect();
     carets.sort_by_key(|c| (c.head, c.tail));

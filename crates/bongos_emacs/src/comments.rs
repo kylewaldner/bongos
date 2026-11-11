@@ -52,12 +52,9 @@ fn carets(editor: &mut Editor, cx: &mut App) -> Vec<Caret> {
         .iter()
         .map(|selection| {
             let head = selection.head().0;
-            let tail = if region::is_active(editor, selection, cx) {
-                selection.tail().0
-            } else {
-                head
-            };
-            Caret { head, tail }
+            let active = region::is_active(editor, selection, cx);
+            let tail = if active { selection.tail().0 } else { head };
+            Caret { head, tail, active }
         })
         .collect()
 }

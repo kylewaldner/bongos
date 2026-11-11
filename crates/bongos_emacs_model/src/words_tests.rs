@@ -9,10 +9,7 @@ fn parse(marked: &str) -> (String, Vec<Caret>) {
         match c {
             'ˇ' => carets.push(Caret::point(text.len())),
             '«' => open = Some(text.len()),
-            '»' => carets.push(Caret {
-                head: text.len(),
-                tail: open.take().unwrap_or(0),
-            }),
+            '»' => carets.push(Caret::new(text.len(), open.take().unwrap_or(0))),
             _ => text.push(c),
         }
     }
@@ -83,7 +80,7 @@ fn move_carets_select_and_merge() {
     );
     assert_eq!(
         forward_word_carets(t.as_str(), &c, None, true),
-        vec![Caret { head: 7, tail: 3 }]
+        vec![Caret::new(7, 3)]
     );
     assert_eq!(
         backward_word_carets(t.as_str(), &c, Some(2), false),
@@ -202,7 +199,7 @@ fn randomized_kills_match_removed_text() {
                 } else {
                     head
                 };
-                Caret { head, tail }
+                Caret::new(head, tail)
             })
             .collect();
         let count = [None, Some(1), Some(3), Some(0), Some(-2), Some(100)][rng.next(6)];

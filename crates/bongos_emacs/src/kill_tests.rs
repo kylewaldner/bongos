@@ -215,28 +215,63 @@ async fn kill_region_or_line_with_a_region_kills_the_region_not_a_line(cx: &mut 
 }
 
 #[gpui::test]
-async fn a_mixed_region_and_no_region_kill_labels_each_piece_on_its_own(cx: &mut TestAppContext) {
+async fn a_mixed_region_and_active_empty_caret_kill_only_the_region(cx: &mut TestAppContext) {
     init_test(cx);
     let mut cx = EditorTestContext::new(cx).await;
     let kills = capture_kills(&mut cx);
 
+    // With mark mode on, the empty caret on "three" is an active empty region: it kills nothing.
     cx.set_state("«one\nˇ»two\nthˇree\nfour");
     mark_mode(&mut cx);
     cx.dispatch_action(KillRegionOrLine { count: None });
     let kills = kills.borrow();
-    assert_eq!(
-        kills[0].pieces,
-        vec!["one\n".to_string(), "three\n".to_string()]
-    );
+    assert_eq!(kills[0].pieces, vec!["one\n".to_string()]);
     assert_eq!(
         kills[0]
             .metadata
             .iter()
             .map(|selection| selection.is_entire_line)
             .collect::<Vec<_>>(),
-        vec![false, true]
+        vec![false]
     );
-    cx.assert_editor_state("ˇtwo\nˇfour");
+    cx.assert_editor_state("ˇtwo\nthˇree\nfour");
+}
+
+#[gpui::test]
+async fn an_active_empty_region_kills_nothing_and_ends_mark_mode(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    let kills = capture_kills(&mut cx);
+
+    cx.set_state("one\ntwˇo\nthree");
+    mark_mode(&mut cx);
+    cx.dispatch_action(KillRegionOrLine { count: None });
+    cx.assert_editor_state("one\ntwˇo\nthree");
+    assert!(kills.borrow().is_empty());
+    cx.update_editor(|editor, _, _| assert!(!editor.selection_mark_mode()));
+
+    // Without mark mode and without a region the line still goes.
+    cx.dispatch_action(KillRegionOrLine { count: None });
+    cx.assert_editor_state("one\nˇthree");
+    assert_eq!(kills.borrow().len(), 1);
+    assert_eq!(kills.borrow()[0].pieces, vec!["two\n".to_string()]);
+}
+
+#[gpui::test]
+async fn copying_an_active_empty_region_copies_nothing(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    let kills = capture_kills(&mut cx);
+
+    cx.set_state("one\ntwˇo\nthree");
+    mark_mode(&mut cx);
+    cx.dispatch_action(CopyRegionOrLine { count: None });
+    cx.assert_editor_state("one\ntwˇo\nthree");
+    assert!(kills.borrow().is_empty());
+
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(false, cx));
+    cx.dispatch_action(CopyRegionOrLine { count: None });
+    assert_eq!(kills.borrow()[0].pieces, vec!["two\n".to_string()]);
 }
 
 #[gpui::test]
