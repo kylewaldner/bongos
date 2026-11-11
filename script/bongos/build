@@ -8,6 +8,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
 log_init build
+say_unified_features
 
 summary_hook() {
   local warnings errors

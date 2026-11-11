@@ -9,6 +9,8 @@
 #                                  (script/bongos/make-stub-binaries makes tiny stand-ins for testing the packaging)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Release and reference builds never use unified features, whatever the caller exported.
+export BONGOS_UNIFIED_FEATURES=0
 . "$here/env.sh"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"

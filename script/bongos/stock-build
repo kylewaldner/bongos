@@ -7,6 +7,8 @@
 # This script never runs the binary. Run it only with a throwaway HOME (BONGOS_STOCK=1 smoke does).
 set -euo pipefail
 here="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Release and reference builds never use unified features, whatever the caller exported.
+export BONGOS_UNIFIED_FEATURES=0
 . "$here/env.sh"
 . "$here/lib.sh"
 

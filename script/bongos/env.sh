@@ -78,3 +78,31 @@ export CC=clang CXX=clang++
 # Tuning with no manifest diff. Never set RUSTFLAGS: it replaces .cargo/config.toml's flags.
 export CARGO_PROFILE_DEV_DEBUG=line-tables-only
 export CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=0
+
+# Unified features, off by default. BONGOS_UNIFIED_FEATURES=1 makes every cargo command use the
+# workspace-wide feature set, so callers that run many differently shaped cargo commands (different
+# -p sets, the app build, the whole-workspace test build) against one target directory share compiled
+# dependencies instead of rebuilding them under new artifact hashes per command. Any other value
+# turns it off, and clears the cargo settings so a stale environment cannot leave it on. Costs:
+#   - The first build after flipping the switch in either direction recompiles everything.
+#   - RUSTC_BOOTSTRAP=1 (cargo needs it for the unstable setting) is also read by rustc and by some
+#     build scripts, which then enable code meant for nightly compilers (seen in anyhow, thiserror,
+#     proc-macro2, cap-primitives, cap-std, io-extras, system-interface).
+#   - The app's own dependency features change slightly (gpui gains font-kit and windows-manifest,
+#     nix gains a few modules, prettyplease gains verbatim).
+#   - `cargo build -p <dependency that is not a workspace member>` silently builds nothing.
+# Release bundles and the reference build force it off, and dependency inspections (cargo_plain in
+# lib.sh) run without it, so they describe the app as it ships.
+if [ "${BONGOS_UNIFIED_FEATURES:-}" = 1 ]; then
+  if [ -z "${RUSTC_BOOTSTRAP:-}" ]; then
+    export RUSTC_BOOTSTRAP=1
+    export BONGOS_SET_RUSTC_BOOTSTRAP=1  # marks the value as ours, so turning the switch off removes only that
+  fi
+  export CARGO_UNSTABLE_FEATURE_UNIFICATION=true
+  export CARGO_RESOLVER_FEATURE_UNIFICATION=workspace
+else
+  unset CARGO_UNSTABLE_FEATURE_UNIFICATION CARGO_RESOLVER_FEATURE_UNIFICATION
+  if [ -n "${BONGOS_SET_RUSTC_BOOTSTRAP:-}" ]; then
+    unset RUSTC_BOOTSTRAP BONGOS_SET_RUSTC_BOOTSTRAP
+  fi
+fi
