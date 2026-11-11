@@ -2311,11 +2311,13 @@ name = "bongos_emacs"
 version = "0.1.0"
 dependencies = [
  "bongos_emacs_model",
+ "bongos_minibuffer",
  "collections",
  "editor",
  "gpui",
  "language",
  "multi_buffer",
+ "project",
  "schemars 1.0.4",
  "serde",
  "settings",
