@@ -459,6 +459,8 @@ fn reserved_names() {
         "tasks/",
         "chats",
         "runs",
+        "workflows",
+        "workflows/",
         ".git",
         ".git/",
         ".task.toml.tmp-1234-AbCdEfGh",
