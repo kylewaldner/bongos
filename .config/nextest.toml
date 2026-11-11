@@ -37,9 +37,8 @@ retries = 3
 #   editor test_tab_in_leading_whitespace_auto_indents_for_bash, test_markdown_indents: depend on
 #     background syntax parsing and auto-indent finishing in time.
 #   languages test_outline_with_destructuring: depends on background syntax parsing finishing in time.
-#   bongos_chat test_no_output_makes_a_chat_idle, test_bell_title_and_exit_reach_the_state_within_a_second,
-#     test_kill_ends_the_process_and_close_drops_the_chat: run a fake CLI in a real PTY with 1 s
-#     wall-clock bounds.
+#   bongos_chat test_no_output_makes_a_chat_idle: runs a fake CLI in a real PTY with 1 s wall-clock
+#     bounds.
 [[profile.default.overrides]]
 filter = '''
 (package(=bongos_linear) & test(=refresh_tests::the_window_skips_recent_reads_and_the_command_ignores_it))
@@ -48,6 +47,6 @@ filter = '''
 | (package(=db) & test(=tests::test_simultaneous_db_corruption))
 | (package(=editor) & (test(=editor_tests::test_tab_in_leading_whitespace_auto_indents_for_bash) | test(=editor_tests::test_markdown_indents)))
 | (package(=languages) & test(=typescript::tests::test_outline_with_destructuring))
-| (package(=bongos_chat) & (test(=runtime_tests::test_no_output_makes_a_chat_idle) | test(=runtime_tests::test_bell_title_and_exit_reach_the_state_within_a_second) | test(=runtime_tests::test_kill_ends_the_process_and_close_drops_the_chat)))
+| (package(=bongos_chat) & test(=runtime_tests::test_no_output_makes_a_chat_idle))
 '''
 retries = { backoff = "fixed", count = 2, delay = "2s" }
