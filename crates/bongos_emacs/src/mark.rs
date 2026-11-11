@@ -172,8 +172,8 @@ pub fn push_mark(
 
 /// Makes a mouse drag set the mark at the drag start, without a ring push. Shift-selection,
 /// select-all and other selection changes have no pending selection and leave the mark alone.
-pub(crate) fn init_editor(window: &mut Option<&mut Window>, cx: &mut Context<Editor>) {
-    if let Some(window) = window.as_deref_mut() {
+pub(crate) fn init_editor(window: Option<&mut Window>, cx: &mut Context<Editor>) {
+    if let Some(window) = window {
         // An edit made by this editor (typing, Tab, undo, redo) ends mark mode and the region.
         // Edits made through another editor of the same buffer do not emit this event here.
         let this = cx.entity();
