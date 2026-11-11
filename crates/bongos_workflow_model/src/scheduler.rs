@@ -385,9 +385,17 @@ pub fn resume_set(state: &RunState) -> Vec<NodeKey> {
 /// its recorded result, finished sibling branches included. The engine reruns one (a picker when
 /// several failed) by starting it; that start reopens the failed run and gives the key its
 /// retries again ([`RunState::retry_floors`]).
+///
+/// A join whose merge conflicted is never in it: a conflict is terminal for the run, and only a
+/// fresh run recovers (rerunning the join would start it without its branches merged).
 pub fn retry_set(definition: &Definition, state: &RunState, limits: &Limits) -> Vec<NodeKey> {
     let mut keys: Vec<NodeKey> = Vec::new();
     for failed in plan(definition, state, limits).failed {
+        if let Failed::Node(failure) = &failed
+            && failure.reason == FailureReason::MergeConflict
+        {
+            continue;
+        }
         if let Some(key) = failed.key()
             && !keys.contains(key)
         {

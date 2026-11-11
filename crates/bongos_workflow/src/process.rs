@@ -70,9 +70,10 @@ impl NodeProcess {
 }
 
 /// Stops every process together: SIGTERM to each group, one shared [`STOP_GRACE`] while any
-/// group still has a live member, then SIGKILL to every group. SIGKILL goes to the group even when
-/// its leader already exited (on SIGTERM or before), so children left in the group die too; it is
-/// never sent to the leader's pid alone. Many processes stop in the time of one.
+/// group still has a live member, then SIGKILL to every group still holding its id. SIGKILL goes to the group even
+/// when its leader already exited (on SIGTERM or before), so children left in the group die too,
+/// but not once the leader is reaped and the group is empty (its id may be reused); it is never
+/// sent to the leader's pid alone. Many processes stop in the time of one.
 pub fn stop_all(processes: &mut [NodeProcess]) {
     for process in processes.iter() {
         signal_group(process.record.pid, Signal::Term);
@@ -81,9 +82,13 @@ pub fn stop_all(processes: &mut [NodeProcess]) {
     while Instant::now() < deadline && any_alive(processes) {
         std::thread::sleep(POLL);
     }
-    for process in processes.iter() {
-        // A group already gone answers ESRCH, which is ignored. A group cannot get a new
-        // process with its id while any member lives, so this reaches only what the node left.
+    for process in processes.iter_mut() {
+        // A group cannot get a new process with its id while any member lives or the leader is
+        // unreaped, so this reaches only what the node left. Once the leader is reaped and the
+        // group is empty, the id is free for reuse and no signal is sent.
+        if process.has_exited() && !group_alive(process.record.pid) {
+            continue;
+        }
         signal_group(process.record.pid, Signal::Kill);
     }
     let deadline = Instant::now() + KILL_WAIT;
@@ -171,9 +176,12 @@ pub fn kill_orphans(records: &[ProcessRecord]) -> Vec<OrphanOutcome> {
         std::thread::sleep(POLL);
     }
     // The leader matched before SIGTERM; a group keeps its id while any member lives, so the
-    // members still alive are the node's own.
+    // members still alive are the node's own. A group already empty may have had its id reused
+    // since, so it gets no SIGKILL.
     for pid in &matched {
-        signal_group(*pid, Signal::Kill);
+        if group_alive(*pid) {
+            signal_group(*pid, Signal::Kill);
+        }
     }
     let deadline = Instant::now() + KILL_WAIT;
     while Instant::now() < deadline && matched.iter().any(|pid| group_alive(*pid)) {

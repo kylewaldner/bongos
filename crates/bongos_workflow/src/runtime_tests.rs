@@ -307,8 +307,13 @@ fn quit_then_reload_shows_interrupted_and_starts_nothing() {
     drop(runtime);
 
     let mut relaunched = Runtime::new(Limits::default(), FakeRunner::new());
-    relaunched.load(spec(temp.path(), 1, FAN)).unwrap();
-    relaunched.load(spec(temp.path(), 2, SINGLE)).unwrap();
+    let orphans = relaunched
+        .load_all(vec![
+            spec(temp.path(), 1, FAN),
+            spec(temp.path(), 2, SINGLE),
+        ])
+        .unwrap();
+    assert_eq!(orphans.len(), 2, "one outcome list per run");
     relaunched.tick();
     assert!(relaunched.runner().started.is_empty());
     let first = relaunched.state(&run_id(1)).unwrap();

@@ -295,43 +295,70 @@ impl<R: Runner> Runtime<R> {
         Ok(())
     }
 
-    /// Loads a run after a relaunch. First every process the log records as running (or
-    /// interrupted with a process) is stopped when its pid is alive with the recorded start time;
-    /// a pid with another start time is a different process and is left alone. Then a run with a
-    /// started key and no finish is marked interrupted with every such key. An interrupted, halted,
-    /// ended or cancelled run gets no command until Kyle acts; any other run (queued, at a gate,
-    /// with a sleeping poll) waits for a run slot like a new one. Nothing starts here.
+    /// Loads a run after a relaunch; [`Runtime::load_all`] with one run.
     pub fn load(&mut self, spec: RunSpec) -> Result<Vec<(NodeKey, OrphanOutcome)>, RuntimeError> {
-        if self.find(&spec.id).is_some() {
-            return Err(RuntimeError::Duplicate(spec.id));
+        let mut orphans = self.load_all(vec![spec])?;
+        Ok(orphans.pop().unwrap_or_default())
+    }
+
+    /// Loads runs after a relaunch. First every process the logs record as running (or
+    /// interrupted with a process) is stopped when its pid is alive with the recorded start time,
+    /// all runs' processes together in one shared grace period; a pid with another start time is
+    /// a different process and is left alone. Then a run with a started key and no finish is
+    /// marked interrupted with every such key. An interrupted, halted, ended or cancelled run gets
+    /// no command until Kyle acts; any other run (queued, at a gate, with a sleeping poll) waits
+    /// for a run slot like a new one. Nothing starts here. A duplicate id or a log that cannot be
+    /// opened loads none of them. Returns each run's orphan outcomes, in `specs` order.
+    pub fn load_all(
+        &mut self,
+        specs: Vec<RunSpec>,
+    ) -> Result<Vec<Vec<(NodeKey, OrphanOutcome)>>, RuntimeError> {
+        let mut runs: Vec<LiveRun> = Vec::with_capacity(specs.len());
+        for spec in specs {
+            if self.find(&spec.id).is_some() || runs.iter().any(|run| run.id == spec.id) {
+                return Err(RuntimeError::Duplicate(spec.id));
+            }
+            runs.push(open_run(spec)?);
         }
-        let mut run = open_run(spec)?;
-        let state = run.state();
-        let (keys, records): (Vec<NodeKey>, Vec<ProcessRecord>) = state
-            .running
-            .iter()
-            .chain(
+        let mut keys: Vec<Vec<NodeKey>> = Vec::with_capacity(runs.len());
+        let mut records: Vec<ProcessRecord> = Vec::new();
+        for run in &runs {
+            let state = run.state();
+            let (run_keys, run_records): (Vec<NodeKey>, Vec<ProcessRecord>) =
                 state
-                    .interrupted
+                    .running
                     .iter()
-                    .filter_map(|(key, running)| running.as_ref().map(|running| (key, running))),
-            )
-            .map(|(key, running)| (key.clone(), process_record(running)))
-            .unzip();
-        let orphans: Vec<(NodeKey, OrphanOutcome)> =
-            keys.into_iter().zip(kill_orphans(&records)).collect();
-        if !state.running.is_empty() && !state.halted && !state.is_over() {
-            let keys: Vec<NodeKey> = state.running.keys().cloned().collect();
-            run.append(Event::Interrupted { keys });
+                    .chain(state.interrupted.iter().filter_map(|(key, running)| {
+                        running.as_ref().map(|running| (key, running))
+                    }))
+                    .map(|(key, running)| (key.clone(), process_record(running)))
+                    .unzip();
+            keys.push(run_keys);
+            records.extend(run_records);
         }
-        let state = run.state();
-        if LiveRun::is_held(&state) {
-            run.status = Status::Held;
-        } else {
-            run.status = Status::Queued;
-            self.queue.push_back(run.id.clone());
+        let mut outcomes = kill_orphans(&records).into_iter();
+        let mut orphans = Vec::with_capacity(runs.len());
+        for (mut run, run_keys) in runs.into_iter().zip(keys) {
+            orphans.push(
+                run_keys
+                    .into_iter()
+                    .zip(outcomes.by_ref())
+                    .collect::<Vec<_>>(),
+            );
+            let state = run.state();
+            if !state.running.is_empty() && !state.halted && !state.is_over() {
+                let keys: Vec<NodeKey> = state.running.keys().cloned().collect();
+                run.append(Event::Interrupted { keys });
+            }
+            let state = run.state();
+            if LiveRun::is_held(&state) {
+                run.status = Status::Held;
+            } else {
+                run.status = Status::Queued;
+                self.queue.push_back(run.id.clone());
+            }
+            self.runs.push(run);
         }
-        self.runs.push(run);
         Ok(orphans)
     }
 
@@ -590,7 +617,8 @@ impl<R: Runner> Runtime<R> {
                         // The branches stay as they are. The conflict is a failed try of the
                         // join's key (scheduler.rs, `Command::MergeBranch`): the scheduler fails
                         // the branch, lets running keys finish and ends the run Failed once
-                        // nothing runs. A retry step can rerun the merge once it is resolved.
+                        // nothing runs. The conflict is terminal for the run: a retry step does
+                        // not offer the join (`retry_set`), so only a fresh run recovers.
                         let failure = Failure::new(
                             FailureReason::MergeConflict,
                             Some(key.clone()),

@@ -351,6 +351,55 @@ fn join_any_merges_the_first_and_cancels_the_rest() {
     assert_eq!(run.tries(&key("gather", 1)), 1);
 }
 
+/// How many merges the scheduler asked for.
+fn merges_asked(run: &FakeRunner) -> usize {
+    run.commands
+        .iter()
+        .filter(|command| matches!(command, Command::MergeBranch { .. }))
+        .count()
+}
+
+#[test]
+fn a_merge_conflict_ends_the_run_failed() {
+    let mut run = fan_runner("all", 3);
+    run.conflicting_joins.insert("gather".to_string());
+    let state = run.run();
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::MergeConflict);
+    assert_eq!(failure.node, Some(key("gather", 1)));
+    assert!(state.merged.is_empty());
+    assert_eq!(merges_asked(&run), 1, "the conflict is not merged again");
+    assert_eq!(run.tries(&key("gather", 1)), 1, "only the conflicted try");
+}
+
+#[test]
+fn retry_set_excludes_a_join_whose_merge_conflicted() {
+    let mut run = fan_runner("all", 3);
+    run.conflicting_joins.insert("gather".to_string());
+    let state = run.run();
+    assert_eq!(failure_of(&state).reason, FailureReason::MergeConflict);
+    assert_eq!(
+        retry_set(&run.definition, &state, &run.limits),
+        Vec::new(),
+        "a conflict is terminal for the run"
+    );
+}
+
+#[test]
+fn a_merge_conflict_on_an_any_join_ends_the_run_failed() {
+    let mut run = fan_runner("any", 5);
+    run.conflicting_joins.insert("gather".to_string());
+    let state = run.run();
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::MergeConflict);
+    assert_eq!(failure.node, Some(key("gather", 1)));
+    assert!(state.merged.is_empty());
+    assert_eq!(merges_asked(&run), 1, "the conflict is not merged again");
+    assert_eq!(run.tries(&key("gather", 1)), 1, "the join never runs");
+    assert!(state.running.is_empty(), "running branches finish first");
+    assert_eq!(retry_set(&run.definition, &state, &run.limits), Vec::new());
+}
+
 const LOOP: &str = r#"
 schema = 1
 name = "loop"
