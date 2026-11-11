@@ -2735,6 +2735,12 @@
     // (linear.enabled)".
     "enabled": true,
   },
+  "workflows": {
+    // Whether workflows are on. While they are off, bongos starts no run, loads no
+    // definition, and every workflow command is hidden and only says "Workflows are off
+    // (workflows.enabled)".
+    "enabled": false,
+  },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
   "server_url": "https://bongos.invalid",
