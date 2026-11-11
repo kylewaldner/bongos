@@ -7,6 +7,8 @@ pub mod builtin_merge;
 mod commands;
 pub mod definitions;
 mod engine;
+pub mod process;
+pub mod runtime;
 mod settings;
 pub mod worktrees;
 
@@ -30,5 +32,7 @@ mod actions_tests;
 mod commands_tests;
 #[cfg(test)]
 mod definitions_tests;
+#[cfg(test)]
+mod runtime_tests;
 #[cfg(test)]
 mod worktree_tests;
