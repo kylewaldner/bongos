@@ -280,6 +280,12 @@ async fn every_emacs_key_resolves_in_an_editor(cx: &mut gpui::TestAppContext) {
         let keymap = Keymap::new(load_all(&platform, true, cx));
         for (input, action) in EDITOR_KEYS {
             for contexts in [&EDITOR, &MARK_MODE_EDITOR] {
+                // Mark mode extends the region with Zed's line motions.
+                let action = match (*input, contexts == &MARK_MODE_EDITOR) {
+                    ("ctrl-a", true) => &"editor::SelectToBeginningOfLine",
+                    ("ctrl-e", true) => &"editor::SelectToEndOfLine",
+                    _ => action,
+                };
                 let (names, pending) = resolve(&keymap, input, contexts);
                 assert_eq!(
                     names.first(),
