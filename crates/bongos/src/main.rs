@@ -527,7 +527,7 @@ fn main() {
         );
         bongos_work::init(
             fs.clone(),
-            bongos_work::WorkDirs::new(util::paths::home_dir()),
+            bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir()),
             cx,
         );
         bongos_chat::init(

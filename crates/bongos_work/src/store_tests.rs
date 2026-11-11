@@ -74,9 +74,7 @@ fn new_store(cx: &mut TestAppContext, root: &Path, enabled: bool) -> Entity<Work
     });
     set_enabled(cx, enabled);
     let fs = Arc::new(RealFs::new(None, cx.executor()));
-    let dirs = WorkDirs {
-        root: root.to_path_buf(),
-    };
+    let dirs = WorkDirs::for_test(root.to_path_buf());
     cx.new(|cx| WorkStore::new(fs, dirs, cx))
 }
 
@@ -166,9 +164,7 @@ async fn nothing_loads_or_watches_while_disabled(cx: &mut TestAppContext) {
     let store = new_store(cx, &root, false);
     let other = {
         let fs = Arc::new(RealFs::new(None, cx.executor()));
-        let dirs = WorkDirs {
-            root: missing_root.clone(),
-        };
+        let dirs = WorkDirs::for_test(missing_root.clone());
         cx.new(|cx| WorkStore::new(fs, dirs, cx))
     };
     settle(cx).await;
@@ -617,4 +613,19 @@ async fn a_root_reached_through_a_symbolic_link_is_watched(cx: &mut TestAppConte
         snapshot_task(store, &canonical).is_some_and(|task| task.goal() == "Through the link")
     })
     .await;
+}
+
+#[test]
+fn work_dirs_new_puts_worktrees_under_the_data_dir() {
+    let dirs = WorkDirs::new(Path::new("/home/u"), Path::new("/data"));
+    assert_eq!(dirs.root, Path::new("/home/u/.bongos"));
+    assert_eq!(dirs.worktrees, Path::new("/data/worktrees"));
+}
+
+#[test]
+fn work_dirs_for_test_puts_worktrees_outside_the_root() {
+    let dirs = WorkDirs::for_test("/tmp/t/work");
+    assert_eq!(dirs.root, Path::new("/tmp/t/work"));
+    assert_eq!(dirs.worktrees, Path::new("/tmp/t/central-worktrees"));
+    assert!(!dirs.worktrees.starts_with(&dirs.root));
 }

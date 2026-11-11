@@ -97,7 +97,7 @@ fn setup(cx: &mut TestAppContext, chats_enabled: bool) -> Setup {
         });
     });
     let fs = Arc::new(RealFs::new(None, cx.executor()));
-    let work = cx.new(|cx| WorkStore::new(fs, WorkDirs { root: root.clone() }, cx));
+    let work = cx.new(|cx| WorkStore::new(fs, WorkDirs::for_test(root.clone()), cx));
     let dirs = ChatDirs {
         types_root: types_root.clone(),
         runtime: base.join("runtime"),

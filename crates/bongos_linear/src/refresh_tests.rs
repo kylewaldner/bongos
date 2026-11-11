@@ -198,7 +198,7 @@ async fn env_with(
     cx.update(|cx| {
         bongos_work::init(
             Arc::new(RealFs::new(None, cx.background_executor().clone())),
-            WorkDirs { root },
+            WorkDirs::for_test(root),
             cx,
         );
         crate::init(cx);

@@ -87,7 +87,7 @@ pub(crate) async fn harness(
     });
     set_enabled(cx, enabled);
     let fs = Arc::new(RealFs::new(None, cx.executor()));
-    let store = cx.new(|cx| WorkStore::new(fs, WorkDirs { root: root.clone() }, cx));
+    let store = cx.new(|cx| WorkStore::new(fs, WorkDirs::for_test(root.clone()), cx));
     cx.update(|cx| {
         cx.set_global(GlobalWorkStore(store.clone()));
         init_palette(cx);
