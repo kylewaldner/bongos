@@ -1530,6 +1530,27 @@ pub struct WorkflowsSettingsContent {
     ///
     /// Default: 14
     pub keep_finished_days: Option<u64>,
+    /// Runs executing at once; the rest wait Queued, in start order.
+    ///
+    /// Default: 3
+    pub max_concurrent_runs: Option<u32>,
+    /// Agent sessions plus programs executing at once across all runs. Null means twice
+    /// `max_concurrent_runs`.
+    ///
+    /// Default: null
+    pub max_concurrent_sessions: Option<u32>,
+    /// Fan-out branches of one run executing at once.
+    ///
+    /// Default: 3
+    pub max_parallel_branches: Option<u32>,
+    /// The widest per-item fan-out when a route sets no `width`.
+    ///
+    /// Default: 8
+    pub fan_out_width: Option<u32>,
+    /// Automatic retries of a node that sets none.
+    ///
+    /// Default: 2
+    pub retries: Option<u32>,
 }
 
 /// Settings for chat sessions.

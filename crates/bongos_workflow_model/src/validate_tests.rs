@@ -858,6 +858,28 @@ fn program_permissions_ceiling() {
 }
 
 #[test]
+fn node_names_are_branch_and_path_safe() {
+    for bad in ["Fix", "fix me", "fix/me", "-fix", "fix.me", "fïx"] {
+        let header = format!("[nodes.\"{bad}\"]");
+        let text = format!("{VALID}\n{header}\nkind = \"agent\"\nprompt = \"fix.md\"\n");
+        assert_error(
+            &text,
+            Some(bad),
+            &header,
+            &format!("node name '{bad}' may use only lowercase letters, digits, '-' and '_'"),
+        );
+    }
+    let diagnostics = diagnostics(VALID);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("may use only")),
+        "{}",
+        render(&diagnostics)
+    );
+}
+
+#[test]
 fn node_and_end_share_a_name() {
     let text = format!("{VALID}\n[ends.fix]\nkind = \"failure\"\n");
     assert_error(

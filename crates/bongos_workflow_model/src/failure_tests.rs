@@ -7,7 +7,7 @@ use FailureClass::{Definition, Task};
 use FailureReason::*;
 
 /// Every reason with its class when not every retry hit it, from the product's closed list.
-const EXPECTED: [(FailureReason, &str, FailureClass); 21] = [
+const EXPECTED: [(FailureReason, &str, FailureClass); 22] = [
     (NodeOutputInvalid, "node output invalid", Definition),
     (AgentExitedNonzero, "agent exited nonzero", Task),
     (ProgramExitedNonzero, "program exited nonzero", Task),
@@ -41,6 +41,7 @@ const EXPECTED: [(FailureReason, &str, FailureClass); 21] = [
         Definition,
     ),
     (InterruptedNotResumed, "interrupted and not resumed", Task),
+    (FailureEndReached, "failure end reached", Task),
 ];
 
 #[test]

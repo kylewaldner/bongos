@@ -2766,6 +2766,17 @@
     // Days after which `workflow: clear finished` offers to remove the worktrees and
     // branches of succeeded and cancelled runs.
     "keep_finished_days": 14,
+    // Runs executing at once; the rest wait Queued, in start order.
+    "max_concurrent_runs": 3,
+    // Agent sessions plus programs executing at once across all runs. Null means twice
+    // `max_concurrent_runs`.
+    "max_concurrent_sessions": null,
+    // Fan-out branches of one run executing at once.
+    "max_parallel_branches": 3,
+    // The widest per-item fan-out when a route sets no `width`.
+    "fan_out_width": 8,
+    // Automatic retries of a node that sets none.
+    "retries": 2,
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
