@@ -663,6 +663,39 @@ async fn emacs_zap_commands_run_on_an_editor_by_name(cx: &mut TestAppContext) {
     assert_eq!(clipboard_text(cx).as_deref(), Some("nd"));
 }
 
+/// Recenter and reposition run on an editor when dispatched by name; a count reaches recenter
+/// as an argument, and reposition leaves one caret and no region.
+#[gpui::test]
+async fn emacs_recenter_and_reposition_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    let text = (0..100)
+        .map(|ix| format!("line {ix}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (editor, cx) = emacs_editor(&text, cx).await;
+    let top = |cx: &mut gpui::VisualTestContext| {
+        editor.update(cx, |editor, cx| editor.scroll_position(cx).y as u32)
+    };
+
+    select_offsets(&editor, &[400..400], cx);
+    let row = editor.update(cx, |editor, cx| {
+        let display = editor.display_snapshot(cx);
+        editor.selections.newest_display(&display).head().row().0
+    });
+    run_emacs("emacs::Recenter", serde_json::json!({ "count": 10 }), cx);
+    assert_eq!(top(cx), row.saturating_sub(10));
+    run_emacs("emacs::Recenter", serde_json::json!({}), cx);
+    assert!(top(cx) < row);
+
+    select_offsets(&editor, &[0..4, 20..30], cx);
+    run_emacs("emacs::Reposition", serde_json::json!({}), cx);
+    let selections = editor.update(cx, |editor, cx| {
+        let display = editor.display_snapshot(cx);
+        editor.selections.all_display(&display)
+    });
+    assert_eq!(selections.len(), 1);
+    assert!(selections[0].is_empty());
+}
+
 /// The whitespace commands run on an editor when dispatched by name with their count argument,
 /// as the palette and a keymap entry reach them; two carets are one undo step.
 #[gpui::test]
