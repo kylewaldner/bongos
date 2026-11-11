@@ -2,10 +2,9 @@ use std::time::Duration;
 
 use bongos_minibuffer::SessionView;
 use editor::{Editor, MultiBufferOffset, ToPoint as _};
-use gpui::{AppContext as _, BorrowAppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle};
+use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle};
 use project::Project;
-use settings::SettingsStore;
-use workspace::{AppState, MultiWorkspace, Workspace};
+use workspace::{AppState, MinibufferRouting, MultiWorkspace, Workspace};
 
 use crate::actions::GotoLine;
 use crate::goto_line::GotoLinePreview;
@@ -34,12 +33,8 @@ async fn workspace_editor(
     if routed {
         cx.update(|cx| {
             bongos_minibuffer::init(cx);
-            cx.update_global::<SettingsStore, _>(|store, cx| {
-                store.update_user_settings(cx, |content| {
-                    content.minibuffer.get_or_insert_default().enabled_for =
-                        Some(vec!["goto_line".to_string()]);
-                });
-            });
+            cx.default_global::<MinibufferRouting>()
+                .set_routes(vec!["goto_line".to_string()]);
         });
     }
     let project = Project::test(app_state.fs.clone(), [], cx).await;
