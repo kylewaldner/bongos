@@ -3,10 +3,12 @@
 //! each handler only says that workflows are off, nothing is read or written and no run starts.
 
 mod actions;
+pub mod builtin_merge;
 mod commands;
 pub mod definitions;
 mod engine;
 mod settings;
+pub mod worktrees;
 
 use ::settings::Settings as _;
 use gpui::App;
@@ -28,3 +30,5 @@ mod actions_tests;
 mod commands_tests;
 #[cfg(test)]
 mod definitions_tests;
+#[cfg(test)]
+mod worktree_tests;
