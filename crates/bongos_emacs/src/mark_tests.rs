@@ -659,7 +659,7 @@ async fn ime_composition_gives_zeds_result(cx: &mut TestAppContext) {
 async fn an_explicit_non_empty_range_replaces_as_zed_does(cx: &mut TestAppContext) {
     let mut cx = test_context(cx, "one two ˇthree").await;
     type_into(&mut cx, Some(4..7), "X");
-    cx.assert_editor_state("one X ˇthree");
+    cx.assert_editor_state("one Xˇ three");
 }
 
 #[gpui::test]
