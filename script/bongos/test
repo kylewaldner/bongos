@@ -29,7 +29,8 @@ fi
 
 # nextest's final line: "Summary [ 12.3s] 100 tests run: 99 passed (1 slow), 1 failed, 4 skipped".
 # A timeout counts as a failure (it shows as "N timed out" there and as TIMEOUT in the failures).
-# Skipped tests are reported as ignored.
+# Skipped tests are reported as ignored. A test that failed and then passed on a retry is counted in
+# "passed" and also shown as "N flaky" in the parentheses; it is printed as flaky=N, last.
 summary_hook() {
   local line
   line=$(grep -E '^ *Summary \[' "$LOG" | tail -n1 || true)
@@ -38,12 +39,13 @@ summary_hook() {
     return 0
   fi
   SUMMARY=$(awk '{
-    p = f = s = t = 0
+    p = f = s = t = k = 0
     if (match($0, /[0-9]+ passed/)) p = substr($0, RSTART, RLENGTH) + 0
     if (match($0, /[0-9]+ failed/)) f = substr($0, RSTART, RLENGTH) + 0
     if (match($0, /[0-9]+ skipped/)) s = substr($0, RSTART, RLENGTH) + 0
     if (match($0, /[0-9]+ timed out/)) t = substr($0, RSTART, RLENGTH) + 0
-    printf "passed=%d failed=%d ignored=%d", p, f + t, s
+    if (match($0, /[0-9]+ flaky/)) k = substr($0, RSTART, RLENGTH) + 0
+    printf "passed=%d failed=%d ignored=%d flaky=%d", p, f + t, s, k
   }' <<<"$line")
 }
 
