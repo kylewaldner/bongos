@@ -1065,7 +1065,7 @@ async fn task_mode_chat_reaches_the_real_chat_new(cx: &mut TestAppContext) {
             });
         });
         let fs = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
-        bongos_work::init(fs, bongos_work::WorkDirs { root }, cx);
+        bongos_work::init(fs, bongos_work::WorkDirs::for_test(root), cx);
         bongos_chat::init(
             bongos_chat::ChatDirs {
                 types_root: dir.join("chat-types"),
@@ -1151,13 +1151,7 @@ async fn default_workspace_has_the_chats_panel(cx: &mut TestAppContext) {
     ));
     cx.update(|cx| {
         let fs = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
-        bongos_work::init(
-            fs,
-            bongos_work::WorkDirs {
-                root: dir.join("work"),
-            },
-            cx,
-        );
+        bongos_work::init(fs, bongos_work::WorkDirs::for_test(dir.join("work")), cx);
         bongos_chat::init(
             bongos_chat::ChatDirs {
                 types_root: dir.join("chat-types"),

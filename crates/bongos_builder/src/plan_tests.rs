@@ -210,7 +210,7 @@ async fn harness(
     .map(|(name, value)| (name.to_string(), value))
     .collect();
     cx.update(|cx| {
-        bongos_work::init(fs.clone(), WorkDirs { root }, cx);
+        bongos_work::init(fs.clone(), WorkDirs::for_test(root), cx);
         bongos_chat::init_in(
             home.clone(),
             env,

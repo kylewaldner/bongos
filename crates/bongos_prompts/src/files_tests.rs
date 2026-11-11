@@ -386,7 +386,11 @@ async fn real_link<'a>(
     let executor = cx.executor();
     cx.update(|_, cx| {
         ChatsSettings::register(cx);
-        bongos_work::init(Arc::new(RealFs::new(None, executor)), WorkDirs { root }, cx);
+        bongos_work::init(
+            Arc::new(RealFs::new(None, executor)),
+            WorkDirs::for_test(root),
+            cx,
+        );
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(true);
