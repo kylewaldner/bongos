@@ -19,6 +19,7 @@ pub mod rules;
 pub mod slug;
 pub mod store;
 mod types;
+pub mod worktree_path;
 
 pub use artifacts::{SessionContext, SharedArtifact, session_context, shared_artifacts};
 pub use error::{Error, ErrorKind, Result};
@@ -61,3 +62,6 @@ mod structure_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod worktree_path_tests;
