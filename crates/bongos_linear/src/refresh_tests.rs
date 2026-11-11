@@ -233,6 +233,8 @@ async fn env_with(
             refresh::global(cx).unwrap(),
         )
     });
+    // Before anything is read, so every read state in a test is stamped with the test's clock.
+    cx.update(|cx| refresher.update(cx, |refresher, _| refresher.freeze_clock()));
     let project = Project::test(app_state.fs.clone(), [], cx).await;
     let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let workspace = window
@@ -722,7 +724,7 @@ async fn few_requests_remaining_pause_automatic_refreshes_only(cx: &mut TestAppC
 #[gpui::test]
 async fn a_known_reset_time_lets_automatic_refreshes_try_again(cx: &mut TestAppContext) {
     let (env, cx) = env(cx, true, true, true).await;
-    let soon = crate::client::now_ms() + 5 * 60_000;
+    let soon = env.refresher.read_with(cx, |refresher, _| refresher.now()) + 5 * 60_000;
     env.fake.fail_next(ApiError::RateLimited {
         reset_at: Some(soon),
     });
