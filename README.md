@@ -288,6 +288,63 @@ stops every request. The keys are for the Emacs keymap; every command is also in
 - **Not there yet.** Todos are not synced, a ticket's status is not mirrored back, and there are no
   webhooks.
 
+## Emacs keys
+
+Emacs is the default base keymap, so a fresh install has these keys with no setting. They work in
+editors; terminals keep their own keys except C-g, and the command keys (M-x, C-x ...) work
+everywhere. The tables list the Linux keys; on macOS Command keys stay as they are in Zed.
+
+| Key | Command |
+|---|---|
+| C-f, C-b, C-n, C-p | forward-char, backward-char, next-line, previous-line |
+| C-a, C-e, M-m | beginning of line, end of line, back to indentation |
+| M-f, M-b | forward-word, backward-word |
+| M-<, M->, C-x [, C-x ] | beginning and end of the buffer |
+| C-v, M-v | scroll down, scroll up |
+| M-{, M-} | backward and forward paragraph |
+| M-g | goto-line (a prompt in the minibuffer, with a preview) |
+| C-l, M-r | recenter, reposition |
+| C-s, C-r | isearch |
+| C-x h | mark the whole buffer |
+| C-SPC, C-x C-x | set the mark, exchange point and mark |
+| C-g | keyboard-quit (cancels a prompt, a mark or a search) |
+
+| Key | Editing command |
+|---|---|
+| C-d, M-d, M-DEL | delete a character, kill word, kill word backward |
+| C-k, C-w, M-w, C-y | kill line, kill region or line, copy, yank |
+| C-/, C-_, C-x u | undo |
+| M-u, M-l, M-c | upcase, downcase, capitalize word |
+| C-t, M-t, C-x C-t | transpose characters, words, lines |
+| M-z, M-Z | zap to char, zap up to char (prompts for the character in the minibuffer) |
+| M-SPC, C-BS, C-x C-o | just one space, delete horizontal space, delete blank lines |
+| M-^, M-q | join line, fill paragraph |
+| M-up, M-down | move the line up or down |
+| C-x C-;, C-c ;, C-c y | toggle comment, comment-dwim, duplicate line |
+| C-=, C-- | expand and contract the region |
+
+| Key | Command |
+|---|---|
+| M-x | execute-extended-command (the command palette) |
+| C-x C-f, C-x b | find a file, switch buffer |
+| C-x C-s, C-x C-w, C-x s | save, write file, save all |
+| C-x k, C-x 0, C-x 1 | kill buffer, close the item, close the others |
+| C-x 2, C-x 3, C-x o | split below, split right, other window |
+| C-x C-c | quit |
+| C-h e | show the echo-area messages |
+
+To switch it off, set another base keymap, for example `"base_keymap": "VSCode"`. Any value other
+than `"Emacs"` removes every Emacs key and brings back Zed's keys, and the cursor goes back to a
+bar. The change applies as soon as the settings file is saved.
+
+`emacs.cursor_style` picks the cursor: `"auto"` (the default) is a block while the base keymap is
+Emacs and your `cursor_shape` otherwise, `"emacs"` is always a block and `"modern"` is always a
+bar.
+
+```json
+{ "base_keymap": "VSCode", "emacs": { "cursor_style": "auto" } }
+```
+
 ## Minibuffer
 
 As in Emacs, prompts open in a one-line strip at the bottom of the window, below the status bar,
@@ -297,7 +354,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
