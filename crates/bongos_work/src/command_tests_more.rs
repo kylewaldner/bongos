@@ -403,6 +403,8 @@ async fn a_task_moves_to_another_project_and_back_with_its_files_and_history(
         layout::project_file(&billing).exists()
     })
     .await;
+    cx.executor().timer(std::time::Duration::from_secs(1)).await;
+    cx.run_until_parked();
     assert!(!billing.join(".git").exists());
     assert!(!harness.has_toast(cx));
 
@@ -461,6 +463,8 @@ async fn a_task_moves_to_another_project_and_back_with_its_files_and_history(
         ["moved to project", "moved"],
         "{events:?}"
     );
+    cx.run_until_parked();
+    assert!(!billing.join(".git").exists());
 }
 
 #[gpui::test]
