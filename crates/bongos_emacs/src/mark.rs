@@ -5,13 +5,13 @@
 use bongos_emacs_model::mark_ring::MarkRing;
 use collections::HashMap;
 use editor::{Editor, EditorEvent, SelectionEffects};
-use gpui::{App, Context, Entity, Global, WeakEntity, Window};
+use gpui::{Action as _, App, Context, Entity, EntityId, Global, WeakEntity, Window, WindowId};
 use language::Buffer;
 use multi_buffer::{Anchor, MultiBuffer, MultiBufferOffset, ToOffset as _};
 use text::{BufferId, SelectionGoal, ToOffset as _};
 
-use crate::actions::{ExchangePointAndMark, SetMarkCommand};
-use crate::region;
+use crate::actions::{ExchangePointAndMark, PopMark, SetMarkCommand};
+use crate::{last_command, region};
 
 /// One buffer's mark and ring. The ring never holds the current mark.
 struct BufferMarks {
@@ -25,6 +25,14 @@ struct BufferMarks {
 #[derive(Default)]
 pub struct MarkStore {
     buffers: HashMap<BufferId, BufferMarks>,
+    pop_chain: Option<PopChain>,
+}
+
+/// Where the last pop happened. Another pop directly after it, in the same window and editor,
+/// continues it.
+struct PopChain {
+    window: WindowId,
+    editor: EntityId,
 }
 
 impl Global for MarkStore {}
@@ -202,16 +210,117 @@ fn collapse_to_heads(editor: &mut Editor, window: &mut Window, cx: &mut Context<
     });
 }
 
-/// `set-mark-command`: deactivates an active region (the mark stays), otherwise sets the mark
-/// at the primary cursor, pushing the old one onto the ring, and turns mark mode on. With a
-/// count it only sets, since popping the ring is not implemented yet.
+/// Whether the previous command was a pop (or a `set-mark-command` that popped) in this window
+/// and editor, so a plain `set-mark-command` keeps popping.
+fn pop_chain_continues(editor: &Entity<Editor>, window: &Window, cx: &mut App) -> bool {
+    let popped = matches!(
+        last_command::last_command(window, cx),
+        Some(name) if name == SetMarkCommand::name_for_type() || name == PopMark::name_for_type()
+    );
+    let id = window.window_handle().window_id();
+    let editor = editor.entity_id();
+    popped
+        && store(cx)
+            .pop_chain
+            .as_ref()
+            .is_some_and(|chain| chain.window == id && chain.editor == editor)
+}
+
+/// Pops the mark ring: the cursor goes to the mark, the newest ring entry becomes the mark
+/// and leaves the ring. Entries at the cursor's new place are skipped, so every pop moves or
+/// says why it cannot.
+fn pop_mark(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+    let (multibuffer, cursor) = primary_cursor(editor, cx);
+    let Some(place) = locate(&multibuffer, cursor, cx) else {
+        return;
+    };
+    let snapshot = multibuffer.read(cx).snapshot(cx);
+    let point = place.anchor.to_offset(&place.snapshot);
+    let outcome = {
+        let marks = marks_mut(cx, &place);
+        let Some(mark) = marks.mark else {
+            bongos_minibuffer::message(window, cx, "No mark set in this buffer");
+            return;
+        };
+        let offset = |anchor: &text::Anchor| anchor.to_offset(&place.snapshot);
+        let mut candidate = Some(mark);
+        let mut target = None;
+        while let Some(anchor) = candidate {
+            if offset(&anchor) != point
+                && let Some(resolved) = snapshot.anchor_in_excerpt(anchor)
+            {
+                target = Some((anchor, resolved));
+                break;
+            }
+            candidate = marks.ring.pop();
+        }
+        if let Some((target, _)) = target {
+            let at = offset(&target);
+            marks.mark = Some(target);
+            while let Some(next) = marks.ring.pop() {
+                if offset(&next) != at {
+                    marks.mark = Some(next);
+                    break;
+                }
+            }
+        }
+        target.map(|(_, resolved)| resolved)
+    };
+    let id = window.window_handle().window_id();
+    store(cx).pop_chain = Some(PopChain {
+        window: id,
+        editor: editor.entity_id(),
+    });
+    let Some(target) = outcome else {
+        bongos_minibuffer::message(window, cx, "Mark ring is empty");
+        return;
+    };
+    editor.update(cx, |editor, cx| {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let target = target.to_offset(&snapshot);
+        let newest = editor.selections.newest_anchor().id;
+        let display = editor.display_snapshot(cx);
+        let mut selections = editor.selections.all::<MultiBufferOffset>(&display);
+        for selection in &mut selections {
+            if selection.id == newest {
+                selection.start = target;
+                selection.end = target;
+                selection.reversed = false;
+                selection.goal = SelectionGoal::None;
+            }
+        }
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select(selections);
+        });
+        editor.set_selection_mark_mode(false, cx);
+    });
+}
+
+/// `pop-mark`: pops the mark ring.
+pub(crate) fn pop_mark_command(
+    _: &PopMark,
+    editor: &Entity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    pop_mark(editor, window, cx);
+}
+
+/// `set-mark-command`: pops the ring with a count or right after a pop; otherwise deactivates
+/// an active region (the mark stays), or sets the mark at the primary cursor, pushing the old
+/// one onto the ring, and turns mark mode on.
 pub(crate) fn set_mark_command(
     action: &SetMarkCommand,
     editor: &Entity<Editor>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if action.count.is_none() && any_region_active(editor, cx) {
+    if action.count.is_some() || pop_chain_continues(editor, window, cx) {
+        pop_mark(editor, window, cx);
+        return;
+    }
+    store(cx).pop_chain = None;
+    if any_region_active(editor, cx) {
         let outside_mark_mode = !editor.read(cx).selection_mark_mode();
         let tail = {
             let editor = editor.read(cx);
@@ -230,9 +339,7 @@ pub(crate) fn set_mark_command(
     }
     editor.update(cx, |editor, cx| collapse_to_heads(editor, window, cx));
     push_mark(editor, None, true, window, cx);
-    if action.count.is_none() {
-        bongos_minibuffer::message(window, cx, "Mark set");
-    }
+    bongos_minibuffer::message(window, cx, "Mark set");
 }
 
 /// `exchange-point-and-mark`: with a region, swaps its ends; without one, selects from the
