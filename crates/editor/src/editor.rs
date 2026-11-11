@@ -97,9 +97,10 @@ pub(crate) use edit_prediction::{
 pub use edit_prediction_types::Direction;
 pub use edit_prediction_types::EditPredictionRequestTrigger;
 pub use editor_settings::{
-    CompletionDetailAlignment, CompletionMenuItemKind, CurrentLineHighlight, DiffViewStyle,
-    DocumentColorsRenderMode, EditorSettings, EditorSettingsScrollbarProxy, ScrollBeyondLastLine,
-    ScrollbarAxes, SearchSettings, ShowMinimap, ui_scrollbar_settings_from_raw,
+    CompletionDetailAlignment, CompletionMenuItemKind, CurrentLineHighlight, CursorStyleOverride,
+    DiffViewStyle, DocumentColorsRenderMode, EditorSettings, EditorSettingsScrollbarProxy,
+    ScrollBeyondLastLine, ScrollbarAxes, SearchSettings, ShowMinimap,
+    ui_scrollbar_settings_from_raw,
 };
 pub use element::{
     CursorLayout, EditorElement, HighlightedRange, HighlightedRangeLine, PointForPosition,
@@ -1022,6 +1023,8 @@ pub struct Editor {
     pending_rename: Option<RenameState>,
     searchable: bool,
     cursor_shape: CursorShape,
+    /// A shape that beats the session toggle and the settings, for this editor alone.
+    cursor_shape_override: Option<CursorShape>,
     /// Whether the cursor is offset one character to the left when something is
     /// selected (needed for vim visual mode)
     cursor_offset_on_selection: bool,
@@ -2236,9 +2239,8 @@ impl Editor {
             linked_editing_range_task: None,
             pending_rename: None,
             searchable: !is_minimap,
-            cursor_shape: EditorSettings::get_global(cx)
-                .cursor_shape
-                .unwrap_or_default(),
+            cursor_shape: editor_settings::effective_cursor_shape(None, cx),
+            cursor_shape_override: None,
             cursor_offset_on_selection: false,
             current_line_highlight: None,
             autoindent_mode: Some(AutoindentMode::EachLine),
@@ -2323,6 +2325,9 @@ impl Editor {
                         cx.observe_in(&display_map, window, Self::on_display_map_changed),
                         cx.observe(&blink_manager, |_, _, cx| cx.notify()),
                         cx.observe_global_in::<SettingsStore>(window, Self::settings_changed),
+                        cx.observe_global::<CursorStyleOverride>(|editor, cx| {
+                            editor.refresh_cursor_shape(cx)
+                        }),
                         cx.observe_global_in::<GlobalTheme>(window, Self::theme_changed),
                         observe_buffer_font_size_adjustment(cx, |_, cx| cx.notify()),
                         cx.observe_window_activation(window, |editor, window, cx| {
@@ -3025,6 +3030,26 @@ impl Editor {
         self.blink_manager.update(cx, BlinkManager::show_cursor);
 
         cx.notify();
+    }
+
+    /// Forces a cursor shape on this editor, above the session toggle and the settings; `None`
+    /// gives the decision back to them.
+    pub fn set_cursor_shape_override(
+        &mut self,
+        cursor_shape: Option<CursorShape>,
+        cx: &mut Context<Self>,
+    ) {
+        self.cursor_shape_override = cursor_shape;
+        self.refresh_cursor_shape(cx);
+    }
+
+    /// Recomputes the shape from the override, the session toggle and the settings.
+    fn refresh_cursor_shape(&mut self, cx: &mut Context<Self>) {
+        let cursor_shape = editor_settings::effective_cursor_shape(self.cursor_shape_override, cx);
+        if cursor_shape != self.cursor_shape {
+            self.set_cursor_shape(cursor_shape, cx);
+            cx.emit(EditorEvent::CursorShapeChanged);
+        }
     }
 
     pub fn show_cursor(&mut self, cx: &mut Context<Self>) {
@@ -9690,7 +9715,6 @@ impl Editor {
         self.refresh_edit_prediction(true, false, EditPredictionRequestTrigger::Other, window, cx);
         self.refresh_inline_values(cx);
 
-        let old_cursor_shape = self.cursor_shape;
         let old_breadcrumbs_visible = self.breadcrumbs_visible();
 
         {
@@ -9702,12 +9726,9 @@ impl Editor {
                 self.breadcrumbs_visibility =
                     BreadcrumbsVisibility::new(editor_settings.toolbar.breadcrumbs);
             }
-            self.cursor_shape = editor_settings.cursor_shape.unwrap_or_default();
         }
 
-        if old_cursor_shape != self.cursor_shape {
-            cx.emit(EditorEvent::CursorShapeChanged);
-        }
+        self.refresh_cursor_shape(cx);
 
         if old_breadcrumbs_visible != self.breadcrumbs_visible() {
             cx.emit(EditorEvent::BreadcrumbsChanged);
