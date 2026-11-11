@@ -204,11 +204,27 @@ const EDITOR_KEYS: &[(&str, &str)] = &[
 /// editor without the Emacs base (`None` where Zed's key is a chord prefix there).
 const CONFLICTS: &[(&str, &str, Option<&str>)] = &[
     ("ctrl-k", "emacs::KillLine", None),
-    ("ctrl-w", "emacs::KillRegionOrLine", Some("pane::CloseActiveItem")),
+    (
+        "ctrl-w",
+        "emacs::KillRegionOrLine",
+        Some("pane::CloseActiveItem"),
+    ),
     ("ctrl-l", "emacs::Recenter", Some("editor::SelectLine")),
-    ("ctrl-t", "emacs::TransposeChars", Some("project_symbols::Toggle")),
-    ("ctrl-=", "emacs::ExpandRegion", Some("zed::IncreaseBufferFontSize")),
-    ("ctrl--", "emacs::ContractRegion", Some("zed::DecreaseBufferFontSize")),
+    (
+        "ctrl-t",
+        "emacs::TransposeChars",
+        Some("project_symbols::Toggle"),
+    ),
+    (
+        "ctrl-=",
+        "emacs::ExpandRegion",
+        Some("zed::IncreaseBufferFontSize"),
+    ),
+    (
+        "ctrl--",
+        "emacs::ContractRegion",
+        Some("zed::DecreaseBufferFontSize"),
+    ),
     ("alt-up", "emacs::MoveLineUp", Some("editor::MoveLineUp")),
 ];
 
@@ -359,12 +375,18 @@ async fn emacs_wins_conflicting_keys_only_inside_editors(cx: &mut gpui::TestAppC
         }
     }
     let emacs = Keymap::new(load_all(&LINUX, true, cx));
-    assert!(resolve(&emacs, "ctrl-k", &PANE).1, "ctrl-k chords outside editors");
+    assert!(
+        resolve(&emacs, "ctrl-k", &PANE).1,
+        "ctrl-k chords outside editors"
+    );
     assert_eq!(
         first(&emacs, "ctrl-k e", &PANE),
         Some("pane::CloseItemsToTheLeft")
     );
-    assert_eq!(first(&emacs, "ctrl-w", &PANE), Some("pane::CloseActiveItem"));
+    assert_eq!(
+        first(&emacs, "ctrl-w", &PANE),
+        Some("pane::CloseActiveItem")
+    );
 }
 
 #[gpui::test]
@@ -426,7 +448,10 @@ async fn macos_git_panel_keeps_its_ctrl_g_chords(cx: &mut gpui::TestAppContext) 
     let (names, pending) = resolve(&keymap, "ctrl-g", &git_panel);
     assert!(pending, "ctrl-g waits for the chord in the git panel");
     assert!(!names.contains(&"emacs::KeyboardQuit"), "{names:?}");
-    assert_eq!(first(&keymap, "ctrl-g ctrl-g", &git_panel), Some("git::Fetch"));
+    assert_eq!(
+        first(&keymap, "ctrl-g ctrl-g", &git_panel),
+        Some("git::Fetch")
+    );
     assert_eq!(first(&keymap, "ctrl-g up", &git_panel), Some("git::Push"));
 }
 
@@ -439,7 +464,10 @@ async fn alt_g_is_goto_line_and_cancels_the_git_chords_in_editors(cx: &mut gpui:
     // The exact match fires at once, so `alt-g b/m/r` can no longer be typed in an editor.
     assert!(!pending);
     let zed = Keymap::new(load_all(&LINUX, false, cx));
-    assert!(resolve(&zed, "alt-g", &EDITOR).1, "Zed waits for alt-g b/m/r");
+    assert!(
+        resolve(&zed, "alt-g", &EDITOR).1,
+        "Zed waits for alt-g b/m/r"
+    );
     // The old goto-line chords are gone.
     for input in ["alt-g g", "alt-g alt-g"] {
         assert!(
