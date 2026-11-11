@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod apply;
 mod comments;
+mod goto_line;
 mod kill;
 pub mod kill_sink;
 pub mod last_command;
@@ -23,6 +24,8 @@ mod zap;
 mod apply_tests;
 #[cfg(test)]
 mod comments_tests;
+#[cfg(test)]
+mod goto_line_tests;
 #[cfg(test)]
 mod kill_sink_tests;
 #[cfg(test)]
@@ -88,6 +91,7 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, zap::zap_back_up_to_char_command);
         register(editor, &weak, recenter::recenter_command);
         register(editor, &weak, recenter::reposition_command);
+        register(editor, &weak, goto_line::goto_line_command);
         recenter::init_editor(cx);
     })
     .detach();

@@ -34,6 +34,11 @@ pub struct SessionView {
 }
 
 impl SessionView {
+    /// The text after the input, as a host set it.
+    pub fn status(&self) -> SharedString {
+        self.core.status.borrow().clone()
+    }
+
     pub(crate) fn new(
         core: Rc<Core>,
         source: Source,
