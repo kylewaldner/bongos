@@ -35,8 +35,9 @@ impl TextSource for str {
 
 /// A caret with an optional region. `tail == head` means no region. `active` is whether the
 /// caret's region is active: a non-empty region always is, and an empty one is while mark mode
-/// is on. An active empty region acts on nothing; commands that fall back to the caret's line
-/// when there is no region do so only when the caret is not active.
+/// is on. An active empty region acts on nothing. Only the kill and copy commands
+/// (kill-region-or-line and copy-region-or-line) fall back to the caret's line when there is no
+/// region, and they do so only when the caret is not active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Caret {
     pub head: usize,
