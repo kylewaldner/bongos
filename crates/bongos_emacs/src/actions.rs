@@ -202,3 +202,16 @@ count_action!(
     /// Contracts the selection to the previous smaller syntax node.
     ContractRegion
 );
+actions!(
+    emacs,
+    [
+        /// Swaps the cursor and the mark, or the two ends of the region.
+        ExchangePointAndMark,
+        /// Moves the cursor to the mark and takes the previous mark off the ring.
+        PopMark,
+    ]
+);
+count_action!(
+    /// Sets the mark at the cursor and starts the region, or deactivates the region.
+    SetMarkCommand
+);
