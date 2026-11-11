@@ -489,6 +489,11 @@ pub struct RunState {
     /// same attempt, so a later `NodeStarted` or `DefinitionReloaded` clears it.
     pub ended: Option<(EndState, Option<Failure>)>,
     pub cancelled: bool,
+    /// For each key restarted by a retry step (the first `NodeStarted` after a failed `Ended`, or
+    /// after the `DefinitionReloaded` of a fresh retry), the number of failed finishes it had
+    /// then. Automatic retries count only the failures after it, so a retry step gives the node
+    /// its full `retries` again.
+    pub retry_floors: BTreeMap<NodeKey, usize>,
     /// Events after the attempt closed (`Cancelled`, or `Ended` succeeded) that were not applied:
     /// a closed attempt never runs again (a restart is a new attempt with its own log), so they
     /// can only be damage; the count lets the caller flag them. A `NodeFinished` after the close
@@ -541,6 +546,8 @@ impl RunState {
 /// in `ignored_after_end`.
 pub fn replay(events: &[Event]) -> RunState {
     let mut state = RunState::default();
+    // Set when a failed end is reopened; the next start is the key the retry step reruns.
+    let mut retry_pending = false;
     for event in events {
         if state.is_over() {
             // A finish touches only the running, finished and cost fields, never the lifecycle.
@@ -557,6 +564,16 @@ pub fn replay(events: &[Event]) -> RunState {
             )
         {
             state.ended = None;
+            retry_pending = true;
+        }
+        if retry_pending && let Event::NodeStarted { key, .. } = event {
+            let failed = state
+                .finished
+                .iter()
+                .filter(|finished| &finished.key == key && !finished.succeeded())
+                .count();
+            state.retry_floors.insert(key.clone(), failed);
+            retry_pending = false;
         }
         apply(&mut state, event);
     }
