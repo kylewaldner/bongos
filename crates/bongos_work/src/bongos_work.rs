@@ -46,7 +46,7 @@ pub use registry::{
     ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
     NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart, observe_view_opened,
 };
-pub use repositories::{default_kind, find_repository, resolve_repository};
+pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
 pub use status::{FocusStatus, breadcrumb};
 pub use store::{

@@ -155,11 +155,14 @@ pub struct SettingsContent {
     pub auto_update: Option<bool>,
 
     /// This base keymap settings adjusts the default keybindings in bongos to be similar
-    /// to other common code editors. By default, bongos's keymap closely follows VSCode's
-    /// keymap, with minor adjustments, this corresponds to the "VSCode" setting.
+    /// to other common code editors. By default, bongos uses the Emacs keymap; the "VSCode"
+    /// setting gives a keymap that closely follows VSCode's, with minor adjustments.
     ///
-    /// Default: VSCode
+    /// Default: Emacs
     pub base_keymap: Option<BaseKeymapContent>,
+
+    /// Settings of the Emacs mode.
+    pub emacs: Option<EmacsSettingsContent>,
 
     /// Configuration for the collab panel visual settings.
     pub collaboration_panel: Option<PanelSettingsContent>,
@@ -268,6 +271,8 @@ pub struct SettingsContent {
 
     /// Settings for the Linear sync of tasks.
     pub linear: Option<LinearSettingsContent>,
+    /// Settings for workflows: runs of node graphs on a task.
+    pub workflows: Option<WorkflowsSettingsContent>,
 
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
@@ -463,12 +468,12 @@ pub struct ExtensionsSettingsContent {
     strum::VariantArray,
 )]
 pub enum BaseKeymapContent {
-    #[default]
     VSCode,
     JetBrains,
     SublimeText,
     Atom,
     TextMate,
+    #[default]
     Emacs,
     Cursor,
     None,
@@ -1492,6 +1497,32 @@ pub struct LinearSettingsContent {
     ///
     /// Default: true
     pub enabled: Option<bool>,
+}
+
+/// Settings for workflows.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowsSettingsContent {
+    /// Whether workflows are on. While they are off, bongos starts no run, loads no definition
+    /// and every workflow command is hidden and only says "Workflows are off
+    /// (workflows.enabled)".
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// The directory that holds run and branch worktrees. Null means
+    /// `<repo>/.bongos-worktrees/.runs/`.
+    ///
+    /// Default: null
+    pub worktrees_dir: Option<String>,
+    /// The least free space, in MB, on the disk holding the run worktrees for a run to start.
+    ///
+    /// Default: 2048
+    pub min_free_disk_mb: Option<u64>,
+    /// Days after which `workflow: clear finished` offers to remove the worktrees and branches
+    /// of succeeded and cancelled runs.
+    ///
+    /// Default: 14
+    pub keep_finished_days: Option<u64>,
 }
 
 /// Settings for chat sessions.

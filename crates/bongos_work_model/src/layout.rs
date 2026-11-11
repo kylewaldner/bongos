@@ -18,6 +18,8 @@ pub const PROMPTS_FILE: &str = "prompts.txt";
 pub const TASKS_DIR: &str = "tasks";
 pub const CHATS_DIR: &str = "chats";
 pub const RUNS_DIR: &str = "runs";
+/// A project's directory of workflow definitions (feature 20), never an artifact.
+pub const WORKFLOWS_DIR: &str = "workflows";
 /// The directory of a task's proposal files, `<n>.proposal.txt`.
 pub const PROPOSALS_DIR: &str = "proposals";
 pub const PROJECTS_DIR: &str = "projects";
@@ -34,6 +36,7 @@ const RESERVED: &[&str] = &[
     TASKS_DIR,
     CHATS_DIR,
     RUNS_DIR,
+    WORKFLOWS_DIR,
     // Never an artifact, a task directory or a slug: guards a user's own repository in a task
     // directory.
     ".git",

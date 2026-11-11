@@ -16,7 +16,9 @@ doctest = false
 test-support = []
 
 [dependencies]
+bongos_work_model.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true

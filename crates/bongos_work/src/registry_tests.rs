@@ -13,7 +13,7 @@ use gpui::{App, Entity, TestAppContext, VisualTestContext};
 use serde_json::json;
 
 use crate::changes::{CHANGES_INTERVAL, ChangedCount, count_porcelain};
-use crate::command_tests::{Harness, group_toml, harness, leaf_toml, wait_until};
+use crate::command_tests::{Harness, Input, group_toml, harness, leaf_toml, wait_until};
 use crate::registry::{
     ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
     NeedsYouSource,
@@ -190,6 +190,59 @@ async fn an_active_run_stops_a_second_run_on_the_leaf(cx: &mut TestAppContext) {
         cx.update(|_, cx| LiveModesRegistry::live_modes("l1", cx)),
         LiveModes::default()
     );
+}
+
+/// The commands that change the todos of a task with a run refuse, with the chip of the run, and
+/// write nothing; every other task, and every task once the run ends, is not held back.
+#[gpui::test]
+async fn advance_skip_and_remove_are_refused_while_the_task_has_a_run(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    let todos =
+        |harness: &Harness, cx: &mut VisualTestContext| harness.file(cx, &["backfill"]).todos;
+    let before = todos(&harness, cx);
+    let runs = Rc::new(FakeRuns {
+        task: "l1",
+        run: RefCell::new(Some(run("ship"))),
+        chats: 0,
+    });
+    cx.update(|_, cx| LiveModesRegistry::add_source("runs", runs.clone(), cx));
+
+    let writes = harness.writes(cx);
+    for (name, inputs) in [
+        ("task::Advance", vec![Input::Pick("backfill")]),
+        (
+            "todo::Skip",
+            vec![Input::Pick("backfill"), Input::Pick("implement")],
+        ),
+        (
+            "todo::Remove",
+            vec![Input::Pick("backfill"), Input::Pick("implement")],
+        ),
+    ] {
+        harness.clear_toasts(cx);
+        harness.run(cx, name, &inputs).await;
+        cx.run_until_parked();
+        assert!(harness.has_toast(cx), "{name} says why");
+        assert_eq!(harness.writes(cx), writes, "{name} wrote");
+        assert_eq!(todos(&harness, cx), before, "{name} changed the todos");
+    }
+    assert_eq!(
+        crate::commands::run_refusal("Run in progress: ship, waiting at a gate, step review"),
+        "Run in progress: ship, waiting at a gate, step review; cancel the run first \
+         (workflow: cancel)"
+    );
+
+    // Another task has no run, so it advances.
+    harness
+        .run_and_wait(cx, "task::Advance", &[Input::Pick("alpha")])
+        .await;
+
+    // The run ends: the task advances again.
+    runs.run.borrow_mut().take();
+    harness
+        .run_and_wait(cx, "task::Advance", &[Input::Pick("backfill")])
+        .await;
+    cx.update(|_, cx| LiveModesRegistry::remove_source("runs", cx));
 }
 
 #[test]

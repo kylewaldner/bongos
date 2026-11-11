@@ -659,3 +659,35 @@ fn load_records_the_hash_of_each_model_file_as_read() {
         Some(content_hash(b"schema = 1\n"))
     );
 }
+
+#[test]
+fn a_child_slugged_workflows_still_loads_and_a_workflows_directory_is_no_artifact() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let project = layout::project_dir(root, "invoicing");
+    write(&layout::project_file(&project), &project_toml("Invoicing"));
+    write(
+        &layout::task_file(&project),
+        &task_toml("g1", "Invoicing", ""),
+    );
+    write(&project.join("workflows/ship/workflow.toml"), "definition");
+    let child = layout::child_dir(&project, layout::WORKFLOWS_DIR);
+    write(
+        &layout::task_file(&child),
+        &task_toml("l1", "Workflows", ""),
+    );
+    write(&project.join("notes/n.md"), "note");
+
+    let tree = load(root);
+    assert!(tree.errors.is_empty(), "{:?}", tree.errors);
+    expect_ids(&tree, &["g1", "l1"]);
+    let project = &tree.projects[0];
+    assert_eq!(project.task.children[0].slug, "workflows");
+    let artifacts: Vec<String> = project
+        .task
+        .files
+        .keys()
+        .filter_map(|path| crate::artifacts::artifact_key(path))
+        .collect();
+    assert_eq!(artifacts, ["notes/n.md"]);
+}

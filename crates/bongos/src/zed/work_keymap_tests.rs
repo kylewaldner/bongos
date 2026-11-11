@@ -272,7 +272,7 @@ async fn other_base_keymaps_have_no_work_keys(cx: &mut TestAppContext) {
         ),
     ];
     for (default, others) in bases {
-        // The default base (VSCode) is the default keymap alone.
+        // The first key of each pair is the base; its set is the default keymap alone.
         let mut sets: Vec<Vec<&str>> = vec![vec![default]];
         sets.extend(others.iter().map(|other| vec![*default, *other]));
         for set in sets {

@@ -26,17 +26,34 @@ async fn workspace_editor(
     routed: bool,
     cx: &mut TestAppContext,
 ) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
+    let routes = routed.then(|| vec!["goto_line".to_string()]);
+    workspace_editor_with(routed, routes, cx).await
+}
+
+/// The same with the minibuffer installed and left on its default `minibuffer.enabled_for`.
+async fn workspace_editor_default_routes(
+    cx: &mut TestAppContext,
+) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
+    workspace_editor_with(true, None, cx).await
+}
+
+async fn workspace_editor_with(
+    minibuffer: bool,
+    routes: Option<Vec<String>>,
+    cx: &mut TestAppContext,
+) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
         editor::init(cx);
         crate::init(cx);
         app_state
     });
-    if routed {
+    if minibuffer {
         cx.update(|cx| {
             bongos_minibuffer::init(cx);
-            cx.default_global::<MinibufferRouting>()
-                .set_routes(vec!["goto_line".to_string()]);
+            if let Some(routes) = routes {
+                cx.default_global::<MinibufferRouting>().set_routes(routes);
+            }
         });
     }
     let project = Project::test(app_state.fs.clone(), [], cx).await;
@@ -283,4 +300,16 @@ async fn goto_line_with_a_column_and_a_region(cx: &mut TestAppContext) {
         assert!(selection.is_empty());
         assert_eq!(selection.head().column(), 2);
     });
+}
+
+#[gpui::test]
+async fn goto_line_opens_in_the_strip_with_the_default_settings(cx: &mut TestAppContext) {
+    let (workspace, _editor, mut cx) = workspace_editor_default_routes(cx).await;
+    let cx = &mut cx;
+    cx.update(|_, cx| {
+        assert!(cx.global::<MinibufferRouting>().is_routed("goto_line"));
+        assert!(cx.global::<MinibufferRouting>().is_routed("zap"));
+    });
+    open_prompt(&workspace, true, cx);
+    press("cancel", cx);
 }

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use bongos_work_model::Kind;
 use bongos_work_model::commands::{NewTask, Placement};
 use bongos_work_model::rules::Place;
-use bongos_work_model::store::WorkTree;
-use gpui::{Context, PathPromptOptions, Window};
+use bongos_work_model::store::{Task, WorkTree};
+use gpui::{App, Context, PathPromptOptions, Window};
 use settings::{Settings as _, SettingsContent, WorkRepositoryContent};
 use util::paths::PathExt as _;
 use workspace::Workspace;
@@ -14,7 +14,7 @@ use workspace::Workspace;
 use crate::actions::work;
 use crate::commands::show_toast;
 use crate::settings::Repository;
-use crate::{WorkSettings, WriteError, modals};
+use crate::{WorkSettings, WorkStore, WriteError, modals};
 
 /// The repository of the task with `id`, from the `work.repositories` list. The name comes from
 /// the task's own `repository` field, else the nearest ancestor's, else the project's (when the
@@ -28,6 +28,19 @@ pub fn resolve_repository<'a>(
     let place = Place::locate(tree, id).ok()?;
     let name = place.repository(place.task.file.as_ref()?)?;
     find_repository(repositories, &name)
+}
+
+/// Whether merging the PR of `task` completes its ships todo: the task's own `merge_is_ship`
+/// when set, else the value of its repository, else true (the repository default).
+pub fn merge_is_ship(task: &Task, cx: &App) -> bool {
+    if let Some(own) = task.file.as_ref().and_then(|file| file.merge_is_ship) {
+        return own;
+    }
+    let tree = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot());
+    let repository = tree.as_deref().zip(task.id()).and_then(|(tree, id)| {
+        resolve_repository(tree, id, &WorkSettings::get_global(cx).repositories)
+    });
+    repository.is_none_or(|repository| repository.merge_is_ship)
 }
 
 /// The entry of `repositories` called `name`.

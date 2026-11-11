@@ -29,6 +29,8 @@ pub mod visual_tests;
 pub(crate) mod windows_only_instance;
 #[cfg(test)]
 mod work_keymap_tests;
+#[cfg(test)]
+mod workflow_tests;
 
 use agent_settings::{UserAgentsMdState, init_user_agents_md};
 use agent_ui::AgentDiffToolbar;
@@ -658,6 +660,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         bongos_prompts::register(workspace);
         bongos_builder::register(workspace);
         bongos_linear::register(workspace);
+        bongos_workflow::register(workspace);
         let work_focus = cx.new(bongos_work::FocusStatus::new);
         let prompts_mode_line = cx.new(|_| bongos_prompts::PromptsModeLine::new());
 
@@ -5461,6 +5464,7 @@ mod tests {
                 "context_server",
                 "copilot",
                 "csv",
+                "cursor",
                 "debug_panel",
                 "debugger",
                 "dev",
@@ -5532,6 +5536,7 @@ mod tests {
                 "vim",
                 "window",
                 "work",
+                "workflow",
                 "workspace",
                 "worktree_picker",
                 "zed",

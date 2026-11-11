@@ -1,8 +1,9 @@
 use core::num;
 
-use gpui::App;
+use gpui::{App, Global};
 use language::CursorShape;
 use project::project_settings::DiagnosticSeverity;
+use settings::{BaseKeymap, EmacsCursorStyle, RegisterSetting, RelativeLineNumbers, Settings};
 pub use settings::{
     CodeLens, CompletionDetailAlignment, CompletionMenuItemKind, CurrentLineHighlight, DelayMs,
     DiffViewStyle, DisplayIn, DocumentColorsRenderMode, DoubleClickInMultibuffer,
@@ -10,7 +11,6 @@ pub use settings::{
     MultiCursorModifier, ScrollBeyondLastLine, ScrollbarDiagnostics, SeedQuerySetting, ShowMinimap,
     SnippetSortOrder,
 };
-use settings::{RegisterSetting, RelativeLineNumbers, Settings};
 use ui::scrollbars::ShowScrollbar;
 
 /// Imports from the VSCode settings at
@@ -192,6 +192,45 @@ impl EditorSettings {
     }
 }
 
+/// The cursor shape the session toggle (`cursor: toggle style`) forces on every editor, or
+/// `None` while the settings decide. It lives for the session and is never written to disk;
+/// every editor observes it. A shape set on one editor with
+/// `Editor::set_cursor_shape_override` beats it.
+#[derive(Default)]
+pub struct CursorStyleOverride(pub Option<CursorShape>);
+
+impl Global for CursorStyleOverride {}
+
+impl CursorStyleOverride {
+    /// The shape the toggle forces, if it has been used.
+    pub fn get(cx: &App) -> Option<CursorShape> {
+        cx.try_global::<Self>().and_then(|style| style.0)
+    }
+
+    /// Makes the shape the editors draw now (the previous toggle, else the settings) the other
+    /// of block and bar.
+    pub fn toggle(cx: &mut App) {
+        let next = if effective_cursor_shape(None, cx) == CursorShape::Block {
+            CursorShape::Bar
+        } else {
+            CursorShape::Block
+        };
+        Self::set(next, cx);
+    }
+
+    /// Forces `shape` on every editor that has no override of its own.
+    pub fn set(shape: CursorShape, cx: &mut App) {
+        cx.set_global(Self(Some(shape)));
+    }
+}
+
+/// The shape an editor draws: its own override, else the session toggle, else the settings.
+pub(crate) fn effective_cursor_shape(own: Option<CursorShape>, cx: &App) -> CursorShape {
+    own.or_else(|| CursorStyleOverride::get(cx))
+        .or(EditorSettings::get_global(cx).cursor_shape)
+        .unwrap_or_default()
+}
+
 impl Settings for EditorSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let editor = content.editor.clone();
@@ -205,7 +244,17 @@ impl Settings for EditorSettings {
         let sticky_scroll = editor.sticky_scroll.unwrap();
         Self {
             cursor_blink: editor.cursor_blink.unwrap(),
-            cursor_shape: editor.cursor_shape.map(Into::into),
+            cursor_shape: match content.emacs.as_ref().and_then(|emacs| emacs.cursor_style) {
+                Some(EmacsCursorStyle::Emacs) => Some(CursorShape::Block),
+                Some(EmacsCursorStyle::Modern) => Some(CursorShape::Bar),
+                Some(EmacsCursorStyle::Auto) | None => {
+                    if content.base_keymap.map(BaseKeymap::from) == Some(BaseKeymap::Emacs) {
+                        Some(CursorShape::Block)
+                    } else {
+                        editor.cursor_shape.map(Into::into)
+                    }
+                }
+            },
             current_line_highlight: editor.current_line_highlight.unwrap(),
             selection_highlight: editor.selection_highlight.unwrap(),
             rounded_selection: editor.rounded_selection.unwrap(),
