@@ -28,9 +28,6 @@ retries = 3
 # hit the same overload) and there are 2 retries (3 attempts): a real regression fails all of them.
 # These tests are not measuring time, so they are not in the serial `perf-timing` group.
 #
-#   bongos_linear refresh_tests: asserts a count that is off by one when a refresh lands late.
-#   bongos_kotlin crash_after_exits_nonzero...: the fake server exits on a fixed 200 ms timer started
-#     at spawn, and the test needs the `initialize` reply inside that window.
 #   bongos_kotlin test_progress_drives_indexing_then_ready: polls a real subprocess with a 15 s
 #     wall-clock limit.
 #   db test_simultaneous_db_corruption: times out after 15 s while parking under load.
@@ -41,9 +38,7 @@ retries = 3
 #     bounds.
 [[profile.default.overrides]]
 filter = '''
-(package(=bongos_linear) & test(=refresh_tests::the_window_skips_recent_reads_and_the_command_ignores_it))
-| (binary_id(=bongos_kotlin::fake_kotlin_server) & test(=crash_after_exits_nonzero_and_leaves_its_pid_file))
-| (binary_id(=bongos_kotlin::lifecycle) & test(=test_progress_drives_indexing_then_ready))
+(binary_id(=bongos_kotlin::lifecycle) & test(=test_progress_drives_indexing_then_ready))
 | (package(=db) & test(=tests::test_simultaneous_db_corruption))
 | (package(=editor) & (test(=editor_tests::test_tab_in_leading_whitespace_auto_indents_for_bash) | test(=editor_tests::test_markdown_indents)))
 | (package(=languages) & test(=typescript::tests::test_outline_with_destructuring))
