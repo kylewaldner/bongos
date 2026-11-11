@@ -7,7 +7,7 @@
 //! store changes. What the rows say is decided by [`analyze`] and [`build`], which have no
 //! window or entity in them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -104,10 +104,11 @@ pub(crate) fn analyze(
     tree: &WorkTree,
     live: &LiveSet,
     todo_warning: u32,
+    workflow_names: Option<Arc<BTreeSet<String>>>,
 ) -> Analysis {
     let parsed = parse(text);
     let checks = Checks {
-        workflows: None,
+        workflows: workflow_names.as_deref().cloned(),
         todo_warning: todo_warning as usize,
         file: Some(ProposalFile {
             number,
@@ -645,6 +646,7 @@ impl ProposalView {
                 tree,
                 &live::collect(tree, cx),
                 TaskBuilderSettings::get_global(cx).todo_warning,
+                live::workflow_names(cx),
             )),
             _ => None,
         };

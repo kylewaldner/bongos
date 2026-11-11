@@ -24,7 +24,7 @@
 //! that waited never applies on its own later. Files present at the first scan (at start, or when
 //! the builder or the store is turned on) are only classified, never applied on their own.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -249,6 +249,7 @@ fn scan(cx: &mut App) {
     };
     let fs = store.read(cx).fs();
     let live = live::collect(&tree, cx);
+    let workflow_names = live::workflow_names(cx);
     let chats = chats(cx);
     let later = cx.global_mut::<Later>();
     later.scanning = true;
@@ -278,8 +279,17 @@ fn scan(cx: &mut App) {
                     },
                 };
                 let hash = file_hash(&bytes);
-                let (status, auto) =
-                    classify(&bytes, number, task, &hash, &tree, &live, &chats, switch);
+                let (status, auto) = classify(
+                    &bytes,
+                    number,
+                    task,
+                    &hash,
+                    &tree,
+                    &live,
+                    workflow_names.clone(),
+                    &chats,
+                    switch,
+                );
                 scanned.push((
                     path,
                     Entry {
@@ -313,6 +323,7 @@ fn classify(
     hash: &str,
     tree: &WorkTree,
     live: &LiveSet,
+    workflow_names: Option<Arc<BTreeSet<String>>>,
     chats: &Chats,
     switch: Switch,
 ) -> (Status, bool) {
@@ -332,7 +343,15 @@ fn classify(
     let Some(task_id) = task.id() else {
         return (Status::Pending, false);
     };
-    let analysis = view::analyze(text, number, task_id, tree, live, switch.todo_warning);
+    let analysis = view::analyze(
+        text,
+        number,
+        task_id,
+        tree,
+        live,
+        switch.todo_warning,
+        workflow_names,
+    );
     let errors = errors(&analysis.problems);
     if errors > 0 {
         return (Status::Problems(errors), false);
@@ -453,10 +472,19 @@ pub(crate) fn auto_apply_command(
     tree: &WorkTree,
     ctx: &WorkContext,
     live: &LiveSet,
+    workflow_names: Option<Arc<BTreeSet<String>>>,
 ) -> Outcome {
     let text =
         std::str::from_utf8(bytes).map_err(|_| format!("proposal {number} is not UTF-8 text"))?;
-    let analysis = view::analyze(text, number, holder, tree, live, switch.todo_warning);
+    let analysis = view::analyze(
+        text,
+        number,
+        holder,
+        tree,
+        live,
+        switch.todo_warning,
+        workflow_names,
+    );
     let errors = errors(&analysis.problems);
     if errors > 0 {
         return Err(format!("proposal {number} has errors"));
@@ -589,6 +617,7 @@ fn run_queue(cx: &mut App) {
                         .snapshot()
                         .map(|now| live::collect(&now, cx))
                         .unwrap_or_default();
+                    let workflow_names = live::workflow_names(cx);
                     let chats = chats(cx);
                     let switch = Switch::read(cx);
                     let holder = entry.task_id.clone();
@@ -601,7 +630,15 @@ fn run_queue(cx: &mut App) {
                                     return Err(reason.clone());
                                 }
                                 auto_apply_command(
-                                    &bytes, &holder, number, &chats, switch, tree, ctx, &live,
+                                    &bytes,
+                                    &holder,
+                                    number,
+                                    &chats,
+                                    switch,
+                                    tree,
+                                    ctx,
+                                    &live,
+                                    workflow_names.clone(),
                                 )
                             },
                             cx,

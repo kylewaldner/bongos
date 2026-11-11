@@ -37,6 +37,7 @@ pub use bongos_builder_model as model;
 pub use context::{MAX_PRINTED_LINES, PLAN_TYPE, plan_section, pointer_section};
 pub use format_file::{BuilderDirs, FORMAT_FILE_NAME};
 pub use language::{FILE_SUFFIX, NAME as LANGUAGE_NAME, register_language};
+pub use live::set_workflow_names;
 pub use plan::plan_todos;
 pub use propose::is_untouched;
 pub use settings::TaskBuilderSettings;
