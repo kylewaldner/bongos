@@ -49,6 +49,7 @@ struct Inner {
     calls: Vec<Call>,
     fail_next: Option<ApiError>,
     page_size: Option<usize>,
+    low_requests: Option<Option<u64>>,
 }
 
 #[derive(Clone)]
@@ -72,6 +73,7 @@ impl FakeLinear {
                 calls: Vec::new(),
                 fail_next: None,
                 page_size: None,
+                low_requests: None,
             })),
         }
     }
@@ -101,6 +103,11 @@ impl FakeLinear {
     /// Makes the next call return `error` (it is still recorded).
     pub fn fail_next(&self, error: ApiError) {
         self.lock().fail_next = Some(error);
+    }
+
+    /// Makes `low_requests` report a nearly used-up window, with this reset time.
+    pub fn set_low_requests(&self, reset_at: Option<Option<u64>>) {
+        self.lock().low_requests = reset_at;
     }
 
     /// Overrides the page size used for subtickets (first page and follow-ups).
@@ -202,6 +209,10 @@ fn find_id(inner: &Inner, reference: &IssueRef) -> Option<String> {
 }
 
 impl LinearApi for FakeLinear {
+    fn low_requests(&self) -> Option<Option<u64>> {
+        self.lock().low_requests
+    }
+
     fn issues(&self, ids: Vec<IssueRef>) -> BoxFuture<'static, Result<Vec<Issue>, ApiError>> {
         let call = Call::Issues(ids.iter().map(IssueRef::as_arg).collect());
         let result = self.begin(call).map(|inner| {

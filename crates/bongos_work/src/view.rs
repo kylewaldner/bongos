@@ -505,6 +505,16 @@ fn add_task(
         Shape::Group => {
             let roll = rollup(task, tree, needs_set);
             details.push(rollup_text(&roll));
+            if let Some(linear) = task.file.as_ref().and_then(|file| file.linear.clone()) {
+                details.push(linear);
+            }
+            if let Some(id) = task.id() {
+                details.extend(
+                    (inputs.row_chips)(id)
+                        .into_iter()
+                        .map(|chip| chip.to_string()),
+                );
+            }
             if archived {
                 details.push("archived".to_string());
             }

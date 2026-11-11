@@ -585,6 +585,7 @@ impl Refresher {
                 step.error = Some(error);
             }
         }
+        linear.update(cx, |linear, _| linear.note_low_requests());
         crate::chips::changed(cx);
         step
     }

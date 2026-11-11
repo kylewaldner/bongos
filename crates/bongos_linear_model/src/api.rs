@@ -188,4 +188,9 @@ pub trait LinearApi: Send + Sync {
     fn create(&self, input: NewIssue) -> BoxFuture<'static, Result<IssueSummary, ApiError>>;
     /// Checks the credentials and returns the workspace name.
     fn viewer(&self) -> BoxFuture<'static, Result<String, ApiError>>;
+    /// `Some(reset_at)` when the last response said fewer than 20 requests remain (the reset time
+    /// in Unix milliseconds, when it sent one); automatic refreshes then pause.
+    fn low_requests(&self) -> Option<Option<u64>> {
+        None
+    }
 }

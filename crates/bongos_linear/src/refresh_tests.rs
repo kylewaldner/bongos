@@ -705,6 +705,21 @@ async fn after_a_rate_limit_only_the_command_tries(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn few_requests_remaining_pause_automatic_refreshes_only(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true, true, true).await;
+    env.fake.set_low_requests(Some(None));
+    env.command(cx).await;
+    assert_eq!(env.calls().len(), 1);
+    env.advance(WINDOW_MS + 1, cx);
+    env.open_view(cx).await;
+    env.focus("l2", cx);
+    env.settle(cx).await;
+    assert_eq!(env.calls().len(), 1, "automatic refreshes pause");
+    env.command(cx).await;
+    assert_eq!(env.calls().len(), 2, "the command still reads");
+}
+
+#[gpui::test]
 async fn a_known_reset_time_lets_automatic_refreshes_try_again(cx: &mut TestAppContext) {
     let (env, cx) = env(cx, true, true, true).await;
     let soon = crate::client::now_ms() + 5 * 60_000;

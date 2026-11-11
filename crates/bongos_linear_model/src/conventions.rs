@@ -15,23 +15,10 @@ pub fn pr_title(file: &TaskFile) -> Option<String> {
     Some(format!("{identifier} {}", file.goal.trim()))
 }
 
-/// The branch segment for a synced link: `rules::linear_branch_segment`, the one implementation,
-/// with the cases it does not handle guarded. An empty template, or one ending in `/`, takes
-/// `{slug}` as its last segment (they would otherwise give `seq-121-` or `kyle/seq-121-`); an
-/// empty slug leaves the identifier alone.
+/// The branch segment for a synced link: `rules::linear_branch_segment`, the one implementation
+/// (it guards an empty template, a template ending in `/` and an empty slug).
 pub fn branch_segment(identifier: &str, template: &str, slug: &str) -> String {
-    let template = template.trim();
-    let template = if template.is_empty() || template.ends_with('/') {
-        format!("{template}{{slug}}")
-    } else {
-        template.to_string()
-    };
-    let segment = linear_branch_segment(identifier, &template, slug);
-    if slug.is_empty() {
-        segment.trim_end_matches('-').to_string()
-    } else {
-        segment
-    }
+    linear_branch_segment(identifier, template, slug)
 }
 
 /// [`branch_segment`] for a task: `None` unless it has a synced link, which keeps today's rule.

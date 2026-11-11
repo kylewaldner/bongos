@@ -524,6 +524,40 @@ async fn row_chips_follow_the_identifier_and_leave_a_row_alone_without_a_source(
 }
 
 #[gpui::test]
+async fn a_linked_group_row_shows_its_identifier_and_chips(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    // Give the group `phase` (`g2`) an identifier; it has no todos, so it stays a group.
+    let mut file = TaskFile::new("Phase", Kind::Document);
+    file.id = "g2".to_string();
+    file.linear = Some("INV-8".to_string());
+    write(
+        &layout::task_file(&harness.task_dir(&["phase"])),
+        &serialize_task(&file).unwrap(),
+    );
+    wait_until(cx, "the group identifier", |cx| {
+        harness
+            .tree(cx)
+            .task_by_id("g2")
+            .is_some_and(|task| task.file.as_ref().is_some_and(|file| file.linear.is_some()))
+    })
+    .await;
+    let source = Rc::new(FakeChips {
+        task: "g2",
+        chips: vec!["1 suggestion"],
+    });
+    cx.update(|_, cx| RowChipsRegistry::add_source("linear", source, cx));
+    let panel = open_panel(&harness, cx).await;
+    press(cx, menu::Confirm);
+    let level = lines(&panel, cx);
+    let at = level
+        .iter()
+        .position(|line| line.contains("Phase"))
+        .unwrap_or_else(|| panic!("no Phase row in {level:?}"));
+    let detail = &level[at + 1];
+    assert!(detail.ends_with("INV-8 \u{b7} 1 suggestion"), "{detail}");
+}
+
+#[gpui::test]
 async fn view_observers_fire_when_the_panel_activates_and_on_task_focus(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx, true, true).await;
     cx.update(|_, cx| {
