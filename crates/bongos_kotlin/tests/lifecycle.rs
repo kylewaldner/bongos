@@ -36,6 +36,8 @@ struct Setup {
     worktree_ids: Vec<WorktreeId>,
     dirs: KotlinDirs,
     pids: PathBuf,
+    /// The fake server's progress gates (`BONGOS_FAKE_LSP_GATES`).
+    gates: PathBuf,
     _temp: tempfile::TempDir,
     _buffers: Vec<Entity<language::Buffer>>,
     _handles: Vec<project::lsp_store::OpenLspBufferHandle>,
@@ -57,6 +59,11 @@ impl Setup {
     fn status(&self, cx: &mut TestAppContext) -> Option<ServerStatus> {
         self.manager
             .read_with(cx, |manager, _| manager.status(self.worktree_id).cloned())
+    }
+
+    /// Lets the fake server send the report of the progress step titled `title`.
+    fn open_gate(&self, title: &str) {
+        fs::write(self.gates.join(title), "").unwrap();
     }
 
     fn log(&self) -> String {
@@ -115,6 +122,8 @@ async fn start_worktrees(
     let temp = tempfile::tempdir().unwrap();
     let pids = temp.path().join("pids");
     fs::create_dir_all(&pids).unwrap();
+    let gates = temp.path().join("gates");
+    fs::create_dir_all(&gates).unwrap();
     let roots: Vec<PathBuf> = (0..count)
         .map(|index| temp.path().join(format!("project{index}")))
         .collect();
@@ -138,7 +147,11 @@ async fn start_worktrees(
         let settings = serde_json::json!({
             "lsp": { "kotlin": { "binary": {
                 "path": binary,
-                "env": { "BONGOS_FAKE_LSP_PIDS": pids, "BONGOS_FAKE_LSP_MODE": mode },
+                "env": {
+                    "BONGOS_FAKE_LSP_PIDS": pids,
+                    "BONGOS_FAKE_LSP_MODE": mode,
+                    "BONGOS_FAKE_LSP_GATES": gates,
+                },
             } } }
         });
         cx.update_global::<SettingsStore, _>(|store, cx| {
@@ -188,6 +201,7 @@ async fn start_worktrees(
         worktree_ids,
         dirs,
         pids,
+        gates,
         _temp: temp,
         _buffers: buffers,
         _handles: handles,
@@ -273,6 +287,20 @@ async fn test_restart_leaves_one_live_pid_and_reaps_the_old_one(cx: &mut TestApp
 #[gpui::test]
 async fn test_progress_drives_indexing_then_ready(cx: &mut TestAppContext) {
     let setup = start(cx, Path::new(FAKE_SERVER), "progress").await;
+    setup.open_gate("Importing");
+    // `LspStore` drops a report that comes less than `SERVER_PROGRESS_THROTTLE_TIMEOUT` after its
+    // begin on the project's fake clock. A slow test thread can handle both in one round, at one
+    // fake instant, so the server holds the report until the begin has been handled and the clock
+    // has moved past the throttle.
+    setup.wait_until(cx, "indexing to begin", |cx| {
+        setup.status(cx)
+            == Some(ServerStatus::Indexing {
+                label: "Indexing".into(),
+            })
+    });
+    cx.executor()
+        .advance_clock(project::SERVER_PROGRESS_THROTTLE_TIMEOUT);
+    setup.open_gate("Indexing");
     setup.wait_until(cx, "indexing to be logged", |_| {
         setup.log().contains("indexing 3/5 modules")
     });
