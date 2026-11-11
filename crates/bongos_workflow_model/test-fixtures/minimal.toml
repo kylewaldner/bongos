@@ -1,0 +1,11 @@
+schema = 1
+name = "tiny"
+start = "only"
+
+[nodes.only]
+kind = "program"
+use = "wait"
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"

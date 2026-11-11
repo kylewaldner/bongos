@@ -1,0 +1,18 @@
+schema = 1
+name = "heal me"
+start = "work"
+heal = true
+
+[extras]
+anything = 1
+
+[nodes.work]
+kind = "agent"
+prompt = "work.md"
+sandbox = "strict"
+output = { done = { type = "text" } }
+routes = [{ to = "finish" }]
+
+[ends.finish]
+kind = "success"
+flavor = "plain"
