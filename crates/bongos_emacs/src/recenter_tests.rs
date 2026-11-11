@@ -23,7 +23,7 @@ async fn test_context(cx: &mut TestAppContext) -> EditorTestContext {
         .collect::<Vec<_>>()
         .join("\n");
     cx.set_state(&format!("ˇ{text}"));
-    cx.update_editor(|editor, window, cx| {
+    cx.update_editor(|editor, _window, cx| {
         editor.set_vertical_scroll_margin(2, cx);
     });
     cx
@@ -31,11 +31,10 @@ async fn test_context(cx: &mut TestAppContext) -> EditorTestContext {
 
 /// The caret row, and its row inside the window.
 fn rows(cx: &mut EditorTestContext) -> (u32, u32) {
-    cx.update_editor(|editor, window, cx| {
+    cx.update_editor(|editor, _window, cx| {
         let display = editor.display_snapshot(cx);
         let row = editor.selections.newest_display(&display).head().row().0;
         let top = editor.scroll_position(cx).y as u32;
-        let _ = window;
         (row, row - top)
     })
 }
