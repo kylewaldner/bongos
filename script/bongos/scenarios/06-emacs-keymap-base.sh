@@ -18,6 +18,10 @@ fi
 
 CONFIG_DIR="$HOME/$BONGOS_CONFIG_PATH"
 SETTINGS_FILE="$CONFIG_DIR/settings.json"
+# Write in place: a rename over the file would end the app's watch on it after the first write.
+atomic_write() {
+  printf '%s\n' "$2" >"$1"
+}
 GLOBAL_FILE="$CONFIG_DIR/global_settings.json"
 STRIP_ROWS=40
 
@@ -70,11 +74,7 @@ poll 30 "C-k and C-x C-s to change the file" line_killed
 shot emacs-default
 say "smoke: screenshot $RUN/emacs-default.png"
 
-cat >"$SETTINGS_FILE" <<'JSON'
-{
-  "base_keymap": "VSCode"
-}
-JSON
+atomic_write "$SETTINGS_FILE" '{ "base_keymap": "VSCode" }'
 sleep 3
 wait_for_settled
 closed=$(bottom_hash)

@@ -291,8 +291,8 @@ stops every request. The keys are for the Emacs keymap; every command is also in
 ## Emacs keys
 
 Emacs is the default base keymap, so a fresh install has these keys with no setting. They work in
-editors; terminals keep their own keys except C-g, and the command keys (M-x, C-x ...) work
-everywhere. The tables list the Linux keys; on macOS Command keys stay as they are in Zed.
+editors; terminals keep their own keys except C-c, C-g and the C-x chords C-x C-c, C-x C-f,
+C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere else. The tables list the Linux keys; on macOS Command keys stay as they are in Zed.
 
 | Key | Command |
 |---|---|
