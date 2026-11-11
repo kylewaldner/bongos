@@ -2314,6 +2314,7 @@ dependencies = [
  "bongos_minibuffer",
  "collections",
  "editor",
+ "git",
  "gpui",
  "language",
  "multi_buffer",
@@ -2324,6 +2325,7 @@ dependencies = [
  "text",
  "theme",
  "theme_settings",
+ "tree-sitter-rust",
  "workspace",
 ]
 

@@ -14,6 +14,7 @@ mod motion;
 pub mod quit;
 mod recenter;
 pub mod region;
+mod region_commands;
 pub mod snapshot_text;
 mod space;
 mod transpose;
@@ -37,7 +38,11 @@ mod lines_tests;
 #[cfg(test)]
 mod motion_tests;
 #[cfg(test)]
+mod quit_tests;
+#[cfg(test)]
 mod recenter_tests;
+#[cfg(test)]
+mod region_tests;
 #[cfg(test)]
 mod space_tests;
 #[cfg(test)]
@@ -57,6 +62,7 @@ pub use last_command::last_command;
 /// tracker. Actions without a handler stay undispatchable, so only working commands reach M-x.
 pub fn init(cx: &mut App) {
     last_command::init(cx);
+    quit::init(cx);
     cx.observe_new(|editor: &mut Editor, _window, cx| {
         let weak = cx.entity().downgrade();
         register(editor, &weak, motion::forward_word);
@@ -92,6 +98,9 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, recenter::recenter_command);
         register(editor, &weak, recenter::reposition_command);
         register(editor, &weak, goto_line::goto_line_command);
+        register(editor, &weak, region_commands::expand_region_command);
+        register(editor, &weak, region_commands::contract_region_command);
+        register(editor, &weak, quit::keyboard_quit_command);
         recenter::init_editor(cx);
     })
     .detach();

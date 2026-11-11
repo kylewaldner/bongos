@@ -1182,3 +1182,202 @@ async fn default_workspace_has_the_chats_panel(cx: &mut TestAppContext) {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// C-g in an idle full editor runs no other action: the quit propagates, and with Zed's
+/// `go_to_line::Toggle` binding unbound (as the Emacs keymap does) nothing else is reached.
+#[gpui::test]
+async fn emacs_idle_quit_in_a_full_editor_runs_no_other_action(cx: &mut TestAppContext) {
+    use gpui::KeyBinding;
+
+    let (editor, cx) = emacs_editor("one two", cx).await;
+    let actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+    let seen = actions.clone();
+    cx.update(|_, cx| {
+        let seen = seen.clone();
+        cx.observe_keystrokes(move |event, _, _| {
+            if let Some(action) = &event.action {
+                seen.borrow_mut().push(action.name());
+            }
+        })
+        .detach();
+        cx.bind_keys([
+            KeyBinding::new(
+                "ctrl-g",
+                editor::actions::ToggleGoToLine,
+                Some("Editor && mode == full"),
+            ),
+            KeyBinding::new(
+                "ctrl-g",
+                gpui::Unbind("go_to_line::Toggle".into()),
+                Some("Editor"),
+            ),
+            KeyBinding::new(
+                "ctrl-g",
+                bongos_emacs::actions::KeyboardQuit,
+                Some("Editor"),
+            ),
+        ]);
+    });
+    let toggled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = toggled.clone();
+    editor.update(cx, |editor, _| {
+        editor
+            .register_action(move |_: &editor::actions::ToggleGoToLine, _, _| flag.set(true))
+            .detach();
+    });
+    cx.simulate_keystrokes("ctrl-g");
+    cx.run_until_parked();
+    assert!(!toggled.get());
+    assert!(
+        !actions.borrow().contains(&"go_to_line::Toggle"),
+        "ran {:?}",
+        actions.borrow()
+    );
+    editor.update(cx, |editor, cx| assert_eq!(editor.text(cx), "one two"));
+}
+
+struct QuitPickerDelegate {
+    dismissed: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl picker::PickerDelegate for QuitPickerDelegate {
+    type ListItem = ui::ListItem;
+
+    fn name() -> &'static str {
+        "quit_test"
+    }
+
+    fn match_count(&self) -> usize {
+        0
+    }
+
+    fn selected_index(&self) -> usize {
+        0
+    }
+
+    fn set_selected_index(
+        &mut self,
+        _: usize,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<picker::Picker<Self>>,
+    ) {
+    }
+
+    fn placeholder_text(&self, _: &mut gpui::Window, _: &mut gpui::App) -> std::sync::Arc<str> {
+        "Test".into()
+    }
+
+    fn update_matches(
+        &mut self,
+        _: String,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<picker::Picker<Self>>,
+    ) -> gpui::Task<()> {
+        gpui::Task::ready(())
+    }
+
+    fn confirm(
+        &mut self,
+        _: bool,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<picker::Picker<Self>>,
+    ) {
+    }
+
+    fn dismissed(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<picker::Picker<Self>>) {
+        self.dismissed.set(true);
+    }
+
+    fn render_match(
+        &self,
+        _: usize,
+        _: bool,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<picker::Picker<Self>>,
+    ) -> Option<Self::ListItem> {
+        None
+    }
+}
+
+struct QuitPickerModal {
+    picker: gpui::Entity<picker::Picker<QuitPickerDelegate>>,
+}
+
+impl gpui::EventEmitter<gpui::DismissEvent> for QuitPickerModal {}
+impl workspace::ModalView for QuitPickerModal {}
+impl gpui::Focusable for QuitPickerModal {
+    fn focus_handle(&self, cx: &gpui::App) -> gpui::FocusHandle {
+        self.picker.focus_handle(cx)
+    }
+}
+impl gpui::Render for QuitPickerModal {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        self.picker.clone()
+    }
+}
+
+/// C-g in a centered picker's query editor is not stolen by the quit handlers: it reaches
+/// `menu::Cancel`, which runs the delegate's `dismissed` (a direct `hide_modal` would skip it).
+#[gpui::test]
+async fn emacs_quit_in_a_picker_query_editor_closes_it_through_cancel(cx: &mut TestAppContext) {
+    use gpui::{AppContext as _, KeyBinding};
+    use workspace::{AppState, MultiWorkspace};
+
+    let app_state = init_keymap_test(cx);
+    let _: &std::sync::Arc<AppState> = &app_state;
+    cx.update(|cx| {
+        editor::init(cx);
+        bongos_emacs::init(cx);
+        cx.bind_keys([
+            KeyBinding::new(
+                "ctrl-g",
+                bongos_emacs::actions::KeyboardQuit,
+                Some("Workspace"),
+            ),
+            KeyBinding::new("ctrl-g", menu::Cancel, None),
+            KeyBinding::new(
+                "ctrl-g",
+                bongos_emacs::actions::KeyboardQuit,
+                Some("Editor"),
+            ),
+        ]);
+    });
+    let project = project::Project::test(app_state.fs.clone(), [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+    let dismissed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = dismissed.clone();
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.toggle_modal(window, cx, move |window, cx| {
+            let picker = cx.new(|cx| {
+                picker::Picker::uniform_list(QuitPickerDelegate { dismissed: flag }, window, cx)
+            });
+            cx.subscribe(&picker, |_, _, _: &gpui::DismissEvent, cx| {
+                cx.emit(gpui::DismissEvent)
+            })
+            .detach();
+            QuitPickerModal { picker }
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = (window, cx);
+    });
+    workspace.update_in(cx, |workspace, window, cx| {
+        assert!(workspace.has_active_modal(window, cx));
+        assert!(workspace.focus_in_modal(window, cx));
+    });
+    cx.simulate_keystrokes("ctrl-g");
+    cx.run_until_parked();
+    assert!(dismissed.get());
+    workspace.update_in(cx, |workspace, window, cx| {
+        assert!(!workspace.has_active_modal(window, cx));
+    });
+}
