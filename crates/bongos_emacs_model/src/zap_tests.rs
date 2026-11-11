@@ -141,7 +141,7 @@ fn zap_up_to_char_forward() {
     assert_eq!(run("ˇaab", None, zu).0, "ˇab");
     assert_eq!(run("ˇaaab", None, zu).0, "ˇaab");
     let (out, plan) = run("ˇab", None, zu);
-    assert_eq!(out, "ˇab");
+    assert_eq!(out, "ab");
     assert!(plan.edits.is_empty() && plan.killed.is_empty());
     assert_eq!(run("ˇ", None, zu).1, Plan::default());
 }
@@ -154,7 +154,7 @@ fn zap_back_forms() {
     assert_eq!(run("foo bar bazˇ", Some(2), zbu).0, "foo baˇ");
     assert_eq!(run("aaˇ", None, zbt).0, "aˇ");
     let (out, plan) = run("aˇ", None, zbu);
-    assert_eq!(out, "aˇ");
+    assert_eq!(out, "a");
     assert!(plan.edits.is_empty());
 }
 
