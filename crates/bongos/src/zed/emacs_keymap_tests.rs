@@ -597,7 +597,7 @@ async fn another_base_keymap_has_no_emacs_binding(cx: &mut gpui::TestAppContext)
     super::tests::init_keymap_test(cx);
     let default_only = Keymap::new(load_all(&LINUX, false, cx));
     let keymap = cx.update(|cx| {
-        settings::SettingsStore::update_global(cx, |store, cx| {
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |settings| {
                 settings.base_keymap = Some(settings::BaseKeymapContent::VSCode);
             });
