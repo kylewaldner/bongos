@@ -1,9 +1,15 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use editor::actions::{SelectAll, SelectRight};
 use editor::test::editor_test_context::EditorTestContext;
 use editor::{Editor, EditorMode};
 use gpui::{AppContext as _, Entity, Modifiers, MouseButton, TestAppContext};
 use multi_buffer::MultiBuffer;
 use text::ToOffset as _;
+use workspace::MinibufferRouting;
+
+use crate::actions::{ExchangePointAndMark, ForwardWord, KeyboardQuit, SetMarkCommand};
 
 use crate::apply_tests::init_test;
 use crate::mark::{mark_for, push_mark, ring_for};
@@ -198,4 +204,171 @@ async fn shift_selection_and_select_all_do_not_set_the_mark(cx: &mut TestAppCont
     cx.dispatch_action(SelectRight);
     cx.dispatch_action(SelectAll);
     assert_eq!(marks(&mut cx), (Some(4), vec![]));
+}
+
+fn echo(cx: &mut EditorTestContext) -> Rc<RefCell<Vec<String>>> {
+    let messages = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let messages = messages.clone();
+        cx.default_global::<MinibufferRouting>()
+            .set_message_hook(Some(Rc::new(move |_, _, text, _| {
+                messages.borrow_mut().push(text.to_string());
+                true
+            })));
+    });
+    messages
+}
+
+fn set_mark_command(cx: &mut EditorTestContext) {
+    cx.dispatch_action(SetMarkCommand { count: None });
+}
+
+/// A forward word as the keymap sends it in selection mode, with `select`.
+fn forward_word(cx: &mut EditorTestContext) {
+    cx.dispatch_action(ForwardWord {
+        count: None,
+        select: true,
+    });
+}
+
+#[gpui::test]
+async fn set_mark_command_sets_the_mark_and_the_region_follows_motions(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇone two three").await;
+    let messages = echo(&mut cx);
+    set_mark_command(&mut cx);
+    assert_eq!(*messages.borrow(), vec!["Mark set"]);
+    assert_eq!(marks(&mut cx), (Some(0), vec![]));
+    assert!(cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+
+    forward_word(&mut cx);
+    cx.assert_editor_state("«oneˇ» two three");
+    forward_word(&mut cx);
+    cx.assert_editor_state("«one twoˇ» three");
+}
+
+#[gpui::test]
+async fn set_mark_command_twice_deactivates_and_keeps_the_mark(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇone two three").await;
+    let messages = echo(&mut cx);
+    set_mark_command(&mut cx);
+    forward_word(&mut cx);
+    set_mark_command(&mut cx);
+    assert_eq!(*messages.borrow(), vec!["Mark set", "Mark deactivated"]);
+    cx.assert_editor_state("oneˇ two three");
+    assert!(!cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+    assert_eq!(marks(&mut cx), (Some(0), vec![]));
+
+    // C-SPC C-SPC leaves the mark set and the previous mark on the ring.
+    cx.set_selections_state("one tˇwo three");
+    set_mark_command(&mut cx);
+    assert_eq!(marks(&mut cx), (Some(5), vec![0]));
+    set_mark_command(&mut cx);
+    assert_eq!(marks(&mut cx), (Some(5), vec![0]));
+    cx.assert_editor_state("one tˇwo three");
+
+    // C-x C-x with the mark at the cursor selects nothing and turns mark mode on.
+    cx.dispatch_action(ExchangePointAndMark);
+    cx.assert_editor_state("one tˇwo three");
+    assert!(cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+}
+
+#[gpui::test]
+async fn exchange_after_deactivation_restores_the_region(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇone two three").await;
+    set_mark_command(&mut cx);
+    forward_word(&mut cx);
+    set_mark_command(&mut cx);
+    cx.dispatch_action(ExchangePointAndMark);
+    cx.assert_editor_state("«ˇone» two three");
+    assert_eq!(marks(&mut cx), (Some(3), vec![]));
+}
+
+#[gpui::test]
+async fn exchange_swaps_the_ends_of_an_active_region(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇone two three").await;
+    set_mark_command(&mut cx);
+    forward_word(&mut cx);
+    cx.dispatch_action(ExchangePointAndMark);
+    cx.assert_editor_state("«ˇone» two three");
+    assert_eq!(marks(&mut cx), (Some(3), vec![]));
+    cx.dispatch_action(ExchangePointAndMark);
+    cx.assert_editor_state("«oneˇ» two three");
+    assert_eq!(marks(&mut cx), (Some(0), vec![]));
+}
+
+#[gpui::test]
+async fn a_mouse_made_selection_swaps_its_ends(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇone two three").await;
+    let start = cx.pixel_position("one ˇtwo three");
+    let end = cx.pixel_position("one two ˇthree");
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    cx.assert_editor_state("one «two ˇ»three");
+    cx.dispatch_action(ExchangePointAndMark);
+    cx.assert_editor_state("one «ˇtwo »three");
+    assert_eq!(marks(&mut cx), (Some(8), vec![]));
+}
+
+#[gpui::test]
+async fn deactivating_a_selection_made_outside_mark_mode_remembers_its_tail(
+    cx: &mut TestAppContext,
+) {
+    let mut cx = test_context(cx, "one «twoˇ» three").await;
+    set_mark_command(&mut cx);
+    cx.assert_editor_state("one twoˇ three");
+    assert_eq!(marks(&mut cx), (Some(4), vec![]));
+    cx.dispatch_action(ExchangePointAndMark);
+    cx.assert_editor_state("one «ˇtwo» three");
+}
+
+#[gpui::test]
+async fn three_cursors_extend_three_regions_and_swap_all_three(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇone\nˇtwo\nˇthree").await;
+    set_mark_command(&mut cx);
+    forward_word(&mut cx);
+    cx.assert_editor_state("«oneˇ»\n«twoˇ»\n«threeˇ»");
+    cx.dispatch_action(ExchangePointAndMark);
+    cx.assert_editor_state("«ˇone»\n«ˇtwo»\n«ˇthree»");
+}
+
+#[gpui::test]
+async fn exchange_without_a_mark_says_so_and_changes_nothing(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one ˇtwo").await;
+    let messages = echo(&mut cx);
+    cx.dispatch_action(ExchangePointAndMark);
+    assert_eq!(*messages.borrow(), vec!["No mark set in this buffer"]);
+    cx.assert_editor_state("one ˇtwo");
+    assert!(!cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+}
+
+#[gpui::test]
+async fn exchange_without_a_region_jumps_to_the_mark_and_never_pushes(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇone two three").await;
+    set_mark_command(&mut cx);
+    set_mark_command(&mut cx);
+    cx.set_selections_state("one two ˇthree");
+    cx.dispatch_action(ExchangePointAndMark);
+    cx.assert_editor_state("«ˇone two »three");
+    assert_eq!(marks(&mut cx), (Some(8), vec![]));
+}
+
+#[gpui::test]
+async fn keyboard_quit_deactivates_the_region(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇone two three").await;
+    set_mark_command(&mut cx);
+    forward_word(&mut cx);
+    cx.dispatch_action(KeyboardQuit);
+    cx.assert_editor_state("oneˇ two three");
+    assert!(!cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+}
+
+#[gpui::test]
+async fn set_mark_command_with_a_count_sets_without_an_echo(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "one ˇtwo").await;
+    let messages = echo(&mut cx);
+    cx.dispatch_action(SetMarkCommand { count: Some(4) });
+    assert!(messages.borrow().is_empty());
+    assert_eq!(marks(&mut cx), (Some(4), vec![]));
+    assert!(cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
 }

@@ -4,11 +4,14 @@
 
 use bongos_emacs_model::mark_ring::MarkRing;
 use collections::HashMap;
-use editor::{Editor, EditorEvent};
+use editor::{Editor, EditorEvent, SelectionEffects};
 use gpui::{App, Context, Entity, Global, WeakEntity, Window};
 use language::Buffer;
-use multi_buffer::{Anchor, MultiBuffer};
-use text::{BufferId, ToOffset as _};
+use multi_buffer::{Anchor, MultiBuffer, MultiBufferOffset, ToOffset as _};
+use text::{BufferId, SelectionGoal, ToOffset as _};
+
+use crate::actions::{ExchangePointAndMark, SetMarkCommand};
+use crate::region;
 
 /// One buffer's mark and ring. The ring never holds the current mark.
 struct BufferMarks {
@@ -177,4 +180,108 @@ pub(crate) fn init_editor(cx: &mut Context<Editor>) {
         set_mark_in(&multibuffer, tail, cx);
     })
     .detach();
+}
+
+/// Whether any caret's region is active.
+fn any_region_active(editor: &Entity<Editor>, cx: &mut App) -> bool {
+    editor.update(cx, |editor, cx| {
+        let display = editor.display_snapshot(cx);
+        let selections = editor.selections.all::<MultiBufferOffset>(&display);
+        selections
+            .iter()
+            .any(|selection| region::is_active(editor, selection, cx))
+    })
+}
+
+/// Collapses every selection to its head.
+fn collapse_to_heads(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
+    editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+        s.move_with(&mut |_, selection| {
+            selection.collapse_to(selection.head(), SelectionGoal::None)
+        });
+    });
+}
+
+/// `set-mark-command`: deactivates an active region (the mark stays), otherwise sets the mark
+/// at the primary cursor, pushing the old one onto the ring, and turns mark mode on. With a
+/// count it only sets, since popping the ring is not implemented yet.
+pub(crate) fn set_mark_command(
+    action: &SetMarkCommand,
+    editor: &Entity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if action.count.is_none() && any_region_active(editor, cx) {
+        let outside_mark_mode = !editor.read(cx).selection_mark_mode();
+        let tail = {
+            let editor = editor.read(cx);
+            let primary = editor.selections.newest_anchor();
+            (outside_mark_mode && primary.start != primary.end).then(|| primary.tail())
+        };
+        if let Some(tail) = tail {
+            set_mark(editor, tail, cx);
+        }
+        editor.update(cx, |editor, cx| {
+            editor.set_selection_mark_mode(false, cx);
+            collapse_to_heads(editor, window, cx);
+        });
+        bongos_minibuffer::message(window, cx, "Mark deactivated");
+        return;
+    }
+    editor.update(cx, |editor, cx| collapse_to_heads(editor, window, cx));
+    push_mark(editor, None, true, window, cx);
+    if action.count.is_none() {
+        bongos_minibuffer::message(window, cx, "Mark set");
+    }
+}
+
+/// `exchange-point-and-mark`: with a region, swaps its ends; without one, selects from the
+/// point to the mark with the cursor at the mark. Never touches the ring.
+pub(crate) fn exchange_point_and_mark_command(
+    _: &ExchangePointAndMark,
+    editor: &Entity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if any_region_active(editor, cx) {
+        editor.update(cx, |editor, cx| {
+            editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+                s.move_with(&mut |_, selection| {
+                    if selection.start != selection.end {
+                        selection.reversed = !selection.reversed;
+                    }
+                });
+            });
+            editor.set_selection_mark_mode(true, cx);
+        });
+        let tail = editor.read(cx).selections.newest_anchor().tail();
+        set_mark(editor, tail, cx);
+        return;
+    }
+    let Some(mark) = mark_for(editor, cx) else {
+        bongos_minibuffer::message(window, cx, "No mark set in this buffer");
+        return;
+    };
+    let point = editor.read(cx).selections.newest_anchor().head();
+    editor.update(cx, |editor, cx| {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let mark_offset = mark.to_offset(&snapshot);
+        let point_offset = point.to_offset(&snapshot);
+        let newest = editor.selections.newest_anchor().id;
+        let display = editor.display_snapshot(cx);
+        let mut selections = editor.selections.all::<MultiBufferOffset>(&display);
+        for selection in &mut selections {
+            if selection.id == newest {
+                selection.start = mark_offset.min(point_offset);
+                selection.end = mark_offset.max(point_offset);
+                selection.reversed = mark_offset < point_offset;
+                selection.goal = SelectionGoal::None;
+            }
+        }
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select(selections);
+        });
+        editor.set_selection_mark_mode(true, cx);
+    });
+    set_mark(editor, point, cx);
 }
