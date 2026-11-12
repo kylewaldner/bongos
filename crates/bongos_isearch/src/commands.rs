@@ -166,11 +166,17 @@ pub(crate) fn yank_symbol(state: &Shared, window: &mut Window, cx: &mut App) {
 
 /// C-y: the kill source's top (the clipboard by default), newlines shown as `⏎`.
 pub(crate) fn yank_kill(state: &Shared, window: &mut Window, cx: &mut App) {
+    if wait_for_find(state, yank_kill) {
+        return;
+    }
     append(state, kill_text(cx), window, cx);
 }
 
 /// C-j: a newline in the string.
 pub(crate) fn quote_newline(state: &Shared, window: &mut Window, cx: &mut App) {
+    if wait_for_find(state, quote_newline) {
+        return;
+    }
     append(state, Some("\n".to_string()), window, cx);
 }
 

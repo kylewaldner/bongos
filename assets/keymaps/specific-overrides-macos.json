@@ -99,6 +99,7 @@
       "alt-s alt-<": "isearch::FirstMatch",
       "alt-s alt->": "isearch::LastMatch",
       "ctrl-l": "isearch::Recenter",
+      "ctrl-c ctrl-o": "isearch::Occur",
     },
   },
   {

@@ -977,7 +977,8 @@ async fn isearch_an_invalid_regexp_keeps_the_string(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), XS);
 }
 
-/// The session block of both overrides keymaps binds exactly the in-session actions.
+/// The session block of both overrides keymaps binds exactly the in-session actions, but the
+/// query replace ones.
 #[gpui::test]
 async fn isearch_the_session_block_binds_the_in_session_actions(cx: &mut TestAppContext) {
     init(false, cx);
@@ -999,7 +1000,12 @@ async fn isearch_the_session_block_binds_the_in_session_actions(cx: &mut TestApp
         });
         bound.sort_unstable();
         bound.dedup();
-        let mut expected = IN_SESSION.to_vec();
+        // Query replace is not bound by isearch: its own feature binds it.
+        let mut expected = IN_SESSION
+            .iter()
+            .copied()
+            .filter(|name| !name.starts_with("isearch::QueryReplace"))
+            .collect::<Vec<_>>();
         expected.sort_unstable();
         assert_eq!(bound, expected, "{path}");
     }

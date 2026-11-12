@@ -56,6 +56,12 @@ actions!(
         LastMatch,
         /// Scrolls the current match to the middle, top or bottom of the window.
         Recenter,
+        /// Ends the search and lists the lines that match in a results tab.
+        Occur,
+        /// Ends the search and starts a query replace of the search string.
+        QueryReplace,
+        /// Ends the search and starts a regexp query replace of the search string.
+        QueryReplaceRegexp,
     ]
 );
 
@@ -83,4 +89,7 @@ pub const IN_SESSION: &[&str] = &[
     "isearch::FirstMatch",
     "isearch::LastMatch",
     "isearch::Recenter",
+    "isearch::Occur",
+    "isearch::QueryReplace",
+    "isearch::QueryReplaceRegexp",
 ];
