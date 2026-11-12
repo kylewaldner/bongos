@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn test_keygen_is_private_and_prints_only_public_data() {
+    fn test_tool_keygen_is_private_and_prints_only_public_data() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("release.key");
         let output = run(&args(&["keygen", path.to_str().unwrap()])).unwrap();
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_keygen_refuses_to_overwrite_and_takes_an_id() {
+    fn test_tool_keygen_refuses_to_overwrite_and_takes_an_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("release.key");
         fs::write(&path, b"existing").unwrap();
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sign_then_verify_through_the_apps_verifier() {
+    fn test_tool_sign_then_verify_through_the_apps_verifier() {
         let dir = tempfile::tempdir().unwrap();
         let (key, id, trusted) = make_key(dir.path(), "a.key");
         let file = dir.path().join("servers.json");
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn test_signing_twice_with_two_keys_keeps_both_and_resigning_replaces() {
+    fn test_tool_signing_twice_with_two_keys_keeps_both_and_resigning_replaces() {
         let dir = tempfile::tempdir().unwrap();
         let (key_a, id_a, trusted_a) = make_key(dir.path(), "a.key");
         let (key_b, id_b, trusted_b) = make_key(dir.path(), "b.key");
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn test_signing_keeps_entries_it_does_not_understand() {
+    fn test_tool_signing_keeps_entries_it_does_not_understand() {
         let dir = tempfile::tempdir().unwrap();
         let (key, id, trusted) = make_key(dir.path(), "a.key");
         let file = dir.path().join("servers.json");
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_fails_after_a_change_and_without_a_signature() {
+    fn test_tool_verify_fails_after_a_change_and_without_a_signature() {
         let dir = tempfile::tempdir().unwrap();
         let (key, id, trusted) = make_key(dir.path(), "a.key");
         let file = dir.path().join("servers.json");
@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_fails_when_the_app_would_skip_every_entry() {
+    fn test_tool_verify_fails_when_the_app_would_skip_every_entry() {
         let dir = tempfile::tempdir().unwrap();
         let (key, id, trusted) = make_key(dir.path(), "a.key");
         let file = dir.path().join("servers.json");
@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bad_command_lines_print_the_usage() {
+    fn test_tool_bad_command_lines_print_the_usage() {
         for bad in [
             vec![],
             vec!["keygen"],
