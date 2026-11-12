@@ -185,6 +185,9 @@ pub mod work {
             /// Debug builds only: writes the rows of the level the Work panel shows to
             /// `work-view.txt` in the logs directory.
             DumpView,
+            /// Debug builds only: writes the repository overview and the store's counters to
+            /// `work-repositories.txt` in the logs directory.
+            DumpRepositories,
         ]
     );
 }

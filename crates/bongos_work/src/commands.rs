@@ -106,6 +106,7 @@ pub fn action_types() -> Vec<TypeId> {
     {
         types.push(TypeId::of::<work::DumpSessionContext>());
         types.push(TypeId::of::<work::DumpView>());
+        types.push(TypeId::of::<work::DumpRepositories>());
     }
     types
 }
