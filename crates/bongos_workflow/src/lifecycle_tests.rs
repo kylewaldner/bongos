@@ -1151,3 +1151,5 @@ mod run_view_tests;
 mod runs_panel_tests;
 #[path = "task_link_tests.rs"]
 mod task_link_tests;
+#[path = "enable_tests.rs"]
+mod enable_tests;

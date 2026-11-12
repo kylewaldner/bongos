@@ -1,5 +1,5 @@
-//! Tests of the `workflow` actions: hidden and toasting while `workflows.enabled` is false, and
-//! touching nothing then.
+//! Tests of the `workflow` actions: shown by default, hidden and toasting while `workflows.enabled`
+//! is set to false, and touching nothing then.
 
 use gpui::{BorrowAppContext as _, TestAppContext, VisualTestContext};
 use project::Project;
@@ -68,31 +68,40 @@ fn palette_hidden(name: &str, cx: &mut TestAppContext) -> bool {
 }
 
 #[gpui::test]
-fn default_settings_are_off(cx: &mut TestAppContext) {
+fn default_settings_are_on(cx: &mut TestAppContext) {
     use_default_settings(cx);
-    cx.update(|cx| assert!(!WorkflowsSettings::get_global(cx).enabled));
+    cx.update(|cx| {
+        assert!(WorkflowsSettings::get_global(cx).enabled);
+        assert_eq!(
+            *WorkflowsSettings::get_global(cx),
+            WorkflowsSettings::default(),
+            "the struct default mirrors default.json"
+        );
+    });
 }
 
 #[gpui::test]
-async fn actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext) {
+async fn actions_are_shown_by_default_and_hidden_while_set_off(cx: &mut TestAppContext) {
     cx.update(|cx| command_palette_hooks::init(cx));
     use_default_settings(cx);
     cx.update(crate::init_palette);
 
     assert_eq!(NAMES.len(), action_types().len(), "every action is listed");
     for name in NAMES {
-        assert!(palette_hidden(name, cx), "{name} is hidden by default");
-    }
-    set_enabled(cx, true);
-    for name in NAMES {
-        assert!(!palette_hidden(name, cx), "{name} shows while on");
+        assert!(!palette_hidden(name, cx), "{name} shows by default");
     }
     set_enabled(cx, false);
     for name in NAMES {
-        assert!(palette_hidden(name, cx), "{name} is hidden again");
+        assert!(palette_hidden(name, cx), "{name} is hidden while set off");
+    }
+    set_enabled(cx, true);
+    for name in NAMES {
+        assert!(!palette_hidden(name, cx), "{name} shows again");
     }
 }
 
+/// A workspace with the actions registered and `workflows.enabled` set to false before the init,
+/// so no engine exists; a test that wants workflows on calls `set_enabled(cx, true)`.
 pub(crate) async fn workspace_with_actions(
     cx: &mut TestAppContext,
 ) -> (
@@ -102,6 +111,11 @@ pub(crate) async fn workspace_with_actions(
 ) {
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.workflows.get_or_insert_default().enabled = Some(false);
+            });
+        });
         crate::init(cx);
         app_state
     });
