@@ -72,6 +72,22 @@
       "alt-o": "minibuffer::Actions",
     },
   },
+  // An isearch session (the `Isearch` context of its prompt). Without `Minibuffer`, so the keys
+  // also hold when the prompt is not routed to the strip and opens centered.
+  {
+    "context": "Isearch > Editor",
+    "bindings": {
+      "ctrl-s": "isearch::RepeatForward",
+      "ctrl-r": "isearch::RepeatBackward",
+      "backspace": "isearch::DelChar",
+      "ctrl-g": "isearch::Abort",
+      "escape": "isearch::Abort",
+      "enter": "isearch::Exit",
+      "ctrl-enter": "isearch::ExitOtherEnd",
+      "alt-p": "isearch::RingPrevious",
+      "alt-n": "isearch::RingNext",
+    },
+  },
   {
     "context": "Minibuffer",
     "bindings": {

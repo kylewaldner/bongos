@@ -384,6 +384,53 @@ async fn minibuffer_commands_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+/// The `isearch` commands, with the palette text of each.
+const ISEARCH_ACTIONS: [(&str, &str); 12] = [
+    ("isearch::Forward", "isearch: forward"),
+    ("isearch::Backward", "isearch: backward"),
+    ("isearch::ForwardRegexp", "isearch: forward regexp"),
+    ("isearch::BackwardRegexp", "isearch: backward regexp"),
+    ("isearch::RepeatForward", "isearch: repeat forward"),
+    ("isearch::RepeatBackward", "isearch: repeat backward"),
+    ("isearch::DelChar", "isearch: del char"),
+    ("isearch::Abort", "isearch: abort"),
+    ("isearch::Exit", "isearch: exit"),
+    ("isearch::ExitOtherEnd", "isearch: exit other end"),
+    ("isearch::RingPrevious", "isearch: ring previous"),
+    ("isearch::RingNext", "isearch: ring next"),
+];
+
+#[gpui::test]
+async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in ISEARCH_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        let isearch_names = cx
+            .all_action_names()
+            .iter()
+            .filter(|name| name.starts_with("isearch::"))
+            .count();
+        assert_eq!(isearch_names, ISEARCH_ACTIONS.len());
+        for name in bongos_isearch::actions::IN_SESSION {
+            assert!(
+                ISEARCH_ACTIONS.iter().any(|(action, _)| action == name),
+                "{name} is an isearch command"
+            );
+        }
+        assert!(
+            cx.build_action("isearch::Forward", None)
+                .unwrap()
+                .partial_eq(&bongos_isearch::actions::Forward)
+        );
+    });
+}
+
 /// The `emacs` commands, with the palette text of each.
 const EMACS_ACTIONS: [(&str, &str); 44] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),

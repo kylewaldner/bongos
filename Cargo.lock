@@ -2341,16 +2341,21 @@ version = "0.1.0"
 name = "bongos_isearch"
 version = "0.1.0"
 dependencies = [
+ "bongos_emacs",
  "bongos_isearch_model",
+ "bongos_minibuffer",
  "buffer_diff",
  "command_palette_hooks",
+ "editor",
  "futures 0.3.32",
  "gpui",
  "language",
  "multi_buffer",
  "project",
  "regex",
+ "settings",
  "util",
+ "workspace",
 ]
 
 [[package]]
