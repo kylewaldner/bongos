@@ -2371,8 +2371,9 @@ mod tests {
             cx.update(|cx| {
                 let notices = notices.clone();
                 cx.subscribe(&self.manager, move |_, event: &KotlinEvent, _| {
-                    let KotlinEvent::FellBack { message, .. } = event;
-                    notices.borrow_mut().push(message.clone());
+                    if let KotlinEvent::FellBack { message, .. } = event {
+                        notices.borrow_mut().push(message.clone());
+                    }
                 })
                 .detach();
             });
