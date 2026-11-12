@@ -38,14 +38,14 @@ pub fn prompt(step: &Step, spec: &SearchSpec) -> String {
     prompt
 }
 
-/// `index` is one-based. A `total` at the cap means the count stopped there:
-/// it reads `10000+`. Without matches the counter is blank.
-pub fn counter(index: Option<usize>, total: usize) -> String {
+/// `index` is one-based. A `capped` count stopped at the cap: it reads `10000+`; exactly
+/// 10000 matches read `n/10000`. Without matches the counter is blank.
+pub fn counter(index: Option<usize>, total: usize, capped: bool) -> String {
     if total == 0 {
         return String::new();
     }
     let index = index.map_or_else(|| "?".to_string(), |index| index.to_string());
-    if total >= COUNT_CAP {
+    if capped {
         format!("{index}/{COUNT_CAP}+")
     } else {
         format!("{index}/{total}")

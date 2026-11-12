@@ -56,12 +56,17 @@ fn prompt_modes() {
 
 #[test]
 fn counter_strings() {
-    assert_eq!(counter(Some(3), 17), "3/17");
-    assert_eq!(counter(Some(3), 10_000), "3/10000+");
-    assert_eq!(counter(None, 10_000), "?/10000+");
-    assert_eq!(counter(None, 5), "?/5");
-    assert_eq!(counter(Some(1), 0), "");
-    assert_eq!(counter(None, 0), "");
+    assert_eq!(counter(Some(3), 17, false), "3/17");
+    assert_eq!(counter(Some(3), 10_000, true), "3/10000+");
+    assert_eq!(counter(None, 10_000, true), "?/10000+");
+    assert_eq!(counter(None, 5, false), "?/5");
+    assert_eq!(counter(Some(1), 0, false), "");
+    assert_eq!(counter(None, 0, false), "");
+}
+
+#[test]
+fn counter_with_exactly_the_cap_is_not_marked_capped() {
+    assert_eq!(counter(Some(3), 10_000, false), "3/10000");
 }
 
 #[test]

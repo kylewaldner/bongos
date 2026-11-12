@@ -22,6 +22,8 @@ actions!(
         DelChar,
         /// Removes a failing suffix of the string, or else ends the search where it started.
         Abort,
+        /// Ends the search where it started, even when part of the string is failing.
+        Quit,
         /// Ends the search with the match selected and the cursor at its end.
         Exit,
         /// Ends the search with the cursor at the other end of the match.
@@ -72,6 +74,7 @@ pub const IN_SESSION: &[&str] = &[
     "isearch::RepeatBackward",
     "isearch::DelChar",
     "isearch::Abort",
+    "isearch::Quit",
     "isearch::Exit",
     "isearch::ExitOtherEnd",
     "isearch::RingPrevious",
