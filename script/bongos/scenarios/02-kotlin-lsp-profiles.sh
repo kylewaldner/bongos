@@ -64,11 +64,18 @@ preinstall() {
     "$(sha256sum "$KOTLIN_FIXTURES/$name.tar.gz" | cut -d' ' -f1)" >"$dir/.bongos-installed"
 }
 
-# Nothing may have reached JetBrains or any other host, and no install may have run.
+# Nothing may have reached JetBrains or any other host, and no install may have run. The proxy sees
+# the two kinds of request every launch makes (the ACP registry and localhost, as in scenarios 03,
+# 25, 26 and 28); anything else fails.
 assert_no_download() {
-  if [ -s "$RUN/proxy.log" ]; then
+  local registry_host strays
+  registry_host=$(sed -nE 's|^const REGISTRY_URL: &str = "https://([^/"]+)/.*|\1|p' \
+    "$BONGOS_ROOT/crates/project/src/agent_registry_store.rs")
+  [ -n "$registry_host" ] || { echo "bongos: no REGISTRY_URL host in crates/project/src/agent_registry_store.rs" >&2; exit 1; }
+  strays=$(awk -v registry="CONNECT $registry_host" 'NF && $0 != registry && $0 != "GET localhost"' "$RUN/proxy.log")
+  if [ -n "$strays" ]; then
     echo "bongos: a request reached the download proxy:" >&2
-    cat "$RUN/proxy.log" >&2
+    echo "$strays" >&2
     exit 1
   fi
   if grep -qE ' install |install error' "$KOTLIN_LOG"; then
