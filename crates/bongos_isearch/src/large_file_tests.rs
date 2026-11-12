@@ -8,7 +8,7 @@ use crate::session_tests::{input, selections, start, status, type_slowly, worksp
 use editor::Editor;
 use gpui::{AppContext as _, TestAppContext};
 use language::Buffer;
-use multi_buffer::{MultiBuffer, MultiBufferOffset};
+use multi_buffer::MultiBuffer;
 use std::time::Duration;
 
 const SIZE: usize = 100 * 1024 * 1024;
