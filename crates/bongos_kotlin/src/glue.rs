@@ -270,4 +270,24 @@ mod notice_tests {
             })
             .unwrap();
     }
+
+    #[gpui::test]
+    async fn test_a_bad_user_manifest_is_toasted_once(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(ManifestNoticePending("manifest ignored".to_string()));
+            attach_notices(cx);
+        });
+        let first = window(cx).await;
+        let second = window(cx).await;
+        first
+            .update(cx, |workspace, _, _| {
+                assert_eq!(workspace.notification_ids().len(), 1);
+            })
+            .unwrap();
+        second
+            .update(cx, |workspace, _, _| {
+                assert!(workspace.notification_ids().is_empty());
+            })
+            .unwrap();
+    }
 }
