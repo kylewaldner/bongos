@@ -6,10 +6,13 @@ use gpui::{
     Action, AppContext as _, ClipboardItem, KeyBinding, Modifiers, MouseButton, TestAppContext,
 };
 use multi_buffer::MultiBuffer;
+use std::cell::Cell;
+use std::rc::Rc;
+use workspace::MinibufferRouting;
 
 use crate::actions::{
-    BackwardKillWord, CopyRegionOrLine, KillLine, KillRegionOrLine, KillWord, ZapBackToChar,
-    ZapBackUpToChar, ZapToChar, ZapUpToChar,
+    AppendNextKill, BackwardKillWord, CopyRegionOrLine, KillLine, KillRegionOrLine, KillWholeLine,
+    KillWord, ZapBackToChar, ZapBackUpToChar, ZapToChar, ZapUpToChar,
 };
 use crate::apply_tests::{capture_kills, init_test};
 use crate::kill_ring_sink::KILL_COMMANDS;
@@ -25,6 +28,8 @@ async fn test_context(cx: &mut TestAppContext) -> EditorTestContext {
             KeyBinding::new("alt-w", CopyRegionOrLine::default(), Some("Editor")),
             KeyBinding::new("alt-d", KillWord::default(), Some("Editor")),
             KeyBinding::new("alt-backspace", BackwardKillWord::default(), Some("Editor")),
+            KeyBinding::new("ctrl-alt-k", KillWholeLine::default(), Some("Editor")),
+            KeyBinding::new("ctrl-alt-w", AppendNextKill, Some("Editor")),
             KeyBinding::new("ctrl-f", editor::actions::MoveRight, Some("Editor")),
         ])
     });
@@ -222,6 +227,93 @@ async fn a_masked_editor_never_kills_or_copies(cx: &mut TestAppContext) {
     cx.set_state("ˇab");
     cx.simulate_keystrokes("ctrl-f");
     cx.assert_editor_state("aˇb");
+}
+
+#[gpui::test]
+async fn a_kill_whole_line_joins_the_kill_sequence(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("ˇone\ntwo\nthree");
+
+    cx.simulate_keystrokes("ctrl-alt-k ctrl-alt-k");
+
+    cx.assert_editor_state("ˇthree");
+    assert_eq!(ring_texts(&mut cx), ["one\ntwo\n"]);
+}
+
+#[gpui::test]
+async fn append_next_kill_joins_a_region_kill_and_a_line_kill(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("«one twoˇ» three\nfour");
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+
+    cx.simulate_keystrokes("ctrl-w ctrl-alt-w ctrl-k");
+
+    // C-k at a line start takes the newline too.
+    cx.assert_editor_state("ˇfour");
+    assert_eq!(ring_texts(&mut cx), ["one two three\n"]);
+    assert_eq!(clipboard_text(&mut cx).as_deref(), Some("one two three\n"));
+}
+
+#[gpui::test]
+async fn append_next_kill_keeps_a_word_kill_sequence_joined(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("ˇone two three");
+
+    cx.simulate_keystrokes("alt-d ctrl-alt-w alt-d");
+
+    assert_eq!(ring_texts(&mut cx), ["one two"]);
+}
+
+#[gpui::test]
+async fn append_next_kill_then_a_motion_does_not_join(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("ˇone two three");
+
+    cx.simulate_keystrokes("alt-d ctrl-alt-w ctrl-f ctrl-k");
+
+    cx.assert_editor_state(" ˇ");
+    assert_eq!(ring_texts(&mut cx), ["two three", "one"]);
+}
+
+#[gpui::test]
+async fn append_next_kill_twice_echoes_once_and_still_joins(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    let echoes = Rc::new(Cell::new(0));
+    cx.update(|_, cx| {
+        let echoes = echoes.clone();
+        cx.default_global::<MinibufferRouting>()
+            .set_message_hook(Some(Rc::new(move |_, _, text, _| {
+                assert_eq!(text, "If the next command is a kill, it will append");
+                echoes.set(echoes.get() + 1);
+                true
+            })));
+    });
+    cx.set_state("ˇone two three");
+
+    cx.simulate_keystrokes("alt-d ctrl-alt-w ctrl-alt-w alt-d");
+
+    assert_eq!(echoes.get(), 1);
+    assert_eq!(ring_texts(&mut cx), ["one two"]);
+}
+
+#[gpui::test]
+async fn append_next_kill_joins_a_kill_in_another_editor(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("ˇone two");
+    cx.simulate_keystrokes("alt-d");
+
+    let buffer = cx.multibuffer(|multibuffer, _| multibuffer.as_singleton().unwrap());
+    let second = cx.update(|window, cx| {
+        let multibuffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        cx.new(|cx| Editor::new(EditorMode::full(), multibuffer, None, window, cx))
+    });
+    cx.simulate_keystrokes("ctrl-alt-w");
+    cx.update(|window, cx| {
+        kill::kill_line_command(&KillLine::default(), &second, window, cx);
+        last_command::record(window, Some("emacs::KillLine"), cx);
+    });
+
+    assert_eq!(ring_texts(&mut cx), ["one two"]);
 }
 
 /// Every `emacs` action that sends a kill is in `KILL_COMMANDS`, and every member sends one.

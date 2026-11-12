@@ -19,6 +19,7 @@ pub const KILL_COMMANDS: &[&str] = &[
     "emacs::KillLine",
     "emacs::KillRegionOrLine",
     "emacs::CopyRegionOrLine",
+    "emacs::KillWholeLine",
     "emacs::KillWord",
     "emacs::BackwardKillWord",
     "emacs::ZapToChar",
@@ -26,6 +27,11 @@ pub const KILL_COMMANDS: &[&str] = &[
     "emacs::ZapBackToChar",
     "emacs::ZapBackUpToChar",
 ];
+
+/// `append-next-kill`. It sends no kill and edits nothing; it counts as a kill command in the
+/// sequence rule (a kill, C-M-w, a kill still joins) and, as the last command, waives the
+/// same-editor rule, so the next kill appends to the newest entry from any editor.
+pub const APPEND_NEXT_KILL: &str = "emacs::AppendNextKill";
 
 /// Where the last kill happened. A mouse selection in that editor, or carets that moved since
 /// the kill, forget it, so the next kill starts a new entry even though a click (or a jump made
@@ -117,14 +123,15 @@ fn kill_to_ring(kill: Kill, window: &mut Window, cx: &mut App) {
         return;
     }
     let window_id = window.window_handle().window_id();
-    let continues = last_command(window, cx)
-        .is_some_and(|command| KILL_COMMANDS.contains(&command))
+    let previous = last_command(window, cx);
+    let armed = previous == Some(APPEND_NEXT_KILL);
+    let continues = previous.is_some_and(|command| armed || KILL_COMMANDS.contains(&command))
         && cx
             .try_global::<LastKill>()
             .and_then(|last| last.0.as_ref())
             .is_some_and(|last| {
                 last.window == window_id
-                    && last.editor == kill.editor
+                    && (armed || last.editor == kill.editor)
                     && last.kind == KillKind::Kill
             });
     // Text copied outside since the last kill becomes its own entry, and breaks the sequence.

@@ -455,7 +455,7 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 44] = [
+const EMACS_ACTIONS: [(&str, &str); 46] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -499,6 +499,8 @@ const EMACS_ACTIONS: [(&str, &str); 44] = [
     ("emacs::KillLine", "emacs: kill line"),
     ("emacs::KillRegionOrLine", "emacs: kill region or line"),
     ("emacs::CopyRegionOrLine", "emacs: copy region or line"),
+    ("emacs::KillWholeLine", "emacs: kill whole line"),
+    ("emacs::AppendNextKill", "emacs: append next kill"),
     ("emacs::Recenter", "emacs: recenter"),
     ("emacs::Reposition", "emacs: reposition"),
     ("emacs::GotoLine", "emacs: goto line"),
