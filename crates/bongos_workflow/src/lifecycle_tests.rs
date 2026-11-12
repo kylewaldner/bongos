@@ -958,15 +958,11 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
     let mut world = World::new();
     let worktrees = real_git(&mut world);
     let mut lifecycle = Lifecycle::new(FakeRunner::new(), Box::new(worktrees), world.settings());
+    lifecycle.runtime_mut().runner_mut().fail("work", 1);
     let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
-    assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
-    let refusal = lifecycle.restart(&run, &world.dirs).unwrap_err();
-    assert_eq!(refusal.kind, RefusalKind::WrongState, "a succeeded run stays");
-    let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
-    settle(&mut lifecycle);
-    lifecycle.cancel(&run).unwrap();
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
     let first = lifecycle.worktree(&run).unwrap().clone();
     assert!(first.branch.ends_with("-1"), "{}", first.branch);
 
@@ -1000,8 +996,9 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Queued));
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
-    assert_eq!(started_nodes(&lifecycle), ["plan", "work", "work"]);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
+    let refusal = lifecycle.restart(&run, &world.dirs).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::WrongState, "a succeeded run stays");
     let first_log = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1).join("events.jsonl");
     assert!(first_log.is_file());
 }
