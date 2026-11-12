@@ -18,6 +18,9 @@
 # line names a listed command; an environment that makes a shell, the dynamic
 # loader or Python run other code, set for a program or in the shim's own),
 # opening or changing a file outside the writable paths or inside a protected one
+# (the OS sandbox's allowlist: the worktree, the scratch directory, the common git
+# directory's objects/, refs/ and logs/ and the worktree's own git directory; its
+# .git file, gitdir, commondir and config.worktree protected)
 # (relative to a directory descriptor or through a file descriptor too; FIFOs and
 # device nodes included), connecting a socket when the node declares no network
 # (or to a host it did not declare), and the introspection that reaches the hook's
@@ -27,7 +30,11 @@
 #
 # This shim is a guardrail, not a security boundary: Python code in the same
 # process can always defeat an audit hook. The OS sandbox is the boundary; a run
-# without it ("not sandboxed" in the try's summary) is not hard-confined.
+# without it ("not sandboxed" in the try's summary) is not hard-confined. Known
+# gaps, accepted for that reason: a walk through closures (__closure__,
+# cell_contents) reaches the hook's state; os.link checks only the destination;
+# binding a unix socket creates a file anywhere; the arguments and environment of
+# a listed command are not checked (git -c core.fsmonitor=... runs).
 
 import sys
 

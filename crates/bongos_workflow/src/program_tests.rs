@@ -778,20 +778,15 @@ fn git_hooks_and_config_are_protected() {
         "'done'",
     ));
     node.git_common_dir = Some(common.clone());
-    #[cfg(target_os = "linux")]
-    {
-        let policy = node.sandbox_policy();
-        let sandbox::SandboxFsPolicy::Restricted { writable_paths } = &policy.fs else {
-            panic!("restricted");
-        };
-        assert!(writable_paths.contains(&common));
-        assert_eq!(
-            policy.git,
-            sandbox::GitSandboxPolicy::Denied {
-                git_dirs: vec![common.join("hooks"), common.join("config")],
-            }
-        );
+    let policy = node.sandbox_policy();
+    let sandbox::SandboxFsPolicy::Restricted { writable_paths } = &policy.fs else {
+        panic!("restricted");
+    };
+    assert!(!writable_paths.contains(&common));
+    for name in ["objects", "refs", "logs"] {
+        assert!(writable_paths.contains(&common.join(name)), "{name}");
     }
+    assert_eq!(policy.git, sandbox::GitSandboxPolicy::default());
     let finish = fixture.run_node(node);
     let failure = failure(&finish);
     assert_eq!(failure.reason, FailureReason::PermissionDenied);
@@ -886,11 +881,9 @@ fn a_program_that_changes_git_metadata_fails_and_it_is_put_back() {
         commands: vec!["cp".to_string()],
         ..Permissions::default()
     };
-    node.git_common_dir = Some(common.clone());
-    let protected = node.protected_paths();
+    node.git_common_dir = Some(common);
+    let protected = node.read_only_paths();
     for path in [
-        common.join("hooks"),
-        common.join("config"),
         worktree.join(".git"),
         git_dir.join("gitdir"),
         git_dir.join("commondir"),
@@ -915,8 +908,11 @@ fn a_program_that_changes_git_metadata_fails_and_it_is_put_back() {
         std::fs::read_to_string(git_dir.join("commondir")).unwrap(),
         "../..\n"
     );
-    // A missing hooks directory is made before the script, so the sandbox can bind it.
-    assert!(common.join("hooks").is_dir());
+    // A missing `config.worktree` is made before the script, so the sandbox can bind it.
+    assert_eq!(
+        std::fs::read_to_string(git_dir.join("config.worktree")).unwrap(),
+        ""
+    );
     let summary = fixture.summary(TRY_DIR);
     assert_eq!(summary["git_metadata_changed"].as_array().unwrap().len(), 2);
 }
@@ -1034,4 +1030,218 @@ fn fifos_and_changes_through_read_only_descriptors_are_checked() {
     let detail = says(failure(&finish));
     assert!(detail.starts_with("permission denied: write "), "{detail}");
     assert!(detail.ends_with("task-worktree/target"), "{detail}");
+}
+
+/// Runs host git in `dir` with a clean configuration; its output, or `None` when it failed.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test fixture runs git to make a real repository"
+)]
+fn git(home: &Path, dir: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .env("HOME", home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// A real repository `repo` (the main worktree) with the linked worktrees `run-worktree` (the
+/// node's) and `other-worktree`: its common git directory, or `None` (the test skips) when git
+/// is not installed.
+fn git_repo(fixture: &Fixture) -> Option<PathBuf> {
+    let home = fixture.root.path();
+    let repo = fixture.path("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    if git(home, &repo, &["init", "-q", "-b", "main"]).is_none() {
+        eprintln!("skipped: git is not installed");
+        return None;
+    }
+    git(
+        home,
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    )
+    .unwrap();
+    for name in ["run", "other"] {
+        let path = fixture.path(&format!("{name}-worktree"));
+        git(
+            home,
+            &repo,
+            &["worktree", "add", "-q", "-b", name, &path.to_string_lossy()],
+        )
+        .unwrap();
+    }
+    Some(repo.join(".git"))
+}
+
+/// The git metadata no script may write: the common git directory's own files, another
+/// worktree's git directory and the node's own pointers.
+fn git_metadata_targets(fixture: &Fixture, common: &Path) -> Vec<PathBuf> {
+    let own = common.join("worktrees/run-worktree");
+    let other = common.join("worktrees/other-worktree");
+    vec![
+        common.join("commondir"),
+        other.join("commondir"),
+        other.join("config.worktree"),
+        common.join("hooks/pre-commit"),
+        common.join("config"),
+        own.join("commondir"),
+        own.join("config.worktree"),
+        fixture.path("run-worktree/.git"),
+    ]
+}
+
+#[test]
+fn the_writable_git_paths_are_an_allowlist() {
+    let Some(fixture) = Fixture::new() else {
+        return;
+    };
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let mut node = fixture.node("pass\n");
+    node.git_common_dir = Some(common.clone());
+    // git writes the real path into the worktree's `.git` file.
+    let own = std::fs::canonicalize(common.join("worktrees/run-worktree")).unwrap();
+    assert_eq!(
+        node.writable_paths(),
+        vec![
+            node.worktree.clone(),
+            node.scratch.clone(),
+            common.join("objects"),
+            common.join("refs"),
+            common.join("logs"),
+            own.clone(),
+        ]
+    );
+    assert_eq!(
+        node.read_only_paths(),
+        vec![
+            node.worktree.join(".git"),
+            own.join("gitdir"),
+            own.join("commondir"),
+            own.join("config.worktree"),
+        ]
+    );
+
+    // In the main worktree the git directory is the common one: read-only as a whole.
+    node.worktree = fixture.path("repo");
+    assert_eq!(
+        node.writable_paths(),
+        vec![node.worktree.clone(), node.scratch.clone()]
+    );
+    assert_eq!(node.read_only_paths(), vec![common]);
+}
+
+#[test]
+fn the_shim_refuses_git_metadata_outside_the_allowlist() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    for target in git_metadata_targets(&fixture, &common) {
+        let before = std::fs::read(&target).ok();
+        let mut node = fixture.node(&script(
+            &format!(
+                "try:\n    open({target:?}, 'a').write('x')\nexcept PermissionError:\n    pass",
+                target = target.to_string_lossy()
+            ),
+            "'done'",
+        ));
+        node.git_common_dir = Some(common.clone());
+        let finish = fixture.run_node(node);
+        let detail = says(failure(&finish));
+        let tail = target.strip_prefix(fixture.root.path()).unwrap();
+        assert!(detail.starts_with("permission denied: write "), "{detail}");
+        assert!(detail.ends_with(&*tail.to_string_lossy()), "{detail}");
+        assert_eq!(std::fs::read(&target).ok(), before, "{}", target.display());
+    }
+}
+
+#[test]
+fn the_sandbox_keeps_git_metadata_read_only_and_a_commit_still_works() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    // Bubblewrap hides the host's /tmp behind its own, so a fixture there cannot be sandboxed.
+    if fixture.root.path().starts_with("/tmp") {
+        return;
+    }
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let targets = git_metadata_targets(&fixture, &common);
+    let names: Vec<String> = targets
+        .iter()
+        .map(|target| target.to_string_lossy().into_owned())
+        .collect();
+    // `cp` and `git` are listed, so their writes pass the shim: only the OS sandbox stops them.
+    let mut node = fixture.node(&script(
+        &format!(
+            "open('fake', 'w').write('gitdir: /elsewhere\\n')\n\
+             for target in {names:?}:\n    \
+             copied = subprocess.run(['cp', 'fake', target], stderr=subprocess.DEVNULL)\n    \
+             assert copied.returncode != 0, target\n\
+             git = ['git', '-c', 'user.name=test', '-c', 'user.email=test@example.invalid']\n\
+             subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'inside'], check=True)\n\
+             subprocess.run(git + ['branch', 'side'], check=True)"
+        ),
+        "'done'",
+    ));
+    node.permissions = Permissions {
+        commands: vec!["cp".to_string(), "git".to_string()],
+        ..Permissions::default()
+    };
+    node.git_common_dir = Some(common);
+    if let Err(reason) = (os_sandbox_probe())(&node.sandbox_policy(), &node.worktree) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    // `config.worktree` is made before the script starts; the rest must stay as it is now.
+    let mut before: Vec<_> = targets
+        .iter()
+        .map(|target| std::fs::read(target).ok())
+        .collect();
+    before[6] = Some(Vec::new());
+    let interpreter = fixture.runner.interpreter().clone();
+    fixture.runner = ProgramRunner::new(interpreter, base_env(fixture.root.path()))
+        .with_clock(fixture.clock.clone())
+        .with_sandbox_probe(os_sandbox_probe());
+    let finish = fixture.run_node(node);
+    let stderr =
+        std::fs::read_to_string(fixture.path(TRY_DIR).join("stderr.log")).unwrap_or_default();
+    assert_eq!(fixture.summary(TRY_DIR)["sandbox"], "sandboxed");
+    assert_eq!(finish.outcome, Ok(json!({ "status": "done" })), "{stderr}");
+    let after: Vec<_> = targets
+        .iter()
+        .map(|target| std::fs::read(target).ok())
+        .collect();
+    assert_eq!(after, before);
+    let home = fixture.root.path();
+    let repo = fixture.path("repo");
+    assert_eq!(
+        git(home, &repo, &["log", "-1", "--format=%s", "run"]).as_deref(),
+        Some("inside")
+    );
+    assert!(git(home, &repo, &["rev-parse", "--verify", "-q", "side"]).is_some());
 }
