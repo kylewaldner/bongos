@@ -135,6 +135,7 @@ pub(crate) struct Delivered(pub Vec<Notice>);
 #[cfg(test)]
 impl Global for Delivered {}
 
+#[derive(Default)]
 struct AnnouncedGlobal(Announced);
 
 impl Global for AnnouncedGlobal {}
