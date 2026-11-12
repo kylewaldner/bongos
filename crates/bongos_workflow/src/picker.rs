@@ -303,7 +303,7 @@ pub(crate) fn run_picker(
         "Run workflow",
         picker.labels(),
         picker.selected(),
-        Box::new(move |index, workspace, window, cx| {
+        Box::new(move |index, _, window, cx| {
             let Some(name) = names.get(index).cloned() else {
                 return;
             };
