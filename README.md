@@ -329,6 +329,86 @@ stops every request. The keys are for the Emacs keymap; every command is also in
 - **Not there yet.** Todos are not synced, a ticket's status is not mirrored back, and there are no
   webhooks.
 
+## Workflows
+
+A workflow is a graph of steps that carries a task's todo from its goal toward a pull request: an
+agent plans, agents implement the work items in parallel, a program runs the tests, an agent
+reviews, and the run stops at a gate to ask you before it merges. It is on by default, and it starts
+nothing by itself: no run, no process and nothing under a task's `runs/` directory until you run a
+workflow. `workflows.enabled` set to `false` hides the commands and the Runs panel and loads no
+definition. The keys are for the Emacs keymap; every command is also in the palette.
+
+- **Definitions and layers.** A definition is a directory holding `workflow.toml` (with its prompts
+  and scripts beside it). Three layers are read, and the one with the highest precedence wins per
+  `name` (the key in the file, not the directory name): the project's
+  (`~/.bongos/projects/<project>/workflows`) over yours (`~/.bongos/workflows`) over the ones bongos
+  ships (`implement PR`, `implement tasks`, `ship PR` and `babysit PR`, written to the data directory
+  under `workflows/shipped/<version>/` and never edited). In this build the app reads the shipped and
+  your layers; the project layer is not connected yet. `workflow: new` makes a definition in your
+  layer, from a minimal one-agent template or as a copy of a shipped one to edit; `workflow: edit
+  definition` opens one; `workflow: validate` checks them all and lists each finding with its line in
+  a read-only buffer. A key bongos does not know is a warning, not an error.
+- **The graph.** One TOML file with `schema = 1`, a `name`, a `start` node, typed `[inputs]` (from
+  the task: its goal, plan, artifacts or pull request), optional `[defaults]` for the settings every
+  node shares, `[nodes.<name>]` and `[ends.<name>]`. A node declares typed `output` fields and
+  `routes` that pick the next node from them (`when`, a `default`, a bounded `max_passes` for a loop
+  back, and `fan_out` to run a branch per item with a `join` that waits for `all` or `any`). An end
+  is a `success` or a `failure` and may report outcomes (`pr`, `document` or `tasks`) that the task
+  takes as its own. A node can set `gate = { when = "before" | "after", question = "..." }` to stop
+  for you, and `polls` to run again after an interval until its result changes.
+- **Agent and program nodes.** An `agent` node runs one headless `claude` (or `codex`) process per
+  try with the rendered prompt, in the run's worktree, with `model`, `permission_mode`,
+  `allowed_tools`, `max_turns`, `max_cost_usd`, `max_minutes` and `retries` taken from the node or
+  `[defaults]`. Its result is only the typed output the CLI returns, checked against the declared
+  fields; the free text is never parsed. A `program` node runs a Python 3.8 or newer script, or one
+  of the shipped `use` nodes (`merge` and `wait`), with no model and no cost, and writes its typed
+  result to a file. Both stop at the caps they declare and fail with a named reason (`turn cap
+  hit`, `time cap hit`, `output cap hit`, `permission denied: <tool>`, `node output invalid`).
+- **Permissions and the sandbox.** A program node declares `permissions = { commands, network, mcp }`
+  and gets nothing else: it may run only the listed commands and reach only the listed hosts, and MCP
+  is refused. This is enforced twice: by an operating-system sandbox (Bubblewrap on Linux) that
+  allows writes only in the node's worktree and scratch directory, the shared git directory's
+  `objects/`, `refs/` and `logs/` and the worktree's own git directory, with the network blocked
+  unless declared; and by an audit hook inside the Python process, which is a guardrail and not a
+  boundary. Known caveat: those shared git paths are writable by design, so a program can write
+  objects and refs to the repository's git directory that every worktree uses, and a git run by
+  you or by another run can then read them. bongos keeps the dangerous parts read-only (`config`,
+  `hooks/`, `packed-refs`, replace refs and alternates, other worktrees' directories), removes
+  planted symlinks after each pass and fails the node if git metadata changed, but it cannot protect
+  the integrity of loose objects and packs while `objects/` is writable; a stricter allowlist for
+  these paths is a later feature. Without Bubblewrap the script runs under the audit hook alone, and
+  the try's summary says `not sandboxed` and why. Treat a definition from another source as code.
+- **Worktrees and merge.** A run works in its own worktree on its own branch, made from the head of
+  the task's branch, and each fan-out branch gets one from the run's branch. They live under
+  `<repository>/.bongos-worktrees/.runs/` unless `workflows.worktrees_dir` says otherwise. Nothing
+  writes your checkout or the task's worktree except the shipped `merge` node, which brings the run's
+  branch into the task's: it refuses a task worktree with uncommitted changes, never rebases (the
+  style is `ff-or-merge`, `ff-only` or `merge-commit`), and on a conflict it aborts and leaves both
+  branches as they were. A run does not start with less than `workflows.min_free_disk_mb` free.
+- **Lifecycle and keys.** `C-c f r` runs a workflow on the task at point (you pick the definition and
+  see what it needs first), `C-c f p` pauses (running steps finish first), `C-c f h` halts now and
+  opens the worktree, `C-c f c` resumes, `C-c f t` retries the failed step, `C-c f R` restarts,
+  `C-c f k` cancels, `C-c f a` approves a gate and `C-c f v` sends it back with notes. `C-c f w`
+  shows the Runs panel (the runs of every task, filtered with `t`, `p` and `s`; `enter` and `l` open the
+  selected run's logs); `C-c f l` opens a run's logs, `C-c f s` its run view, `C-c f
+  o` its worktree, `C-c f d` its diff and `C-c f x` is meant to clear finished runs (the
+  worktrees of those older than `workflows.keep_finished_days`; not connected yet). `C-c f n`, `C-c f e` and `C-c f V`
+  are `workflow: new`, `edit definition` and `validate`. A run waiting at a gate or failed marks its
+  task as needing you. A run survives a restart of bongos; a run that was running comes back
+  interrupted and waits for `resume`. In this build the node runners are not yet connected to the
+  engine, so a started run cannot execute its nodes.
+- **Settings.** All under `workflows`, the main ones also on the Work page of the settings window:
+  `enabled` (true), `worktrees_dir` (null), `min_free_disk_mb` (2048), `keep_finished_days` (14),
+  `max_concurrent_runs` (3), `max_concurrent_sessions` (null, twice the runs), `max_parallel_branches`
+  (3), `fan_out_width` (8), `retries` (2), `poll_interval_minutes` (5), `wait_give_up_days` (7) and
+  `programs` with `python` (null, `python3` then `python` on `PATH`), `max_minutes` (10) and
+  `max_output_mb` (10).
+- **Privacy.** Workflows run only the local CLIs and scripts a definition names. bongos itself
+  contacts no host for them; what leaves the machine is what those programs do themselves: the model
+  provider of the `claude` or `codex` you run, and `gh` or the network hosts a program node declares
+  (the shipped `wait` and `merge` programs use `gh` and git). A program node with no declared hosts
+  has no network under the sandbox.
+
 ## Emacs keys
 
 Emacs is the default base keymap, so a fresh install has these keys with no setting. They work in
