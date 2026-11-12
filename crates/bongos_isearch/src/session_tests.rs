@@ -41,7 +41,7 @@ fun reconcile(record: Record) {
 
 /// Starts the app with the minibuffer, the Emacs commands and isearch, and binds the shipped
 /// overrides keymap (the minibuffer blocks and the isearch session block).
-fn init(routed: bool, cx: &mut TestAppContext) -> std::sync::Arc<AppState> {
+pub(crate) fn init(routed: bool, cx: &mut TestAppContext) -> std::sync::Arc<AppState> {
     cx.update(|cx| {
         let app_state = AppState::test(cx);
         command_palette_hooks::init(cx);
@@ -126,7 +126,7 @@ pub(crate) fn status(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) 
     view.read_with(cx, |view, _| view.status().to_string())
 }
 
-fn prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
+pub(crate) fn prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
     let state = test_session(workspace, cx).expect("a session is open");
     let prompt = state.borrow().prompt.clone();
     prompt
@@ -160,7 +160,7 @@ fn reversed(start: usize, end: usize) -> Range<usize> {
     }
 }
 
-fn cursor(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
+pub(crate) fn cursor(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
     let selections = selections(editor, cx);
     assert_eq!(selections.len(), 1, "one cursor: {selections:?}");
     assert!(
@@ -171,7 +171,11 @@ fn cursor(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
     selections[0].start
 }
 
-fn set_selections(editor: &Entity<Editor>, ranges: Vec<Range<usize>>, cx: &mut VisualTestContext) {
+pub(crate) fn set_selections(
+    editor: &Entity<Editor>,
+    ranges: Vec<Range<usize>>,
+    cx: &mut VisualTestContext,
+) {
     editor.update_in(cx, |editor, window, cx| {
         editor.change_selections(Default::default(), window, cx, |s| {
             s.select_ranges(
@@ -184,7 +188,7 @@ fn set_selections(editor: &Entity<Editor>, ranges: Vec<Range<usize>>, cx: &mut V
     cx.run_until_parked();
 }
 
-fn text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
+pub(crate) fn text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
     editor.update(cx, |editor, cx| editor.text(cx))
 }
 
@@ -192,11 +196,11 @@ fn scroll_top(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> f64 {
     editor.update(cx, |editor, cx| editor.scroll_position(cx).y)
 }
 
-fn ring(name: &str, cx: &mut VisualTestContext) -> Vec<String> {
+pub(crate) fn ring(name: &str, cx: &mut VisualTestContext) -> Vec<String> {
     cx.update(|_, cx| HistoryStore::global(cx).ring(name).entries().to_vec())
 }
 
-fn mark(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Option<usize> {
+pub(crate) fn mark(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Option<usize> {
     cx.update(|_, cx| {
         let anchor = bongos_emacs::mark::mark_for(editor, cx)?;
         let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
@@ -216,14 +220,14 @@ pub(crate) fn start(
 }
 
 /// Types `string` one character at a time, each search landing before the next character.
-fn type_slowly(string: &str, cx: &mut VisualTestContext) {
+pub(crate) fn type_slowly(string: &str, cx: &mut VisualTestContext) {
     for character in string.chars() {
         cx.simulate_input(&character.to_string());
         cx.run_until_parked();
     }
 }
 
-fn keys(keys: &str, cx: &mut VisualTestContext) {
+pub(crate) fn keys(keys: &str, cx: &mut VisualTestContext) {
     cx.simulate_keystrokes(keys);
     cx.run_until_parked();
 }
@@ -607,6 +611,39 @@ async fn isearch_ctrl_g_trims_a_failing_suffix_then_restores_everything(cx: &mut
         ring(TEXT_HISTORY, cx).is_empty(),
         "an aborted search is not recorded"
     );
+}
+
+/// RET while a find runs waits for it; a C-g that then only trims a failing suffix calls the
+/// exit off, so a later click outside exits at the match without selecting it.
+#[gpui::test]
+async fn isearch_ctrl_g_that_trims_calls_off_a_waiting_exit(cx: &mut TestAppContext) {
+    let content = long_text();
+    let (workspace, editor, mut cx) = workspace_text(&content, true, cx).await;
+    let cx = &mut cx;
+    set_selections(&editor, vec![4..4], cx);
+    let needle = content.find("needle").unwrap();
+
+    start(Forward, &workspace, cx);
+    type_slowly("needlez", cx);
+    assert_eq!(prompt(&workspace, cx), "Failing I-search: ");
+    // In one go: the find for `needlezz` is still running when RET and C-g arrive.
+    keys("z enter ctrl-g", cx);
+    assert!(session_open(&workspace, cx), "C-g only trims");
+    assert_eq!(input(&workspace, cx), "needle");
+    assert_eq!(cursor(&editor, cx), needle + 6);
+
+    let handle = editor.read_with(cx, |editor, cx| editor.focus_handle(cx));
+    cx.update(|window, cx| window.focus(&handle, cx));
+    workspace.update_in(cx, |workspace, window, cx| workspace.hide_modal(window, cx));
+    cx.run_until_parked();
+    assert!(!session_open(&workspace, cx));
+    assert_eq!(
+        cursor(&editor, cx),
+        needle + 6,
+        "no selection: not a RET exit"
+    );
+    assert_eq!(mark(&editor, cx), Some(4));
+    assert_eq!(text(&editor, cx), content);
 }
 
 #[gpui::test]
