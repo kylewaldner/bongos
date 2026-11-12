@@ -128,6 +128,30 @@ pub trait Runner {
     fn merge_branch(&mut self, run: &str, join: &str, branch: &Branch) -> Result<String, Failure>;
 }
 
+impl<R: Runner + ?Sized> Runner for Box<R> {
+    fn start(
+        &mut self,
+        run: &str,
+        definition: &Definition,
+        key: &NodeKey,
+        try_number: u32,
+    ) -> Result<ProcessRecord, Failure> {
+        (**self).start(run, definition, key, try_number)
+    }
+
+    fn poll(&mut self) -> Vec<Finish> {
+        (**self).poll()
+    }
+
+    fn stop(&mut self, tries: &[(String, NodeKey)]) {
+        (**self).stop(tries)
+    }
+
+    fn merge_branch(&mut self, run: &str, join: &str, branch: &Branch) -> Result<String, Failure> {
+        (**self).merge_branch(run, join, branch)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     /// Waiting for a run slot.
@@ -404,6 +428,117 @@ impl<R: Runner> Runtime<R> {
         self.runs[index].append(Event::Cancelled);
         self.hold(index);
         Ok(())
+    }
+
+    /// Pauses run `id`: appends `Paused`. No new key starts; the running ones finish, and the
+    /// run ends once nothing is left to do (the scheduler's paused rule).
+    pub fn pause(&mut self, id: &str) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        if !self.runs[index].state().paused {
+            self.runs[index].append(Event::Paused);
+        }
+        Ok(())
+    }
+
+    /// Resumes run `id`: appends `Resumed` when it was paused or halted, then starts a new try of
+    /// every key a halt stopped or a quit interrupted ([`scheduler::resume_set`] less the keys
+    /// still in flight), in the same worktree. A resumed try does not count against `retries`,
+    /// and completed keys are not rerun. The run then waits for a run slot. The keys started.
+    pub fn resume(&mut self, id: &str) -> Result<Vec<NodeKey>, RuntimeError> {
+        let index = self.live(id)?;
+        let state = self.runs[index].state();
+        if state.paused || state.halted {
+            self.runs[index].append(Event::Resumed);
+        }
+        let keys: Vec<NodeKey> = scheduler::resume_set(&state)
+            .into_iter()
+            .filter(|key| !self.runs[index].in_flight.contains(key))
+            .collect();
+        for key in &keys {
+            self.start(index, key.clone());
+        }
+        self.requeue(index);
+        Ok(keys)
+    }
+
+    /// Starts a new try of `key` now (a retry step) and queues the run for a slot. On a failed
+    /// run the start reopens it and gives the key its retries again
+    /// ([`RunState::retry_floors`]).
+    pub fn rerun(&mut self, id: &str, key: NodeKey) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        self.start(index, key);
+        self.requeue(index);
+        Ok(())
+    }
+
+    /// Continues run `id` on `definition`, revision `rev` of the run (`DefinitionReloaded`).
+    pub fn reload_definition(
+        &mut self,
+        id: &str,
+        definition: Definition,
+        rev: u32,
+    ) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        let run = &mut self.runs[index];
+        run.definition = definition;
+        run.append(Event::DefinitionReloaded { rev });
+        Ok(())
+    }
+
+    /// Closes the open gate of `key` (`GateClosed`); the run continues at its next tick.
+    pub fn close_gate(
+        &mut self,
+        id: &str,
+        key: NodeKey,
+        by: &str,
+        edit: Option<Value>,
+        comment: Option<String>,
+    ) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        self.runs[index].append(Event::GateClosed {
+            key,
+            by: by.to_string(),
+            edit,
+            comment,
+        });
+        self.requeue(index);
+        Ok(())
+    }
+
+    /// Drops run `id` from the runtime, stopping its tries in flight first. Its log stays on
+    /// disk. Whether it was loaded.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let Some(index) = self.find(id) else {
+            return false;
+        };
+        self.stop_in_flight(&[index]);
+        self.queue.retain(|queued| queued != id);
+        self.runs.remove(index);
+        true
+    }
+
+    /// The definition run `id` runs now.
+    pub fn definition(&self, id: &str) -> Option<&Definition> {
+        self.find(id).map(|index| &self.runs[index].definition)
+    }
+
+    /// The keys of run `id` with a try in flight in this runtime.
+    pub fn in_flight(&self, id: &str) -> Vec<NodeKey> {
+        self.find(id)
+            .map(|index| self.runs[index].in_flight.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Queues a held or parked run for a run slot again, after Kyle acted on it.
+    fn requeue(&mut self, index: usize) {
+        let run = &mut self.runs[index];
+        if matches!(run.status, Status::Held | Status::Parked) {
+            run.status = Status::Queued;
+            let id = run.id.clone();
+            if !self.queue.contains(&id) {
+                self.queue.push_back(id);
+            }
+        }
     }
 
     /// Quit: stops every process of every run together (within 5 s) and appends `Interrupted`
@@ -816,6 +951,10 @@ pub(crate) mod fake {
         /// Every merge asked for, as `(run, join, branch)`.
         pub merges: Vec<(String, String, Branch)>,
         results: BTreeMap<String, Value>,
+        /// Tries of each node still to fail, `agent exited nonzero`.
+        failures: BTreeMap<String, u32>,
+        /// The session id each node's tries report.
+        sessions: BTreeMap<String, String>,
         running: Vec<Try>,
     }
 
@@ -827,6 +966,18 @@ pub(crate) mod fake {
         /// The result every try of `node` finishes with.
         pub fn script(&mut self, node: &str, result: Value) -> &mut Self {
             self.results.insert(node.to_string(), result);
+            self
+        }
+
+        /// The session id every try of `node` reports when it finishes.
+        pub fn session(&mut self, node: &str, id: &str) -> &mut Self {
+            self.sessions.insert(node.to_string(), id.to_string());
+            self
+        }
+
+        /// The next `times` tries of `node` fail `agent exited nonzero`.
+        pub fn fail(&mut self, node: &str, times: u32) -> &mut Self {
+            self.failures.insert(node.to_string(), times);
             self
         }
 
@@ -906,12 +1057,30 @@ pub(crate) mod fake {
                     if let Some(process) = done.process.as_mut() {
                         process.stop();
                     }
+                    if let Some(left) = self.failures.get_mut(&done.key.node)
+                        && *left > 0
+                    {
+                        *left -= 1;
+                        let failure = Failure::new(
+                            FailureReason::AgentExitedNonzero,
+                            Some(done.key.clone()),
+                            "scripted failure",
+                        );
+                        return Finish {
+                            outcome: Err(failure),
+                            ..Finish::ok(done.run, done.key, done.try_number, Value::Null)
+                        };
+                    }
                     let result = self
                         .results
                         .get(&done.key.node)
                         .cloned()
                         .unwrap_or_else(|| json!({ "summary": "ok" }));
-                    Finish::ok(done.run, done.key, done.try_number, result)
+                    let session_id = self.sessions.get(&done.key.node).cloned();
+                    Finish {
+                        session_id,
+                        ..Finish::ok(done.run, done.key, done.try_number, result)
+                    }
                 })
                 .collect()
         }
