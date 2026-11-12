@@ -32,7 +32,7 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         false,
         Box::new(|title, workspace, _, cx| {
             if ProjectRepositorySettings::get_global(cx).enabled {
-                new_repository_project(title, workspace, cx);
+                new_repository_project(title, cx);
                 return;
             }
             submit(workspace, cx, move |tree, ctx| {
@@ -53,7 +53,7 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
 
 /// `project: new` while `project_repository.enabled`: makes the project folder with its
 /// repository instead of an old-format project.
-fn new_repository_project(title: String, workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+fn new_repository_project(title: String, cx: &mut Context<Workspace>) {
     let settings = ProjectRepositorySettings::get_global(cx).clone();
     let request = CreateRequest {
         folder: settings.project_folder(&slugify(&title)),
