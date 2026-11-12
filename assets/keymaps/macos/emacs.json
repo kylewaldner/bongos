@@ -25,9 +25,11 @@
     "bindings": {
       "ctrl-g": "emacs::KeyboardQuit", // keyboard-quit
       "alt-g": "emacs::GotoLine", // goto-line
-      "ctrl-space": "editor::SetMark", // set-mark
-      "ctrl-@": "editor::SetMark", // set-mark
-      "ctrl-x ctrl-x": "editor::SwapSelectionEnds", // exchange-point-and-mark
+      "ctrl-space": "emacs::SetMarkCommand", // set-mark-command
+      "ctrl-@": "emacs::SetMarkCommand", // set-mark-command
+      "ctrl-.": "emacs::SetMarkCommand", // set-mark-command (beats editor::ToggleCodeActions in editors)
+      "ctrl-x ctrl-space": "emacs::PopMark", // pop-mark
+      "ctrl-x ctrl-x": "emacs::ExchangePointAndMark", // exchange-point-and-mark
       "ctrl-f": "editor::MoveRight", // forward-char
       "ctrl-b": "editor::MoveLeft", // backward-char
       "ctrl-n": "editor::MoveDown", // next-line
@@ -67,7 +69,7 @@
       "alt-shift-z": "emacs::ZapUpToChar", // zap-up-to-char
       "ctrl-alt-z": "emacs::ZapBackToChar", // zap-back-to-char
       "ctrl-alt-shift-z": "emacs::ZapBackUpToChar", // zap-back-up-to-char
-      "alt-.": "editor::GoToDefinition", // xref-find-definitions
+      "alt-.": "emacs::XrefFindDefinitions", // xref-find-definitions
       "alt-?": "editor::FindAllReferences", // xref-find-references
       "alt-,": "pane::GoBack", // xref-pop-marker-stack
       "ctrl-x h": "editor::SelectAll", // mark-whole-buffer
@@ -90,8 +92,8 @@
       "alt-v": "editor::MovePageUp", // scroll-down
       "ctrl-x [": "editor::MoveToBeginning", // beginning-of-buffer
       "ctrl-x ]": "editor::MoveToEnd", // end-of-buffer
-      "alt-<": "editor::MoveToBeginning", // beginning-of-buffer
-      "alt->": "editor::MoveToEnd", // end-of-buffer
+      "alt-<": "emacs::BeginningOfBuffer", // beginning-of-buffer
+      "alt->": "emacs::EndOfBuffer", // end-of-buffer
       "ctrl-home": "editor::MoveToBeginning", // beginning-of-buffer
       "ctrl-end": "editor::MoveToEnd", // end-of-buffer
       "ctrl-l": "emacs::Recenter", // recenter
@@ -201,6 +203,7 @@
       "ctrl-x 3": "pane::SplitRight", // split-window-right
       "ctrl-x ctrl-f": "file_finder::Toggle", // find-file
       "ctrl-x ctrl-s": "workspace::Save", // save-buffer
+      "ctrl-x ctrl-.": "emacs::PopGlobalMark", // pop-global-mark
       "ctrl-x ctrl-w": "workspace::SaveAs", // write-file
       "ctrl-x s": "workspace::SaveAll", // save-some-buffers
       // Work panel (C-c w): tasks, todos, projects and artifacts. The unbound commands are in

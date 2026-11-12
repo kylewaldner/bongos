@@ -340,14 +340,14 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | C-f, C-b, C-n, C-p | forward-char, backward-char, next-line, previous-line |
 | C-a, C-e, M-m | beginning of line, end of line, back to indentation |
 | M-f, M-b | forward-word, backward-word |
-| M-<, M->, C-x [, C-x ] | beginning and end of the buffer |
+| M-<, M->, C-x [, C-x ] | beginning and end of the buffer (M-< and M-> push the mark first) |
 | C-v, M-v | scroll down, scroll up |
 | M-{, M-} | backward and forward paragraph |
 | M-g | goto-line (a prompt in the minibuffer, with a preview) |
 | C-l, M-r | recenter, reposition |
 | C-s, C-r | isearch |
 | C-x h | mark the whole buffer |
-| C-SPC, C-x C-x | set the mark, exchange point and mark |
+| C-SPC, C-x C-SPC, C-x C-x | set the mark, pop the mark ring, exchange point and mark |
 | C-g | keyboard-quit (cancels a prompt, a mark or a search) |
 
 | Key | Editing command |
@@ -384,6 +384,33 @@ bar.
 
 ```json
 { "base_keymap": "VSCode", "emacs": { "cursor_style": "auto" } }
+```
+
+### Mark and region
+
+| Key | Command |
+|---|---|
+| C-SPC, C-@, C-. | set the mark and start the region; with a region, deactivate it (the mark stays) |
+| C-x C-SPC | pop the mark ring: go to the mark, and the previous mark becomes the mark |
+| C-x C-. | pop the global mark: back to the newest earlier location in another file |
+| C-x C-x | exchange point and mark (with no region, it selects from point to the mark) |
+| M-<, M-> | push the mark, then jump to the start or end of the buffer |
+| M-. | push the mark, then go to the definition |
+| M-t, C-x C-t | with a mark away from point, swap the word or line at point with the one at the mark |
+
+C-SPC pressed right after a pop keeps popping, as in Emacs. C-u is not a prefix key yet, so
+C-x C-SPC stands in for C-u C-SPC. Inside editors C-. sets the mark instead of opening code
+actions, which stay in the command palette.
+
+The mark and its ring belong to the buffer, so two panes showing one file share them, and edits
+move them with their text. C-x C-. crosses files: it goes back through the active pane's history.
+
+`emacs.delete_selection` (default `false`) decides what typing does over an active region: while
+it is false, the character goes in at point, the selected text stays and the region is
+deactivated; set it to `true` to have typing replace the region, as in other editors.
+
+```json
+{ "emacs": { "delete_selection": true } }
 ```
 
 ## Minibuffer
