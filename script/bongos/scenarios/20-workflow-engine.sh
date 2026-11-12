@@ -16,8 +16,8 @@
 #      creates it again.
 #   5. `workflow: show runs` brings up the Runs panel and a second one hides it (the screen
 #      changes each time); `workflow: run` with no task at point and `workflow: pause` with no run
-#      answer with a message and leave the app running and nothing written under the runs
-#      directory.
+#      answer with a message and leave the app running and no run record
+#      (no non-empty runs/ directory under ~/.bongos outside workflows/).
 #   6. With workflows.enabled set to false in settings.json, the Runs panel goes away and C-c f n
 #      does nothing (no workflow is created); set back to true, the same key creates one again.
 #   7. The proxy got no request beyond the two kinds every launch makes (the ACP registry and
@@ -148,9 +148,10 @@ palette "workflow: pause"
 shot workflow-pause-no-run
 frame_has_ui workflow-pause-no-run
 kill -0 "$APP_PID" 2>/dev/null || fail "the app exited after the run commands with no run"
-if [ -e "$HOME/.bongos/runs" ] && [ -n "$(ls -A "$HOME/.bongos/runs" 2>/dev/null)" ]; then
-  fail "a run record was written with no run started: $(ls -R "$HOME/.bongos/runs")"
-fi
+# Run records live in a task'"'"'s own runs/ directory, so look for any non-empty runs directory
+# under ~/.bongos that is not inside a workflow definition.
+RUN_RECORDS="$(find "$HOME/.bongos" -type d -name runs -not -path '*/workflows/*' -not -empty 2>/dev/null || true)"
+[ -z "$RUN_RECORDS" ] || fail "a run record was written with no run started: $RUN_RECORDS"
 say "smoke: the Runs panel and the messages: $RUN/workflow-runs-panel.png, $RUN/workflow-run-no-task.png, $RUN/workflow-pause-no-run.png"
 
 # ---------------------------------------------------------------------------------------------

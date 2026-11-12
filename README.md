@@ -389,8 +389,8 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   see what it needs first), `C-c f p` pauses (running steps finish first), `C-c f h` halts now and
   opens the worktree, `C-c f c` resumes, `C-c f t` retries the failed step, `C-c f R` restarts,
   `C-c f k` cancels, `C-c f a` approves a gate and `C-c f v` sends it back with notes. `C-c f w`
-  shows the Runs panel (the runs of every task, filtered with `t`, `p` and `s`; `enter` opens a run
-  view with its graph, `g` toggles it); `C-c f l` opens a run's logs, `C-c f s` its run view, `C-c f
+  shows the Runs panel (the runs of every task, filtered with `t`, `p` and `s`; `enter` and `l` open the
+  selected run's logs); `C-c f l` opens a run's logs, `C-c f s` its run view, `C-c f
   o` its worktree, `C-c f d` its diff and `C-c f x` is meant to clear finished runs (the
   worktrees of those older than `workflows.keep_finished_days`; not connected yet). `C-c f n`, `C-c f e` and `C-c f V`
   are `workflow: new`, `edit definition` and `validate`. A run waiting at a gate or failed marks its
