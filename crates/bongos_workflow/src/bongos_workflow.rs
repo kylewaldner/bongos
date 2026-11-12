@@ -13,6 +13,7 @@ mod engine;
 pub mod gates;
 pub mod lifecycle;
 pub mod mcp;
+pub mod outcomes;
 pub mod process;
 pub mod runner_claude;
 pub mod runner_codex;
@@ -21,6 +22,7 @@ pub mod runtime;
 mod settings;
 pub mod sources;
 pub mod status_item;
+pub mod task_link;
 pub mod worktrees;
 
 use ::settings::Settings as _;

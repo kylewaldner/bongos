@@ -2590,6 +2590,7 @@ name = "bongos_workflow"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_builder_model",
  "bongos_chat",
  "bongos_work",
  "bongos_work_model",
