@@ -53,12 +53,12 @@ fn mark_form_offset(editor: &Entity<Editor>, count: Option<i32>, cx: &mut App) -
         return None;
     };
     let snapshot = editor.buffer().read(cx).snapshot(cx);
-    let head = selection.head().to_offset(&snapshot);
-    let tail = selection.tail().to_offset(&snapshot);
+    let head = selection.head().to_offset(&snapshot).0;
+    let tail = selection.tail().to_offset(&snapshot).0;
     if head != tail {
         return None;
     }
-    let mark = mark.to_offset(&snapshot);
+    let mark = mark.to_offset(&snapshot).0;
     // A mark at point has nothing to swap with: the plain form runs.
     (mark != head).then_some(mark)
 }

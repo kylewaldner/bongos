@@ -290,20 +290,16 @@ fn parse_pm(marked: &str) -> (String, usize, usize) {
     (text, point.unwrap(), mark.unwrap())
 }
 
-fn with_mark(marked: &str, f: fn(&dyn TextSource, usize, usize) -> Plan) -> (String, Vec<Caret>) {
-    let (text, point, mark) = parse_pm(marked);
-    let plan = f(text.as_str() as &dyn TextSource, point, mark);
-    (apply(&text, &plan), plan.carets)
-}
-
 fn words_mark(marked: &str) -> String {
-    let (text, carets) = with_mark(marked, |t, p, m| transpose_words_with_mark(t, p, m));
-    show(&text, &carets)
+    let (text, point, mark) = parse_pm(marked);
+    let plan = transpose_words_with_mark(text.as_str(), point, mark);
+    show(&apply(&text, &plan), &plan.carets)
 }
 
 fn lines_mark(marked: &str) -> String {
-    let (text, carets) = with_mark(marked, |t, p, m| transpose_lines_with_mark(t, p, m));
-    show(&text, &carets)
+    let (text, point, mark) = parse_pm(marked);
+    let plan = transpose_lines_with_mark(text.as_str(), point, mark);
+    show(&apply(&text, &plan), &plan.carets)
 }
 
 #[test]
@@ -360,12 +356,6 @@ fn transpose_lines_with_mark_does_nothing_for_one_line() {
         let plan = transpose_lines_with_mark(text.as_str(), point, mark);
         assert!(plan.edits.is_empty() && plan.carets.is_empty(), "{marked}");
     }
-}
-
-fn sorted_chars(text: &str) -> Vec<char> {
-    let mut chars: Vec<char> = text.chars().collect();
-    chars.sort_unstable();
-    chars
 }
 
 #[test]
