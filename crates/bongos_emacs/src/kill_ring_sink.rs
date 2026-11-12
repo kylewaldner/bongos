@@ -54,7 +54,7 @@ pub(crate) fn init(cx: &mut App) {
     set_kill_sink(cx, kill_to_ring);
 }
 
-/// Watches `editor` for mouse selections, which end a kill sequence there.
+/// Watches `editor` for mouse selections, which end a kill sequence and a yank there.
 pub(crate) fn init_editor(cx: &mut Context<Editor>) {
     cx.subscribe_self(|editor, event: &EditorEvent, cx| {
         let EditorEvent::SelectionsChanged { local: true } = event else {
@@ -64,6 +64,7 @@ pub(crate) fn init_editor(cx: &mut Context<Editor>) {
             return;
         }
         forget_kill_in(cx.entity_id(), cx);
+        crate::yank::forget_yank_in(cx.entity_id(), cx);
     })
     .detach();
 }
