@@ -113,12 +113,26 @@ fn a_loop_is_an_arc_labeled_with_its_pass() {
     let state = run.run();
     let graph = layout(&run.definition, &state);
     let text = graph.text();
-    assert!(text.contains("arcs\n  fix -> test \"pass 2 of 3\""), "{text}");
-    assert!(text.contains("lane 0 test (program) succeeded pass 3"), "{text}");
+    assert!(
+        text.contains("arcs\n  fix -> test \"pass 2 of 3\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("lane 0 test (program) succeeded pass 3"),
+        "{text}"
+    );
     // The back edge does not push `test` right of `fix`.
     assert_eq!(graph.nodes[0].name, "test");
     assert_eq!(graph.nodes[0].column, 0);
-    assert_eq!(graph.nodes.iter().find(|node| node.name == "fix").unwrap().column, 1);
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "fix")
+            .unwrap()
+            .column,
+        1
+    );
 }
 
 const ROUTED: &str = r#"

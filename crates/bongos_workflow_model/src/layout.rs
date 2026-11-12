@@ -8,8 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::definition::{Definition, NodeKind, Target};
-use crate::record::{NodeKey, RunState};
+use crate::definition::{Definition, EndKind, NodeKind, Target};
+use crate::record::{EndState, NodeKey, RunState};
 
 /// What a laid-out box shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,8 +210,7 @@ pub fn layout(definition: &Definition, state: &RunState) -> GraphLayout {
     let names = definition
         .nodes
         .iter()
-        .map(|node| (node.name.as_str(), Some(node.kind.value)))
-        .chain(definition.ends.iter().map(|end| (end.name.as_str(), None)));
+        .map(|node| (node.name.as_str(), Some(node.kind.value)));
     for (name, kind) in names {
         let passes = state.passes.get(name).copied().unwrap_or(0);
         let column = column[name];
@@ -257,23 +256,43 @@ pub fn layout(definition: &Definition, state: &RunState) -> GraphLayout {
                     });
                 }
             }
-            None => {
-                let end = definition.end(name).expect("end of the list");
-                let reached = state.routes.iter().any(|route| route.to == name);
-                nodes.push(LayoutNode {
-                    name: name.to_string(),
-                    kind: match end.kind {
-                        crate::definition::EndKind::Success => BoxKind::EndSuccess,
-                        crate::definition::EndKind::Failure => BoxKind::EndFailure,
-                    },
-                    column,
-                    lane: 0,
-                    branch: Vec::new(),
-                    status: if reached { Status::Reached } else { unreached },
-                    passes: 0,
-                });
-            }
+            None => {}
         }
+    }
+    for end in &definition.ends {
+        let name = end.name.as_str();
+        // The log records no route into an end: a succeeded run reached the success ends that a
+        // succeeded node routes to.
+        let routed_by_success = |node: &crate::definition::Node| {
+            node.routes.iter().any(|route| match &route.to {
+                Some(Target::One(to)) => to == name,
+                Some(Target::Many(to)) => to.iter().any(|to| to == name),
+                None => false,
+            }) && nodes
+                .iter()
+                .any(|laid| laid.name == node.name && laid.status == Status::Succeeded)
+        };
+        let reached = state.routes.iter().any(|route| route.to == name)
+            || (matches!(state.ended, Some((EndState::Succeeded, _)))
+                && end.kind == EndKind::Success
+                && definition.nodes.iter().any(routed_by_success));
+        let unreached = if over {
+            Status::Skipped
+        } else {
+            Status::Pending
+        };
+        nodes.push(LayoutNode {
+            name: name.to_string(),
+            kind: match end.kind {
+                EndKind::Success => BoxKind::EndSuccess,
+                EndKind::Failure => BoxKind::EndFailure,
+            },
+            column: column[name],
+            lane: 0,
+            branch: Vec::new(),
+            status: if reached { Status::Reached } else { unreached },
+            passes: 0,
+        });
     }
     // Two boxes in one column never share a lane.
     let mut taken: BTreeSet<(usize, usize)> = BTreeSet::new();
@@ -362,7 +381,12 @@ fn highest_pass(state: &RunState, node: &str, branch: &[(String, u32)]) -> Optio
         .max()
 }
 
-fn node_status(state: &RunState, node: &str, branch: &[(String, u32)], unreached: Status) -> Status {
+fn node_status(
+    state: &RunState,
+    node: &str,
+    branch: &[(String, u32)],
+    unreached: Status,
+) -> Status {
     let Some(pass) = highest_pass(state, node, branch) else {
         return unreached;
     };
@@ -420,7 +444,10 @@ impl GraphLayout {
                 if edge.label.is_empty() {
                     text.push_str(&format!("  {} -> {}\n", edge.from, edge.to));
                 } else {
-                    text.push_str(&format!("  {} -> {} ({})\n", edge.from, edge.to, edge.label));
+                    text.push_str(&format!(
+                        "  {} -> {} ({})\n",
+                        edge.from, edge.to, edge.label
+                    ));
                 }
             }
         }
