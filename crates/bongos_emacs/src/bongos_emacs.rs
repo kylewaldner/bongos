@@ -1,6 +1,6 @@
 //! The Emacs commands on top of the editor: the `emacs` actions, the one path that applies a
-//! command's plan, the kill sink, the last-command tracker and the C-g hooks. The text logic
-//! lives in `bongos_emacs_model`.
+//! command's plan, the kill sink and its kill ring writer, the last-command tracker and the C-g
+//! hooks. The text logic lives in `bongos_emacs_model`.
 
 pub mod actions;
 pub mod apply;
@@ -10,6 +10,7 @@ mod global_mark;
 mod goto_line;
 mod jumps;
 mod kill;
+pub mod kill_ring_sink;
 pub mod kill_sink;
 pub mod last_command;
 mod lines;
@@ -37,6 +38,8 @@ mod global_mark_tests;
 mod goto_line_tests;
 #[cfg(test)]
 mod jumps_tests;
+#[cfg(test)]
+mod kill_ring_sink_tests;
 #[cfg(test)]
 mod kill_sink_tests;
 #[cfg(test)]
@@ -74,6 +77,7 @@ pub use last_command::last_command;
 /// tracker. Actions without a handler stay undispatchable, so only working commands reach M-x.
 pub fn init(cx: &mut App) {
     last_command::init(cx);
+    kill_ring_sink::init(cx);
     quit::init(cx);
     cursor::init(cx);
     global_mark::init(cx);
@@ -123,6 +127,7 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, jumps::xref_find_definitions_command);
         register(editor, &weak, jumps::xref_find_implementations_command);
         recenter::init_editor(cx);
+        kill_ring_sink::init_editor(cx);
         mark::init_editor(window, cx);
     })
     .detach();

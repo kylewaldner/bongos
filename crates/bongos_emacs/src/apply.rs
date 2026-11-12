@@ -6,6 +6,7 @@ use editor::{ClipboardSelection, Editor, SelectionEffects};
 use gpui::{App, Entity, Window};
 use multi_buffer::{MultiBufferOffset, MultiBufferSnapshot};
 
+use crate::kill_ring_sink;
 use crate::kill_sink::{self, Kill, KillDirection, KillKind};
 use crate::region;
 use crate::snapshot_text::SnapshotText;
@@ -69,8 +70,9 @@ impl Command {
 /// Runs a command on every caret of `editor`:
 /// 1. reads the snapshot and every selection and computes the plan once for all carets (a
 ///    selection's region counts only when `region::is_active`);
-/// 2. does nothing when the plan is empty (a zap that found nothing keeps the region), or when
-///    the command edits and the editor is read-only (nothing is killed either);
+/// 2. does nothing when the plan is empty (a zap that found nothing keeps the region), when
+///    the command edits and the editor is read-only (nothing is killed either), or when the
+///    command would kill or copy text in a masked editor;
 /// 3. hands the killed text to the kill sink before touching the buffer;
 /// 4. finalizes the open undo group (so earlier typing stays its own step), applies all edits and
 ///    the new carets in one transaction, ends mark mode, and finalizes the transaction so the
@@ -105,6 +107,14 @@ pub fn run(
         if edits && editor.read_only(cx) {
             return None;
         }
+        // A masked editor (a secret field) never kills or copies: its text stays where it is and
+        // nothing reaches the kill ring or the clipboard. Motions still run.
+        if command.kind != CommandKind::Motion && !plan.killed.is_empty() && editor.is_masked(cx) {
+            return None;
+        }
+        if !plan.killed.is_empty() {
+            kill_ring_sink::forget_kill_if_moved(cx.entity_id(), &selections, &snapshot, cx);
+        }
         let kill = (!plan.killed.is_empty()).then(|| {
             let metadata = kill_metadata(&plan, &snapshot, command)
                 .into_iter()
@@ -133,6 +143,7 @@ pub fn run(
                     KillDirection::Forward
                 },
                 command: command.name,
+                editor: cx.entity_id(),
             }
         });
         Some((plan, kill, edits))
@@ -142,6 +153,7 @@ pub fn run(
     };
 
     // The killed text is saved before the buffer changes, so nothing deleted is lost.
+    let killed = kill.is_some();
     if let Some(kill) = kill {
         kill_sink::send(kill, window, cx);
     }
@@ -185,6 +197,10 @@ pub fn run(
         }
         if edits {
             editor.set_selection_mark_mode(false, cx);
+        }
+        if killed {
+            let carets = editor.selections.disjoint_anchors_arc();
+            kill_ring_sink::remember_carets(cx.entity_id(), carets, cx);
         }
     });
     true

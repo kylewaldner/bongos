@@ -1,10 +1,10 @@
-//! Where killed and copied text goes. Until the kill ring exists it is the system clipboard;
-//! the kill ring replaces the sink with `set_kill_sink`.
+//! Where killed and copied text goes. Without a sink set it is the system clipboard; `init`
+//! installs the kill ring's sink with `set_kill_sink`.
 
 use std::rc::Rc;
 
 use editor::ClipboardSelection;
-use gpui::{App, ClipboardItem, Global, Window};
+use gpui::{App, ClipboardItem, EntityId, Global, Window};
 
 /// Whether the text was deleted or only copied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +30,8 @@ pub struct Kill {
     pub direction: KillDirection,
     /// The action name of the command, such as `emacs::KillWord`.
     pub command: &'static str,
+    /// The editor the text came from, so kills in another editor do not join.
+    pub editor: EntityId,
 }
 
 impl Kill {
