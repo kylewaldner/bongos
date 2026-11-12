@@ -25,6 +25,8 @@ mod engine_tests;
 #[cfg(test)]
 mod intercept_tests;
 #[cfg(test)]
+mod large_file_tests;
+#[cfg(test)]
 mod occur_tests;
 #[cfg(test)]
 mod perf_tests;
@@ -33,7 +35,6 @@ mod seams_tests;
 #[cfg(test)]
 mod session_tests;
 
-use command_palette_hooks::CommandPaletteFilter;
 use gpui::App;
 
 pub use engine::{
@@ -43,11 +44,7 @@ pub use engine::{
 /// The action namespace of the isearch commands.
 pub const NAMESPACE: &str = "isearch";
 
-/// Registers the starters on every editor and the in-session commands on every workspace, and
-/// hides the `isearch` actions from the command palette until the feature is turned on.
+/// Registers the starters on every editor and the in-session commands on every workspace.
 pub fn init(cx: &mut App) {
     session::init(cx);
-    CommandPaletteFilter::update_global(cx, |filter, _| {
-        filter.hide_namespace(NAMESPACE);
-    });
 }

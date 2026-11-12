@@ -42,6 +42,19 @@ fun reconcile(record: Record) {
 /// Starts the app with the minibuffer, the Emacs commands and isearch, and binds the shipped
 /// overrides keymap (the minibuffer blocks and the isearch session block).
 pub(crate) fn init(routed: bool, cx: &mut TestAppContext) -> std::sync::Arc<AppState> {
+    let routes = if routed {
+        vec![crate::session::HOST.to_string()]
+    } else {
+        Vec::new()
+    };
+    init_with_routes(Some(routes), cx)
+}
+
+/// The same with `minibuffer.enabled_for` as `routes` sets it, or left at its default for `None`.
+fn init_with_routes(
+    routes: Option<Vec<String>>,
+    cx: &mut TestAppContext,
+) -> std::sync::Arc<AppState> {
     cx.update(|cx| {
         let app_state = AppState::test(cx);
         command_palette_hooks::init(cx);
@@ -49,12 +62,9 @@ pub(crate) fn init(routed: bool, cx: &mut TestAppContext) -> std::sync::Arc<AppS
         bongos_minibuffer::init(cx);
         bongos_emacs::init(cx);
         crate::init(cx);
-        let routes = if routed {
-            vec![crate::session::HOST.to_string()]
-        } else {
-            Vec::new()
-        };
-        cx.default_global::<MinibufferRouting>().set_routes(routes);
+        if let Some(routes) = routes {
+            cx.default_global::<MinibufferRouting>().set_routes(routes);
+        }
         let bindings =
             KeymapFile::load_asset_allow_partial_failure("keymaps/specific-overrides.json", cx)
                 .expect("the overrides keymap loads");
@@ -69,7 +79,17 @@ pub(crate) async fn workspace_with(
     cx: &mut TestAppContext,
     make: impl FnOnce(&Entity<Project>, &mut gpui::Window, &mut gpui::App) -> Entity<Editor>,
 ) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
-    let app_state = init(routed, cx);
+    let routes = routed.then(|| vec![crate::session::HOST.to_string()]);
+    workspace_with_routes(Some(routes.unwrap_or_default()), cx, make).await
+}
+
+/// The same with `minibuffer.enabled_for` as `routes` sets it, or left at its default for `None`.
+async fn workspace_with_routes(
+    routes: Option<Vec<String>>,
+    cx: &mut TestAppContext,
+    make: impl FnOnce(&Entity<Project>, &mut gpui::Window, &mut gpui::App) -> Entity<Editor>,
+) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
+    let app_state = init_with_routes(routes, cx);
     let project = Project::test(app_state.fs.clone(), [], cx).await;
     let window: WindowHandle<MultiWorkspace> = {
         let project = project.clone();
@@ -274,6 +294,49 @@ async fn isearch_starters_open_a_centered_session(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn isearch_starters_open_a_session_in_the_strip(cx: &mut TestAppContext) {
     starters_open_a_session_with_their_prompt(true, cx).await;
+}
+
+#[gpui::test]
+async fn isearch_actions_are_listed_in_the_command_palette(cx: &mut TestAppContext) {
+    init(true, cx);
+    cx.update(|cx| {
+        let filter = command_palette_hooks::CommandPaletteFilter::try_global(cx)
+            .expect("the palette filter is installed");
+        let mut shown = 0;
+        for name in cx.all_action_names() {
+            if !name.starts_with("isearch::") {
+                continue;
+            }
+            let action = cx.build_action(name, None).expect("the action builds");
+            assert!(!filter.is_hidden(action.as_ref()), "{name} is hidden");
+            shown += 1;
+        }
+        assert!(shown >= 28, "{shown} isearch actions");
+    });
+}
+
+#[gpui::test]
+async fn isearch_opens_in_the_strip_with_the_default_settings(cx: &mut TestAppContext) {
+    let text = KOTLIN.to_string();
+    let (workspace, _editor, mut cx) =
+        workspace_with_routes(None, cx, move |project, window, cx| {
+            let buffer = project.update(cx, |project, cx| {
+                project.create_local_buffer(&text, None, false, cx)
+            });
+            cx.new(|cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx))
+        })
+        .await;
+    let cx = &mut cx;
+    cx.update(|_, cx| {
+        assert!(
+            cx.global::<MinibufferRouting>()
+                .is_routed(crate::session::HOST)
+        );
+    });
+    start(Forward, &workspace, cx);
+    assert!(in_strip(&workspace, cx));
+    keys("ctrl-g", cx);
+    assert!(!session_open(&workspace, cx));
 }
 
 async fn typing_lands_on_the_first_match_after_point(routed: bool, cx: &mut TestAppContext) {

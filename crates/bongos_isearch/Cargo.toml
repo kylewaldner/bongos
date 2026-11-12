@@ -17,7 +17,6 @@ bongos_emacs.workspace = true
 bongos_emacs_model.workspace = true
 bongos_isearch_model.workspace = true
 bongos_minibuffer.workspace = true
-command_palette_hooks.workspace = true
 editor.workspace = true
 futures.workspace = true
 gpui.workspace = true
@@ -29,6 +28,7 @@ workspace.workspace = true
 
 [dev-dependencies]
 buffer_diff = { workspace = true, features = ["test-support"] }
+command_palette_hooks.workspace = true
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }

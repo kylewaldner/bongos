@@ -131,7 +131,7 @@ pub(crate) fn start(editor: &Entity<Editor>, spec: SearchSpec, window: &mut Wind
 }
 
 /// Builds the read-only multibuffer of `lines`, one excerpt per run of consecutive rows.
-fn results(
+pub(crate) fn results(
     source: &Entity<MultiBuffer>,
     lines: &Lines,
     string: &str,
@@ -144,10 +144,16 @@ fn results(
                 continue;
             };
             let snapshot = buffer.read(cx).snapshot();
+            // The pass ran on an older snapshot: skip the rows the buffer no longer has.
+            let last_row = snapshot.max_point().row;
             let ranges = rows
                 .iter()
+                .filter(|row| **row <= last_row)
                 .map(|row| Point::new(*row, 0)..Point::new(*row, snapshot.line_len(*row)))
                 .collect::<Vec<_>>();
+            if ranges.is_empty() {
+                continue;
+            }
             let path = PathKey::for_buffer(&buffer, cx);
             results.set_excerpts_for_path(path, buffer as Entity<Buffer>, ranges, 0, cx);
         }
