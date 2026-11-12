@@ -20,6 +20,7 @@ pub mod run_view;
 pub mod runner_claude;
 pub mod runner_codex;
 pub mod runner_program;
+pub mod runs_panel;
 pub mod runtime;
 mod settings;
 pub mod sources;
@@ -35,6 +36,7 @@ pub use actions::{WorkflowToast, action_types, init_palette, register, workflow}
 pub use engine::{EngineRunner, SharedLifecycle, WorkflowEngine};
 pub use lifecycle::{Refusal, RefusalKind, RunId, RunStatus, StartRequest, WorkflowEvent};
 pub use settings::WorkflowsSettings;
+pub use runs_panel::{RunsPanel, init_panel};
 pub use status_item::WorkflowStatus;
 
 /// Registers the `workflows` settings and, when `workflows.enabled` is already true, creates the

@@ -855,6 +855,12 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
                 bongos_work::init_panel(workspace, window, cx)
             })
             .log_err();
+        // The Runs panel follows `workflows.enabled` the same way.
+        workspace_handle
+            .update_in(&mut cx.clone(), |workspace, window, cx| {
+                bongos_workflow::init_panel(workspace, window, cx)
+            })
+            .log_err();
         // The Chats panel follows `chats.enabled` the same way.
         workspace_handle
             .update_in(&mut cx.clone(), |workspace, window, cx| {

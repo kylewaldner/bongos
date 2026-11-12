@@ -54,3 +54,59 @@ async fn run_by_name_is_handled_and_says_workflows_are_off(cx: &mut TestAppConte
         workspace.notification_ids().contains(&id)
     }));
 }
+
+#[gpui::test]
+async fn the_runs_panel_is_absent_while_workflows_are_off_and_follows_the_setting(
+    cx: &mut TestAppContext,
+) {
+    let app_state = init_test(cx);
+    cx.update(bongos_workflow::init);
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree(path!("/root"), json!({ "a": null }))
+        .await;
+    cx.update(|cx| {
+        workspace::open_paths(
+            &[path!("/root/a").into()],
+            app_state.clone(),
+            workspace::OpenOptions::default(),
+            cx,
+        )
+    })
+    .await
+    .unwrap();
+    let multi_workspace = cx.windows()[0].downcast::<MultiWorkspace>().unwrap();
+    let workspace = multi_workspace
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    multi_workspace
+        .update(cx, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                bongos_workflow::init_panel(workspace, window, cx)
+            })
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let has_panel = |cx: &mut TestAppContext| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.panel::<bongos_workflow::RunsPanel>(cx).is_some()
+        })
+    };
+    assert!(!has_panel(cx), "absent while workflows.enabled is off");
+
+    let set_enabled = |cx: &mut TestAppContext, enabled: bool| {
+        cx.update(|cx| {
+            settings::SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.workflows.get_or_insert_default().enabled = Some(enabled);
+                });
+            });
+        });
+        cx.run_until_parked();
+    };
+    set_enabled(cx, true);
+    assert!(has_panel(cx), "added when workflows are turned on");
+    set_enabled(cx, false);
+    assert!(!has_panel(cx), "removed when workflows are turned off");
+}

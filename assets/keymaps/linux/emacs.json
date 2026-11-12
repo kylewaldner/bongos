@@ -410,6 +410,12 @@
     },
   },
   {
+    "context": "RunsPanel",
+    "bindings": {
+      "enter": "menu::Confirm",
+    },
+  },
+  {
     "context": "RunView",
     "bindings": {
       "g": "workflow::ToggleGraph",
