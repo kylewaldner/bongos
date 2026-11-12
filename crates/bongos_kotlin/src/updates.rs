@@ -1896,8 +1896,9 @@ mod tests {
         assert!(updates.read_with(cx, |updates, _| updates.download_progress().is_some()));
         let cancelled = updates.update(cx, |updates, cx| updates.cancel_download(cx));
         assert!(cancelled);
+        let reader = cx.clone();
         wait_until(cx, "the download to end", || {
-            !updates.read_with(cx, |updates, _| updates.downloading)
+            !updates.read_with(&reader, |updates, _| updates.downloading)
         });
         let dir = harness.server_dir();
         assert!(!dir.join(".263.3.0.download").exists());
