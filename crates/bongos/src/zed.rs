@@ -32,6 +32,8 @@ pub(crate) mod windows_only_instance;
 #[cfg(test)]
 mod work_keymap_tests;
 #[cfg(test)]
+mod workflow_keymap_tests;
+#[cfg(test)]
 mod workflow_tests;
 
 use agent_settings::{UserAgentsMdState, init_user_agents_md};
