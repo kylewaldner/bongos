@@ -18,8 +18,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::runner_program::{
-    Clock, DENIALS_FILE, INTERPRETER_FIX, Interpreter, MCP_REFUSAL, PollPlan, ProgramCaps,
-    ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe, os_sandbox_probe,
+    Clock, DENIALS_END, DENIALS_FILE, INTERPRETER_FIX, Interpreter, MCP_REFUSAL, PollPlan,
+    ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe,
+    os_sandbox_probe,
 };
 use crate::runtime::Finish;
 
@@ -317,7 +318,10 @@ fn an_unlisted_command_fails_even_when_the_script_catches_it() {
     assert_eq!(failure.reason, FailureReason::PermissionDenied);
     assert_eq!(says(failure), "permission denied: curl");
     let denials = std::fs::read_to_string(fixture.path(TRY_DIR).join(DENIALS_FILE)).unwrap();
-    assert_eq!(denials.trim(), r#"{"what": "curl"}"#);
+    assert_eq!(
+        denials.lines().collect::<Vec<_>>(),
+        [r#"{"what": "curl"}"#, DENIALS_END]
+    );
 }
 
 #[test]
@@ -403,7 +407,7 @@ fn the_output_cap_names_itself() {
             &fixture.node("pass"),
             crate::runner_program::Exit::Code(0),
             true,
-            &[],
+            &crate::runner_program::DenialLog::ended(Vec::new()),
             crate::runner_program::ResultFile::Missing,
             "",
         )
@@ -656,4 +660,198 @@ fn the_environment_is_clean() {
     );
     assert!(env["TMPDIR"].ends_with("scratch/check/tmp"));
     assert!(env["BONGOS_RESULT"].ends_with("scratch/check/result.json"));
+}
+
+#[test]
+fn a_copied_binary_named_like_a_listed_command_is_denied() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let copy = "shutil.copy(shutil.which('id') or '/usr/bin/id', 'true')\n";
+    let finish = fixture.run(&script(
+        &format!(
+            "import shutil\n{copy}\
+             try:\n    subprocess.run(['./true'])\nexcept PermissionError:\n    pass"
+        ),
+        "'done'",
+    ));
+    assert_eq!(says(failure(&finish)), "permission denied: true");
+
+    let finish = fixture.run(&script(
+        "import shutil\n\
+         env = dict(os.environ, PATH=os.getcwd() + ':' + os.environ['PATH'])\n\
+         try:\n    subprocess.run(['true'], env=env)\nexcept PermissionError:\n    pass",
+        "'done'",
+    ));
+    assert_eq!(
+        says(failure(&finish)),
+        "permission denied: command from a writable PATH entry: true"
+    );
+
+    let finish = fixture.run(&script(
+        "import shutil\n\
+         try:\n    subprocess.run(['id'], executable=shutil.which('true'))\n\
+         except PermissionError:\n    pass",
+        "'done'",
+    ));
+    assert_eq!(failure(&finish).reason, FailureReason::PermissionDenied);
+}
+
+#[test]
+fn a_write_through_a_directory_descriptor_is_checked() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let finish = fixture.run(&script(
+        "import shutil\n\
+         os.makedirs('tree/sub')\nopen('tree/sub/f', 'w').close()\nshutil.rmtree('tree')",
+        "'done'",
+    ));
+    assert_eq!(finish.outcome, Ok(json!({ "status": "done" })));
+
+    let finish = fixture.run(&script(
+        "fd = os.open('/', os.O_RDONLY)\n\
+         try:\n    os.remove('bongos-no-such-file', dir_fd=fd)\nexcept PermissionError:\n    pass",
+        "'done'",
+    ));
+    assert_eq!(
+        says(failure(&finish)),
+        "permission denied: write /bongos-no-such-file"
+    );
+
+    let finish = fixture.run(&script(
+        "fd = os.open('/', os.O_RDONLY)\n\
+         try:\n    os.open('bongos-x', os.O_WRONLY | os.O_CREAT, dir_fd=fd)\n\
+         except PermissionError:\n    pass",
+        "'done'",
+    ));
+    assert_eq!(
+        says(failure(&finish)),
+        "permission denied: write relative to a directory descriptor: bongos-x"
+    );
+}
+
+#[test]
+fn reaching_the_hook_state_is_denied() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    for (body, what) in [
+        ("import gc\ngc.get_objects()", "gc.get_objects"),
+        ("import ctypes", "import ctypes"),
+        ("sys.settrace(lambda *args: None)", "sys.settrace"),
+    ] {
+        let finish = fixture.run(&script(
+            &format!(
+                "try:\n    {}\nexcept PermissionError:\n    pass",
+                body.replace('\n', "\n    ")
+            ),
+            "'done'",
+        ));
+        assert_eq!(says(failure(&finish)), format!("permission denied: {what}"));
+    }
+    // An uncaught error is printed without tripping the frame checks.
+    let finish = fixture
+        .run("import collections\ncollections.namedtuple('A', 'a')\nraise ValueError('boom')\n");
+    assert_eq!(
+        says(failure(&finish)),
+        "program exited nonzero: exit code 1: ValueError: boom"
+    );
+}
+
+#[test]
+fn git_hooks_and_config_are_protected() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let common = fixture.path("repo.git");
+    std::fs::create_dir_all(common.join("hooks")).unwrap();
+    std::fs::create_dir_all(common.join("refs/heads")).unwrap();
+    std::fs::write(common.join("config"), "").unwrap();
+    let mut node = fixture.node(&script(
+        &format!(
+            "open({ref_:?}, 'w').write('x')\n\
+             try:\n    open({hook:?}, 'w').write('x')\nexcept PermissionError:\n    pass",
+            ref_ = common.join("refs/heads/run").to_string_lossy(),
+            hook = common.join("hooks/pre-commit").to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    node.git_common_dir = Some(common.clone());
+    #[cfg(target_os = "linux")]
+    {
+        let policy = node.sandbox_policy();
+        let sandbox::SandboxFsPolicy::Restricted { writable_paths } = &policy.fs else {
+            panic!("restricted");
+        };
+        assert!(writable_paths.contains(&common));
+        assert_eq!(
+            policy.git,
+            sandbox::GitSandboxPolicy::Denied {
+                git_dirs: vec![common.join("hooks"), common.join("config")],
+            }
+        );
+    }
+    let finish = fixture.run_node(node);
+    let failure = failure(&finish);
+    assert_eq!(failure.reason, FailureReason::PermissionDenied);
+    assert!(
+        failure.detail.ends_with("hooks/pre-commit"),
+        "{}",
+        failure.detail
+    );
+    assert!(common.join("refs/heads/run").exists());
+}
+
+#[test]
+fn a_fifo_result_fails_without_hanging() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let started = Instant::now();
+    let finish = fixture.run("import os\nos.mkfifo(os.environ['BONGOS_RESULT'])\n");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(
+        says(failure(&finish)),
+        "program result invalid: $BONGOS_RESULT is not a regular file"
+    );
+
+    let finish = fixture.run("import os\nos.symlink('/dev/zero', os.environ['BONGOS_RESULT'])\n");
+    assert_eq!(
+        says(failure(&finish)),
+        "program result invalid: $BONGOS_RESULT is not a regular file"
+    );
+}
+
+#[test]
+fn a_lost_denial_log_fails_the_node() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    for body in ["os.closerange(3, 4096)", "sys.stdout.flush()\nos._exit(0)"] {
+        let finish = fixture.run(&format!(
+            "import json, os, sys\n\
+             with open(os.environ['BONGOS_RESULT'], 'w') as result:\n    \
+             json.dump({{'status': 'done'}}, result)\n{body}\n"
+        ));
+        let failure = failure(&finish);
+        assert_eq!(
+            failure.reason,
+            FailureReason::ProgramResultInvalid,
+            "{body}"
+        );
+        assert!(
+            failure
+                .detail
+                .starts_with("the shim's denial log ended early"),
+            "{}",
+            failure.detail
+        );
+    }
 }

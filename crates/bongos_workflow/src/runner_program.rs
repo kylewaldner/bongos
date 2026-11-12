@@ -15,7 +15,13 @@
 //!   "not sandboxed: <reason>". Second by the embedded shim's audit hook (`shim.py`), which denies
 //!   unlisted programs, writes outside the writable paths and undeclared connections. A denial
 //!   reaches bongos through a pipe (file descriptor 3, kept in `denials.jsonl`), so it fails the
-//!   node even when the script caught the `PermissionError`. MCP is refused in v1.
+//!   node even when the script caught the `PermissionError`; the shim ends the log with a marker,
+//!   and a clean exit without it fails the node too. MCP is refused in v1.
+//! - The shim is a guardrail, not a security boundary: code in the same Python process can always
+//!   get around an audit hook. The OS sandbox is the boundary, so a run that is "not sandboxed"
+//!   is not hard-confined. In the common git directory the sandbox keeps `hooks/` and `config`
+//!   read-only on Linux (the shim refuses writes there on every platform); the refs of other
+//!   branches stay writable, since a commit needs the refs and object stores.
 //! - Caps: `max_minutes` (the node's, else `workflows.programs.max_minutes`), the captured output
 //!   (`workflows.programs.max_output_mb`; the rest is dropped and the process stopped) and the
 //!   result size ([`RESULT_CAP`]). Halt and cancel stop the process group within 5 s.
@@ -61,6 +67,8 @@ pub const STDOUT_FILE: &str = "stdout.log";
 pub const STDERR_FILE: &str = "stderr.log";
 pub const DENIALS_FILE: &str = "denials.jsonl";
 pub const SUMMARY_FILE: &str = "summary.json";
+/// The line the shim writes to the denials pipe when the script ends.
+pub const DENIALS_END: &str = r#"{"end": true}"#;
 /// The checked result, kept once the try succeeded.
 pub const RESULT_FILE: &str = "result.json";
 
@@ -282,12 +290,35 @@ impl ProgramNode {
         paths
     }
 
-    /// The OS sandbox policy of the node.
+    /// The parts of the common git directory no script may change: `hooks/` and `config` would
+    /// run or configure code in every later git command.
+    pub fn protected_paths(&self) -> Vec<PathBuf> {
+        self.git_common_dir
+            .iter()
+            .flat_map(|dir| [dir.join("hooks"), dir.join("config")])
+            .collect()
+    }
+
+    /// The OS sandbox policy of the node. On Linux the common git directory is a writable path
+    /// and its [`ProgramNode::protected_paths`] are protected git directories, which Bubblewrap
+    /// binds read-only over it. Elsewhere a protected git directory cannot be read either (git
+    /// needs `config`), so the whole common git directory stays writable there.
     pub fn sandbox_policy(&self) -> SandboxPolicy {
-        SandboxPolicy {
-            fs: SandboxFsPolicy::Restricted {
-                writable_paths: vec![self.worktree.clone(), self.scratch.clone()],
+        let mut writable_paths = vec![self.worktree.clone(), self.scratch.clone()];
+        let git = match &self.git_common_dir {
+            Some(dir) if cfg!(target_os = "linux") => {
+                writable_paths.push(dir.clone());
+                GitSandboxPolicy::Denied {
+                    git_dirs: self.protected_paths(),
+                }
+            }
+            Some(dir) => GitSandboxPolicy::Allowed {
+                git_dirs: vec![dir.clone()],
             },
+            None => GitSandboxPolicy::default(),
+        };
+        SandboxPolicy {
+            fs: SandboxFsPolicy::Restricted { writable_paths },
             network: if self.permissions.network.is_empty() {
                 SandboxNetPolicy::Blocked
             } else {
@@ -295,12 +326,7 @@ impl ProgramNode {
                     allowed_domains: self.permissions.network.clone(),
                 }
             },
-            git: match &self.git_common_dir {
-                Some(dir) => GitSandboxPolicy::Allowed {
-                    git_dirs: vec![dir.clone()],
-                },
-                None => GitSandboxPolicy::default(),
-            },
+            git,
         }
     }
 }
@@ -369,17 +395,39 @@ pub enum Exit {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResultFile {
     Missing,
+    /// Not a regular file (a FIFO, a device, a directory or a symlink).
+    NotRegular,
     /// Over [`RESULT_CAP`]; the size.
     TooLarge(u64),
     Text(String),
 }
 
 impl ResultFile {
+    /// Reads the result without following a symlink or blocking on a FIFO or device.
     pub fn read(path: &Path) -> Self {
-        let Ok(file) = File::open(path) else {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Self::NotRegular,
+            Err(_) => return Self::Missing,
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let Ok(file) = options.open(path) else {
+            return Self::NotRegular;
+        };
+        // The path may have been swapped between the two looks.
+        let Ok(metadata) = file.metadata() else {
             return Self::Missing;
         };
-        let size = file.metadata().map_or(0, |metadata| metadata.len());
+        if !metadata.file_type().is_file() {
+            return Self::NotRegular;
+        }
+        let size = metadata.len();
         if size > RESULT_CAP {
             return Self::TooLarge(size);
         }
@@ -403,13 +451,14 @@ fn size_text(bytes: u64) -> String {
 }
 
 /// The outcome of a finished try. Pure. In order: the time cap, the output cap, the first denial,
-/// a nonzero exit, then the result (missing, too large, not JSON or not matching the output).
+/// a nonzero exit, a denial log without its end marker, then the result (missing, not a regular
+/// file, too large, not JSON or not matching the output).
 pub fn classify(
     key: &NodeKey,
     node: &ProgramNode,
     exit: Exit,
     output_capped: bool,
-    denials: &[String],
+    denials: &DenialLog,
     result: ResultFile,
     stderr: &str,
 ) -> Result<TypedResult, Failure> {
@@ -434,7 +483,7 @@ pub fn classify(
             ),
         );
     }
-    if let Some(what) = denials.first() {
+    if let Some(what) = denials.denials.first() {
         return fail(FailureReason::PermissionDenied, what.clone());
     }
     if exit != Exit::Code(0) {
@@ -448,11 +497,25 @@ pub fn classify(
         };
         return fail(FailureReason::ProgramExitedNonzero, detail);
     }
+    if !denials.ended && cfg!(unix) {
+        return fail(
+            FailureReason::ProgramResultInvalid,
+            "the shim's denial log ended early (its pipe was closed, or the script left with \
+             os._exit), so the run cannot be trusted"
+                .to_string(),
+        );
+    }
     let text = match result {
         ResultFile::Missing => {
             return fail(
                 FailureReason::ProgramResultInvalid,
                 "the script wrote no result to $BONGOS_RESULT".to_string(),
+            );
+        }
+        ResultFile::NotRegular => {
+            return fail(
+                FailureReason::ProgramResultInvalid,
+                "$BONGOS_RESULT is not a regular file".to_string(),
             );
         }
         ResultFile::TooLarge(size) => {
@@ -480,13 +543,35 @@ pub fn classify(
         .or_else(|problems| fail(FailureReason::ProgramResultInvalid, problems))
 }
 
-/// The denials the shim reported, one `what` per line of `denials.jsonl`.
-pub fn read_denials(path: &Path) -> Vec<String> {
+/// What the shim wrote to the denials pipe.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DenialLog {
+    /// One `what` per denial.
+    pub denials: Vec<String>,
+    /// Whether the shim wrote [`DENIALS_END`] after the script.
+    pub ended: bool,
+}
+
+impl DenialLog {
+    /// A complete log with these denials.
+    pub fn ended(denials: Vec<String>) -> Self {
+        Self {
+            denials,
+            ended: true,
+        }
+    }
+}
+
+/// The denials the shim reported, one `what` per line of `denials.jsonl`, and whether the log
+/// has its end marker.
+pub fn read_denials(path: &Path) -> DenialLog {
     let Ok(text) = fs::read_to_string(path) else {
-        return Vec::new();
+        return DenialLog::default();
     };
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
+    let ended = text.lines().any(|line| line.trim() == DENIALS_END);
+    let denials = text
+        .lines()
+        .filter(|line| !line.trim().is_empty() && line.trim() != DENIALS_END)
         .map(|line| {
             serde_json::from_str::<Value>(line)
                 .ok()
@@ -498,7 +583,8 @@ pub fn read_denials(path: &Path) -> Vec<String> {
                 })
                 .unwrap_or_else(|| line.trim().to_string())
         })
-        .collect()
+        .collect();
+    DenialLog { denials, ended }
 }
 
 /// The output of one process: bytes seen and whether the cap dropped some.
@@ -681,6 +767,7 @@ impl ProgramRunner {
             "commands": node.permissions.commands,
             "network": node.permissions.network,
             "writable": node.writable_paths(),
+            "protected": node.protected_paths(),
             "denials_fd": DENIALS_FD,
         });
         fs::write(
@@ -969,7 +1056,8 @@ impl ProgramRunner {
                 },
                 "output_bytes": pass.capture.bytes.load(Ordering::SeqCst),
                 "output_capped": capped,
-                "denials": denials,
+                "denials": denials.denials,
+                "denial_log_ended": denials.ended,
             }),
         );
         let elapsed_ms = pass.started_wall.elapsed().as_millis() as u64;
