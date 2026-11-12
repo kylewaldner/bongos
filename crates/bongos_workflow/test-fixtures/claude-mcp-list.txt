@@ -1,0 +1,6 @@
+Checking MCP server health…
+
+beta: /bin/sleep 1 - ✘ Failed to connect — CONNECTION_CLOSED: Connection closed
+alpha: /bin/true  - ✘ Failed to connect — CONNECTION_CLOSED: Connection closed
+gamma: http://127.0.0.1:9/mcp (HTTP) - ✘ Failed to connect — ECONNREFUSED: Unable to connect. Is the computer able to access the url?
+delta: http://127.0.0.1:9/sse (SSE) - ✘ Failed to connect — SSE error: ECONNREFUSED: Unable to connect. Is the computer able to access the url?

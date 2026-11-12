@@ -934,3 +934,37 @@ fn tarjan_finds_components() {
     components.sort();
     assert_eq!(components, vec![vec![0, 1, 2], vec![3], vec![4]]);
 }
+
+#[test]
+fn permission_modes_are_the_ones_claude_accepts() {
+    assert_eq!(
+        crate::validate::PERMISSION_MODES,
+        [
+            "acceptEdits",
+            "auto",
+            "bypassPermissions",
+            "default",
+            "manual",
+            "dontAsk",
+            "plan"
+        ]
+    );
+    let text = mutate(
+        r#"permission_mode = "acceptEdits""#,
+        r#"permission_mode = "nonsense""#,
+    );
+    assert_error(
+        &text,
+        Some("triage"),
+        "permission_mode = ",
+        "unknown permission mode 'nonsense'",
+    );
+    // `default` stays accepted next to `manual`.
+    for mode in ["auto", "default", "manual", "dontAsk", "plan"] {
+        let text = mutate(
+            r#"permission_mode = "acceptEdits""#,
+            &format!("permission_mode = \"{mode}\""),
+        );
+        assert!(!has_errors(&diagnostics(&text)), "{mode}");
+    }
+}

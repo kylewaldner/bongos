@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000200000004"}
+{"type":"turn.started"}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":5}}
+{"type":"turn.started"}
+{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":100,"output_tokens":5}}
+{"type":"turn.started"}
+{"type":"turn.completed","usage":{"input_tokens":300,"cached_input_tokens":200,"output_tokens":5}}
+{"type":"turn.started"}

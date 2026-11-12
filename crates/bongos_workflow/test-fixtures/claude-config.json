@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "beta": { "type": "stdio", "command": "/bin/sleep", "args": ["1"], "env": {} }
+  },
+  "projects": {
+    "/work/proj": {
+      "allowedTools": [],
+      "mcpServers": {
+        "alpha": { "type": "stdio", "command": "/bin/true", "args": [], "env": {} },
+        "gamma": { "type": "http", "url": "http://127.0.0.1:9/mcp" }
+      }
+    },
+    "/work/other": {
+      "mcpServers": { "elsewhere": { "type": "http", "url": "http://127.0.0.1:9/x" } }
+    }
+  }
+}

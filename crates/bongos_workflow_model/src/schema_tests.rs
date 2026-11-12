@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::definition::{Outcome, OutputField, parse};
-use crate::schema::{TypedValue, check, json_schema};
+use crate::schema::{TypedValue, check, json_schema, json_schema_strict};
 
 /// The output fields of one node declared with `spec`.
 fn output(spec: &str) -> Vec<OutputField> {
@@ -50,6 +50,37 @@ fn json_schema_covers_every_field_type() {
             "verdict", "summary", "design", "score", "items", "files", "sizes"
         ]
     );
+}
+
+#[test]
+fn strict_schema_requires_every_property_and_nulls_the_optional_ones() {
+    let schema = json_schema_strict(&every_type());
+    assert_eq!(
+        schema["required"],
+        json!([
+            "verdict", "summary", "design", "score", "items", "files", "sizes"
+        ])
+    );
+    assert_eq!(
+        schema["properties"]["score"]["type"],
+        json!(["number", "null"])
+    );
+    assert_eq!(
+        schema["properties"]["files"]["type"],
+        json!(["array", "null"])
+    );
+    assert_eq!(schema["properties"]["summary"]["type"], json!("string"));
+    assert_eq!(schema["additionalProperties"], json!(false));
+    // Null is tolerated for an optional field when the result is read.
+    let result = check(
+        &every_type(),
+        &json!({
+            "verdict": "approve", "summary": "s", "design": "d.md", "score": null,
+            "items": [], "files": null, "sizes": null,
+        }),
+    )
+    .unwrap();
+    assert!(result.get("score").is_none());
 }
 
 #[test]

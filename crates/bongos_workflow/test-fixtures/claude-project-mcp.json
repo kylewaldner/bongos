@@ -1,0 +1,1 @@
+{ "mcpServers": { "shared": { "type": "stdio", "command": "/bin/true", "args": [] } } }

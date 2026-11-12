@@ -1,0 +1,6 @@
+Name    Command  Args                  Env  Cwd  Status    Auth
+github  npx      -y @example/gh-mcp    -    -    enabled   Unsupported
+linear  npx      -y @example/linear    -    -    disabled  Unsupported
+
+Name    Url                       Bearer Token Env Var  Status   Auth
+sentry  https://example.test/mcp  -                     enabled  Unsupported
