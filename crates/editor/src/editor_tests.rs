@@ -32398,6 +32398,13 @@ pub(crate) fn init_test(cx: &mut TestAppContext, f: fn(&mut AllLanguageSettingsC
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         release_channel::init(semver::Version::new(0, 0, 0), cx);
         crate::init(cx);
+        // The default Emacs base keymap keeps selected text when typing; these tests cover the
+        // editor's regular typing behavior.
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.emacs.get_or_insert_default().delete_selection = Some(true);
+            });
+        });
     });
     zlog::init_test();
     update_test_language_settings(cx, &f);

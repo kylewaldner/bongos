@@ -2801,7 +2801,22 @@ impl EntityInputHandler for Editor {
             return;
         }
 
+        // Under the Emacs base keymap, typing at a region inserts at point and keeps the text.
+        // Only plain typing qualifies: no explicit range, no IME marked text, a full editor.
+        let plain_typing = range_utf16.as_ref().is_none_or(|range| range.is_empty())
+            && self.marked_text_ranges(cx).is_none();
+        let collapse_first = plain_typing
+            && self.mode.is_full()
+            && !EditorSettings::get_global(cx).typing_replaces_selection;
+
         self.transact(window, cx, |this, window, cx| {
+            if collapse_first {
+                this.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+                    s.move_with(&mut |_, selection| {
+                        selection.collapse_to(selection.head(), SelectionGoal::None)
+                    });
+                });
+            }
             let new_selected_ranges = if let Some(range_utf16) = range_utf16 {
                 if let Some(marked_ranges) = this.marked_text_ranges(cx) {
                     // During IME composition, macOS reports the replacement range

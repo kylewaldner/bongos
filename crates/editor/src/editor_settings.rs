@@ -19,6 +19,9 @@ use ui::scrollbars::ShowScrollbar;
 pub struct EditorSettings {
     pub cursor_blink: bool,
     pub cursor_shape: Option<CursorShape>,
+    /// Whether typing over a non-empty selection replaces it; false under the Emacs base keymap
+    /// unless `emacs.delete_selection` is set.
+    pub typing_replaces_selection: bool,
     pub current_line_highlight: CurrentLineHighlight,
     pub selection_highlight: bool,
     pub rounded_selection: bool,
@@ -255,6 +258,13 @@ impl Settings for EditorSettings {
                     }
                 }
             },
+            typing_replaces_selection: content.base_keymap.map(BaseKeymap::from)
+                != Some(BaseKeymap::Emacs)
+                || content
+                    .emacs
+                    .as_ref()
+                    .and_then(|emacs| emacs.delete_selection)
+                    .unwrap_or(false),
             current_line_highlight: editor.current_line_highlight.unwrap(),
             selection_highlight: editor.selection_highlight.unwrap(),
             rounded_selection: editor.rounded_selection.unwrap(),
