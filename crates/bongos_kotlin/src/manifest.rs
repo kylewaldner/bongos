@@ -152,6 +152,15 @@ impl Manifest {
         }
     }
 
+    /// The arguments and environment `server` starts with, whatever build runs.
+    pub(crate) fn args_and_env(
+        &self,
+        server: KotlinServerKind,
+    ) -> Option<(Vec<String>, BTreeMap<String, String>)> {
+        let pin = self.servers.get(server_name(server))?;
+        Some((pin.args.clone(), pin.env.clone()))
+    }
+
     /// The pin of `server` for `platform` (`current_platform()` in the app).
     pub fn entry(&self, server: KotlinServerKind, platform: &str) -> Result<ManifestEntry> {
         let name = server_name(server);
@@ -179,7 +188,7 @@ impl Manifest {
 }
 
 /// True when `name` is one plain path component, so joining it cannot leave its parent.
-fn is_plain_name(name: &str) -> bool {
+pub(crate) fn is_plain_name(name: &str) -> bool {
     let mut components = Path::new(name).components();
     matches!(
         (components.next(), components.next()),
@@ -187,12 +196,12 @@ fn is_plain_name(name: &str) -> bool {
     )
 }
 
-fn is_relative_path(path: &str) -> bool {
+pub(crate) fn is_relative_path(path: &str) -> bool {
     let mut components = Path::new(path).components().peekable();
     components.peek().is_some() && components.all(|part| matches!(part, Component::Normal(_)))
 }
 
-fn is_sha256_hex(text: &str) -> bool {
+pub(crate) fn is_sha256_hex(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 

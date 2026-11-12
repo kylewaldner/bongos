@@ -9,6 +9,7 @@ mod license;
 mod log;
 mod manager;
 mod manifest;
+mod remote_manifest;
 mod resolve;
 mod status;
 mod status_item;
@@ -46,6 +47,10 @@ pub use manager::{
     ServerStatus, fallback_message,
 };
 pub use manifest::{ArchiveKind, Manifest, ManifestEntry, OVERRIDE_VAR, current_platform};
+pub use remote_manifest::{
+    KEY_VAR as MANIFEST_KEY_VAR, RELEASE_KEYS, RemoteBuild, RemoteManifest, TrustedKey,
+    compare_versions, is_allowed_archive_url, parse_version, trusted_keys, verify_signature,
+};
 pub use resolve::{
     Layer, LayerReport, Resolved, ResolvedSource, clear_project_override, layer_report,
     project_override, resolve, set_project_override,
