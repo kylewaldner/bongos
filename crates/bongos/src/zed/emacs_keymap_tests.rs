@@ -334,10 +334,11 @@ async fn the_key_table_covers_every_emacs_action(cx: &mut gpui::TestAppContext) 
         let names = cx.all_action_names();
         // Every emacs action has a key; the cursor toggle is left unbound on purpose.
         // The mark commands are registered unbound until their keys are added.
-        const UNBOUND: [&str; 3] = [
+        const UNBOUND: [&str; 4] = [
             "emacs::SetMarkCommand",
             "emacs::ExchangePointAndMark",
             "emacs::PopMark",
+            "emacs::PopGlobalMark",
         ];
         for name in names
             .iter()

@@ -2881,6 +2881,36 @@ impl Workspace {
         self.navigate_history(pane, NavigationMode::GoingBack, window, cx)
     }
 
+    /// Goes back to the newest location in `pane`'s history that is in another item and another
+    /// file than the active one. Newer entries for the active item or file stay in the history.
+    pub fn go_back_to_other_item(
+        &mut self,
+        pane: WeakEntity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Task<Result<()>> {
+        let (active_id, active_path) = pane
+            .upgrade()
+            .and_then(|pane| pane.read(cx).active_item())
+            .map(|item| (Some(item.item_id()), item.project_path(cx)))
+            .unwrap_or((None, None));
+        self.navigate_history_impl(
+            pane,
+            NavigationMode::GoingBack,
+            window,
+            &mut |history, cx| {
+                history.pop_backward_where(
+                    &mut |entry, path| {
+                        Some(entry.item.id()) != active_id
+                            && (active_path.is_none() || path != active_path.as_ref())
+                    },
+                    cx,
+                )
+            },
+            cx,
+        )
+    }
+
     pub fn go_forward(
         &mut self,
         pane: WeakEntity<Pane>,
