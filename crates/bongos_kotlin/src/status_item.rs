@@ -15,9 +15,9 @@ use util::truncate_and_trailoff;
 use workspace::{OpenOptions, StatusItemView, Workspace};
 
 use crate::{
-    CancelInstall, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSetup, KotlinUpdates,
-    LicenseActivate, LicenseStatus, LicenseTrial, ReimportProject, RestartServer,
-    ReviewIntellijEula, ShowLogs, SwitchServer,
+    CancelInstall, CheckForServerUpdates, KotlinLog, KotlinProjectManager, KotlinRegistry,
+    KotlinSetup, KotlinUpdates, LicenseActivate, LicenseStatus, LicenseTrial, ReimportProject,
+    RestartServer, ReviewIntellijEula, ShowLogs, SwitchServer,
     status::{self, Command, MAX_TEXT_CHARS, MenuItem, Snapshot},
 };
 
@@ -94,6 +94,11 @@ impl KotlinStatusItem {
         let checking = updates
             .as_ref()
             .is_some_and(|updates| updates.read(cx).is_checking());
+        let info = updates
+            .as_ref()
+            .map_or(status::UpdatesInfo::Off, |updates| {
+                updates.read(cx).status_info()
+            });
         let mut first = None;
         for (manager, _) in &self.managers {
             for (worktree_id, state) in manager.read(cx).worktrees() {
@@ -102,6 +107,7 @@ impl KotlinStatusItem {
                 };
                 snapshot.download = download.clone();
                 snapshot.checking = checking;
+                snapshot.updates = info.clone();
                 if Some(worktree_id) == self.active_worktree {
                     return Some(snapshot);
                 }
@@ -193,6 +199,7 @@ fn action_for(command: &Command, cx: &App) -> Option<Box<dyn Action>> {
     match command {
         Command::ShowLogs => Some(ShowLogs.boxed_clone()),
         Command::CancelInstall => Some(CancelInstall.boxed_clone()),
+        Command::CheckForServerUpdates => Some(CheckForServerUpdates.boxed_clone()),
         Command::SetJdkHome => Some(zed_actions::OpenSettingsFile.boxed_clone()),
         Command::OpenProtocolLog => cx.build_action(PROTOCOL_LOG_ACTION, None).ok(),
         Command::SwitchServer => Some(SwitchServer.boxed_clone()),
