@@ -204,6 +204,7 @@ impl WorkflowEngine {
         cx.set_global(engine.clone());
         crate::sources::register(&engine, cx);
         crate::gates::register(&engine, cx);
+        crate::run_view::observe_focus(&engine, cx);
         Some(engine)
     }
 

@@ -167,3 +167,14 @@ fn the_dump_writes_the_text_of_the_view(cx: &mut TestAppContext) {
     assert!(path.ends_with("workflow-run-view.txt"));
     assert_eq!(fs::read_to_string(path).unwrap(), text);
 }
+
+#[gpui::test]
+fn focusing_a_task_shows_its_active_run_only(cx: &mut TestAppContext) {
+    let world = world();
+    let engine = engine_of(&world, cx);
+    assert_eq!(crate::run_view::run_to_show(&engine, Some(LEAF)), None);
+    assert_eq!(crate::run_view::run_to_show(&engine, None), None);
+    let run = start(&engine, &world, "gated", cx);
+    assert_eq!(crate::run_view::run_to_show(&engine, Some(LEAF)), Some(run));
+    assert_eq!(crate::run_view::run_to_show(&engine, Some("other")), None);
+}

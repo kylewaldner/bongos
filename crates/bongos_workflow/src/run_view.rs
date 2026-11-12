@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use bongos_work::Focus;
 use bongos_workflow_model::definition::{Definition, NodeKind};
 use bongos_workflow_model::layout::{GraphLayout, LayoutNode, Status, layout};
 use bongos_workflow_model::record::{NodeKey, RunState, branch_label};
@@ -26,7 +27,7 @@ use ui::{
     LabelCommon as _, LabelSize, h_flex, prelude::*, v_flex,
 };
 use workspace::item::{Item, ItemEvent};
-use workspace::{OpenOptions, OpenVisible, Workspace};
+use workspace::{MultiWorkspace, OpenOptions, OpenVisible, Workspace};
 
 use crate::actions::{show_toast, workflow};
 use crate::commands::{on, on_run, open_report, open_worktree};
@@ -1302,6 +1303,58 @@ fn show_diff(
                 Err(error) => show_toast(workspace, format!("git diff failed: {error}"), cx),
             })
             .ok();
+    })
+    .detach();
+}
+
+/// The run `task: focus` on `task` opens a run view of: the task's active run, if it has one.
+pub fn run_to_show(engine: &WorkflowEngine, task: Option<&str>) -> Option<RunId> {
+    engine.active_run_id(task?)
+}
+
+/// Opens the run view of a focused task's active run in the window's active workspace. Does
+/// nothing while no run is active, and while no window is.
+fn open_for_focus(engine: &WorkflowEngine, task: &str, cx: &mut App) {
+    let Some(run) = run_to_show(engine, Some(task)) else {
+        return;
+    };
+    let Some(window) = cx
+        .active_window()
+        .and_then(|window| window.downcast::<MultiWorkspace>())
+    else {
+        return;
+    };
+    let engine = engine.clone();
+    // `task: focus` records the focus once the window switched to the task's workspace, so the
+    // active workspace is the one to show the run in; the update runs after the focus update.
+    cx.defer(move |cx| {
+        window
+            .update(cx, |multi, window, cx| {
+                let workspace = multi.workspace().clone();
+                workspace.update(cx, |workspace, cx| show(engine, run, workspace, window, cx));
+            })
+            .ok();
+    });
+}
+
+/// Makes `task: focus` on a leaf with an active run open its run view (PRD 8): observes the focus
+/// of `bongos_work`, which exists once that crate is initialized, and shows the run when the
+/// focused task changes. Quietly does nothing when the focus is not there.
+pub(crate) fn observe_focus(engine: &WorkflowEngine, cx: &mut App) {
+    let Some(focus) = Focus::global(cx) else {
+        return;
+    };
+    let engine = engine.clone();
+    let last = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+    cx.observe(&focus, move |focus, cx| {
+        let task = focus.read(cx).task_id().map(str::to_string);
+        if *last.borrow() == task {
+            return;
+        }
+        *last.borrow_mut() = task.clone();
+        if let Some(task) = task {
+            open_for_focus(&engine, &task, cx);
+        }
     })
     .detach();
 }
