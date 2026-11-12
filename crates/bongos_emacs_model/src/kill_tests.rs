@@ -434,3 +434,62 @@ fn an_active_empty_region_kills_and_copies_nothing() {
     let plan = kill_region_or_line(text, &carets, None);
     assert_eq!(killed(&plan), ["foo"]);
 }
+
+fn kw(t: &str, c: &[Caret], n: Option<i32>) -> Plan {
+    kill_whole_line(t, c, n)
+}
+
+#[test]
+fn kill_whole_line_takes_the_line_with_its_newline() {
+    let (out, plan) = run("foo\nbˇar\nbaz", None, kw);
+    assert_eq!(out, "foo\nˇbaz");
+    assert_eq!(killed(&plan), ["bar\n"]);
+    assert!(plan.killed[0].whole_line && !plan.killed[0].backward);
+}
+
+#[test]
+fn kill_whole_line_ignores_the_region() {
+    let (out, plan) = run("a «b\nc» d\ne", None, kw);
+    assert_eq!(killed(&plan), ["c d\n"]);
+    assert_eq!(out, "a b\nˇe");
+}
+
+#[test]
+fn kill_whole_line_with_a_positive_count() {
+    let (out, plan) = run("a\nˇb\nc\nd\ne", Some(3), kw);
+    assert_eq!(out, "a\nˇe");
+    assert_eq!(killed(&plan), ["b\nc\nd\n"]);
+}
+
+#[test]
+fn kill_whole_line_with_zero_keeps_the_newline() {
+    let (out, plan) = run("a\nbˇar\nc", Some(0), kw);
+    assert_eq!(out, "a\nˇ\nc");
+    assert_eq!(killed(&plan), ["bar"]);
+    assert!(plan.killed[0].whole_line);
+}
+
+#[test]
+fn kill_whole_line_with_a_negative_count_goes_up() {
+    let (out, plan) = run("a\nb\nˇc\nd", Some(-2), kw);
+    assert_eq!(out, "a\nˇd");
+    assert_eq!(killed(&plan), ["b\nc\n"]);
+    assert!(plan.killed[0].backward && plan.killed[0].whole_line);
+}
+
+#[test]
+fn kill_whole_line_on_the_last_line_without_a_newline() {
+    let (out, plan) = run("foo\nbˇar", None, kw);
+    assert_eq!(out, "fooˇ");
+    assert_eq!(killed(&plan), ["bar\n"]);
+    let (out, plan) = run("ˇfoo", None, kw);
+    assert_eq!(out, "ˇ");
+    assert_eq!(killed(&plan), ["foo\n"]);
+}
+
+#[test]
+fn kill_whole_line_with_two_carets() {
+    let (out, plan) = run("aˇa\nbb\ncˇc\ndd", None, kw);
+    assert_eq!(out, "ˇbb\nˇdd");
+    assert_eq!(killed(&plan), ["aa\n", "cc\n"]);
+}

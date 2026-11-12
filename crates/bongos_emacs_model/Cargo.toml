@@ -13,3 +13,5 @@ path = "src/bongos_emacs_model.rs"
 doctest = false
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true

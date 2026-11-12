@@ -105,7 +105,6 @@ struct Item {
 
 fn whole_lines<T: TextSource + ?Sized>(text: &T, point: usize, n: i32) -> Item {
     let start = line_start(text, point);
-    let len = text.len();
     let mut item = Item {
         range: point..point,
         backward: false,
@@ -116,18 +115,25 @@ fn whole_lines<T: TextSource + ?Sized>(text: &T, point: usize, n: i32) -> Item {
     if n > 0 {
         let end = past_nth_newline(text, start, n.unsigned_abs());
         item.range = start..end;
-        if end == len && start < len && !ends_with_newline(text) {
-            item.needs_newline = true;
-            if start > 0 {
-                item.range.start = start - 1;
-                item.widened_at = Some(start - 1);
-            }
-        }
+        take_unterminated_last_line(text, &mut item);
     } else if n < 0 {
         item.range = nth_line_start_above(text, start, n.unsigned_abs())..start;
         item.backward = true;
     }
     item
+}
+
+/// When the range reaches a last line that has no newline, the piece must end
+/// in one, and the newline before the range is taken instead.
+fn take_unterminated_last_line<T: TextSource + ?Sized>(text: &T, item: &mut Item) {
+    let len = text.len();
+    if item.range.end == len && item.range.start < len && !ends_with_newline(text) {
+        item.needs_newline = true;
+        if item.range.start > 0 {
+            item.range.start -= 1;
+            item.widened_at = Some(item.range.start);
+        }
+    }
 }
 
 fn ends_with_newline<T: TextSource + ?Sized>(text: &T) -> bool {
@@ -138,7 +144,7 @@ fn ends_with_newline<T: TextSource + ?Sized>(text: &T) -> bool {
 /// group. Empty items stay so every caret keeps its place.
 fn items<T: TextSource + ?Sized>(text: &T, carets: &[Caret], count: Option<i32>) -> Vec<Item> {
     let n = count.unwrap_or(1);
-    let mut items: Vec<Item> = carets
+    let items: Vec<Item> = carets
         .iter()
         .map(|caret| {
             if caret.has_region() {
@@ -163,6 +169,10 @@ fn items<T: TextSource + ?Sized>(text: &T, carets: &[Caret], count: Option<i32>)
             }
         })
         .collect();
+    merge_items(items)
+}
+
+fn merge_items(mut items: Vec<Item>) -> Vec<Item> {
     items.sort_by_key(|i| (i.range.start, i.range.end));
     let mut merged: Vec<Item> = Vec::with_capacity(items.len());
     for item in items {
@@ -212,6 +222,60 @@ pub fn kill_region_or_line<T: TextSource + ?Sized>(
     count: Option<i32>,
 ) -> Plan {
     let items = items(text, carets, count);
+    let killed = items
+        .iter()
+        .filter(|item| !item.range.is_empty())
+        .map(|item| piece(text, item))
+        .collect();
+    let ranges = items.iter().map(|item| item.range.clone()).collect();
+    let after: Vec<Caret> = items
+        .iter()
+        .map(|item| Caret::point(item.range.start))
+        .collect();
+    deletion_plan(ranges, &after, killed)
+}
+
+/// kill-whole-line: ignores any region. `None` or N > 0 kills N whole lines
+/// from the caret's line start, newline included; on a last line without a
+/// newline it also takes the newline before. A negative count kills the
+/// caret's line and the |N| - 1 lines above it, as a backward piece; 0 kills
+/// the line's text without its newline.
+pub fn kill_whole_line<T: TextSource + ?Sized>(
+    text: &T,
+    carets: &[Caret],
+    count: Option<i32>,
+) -> Plan {
+    let n = count.unwrap_or(1);
+    let items = merge_items(
+        carets
+            .iter()
+            .map(|caret| {
+                let start = line_start(text, caret.head);
+                if n == 0 {
+                    return Item {
+                        range: start..line_end(text, caret.head),
+                        backward: false,
+                        needs_newline: false,
+                        widened_at: None,
+                        whole_line: true,
+                    };
+                }
+                if n > 0 {
+                    return whole_lines(text, caret.head, n);
+                }
+                let mut item = Item {
+                    range: nth_line_start_above(text, start, n.unsigned_abs() - 1)
+                        ..past_newline(text, line_end(text, caret.head)),
+                    backward: true,
+                    needs_newline: false,
+                    widened_at: None,
+                    whole_line: true,
+                };
+                take_unterminated_last_line(text, &mut item);
+                item
+            })
+            .collect(),
+    );
     let killed = items
         .iter()
         .filter(|item| !item.range.is_empty())
