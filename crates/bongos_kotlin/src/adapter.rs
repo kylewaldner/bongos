@@ -853,6 +853,7 @@ mod tests {
             state_dir: temp.path().join("state"),
             logs_dir: temp.path().join("logs"),
             install_root: temp.path().join("languages"),
+            config_dir: temp.path().join("config"),
         };
         let archive =
             crate::install::tests::tar_gz(&crate::install::tests::files(2 * 1024 * 1024, true));
@@ -1716,6 +1717,7 @@ launcher = "bin/launcher"
             state_dir: temp.path().join("state"),
             logs_dir: temp.path().join("logs"),
             install_root: temp.path().join("languages"),
+            config_dir: temp.path().join("config"),
         };
         let root = temp.path().to_path_buf();
         let manifest = Manifest::embedded();
@@ -1824,6 +1826,7 @@ launcher = "bin/launcher"
             state_dir: temp.path().join("state"),
             logs_dir: temp.path().join("logs"),
             install_root: temp.path().join("languages"),
+            config_dir: temp.path().join("config"),
         };
         let manifest = Manifest::embedded();
         let kotlin_lsp = install(&dirs, &manifest, KotlinServerKind::KotlinLsp);

@@ -135,6 +135,7 @@ async fn start_worktrees(
         state_dir: temp.path().join("state"),
         logs_dir: temp.path().join("logs"),
         install_root: temp.path().join("languages"),
+        config_dir: temp.path().join("config"),
     };
 
     cx.executor().allow_parking();
