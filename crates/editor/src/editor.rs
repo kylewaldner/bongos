@@ -3527,7 +3527,8 @@ impl Editor {
         // the regex). A manual selection made by the user clears this flag, restoring
         // the normal occurrence-highlight behavior.
         if self.last_selection_from_search
-            && self.has_background_highlights(HighlightKey::BufferSearchHighlights)
+            && (self.has_background_highlights(HighlightKey::BufferSearchHighlights)
+                || self.has_background_highlights(HighlightKey::Isearch))
         {
             return None;
         }

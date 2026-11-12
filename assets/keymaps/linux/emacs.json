@@ -412,7 +412,10 @@
   {
     "context": "RunsPanel",
     "bindings": {
-      "enter": "menu::Confirm",
+      "enter": "workflow::OpenLogs",
+      "a": "workflow::Approve",
+      "v": "workflow::Revise",
+      "l": "workflow::OpenLogs",
     },
   },
   {

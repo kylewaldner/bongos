@@ -18,8 +18,11 @@ use crate::actions::{OFF_MESSAGE, show_toast, workflow};
 use crate::definitions::DefinitionError;
 use crate::engine::WorkflowEngine;
 use crate::lifecycle::{Refusal, RunId};
+use crate::shipped::TEMPLATES;
 use settings::Settings as _;
 
+/// The first choice of `workflow: new`: the minimal template.
+pub const MINIMAL_CHOICE: &str = "Minimal";
 /// The title of the diagnostics buffer of `workflow: validate`.
 pub const VALIDATE_TITLE: &str = "Workflow diagnostics";
 
@@ -43,20 +46,42 @@ pub(crate) fn register(workspace: &mut Workspace) {
             )
         })
         .register_action(|workspace, _: &workflow::New, window, cx| {
-            run(
+            if !WorkflowsSettings::get_global(cx).enabled {
+                show_toast(workspace, OFF_MESSAGE.to_string(), cx);
+                return;
+            }
+            // The minimal template first, then a copy of each shipped definition to edit.
+            let mut choices = vec![format!("{MINIMAL_CHOICE}: one agent node")];
+            choices.extend(
+                TEMPLATES
+                    .iter()
+                    .map(|template| format!("{}: {}", template.name, template.description)),
+            );
+            bongos_work::pick(
                 workspace,
+                "New workflow from",
+                choices,
+                0,
+                Box::new(|index, workspace, window, cx| {
+                    let template = index.checked_sub(1).and_then(|index| TEMPLATES.get(index));
+                    run(
+                        workspace,
+                        window,
+                        cx,
+                        move |engine| engine.new_definition(None, template),
+                        |created, workspace, window, cx| {
+                            show_toast(
+                                workspace,
+                                format!("Created workflow '{}'", created.name),
+                                cx,
+                            );
+                            open_file(created.file, workspace, window, cx);
+                        },
+                    )
+                }),
                 window,
                 cx,
-                |engine| engine.new_definition(None),
-                |created, workspace, window, cx| {
-                    show_toast(
-                        workspace,
-                        format!("Created workflow '{}'", created.name),
-                        cx,
-                    );
-                    open_file(created.file, workspace, window, cx);
-                },
-            )
+            );
         })
         .register_action(|workspace, _: &workflow::EditDefinition, window, cx| {
             // The first definition by name until the picker of step 17.

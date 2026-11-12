@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Component, Path, PathBuf};
 
+use crate::shipped::{self, Template};
 use bongos_work_model::layout::{WORKFLOWS_DIR, project_dir};
 use bongos_work_model::slug::slugify;
 use bongos_workflow_model::layers::{self, DEFINITION_FILE};
@@ -34,8 +35,8 @@ pub struct ShippedFile {
     pub contents: &'static str,
 }
 
-/// The shipped definitions. Empty until step 20 adds the shipped templates.
-pub const SHIPPED_FILES: &[ShippedFile] = &[];
+/// The shipped definitions: every file of [`crate::shipped::TEMPLATES`].
+pub const SHIPPED_FILES: &[ShippedFile] = crate::shipped::FILES;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DefinitionError {
@@ -401,6 +402,23 @@ fn minimal_template(quoted_name: &str) -> String {
 /// The prompt of the minimal template.
 const MINIMAL_PROMPT: &str = "{{inputs.goal}}\n";
 
+/// `text` with its top-level `name = ...` line replaced by `name = <quoted_name>`.
+fn with_name(text: &str, quoted_name: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut top_level = true;
+    let mut renamed = false;
+    for line in text.split_inclusive('\n') {
+        top_level &= !line.starts_with('[');
+        if top_level && !renamed && line.starts_with("name = ") {
+            output.push_str(&format!("name = {quoted_name}\n"));
+            renamed = true;
+        } else {
+            output.push_str(line);
+        }
+    }
+    output
+}
+
 /// A definition [`new_definition`] wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewDefinition {
@@ -450,10 +468,23 @@ pub fn new_definition(
     profile: Option<&Path>,
     name: Option<&str>,
 ) -> Result<NewDefinition, DefinitionError> {
+    new_definition_from(profile, name, None)
+}
+
+/// [`new_definition`] starting from a shipped definition instead of the minimal template: every
+/// file of `template` is copied into the new directory and the workflow takes `name`, or with no
+/// name the template's own name. A copy with the template's name shadows the shipped definition
+/// (the profile layer wins), which is how a shipped workflow is customized.
+pub fn new_definition_from(
+    profile: Option<&Path>,
+    name: Option<&str>,
+    template: Option<&Template>,
+) -> Result<NewDefinition, DefinitionError> {
     let profile = profile.ok_or(DefinitionError::NoProfileDir)?;
-    let name = match name {
-        Some(name) => name.trim().to_string(),
-        None => next_free_name(profile),
+    let name = match (name, template) {
+        (Some(name), _) => name.trim().to_string(),
+        (None, Some(template)) => template.name.to_string(),
+        (None, None) => next_free_name(profile),
     };
     if !name_is_usable(&name) {
         return Err(DefinitionError::InvalidName(name));
@@ -484,8 +515,24 @@ pub fn new_definition(
     }
     let file = dir.join(DEFINITION_FILE);
     let quoted = toml::Value::String(name.clone()).to_string();
-    let written = write_new(&file, &minimal_template(&quoted))
-        .and_then(|()| write_new(&dir.join(TEMPLATE_PROMPT_FILE), MINIMAL_PROMPT));
+    let files: Vec<(&str, String)> = match template {
+        None => vec![
+            (DEFINITION_FILE, minimal_template(&quoted)),
+            (TEMPLATE_PROMPT_FILE, MINIMAL_PROMPT.to_string()),
+        ],
+        Some(template) => shipped::files_of(template)
+            .map(|(relative, contents)| {
+                if relative == DEFINITION_FILE {
+                    (relative, with_name(contents, &quoted))
+                } else {
+                    (relative, contents.to_string())
+                }
+            })
+            .collect(),
+    };
+    let written = files
+        .iter()
+        .try_for_each(|(relative, contents)| write_new(&dir.join(relative), contents));
     if let Err(error) = written {
         // The directory is ours, made a moment ago, so removing it leaves nothing behind.
         fs::remove_dir_all(&dir).ok();

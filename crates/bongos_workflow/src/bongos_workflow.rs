@@ -23,6 +23,7 @@ pub mod runner_program;
 pub mod runs_panel;
 pub mod runtime;
 mod settings;
+pub mod shipped;
 pub mod sources;
 pub mod status_item;
 pub mod summary;
@@ -66,5 +67,7 @@ mod runner_claude_tests;
 mod runner_codex_tests;
 #[cfg(test)]
 mod runtime_tests;
+#[cfg(test)]
+mod shipped_tests;
 #[cfg(test)]
 mod worktree_tests;
