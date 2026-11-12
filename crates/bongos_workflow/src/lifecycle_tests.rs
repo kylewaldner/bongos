@@ -21,7 +21,7 @@ use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::{Event, InputValue, LayerDirs, NodeKey};
 use gpui::TestAppContext;
 use serde_json::json;
-use settings::SettingsStore;
+use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
 
 use crate::WorkflowsSettings;
