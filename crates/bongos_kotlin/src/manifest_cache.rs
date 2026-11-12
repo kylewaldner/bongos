@@ -191,21 +191,12 @@ impl ManifestCache {
     /// The cached manifest, verified again with `keys`. A missing, corrupt, foreign or unknown-key
     /// cache is `None` (and logged). Takes no lock.
     pub fn load(&self, manifest_url: &Url, keys: &[TrustedKey]) -> Option<CachedManifest> {
-        match load_cache(&self.cache_path(), manifest_url, keys) {
-            Ok(cached) => cached,
-            Err(error) => {
-                log::info!("manifest: ignoring the cached manifest: {error:#}");
-                None
-            }
-        }
+        load_logged(&self.cache_path(), manifest_url, keys)
     }
 
     /// `state.json` as it is now. Takes no lock; for a read, modify and write use `with_state`.
     pub fn read_state(&self) -> ServerState {
-        read_state(&self.state_path()).unwrap_or_else(|error| {
-            log::info!("manifest: {error:#}");
-            ServerState::default()
-        })
+        read_state_logged(&self.state_path())
     }
 
     /// Runs `f` on `state.json` under the state lock and writes the result if it changed. When
@@ -296,6 +287,38 @@ impl ManifestCache {
         }
         Ok(result)
     }
+}
+
+/// What a start reads under `install_root`: the cached manifest (verified again with `keys`) and
+/// `state.json`, as `ManifestCache::load` and `ManifestCache::read_state` read them. Takes no lock
+/// and needs no lock registry: both files are only ever replaced by a rename.
+pub fn read_for_start(
+    install_root: &Path,
+    manifest_url: &Url,
+    keys: &[TrustedKey],
+) -> (Option<CachedManifest>, ServerState) {
+    let dir = install_root.join(MANIFEST_DIR);
+    (
+        load_logged(&dir.join(CACHE_FILE), manifest_url, keys),
+        read_state_logged(&dir.join(STATE_FILE)),
+    )
+}
+
+fn load_logged(path: &Path, manifest_url: &Url, keys: &[TrustedKey]) -> Option<CachedManifest> {
+    match load_cache(path, manifest_url, keys) {
+        Ok(cached) => cached,
+        Err(error) => {
+            log::info!("manifest: ignoring the cached manifest: {error:#}");
+            None
+        }
+    }
+}
+
+fn read_state_logged(path: &Path) -> ServerState {
+    read_state(path).unwrap_or_else(|error| {
+        log::info!("manifest: {error:#}");
+        ServerState::default()
+    })
 }
 
 fn load_cache(
@@ -444,7 +467,7 @@ fn read_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::locks::{LockTimedOut, tests::thread_registry};
     use futures::{FutureExt as _, executor::block_on};
@@ -455,7 +478,7 @@ mod tests {
     const DIGEST: &str = "ae0c4b01e17ab73a4a5227a78ea99e6dcbe3e499600315b22759a4e4cddd11df";
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
-    fn key_pair(seed: u8) -> Ed25519KeyPair {
+    pub(crate) fn key_pair(seed: u8) -> Ed25519KeyPair {
         Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap()
     }
 
@@ -463,7 +486,7 @@ mod tests {
         TrustedKey::parse(id, &BASE64.encode(pair.public_key().as_ref())).unwrap()
     }
 
-    fn release_keys() -> Vec<TrustedKey> {
+    pub(crate) fn release_keys() -> Vec<TrustedKey> {
         vec![trusted("release-1", &key_pair(7))]
     }
 
@@ -471,7 +494,7 @@ mod tests {
         Url::parse("https://manifests.example.com/kotlin/servers.json").unwrap()
     }
 
-    fn servers(serial: u64, version: &str) -> Vec<u8> {
+    pub(crate) fn servers(serial: u64, version: &str) -> Vec<u8> {
         let url = format!(
             "https://download.jetbrains.com/language-server/kotlin-server/{version}/kotlin-server-{version}.tar.gz"
         );
@@ -489,7 +512,11 @@ mod tests {
         .unwrap()
     }
 
-    fn signed_with(servers: Vec<u8>, id: &str, pair: &Ed25519KeyPair) -> FetchedManifest {
+    pub(crate) fn signed_with(
+        servers: Vec<u8>,
+        id: &str,
+        pair: &Ed25519KeyPair,
+    ) -> FetchedManifest {
         let sig = serde_json::to_vec(&json!({
             "signatures": [{ "key": id, "ed25519": BASE64.encode(pair.sign(&servers)) }]
         }))
@@ -497,11 +524,11 @@ mod tests {
         FetchedManifest { servers, sig }
     }
 
-    fn signed(serial: u64, version: &str) -> FetchedManifest {
+    pub(crate) fn signed(serial: u64, version: &str) -> FetchedManifest {
         signed_with(servers(serial, version), "release-1", &key_pair(7))
     }
 
-    fn now() -> DateTime<Utc> {
+    pub(crate) fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-11-12T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
