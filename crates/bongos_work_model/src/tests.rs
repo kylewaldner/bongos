@@ -98,6 +98,61 @@ fn leaf_task_round_trips_with_every_field() {
 }
 
 #[test]
+fn old_files_without_the_definition_fields_parse_and_write_unchanged() {
+    // `LEAF` and `GROUP` predate `work_kind`, `areas`, `size`, `repositories` and `Todo.id`.
+    for text in [LEAF, GROUP] {
+        let task = parse_task(text).unwrap();
+        assert_eq!(task.work_kind, None);
+        assert!(task.areas.is_empty() && task.repositories.is_empty());
+        assert_eq!(task.size, None);
+        assert!(task.todos.iter().all(|todo| todo.id.is_none()));
+        assert!(task.extra.is_empty());
+        let written = serialize_task(&task).unwrap();
+        for absent in ["work_kind", "areas", "size", "repositories"] {
+            assert!(!written.contains(absent), "{absent} written: {written}");
+        }
+        assert_eq!(parse_task(&written).unwrap(), task);
+    }
+}
+
+#[test]
+fn the_definition_fields_round_trip() {
+    let mut task = leaf();
+    task.work_kind = Some("refactor".to_string());
+    task.areas = vec!["billing".to_string(), "api".to_string()];
+    task.size = Some(3);
+    task.repositories = vec!["invoicing".to_string()];
+    task.todos[0].id = Some("0196f1c2-1111-7000-8000-000000000001".to_string());
+    let text = serialize_task(&task).unwrap();
+    assert!(text.contains("work_kind = \"refactor\""), "{text}");
+    assert!(text.contains("size = 3"), "{text}");
+    let back = parse_task(&text).unwrap();
+    assert_eq!(back, task);
+    assert!(back.extra.is_empty());
+    assert_eq!(
+        back.todos[0].id.as_deref(),
+        Some("0196f1c2-1111-7000-8000-000000000001")
+    );
+    assert_eq!(back.todos[1].id, None);
+}
+
+#[test]
+fn project_id_is_optional_and_round_trips() {
+    let old = parse_project("schema = 1\ntitle = \"P\"\n").unwrap();
+    assert_eq!(old.id, None);
+    assert!(!serialize_project(&old).unwrap().contains("id ="));
+
+    let mut project = ProjectFile::new("P");
+    project.id = Some("0196f1c2-2222-7000-8000-000000000002".to_string());
+    let text = serialize_project(&project).unwrap();
+    assert!(
+        text.contains("id = \"0196f1c2-2222-7000-8000-000000000002\""),
+        "{text}"
+    );
+    assert_eq!(parse_project(&text).unwrap(), project);
+}
+
+#[test]
 fn group_task_round_trips_without_leaf_fields() {
     let group = parse_task(GROUP).unwrap();
     assert!(group.todos.is_empty() && group.result.is_none() && group.branch.is_none());

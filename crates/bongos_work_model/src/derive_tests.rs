@@ -9,6 +9,7 @@ const AT: &str = "2026-11-08T10:05:00Z";
 
 fn todo(name: &str, role: Option<TodoRole>, state: TodoState, started: bool) -> Todo {
     Todo {
+        id: None,
         name: name.to_string(),
         role,
         workflow: None,

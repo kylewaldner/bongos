@@ -13,6 +13,7 @@ pub fn at(text: &str) -> Timestamp {
 
 pub fn todo(name: &str, role: Option<TodoRole>) -> Todo {
     Todo {
+        id: None,
         name: name.to_string(),
         role,
         workflow: None,

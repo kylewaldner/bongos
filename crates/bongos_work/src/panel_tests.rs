@@ -165,6 +165,7 @@ async fn with_solo_leaf(harness: &Harness, cx: &mut VisualTestContext) {
     let mut file = TaskFile::new("Solo", Kind::Document);
     file.id = "l9".to_string();
     file.todos = vec![Todo {
+        id: None,
         name: "write".to_string(),
         role: None,
         workflow: None,

@@ -301,6 +301,7 @@ fn hook_todos() -> Vec<bongos_work_model::Todo> {
     ["plan it", "build it"]
         .into_iter()
         .map(|name| bongos_work_model::Todo {
+            id: None,
             name: name.to_string(),
             role: None,
             workflow: None,

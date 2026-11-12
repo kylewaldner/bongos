@@ -505,6 +505,7 @@ pub fn accept(
 /// The one todo of a leaf made from a ticket (26 D9).
 pub fn plan_todo() -> Todo {
     Todo {
+        id: None,
         name: "plan".to_string(),
         role: Some(TodoRole::Plans),
         workflow: None,

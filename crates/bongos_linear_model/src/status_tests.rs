@@ -107,6 +107,7 @@ fn started_waits_for_the_plan_todo() {
 
 fn todo_named(name: &str, role: Option<TodoRole>) -> bongos_work_model::Todo {
     bongos_work_model::Todo {
+        id: None,
         name: name.to_string(),
         role,
         workflow: None,
