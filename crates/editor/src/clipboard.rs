@@ -371,7 +371,9 @@ impl Editor {
         if self.is_masked(cx) {
             return;
         }
-        if let Some(entry) = kill_ring::entry_from_clipboard(&item) {
+        if let Some(entry) = kill_ring::entry_from_clipboard(&item)
+            && !entry.text.is_empty()
+        {
             kill_ring::update(cx, |ring| ring.push(entry));
             kill_ring::write_newest_to_clipboard(cx);
         }
@@ -386,7 +388,7 @@ impl Editor {
     /// Pushes an item this editor wrote to the clipboard onto the kill ring.
     /// A masked editor pushes nothing and marks the text as ignored instead,
     /// so a later clipboard capture skips it too.
-    fn push_to_kill_ring(&self, item: &ClipboardItem, cx: &mut Context<Self>) {
+    pub(crate) fn push_to_kill_ring(&self, item: &ClipboardItem, cx: &mut Context<Self>) {
         let Some(entry) = kill_ring::entry_from_clipboard(item) else {
             return;
         };
@@ -408,7 +410,7 @@ impl Editor {
         };
         let text = entry.text.clone();
         let selections = kill_ring::clipboard_selections(entry);
-        self.do_paste(&text, Some(selections), false, window, cx);
+        self.do_paste(&text, selections, false, window, cx);
     }
 
     pub(super) fn copy_and_trim(

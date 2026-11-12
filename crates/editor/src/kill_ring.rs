@@ -78,37 +78,46 @@ pub fn entry_from_clipboard(item: &ClipboardItem) -> Option<Entry> {
 /// The clipboard item for an entry, in the format `editor::Copy` writes, so
 /// `editor::Paste` and other readers of that format get its pieces back.
 pub fn clipboard_item(entry: &Entry) -> ClipboardItem {
-    ClipboardItem::new_string_with_json_metadata(entry.text.clone(), clipboard_selections(entry))
+    match clipboard_selections(entry) {
+        Some(selections) => {
+            ClipboardItem::new_string_with_json_metadata(entry.text.clone(), selections)
+        }
+        None => ClipboardItem::new_string(entry.text.clone()),
+    }
 }
 
 /// The per-piece selections of an entry, as `Editor::do_paste` reads them.
-/// An entry whose pieces do not fit its text gives one plain selection.
-pub(crate) fn clipboard_selections(entry: &Entry) -> Vec<ClipboardSelection> {
+/// `None` for an entry that is one plain piece (no origin, not a whole line,
+/// no indent) or whose pieces do not fit its text: it pastes as plain text.
+pub(crate) fn clipboard_selections(entry: &Entry) -> Option<Vec<ClipboardSelection>> {
     let pieces = entry
         .pieces
         .iter()
         .map(|piece| (piece.len, piece.is_entire_line))
         .collect::<Vec<_>>();
     if split_pieces(&entry.text, &pieces).is_none() {
-        return vec![ClipboardSelection {
-            len: entry.text.len(),
-            is_entire_line: false,
-            first_line_indent: 0,
-            file_path: None,
-            line_range: None,
-        }];
+        return None;
     }
-    entry
-        .pieces
-        .iter()
-        .map(|piece| ClipboardSelection {
-            len: piece.len,
-            is_entire_line: piece.is_entire_line,
-            first_line_indent: piece.first_line_indent,
-            file_path: piece.origin.as_ref().map(|origin| origin.path.clone()),
-            line_range: piece.origin.as_ref().map(|origin| origin.lines.clone()),
-        })
-        .collect()
+    if let [piece] = entry.pieces.as_slice()
+        && !piece.is_entire_line
+        && piece.first_line_indent == 0
+        && piece.origin.is_none()
+    {
+        return None;
+    }
+    Some(
+        entry
+            .pieces
+            .iter()
+            .map(|piece| ClipboardSelection {
+                len: piece.len,
+                is_entire_line: piece.is_entire_line,
+                first_line_indent: piece.first_line_indent,
+                file_path: piece.origin.as_ref().map(|origin| origin.path.clone()),
+                line_range: piece.origin.as_ref().map(|origin| origin.lines.clone()),
+            })
+            .collect(),
+    )
 }
 
 /// Writes the newest entry to the system clipboard, if there is one.

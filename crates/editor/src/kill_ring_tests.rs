@@ -248,3 +248,61 @@ async fn test_clipboard_item_is_pasted_per_caret(cx: &mut TestAppContext) {
     cx.update_editor(|e, window, cx| e.paste(&Paste, window, cx));
     cx.assert_editor_state("a oneˇ\nb two\nlinesˇ\nc threeˇ");
 }
+
+#[gpui::test]
+async fn test_cut_to_end_of_line_pushes_to_ring(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("one ˇtwo\nthree");
+    cx.update_editor(|e, window, cx| {
+        e.cut_to_end_of_line(
+            &crate::actions::CutToEndOfLine {
+                stop_at_newlines: false,
+            },
+            window,
+            cx,
+        )
+    });
+    assert_eq!(ring_texts(&mut cx), ["two"]);
+
+    cx.update_editor(|e, _, cx| e.set_masked(true, cx));
+    cx.set_state("ˇsecret\nnext");
+    cx.update_editor(|e, window, cx| {
+        e.cut_to_end_of_line(
+            &crate::actions::CutToEndOfLine {
+                stop_at_newlines: false,
+            },
+            window,
+            cx,
+        )
+    });
+    assert_eq!(ring_texts(&mut cx), ["two"]);
+}
+
+#[gpui::test]
+async fn test_set_kill_ring_text_yanks_one_line_per_caret(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.update_editor(|e, _, cx| e.set_kill_ring_text("a\nb\nc", cx));
+    cx.set_state("ˇ1\nˇ2\nˇ3");
+    cx.update_editor(|e, window, cx| e.kill_ring_yank(&KillRingYank, window, cx));
+    cx.assert_editor_state("aˇ1\nbˇ2\ncˇ3");
+}
+
+#[gpui::test]
+async fn test_kill_ring_cut_with_nothing_to_cut_pushes_nothing(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.update_editor(|e, _, cx| e.set_kill_ring_text("kept", cx));
+    cx.write_to_clipboard(ClipboardItem::new_string("outside".to_string()));
+    cx.set_state("ˇ");
+    cx.update_editor(|e, window, cx| e.kill_ring_cut(&KillRingCut, window, cx));
+    assert_eq!(ring_texts(&mut cx), ["kept"]);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("outside".to_string())
+    );
+}
