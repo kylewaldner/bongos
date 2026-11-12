@@ -553,10 +553,12 @@ pub struct Pruned {
 
 /// Deletes every kotlin-lsp version directory of `dir` except the active, previous and trial builds
 /// of `state.json` and `pin_version`. A version with a pending-trial marker, or an install marker
-/// younger than `PRUNE_GRACE` at `now`, stays too. Runs under the state lock and takes each version
-/// lock with one `try_lock`: a busy version is skipped, never waited for. Dot-files (lock files,
-/// markers, partial files) are never touched, except the `.download` file and `.staging` directory
-/// older installs left behind, deleted once untouched for `PRUNE_GRACE`.
+/// younger than `PRUNE_GRACE` at `now`, stays too. Under the state lock it reads the keep set and
+/// takes each other version's lock with one `try_lock`: a busy version is skipped, never waited
+/// for. The deletions run after the state lock is released, each still under its version lock, so
+/// a large delete never holds up a `state.json` write. Dot-files (lock files, markers, partial
+/// files) are never touched, except the `.download` file and `.staging` directory older installs
+/// left behind, deleted once untouched for `PRUNE_GRACE`.
 pub async fn prune(
     cache: &ManifestCache,
     locks: &LockRegistry,
@@ -564,7 +566,7 @@ pub async fn prune(
     pin_version: Option<&str>,
     now: SystemTime,
 ) -> Result<Pruned> {
-    cache
+    let (victims, busy) = cache
         .with_state(|state| {
             let builds = &state.kotlin_lsp;
             let keep: Vec<&str> = [&builds.active, &builds.previous, &builds.trial]
@@ -572,31 +574,17 @@ pub async fn prune(
                 .filter_map(|build| build.as_ref().map(|build| build.version.as_str()))
                 .chain(pin_version)
                 .collect();
-            let mut pruned = Pruned::default();
+            let mut victims = Vec::new();
+            let mut busy = Vec::new();
             let entries = match fs::read_dir(dir) {
                 Ok(entries) => entries,
                 Err(error) => {
                     if error.kind() != std::io::ErrorKind::NotFound {
                         log::warn!("listing {}: {error}", dir.display());
                     }
-                    return pruned;
+                    return (victims, busy);
                 }
             };
-            for legacy in LEGACY_PARTIALS {
-                let path = dir.join(legacy);
-                let stale = fs::symlink_metadata(&path)
-                    .and_then(|meta| meta.modified())
-                    .is_ok_and(|modified| {
-                        now.duration_since(modified)
-                            .is_ok_and(|age| age >= PRUNE_GRACE)
-                    });
-                if stale {
-                    match remove_path(&path) {
-                        Ok(()) => log::info!("prune: removed {}", path.display()),
-                        Err(error) => log::warn!("removing {}: {error}", path.display()),
-                    }
-                }
-            }
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
@@ -608,17 +596,42 @@ pub async fn prune(
                     continue;
                 }
                 match locks.try_version_lock(dir, &name) {
-                    Ok(Some(_lock)) => match remove_path(&path) {
-                        Ok(()) => pruned.removed.push(name),
-                        Err(error) => log::warn!("removing {}: {error}", path.display()),
-                    },
-                    Ok(None) => pruned.busy.push(name),
+                    Ok(Some(lock)) => victims.push((name, path, lock)),
+                    Ok(None) => busy.push(name),
                     Err(error) => log::warn!("not pruning {}: {error:#}", path.display()),
                 }
             }
-            pruned
+            (victims, busy)
         })
-        .await
+        .await?;
+
+    for legacy in LEGACY_PARTIALS {
+        let path = dir.join(legacy);
+        let stale = fs::symlink_metadata(&path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| {
+                now.duration_since(modified)
+                    .is_ok_and(|age| age >= PRUNE_GRACE)
+            });
+        if stale {
+            match remove_path(&path) {
+                Ok(()) => log::info!("prune: removed {}", path.display()),
+                Err(error) => log::warn!("removing {}: {error}", path.display()),
+            }
+        }
+    }
+    let mut pruned = Pruned {
+        removed: Vec::new(),
+        busy,
+    };
+    // Each version lock is held until its directory is gone, then released.
+    for (name, path, _lock) in victims {
+        match remove_path(&path) {
+            Ok(()) => pruned.removed.push(name),
+            Err(error) => log::warn!("removing {}: {error}", path.display()),
+        }
+    }
+    Ok(pruned)
 }
 
 /// The partial download and staging names of older installs, which had no version in them.
