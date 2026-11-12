@@ -9,6 +9,8 @@ pub mod edit_prediction_registry;
 #[cfg(test)]
 mod emacs_keymap_tests;
 #[cfg(test)]
+mod isearch_keymap_tests;
+#[cfg(test)]
 mod linear_keymap_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;

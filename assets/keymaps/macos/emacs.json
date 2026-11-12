@@ -100,8 +100,10 @@
       "alt-r": "emacs::Reposition", // reposition
       "ctrl-=": "emacs::ExpandRegion", // expand-region
       "ctrl--": "emacs::ContractRegion", // contract-region
-      "ctrl-s": "buffer_search::Deploy", // isearch-forward
-      "ctrl-r": "buffer_search::Deploy", // isearch-backward
+      "ctrl-s": "isearch::Forward", // isearch-forward
+      "ctrl-r": "isearch::Backward", // isearch-backward
+      "ctrl-alt-s": "isearch::ForwardRegexp", // isearch-forward-regexp
+      "ctrl-alt-r": "isearch::BackwardRegexp", // isearch-backward-regexp
       "alt-^": "editor::JoinLines", // join-line
       "alt-q": "editor::Rewrap", // fill-paragraph
     },

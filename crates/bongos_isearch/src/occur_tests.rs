@@ -8,7 +8,8 @@ use language::ToPoint as _;
 use workspace::Workspace;
 
 use crate::actions::Forward;
-use crate::occur::{LINE_CAP, title};
+use crate::engine::build_query;
+use crate::occur::{LINE_CAP, group, results, title};
 use crate::session_tests::{keys, session_open, start, text, type_slowly, workspace_text};
 
 /// `count` lines `line N` (N from 1), with `needle` appended to the lines in `with`.
@@ -212,4 +213,31 @@ async fn occur_leaves_point_at_the_match_and_pushes_the_mark(cx: &mut TestAppCon
     let first_match = source.find("needle").unwrap() + "needle".len();
     assert_eq!(crate::session_tests::cursor(&editor, cx), first_match);
     assert_eq!(crate::session_tests::mark(&editor, cx), Some(0));
+}
+
+#[gpui::test]
+async fn occur_skips_rows_the_buffer_lost_while_the_pass_ran(cx: &mut TestAppContext) {
+    let source = lines(6, &[2, 5]);
+    let (_workspace, editor, mut cx) = workspace_text(&source, true, cx).await;
+    let cx = &mut cx;
+    let mut spec = bongos_isearch_model::SearchSpec::new(false);
+    spec.string = "needle".to_string();
+    let query = build_query(&bongos_isearch_model::compile(&spec)).unwrap();
+    let (buffer, old) = editor.update(cx, |editor, cx| {
+        (
+            editor.buffer().clone(),
+            editor.buffer().read(cx).snapshot(cx),
+        )
+    });
+    let found = group(&old, &query);
+    assert_eq!(found.len(), 2);
+
+    // The buffer shrinks to two lines after the pass; both matching lines are gone or stale.
+    editor.update_in(cx, |editor, window, cx| {
+        editor.set_text("one\ntwo needle", window, cx)
+    });
+    cx.run_until_parked();
+    let list = cx.update(|_, cx| results(&buffer, &found, "needle", cx));
+    let rows = list.read_with(cx, |list, cx| list.snapshot(cx).max_point().row);
+    assert_eq!(rows, 0, "only the surviving row is listed");
 }

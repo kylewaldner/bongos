@@ -589,14 +589,14 @@ const RESERVED: &[(&str, &[&str])] = &[
     ("ctrl-x 2", &["pane::SplitDown"]),
     ("ctrl-x 3", &["pane::SplitRight"]),
     ("ctrl-x o", &["workspace::ActivateNextPane"]),
-    // Also the search bar's own next and previous match.
+    // Incremental search, and the search bar's own next and previous match.
     (
         "ctrl-s",
-        &["buffer_search::Deploy", "search::SelectNextMatch"],
+        &["isearch::Forward", "search::SelectNextMatch"],
     ),
     (
         "ctrl-r",
-        &["buffer_search::Deploy", "search::SelectPreviousMatch"],
+        &["isearch::Backward", "search::SelectPreviousMatch"],
     ),
     ("ctrl-y", &["editor::Paste"]),
     ("alt-shift-y", &[]),

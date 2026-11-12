@@ -385,7 +385,7 @@ async fn minibuffer_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `isearch` commands, with the palette text of each.
-const ISEARCH_ACTIONS: [(&str, &str); 28] = [
+pub(super) const ISEARCH_ACTIONS: [(&str, &str); 28] = [
     ("isearch::Forward", "isearch: forward"),
     ("isearch::Backward", "isearch: backward"),
     ("isearch::ForwardRegexp", "isearch: forward regexp"),
