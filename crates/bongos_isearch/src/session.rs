@@ -42,9 +42,9 @@ use workspace::Workspace;
 
 use crate::actions::{
     Abort, Backward, BackwardRegexp, DelChar, EditString, Exit, ExitOtherEnd, FirstMatch, Forward,
-    ForwardRegexp, LastMatch, Occur, QueryReplace, QueryReplaceRegexp, QuoteNewline, Recenter,
-    RepeatBackward, RepeatForward, RingNext, RingPrevious, ToggleCaseFold, ToggleLaxWhitespace,
-    ToggleRegexp, YankChar, YankKill, YankLine, YankSymbol, YankWord,
+    ForwardRegexp, LastMatch, Occur, QueryReplace, QueryReplaceRegexp, Quit, QuoteNewline,
+    Recenter, RepeatBackward, RepeatForward, RingNext, RingPrevious, ToggleCaseFold,
+    ToggleLaxWhitespace, ToggleRegexp, YankChar, YankKill, YankLine, YankSymbol, YankWord,
 };
 use crate::commands;
 use crate::display::{self, Display};
@@ -227,7 +227,12 @@ pub(crate) fn init(cx: &mut App) {
         register_in_session_always::<RepeatBackward>(workspace, |state, window, cx| {
             repeat_command(state, Direction::Backward, window, cx)
         });
-        register_in_session_always::<Abort>(workspace, abort);
+        register_in_session_always::<Abort>(workspace, |state, window, cx| {
+            abort(state, false, window, cx)
+        });
+        register_in_session_always::<Quit>(workspace, |state, window, cx| {
+            abort(state, true, window, cx)
+        });
         register_in_session_always::<Exit>(workspace, |state, window, cx| {
             if state.borrow().editing.is_some() {
                 commands::resume_editing(state, None, window, cx);
@@ -947,12 +952,7 @@ fn status_text(state: &SessionState) -> String {
     let index = count
         .index_of(MultiBufferOffset(found.start))
         .map(|index| index + 1);
-    let total = if count.capped {
-        COUNT_CAP
-    } else {
-        count.starts.len()
-    };
-    counter(index, total)
+    counter(index, count.starts.len(), count.capped)
 }
 
 /// The find has run for about a frame: the status says it is still running.
@@ -1024,8 +1024,9 @@ fn del_char(state: &Shared, window: &mut Window, cx: &mut App) {
     run(state, request, &handle, window, cx);
 }
 
-/// C-g and Escape: a failing suffix goes first; otherwise the session ends where it started.
-fn abort(state: &Shared, window: &mut Window, cx: &mut App) {
+/// C-g: a failing suffix goes first; otherwise the session ends where it started. Escape
+/// (`always_quit`) skips the trimming and always ends the session where it started.
+fn abort(state: &Shared, always_quit: bool, window: &mut Window, cx: &mut App) {
     let Some(handle) = handle_of(state) else {
         return;
     };
@@ -1042,7 +1043,11 @@ fn abort(state: &Shared, window: &mut Window, cx: &mut App) {
         // session goes on as if the exit had not been asked for.
         state.exit_after_find = false;
         state.pending_exit = None;
-        state.model.abort()
+        if always_quit {
+            AbortOutcome::Quit
+        } else {
+            state.model.abort()
+        }
     };
     match outcome {
         AbortOutcome::TrimmedFailingSuffix(string) => {

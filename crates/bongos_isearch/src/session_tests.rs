@@ -747,6 +747,26 @@ async fn isearch_escape_aborts(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn isearch_escape_in_a_failing_state_quits_to_the_origin(cx: &mut TestAppContext) {
+    let content = long_text();
+    let (workspace, editor, mut cx) = workspace_text(&content, true, cx).await;
+    let cx = &mut cx;
+    set_selections(&editor, vec![4..4], cx);
+    let top = scroll_top(&editor, cx);
+
+    start(Forward, &workspace, cx);
+    type_slowly("needle", cx);
+    cx.simulate_input("zzz");
+    cx.run_until_parked();
+    assert_eq!(prompt(&workspace, cx), "Failing I-search: ");
+    keys("escape", cx);
+    assert!(!session_open(&workspace, cx), "Escape never only trims");
+    assert_eq!(cursor(&editor, cx), 4);
+    assert_eq!(scroll_top(&editor, cx), top);
+    assert_eq!(text(&editor, cx), content);
+}
+
+#[gpui::test]
 async fn isearch_a_click_outside_or_another_modal_exits_at_the_match(cx: &mut TestAppContext) {
     let (workspace, editor, mut cx) = workspace_text(XS, true, cx).await;
     let cx = &mut cx;

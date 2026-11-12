@@ -87,7 +87,7 @@
       "ctrl-r": "isearch::RepeatBackward",
       "backspace": "isearch::DelChar",
       "ctrl-g": "isearch::Abort",
-      "escape": "isearch::Abort",
+      "escape": "isearch::Quit",
       "enter": "isearch::Exit",
       "ctrl-enter": "isearch::ExitOtherEnd",
       "alt-p": "isearch::RingPrevious",
