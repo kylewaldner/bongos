@@ -3,7 +3,7 @@
 use bongos_project_repo::{CreateRequest, ProjectRepo, ProjectRepositorySettings, RepositoryLocations};
 use bongos_work_model::commands::{self as model, NewProject};
 use bongos_work_model::slug::slugify;
-use gpui::{Context, Window};
+use gpui::{AppContext as _, Context, Window};
 use settings::Settings as _;
 use workspace::Workspace;
 
