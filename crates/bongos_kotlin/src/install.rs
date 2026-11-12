@@ -24,11 +24,13 @@ use std::{
 use anyhow::{Context as _, Result, bail, ensure};
 use async_compression::futures::bufread::GzipDecoder;
 use collections::HashMap;
-use futures::{AsyncReadExt as _, AsyncWriteExt as _, StreamExt as _, io::BufReader};
+use futures::{AsyncWriteExt as _, StreamExt as _, io::BufReader};
 use gpui::{App, AppContext as _, Task};
-use http_client::HttpClient;
+use http_client::{
+    HttpClient,
+    github_download::{DownloadCancelled, download_verified_file},
+};
 use settings::KotlinServerKind;
-use sha2::{Digest as _, Sha256};
 
 use crate::{
     installed::{MARKER, Marker, check_dir, server_name},
@@ -36,11 +38,10 @@ use crate::{
 };
 
 /// Progress is reported each time this many more bytes have arrived.
-pub const PROGRESS_STEP: u64 = 1024 * 1024;
+pub const PROGRESS_STEP: u64 = http_client::github_download::VERIFIED_DOWNLOAD_PROGRESS_STEP;
 
 const DOWNLOAD_FILE: &str = ".download";
 const STAGING_DIR: &str = ".staging";
-const CHUNK_SIZE: usize = 64 * 1024;
 
 /// Called with the bytes downloaded and the total from `Content-Length`, when the server sent one.
 pub type ProgressFn = dyn Fn(u64, Option<u64>) + Send + Sync;
@@ -66,8 +67,8 @@ pub struct InstalledServer {
     pub launcher: PathBuf,
 }
 
-/// An archive whose digest matched the manifest. Only `download_verified` makes one, and the
-/// extractors take nothing else.
+/// An archive whose digest matched the manifest. Only `install_locked` makes one, right after
+/// `download_verified_file` checked it, and the extractors take nothing else.
 struct VerifiedArchive(PathBuf);
 
 /// Removes the install's partial files when dropped: on success there are none left, on an error,
@@ -217,8 +218,17 @@ async fn install_locked(
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let _partial = PartialFiles::new(dir);
 
-    let archive =
-        download_verified(entry, &dir.join(DOWNLOAD_FILE), http, progress, cancel).await?;
+    let download = dir.join(DOWNLOAD_FILE);
+    download_verified_file(http, &entry.url, &entry.sha256, &download, progress, cancel)
+        .await
+        .map_err(|error| {
+            if error.downcast_ref::<DownloadCancelled>().is_some() {
+                InstallCancelled.into()
+            } else {
+                error
+            }
+        })?;
+    let archive = VerifiedArchive(download);
     check_cancel(cancel)?;
 
     let staging = dir.join(STAGING_DIR);
@@ -260,75 +270,6 @@ async fn install_locked(
         server_name(server)
     );
     Ok(installed_server(server, entry, final_dir))
-}
-
-/// Streams the archive to `path`, hashing as it goes, and returns it only when the digest matches.
-async fn download_verified(
-    entry: &ManifestEntry,
-    path: &Path,
-    http: &dyn HttpClient,
-    progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
-    cancel: &AtomicBool,
-) -> Result<VerifiedArchive> {
-    let url = &entry.url;
-    let mut response = http
-        .get(url, Default::default(), true)
-        .await
-        .with_context(|| format!("downloading {url}"))?;
-    ensure!(
-        response.status().is_success(),
-        "downloading {url}: the server answered {}",
-        response.status()
-    );
-    let total = response
-        .headers()
-        .get(http_client::http::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-
-    let mut file = async_fs::File::create(path)
-        .await
-        .with_context(|| format!("creating {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; CHUNK_SIZE];
-    let (mut downloaded, mut reported) = (0u64, 0u64);
-    progress(0, total);
-    loop {
-        check_cancel(cancel)?;
-        let read = response
-            .body_mut()
-            .read(&mut buffer)
-            .await
-            .with_context(|| format!("downloading {url}"))?;
-        if read == 0 {
-            break;
-        }
-        let chunk = &buffer[..read];
-        hasher.update(chunk);
-        file.write_all(chunk)
-            .await
-            .with_context(|| format!("writing {}", path.display()))?;
-        downloaded += read as u64;
-        if downloaded - reported >= PROGRESS_STEP {
-            reported = downloaded;
-            progress(downloaded, total);
-        }
-    }
-    file.flush()
-        .await
-        .with_context(|| format!("writing {}", path.display()))?;
-    drop(file);
-    if reported != downloaded {
-        progress(downloaded, total);
-    }
-
-    let actual = format!("{:x}", hasher.finalize());
-    ensure!(
-        actual == entry.sha256,
-        "{url} failed its SHA-256 check: expected {}, got {actual}",
-        entry.sha256
-    );
-    Ok(VerifiedArchive(path.to_path_buf()))
 }
 
 async fn extract(
@@ -471,9 +412,10 @@ pub(crate) mod tests {
         task::{Context, Poll},
     };
 
-    use futures::{AsyncRead, executor::block_on, io::Cursor};
+    use futures::{AsyncRead, AsyncReadExt as _, executor::block_on, io::Cursor};
     use gpui::TestAppContext;
     use http_client::{AsyncBody, FakeHttpClient, Response};
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
     use crate::installed::check_installed;
