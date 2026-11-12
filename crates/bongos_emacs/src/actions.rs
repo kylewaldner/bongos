@@ -209,6 +209,8 @@ actions!(
         ExchangePointAndMark,
         /// Moves the cursor to the mark and takes the previous mark off the ring.
         PopMark,
+        /// Goes back to the newest earlier location in another file.
+        PopGlobalMark,
     ]
 );
 count_action!(

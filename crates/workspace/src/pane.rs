@@ -4700,6 +4700,47 @@ impl NavHistory {
         entry
     }
 
+    /// Whether the backward stack holds an entry matching `pred`, which gets the entry and the
+    /// project path of its item (as `for_each_entry` reads it).
+    pub fn last_backward_where(
+        &self,
+        pred: &mut dyn FnMut(&NavigationEntry, Option<&ProjectPath>) -> bool,
+        cx: &App,
+    ) -> bool {
+        let state = self.0.lock();
+        Self::newest_backward_where(&state, pred, cx).is_some()
+    }
+
+    /// Removes and returns the newest backward-stack entry matching `pred`, leaving every other
+    /// entry, newer or older, where it was.
+    pub fn pop_backward_where(
+        &mut self,
+        pred: &mut dyn FnMut(&NavigationEntry, Option<&ProjectPath>) -> bool,
+        cx: &mut App,
+    ) -> Option<NavigationEntry> {
+        let mut state = self.0.lock();
+        let index = Self::newest_backward_where(&state, pred, cx)?;
+        let entry = state.backward_stack.remove(index);
+        if entry.is_some() {
+            state.did_update(cx);
+        }
+        entry
+    }
+
+    fn newest_backward_where(
+        state: &NavHistoryState,
+        pred: &mut dyn FnMut(&NavigationEntry, Option<&ProjectPath>) -> bool,
+        cx: &App,
+    ) -> Option<usize> {
+        state.backward_stack.iter().rposition(|entry| {
+            let path = match state.paths_by_item.get(&entry.item.id()) {
+                Some((path, _)) => Some(path.clone()),
+                None => entry.item.upgrade().and_then(|item| item.project_path(cx)),
+            };
+            pred(entry, path.as_ref())
+        })
+    }
+
     pub fn push<D: 'static + Any + Send + Sync>(
         &mut self,
         data: Option<D>,
@@ -8796,6 +8837,86 @@ mod tests {
             pane.activate_next_item(&ActivateNextItem { wrap_around: false }, window, cx);
         });
         assert_item_labels(&pane, ["A", "B", "C*"], cx);
+    }
+
+    #[gpui::test]
+    async fn test_pop_backward_where_removes_only_the_newest_match(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+        let a = add_labeled_item(&pane, "A", false, cx);
+        let b = add_labeled_item(&pane, "B", false, cx);
+        let c = add_labeled_item(&pane, "C", false, cx);
+        let (a_id, b_id, c_id) = (a.item_id(), b.item_id(), c.item_id());
+
+        let backward = |pane: &Entity<Pane>, cx: &mut VisualTestContext| {
+            pane.read_with(cx, |pane, _| {
+                pane.nav_history
+                    .0
+                    .lock()
+                    .backward_stack
+                    .iter()
+                    .map(|entry| (entry.item.id(), entry.row))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        pane.update_in(cx, |pane, _, cx| {
+            let history = pane.nav_history_mut();
+            history.clear(cx);
+            for (item, row) in [
+                (a.downgrade(), 1),
+                (b.downgrade(), 2),
+                (a.downgrade(), 3),
+                (b.downgrade(), 4),
+                (c.downgrade(), 5),
+            ] {
+                history.push::<()>(None, Arc::new(item), false, Some(row), cx);
+            }
+        });
+
+        let mut is_b = |entry: &NavigationEntry, _: Option<&ProjectPath>| entry.item.id() == b_id;
+        let mut is_none = |_: &NavigationEntry, _: Option<&ProjectPath>| false;
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(pane.nav_history().last_backward_where(&mut is_b, cx));
+            assert!(!pane.nav_history().last_backward_where(&mut is_none, cx));
+            let entry = pane
+                .nav_history_mut()
+                .pop_backward_where(&mut is_b, cx)
+                .unwrap();
+            assert_eq!((entry.item.id(), entry.row), (b_id, Some(4)));
+            assert!(
+                pane.nav_history_mut()
+                    .pop_backward_where(&mut is_none, cx)
+                    .is_none()
+            );
+        });
+        assert_eq!(
+            backward(&pane, cx),
+            vec![
+                (a_id, Some(1)),
+                (b_id, Some(2)),
+                (a_id, Some(3)),
+                (c_id, Some(5))
+            ]
+        );
+
+        pane.update_in(cx, |pane, _, cx| {
+            let entry = pane
+                .nav_history_mut()
+                .pop_backward_where(&mut is_b, cx)
+                .unwrap();
+            assert_eq!((entry.item.id(), entry.row), (b_id, Some(2)));
+            assert!(!pane.nav_history().last_backward_where(&mut is_b, cx));
+        });
+        assert_eq!(
+            backward(&pane, cx),
+            vec![(a_id, Some(1)), (a_id, Some(3)), (c_id, Some(5))]
+        );
     }
 
     fn init_test(cx: &mut TestAppContext) {
