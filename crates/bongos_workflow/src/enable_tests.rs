@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use super::task_link_tests::linked;
 use super::*;
 use crate::runs_panel::RunRow;
 
@@ -44,35 +45,45 @@ fn enabling_by_default_starts_nothing_and_changes_no_task(cx: &mut TestAppContex
     let before = snapshot(&world.root.join("work"));
     assert!(before.contains_key(&task_dir.join("context.md")));
 
-    // The app's own init under the default settings: the engine is made, and nothing runs.
-    let settings = cx.update(|cx| {
+    // The settings are the shipped defaults, and the engine is built the way `ensure` builds it
+    // (its sources, gates and observers registered) over this world's directories and a scripted
+    // runner, so it sees the task tree and the `runs/` root. `crate::init` itself is not called:
+    // it would write the shipped definitions into the real data directory.
+    cx.update(|cx| {
         let store = SettingsStore::new(cx, &settings::default_settings());
         cx.set_global(store);
         release_channel::init(semver::Version::new(0, 0, 0), cx);
-        crate::init(cx);
-        let engine = cx
-            .try_global::<WorkflowEngine>()
-            .expect("the engine exists under the default settings")
-            .clone();
-        assert!(engine.lifecycle().all_runs().is_empty(), "no run exists");
-        WorkflowsSettings::get_global(cx).clone()
+        WorkflowsSettings::register(cx);
+        assert!(WorkflowsSettings::get_global(cx).enabled);
     });
-    assert!(settings.enabled);
+    let linked = linked(&world, FakeRunner::new(), cx);
+    cx.update(|cx| {
+        cx.set_global(linked.engine.clone());
+        crate::sources::register(&linked.engine, cx);
+        crate::gates::register(&linked.engine, cx);
+        crate::run_view::observe_focus(&linked.engine, cx);
+    });
 
-    // The same settings over the scripted runner: ticking finds nothing to start.
-    let worktrees = DirWorktrees {
-        root: world.root.join("runs"),
-        error: world.worktree_error.clone(),
-    };
-    let mut lifecycle = Lifecycle::new(FakeRunner::new(), Box::new(worktrees), settings);
-    settle(&mut lifecycle);
-    assert!(lifecycle.all_runs().is_empty());
-    assert!(RunRow::all(&lifecycle).is_empty());
+    // Ticking, settling and publishing find nothing to start.
+    linked.drive(cx);
+    cx.update(|cx| linked.engine.publish(cx));
+    cx.run_until_parked();
+    {
+        let lifecycle = linked.engine.lifecycle();
+        assert!(lifecycle.all_runs().is_empty(), "no run exists");
+        assert!(RunRow::all(&lifecycle).is_empty());
+    }
+    {
+        let runner = linked.runner.lock().unwrap();
+        assert!(runner.started.is_empty(), "no process was started");
+        assert!(runner.in_flight().is_empty());
+    }
+    assert!(linked.engine.active_run(LEAF).is_none());
+    assert!(cx.update(|cx| LiveModesRegistry::can_start_run(LEAF, cx).allowed));
     assert!(
-        lifecycle.runtime().runner().started.is_empty(),
-        "no process was started"
+        linked.writes.changes.lock().unwrap().is_empty(),
+        "no task write was made"
     );
-    assert!(lifecycle.runtime().runner().in_flight().is_empty());
 
     assert!(!world.root.join("runs").exists(), "nothing under runs/");
     assert!(

@@ -24,8 +24,8 @@ fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
 #[gpui::test]
 async fn run_by_name_is_handled_and_says_workflows_are_off(cx: &mut TestAppContext) {
     let app_state = init_test(cx);
-    cx.update(bongos_workflow::init);
     set_enabled(cx, false);
+    cx.update(bongos_workflow::init);
     app_state
         .fs
         .as_fake()
@@ -72,8 +72,8 @@ async fn the_runs_panel_is_absent_while_workflows_are_off_and_follows_the_settin
     cx: &mut TestAppContext,
 ) {
     let app_state = init_test(cx);
-    cx.update(bongos_workflow::init);
     set_enabled(cx, false);
+    cx.update(bongos_workflow::init);
     app_state
         .fs
         .as_fake()

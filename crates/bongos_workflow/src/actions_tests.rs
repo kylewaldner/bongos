@@ -42,7 +42,9 @@ fn use_default_settings(cx: &mut TestAppContext) {
         let store = SettingsStore::new(cx, &settings::default_settings());
         cx.set_global(store);
         release_channel::init(semver::Version::new(0, 0, 0), cx);
-        crate::init(cx);
+        // Not `crate::init`: with workflows on it would write the shipped definitions into the
+        // real data directory, and these tests need the setting, not the engine.
+        WorkflowsSettings::register(cx);
     });
 }
 
