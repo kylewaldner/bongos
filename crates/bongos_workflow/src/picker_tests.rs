@@ -6,6 +6,7 @@
 use bongos_workflow_model::layers::DEFINITION_FILE;
 
 use super::*;
+use super::task_link_tests::linked;
 use crate::picker::{Choice, Picker, Review, Row, candidates, todo_workflow};
 use crate::runner_claude::AgentDefaults;
 use crate::runner_program::ProgramSettings;
