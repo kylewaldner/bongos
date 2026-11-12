@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Builds and signs the remote Kotlin server manifest (servers.json and servers.json.sig) from the
+# newest kotlin-lsp pin. A developer runs this with network access when a newer kotlin-lsp build
+# should reach users before the next release; no gate runs it. Uploading the two files is a manual
+# step.
+#   publish-kotlin-manifest --key <private key file> --key-id <id> --serial <n> [options]
+#     --key <path>       the Ed25519 private key made by `bongos-kotlin-manifest keygen` (never printed)
+#     --key-id <id>      the id the app knows the matching public key by
+#     --serial <n>       must be higher than the last published serial (for example 2026111201)
+#     --out <dir>        where the files go (default: a new directory under $TMPDIR)
+#     --pubkey <id:key>  the public key printed by keygen; when given, the signed files are verified
+#                        with the app's own verifier before the script finishes
+#     --built YYYY-MM-DD the kotlin-lsp build date, passed to pin-kotlin-servers (see its header)
+#     --pin <file>       use this servers.toml instead of running `pin-kotlin-servers --print`
+#                        (no network then)
+# Needs the network unless --pin is given. kotlin-lsp builds expire 29 days after they are built;
+# the manifest carries that expires date, and the app skips an expired entry.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+
+usage() {
+  echo "usage: publish-kotlin-manifest --key <private key file> --key-id <id> --serial <n> [--out <dir>] [--pubkey <id:key>] [--built YYYY-MM-DD] [--pin <servers.toml>]" >&2
+  exit 2
+}
+
+key="" key_id="" serial="" out="" pubkey="" built="" pin=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --key) [ "$#" -ge 2 ] || usage; key=$2; shift ;;
+    --key-id) [ "$#" -ge 2 ] || usage; key_id=$2; shift ;;
+    --serial) [ "$#" -ge 2 ] || usage; serial=$2; shift ;;
+    --out) [ "$#" -ge 2 ] || usage; out=$2; shift ;;
+    --pubkey) [ "$#" -ge 2 ] || usage; pubkey=$2; shift ;;
+    --built) [ "$#" -ge 2 ] || usage; built=$2; shift ;;
+    --pin) [ "$#" -ge 2 ] || usage; pin=$2; shift ;;
+    *) usage ;;
+  esac
+  shift
+done
+[ -n "$key" ] && [ -n "$key_id" ] && [ -n "$serial" ] || usage
+case "$serial" in ''|*[!0-9]*) echo "publish-kotlin-manifest: --serial must be a whole number" >&2; exit 2 ;; esac
+[ -f "$key" ] || { echo "publish-kotlin-manifest: no private key file at $key" >&2; exit 1; }
+
+if [ -z "$out" ]; then
+  out=$(mktemp -d "${TMPDIR:?TMPDIR is not set}/kotlin-manifest.XXXXXX")
+else
+  mkdir -p "$out"
+fi
+
+work=$(mktemp -d "${TMPDIR:?TMPDIR is not set}/publish-kotlin-manifest.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+# The newest pin, as servers.toml text (network), or the file given with --pin.
+if [ -n "$pin" ]; then
+  cp "$pin" "$work/servers.toml"
+else
+  pin_args=(--print)
+  [ -n "$built" ] && pin_args+=(--built "$built")
+  "$here/pin-kotlin-servers" "${pin_args[@]}" >"$work/servers.toml"
+fi
+
+PUB_TOML=$work/servers.toml PUB_SERIAL=$serial PUB_OUT=$out/servers.json python3 -I - <<'PY'
+import datetime, json, os, tomllib
+
+with open(os.environ["PUB_TOML"], "rb") as handle:
+    pin = tomllib.load(handle)["kotlin-lsp"]
+
+platforms = {}
+for name, spec in pin["platform"].items():
+    entry = {
+        "url": spec["url"],
+        "sha256": spec["sha256"],
+        "archive": spec["archive"],
+        "strip_components": spec["strip_components"],
+        "launcher": spec["launcher"],
+    }
+    if "runtime" in spec:
+        entry["runtime"] = spec["runtime"]
+    platforms[name] = entry
+
+# built + 29 days is the pin's `expires`; a manifest never carries args or env (the app ignores them).
+manifest = {
+    "schema": 1,
+    "kind": "bongos-kotlin-servers",
+    "serial": int(os.environ["PUB_SERIAL"]),
+    "published": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
+    "kotlin-lsp": [
+        {
+            "version": pin["version"],
+            "built": str(pin["built"]),
+            "expires": str(pin["expires"]),
+            "requires": 1,
+            "platform": platforms,
+        }
+    ],
+}
+with open(os.environ["PUB_OUT"], "w") as handle:
+    json.dump(manifest, handle, indent=2)
+    handle.write("\n")
+PY
+
+cargo_limited build -p bongos_kotlin --bin bongos-kotlin-manifest --locked --color never
+tool="$CARGO_TARGET_DIR/debug/bongos-kotlin-manifest"
+"$tool" sign "$key" "$key_id" "$out/servers.json"
+if [ -n "$pubkey" ]; then
+  "$tool" verify "$out/servers.json" "$pubkey"
+else
+  echo "publish-kotlin-manifest: not verified; pass --pubkey <id:key> (printed by keygen) to check the signature with the app's verifier"
+fi
+echo "publish-kotlin-manifest: wrote $out/servers.json and $out/servers.json.sig (serial $serial); upload both"
