@@ -129,6 +129,8 @@ async fn new_writes_the_template_and_opens_it(cx: &mut TestAppContext) {
     let file = env.profile.join("new-workflow").join(DEFINITION_FILE);
     seed(&env, &file, b"schema = 1\n").await;
     dispatch("workflow::New", cx);
+    // The list of templates is open with "Minimal" first; confirming it writes the minimal one.
+    dispatch("menu::Confirm", cx);
 
     let written = std::fs::read_to_string(&file).expect("the template is written");
     assert!(written.contains("name = \"new-workflow\""), "{written}");
