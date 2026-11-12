@@ -32,7 +32,10 @@ use crate::{
     license::fallback_for,
     manager::{ADAPTER_NAME, EXPIRED_REASON, FallbackReason, KotlinProjectManager, KotlinRegistry},
     manifest::{Manifest, ManifestEntry, current_platform},
+    manifest_cache::{ServerState, read_for_start},
+    remote_manifest::trusted_keys,
     resolve::resolve,
+    versions::{Resolution, resolve_build},
 };
 
 pub struct KotlinAdapter {
@@ -237,11 +240,11 @@ async fn start_command(
     server: KotlinServerKind,
     cx: &mut AsyncApp,
 ) -> Result<LanguageServerBinary, StartError> {
-    let entry = match current_platform()
+    let (platform, pin) = match current_platform()
         .ok_or_else(|| anyhow::anyhow!("no {} build for this platform", server_name(server)))
-        .and_then(|platform| manifest.entry(server, platform))
+        .and_then(|platform| Ok((platform, manifest.entry(server, platform)?)))
     {
-        Ok(entry) => entry,
+        Ok(found) => found,
         Err(error) => {
             let reason = error.to_string();
             cx.update(|cx| start_failed(worktree_root, worktree_id, reason, cx));
@@ -249,10 +252,42 @@ async fn start_command(
         }
     };
 
+    // kotlin-lsp may run a downloaded build instead of the pin (`versions.rs`); IntelliJ runs its pin.
+    let resolution = match server {
+        KotlinServerKind::KotlinLsp => {
+            let manifest_url =
+                cx.update(|cx| KotlinSettings::get_global(cx).manifest_url_for_fetch());
+            let (install_root, pin) = (dirs.install_root.clone(), pin.clone());
+            let resolution = cx
+                .background_spawn(async move {
+                    kotlin_lsp_resolution(&install_root, manifest_url, platform, pin, today)
+                })
+                .await;
+            let text = match &resolution {
+                Resolution::Trial(entry) => Some(format!("kotlin-lsp {} (trial)", entry.version)),
+                Resolution::Active(entry) => {
+                    Some(format!("kotlin-lsp {} (downloaded)", entry.version))
+                }
+                Resolution::Pin(_) | Resolution::Expired => None,
+            };
+            if let Some(text) = text {
+                cx.update(|cx| log_line(worktree_root, &text, cx));
+            }
+            resolution
+        }
+        KotlinServerKind::Intellij => Resolution::Pin(pin.clone()),
+    };
+    let entry = match &resolution {
+        Resolution::Trial(entry) | Resolution::Active(entry) | Resolution::Pin(entry) => {
+            entry.clone()
+        }
+        Resolution::Expired => pin,
+    };
+
     let expired = cx.update(|cx| {
         let known = manager_of(worktree_root, cx)
             .is_some_and(|manager| manager.read(cx).is_expired(worktree_id, server));
-        known || entry.is_expired(today)
+        known || resolution == Resolution::Expired || entry.is_expired(today)
     });
     if expired && server == KotlinServerKind::Intellij {
         return Err(refused(
@@ -298,6 +333,13 @@ async fn start_command(
     };
     let binary = match cx.background_spawn(async move { check() }).await {
         Some(binary) => binary,
+        // A start installs only the pin; a downloaded build that went missing is not installed again.
+        None if !matches!(resolution, Resolution::Pin(_)) => {
+            let error = not_installed(server);
+            let reason = error.to_string();
+            cx.update(|cx| start_failed(worktree_root, worktree_id, reason, cx));
+            return Err(error.into());
+        }
         None => {
             if server == KotlinServerKind::Intellij && !intellij_download_allowed(worktree_id, cx) {
                 let reason = INTELLIJ_DOWNLOAD_HINT.to_string();
@@ -342,6 +384,34 @@ async fn start_command(
         KotlinServerKind::KotlinLsp => Ok(binary),
         KotlinServerKind::Intellij => intellij_gates(dirs, &entry, binary, worktree_root, cx).await,
     }
+}
+
+/// The kotlin-lsp build a start runs. Without a manifest URL nothing is read and the pin runs, as
+/// before any manifest was cached; with one, `cache.json` and `state.json` are read as files, with
+/// no lock, and no download is waited for.
+fn kotlin_lsp_resolution(
+    install_root: &Path,
+    manifest_url: Option<http_client::Url>,
+    platform: &str,
+    pin: ManifestEntry,
+    today: NaiveDate,
+) -> Resolution {
+    let Some(manifest_url) = manifest_url else {
+        return resolve_build(&pin, &[], &ServerState::default(), |_| false, today);
+    };
+    let (cached, state) = read_for_start(install_root, &manifest_url, &trusted_keys(true));
+    let entries: Vec<ManifestEntry> = cached
+        .iter()
+        .flat_map(|cached| &cached.manifest.kotlin_lsp)
+        .filter_map(|build| build.entry(platform).cloned())
+        .collect();
+    resolve_build(
+        &pin,
+        &entries,
+        &state,
+        |entry| check_installed(install_root, KotlinServerKind::KotlinLsp, entry).is_some(),
+        today,
+    )
 }
 
 /// The binary with the import JDK as `JAVA_HOME`; unchanged when the bundled runtime imports.
@@ -1066,6 +1136,38 @@ launcher = "bin/launcher"
         assert_eq!(fixture.status(cx), expired_status);
         assert_eq!(net.requests(), 0);
         assert!(!fixture.server_dir().exists());
+    }
+
+    /// With `kotlin.manifest_url` empty, a start reads no cache or state and runs the pin, even when
+    /// `state.json` names an installed downloaded build.
+    #[gpui::test]
+    async fn test_without_a_manifest_url_the_pin_starts(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = fixture(cx, Rc::new(NoHost), "2027-01-01");
+        let downloaded = ManifestEntry {
+            version: "9.9.9".into(),
+            ..fixture.entry.clone()
+        };
+        crate::installed::tests::install(&fixture.dirs.install_root, &downloaded);
+        let manifest_dir = fixture.dirs.install_root.join(crate::locks::MANIFEST_DIR);
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join(crate::manifest_cache::STATE_FILE),
+            serde_json::json!({
+                "version": 1,
+                "kotlin-lsp": {
+                    "active": { "version": "9.9.9", "sha256": downloaded.sha256 },
+                    "trial": { "version": "9.9.9", "sha256": downloaded.sha256 },
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let net = net_serving(fixture.archive.clone());
+
+        let binary = fixture.command(cx, &net, today()).await.unwrap();
+        assert_eq!(binary.path, fixture.launcher());
+        assert_eq!(net.requests(), 1);
     }
 
     /// `expires` is the last day the build runs; the day after, even an installed server is not

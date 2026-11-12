@@ -17,6 +17,7 @@ mod status;
 mod status_item;
 mod unsupported;
 mod updates;
+mod versions;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -56,7 +57,7 @@ pub use manager::{
 pub use manifest::{ArchiveKind, Manifest, ManifestEntry, OVERRIDE_VAR, current_platform};
 pub use manifest_cache::{
     BuildId, CachedManifest, Claim, FETCH_LEASE, FetchOutcome, FetchedManifest, KotlinLspBuilds,
-    Lease, ManifestCache, ServerState,
+    Lease, ManifestCache, ServerState, read_for_start,
 };
 pub use remote_manifest::sig_url;
 pub use remote_manifest::{
@@ -78,6 +79,7 @@ pub use updates::{
     FETCH_TIMEOUT, KotlinUpdates, MAX_AGE, Refresh, STARTUP_DELAY, UpdateSetup, UpdateTimings,
     WAKE_INTERVAL, WallClock,
 };
+pub use versions::{Resolution, resolve_build};
 
 actions!(
     kotlin,
