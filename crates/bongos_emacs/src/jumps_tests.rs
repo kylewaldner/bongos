@@ -5,11 +5,11 @@ use editor::Editor;
 use editor::test::editor_test_context::EditorTestContext;
 use futures::StreamExt as _;
 use gpui::{
-    App, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle,
+    App, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle,
 };
 use language::{FakeLspAdapter, rust_lang};
 use multi_buffer::ToOffset as _;
-use project::{Project, ProjectPath};
+use project::{Fs as _, Project, ProjectPath};
 use text::Point;
 use workspace::{AppState, MultiWorkspace, Workspace, WorkspaceHandle as _};
 
