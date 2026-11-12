@@ -62,7 +62,7 @@ fn every_event() -> Vec<Event> {
         },
         Event::GateClosed {
             key: plan.clone(),
-            by: "kyle".to_string(),
+            by: "person".to_string(),
             edit: Some(json!({ "items": ["a"] })),
             comment: Some("one is enough".to_string()),
         },
@@ -422,7 +422,7 @@ fn replay_of_gates() {
         },
         Event::GateClosed {
             key: plan,
-            by: "kyle".to_string(),
+            by: "person".to_string(),
             edit: None,
             comment: Some("fine".to_string()),
         },
@@ -739,6 +739,26 @@ fn run_toml_round_trips() {
     assert!(text.contains("started_by = \"tree-run\""), "{text}");
     assert_eq!(RunToml::parse(&text).unwrap(), run);
     assert_eq!(run.current_attempt().unwrap().n, 2);
+}
+
+#[test]
+fn an_old_run_toml_started_by_kyle_loads_as_a_person() {
+    let mut run = run_toml();
+    run.started_by = StartedBy::Person;
+    let old = run
+        .to_toml()
+        .replace("started_by = \"person\"", "started_by = \"kyle\"");
+    assert!(old.contains("started_by = \"kyle\""), "{old}");
+    assert_eq!(RunToml::parse(&old).unwrap(), run);
+}
+
+#[test]
+fn a_new_run_toml_writes_started_by_person() {
+    let mut run = run_toml();
+    run.started_by = StartedBy::Person;
+    let text = run.to_toml();
+    assert!(text.contains("started_by = \"person\""), "{text}");
+    assert!(!text.contains("kyle"), "{text}");
 }
 
 #[test]

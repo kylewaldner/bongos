@@ -47,7 +47,7 @@ pub const RUNS_DIR: &str = "runs";
 /// The record of a run in its directory.
 pub const RUN_FILE: &str = "run.toml";
 /// Who closes a gate from the app.
-pub const BY_KYLE: &str = "kyle";
+pub const BY_PERSON: &str = "person";
 /// The heading a revision comment goes under in the node's prompt.
 pub const REVISION_HEADING: &str = "Revision requested:";
 
@@ -72,7 +72,7 @@ impl StartRequest {
             todo_index: None,
             workflow: None,
             overrides: BTreeMap::new(),
-            started_by: StartedBy::Kyle,
+            started_by: StartedBy::Person,
         }
     }
 }
@@ -849,7 +849,7 @@ impl<R: Runner> Lifecycle<R> {
             None => None,
         };
         self.runtime
-            .close_gate(run, key.clone(), BY_KYLE, edit, None)
+            .close_gate(run, key.clone(), BY_PERSON, edit, None)
             .map_err(Refusal::runtime)?;
         self.note(run);
         Ok(())
@@ -868,7 +868,7 @@ impl<R: Runner> Lifecycle<R> {
             ));
         }
         self.runtime
-            .close_gate(run, key.clone(), BY_KYLE, None, Some(comment))
+            .close_gate(run, key.clone(), BY_PERSON, None, Some(comment))
             .map_err(Refusal::runtime)?;
         self.note(run);
         Ok(())

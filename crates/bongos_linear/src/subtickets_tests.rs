@@ -202,7 +202,7 @@ fn declined(env: &Env, cx: &mut VisualTestContext) -> Vec<String> {
 }
 
 #[gpui::test]
-async fn kyles_apply_opens_the_offer_and_sends_nothing(cx: &mut TestAppContext) {
+async fn a_persons_apply_opens_the_offer_and_sends_nothing(cx: &mut TestAppContext) {
     let (env, cx) = start(cx).await;
     apply(&env, GROUP, 1, "kyle", cx).await;
     let (title, labels) = wait_checklist(&env, cx).await;

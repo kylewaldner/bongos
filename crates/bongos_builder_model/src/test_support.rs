@@ -50,6 +50,7 @@ pub fn group(slug: &str, goal: &str, children: Vec<Task>) -> Task {
 
 pub fn todo(name: &str, role: Option<TodoRole>, state: TodoState) -> Todo {
     Todo {
+        id: None,
         name: name.to_string(),
         role,
         workflow: None,

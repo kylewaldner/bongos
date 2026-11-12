@@ -12,6 +12,9 @@ workspace = true
 path = "src/bongos_work_model.rs"
 doctest = false
 
+[features]
+test-support = []
+
 [dependencies]
 chrono.workspace = true
 serde.workspace = true

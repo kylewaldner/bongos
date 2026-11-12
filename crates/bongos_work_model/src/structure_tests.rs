@@ -418,6 +418,7 @@ fn new_task_todos_override_the_kind_defaults() {
     let root = temp.path();
     let tree = loaded(&temp);
     let plan = Todo {
+        id: None,
         name: "plan".to_string(),
         role: Some(TodoRole::Plans),
         workflow: None,

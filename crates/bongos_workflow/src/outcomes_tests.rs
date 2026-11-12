@@ -31,7 +31,7 @@ kind = "success"
 outcomes = ["pr", "document", "tasks"]
 "#;
 
-const PROPOSAL: &str = "format 1\nproposal 4\nfor someone-else\nby kyle\nwhy split the login work\n\n\
+const PROPOSAL: &str = "format 1\nproposal 4\nfor someone-else\nby person\nwhy split the login work\n\n\
                         Add login | id=leaf-id\n  todo: implement\n";
 
 fn deliver_world() -> World {
@@ -88,7 +88,7 @@ fn run_deliver(
 fn outcomes_a_document_is_a_shared_artifact_under_a_free_name(cx: &mut TestAppContext) {
     let world = deliver_world();
     let leaf_dir = leaf_dir(&world);
-    fs::write(leaf_dir.join("design.md"), "Kyle's own design\n").unwrap();
+    fs::write(leaf_dir.join("design.md"), "A person's own design\n").unwrap();
     let (linked, run) = run_deliver(
         &world,
         "notes/design.md",
@@ -103,7 +103,7 @@ fn outcomes_a_document_is_a_shared_artifact_under_a_free_name(cx: &mut TestAppCo
     // Never overwriting: the run's copy takes the next free name.
     assert_eq!(
         fs::read_to_string(leaf_dir.join("design.md")).unwrap(),
-        "Kyle's own design\n"
+        "A person's own design\n"
     );
     assert_eq!(
         fs::read_to_string(leaf_dir.join("design-2.md")).unwrap(),

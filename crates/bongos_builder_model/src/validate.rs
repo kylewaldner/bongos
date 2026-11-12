@@ -320,6 +320,7 @@ impl<'a> Validator<'a> {
                 self.problems.push(error(todo.line, message));
             }
             built.push(bongos_work_model::Todo {
+                id: None,
                 name: todo.name.clone(),
                 role: todo.role,
                 workflow: None,
@@ -418,6 +419,7 @@ impl<'a> Validator<'a> {
                 .todos
                 .iter()
                 .map(|todo| bongos_work_model::Todo {
+                    id: None,
                     name: todo.name.clone(),
                     role: todo.role,
                     workflow: None,

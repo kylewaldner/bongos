@@ -366,8 +366,8 @@ fn the_exclude_line_is_added_once_also_through_a_linked_worktree() {
 fn branch_names_paths_and_pull_numbers() {
     assert_eq!(branch_name("{slug}", "backfill", None), "backfill");
     assert_eq!(
-        branch_name("kyle/{slug}", "backfill", Some("INV-7")),
-        "kyle/backfill"
+        branch_name("person/{slug}", "backfill", Some("INV-7")),
+        "person/backfill"
     );
     assert_eq!(
         branch_name("{linear}-{slug}", "backfill", Some("inv-7")),
@@ -375,8 +375,8 @@ fn branch_names_paths_and_pull_numbers() {
     );
     assert_eq!(branch_name("{linear}-{slug}", "backfill", None), "backfill");
     assert_eq!(
-        branch_name("kyle/{linear}/{slug}", "backfill", None),
-        "kyle/backfill"
+        branch_name("person/{linear}/{slug}", "backfill", None),
+        "person/backfill"
     );
     assert_eq!(branch_name("{linear}", "backfill", None), "backfill");
 
@@ -444,7 +444,7 @@ fn home_is_expanded_only_at_the_start() {
         expand_home("/srv/invoicing"),
         PathBuf::from("/srv/invoicing")
     );
-    assert_eq!(expand_home("~kyle/src"), PathBuf::from("~kyle/src"));
+    assert_eq!(expand_home("~person/src"), PathBuf::from("~person/src"));
     assert_eq!(expand_home("src/~/x"), PathBuf::from("src/~/x"));
 }
 
@@ -675,9 +675,9 @@ fn started_branch(group: Link, engine: Link, template: &str) -> String {
 fn branches_with_no_link_or_a_hand_set_one_are_the_ones_they_always_were() {
     for template in [
         "{slug}",
-        "kyle/{slug}",
+        "person/{slug}",
         "{linear}-{slug}",
-        "kyle/{linear}/{slug}",
+        "person/{linear}/{slug}",
     ] {
         assert_eq!(
             started_branch(Link::None, Link::None, template),
@@ -701,8 +701,8 @@ fn branches_with_no_link_or_a_hand_set_one_are_the_ones_they_always_were() {
     );
     // A pending create has no identifier yet and no branch rule.
     assert_eq!(
-        started_branch(Link::None, Link::Pending, "kyle/{slug}"),
-        "kyle/engine"
+        started_branch(Link::None, Link::Pending, "person/{slug}"),
+        "person/engine"
     );
     assert_eq!(
         started_branch(Link::Hand("INV-7"), Link::Pending, "{linear}-{slug}"),
@@ -724,8 +724,8 @@ fn a_synced_leaf_gets_its_identifier_in_the_branch() {
         "seq-121-engine"
     );
     assert_eq!(
-        started_branch(Link::None, Link::Synced("SEQ-121"), "kyle/{slug}"),
-        "kyle/seq-121-engine"
+        started_branch(Link::None, Link::Synced("SEQ-121"), "person/{slug}"),
+        "person/seq-121-engine"
     );
 }
 
@@ -741,8 +741,8 @@ fn a_synced_group_is_skipped_in_the_ancestor_fallback() {
         "engine"
     );
     assert_eq!(
-        started_branch(Link::Synced("SEQ-9"), Link::Pending, "kyle/{slug}"),
-        "kyle/engine"
+        started_branch(Link::Synced("SEQ-9"), Link::Pending, "person/{slug}"),
+        "person/engine"
     );
     // The leaf's own synced link wins over its group's.
     assert_eq!(

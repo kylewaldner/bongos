@@ -208,10 +208,10 @@ impl Fixture {
         }
     }
 
-    /// `alpha` (`kyle/alpha` when `nested`) under `beta` in `invoicing`.
+    /// `alpha` (`person/alpha` when `nested`) under `beta` in `invoicing`.
     async fn stack_invoicing(&self, cx: &mut VisualTestContext, nested: bool) -> Stack {
         let (parent_branch, child_branch) = if nested {
-            ("kyle/alpha", "kyle/beta")
+            ("person/alpha", "person/beta")
         } else {
             ("alpha", "beta")
         };
@@ -304,7 +304,7 @@ fn needed(head: String) -> Option<RebaseState> {
 fn only_ref_paths_matter() {
     for path in [
         "refs/heads/alpha",
-        "refs/heads/kyle/alpha",
+        "refs/heads/person/alpha",
         "refs/remotes/origin/main",
         "refs",
         "reftable/tables.list",
@@ -398,7 +398,7 @@ async fn nested_branches_and_packed_refs_still_trigger(cx: &mut TestAppContext) 
     let stack = fixture.stack_invoicing(cx, true).await;
     fixture.settle(cx).await;
 
-    let moved = advance(&stack.repository, stack.parent_branch, "kyle/alpha moves");
+    let moved = advance(&stack.repository, stack.parent_branch, "person/alpha moves");
     fixture
         .until_state(
             cx,
@@ -409,14 +409,14 @@ async fn nested_branches_and_packed_refs_still_trigger(cx: &mut TestAppContext) 
         .await;
     git(
         &stack.repository,
-        &["update-ref", "refs/heads/kyle/beta", &moved],
+        &["update-ref", "refs/heads/person/beta", &moved],
     );
     fixture
         .until_state(cx, stack.child, "the flag to clear", None)
         .await;
     fixture.settle(cx).await;
 
-    // Packing moves every loose ref into `packed-refs` and prunes `refs/heads/kyle`.
+    // Packing moves every loose ref into `packed-refs` and prunes `refs/heads/person`.
     let events = fixture.ref_events(cx);
     git(&stack.repository, &["pack-refs", "--all"]);
     wait_until(cx, "the pack to be seen", |cx| {
@@ -426,7 +426,7 @@ async fn nested_branches_and_packed_refs_still_trigger(cx: &mut TestAppContext) 
     fixture.settle(cx).await;
 
     // The branch moves again, its directory made anew.
-    let moved_again = advance(&stack.repository, stack.parent_branch, "kyle/alpha again");
+    let moved_again = advance(&stack.repository, stack.parent_branch, "person/alpha again");
     fixture
         .until_state(
             cx,

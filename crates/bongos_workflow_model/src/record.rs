@@ -297,7 +297,9 @@ pub fn repair(file: &mut File) -> Result<ParsedLog, RepairError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StartedBy {
-    Kyle,
+    /// Read `"kyle"` from older run files; always written as `"person"`.
+    #[serde(alias = "kyle")]
+    Person,
     TreeRun,
     Healer,
 }

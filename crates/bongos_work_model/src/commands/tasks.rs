@@ -44,6 +44,7 @@ pub struct TaskEdit {
 /// roles, so those tasks are stackable whatever their todos are later renamed to.
 pub fn default_todos(kind: Kind) -> Vec<Todo> {
     let todo = |name: &str, role: Option<TodoRole>| Todo {
+        id: None,
         name: name.to_string(),
         role,
         workflow: None,

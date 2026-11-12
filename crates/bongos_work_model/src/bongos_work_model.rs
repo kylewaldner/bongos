@@ -10,6 +10,8 @@ pub mod commands;
 pub mod derive;
 mod error;
 pub mod files;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
 pub mod graph;
 pub mod io;
 pub mod journal;
@@ -41,9 +43,6 @@ mod commands_tests;
 
 #[cfg(test)]
 mod derive_tests;
-
-#[cfg(test)]
-mod fixtures;
 
 #[cfg(test)]
 mod graph_tests;
