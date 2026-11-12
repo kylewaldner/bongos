@@ -179,6 +179,7 @@ pub fn attach_notices(cx: &mut App) {
                     KotlinUpdatesEvent::DownloadStarted { version } => {
                         show_download_notice(workspace, version, cx)
                     }
+                    KotlinUpdatesEvent::DownloadFinished { .. } => {}
                 },
             )
             .detach();

@@ -432,6 +432,12 @@ async fn start_command(
 
 /// The keys a cached manifest must verify with: the release keys (plus the debug-only override),
 /// or the keys a test set.
+#[cfg(not(test))]
+fn manifest_keys(_: &App) -> Vec<TrustedKey> {
+    trusted_keys(true)
+}
+
+#[cfg(test)]
 fn manifest_keys(cx: &App) -> Vec<TrustedKey> {
     cx.try_global::<ManifestKeys>()
         .map(|keys| keys.0.clone())
@@ -439,8 +445,10 @@ fn manifest_keys(cx: &App) -> Vec<TrustedKey> {
 }
 
 /// Replaces the trusted manifest keys of starts, for tests.
+#[cfg(test)]
 pub struct ManifestKeys(pub Vec<TrustedKey>);
 
+#[cfg(test)]
 impl gpui::Global for ManifestKeys {}
 
 /// What a kotlin-lsp start runs, and for a trial what runs once it is rejected.
@@ -2098,5 +2106,56 @@ launcher = "bin/launcher"
         }));
         assert_eq!(notices.borrow().len(), 1);
         assert_eq!(down.requests(), 0);
+    }
+
+    /// An expired pin stops the worktree; a verified newer build is then downloaded and recorded,
+    /// and the worktree restarts and runs it as a trial. The expired status is never shown again.
+    #[gpui::test]
+    async fn test_an_expired_pin_then_a_newer_build_restarts_with_the_trial(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let host = Rc::new(StartingHost::default());
+        // The pin expired the day before `today()`.
+        let fixture = fixture(cx, host.clone(), "2026-11-06");
+        let down = net_down();
+        *host.fixture.borrow_mut() = Some((
+            fixture.dirs.clone(),
+            fixture.manifest.clone(),
+            fixture.root.clone(),
+        ));
+        *host.http.borrow_mut() = Some(down.client.clone());
+        *host.manager.borrow_mut() = Some(fixture.manager.downgrade());
+
+        let error = fixture.command(cx, &down, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), EXPIRED_REASON);
+        let expired = Some(ServerStatus::Failed {
+            reason: EXPIRED_REASON.into(),
+        });
+        assert_eq!(fixture.status(cx), expired);
+
+        // The newer build is downloaded and recorded as the trial (and the manifest is cached).
+        let (_, trial) = seed_trial(cx, &fixture);
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _observe = cx.update(|cx| {
+            let seen = seen.clone();
+            cx.observe(&fixture.manager, move |manager, cx| {
+                seen.borrow_mut()
+                    .push(manager.read(cx).status(worktree()).cloned());
+            })
+        });
+        fixture.manager.update(cx, |manager, cx| {
+            manager.newer_build_ready(&trial.version, cx)
+        });
+        wait_until(cx, "the restart", |_| !host.started.borrow().is_empty());
+        cx.run_until_parked();
+
+        assert_eq!(*host.started.borrow(), [fixture.launcher_of(&trial)]);
+        assert_eq!(fixture.launched_trial(cx), Some(build_id(&trial)));
+        assert_eq!(fixture.status(cx), Some(ServerStatus::Ready));
+        assert!(!seen.borrow().contains(&expired), "{:?}", seen.borrow());
+        assert!(!fixture.manager.read_with(cx, |manager, _| {
+            manager.is_expired(worktree(), KotlinServerKind::KotlinLsp)
+        }));
     }
 }

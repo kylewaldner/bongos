@@ -157,6 +157,9 @@ pub struct DownloadProgress {
 pub enum KotlinUpdatesEvent {
     /// A background download of kotlin-lsp `version` began.
     DownloadStarted { version: String },
+    /// A newer kotlin-lsp build `version` is installed and recorded as the trial: a worktree
+    /// stopped by an expired build can start it now.
+    DownloadFinished { version: String },
 }
 
 /// The background download in flight: its progress and the flag that stops it.
@@ -320,6 +323,12 @@ impl KotlinUpdates {
         }
     }
 
+    /// Whether a manifest check or the planning of a download runs, before any download began:
+    /// what a worktree stopped by an expired build shows as "checking for a newer Kotlin server".
+    pub fn is_checking(&self) -> bool {
+        (self.running || self.downloading) && self.download.is_none()
+    }
+
     /// The progress of the background download, `None` while none runs.
     pub fn download_progress(&self) -> Option<&DownloadProgress> {
         self.download.as_ref().map(|download| &download.progress)
@@ -359,6 +368,7 @@ impl KotlinUpdates {
             return;
         };
         self.downloading = true;
+        cx.notify();
         let checker = self.checker.clone();
         cx.spawn(async move |this, cx| {
             let plan = cx
@@ -367,11 +377,15 @@ impl KotlinUpdates {
                     async move { checker.plan_download(&url) }
                 })
                 .await;
+            let mut finished = None;
             match plan {
                 DownloadPlan::Nothing => {}
                 DownloadPlan::Record(entry) => {
-                    cx.background_spawn(async move { checker.record_trial(&entry).await })
-                        .await
+                    let version = entry.version.clone();
+                    let recorded = cx
+                        .background_spawn(async move { checker.record_trial(&entry).await })
+                        .await;
+                    finished = recorded.then_some(version);
                 }
                 DownloadPlan::Download(entry) => {
                     let version = entry.version.clone();
@@ -439,28 +453,44 @@ impl KotlinUpdates {
                     if let Some(forwarder) = forwarder {
                         forwarder.await;
                     }
-                    cx.background_spawn(async move {
-                        match result {
-                            Ok(_) => checker.record_trial(&entry).await,
-                            Err(error) if error.downcast_ref::<InstallCancelled>().is_some() => {
-                                checker.note(&format!("download: kotlin-lsp {version} cancelled"))
+                    let recorded = cx
+                        .background_spawn({
+                            let version = version.clone();
+                            async move {
+                                match result {
+                                    Ok(_) => return checker.record_trial(&entry).await,
+                                    Err(error)
+                                        if error.downcast_ref::<InstallCancelled>().is_some() =>
+                                    {
+                                        checker.note(&format!(
+                                            "download: kotlin-lsp {version} cancelled"
+                                        ))
+                                    }
+                                    Err(error)
+                                        if error.downcast_ref::<VersionBusy>().is_some() =>
+                                    {
+                                        checker.note(&format!(
+                                            "download: kotlin-lsp {version} skipped: another install holds it"
+                                        ))
+                                    }
+                                    Err(error) => checker.note(&format!(
+                                        "download: kotlin-lsp {version} failed: {error:#}"
+                                    )),
+                                }
+                                false
                             }
-                            Err(error) if error.downcast_ref::<VersionBusy>().is_some() => checker
-                                .note(&format!(
-                                    "download: kotlin-lsp {version} skipped: another install holds it"
-                                )),
-                            Err(error) => checker.note(&format!(
-                                "download: kotlin-lsp {version} failed: {error:#}"
-                            )),
-                        }
-                    })
-                    .await
+                        })
+                        .await;
+                    finished = recorded.then_some(version);
                 }
             }
             this.update(cx, |this, cx| {
                 this.downloading = false;
                 this.download = None;
                 cx.notify();
+                if let Some(version) = finished {
+                    cx.emit(KotlinUpdatesEvent::DownloadFinished { version });
+                }
             })
             .ok();
         })
@@ -507,6 +537,7 @@ impl KotlinUpdates {
         let pending = std::mem::take(&mut self.force_pending);
         let force = force || pending;
         self.running = true;
+        cx.notify();
         let checker = self.checker.clone();
         let (sender, receiver) = futures::channel::oneshot::channel();
         cx.spawn(async move |this, cx| {
@@ -515,6 +546,7 @@ impl KotlinUpdates {
                 .await;
             this.update(cx, |this, cx| {
                 this.running = false;
+                cx.notify();
                 this.maybe_download(cx);
                 if url_changed && result == Refresh::Busy {
                     // Another process holds the lease: the next wake-up checks the new URL.
@@ -623,11 +655,12 @@ impl Checker {
     /// that lock the build is recorded only when it is not rejected and is newer than the active
     /// build and the trial, so a process planning from an older manifest never replaces a newer
     /// trial. A build not recorded loses its marker too, so the startup prune can delete it.
-    async fn record_trial(&self, entry: &ManifestEntry) {
+    /// Returns whether the build is now the trial (or already was): a newer build can start.
+    async fn record_trial(&self, entry: &ManifestEntry) -> bool {
         let marker = pending_marker_path(&self.server_dir(), &entry.version);
         if !marker.exists() {
             // Another install of this build finished first; its process records it.
-            return;
+            return false;
         }
         let trial = BuildId {
             version: entry.version.clone(),
@@ -645,6 +678,10 @@ impl Checker {
                 {
                     ::log::warn!("removing {}: {error}", marker.display());
                 }
+                let usable = matches!(
+                    outcome,
+                    TrialRecord::Recorded | TrialRecord::AlreadyRecorded
+                );
                 self.note(&match outcome {
                     TrialRecord::Recorded => {
                         format!("download: kotlin-lsp {version} installed as the trial")
@@ -659,10 +696,14 @@ impl Checker {
                         "download: kotlin-lsp {version} not recorded: {other} is as new or newer"
                     ),
                 });
+                usable
             }
-            Err(error) => self.note(&format!(
-                "download: kotlin-lsp {version} is installed but not recorded yet: {error:#}"
-            )),
+            Err(error) => {
+                self.note(&format!(
+                    "download: kotlin-lsp {version} is installed but not recorded yet: {error:#}"
+                ));
+                false
+            }
         }
     }
 
@@ -1973,8 +2014,8 @@ mod tests {
             })
         });
         start(cx, &updates);
-        wait_until(cx, "the trial", || {
-            harness.cache().read_state().kotlin_lsp.trial.is_some()
+        wait_until(cx, "the download to finish", || {
+            events.lock().unwrap().len() == 2
         });
         let seen: Vec<DownloadProgress> = seen.lock().unwrap().iter().flatten().cloned().collect();
         let last = seen.last().expect("progress was shown");
@@ -1983,9 +2024,14 @@ mod tests {
         assert!(updates.read_with(cx, |updates, _| updates.download_progress().is_none()));
         assert_eq!(
             *events.lock().unwrap(),
-            [KotlinUpdatesEvent::DownloadStarted {
-                version: "263.3.0".into()
-            }]
+            [
+                KotlinUpdatesEvent::DownloadStarted {
+                    version: "263.3.0".into()
+                },
+                KotlinUpdatesEvent::DownloadFinished {
+                    version: "263.3.0".into()
+                }
+            ]
         );
     }
 
@@ -2054,5 +2100,169 @@ mod tests {
         let project = project::Project::test(fs, [] as [&Path; 0], cx).await;
         assert!(cx.update(|cx| crate::cancel_installs(&project, cx)));
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    /// What the status item shows for a worktree stopped by an expired build, right now.
+    fn expired_text(updates: &Entity<KotlinUpdates>, cx: &mut TestAppContext) -> String {
+        updates.read_with(cx, |updates, _| expired_text_of(updates))
+    }
+
+    fn expired_text_of(updates: &KotlinUpdates) -> String {
+        let snapshot = crate::status::Snapshot {
+            effective: KotlinServerKind::KotlinLsp,
+            status: crate::manager::ServerStatus::Failed {
+                reason: crate::manager::EXPIRED_REASON.into(),
+            },
+            fallback: None,
+            gradle_error: None,
+            download: updates.download_progress().cloned(),
+            checking: updates.is_checking(),
+        };
+        crate::status::status_line(&snapshot).text
+    }
+
+    fn record_events(
+        cx: &mut TestAppContext,
+        updates: &Entity<KotlinUpdates>,
+    ) -> (
+        Arc<std::sync::Mutex<Vec<KotlinUpdatesEvent>>>,
+        gpui::Subscription,
+    ) {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscription = cx.update(|cx| {
+            let events = events.clone();
+            cx.subscribe(updates, move |_, event: &KotlinUpdatesEvent, _| {
+                events.lock().unwrap().push(event.clone());
+            })
+        });
+        (events, subscription)
+    }
+
+    const EXPIRED_TEXT: &str = "Kotlin: kotlin-lsp, server expired, update bongos";
+
+    /// A newer build downloads for a worktree stopped by an expired build: the status shows the
+    /// check and then the download, never "expired", the finish is announced once, and the
+    /// expired status is back only when the work is over.
+    #[gpui::test]
+    fn test_a_finished_download_is_announced_and_the_interim_status_never_says_expired(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let reader = cx.clone();
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["263.3.0"]);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        let (events, _events) = record_events(cx, &updates);
+        let texts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _observe = cx.update(|cx| {
+            let texts = texts.clone();
+            cx.observe(&updates, move |updates, cx| {
+                texts
+                    .lock()
+                    .unwrap()
+                    .push(expired_text_of(updates.read(cx)));
+            })
+        });
+        start(cx, &updates);
+        wait_until(cx, "the download to end", || {
+            harness.cache().read_state().kotlin_lsp.trial.is_some()
+                && !updates.read_with(&reader, |updates, _| updates.downloading)
+        });
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                KotlinUpdatesEvent::DownloadStarted {
+                    version: "263.3.0".into()
+                },
+                KotlinUpdatesEvent::DownloadFinished {
+                    version: "263.3.0".into()
+                }
+            ]
+        );
+        let texts = texts.lock().unwrap().clone();
+        let interim: Vec<&String> = texts.iter().filter(|text| *text != EXPIRED_TEXT).collect();
+        assert!(!interim.is_empty(), "{texts:?}");
+        for text in &interim {
+            assert!(!text.to_lowercase().contains("expired"), "{text}");
+        }
+        assert!(
+            interim
+                .iter()
+                .any(|text| text.as_str() == "Kotlin: checking for a newer Kotlin server"),
+            "{texts:?}"
+        );
+        assert!(
+            interim
+                .iter()
+                .any(|text| text.starts_with("Kotlin: downloading kotlin-lsp 263.3.0")),
+            "{texts:?}"
+        );
+    }
+
+    /// No newer build, a failed download and a cancelled download announce nothing, and the
+    /// status of an expired worktree is exactly the expired text again.
+    #[gpui::test]
+    fn test_no_newer_build_leaves_the_expired_status(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let reader = cx.clone();
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["262.0.5"]);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        let (events, _events) = record_events(cx, &updates);
+        start(cx, &updates);
+        wait_until(cx, "the pass to end", || {
+            !updates.read_with(&reader, |updates, _| updates.downloading)
+        });
+        assert_eq!(*events.lock().unwrap(), []);
+        assert_eq!(expired_text(&updates, cx), EXPIRED_TEXT);
+    }
+
+    #[gpui::test]
+    fn test_a_failed_download_leaves_the_expired_status(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let reader = cx.clone();
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["263.3.0"]);
+        harness
+            .server
+            .serve(&archive_url("263.3.0"), Route::Offline);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        let (events, _events) = record_events(cx, &updates);
+        start(cx, &updates);
+        wait_until(cx, "the pass to end", || {
+            !updates.read_with(&reader, |updates, _| updates.downloading)
+        });
+        assert_eq!(
+            *events.lock().unwrap(),
+            [KotlinUpdatesEvent::DownloadStarted {
+                version: "263.3.0".into()
+            }]
+        );
+        assert_eq!(harness.cache().read_state().kotlin_lsp.trial, None);
+        assert_eq!(expired_text(&updates, cx), EXPIRED_TEXT);
+    }
+
+    #[gpui::test]
+    fn test_a_cancelled_download_leaves_the_expired_status(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let reader = cx.clone();
+        let harness = Harness::new(cx);
+        let (updates, _locks, _active) = start_stalled_download(cx, &harness);
+        let (events, _events) = record_events(cx, &updates);
+        let downloading = expired_text(&updates, cx);
+        assert!(downloading.starts_with("Kotlin: downloading kotlin-lsp 263.3.0"));
+        assert!(!downloading.to_lowercase().contains("expired"));
+        assert!(updates.update(cx, |updates, cx| updates.cancel_download(cx)));
+        wait_until(cx, "the download to end", || {
+            !updates.read_with(&reader, |updates, _| updates.downloading)
+        });
+        assert_eq!(*events.lock().unwrap(), []);
+        assert_eq!(expired_text(&updates, cx), EXPIRED_TEXT);
     }
 }
