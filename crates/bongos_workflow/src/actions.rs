@@ -142,8 +142,8 @@ pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Co
 }
 
 /// Registers the handler of `A`: it shows the off toast while `workflows.enabled` is false. The
-/// engine's handlers replace the body when it is true in later steps (`validate`, `new` and `edit
-/// definition` have theirs in `commands`).
+/// engine's handlers replace the body when it is true in later steps (`validate`, `new`, `edit
+/// definition` and the run commands have theirs in `commands`).
 fn register_action<A: Action>(workspace: &mut Workspace) {
     workspace.register_action(move |workspace, _: &A, _: &mut Window, cx| {
         if !WorkflowsSettings::get_global(cx).enabled {
@@ -154,23 +154,12 @@ fn register_action<A: Action>(workspace: &mut Workspace) {
 
 /// Registers the handlers of the workflow actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
-    register_action::<workflow::Run>(workspace);
-    register_action::<workflow::Pause>(workspace);
-    register_action::<workflow::Halt>(workspace);
-    register_action::<workflow::Resume>(workspace);
-    register_action::<workflow::RetryStep>(workspace);
-    register_action::<workflow::RetryStepFresh>(workspace);
-    register_action::<workflow::Restart>(workspace);
-    register_action::<workflow::Cancel>(workspace);
-    register_action::<workflow::Approve>(workspace);
-    register_action::<workflow::Revise>(workspace);
     register_action::<workflow::OpenLogs>(workspace);
     register_action::<workflow::ShowRuns>(workspace);
     register_action::<workflow::ShowRun>(workspace);
     register_action::<workflow::OpenRunWorktree>(workspace);
     register_action::<workflow::ShowRunDiff>(workspace);
     register_action::<workflow::ClearFinished>(workspace);
-    register_action::<workflow::CopyResumeCommand>(workspace);
     register_action::<workflow::ToggleGraph>(workspace);
     register_action::<workflow::DumpRunView>(workspace);
     register_action::<workflow::DumpEngine>(workspace);

@@ -196,6 +196,17 @@ async fn nothing_is_read_or_written_while_off(cx: &mut TestAppContext) {
         "workflow::Validate",
         "workflow::New",
         "workflow::EditDefinition",
+        "workflow::Run",
+        "workflow::Pause",
+        "workflow::Halt",
+        "workflow::Resume",
+        "workflow::RetryStep",
+        "workflow::RetryStepFresh",
+        "workflow::Restart",
+        "workflow::Cancel",
+        "workflow::Approve",
+        "workflow::Revise",
+        "workflow::CopyResumeCommand",
     ] {
         dispatch(name, cx);
         cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, OFF_MESSAGE, "{name}"));

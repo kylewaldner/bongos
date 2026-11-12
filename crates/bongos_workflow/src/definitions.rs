@@ -14,7 +14,8 @@ use bongos_work_model::layout::{WORKFLOWS_DIR, project_dir};
 use bongos_work_model::slug::slugify;
 use bongos_workflow_model::layers::{self, DEFINITION_FILE};
 use bongos_workflow_model::{
-    Diagnostic, Layer, LayerDirs, Resolved, Severity, ValidationContext, Warning, parse, validate,
+    Definition, Diagnostic, Layer, LayerDirs, Resolved, Severity, ValidationContext, Warning,
+    parse, validate,
 };
 
 /// The work directory under the home directory (`<home>/.bongos`, as `bongos_work::WorkDirs`).
@@ -270,6 +271,15 @@ fn list_files(dir: &Path) -> BTreeSet<String> {
 /// Parses and validates the definition in `dir`, with the default [`ValidationContext`] and the
 /// files found in `dir`.
 pub fn check_definition(resolved: &Resolved) -> DefinitionReport {
+    check_definition_with(resolved, |_, _| {})
+}
+
+/// [`check_definition`] with `adjust` completing the [`ValidationContext`] from the parsed
+/// definition before it is validated (a start fills in what it checks itself).
+pub fn check_definition_with(
+    resolved: &Resolved,
+    adjust: impl FnOnce(&Definition, &mut ValidationContext),
+) -> DefinitionReport {
     let mut report = DefinitionReport {
         name: resolved.name.clone(),
         layer: resolved.layer,
@@ -293,10 +303,11 @@ pub fn check_definition(resolved: &Resolved) -> DefinitionReport {
             return report;
         }
     };
-    let context = ValidationContext {
+    let mut context = ValidationContext {
         files: list_files(&resolved.dir),
         ..ValidationContext::default()
     };
+    adjust(&definition, &mut context);
     report.warnings = definition.warnings();
     report.diagnostics = validate(&definition, &context);
     report
