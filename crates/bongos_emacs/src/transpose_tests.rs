@@ -1,8 +1,13 @@
 use editor::actions::Undo;
 use editor::test::editor_test_context::EditorTestContext;
-use gpui::TestAppContext;
+use editor::{Editor, EditorMode};
+use gpui::{AppContext as _, TestAppContext};
+use multi_buffer::MultiBuffer;
+use text::Point;
 
-use crate::actions::{TransposeChars, TransposeLines, TransposeWords, TransposeWordsReverse};
+use crate::actions::{
+    SetMarkCommand, TransposeChars, TransposeLines, TransposeWords, TransposeWordsReverse,
+};
 use crate::apply_tests::{capture_kills, init_test};
 
 #[gpui::test]
@@ -302,4 +307,199 @@ async fn read_only_buffer_is_unchanged(cx: &mut TestAppContext) {
     cx.dispatch_action(TransposeWordsReverse { count: None });
     cx.dispatch_action(TransposeLines { count: None });
     cx.assert_editor_state("one twoˇ three\nfour");
+}
+
+/// C-SPC C-SPC at the current caret: the mark is set and the region deactivated.
+fn set_mark_here(cx: &mut EditorTestContext) {
+    cx.dispatch_action(SetMarkCommand { count: None });
+    cx.dispatch_action(SetMarkCommand { count: None });
+}
+
+#[gpui::test]
+async fn transpose_words_with_a_mark_swaps_the_words_at_point_and_mark(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    let kills = capture_kills(&mut cx);
+
+    cx.set_state("one ˇtwo three four");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one two three ˇfour");
+    cx.dispatch_action(TransposeWords { count: None });
+    cx.assert_editor_state("one four three twoˇ");
+
+    // The mark stays with its text, so the swap can be undone in one step.
+    cx.dispatch_action(Undo);
+    cx.assert_editor_state("one two three ˇfour");
+
+    // A zero count takes the mark form too.
+    cx.dispatch_action(TransposeWords { count: Some(0) });
+    cx.assert_editor_state("one four three twoˇ");
+    assert!(kills.borrow().is_empty());
+}
+
+#[gpui::test]
+async fn transpose_words_with_the_mark_after_point(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("one two three ˇfour");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one ˇtwo three four");
+    cx.dispatch_action(TransposeWords { count: None });
+    cx.assert_editor_state("one fourˇ three two");
+}
+
+#[gpui::test]
+async fn transpose_words_with_the_mark_in_the_same_word_changes_nothing(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("one tˇwo three");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one twˇo three");
+    cx.dispatch_action(TransposeWords { count: None });
+    cx.assert_editor_state("one twˇo three");
+}
+
+#[gpui::test]
+async fn transpose_words_with_the_mark_at_point_uses_the_plain_form(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("one twoˇ three four");
+    cx.dispatch_action(SetMarkCommand { count: None });
+    cx.dispatch_action(TransposeWords { count: None });
+    cx.assert_editor_state("one three twoˇ four");
+}
+
+#[gpui::test]
+async fn transpose_words_with_a_mark_but_another_state_uses_the_plain_form(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    // No mark.
+    cx.set_state("one twoˇ three four");
+    cx.dispatch_action(TransposeWords { count: None });
+    cx.assert_editor_state("one three twoˇ four");
+
+    // A count other than none or 0.
+    cx.set_state("ˇone two three four");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one twoˇ three four");
+    cx.dispatch_action(TransposeWords { count: Some(2) });
+    cx.assert_editor_state("one three four twoˇ");
+
+    // A non-empty region.
+    cx.set_state("ˇone two three four");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one «twoˇ» three four");
+    cx.dispatch_action(TransposeWords { count: None });
+    cx.assert_editor_state("one three twoˇ four");
+
+    // Two carets.
+    cx.set_state("ˇone two three four five six");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one twoˇ three fourˇ five six");
+    cx.dispatch_action(TransposeWords { count: None });
+    cx.assert_editor_state("one three twoˇ five fourˇ six");
+}
+
+#[gpui::test]
+async fn transpose_lines_with_a_mark_swaps_the_lines_at_point_and_mark(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("oˇne\ntwo\nthree\nfour");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one\ntwo\nthˇree\nfour");
+    cx.dispatch_action(TransposeLines { count: None });
+    cx.assert_editor_state("three\ntwo\none\nˇfour");
+    cx.dispatch_action(Undo);
+    cx.assert_editor_state("one\ntwo\nthˇree\nfour");
+
+    // The last line without a newline.
+    cx.set_selections_state("one\ntwo\nthree\nfˇour");
+    cx.dispatch_action(TransposeLines { count: Some(0) });
+    cx.assert_editor_state("four\ntwo\nthree\noneˇ");
+}
+
+#[gpui::test]
+async fn transpose_lines_with_the_mark_on_the_same_line_changes_nothing(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("one\ntˇwo\nthree");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one\ntwˇo\nthree");
+    cx.dispatch_action(TransposeLines { count: None });
+    cx.assert_editor_state("one\ntwˇo\nthree");
+}
+
+#[gpui::test]
+async fn transpose_lines_with_a_mark_but_another_state_uses_the_plain_form(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    // Mark at point.
+    cx.set_state("one\ntwoˇ\nthree");
+    cx.dispatch_action(SetMarkCommand { count: None });
+    cx.dispatch_action(TransposeLines { count: None });
+    cx.assert_editor_state("two\noneˇ\nthree");
+
+    // A count of 2 and a region keep the plain form.
+    cx.set_state("ˇone\ntwo\nthree\nfour");
+    set_mark_here(&mut cx);
+    cx.set_selections_state("one\ntwoˇ\nthree\nfour");
+    cx.dispatch_action(TransposeLines { count: Some(2) });
+    cx.assert_editor_state("two\nthree\noneˇ\nfour");
+}
+
+#[gpui::test]
+async fn transpose_words_with_the_mark_in_another_excerpt_uses_the_plain_form(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    let editor = cx.update(|window, cx| {
+        let multibuffer = MultiBuffer::build_multi(
+            [(
+                "one two\nx\ny\nz\nthree four",
+                vec![
+                    Point::new(0, 0)..Point::new(0, 7),
+                    Point::new(4, 0)..Point::new(4, 10),
+                ],
+            )],
+            cx,
+        );
+        cx.new(|cx| Editor::new(EditorMode::full(), multibuffer, None, window, cx))
+    });
+    cx.update(|window, cx| {
+        let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+        let mark = snapshot.anchor_after(Point::new(0, 4));
+        assert!(crate::mark::set_mark(&editor, mark, cx));
+        editor.update(cx, |editor, cx| {
+            editor.change_selections(Default::default(), window, cx, |s| {
+                s.select_ranges([Point::new(1, 6)..Point::new(1, 6)])
+            })
+        });
+        assert_eq!(editor.read(cx).text(cx), "one two\nthree four");
+        crate::transpose::transpose_words_command(
+            &TransposeWords { count: None },
+            &editor,
+            window,
+            cx,
+        );
+        // The plain form swaps "three" and "four"; the mark form would have swapped "two" with
+        // "four" across excerpts.
+        assert_eq!(editor.read(cx).text(cx), "one two\nfour three");
+        let buffers = editor.read(cx).buffer().read(cx).all_buffers();
+        assert_eq!(buffers.len(), 1);
+        let buffer = buffers.iter().next().unwrap();
+        assert_eq!(buffer.read(cx).text(), "one two\nx\ny\nz\nfour three");
+    });
 }
