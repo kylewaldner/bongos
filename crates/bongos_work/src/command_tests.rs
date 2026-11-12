@@ -639,7 +639,7 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
 
 /// Every action these commands register, but the debug-only `work::DumpSessionContext` and
 /// `work::DumpView` and `work::DumpRepositories`.
-const NAMES: [&str; 58] = [
+const NAMES: [&str; 59] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -682,6 +682,7 @@ const NAMES: [&str; 58] = [
     "project::OpenFolder",
     "project::Focus",
     "work::AddRepository",
+    "work::EditWorktreeRoot",
     "task::SetDefaultVisibility",
     "task::Think",
     "task::Mode",

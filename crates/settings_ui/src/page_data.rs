@@ -174,24 +174,16 @@ fn work_page(token_set: bool) -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Repositories",
-                description: "The repositories tasks can name: a name, a path, a setup command, whether a merged PR ships, whether it deploys and a branch template.",
-                field: Box::new(
-                    SettingField {
-                        organization_override: None,
-                        json_path: Some("work.repositories"),
-                        pick: |settings_content| {
-                            settings_content.work.as_ref()?.repositories.as_ref()
-                        },
-                        write: |settings_content, value, _| {
-                            settings_content.work.get_or_insert_default().repositories = value;
-                        },
-                    }
-                    .unimplemented(),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Repositories".into(),
+                r#type: Default::default(),
+                description: Some(
+                    "The repositories tasks can name, where the worktrees of each go and what is wrong with that.".into(),
                 ),
-                metadata: None,
+                json_path: Some("work.repositories"),
+                in_json: true,
                 files: USER,
+                render: crate::pages::render_work_repositories_page,
             }),
             SettingsPageItem::ActionLink(ActionLink {
                 title: "Add Repository".into(),
@@ -529,6 +521,9 @@ fn chats_page() -> SettingsPage {
 /// does not depend on the crate that defines it.
 const WORK_ADD_REPOSITORY: &str = "work::AddRepository";
 
+/// The name of the `work: edit worktree root` action, run by name like `work::AddRepository`.
+pub(crate) const WORK_EDIT_WORKTREE_ROOT: &str = "work::EditWorktreeRoot";
+
 /// The names of the Linear token actions, run by name like `work::AddRepository`.
 const LINEAR_SET_TOKEN: &str = "linear::SetToken";
 const LINEAR_CLEAR_TOKEN: &str = "linear::ClearToken";
@@ -540,13 +535,26 @@ fn run_in_original_window(
     cx: &mut App,
     name: &'static str,
 ) {
+    run_action_in_original_window(settings_window, window, cx, name, None);
+}
+
+/// Like [`run_in_original_window`], building the action from the JSON `data` as a key binding
+/// would.
+pub(crate) fn run_action_in_original_window(
+    settings_window: &SettingsWindow,
+    window: &mut Window,
+    cx: &mut App,
+    name: &'static str,
+    data: Option<serde_json::Value>,
+) {
     let Some(original_window) = settings_window.original_window else {
         return;
     };
     original_window
         .update(cx, |_workspace, original_window, cx| {
-            if let Ok(action) = cx.build_action(name, None) {
-                original_window.dispatch_action(action, cx);
+            match cx.build_action(name, data) {
+                Ok(action) => original_window.dispatch_action(action, cx),
+                Err(error) => log::error!("could not build {name}: {error}"),
             }
             original_window.activate_window();
         })
@@ -10638,6 +10646,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                SettingsPageItem::SubPageLink(link) => link.json_path,
                 _ => None,
             })
             .filter(|path| path.starts_with("work."))
@@ -10659,6 +10668,7 @@ mod tests {
             .filter_map(|item| match item {
                 SettingsPageItem::SettingItem(item) => Some(item.title.to_string()),
                 SettingsPageItem::ActionLink(link) => Some(link.title.to_string()),
+                SettingsPageItem::SubPageLink(link) => Some(link.title.to_string()),
                 _ => None,
             })
             .collect();
@@ -10670,6 +10680,20 @@ mod tests {
         ] {
             assert!(titles.iter().any(|title| title == expected), "{titles:?}");
         }
+        // Repositories opens its own page rather than an item marked unimplemented.
+        let repositories = page
+            .items
+            .iter()
+            .find_map(|item| match item {
+                SettingsPageItem::SubPageLink(link) if link.title == "Repositories" => Some(link),
+                _ => None,
+            })
+            .expect("Repositories is a sub page link");
+        assert_eq!(repositories.json_path, Some("work.repositories"));
+        assert!(!page.items.iter().any(|item| matches!(
+            item,
+            SettingsPageItem::SettingItem(item) if item.title == "Repositories"
+        )));
     }
 
     #[test]

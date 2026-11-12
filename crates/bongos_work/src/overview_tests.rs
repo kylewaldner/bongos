@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use bongos_work_model::store::load;
 use bongos_work_model::worktree_path::{MAX_WORKTREE_PATH, TemplateError};
 use bongos_work_model::{Kind, Status, layout};
-use gpui::{TestAppContext, UpdateGlobal as _, VisualTestContext};
+use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _, VisualTestContext};
 use settings::{SettingsStore, WorkRepositoryContent};
 use tempfile::TempDir;
 
@@ -376,4 +376,65 @@ fn the_dump_lists_the_counters_and_every_row() {
     ] {
         assert!(text.contains(expected), "{expected:?} missing from\n{text}");
     }
+}
+
+#[gpui::test]
+async fn the_old_worktree_notice_stays_hidden_once_dismissed(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    // The test database is shared: start from a notice nobody dismissed.
+    let db = cx.update(|_, cx| db::kvp::KeyValueStore::global(cx));
+    db.scoped(crate::KVP_NAMESPACE)
+        .delete(crate::OLD_WORKTREE_NOTICE_KEY.to_string())
+        .await
+        .unwrap();
+    let restart = |cx: &mut VisualTestContext| {
+        let fs = harness.store.read_with(cx, |store, _| store.fs());
+        let dirs = crate::WorkDirs::for_test(harness.root.clone());
+        cx.update(|_, cx| cx.new(|cx| crate::WorkStore::new(fs, dirs, cx)))
+    };
+    let shows = |store: &gpui::Entity<crate::WorkStore>, cx: &mut VisualTestContext| {
+        store.read_with(cx, |store, _| store.shows_old_worktree_notice())
+    };
+
+    let (_temp, base) = base();
+    let repository = base.join("src").join("invoicing");
+    let old = repository.join(".bongos-worktrees");
+    std::fs::create_dir_all(old.join("backfill")).unwrap();
+    set_repositories(cx, &[("invoicing", &repository)]);
+    // Without old-root tasks there is nothing to say.
+    cx.run_until_parked();
+    assert!(!shows(&harness.store, cx));
+    record_worktrees(
+        &harness.root,
+        &[(&["backfill"], "l1", Status::Open, &old.join("backfill"))],
+    );
+    wait_until(cx, "the notice", |cx| shows(&harness.store, cx)).await;
+
+    // A restarted store that was never dismissed still shows it.
+    let fresh = restart(cx);
+    wait_until(cx, "the notice after a restart", |cx| shows(&fresh, cx)).await;
+    drop(fresh);
+
+    harness
+        .store
+        .update(cx, |store, cx| store.dismiss_old_worktree_notice(cx));
+    assert!(!shows(&harness.store, cx), "Dismiss hides it");
+    cx.run_until_parked();
+    let stored = db
+        .scoped(crate::KVP_NAMESPACE)
+        .read(crate::OLD_WORKTREE_NOTICE_KEY)
+        .unwrap();
+    assert!(stored.is_some(), "the dismissal is stored");
+
+    let restarted = restart(cx);
+    wait_until(cx, "the restarted overview", |cx| {
+        restarted.read_with(cx, |store, _| {
+            store
+                .repository_overview()
+                .first()
+                .is_some_and(|row| !row.old_root.is_empty())
+        })
+    })
+    .await;
+    assert!(!shows(&restarted, cx), "it stays hidden after a restart");
 }

@@ -85,6 +85,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::OpenFolder>(),
         TypeId::of::<project::Focus>(),
         TypeId::of::<work::AddRepository>(),
+        TypeId::of::<work::EditWorktreeRoot>(),
         TypeId::of::<task::SetDefaultVisibility>(),
         TypeId::of::<task::Think>(),
         TypeId::of::<task::Mode>(),

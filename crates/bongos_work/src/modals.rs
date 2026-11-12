@@ -3,13 +3,14 @@
 //! either kind. When `work` is listed in `minibuffer.enabled_for`, both open in the minibuffer
 //! strip as a completing read and a string read instead, with the same continuation.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bongos_minibuffer::{Candidate, Outcome, Session, Source};
-use editor::Editor;
+use editor::{Editor, EditorEvent};
 use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString, Task,
-    WeakEntity, Window,
+    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
+    Subscription, Task, WeakEntity, Window,
 };
 use picker::{Picker, PickerDelegate};
 use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
@@ -273,9 +274,83 @@ pub fn ask(
             editor,
             allow_empty,
             hint: None,
+            hint_is_error: false,
+            check: None,
             workspace: weak,
             then: Some(then),
+            _edits: None,
         }
+    });
+}
+
+/// Checks the trimmed text of [`ask_checked`]: `Ok` holds the status to show, `Err` the error
+/// that keeps the text from being confirmed.
+pub type Check = Rc<dyn Fn(&str) -> Result<String, String>>;
+
+/// The status a [`Check`] shows for `text`: its error, or what confirming would do.
+fn checked_status(check: &Check, text: &str) -> String {
+    match check(text.trim()) {
+        Ok(status) | Err(status) => status,
+    }
+}
+
+/// Like [`ask`], with `check` run on every edit: the status under the line (after it, in the
+/// minibuffer) shows its error or its message, and text it refuses cannot be confirmed. Empty
+/// text is passed to `check` like any other.
+pub fn ask_checked(
+    workspace: &mut Workspace,
+    title: impl Into<SharedString>,
+    initial: &str,
+    check: Check,
+    then: Then<String>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let weak = cx.entity().downgrade();
+    let title = title.into();
+    if workspace::routes_to_minibuffer(MINIBUFFER_NAME, cx) {
+        let on_input = check.clone();
+        let refuse = check.clone();
+        let session = Session::string(MINIBUFFER_NAME, format!("{title}: "))
+            .initial_input(initial)
+            .history(format!("{MINIBUFFER_NAME} {title}"))
+            .check(move |text| refuse(text.trim()).map(|_| ()).map_err(Into::into))
+            .on_input(move |text, handle, _, cx| {
+                handle.set_status(checked_status(&on_input, text), cx);
+            })
+            .on_confirm(move |outcome, window, cx| {
+                if let Outcome::Input(text) = outcome {
+                    run_then(&weak, text.trim().to_string(), then, window, cx);
+                }
+            });
+        let handle = bongos_minibuffer::open(workspace, session, window, cx);
+        handle.set_status(checked_status(&check, initial), cx);
+        return;
+    }
+    show(workspace, window, cx, |window, cx| {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_text(initial, window, cx);
+            editor
+        });
+        let edits = cx.subscribe(&editor, |prompt: &mut TextPrompt, _, event, cx| {
+            if matches!(event, EditorEvent::BufferEdited) {
+                prompt.refresh_check(cx);
+            }
+        });
+        let mut prompt = TextPrompt {
+            title,
+            editor,
+            allow_empty: true,
+            hint: None,
+            hint_is_error: false,
+            check: Some(check),
+            workspace: weak,
+            then: Some(then),
+            _edits: Some(edits),
+        };
+        prompt.refresh_check(cx);
+        prompt
     });
 }
 
@@ -283,9 +358,13 @@ pub(crate) struct TextPrompt {
     title: SharedString,
     pub(crate) editor: Entity<Editor>,
     allow_empty: bool,
-    hint: Option<SharedString>,
+    /// Shown in place of the title: why the text was refused, or the status of a check.
+    pub(crate) hint: Option<SharedString>,
+    pub(crate) hint_is_error: bool,
+    check: Option<Check>,
     workspace: WeakEntity<Workspace>,
     then: Option<Then<String>>,
+    _edits: Option<Subscription>,
 }
 
 impl ModalView for TextPrompt {}
@@ -303,10 +382,34 @@ impl TextPrompt {
         cx.emit(DismissEvent);
     }
 
+    /// Shows what the check says about the text as it is now.
+    fn refresh_check(&mut self, cx: &mut Context<Self>) {
+        let Some(check) = &self.check else {
+            return;
+        };
+        let text = self.editor.read(cx).text(cx);
+        let (hint, is_error) = match check(text.trim()) {
+            Ok(status) => (status, false),
+            Err(error) => (error, true),
+        };
+        self.hint = Some(hint.into());
+        self.hint_is_error = is_error;
+        cx.notify();
+    }
+
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).text(cx).trim().to_string();
         if text.is_empty() && !self.allow_empty {
             self.hint = Some("Type something, or press Escape to cancel".into());
+            self.hint_is_error = true;
+            cx.notify();
+            return;
+        }
+        if let Some(check) = &self.check
+            && let Err(error) = check(&text)
+        {
+            self.hint = Some(error.into());
+            self.hint_is_error = true;
             cx.notify();
             return;
         }
@@ -334,16 +437,24 @@ impl Render for TextPrompt {
                     .child(self.editor.clone()),
             )
             .child(
-                h_flex()
+                v_flex()
                     .bg(theme.colors().editor_background)
                     .rounded_b_sm()
                     .w_full()
                     .p_2()
                     .gap_1()
+                    // A checked prompt keeps its title above the status.
+                    .when(self.check.is_some(), |this| {
+                        this.child(
+                            Label::new(self.title.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                    })
                     .child(
                         Label::new(self.hint.clone().unwrap_or_else(|| self.title.clone()))
                             .size(LabelSize::Small)
-                            .color(if self.hint.is_some() {
+                            .color(if self.hint_is_error {
                                 Color::Error
                             } else {
                                 Color::Muted

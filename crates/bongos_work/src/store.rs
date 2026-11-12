@@ -31,6 +31,7 @@ use bongos_work_model::files::content_hash;
 use bongos_work_model::layout::{self, OP_FILE, TASKS_DIR, is_temp_file};
 use bongos_work_model::rules::Refusal;
 use bongos_work_model::store::{self as model_store, WorkTree};
+use db::kvp::KeyValueStore;
 use fs::{Fs, PathEvent, PathEventKind, Watcher};
 use futures::channel::{mpsc, oneshot};
 use futures::{StreamExt as _, select_biased};
@@ -48,6 +49,10 @@ use crate::worktrees::Layout;
 use crate::{WorkDirs, WorkSettings};
 
 /// How long the watcher gathers events before delivering them.
+/// The key value store key (in [`crate::KVP_NAMESPACE`]) set once the notice about worktrees
+/// left under the old `.bongos-worktrees` directories is dismissed.
+pub const OLD_WORKTREE_NOTICE_KEY: &str = "old_worktree_notice_dismissed";
+
 pub const WATCH_LATENCY: Duration = Duration::from_millis(200);
 
 /// How many times a write is reapplied after its files changed under it.
@@ -143,6 +148,8 @@ pub struct WorkStore {
     overview_task: Option<Task<()>>,
     /// The settings the overview was last computed from, to skip unrelated settings changes.
     overview_settings: Option<(Vec<Repository>, Option<String>)>,
+    /// Whether the old worktree root notice was dismissed, read from the key value store.
+    old_worktree_notice_dismissed: bool,
     /// Runs on the background executor after the probes of the next full rebase check.
     #[cfg(test)]
     pub(crate) after_full_probe: Option<Box<dyn FnOnce() + Send>>,
@@ -151,6 +158,16 @@ pub struct WorkStore {
     pub(crate) changed: HashMap<PathBuf, ChangedCount>,
     pub(crate) status_runs: usize,
     _settings: Subscription,
+}
+
+/// Whether the old worktree root notice was dismissed in an earlier run.
+fn read_notice_dismissed(cx: &gpui::App) -> bool {
+    KeyValueStore::global(cx)
+        .scoped(crate::KVP_NAMESPACE)
+        .read(OLD_WORKTREE_NOTICE_KEY)
+        .log_err()
+        .flatten()
+        .is_some()
 }
 
 /// An enabled period: the queue of writes and the task doing all disk work.
@@ -198,6 +215,7 @@ impl WorkStore {
             overview: Vec::new(),
             overview_task: None,
             overview_settings: None,
+            old_worktree_notice_dismissed: read_notice_dismissed(cx),
             #[cfg(test)]
             after_full_probe: None,
             needs_you: BTreeMap::new(),
@@ -244,6 +262,29 @@ impl WorkStore {
     /// when the snapshot or the repository settings change, so it can lag them briefly.
     pub fn repository_overview(&self) -> &[RepositoryRow] {
         &self.overview
+    }
+
+    /// Whether the Repositories page shows the notice that worktrees under the old
+    /// `.bongos-worktrees` directories stay where they are: some repository has old-root tasks
+    /// and the notice was never dismissed.
+    pub fn shows_old_worktree_notice(&self) -> bool {
+        !self.old_worktree_notice_dismissed
+            && self.overview.iter().any(|row| !row.old_root.is_empty())
+    }
+
+    /// Hides the old worktree root notice for good: the key value store remembers it.
+    pub fn dismiss_old_worktree_notice(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.old_worktree_notice_dismissed {
+            return;
+        }
+        self.old_worktree_notice_dismissed = true;
+        let db = KeyValueStore::global(cx);
+        db::write_and_log(cx, move || async move {
+            db.scoped(crate::KVP_NAMESPACE)
+                .write(OLD_WORKTREE_NOTICE_KEY.to_string(), "true".to_string())
+                .await
+        });
+        cx.notify();
     }
 
     /// Recomputes the overview when the repositories or the default root differ from what it was

@@ -105,8 +105,9 @@ pub(crate) type PreviewHandler = Rc<dyn Fn(Preview, &mut Window, &mut App)>;
 pub(crate) type InputHandler = Rc<dyn Fn(&str, &SessionHandle, &mut Window, &mut App)>;
 pub(crate) type ConfirmHandler = Box<dyn FnOnce(Outcome, &mut Window, &mut App)>;
 pub(crate) type CancelHandler = Box<dyn FnOnce(&mut Window, &mut App)>;
-/// Decides whether free input may be answered as it is, for a session that refuses some of it.
-pub(crate) type InputCheck = Rc<dyn Fn(&str) -> bool>;
+/// Decides whether free input may be answered as it is, for a session that refuses some of it:
+/// `Err` holds the refusal to show.
+pub(crate) type InputCheck = Rc<dyn Fn(&str) -> Result<(), SharedString>>;
 pub(crate) type ActionHandler = Rc<dyn Fn(Value, &mut Window, &mut App)>;
 
 /// An entry of the M-o menu: it answers the session in place of `on_confirm`, with the selected
@@ -125,7 +126,7 @@ pub struct Session {
     initial_input: String,
     default: Option<String>,
     free_input: bool,
-    accept: Option<(InputCheck, SharedString)>,
+    accept: Option<InputCheck>,
     history: String,
     key_context: Option<KeyContext>,
     actions: Vec<SessionAction>,
@@ -186,11 +187,24 @@ impl Session {
     /// default). Otherwise the session stays open and shows `refusal` after the input, until the
     /// input changes.
     pub fn accept(
-        mut self,
+        self,
         accept: impl Fn(&str) -> bool + 'static,
         refusal: impl Into<SharedString>,
     ) -> Self {
-        self.accept = Some((Rc::new(accept), refusal.into()));
+        let refusal = refusal.into();
+        self.check(move |input| {
+            if accept(input) {
+                Ok(())
+            } else {
+                Err(refusal.clone())
+            }
+        })
+    }
+
+    /// Like [`Self::accept`], with the refusal decided by `check` for each input: `Err` holds
+    /// the text shown after the input.
+    pub fn check(mut self, check: impl Fn(&str) -> Result<(), SharedString> + 'static) -> Self {
+        self.accept = Some(Rc::new(check));
         self
     }
 
@@ -276,7 +290,7 @@ pub(crate) struct Core {
     pub(crate) status: RefCell<SharedString>,
     pub(crate) default: Option<String>,
     pub(crate) free_input: bool,
-    pub(crate) accept: Option<(InputCheck, SharedString)>,
+    pub(crate) accept: Option<InputCheck>,
     /// Whether the status shows a refusal, which the next change of the input removes.
     pub(crate) refused: Cell<bool>,
     pub(crate) history_name: String,

@@ -41,7 +41,7 @@ pub use changes::CHANGES_INTERVAL;
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
 pub use commands::{ready, set_new_task_todos, show_toast, with_task};
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, focus_task, is_project_top, target};
-pub use modals::{MINIBUFFER_NAME, Then, ask, pick};
+pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
 pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root_tasks};
 pub use panel::{WorkPanel, init_panel, task_at_point};
 pub use rebase::RebaseState;
@@ -54,7 +54,8 @@ pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_rep
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
 pub use status::{FocusStatus, breadcrumb};
 pub use store::{
-    ECHO_TTL, MAX_RETRIES, Stats, WATCH_LATENCY, WorkCommand, WorkStore, WorkStoreEvent, WriteError,
+    ECHO_TTL, MAX_RETRIES, OLD_WORKTREE_NOTICE_KEY, Stats, WATCH_LATENCY, WorkCommand, WorkStore,
+    WorkStoreEvent, WriteError,
 };
 pub use worktrees::expand_home;
 

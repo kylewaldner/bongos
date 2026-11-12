@@ -196,3 +196,65 @@ async fn unrouted_pick_and_ask_stay_modals(cx: &mut TestAppContext) {
         assert!(workspace.active_modal::<TextPrompt>(cx).is_some());
     });
 }
+
+#[gpui::test]
+async fn routed_ask_checked_shows_the_check_and_refuses_what_it_refuses(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &["work"], "work_modal_route_checked").await;
+    let cx = &mut cx;
+    let log: Log = Log::default();
+    let status = |cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_modal::<SessionView>(cx)
+                .expect("a session is open")
+                .read(cx)
+                .status()
+                .to_string()
+        })
+    };
+    let open = |cx: &mut VisualTestContext| {
+        let asked = log.clone();
+        workspace.update_in(cx, |workspace, window, cx| {
+            modals::ask_checked(
+                workspace,
+                "Root",
+                "a",
+                Rc::new(|text: &str| {
+                    if text.contains('!') {
+                        Err(format!("bad {text}"))
+                    } else {
+                        Ok(format!("ok {text}"))
+                    }
+                }),
+                Box::new(move |text, _, _, _| asked.borrow_mut().push(format!("asked:{text}"))),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    };
+
+    open(cx);
+    assert_eq!(status(cx), "ok a", "the initial text is checked");
+    cx.simulate_input("!");
+    cx.run_until_parked();
+    assert_eq!(status(cx), "bad a!", "every edit is checked");
+    confirm(cx);
+    assert!(
+        session_open(&workspace, cx),
+        "refused text is not confirmed"
+    );
+    assert_eq!(
+        status(cx),
+        "bad a!",
+        "the refusal is the check's error as it is"
+    );
+    cx.dispatch_action(minibuffer::Cancel);
+    cx.run_until_parked();
+    assert!(log.borrow().is_empty());
+
+    open(cx);
+    confirm(cx);
+    assert!(!session_open(&workspace, cx));
+    assert_eq!(*log.borrow(), ["asked:a"]);
+}

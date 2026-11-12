@@ -175,6 +175,20 @@ pub mod work {
         ]
     );
 
+    /// Asks for the worktree root of a repository (picked by name unless `repository` names
+    /// one) and writes it as that entry's `worktree_root` in the user settings. Empty input
+    /// clears it, so the repository uses `work.default_worktree_root`.
+    #[derive(
+        Clone, Debug, Default, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action,
+    )]
+    #[action(namespace = work)]
+    #[serde(deny_unknown_fields)]
+    pub struct EditWorktreeRoot {
+        /// The name of the repository, as in `work.repositories`.
+        #[serde(default)]
+        pub repository: Option<String>,
+    }
+
     #[cfg(debug_assertions)]
     actions!(
         work,

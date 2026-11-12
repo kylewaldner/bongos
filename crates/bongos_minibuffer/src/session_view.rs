@@ -571,11 +571,11 @@ impl SessionDelegate {
     /// does not accept it.
     fn input_finish(&self, cx: &mut App) -> Option<Finish> {
         let outcome = self.input_outcome();
-        if let (Some((accept, refusal)), Outcome::Input(input)) = (&self.core.accept, &outcome)
-            && !accept(input)
+        if let (Some(accept), Outcome::Input(input)) = (&self.core.accept, &outcome)
+            && let Err(refusal) = accept(input)
         {
             self.core.refused.set(true);
-            self.core.handle().set_status(refusal.clone(), cx);
+            self.core.handle().set_status(refusal, cx);
             return None;
         }
         let history = match &outcome {
