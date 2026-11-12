@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use bongos_workflow_model::definition::{Definition, FieldType, parse};
+use bongos_workflow_model::definition::{Definition, parse};
 use bongos_workflow_model::fake::{FakeRunner, Scripted};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{EndState, RunState};
@@ -521,7 +521,7 @@ fn new_from_a_template_copies_every_file_and_renames_the_workflow() {
         }
     }
     let dirs = LayerDirs {
-        profile: Some(profile.clone()),
+        profile: Some(profile),
         ..LayerDirs::default()
     };
     let report = validate_definitions(&dirs, None).unwrap();
