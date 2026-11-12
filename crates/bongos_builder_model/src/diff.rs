@@ -2068,6 +2068,7 @@ fn same_opt(a: Option<&str>, b: Option<&str>) -> bool {
 
 fn open_todo(name: &str, role: Option<TodoRole>, workflow: Option<String>) -> Todo {
     Todo {
+        id: None,
         name: name.to_string(),
         role,
         workflow,

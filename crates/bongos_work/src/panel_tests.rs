@@ -165,6 +165,7 @@ async fn with_solo_leaf(harness: &Harness, cx: &mut VisualTestContext) {
     let mut file = TaskFile::new("Solo", Kind::Document);
     file.id = "l9".to_string();
     file.todos = vec![Todo {
+        id: None,
         name: "write".to_string(),
         role: None,
         workflow: None,
@@ -503,13 +504,13 @@ async fn row_chips_follow_the_identifier_and_leave_a_row_alone_without_a_source(
     // Chips come after the identifier, in the order given; another task's row is untouched.
     let source = Rc::new(FakeChips {
         task: "l9",
-        chips: vec!["In Progress", "Kyle"],
+        chips: vec!["In Progress", "Person"],
     });
     cx.update(|_, cx| RowChipsRegistry::add_source("linear", source, cx));
     cx.run_until_parked();
     assert_eq!(
         solo_detail(&panel, cx),
-        format!("{plain} \u{b7} In Progress \u{b7} Kyle")
+        format!("{plain} \u{b7} In Progress \u{b7} Person")
     );
     let other = lines(&panel, cx)
         .into_iter()

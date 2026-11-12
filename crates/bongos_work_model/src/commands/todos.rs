@@ -136,6 +136,7 @@ pub fn todo_add(
         file.todos.insert(
             position,
             Todo {
+                id: None,
                 name: name.to_string(),
                 role: new.role,
                 workflow: new.workflow.clone(),

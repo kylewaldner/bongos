@@ -32,6 +32,7 @@ const OPENING_LINE_WAIT: Duration = Duration::from_secs(300);
 /// The one todo of a new task while the builder is on: `plan`, role `plans`, no workflow.
 pub fn plan_todos() -> Vec<Todo> {
     vec![Todo {
+        id: None,
         name: PLAN_TODO.to_string(),
         role: Some(TodoRole::Plans),
         workflow: None,

@@ -248,6 +248,7 @@ struct World {
 
 fn todo(name: &str, workflow: Option<&str>, state: TodoState) -> Todo {
     Todo {
+        id: None,
         name: name.to_string(),
         role: None,
         workflow: workflow.map(str::to_string),

@@ -103,7 +103,7 @@ fn entries_have_the_documented_defaults() {
     let text = r#"{ "work": { "repositories": [
         { "name": "invoicing", "path": "~/src/invoicing" },
         { "name": "site", "path": "/srv/site", "setup_command": "npm ci",
-          "merge_is_ship": false, "deployments": false, "branch_template": "kyle/{slug}" }
+          "merge_is_ship": false, "deployments": false, "branch_template": "person/{slug}" }
     ] } }"#;
     let (content, _) = parse_json::<SettingsContent>(text);
     let entries = content.unwrap().work.unwrap().repositories.unwrap();
@@ -123,7 +123,7 @@ fn entries_have_the_documented_defaults() {
     let site = Repository::from(&entries[1]);
     assert_eq!(site.setup_command.as_deref(), Some("npm ci"));
     assert!(!site.merge_is_ship && !site.deployments);
-    assert_eq!(site.branch_template, "kyle/{slug}");
+    assert_eq!(site.branch_template, "person/{slug}");
 }
 
 #[gpui::test]

@@ -134,6 +134,9 @@ pub struct ShipOverridden {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Todo {
+    /// A UUID v7. `None` only while reading a file written before todos had ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<TodoRole>,
@@ -266,6 +269,18 @@ pub struct TaskFile {
     pub closed: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// Free text naming the kind of work the task is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_kind: Option<String>,
+    /// Area tags of the task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<String>,
+    /// The task's size in jobs; unset counts as 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    /// The task's code repositories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_is_ship: Option<bool>,
     #[serde(default)]
@@ -321,6 +336,10 @@ impl TaskFile {
             created: now(),
             closed: None,
             repository: None,
+            work_kind: None,
+            areas: Vec::new(),
+            size: None,
+            repositories: Vec::new(),
             merge_is_ship: None,
             default_visibility: Visibility::Shared,
             activity: None,
@@ -389,6 +408,9 @@ pub enum DocsHome {
 pub struct ProjectFile {
     #[serde(default = "schema_one")]
     pub schema: u32,
+    /// A UUID v7. `None` only while reading a file written before projects had ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub title: String,
     #[serde(default)]
     pub repositories: Vec<String>,
@@ -409,6 +431,7 @@ impl ProjectFile {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             schema: SCHEMA,
+            id: None,
             title: title.into(),
             repositories: Vec::new(),
             docs_home: None,
