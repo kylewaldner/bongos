@@ -555,7 +555,8 @@ pub struct Pruned {
 /// of `state.json` and `pin_version`. A version with a pending-trial marker, or an install marker
 /// younger than `PRUNE_GRACE` at `now`, stays too. Runs under the state lock and takes each version
 /// lock with one `try_lock`: a busy version is skipped, never waited for. Dot-files (lock files,
-/// markers, partial files) are never touched.
+/// markers, partial files) are never touched, except the `.download` file and `.staging` directory
+/// older installs left behind, deleted once untouched for `PRUNE_GRACE`.
 pub async fn prune(
     cache: &ManifestCache,
     locks: &LockRegistry,
@@ -581,6 +582,21 @@ pub async fn prune(
                     return pruned;
                 }
             };
+            for legacy in LEGACY_PARTIALS {
+                let path = dir.join(legacy);
+                let stale = fs::symlink_metadata(&path)
+                    .and_then(|meta| meta.modified())
+                    .is_ok_and(|modified| {
+                        now.duration_since(modified)
+                            .is_ok_and(|age| age >= PRUNE_GRACE)
+                    });
+                if stale {
+                    match remove_path(&path) {
+                        Ok(()) => log::info!("prune: removed {}", path.display()),
+                        Err(error) => log::warn!("removing {}: {error}", path.display()),
+                    }
+                }
+            }
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
@@ -604,6 +620,9 @@ pub async fn prune(
         })
         .await
 }
+
+/// The partial download and staging names of older installs, which had no version in them.
+const LEGACY_PARTIALS: [&str; 2] = [".download", ".staging"];
 
 /// Whether the install marker in `version_dir` was written less than `PRUNE_GRACE` before `now`
 /// (or after it: the clock moved back).
@@ -1760,6 +1779,29 @@ pub(crate) mod tests {
         assert_eq!(names(&dir), [".7.0.pending", "7.0", "8.0"]);
         // No lock was taken for the kept versions; their locks are free.
         assert!(registry.try_version_lock(&dir, "7.0").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_prune_removes_the_partial_files_of_older_installs() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        fs::create_dir_all(dir.join(".staging/leftover")).unwrap();
+        fs::write(dir.join(".download"), "half").unwrap();
+        fs::write(pending_marker_path(&dir, "7.0"), "digest").unwrap();
+        fs::write(dir.join(".7.0.download"), "half").unwrap();
+        let registry = thread_registry();
+        let _lock = registry.try_version_lock(&dir, "7.0").unwrap().unwrap();
+        let cache = ManifestCache::new(root.path(), registry.clone());
+
+        // Fresh leftovers may belong to an older bongos still installing: they stay.
+        block_on(prune(&cache, &registry, &dir, None, SystemTime::now())).unwrap();
+        assert!(dir.join(".download").is_file());
+        assert!(dir.join(".staging/leftover").is_dir());
+
+        let later = SystemTime::now() + PRUNE_GRACE + Duration::from_secs(60);
+        block_on(prune(&cache, &registry, &dir, None, later)).unwrap();
+        assert_eq!(names(&dir), [".7.0.download", ".7.0.pending"]);
+        assert!(dir.join(".7.0.lock").is_file());
     }
 
     #[test]

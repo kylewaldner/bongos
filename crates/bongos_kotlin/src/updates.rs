@@ -57,7 +57,8 @@ use crate::{
     log::KotlinLog,
     manifest::{Manifest, ManifestEntry, current_platform},
     manifest_cache::{
-        BuildId, Claim, FetchOutcome, FetchedManifest, ManifestCache, read_for_start,
+        BuildId, Claim, FetchOutcome, FetchedManifest, KotlinLspBuilds, ManifestCache,
+        read_for_start,
     },
     remote_manifest::{
         MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, TrustedKey, compare_versions, sig_url,
@@ -508,7 +509,10 @@ impl Checker {
     }
 
     /// Records an installed build with a pending-trial marker as the trial, then removes the
-    /// marker. Called with no version lock held; takes the state lock only for the write.
+    /// marker. Called with no version lock held; takes the state lock only for the write. Under
+    /// that lock the build is recorded only when it is not rejected and is newer than the active
+    /// build and the trial, so a process planning from an older manifest never replaces a newer
+    /// trial. A build not recorded loses its marker too, so the startup prune can delete it.
     async fn record_trial(&self, entry: &ManifestEntry) {
         let marker = pending_marker_path(&self.server_dir(), &entry.version);
         if !marker.exists() {
@@ -519,25 +523,35 @@ impl Checker {
             version: entry.version.clone(),
             sha256: entry.sha256.clone(),
         };
+        let version = &entry.version;
         match self
             .cache
-            .with_state(|state| state.kotlin_lsp.trial = Some(trial))
+            .with_state(|state| record_if_newer(&mut state.kotlin_lsp, trial))
             .await
         {
-            Ok(()) => {
+            Ok(outcome) => {
                 if let Err(error) = fs::remove_file(&marker)
                     && error.kind() != std::io::ErrorKind::NotFound
                 {
                     ::log::warn!("removing {}: {error}", marker.display());
                 }
-                self.note(&format!(
-                    "download: kotlin-lsp {} installed as the trial",
-                    entry.version
-                ));
+                self.note(&match outcome {
+                    TrialRecord::Recorded => {
+                        format!("download: kotlin-lsp {version} installed as the trial")
+                    }
+                    TrialRecord::AlreadyRecorded => {
+                        format!("download: kotlin-lsp {version} is already recorded")
+                    }
+                    TrialRecord::Rejected => {
+                        format!("download: kotlin-lsp {version} not recorded: it was rejected")
+                    }
+                    TrialRecord::NotNewer(other) => format!(
+                        "download: kotlin-lsp {version} not recorded: {other} is as new or newer"
+                    ),
+                });
             }
             Err(error) => self.note(&format!(
-                "download: kotlin-lsp {} is installed but not recorded yet: {error:#}",
-                entry.version
+                "download: kotlin-lsp {version} is installed but not recorded yet: {error:#}"
             )),
         }
     }
@@ -612,6 +626,41 @@ impl Checker {
 
 /// GET the manifest, then GET its `.sig`, following redirects. Nothing is added to the requests:
 /// no query, no cookie, no conditional or identifying header beyond what the client sends anyway.
+/// What `record_if_newer` did with a downloaded build.
+#[derive(Debug, PartialEq, Eq)]
+enum TrialRecord {
+    Recorded,
+    /// The build already is the trial or the active build.
+    AlreadyRecorded,
+    Rejected,
+    /// The active build or the trial, this version, is as new or newer.
+    NotNewer(String),
+}
+
+/// Makes `trial` the trial of `builds` when it is not rejected and is newer than the active build
+/// and the current trial. Runs under the state lock.
+fn record_if_newer(builds: &mut KotlinLspBuilds, trial: BuildId) -> TrialRecord {
+    let same =
+        |id: &BuildId| id.version == trial.version && id.sha256.eq_ignore_ascii_case(&trial.sha256);
+    if builds.rejected.iter().any(&same) {
+        return TrialRecord::Rejected;
+    }
+    if [&builds.active, &builds.trial]
+        .into_iter()
+        .flatten()
+        .any(&same)
+    {
+        return TrialRecord::AlreadyRecorded;
+    }
+    for build in [&builds.active, &builds.trial].into_iter().flatten() {
+        if compare_versions(&trial.version, &build.version) != Some(VersionOrder::Greater) {
+            return TrialRecord::NotNewer(build.version.clone());
+        }
+    }
+    builds.trial = Some(trial);
+    TrialRecord::Recorded
+}
+
 async fn fetch_pair(http: &dyn HttpClient, url: &Url) -> Result<FetchedManifest> {
     let servers = get_capped(http, url, MAX_MANIFEST_BYTES, "manifest").await?;
     let sig = get_capped(http, &sig_url(url), MAX_SIGNATURE_BYTES, "signature").await?;
@@ -1560,6 +1609,92 @@ mod tests {
             harness.cache().read_state().kotlin_lsp.trial.is_some()
         });
         assert_eq!(harness.archive_requests(), 1);
+    }
+
+    /// Installs nothing, but leaves the pending-trial marker of `version` and records it the way a
+    /// finished background download does. Returns whether the marker is gone.
+    fn record(
+        cx: &mut TestAppContext,
+        harness: &Harness,
+        updates: &Entity<KotlinUpdates>,
+        version: &str,
+    ) -> bool {
+        let entry = ManifestEntry {
+            version: version.into(),
+            ..harness.pin()
+        };
+        let marker = pending_marker_path(&harness.server_dir(), version);
+        fs::create_dir_all(harness.server_dir()).unwrap();
+        fs::write(&marker, &entry.sha256).unwrap();
+        let checker = updates.read_with(cx, |updates, _| updates.checker.clone());
+        block_on(checker.record_trial(&entry));
+        !marker.exists()
+    }
+
+    fn trial_version(harness: &Harness) -> Option<String> {
+        harness
+            .cache()
+            .read_state()
+            .kotlin_lsp
+            .trial
+            .map(|trial| trial.version)
+    }
+
+    #[gpui::test]
+    fn test_an_older_build_does_not_replace_a_newer_trial(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        let updates = harness.updates(cx);
+        assert!(record(cx, &harness, &updates, "263.4.0"));
+        assert!(record(cx, &harness, &updates, "263.3.0"));
+        assert!(record(cx, &harness, &updates, "263.4.0"));
+        assert_eq!(trial_version(&harness).as_deref(), Some("263.4.0"));
+        assert_eq!(
+            harness.download_lines(),
+            [
+                "download: kotlin-lsp 263.4.0 installed as the trial",
+                "download: kotlin-lsp 263.3.0 not recorded: 263.4.0 is as new or newer",
+                "download: kotlin-lsp 263.4.0 is already recorded",
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn test_a_newer_build_replaces_an_older_trial(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        let updates = harness.updates(cx);
+        assert!(record(cx, &harness, &updates, "263.3.0"));
+        assert!(record(cx, &harness, &updates, "263.10.0"));
+        assert_eq!(trial_version(&harness).as_deref(), Some("263.10.0"));
+    }
+
+    #[gpui::test]
+    fn test_a_rejected_build_is_not_recorded(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        let updates = harness.updates(cx);
+        let digest = harness.pin().sha256;
+        block_on(harness.cache().with_state(|state| {
+            state.kotlin_lsp.active = Some(BuildId {
+                version: "263.1.0".into(),
+                sha256: digest.clone(),
+            });
+            state.kotlin_lsp.rejected.push(BuildId {
+                version: "263.5.0".into(),
+                sha256: digest.to_uppercase(),
+            });
+        }))
+        .unwrap();
+        assert!(record(cx, &harness, &updates, "263.5.0"));
+        assert_eq!(trial_version(&harness), None);
+        assert_eq!(
+            harness.download_lines(),
+            ["download: kotlin-lsp 263.5.0 not recorded: it was rejected"]
+        );
+        // Older than the active build: not recorded either.
+        assert!(record(cx, &harness, &updates, "263.0.9"));
+        assert_eq!(trial_version(&harness), None);
     }
 
     #[test]
