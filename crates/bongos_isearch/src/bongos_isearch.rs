@@ -25,6 +25,8 @@ mod engine_tests;
 #[cfg(test)]
 mod intercept_tests;
 #[cfg(test)]
+mod large_file_tests;
+#[cfg(test)]
 mod occur_tests;
 #[cfg(test)]
 mod perf_tests;
