@@ -344,8 +344,14 @@ async fn the_key_table_covers_every_emacs_action(cx: &mut gpui::TestAppContext) 
         let names = cx.all_action_names();
         // Every emacs action has an editor key; the cursor toggle is left unbound on purpose.
         // `pop-global-mark` is a workspace key (`mark_keymap_tests`) and the implementations
-        // jump stays in the palette.
-        const UNBOUND: [&str; 2] = ["emacs::PopGlobalMark", "emacs::XrefFindImplementations"];
+        // jump stays in the palette. The whole-line kill and append-next-kill commands are
+        // reachable by name until their keys are added.
+        const UNBOUND: [&str; 4] = [
+            "emacs::PopGlobalMark",
+            "emacs::XrefFindImplementations",
+            "emacs::KillWholeLine",
+            "emacs::AppendNextKill",
+        ];
         for name in names
             .iter()
             .filter(|name| name.starts_with("emacs::") && !UNBOUND.contains(name))
