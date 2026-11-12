@@ -14,6 +14,7 @@ pub mod gates;
 pub mod lifecycle;
 pub mod mcp;
 pub mod outcomes;
+pub mod picker;
 pub mod process;
 pub mod runner_claude;
 pub mod runner_codex;
@@ -22,6 +23,7 @@ pub mod runtime;
 mod settings;
 pub mod sources;
 pub mod status_item;
+pub mod summary;
 pub mod task_link;
 pub mod worktrees;
 

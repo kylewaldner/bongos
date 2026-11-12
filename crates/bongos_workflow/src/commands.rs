@@ -17,7 +17,7 @@ use crate::WorkflowsSettings;
 use crate::actions::{OFF_MESSAGE, show_toast, workflow};
 use crate::definitions::DefinitionError;
 use crate::engine::WorkflowEngine;
-use crate::lifecycle::{Refusal, RunId, StartRequest};
+use crate::lifecycle::{Refusal, RunId};
 use settings::Settings as _;
 
 /// The title of the diagnostics buffer of `workflow: validate`.
@@ -78,13 +78,11 @@ pub const NO_TASK: &str = "Select a leaf task to run its workflow";
 
 fn register_run_commands(workspace: &mut Workspace) {
     on::<workflow::Run>(workspace, |engine, workspace, window, cx| {
-        // The todo's named workflow until the picker of step 17.
         let Some(task_id) = bongos_work::task_at_point(workspace, window, cx) else {
             show_toast(workspace, NO_TASK.to_string(), cx);
             return;
         };
-        let started = engine.start(StartRequest::new(task_id), cx);
-        report(workspace, started.map(|_| "Workflow run started"), cx);
+        crate::picker::run_picker(engine, task_id, workspace, window, cx);
     });
     on_run::<workflow::Pause>(workspace, |engine, run, workspace, _, cx| {
         let paused = engine.pause(&run, cx);
@@ -317,7 +315,7 @@ fn open_file(
 
 /// Opens `text` in a read-only buffer titled `title` in the active pane. The buffer is in memory
 /// only: it has no path, so opening it creates no file and closing it asks nothing.
-fn open_report(
+pub(crate) fn open_report(
     title: String,
     text: String,
     workspace: &mut Workspace,

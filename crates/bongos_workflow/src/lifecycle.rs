@@ -1165,7 +1165,7 @@ impl<R: Runner> Lifecycle<R> {
 
 /// The todo a run completes: `index` when it names an open todo, else with no index the first
 /// open one.
-fn open_todo(task: &Task, index: Option<usize>) -> Option<(usize, &bongos_work_model::Todo)> {
+pub(crate) fn open_todo(task: &Task, index: Option<usize>) -> Option<(usize, &bongos_work_model::Todo)> {
     let todos = &task.file.as_ref()?.todos;
     match index {
         Some(index) => todos
