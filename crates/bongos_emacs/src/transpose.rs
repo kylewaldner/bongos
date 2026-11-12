@@ -62,7 +62,8 @@ fn mark_form_offset(editor: &Entity<Editor>, count: Option<i32>, cx: &mut App) -
     // One rewrite spans point to mark, so both must sit in one excerpt; across excerpts the
     // plain form runs.
     snapshot.excerpt_containing(
-        multi_buffer::MultiBufferOffset(head.min(mark))..multi_buffer::MultiBufferOffset(head.max(mark)),
+        multi_buffer::MultiBufferOffset(head.min(mark))
+            ..multi_buffer::MultiBufferOffset(head.max(mark)),
     )?;
     // A mark at point has nothing to swap with: the plain form runs.
     (mark != head).then_some(mark)
