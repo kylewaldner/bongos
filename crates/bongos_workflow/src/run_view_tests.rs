@@ -91,11 +91,6 @@ fn the_view_never_shows_what_is_in_the_worktree(cx: &mut TestAppContext) {
     let dir = try_dir(&attempt, &key, 1);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("stdout.log"), "a line of the log\n").unwrap();
-    engine.lifecycle().runtime_mut().runner_mut().release_all();
-    for _ in 0..4 {
-        engine.lifecycle().tick();
-        cx.update(|cx| engine.publish(cx));
-    }
 
     let view = view(&engine, &run, cx);
     cx.update(|cx| {

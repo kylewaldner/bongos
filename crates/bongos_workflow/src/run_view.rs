@@ -470,9 +470,19 @@ fn detail(data: &RunData, graph: &GraphLayout, selected: &Selection) -> Detail {
         if let Some(failure) = &last.failure {
             detail.caps.push(format!("failed: {failure}"));
         }
-        if let Some(dir) = &data.attempt_dir {
-            detail.log = try_log(dir, &last.key, last.try_number);
-        }
+    }
+    // The log is the running try's, else the last finished one's.
+    let running = key.as_ref().and_then(|key| {
+        data.state
+            .running
+            .iter()
+            .filter(|(running, _)| running.node == key.node && running.branch == key.branch)
+            .map(|(running, node)| (running.clone(), node.try_number))
+            .next_back()
+    });
+    let logged = running.or_else(|| last.map(|last| (last.key.clone(), last.try_number)));
+    if let (Some(dir), Some((key, try_number))) = (&data.attempt_dir, logged) {
+        detail.log = try_log(dir, &key, try_number);
     }
     detail
 }
