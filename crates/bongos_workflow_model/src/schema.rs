@@ -25,6 +25,39 @@ pub fn json_schema(output: &[OutputField]) -> Value {
     })
 }
 
+/// The schema Codex's `--output-schema` strict mode accepts: every property is `required`, and an
+/// optional field is nullable (`type` is `[T, "null"]`, a choice's `enum` also lists `null`). The
+/// result check treats `null` as an absent optional field.
+pub fn json_schema_strict(output: &[OutputField]) -> Value {
+    let properties = output
+        .iter()
+        .map(|field| {
+            let mut schema = field_schema(&field.field_type);
+            if field.optional {
+                if let Some(object) = schema.as_object_mut() {
+                    if let Some(kind) = object.get("type").cloned() {
+                        object.insert("type".to_string(), json!([kind, "null"]));
+                    }
+                    if let Some(Value::Array(values)) = object.get_mut("enum") {
+                        values.push(Value::Null);
+                    }
+                }
+            }
+            (field.name.clone(), schema)
+        })
+        .collect::<Map<_, _>>();
+    let required = output
+        .iter()
+        .map(|field| Value::String(field.name.clone()))
+        .collect::<Vec<_>>();
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
 fn field_schema(field_type: &FieldType) -> Value {
     match field_type {
         FieldType::Choice(values) => json!({ "type": "string", "enum": values }),
