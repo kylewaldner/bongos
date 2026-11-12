@@ -25,15 +25,17 @@ use ui::{
     Button, ButtonCommon as _, ButtonStyle, Clickable as _, Color, Icon, IconName, Label,
     LabelCommon as _, LabelSize, h_flex, prelude::*, v_flex,
 };
-use workspace::Workspace;
 use workspace::item::{Item, ItemEvent};
+use workspace::{OpenOptions, OpenVisible, Workspace};
 
-use crate::actions::workflow;
+use crate::actions::{show_toast, workflow};
+use crate::commands::{on, on_run, open_report, open_worktree};
 use crate::engine::WorkflowEngine;
-use crate::lifecycle::{RunId, RunStatus, attempt_dir, definition_copy_dir};
+use crate::lifecycle::{RunId, RunStatus, definition_copy_dir};
 use crate::outcomes::{self, RunOutcome};
 use crate::runner_claude::STREAM_FILE;
 use crate::runner_program::{STDERR_FILE, STDOUT_FILE};
+use crate::worktrees::Git;
 
 /// How many log lines the detail pane shows.
 pub const LOG_LINES: usize = 200;
@@ -574,6 +576,11 @@ impl RunView {
 
     pub fn run(&self) -> &RunId {
         &self.run
+    }
+
+    /// The box the detail pane is about.
+    pub fn selected(&self) -> Option<&Selection> {
+        self.selected.as_ref()
     }
 
     pub fn mode(&self) -> Mode {
@@ -1133,4 +1140,158 @@ pub fn dump(dir: &Path, text: &str) -> std::io::Result<PathBuf> {
     let path = dir.join(DUMP_FILE);
     fs::write(&path, text)?;
     Ok(path)
+}
+
+/// The toast when there is no log to open yet.
+pub const NO_LOG: &str = "The run has no log yet";
+
+/// The file `workflow: open logs` opens: the log of the selected node's last try, else of the
+/// last try that started.
+fn log_target(engine: &WorkflowEngine, run: &str, selected: Option<&Selection>) -> Option<PathBuf> {
+    let lifecycle = engine.lifecycle();
+    let state = lifecycle.state(run)?;
+    let attempt = lifecycle.current_attempt_dir(run)?;
+    let matches = |key: &NodeKey| {
+        selected.is_none_or(|(node, branch)| &key.node == node && &key.branch == branch)
+    };
+    let running = state
+        .running
+        .iter()
+        .filter(|(key, _)| matches(key))
+        .map(|(key, node)| (key.clone(), node.try_number))
+        .next_back();
+    let finished = state
+        .finished
+        .iter()
+        .rfind(|finished| matches(&finished.key))
+        .or_else(|| state.finished.last())
+        .map(|finished| (finished.key.clone(), finished.try_number));
+    let (key, try_number) = running.or(finished)?;
+    log_file(&attempt, &key, try_number)
+}
+
+pub(crate) fn register(workspace: &mut Workspace) {
+    on::<workflow::ToggleGraph>(workspace, |_, workspace, _, cx| {
+        match workspace.active_item_as::<RunView>(cx) {
+            Some(view) => view.update(cx, |view, cx| view.toggle_graph(cx)),
+            None => show_toast(workspace, "No run view is open".to_string(), cx),
+        }
+    });
+    on_run::<workflow::ShowRun>(workspace, |engine, run, workspace, window, cx| {
+        show(engine, run, workspace, window, cx);
+    });
+    on_run::<workflow::OpenRunWorktree>(workspace, |engine, run, workspace, window, cx| {
+        let path = engine
+            .lifecycle()
+            .worktree(&run)
+            .map(|worktree| worktree.path.clone());
+        match path {
+            Some(path) => open_worktree(path, window, cx),
+            None => show_toast(workspace, "The run has no worktree".to_string(), cx),
+        }
+    });
+    on_run::<workflow::OpenLogs>(workspace, |engine, run, workspace, window, cx| {
+        let selected = workspace
+            .active_item_as::<RunView>(cx)
+            .and_then(|view| view.read(cx).selected.clone());
+        let Some(path) = log_target(&engine, &run, selected.as_ref()) else {
+            show_toast(workspace, NO_LOG.to_string(), cx);
+            return;
+        };
+        workspace
+            .open_abs_path(
+                path,
+                OpenOptions {
+                    visible: Some(OpenVisible::None),
+                    ..OpenOptions::default()
+                },
+                window,
+                cx,
+            )
+            .detach_and_log_err(cx);
+    });
+    on_run::<workflow::ShowRunDiff>(workspace, show_diff);
+    on_run::<workflow::DumpRunView>(workspace, |engine, run, workspace, _, cx| {
+        if !cfg!(debug_assertions) {
+            show_toast(
+                workspace,
+                "The run view dump is for debug builds".to_string(),
+                cx,
+            );
+            return;
+        }
+        let text = match workspace.active_item_as::<RunView>(cx) {
+            Some(view) => view.read(cx).text(),
+            None => match RunData::of(&engine, &run, 0) {
+                Some(data) => Snapshot::build(&data, None).text(Mode::List),
+                None => "The run is no longer known".to_string(),
+            },
+        };
+        let written = cx.background_spawn(async move { dump(paths::logs_dir(), &text) });
+        cx.spawn(async move |workspace, cx| {
+            let result = written.await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    let message = match result {
+                        Ok(path) => format!("Wrote {}", path.display()),
+                        Err(error) => format!("Could not write the run view: {error}"),
+                    };
+                    show_toast(workspace, message, cx)
+                })
+                .ok();
+        })
+        .detach();
+    });
+}
+
+/// `workflow: show run diff`: `git diff <task branch>...<run branch>` in a read-only buffer.
+fn show_diff(
+    engine: WorkflowEngine,
+    run: RunId,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let (dir, task_branch, run_branch) = {
+        let lifecycle = engine.lifecycle();
+        (
+            lifecycle
+                .worktree(&run)
+                .map(|worktree| worktree.path.clone()),
+            lifecycle
+                .task_checkout(&run)
+                .and_then(|checkout| checkout.branch.clone()),
+            lifecycle
+                .worktree(&run)
+                .map(|worktree| worktree.branch.clone()),
+        )
+    };
+    let (Some(dir), Some(task_branch), Some(run_branch)) = (dir, task_branch, run_branch) else {
+        show_toast(
+            workspace,
+            "The run has no branch to compare with its task".to_string(),
+            cx,
+        );
+        return;
+    };
+    let range = format!("{task_branch}...{run_branch}");
+    let title = format!("Run diff {range}");
+    let output = cx.background_spawn(async move {
+        Git::new("git")
+            .run(&dir, &["diff", "--no-color", &range])
+            .await
+    });
+    cx.spawn_in(window, async move |workspace, cx| {
+        let result = output.await;
+        workspace
+            .update_in(cx, |workspace, window, cx| match result {
+                Ok(diff) if diff.is_empty() => {
+                    show_toast(workspace, "The run changed nothing yet".to_string(), cx)
+                }
+                Ok(diff) => open_report(title, diff, workspace, window, cx),
+                Err(error) => show_toast(workspace, format!("git diff failed: {error}"), cx),
+            })
+            .ok();
+    })
+    .detach();
 }

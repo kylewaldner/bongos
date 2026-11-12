@@ -2620,6 +2620,7 @@ dependencies = [
  "language",
  "libc",
  "log",
+ "menu",
  "paths",
  "project",
  "release_channel",

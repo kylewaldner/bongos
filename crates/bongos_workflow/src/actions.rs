@@ -154,14 +154,9 @@ fn register_action<A: Action>(workspace: &mut Workspace) {
 
 /// Registers the handlers of the workflow actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
-    register_action::<workflow::OpenLogs>(workspace);
     register_action::<workflow::ShowRuns>(workspace);
-    register_action::<workflow::ShowRun>(workspace);
-    register_action::<workflow::OpenRunWorktree>(workspace);
-    register_action::<workflow::ShowRunDiff>(workspace);
     register_action::<workflow::ClearFinished>(workspace);
-    register_action::<workflow::ToggleGraph>(workspace);
-    register_action::<workflow::DumpRunView>(workspace);
     register_action::<workflow::DumpEngine>(workspace);
     crate::commands::register(workspace);
+    crate::run_view::register(workspace);
 }
