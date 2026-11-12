@@ -259,6 +259,9 @@ pub struct SettingsContent {
     /// Settings for the Work view: projects and tasks kept as files under `~/.bongos`.
     pub work: Option<WorkSettingsContent>,
 
+    /// Settings for project repositories: a project's definitions kept in a git repository.
+    pub project_repository: Option<ProjectRepositorySettingsContent>,
+
     /// Settings for chat sessions: agent CLIs run in terminals and recorded under a task's
     /// `chats/` directory.
     pub chats: Option<ChatsSettingsContent>,
@@ -1439,6 +1442,75 @@ pub struct WorkSettingsContent {
     ///
     /// Default: null, the central directory
     pub default_worktree_root: Option<String>,
+}
+
+/// Where each part of a project folder goes. `{folder}` is the project folder.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ProjectRepositoryLayoutContent {
+    /// Default: "{folder}/repository"
+    pub repository: Option<String>,
+    /// Default: "{folder}/working-copies"
+    pub working_copies: Option<String>,
+    /// Default: "{folder}/state"
+    pub state: Option<String>,
+    /// Default: "{folder}/files"
+    pub files: Option<String>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ProjectRepositorySettingsContent {
+    /// Whether projects live in a git repository. While it is off, projects keep the old format.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// The folder new project folders go in; null is `<data dir>/projects`.
+    ///
+    /// Default: null
+    pub projects_dir: Option<String>,
+    /// Where each part of a project folder goes, resolved once when the project is created.
+    pub layout: Option<ProjectRepositoryLayoutContent>,
+    /// Default: "work/"
+    pub branch_prefix: Option<String>,
+    /// Default: "bongos/state"
+    pub state_branch: Option<String>,
+    /// Default: true
+    pub squash: Option<bool>,
+    /// Default: false
+    pub keep_landed: Option<bool>,
+    /// Default: 14
+    pub stale_after_days: Option<u32>,
+    /// Default: 120
+    pub queue_limit_seconds: Option<u32>,
+    /// Default: 1048576
+    pub text_file_limit_bytes: Option<u64>,
+    /// Default: 5242880
+    pub image_limit_bytes: Option<u64>,
+    /// Regular expressions a landing refuses to let through.
+    pub secret_patterns: Option<Vec<String>>,
+    /// Default: true
+    pub judgment_survives_unrelated: Option<bool>,
+    /// Default: 60
+    pub min_snapshot_gap_seconds: Option<u32>,
+    /// Default: 5
+    pub push_retry_min_minutes: Option<u32>,
+    /// Default: 60
+    pub push_retry_max_minutes: Option<u32>,
+    /// Default: 30
+    pub thinning_after_days: Option<u32>,
+    /// Default: 30
+    pub replaced_keep_days: Option<u32>,
+    /// Default: null
+    pub run_record_copy_dir: Option<String>,
+    /// Default: 60
+    pub run_record_copy_interval_minutes: Option<u32>,
+    /// Default: "One-offs"
+    pub oneoffs_project: Option<String>,
+    /// Default: false
+    pub ask_work_kind: Option<bool>,
+    /// Default: 15
+    pub default_snapshot_interval_minutes: Option<u32>,
 }
 
 /// Settings for the prompts editor.
