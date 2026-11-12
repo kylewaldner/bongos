@@ -851,6 +851,12 @@ mod tests {
     }
 
     #[test]
+    fn test_release_keys_are_empty() {
+        // No key is shipped, so no release build can trust a remote manifest.
+        assert!(RELEASE_KEYS.is_empty());
+    }
+
+    #[test]
     fn test_release_keys_are_well_formed() {
         for (id, base64) in RELEASE_KEYS {
             TrustedKey::parse(id, base64).unwrap();

@@ -230,7 +230,7 @@ status_text_stable() {
 
 # Fails when the proxy got a request since the scenario began other than the two kinds every launch
 # makes (the ACP registry and localhost, as in scenarios 28, 03, 25 and 26), which rules out the
-# manifest host, bongos.rocks and every archive host (the fake host is reached with NO_PROXY).
+# manifest host, the bongos site and every archive host (the fake host is reached with NO_PROXY).
 assert_proxy_strays_none() {
   local registry_host strays
   registry_host=$(sed -nE 's|^const REGISTRY_URL: &str = "https://([^/"]+)/.*|\1|p' \

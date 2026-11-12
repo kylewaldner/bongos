@@ -100,3 +100,10 @@ crates/bongos/src/main.rs zed.dev
 crates/bongos/src/zed/app_menus.rs zed.dev
 crates/bongos/src/zed/quick_action_bar/repl_menu.rs zed.dev
 crates/bongos/src/zed.rs zed.dev
+
+# bongos never contacts bongos.rocks; the guard in the harness detects it
+# lib.sh greps the proxy log for the host and fails the smoke run if it appears
+script/bongos/lib.sh bongos.rocks
+script/bongos/lib.sh bongos\.rocks
+# OpenRouter attribution header: the string is sent to openrouter.ai as HTTP-Referer, bongos.rocks itself is never contacted
+crates/open_router/src/open_router.rs bongos.rocks
