@@ -1,4 +1,4 @@
-//! The workflow actions in the whole app: with `workflows.enabled` false (the default) a run
+//! The workflow actions in the whole app: with `workflows.enabled` set to false a run
 //! started the way `task: mode` starts it, by the name `workflow::Run`, finds a handler and says
 //! that workflows are off, instead of "Workflows arrive with feature 20".
 
@@ -10,9 +10,21 @@ use workspace::notifications::NotificationId;
 
 use super::tests::init_test;
 
+fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
+    cx.update(|cx| {
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.workflows.get_or_insert_default().enabled = Some(enabled);
+            });
+        });
+    });
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 async fn run_by_name_is_handled_and_says_workflows_are_off(cx: &mut TestAppContext) {
     let app_state = init_test(cx);
+    set_enabled(cx, false);
     cx.update(bongos_workflow::init);
     app_state
         .fs
@@ -60,6 +72,7 @@ async fn the_runs_panel_is_absent_while_workflows_are_off_and_follows_the_settin
     cx: &mut TestAppContext,
 ) {
     let app_state = init_test(cx);
+    set_enabled(cx, false);
     cx.update(bongos_workflow::init);
     app_state
         .fs
@@ -95,16 +108,6 @@ async fn the_runs_panel_is_absent_while_workflows_are_off_and_follows_the_settin
     };
     assert!(!has_panel(cx), "absent while workflows.enabled is off");
 
-    let set_enabled = |cx: &mut TestAppContext, enabled: bool| {
-        cx.update(|cx| {
-            cx.update_global::<settings::SettingsStore, _>(|store, cx| {
-                store.update_user_settings(cx, |content| {
-                    content.workflows.get_or_insert_default().enabled = Some(enabled);
-                });
-            });
-        });
-        cx.run_until_parked();
-    };
     set_enabled(cx, true);
     assert!(has_panel(cx), "added when workflows are turned on");
     set_enabled(cx, false);

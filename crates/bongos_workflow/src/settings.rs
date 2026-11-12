@@ -8,8 +8,10 @@ use crate::runner_program::ProgramSettings;
 /// The `workflows` settings (user level only).
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
 pub struct WorkflowsSettings {
-    /// Whether workflows are on. While false, bongos starts no run, loads no definition and every
-    /// workflow command is hidden and only says "Workflows are off (workflows.enabled)".
+    /// Whether workflows are on (the default). Enabling starts nothing by itself: no run starts,
+    /// no process starts and nothing is written under `runs/` until a workflow is run. While
+    /// false, bongos starts no run, loads no definition and every workflow command is hidden and
+    /// only says "Workflows are off (workflows.enabled)".
     pub enabled: bool,
     /// The directory holding run and branch worktrees; `None` means
     /// `<repo>/.bongos-worktrees/.runs/`.
@@ -29,7 +31,7 @@ pub struct WorkflowsSettings {
 impl Default for WorkflowsSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             worktrees_dir: None,
             min_free_disk_mb: 2048,
             keep_finished_days: 14,

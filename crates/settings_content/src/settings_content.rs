@@ -1510,11 +1510,12 @@ pub struct LinearSettingsContent {
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct WorkflowsSettingsContent {
-    /// Whether workflows are on. While they are off, bongos starts no run, loads no definition
-    /// and every workflow command is hidden and only says "Workflows are off
-    /// (workflows.enabled)".
+    /// Whether workflows are on. It is on by default, and enabling starts nothing by itself: no
+    /// run starts, no process starts and nothing is written under `runs/` until you run a
+    /// workflow. While it is off, bongos starts no run, loads no definition, and every workflow
+    /// command is hidden and only says "Workflows are off (workflows.enabled)".
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
     /// The directory that holds run and branch worktrees. Null means
     /// `<repo>/.bongos-worktrees/.runs/`.
