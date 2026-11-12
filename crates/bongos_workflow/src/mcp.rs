@@ -58,7 +58,7 @@ pub struct Location {
     pub cwd: PathBuf,
     /// The home directory holding `.claude.json`.
     pub home: PathBuf,
-    /// The Codex home (`$CODEX_HOME`, else `<home>/.codex`).
+    /// The Codex home (`<home>/.codex`).
     pub codex_home: PathBuf,
 }
 
@@ -394,7 +394,7 @@ pub fn check_start(
 }
 
 /// `-c` overrides that disable servers on Codex: every server of `installed` that no allowed
-/// entry names, and every excluded server even when it is named. A name that is not a plain TOML
+/// entry names, and every excluded server that is installed, even when it is named. A name that is not a plain TOML
 /// key is quoted.
 pub fn codex_disable_args(
     installed: &BTreeSet<String>,
@@ -409,7 +409,7 @@ pub fn codex_disable_args(
         .iter()
         .filter(|server| !allowed.contains(*server))
         .collect();
-    disabled.extend(exclude);
+    disabled.extend(exclude.iter().filter(|server| installed.contains(*server)));
     disabled
         .into_iter()
         .flat_map(|server| {

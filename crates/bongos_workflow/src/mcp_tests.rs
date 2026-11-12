@@ -423,3 +423,10 @@ fn a_malformed_exclude_name_refuses_the_start() {
         assert!(check_start(agent, None, &[], &BTreeSet::new(), &list(&["ok-name_1.x"])).is_ok());
     }
 }
+
+#[test]
+fn codex_does_not_disable_an_excluded_server_that_is_not_installed() {
+    let installed = names(&["github"]);
+    let args = codex_disable_args(&installed, &[], &list(&["ghost"]));
+    assert_eq!(args, list(&["-c", "mcp_servers.github.enabled=false"]));
+}

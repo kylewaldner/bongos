@@ -472,6 +472,16 @@ fn the_time_cap_stops_the_process() {
 }
 
 #[test]
+fn a_transient_401_error_before_a_completed_turn_is_not_logged_out() {
+    let root = TempDir::new().unwrap();
+    let node = node(&definition(), root.path());
+    let stream = fixture("codex-transient-error.jsonl")
+        .replace("Reconnecting... 1/5", "401 Unauthorized, retrying 1/5");
+    let result = classify(&key(), &node, "codex", &stream, "", Exit::Code(0));
+    assert!(result.outcome.is_ok(), "{:?}", result.outcome);
+}
+
+#[test]
 fn a_transient_error_event_before_a_completed_turn_does_not_fail_the_try() {
     let root = TempDir::new().unwrap();
     let node = node(&definition(), root.path());

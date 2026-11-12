@@ -368,7 +368,7 @@ pub fn classify(
         .into_iter()
         .filter(|message| failed_server(message).is_none())
         .collect();
-    if errors.iter().any(|message| says_logged_out(message))
+    if fatal.iter().any(|message| says_logged_out(message))
         || (exit != Exit::Code(0) && says_logged_out(stderr))
     {
         return fail(
