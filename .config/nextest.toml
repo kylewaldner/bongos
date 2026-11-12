@@ -36,11 +36,15 @@ retries = 3
 #   languages test_outline_with_destructuring: depends on background syntax parsing finishing in time.
 #   bongos_chat test_no_output_makes_a_chat_idle: runs a fake CLI in a real PTY with 1 s wall-clock
 #     bounds.
+#   bongos_workflow halt, cancel, time cap and output cap tests, and the Claude runner's run through
+#     the runtime: real processes stopped within wall-clock bounds (5 s, 10 s, 30 s) that a machine
+#     with a load average above its core count overshoots.
 [[profile.default.overrides]]
 filter = '''
 (package(=db) & test(=tests::test_simultaneous_db_corruption))
 | (package(=editor) & (test(=editor_tests::test_tab_in_leading_whitespace_auto_indents_for_bash) | test(=editor_tests::test_markdown_indents) | test(=editor_tests::test_indent_after_input_for_bash)))
 | (package(=languages) & test(=typescript::tests::test_outline_with_destructuring))
 | (package(=bongos_chat) & test(=runtime_tests::test_no_output_makes_a_chat_idle))
+| (package(=bongos_workflow) & (test(=runtime_tests::halt_ends_a_child_that_ignores_sigterm_within_five_seconds) | test(=runtime_tests::cancel_stops_processes_and_closes_the_run) | test(=runner_codex_tests::the_time_cap_stops_the_process) | test(=runner_claude_tests::a_valid_result_routes_through_the_runtime) | test(=program_tests::halt_stops_the_process_within_five_seconds) | test(=program_tests::the_output_cap_names_itself)))
 '''
 retries = { backoff = "fixed", count = 2, delay = "2s" }

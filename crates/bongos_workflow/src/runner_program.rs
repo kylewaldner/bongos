@@ -19,9 +19,13 @@
 //!   and a clean exit without it fails the node too. MCP is refused in v1.
 //! - The shim is a guardrail, not a security boundary: code in the same Python process can always
 //!   get around an audit hook. The OS sandbox is the boundary, so a run that is "not sandboxed"
-//!   is not hard-confined. In the common git directory the sandbox keeps `hooks/` and `config`
-//!   read-only on Linux (the shim refuses writes there on every platform); the refs of other
-//!   branches stay writable, since a commit needs the refs and object stores.
+//!   is not hard-confined. The sandbox keeps the git metadata that runs or redirects git
+//!   ([`ProgramNode::protected_paths`]: `hooks/`, `config`, the worktree's `.git` file and its git
+//!   directory's `gitdir`, `commondir` and `config.worktree`) read-only on Linux, and the shim
+//!   refuses writes there on every platform; after every pass the runner compares them with what
+//!   they held before ([`GitMetadata`]), puts them back and fails the node ("program changed git
+//!   metadata") when they changed. The refs of other branches stay writable, since a commit needs
+//!   the refs and object stores.
 //! - Caps: `max_minutes` (the node's, else `workflows.programs.max_minutes`), the captured output
 //!   (`workflows.programs.max_output_mb`; the rest is dropped and the process stopped) and the
 //!   result size ([`RESULT_CAP`]). Halt and cancel stop the process group within 5 s.
@@ -290,13 +294,22 @@ impl ProgramNode {
         paths
     }
 
-    /// The parts of the common git directory no script may change: `hooks/` and `config` would
-    /// run or configure code in every later git command.
+    /// The git metadata no script may change: `hooks/` and `config` in the common git directory
+    /// would run or configure code in every later git command, and the worktree's `.git` file and
+    /// its git directory's `gitdir`, `commondir` and `config.worktree` would point a later git
+    /// command at a git directory the script made. The worktree's `.git` is listed only when it is
+    /// a file (a linked worktree); a missing path cannot be bound read-only, so
+    /// [`GitMetadata`] checks every one of them again after the script.
     pub fn protected_paths(&self) -> Vec<PathBuf> {
-        self.git_common_dir
-            .iter()
-            .flat_map(|dir| [dir.join("hooks"), dir.join("config")])
-            .collect()
+        let Some(common) = &self.git_common_dir else {
+            return Vec::new();
+        };
+        let mut paths = vec![common.join("hooks"), common.join("config")];
+        if let Some(dir) = linked_git_dir(&self.worktree) {
+            paths.push(self.worktree.join(".git"));
+            paths.extend(PER_WORKTREE_FILES.iter().map(|name| dir.join(name)));
+        }
+        paths
     }
 
     /// The OS sandbox policy of the node. On Linux the common git directory is a writable path
@@ -329,6 +342,232 @@ impl ProgramNode {
             git,
         }
     }
+}
+
+/// The files of a worktree's git directory that point git elsewhere or configure it.
+const PER_WORKTREE_FILES: &[&str] = &["gitdir", "commondir", "config.worktree"];
+
+/// The git directory a linked worktree's `.git` file names (`gitdir: <path>`), or `None` when
+/// `.git` is not such a file.
+fn linked_git_dir(worktree: &Path) -> Option<PathBuf> {
+    let gitlink = worktree.join(".git");
+    if !fs::symlink_metadata(&gitlink).ok()?.file_type().is_file() {
+        return None;
+    }
+    let text = fs::read_to_string(&gitlink).ok()?;
+    let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+    if target.is_empty() {
+        return None;
+    }
+    Some(worktree.join(target))
+}
+
+/// What one path of the git metadata held.
+#[derive(Debug, Clone, PartialEq)]
+enum Snap {
+    Missing,
+    File(Vec<u8>),
+    Symlink(PathBuf),
+    /// A directory by identity, with its entries when they are watched too (`hooks/`).
+    Dir {
+        id: (u64, u64),
+        entries: Option<Vec<(std::ffi::OsString, Snap)>>,
+    },
+    Other,
+}
+
+impl Snap {
+    fn take(path: &Path, list: bool) -> Self {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            return Self::Missing;
+        };
+        let kind = metadata.file_type();
+        if kind.is_symlink() {
+            return fs::read_link(path).map_or(Self::Other, Self::Symlink);
+        }
+        if kind.is_file() {
+            return fs::read(path).map_or(Self::Other, Self::File);
+        }
+        if !kind.is_dir() {
+            return Self::Other;
+        }
+        let entries = list.then(|| {
+            let mut entries: Vec<_> = fs::read_dir(path)
+                .map(|read| {
+                    read.flatten()
+                        .map(|entry| (entry.file_name(), Self::take(&entry.path(), false)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries
+        });
+        Self::Dir {
+            id: dir_id(&metadata),
+            entries,
+        }
+    }
+
+    /// Puts `path` back as it was, as far as it can: a file, a symlink, a missing path or the
+    /// entries of a watched directory. A directory replaced by another stays changed. Never
+    /// writes through a symlink.
+    fn restore(&self, path: &Path) {
+        let parent_is_dir = path
+            .parent()
+            .and_then(|parent| fs::symlink_metadata(parent).ok())
+            .is_some_and(|metadata| metadata.file_type().is_dir());
+        if !parent_is_dir {
+            return;
+        }
+        let result = match self {
+            Self::Missing => remove_any(path),
+            Self::File(bytes) => remove_any(path).and_then(|()| {
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                options.open(path)?.write_all(bytes)
+            }),
+            Self::Symlink(target) => remove_any(path).and_then(|()| symlink(target, path)),
+            Self::Dir {
+                entries: Some(entries),
+                ..
+            } => {
+                let is_dir = fs::symlink_metadata(path)
+                    .is_ok_and(|metadata| metadata.file_type().is_dir());
+                let made = if is_dir {
+                    Ok(())
+                } else {
+                    remove_any(path).and_then(|()| fs::create_dir(path))
+                };
+                made.map(|()| {
+                    if let Ok(read) = fs::read_dir(path) {
+                        for entry in read.flatten() {
+                            let name = entry.file_name();
+                            let kept = entries.iter().any(|(kept, _)| *kept == name);
+                            if !kept {
+                                remove_any(&entry.path()).ok();
+                            }
+                        }
+                    }
+                    for (name, snap) in entries {
+                        let entry = path.join(name);
+                        if Self::take(&entry, false) != *snap {
+                            snap.restore(&entry);
+                        }
+                    }
+                })
+            }
+            Self::Dir { entries: None, .. } | Self::Other => Ok(()),
+        };
+        if let Err(error) = result {
+            log::error!("workflows: could not restore {}: {error}", path.display());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn dir_id(metadata: &fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn dir_id(_metadata: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, path: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, path)
+}
+
+#[cfg(not(unix))]
+fn symlink(_target: &Path, _path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Removes whatever is at `path` (a directory with its contents), without following a symlink.
+fn remove_any(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+        Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+    }
+}
+
+/// The git metadata a script must leave alone, as it was before the script started: the
+/// worktree's `.git`, the common git directory with its `config` and `hooks/`, and the worktree's
+/// git directory with its `gitdir`, `commondir` and `config.worktree`. The OS sandbox binds the
+/// files read-only on Linux, but it cannot bind a path that does not exist yet, a run may be
+/// unsandboxed, and a listed command writes past the shim; so after every pass the runner
+/// compares, puts back what it can and fails the node, before any later git command on the host
+/// reads a git directory the script pointed it at.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GitMetadata {
+    entries: Vec<(PathBuf, bool, Snap)>,
+}
+
+impl GitMetadata {
+    pub fn take(node: &ProgramNode) -> Self {
+        let gitlink = node.worktree.join(".git");
+        let mut paths = vec![(gitlink.clone(), false)];
+        if let Some(common) = &node.git_common_dir {
+            paths.push((common.clone(), false));
+            paths.push((common.join("config"), false));
+            paths.push((common.join("hooks"), true));
+        }
+        let git_dir = linked_git_dir(&node.worktree).or_else(|| {
+            fs::symlink_metadata(&gitlink)
+                .is_ok_and(|metadata| metadata.file_type().is_dir())
+                .then_some(gitlink)
+        });
+        if let Some(dir) = git_dir {
+            paths.push((dir.clone(), false));
+            paths.extend(PER_WORKTREE_FILES.iter().map(|name| (dir.join(name), false)));
+        }
+        Self {
+            entries: paths
+                .into_iter()
+                .map(|(path, list)| {
+                    let snap = Snap::take(&path, list);
+                    (path, list, snap)
+                })
+                .collect(),
+        }
+    }
+
+    /// The paths that no longer hold what they held.
+    pub fn changed(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .filter(|(path, list, snap)| Snap::take(path, *list) != *snap)
+            .map(|(path, _, _)| path.clone())
+            .collect()
+    }
+
+    /// Puts back what changed, then returns the paths that had changed (empty when nothing did).
+    pub fn check_and_restore(&self) -> Vec<PathBuf> {
+        let changed = self.changed();
+        for (path, _, snap) in &self.entries {
+            if changed.contains(path) {
+                snap.restore(path);
+            }
+        }
+        changed
+    }
+}
+
+/// The failure of a pass that changed git metadata.
+fn git_metadata_failure(key: &NodeKey, changed: &[PathBuf]) -> Failure {
+    let paths: Vec<String> = changed
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    Failure::new(
+        FailureReason::PermissionDenied,
+        Some(key.clone()),
+        format!("program changed git metadata: {}", paths.join(", ")),
+    )
 }
 
 /// The environment of a program: the agent runners' names, `BONGOS_STATE`, `BONGOS_RESULT` and
@@ -653,6 +892,8 @@ struct Pass {
     sandbox_note: String,
     /// Kept alive while the process runs: it owns the network proxy.
     sandbox: Option<Sandbox>,
+    /// The git metadata before the script started, checked after it ends.
+    git: GitMetadata,
 }
 
 /// A polling node between passes: no process, no cost.
@@ -756,6 +997,16 @@ impl ProgramRunner {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io(&result_path, error)),
         }
+        // A hooks directory that does not exist cannot be bound read-only, so it is made first.
+        if let Some(common) = &node.git_common_dir {
+            let hooks = common.join("hooks");
+            if fs::symlink_metadata(&hooks).is_err()
+                && let Err(error) = fs::create_dir(&hooks)
+            {
+                log::error!("workflows: could not create {}: {error}", hooks.display());
+            }
+        }
+        let git = GitMetadata::take(&node);
         let shim = dir.join(SHIM_FILE);
         fs::write(&shim, SHIM).map_err(|error| io(&shim, error))?;
         let state_file = dir.join(STATE_FILE);
@@ -854,6 +1105,7 @@ impl ProgramRunner {
                 readers,
                 sandbox_note,
                 sandbox,
+                git,
             },
             process,
         ));
@@ -998,12 +1250,22 @@ impl ProgramRunner {
         self.passes = kept;
         let mut processes: Vec<NodeProcess> = Vec::new();
         let mut sandboxes = Vec::new();
+        let mut gits = Vec::new();
         for (pass, process) in stopped {
             processes.push(process);
             sandboxes.push(pass.sandbox);
+            gits.push(pass.git);
         }
         stop_all(&mut processes);
         drop(sandboxes);
+        for git in gits {
+            let changed = git.check_and_restore();
+            if !changed.is_empty() {
+                log::error!(
+                    "workflows: a stopped program changed git metadata (put back): {changed:?}"
+                );
+            }
+        }
     }
 
     /// The tries with a process, as `(run, key)`.
@@ -1035,6 +1297,7 @@ impl ProgramRunner {
         drop(pass.sandbox.take());
         let capped = pass.capture.capped.load(Ordering::SeqCst);
         let denials = read_denials(&pass.dir.join(DENIALS_FILE));
+        let git_changed = pass.git.check_and_restore();
         let classified = classify(
             &pass.key,
             &pass.node,
@@ -1044,6 +1307,11 @@ impl ProgramRunner {
             ResultFile::read(&pass.node.result_path()),
             &read_tail(&pass.dir.join(STDERR_FILE), STDERR_TAIL),
         );
+        let classified = if git_changed.is_empty() {
+            classified
+        } else {
+            Err(git_metadata_failure(&pass.key, &git_changed))
+        };
         write_summary(
             &pass.dir,
             &json!({
@@ -1058,6 +1326,7 @@ impl ProgramRunner {
                 "output_capped": capped,
                 "denials": denials.denials,
                 "denial_log_ended": denials.ended,
+                "git_metadata_changed": git_changed,
             }),
         );
         let elapsed_ms = pass.started_wall.elapsed().as_millis() as u64;

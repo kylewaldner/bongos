@@ -855,3 +855,185 @@ fn a_lost_denial_log_fails_the_node() {
         );
     }
 }
+
+#[test]
+fn a_program_that_changes_git_metadata_fails_and_it_is_put_back() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let common = fixture.path("repo.git");
+    let git_dir = common.join("worktrees/run");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    std::fs::write(common.join("config"), "[core]\n").unwrap();
+    std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+    std::fs::write(git_dir.join("gitdir"), "run-worktree/.git\n").unwrap();
+    let worktree = fixture.path("run-worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let gitlink = format!("gitdir: {}\n", git_dir.to_string_lossy());
+    std::fs::write(worktree.join(".git"), &gitlink).unwrap();
+
+    // `cp` is a listed command, so its writes pass the shim; the runner still sees them.
+    let mut node = fixture.node(&script(
+        &format!(
+            "open('fake', 'w').write('gitdir: /elsewhere\\n')\n\
+             subprocess.run(['cp', 'fake', '.git'], check=True)\n\
+             subprocess.run(['cp', 'fake', {commondir:?}], check=True)",
+            commondir = git_dir.join("commondir").to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    node.permissions = Permissions {
+        commands: vec!["cp".to_string()],
+        ..Permissions::default()
+    };
+    node.git_common_dir = Some(common.clone());
+    let protected = node.protected_paths();
+    for path in [
+        common.join("hooks"),
+        common.join("config"),
+        worktree.join(".git"),
+        git_dir.join("gitdir"),
+        git_dir.join("commondir"),
+        git_dir.join("config.worktree"),
+    ] {
+        assert!(protected.contains(&path), "{protected:?}");
+    }
+    let finish = fixture.run_node(node);
+    let failure = failure(&finish);
+    assert_eq!(failure.reason, FailureReason::PermissionDenied);
+    assert!(
+        failure
+            .detail
+            .starts_with("program changed git metadata: "),
+        "{}",
+        failure.detail
+    );
+    assert!(failure.detail.contains("commondir"), "{}", failure.detail);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".git")).unwrap(),
+        gitlink
+    );
+    assert_eq!(
+        std::fs::read_to_string(git_dir.join("commondir")).unwrap(),
+        "../..\n"
+    );
+    // A missing hooks directory is made before the script, so the sandbox can bind it.
+    assert!(common.join("hooks").is_dir());
+    let summary = fixture.summary(TRY_DIR);
+    assert_eq!(summary["git_metadata_changed"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_shell_runs_only_as_dash_c_with_a_clean_environment() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let marker = fixture.path("run-worktree/ran");
+    for (body, what) in [
+        (
+            "subprocess.run(['sh', 'a.sh', '-c', 'true'])",
+            "permission denied: sh",
+        ),
+        (
+            "subprocess.run(['sh', '--rcfile', 'a.sh', '-i', '-c', 'true'])",
+            "permission denied: sh",
+        ),
+        (
+            "subprocess.run(['sh', '-c', 'true'], env={'PATH': os.environ['PATH'], 'BASH_ENV': 'a.sh'})",
+            "permission denied: a program started with BASH_ENV set",
+        ),
+        (
+            "subprocess.run(['true'], env={'PATH': os.environ['PATH'], 'LD_PRELOAD': 'x.so'})",
+            "permission denied: a program started with LD_PRELOAD set",
+        ),
+        (
+            "os.environ['BASH_ENV'] = 'a.sh'",
+            "permission denied: setting BASH_ENV",
+        ),
+    ] {
+        let finish = fixture.run(&script(
+            &format!(
+                "open('a.sh', 'w').write('touch ran\\n')\n\
+                 try:\n    {body}\nexcept PermissionError:\n    pass"
+            ),
+            "'done'",
+        ));
+        assert_eq!(says(failure(&finish)), what, "{body}");
+        assert!(!marker.exists(), "{body}");
+    }
+}
+
+#[test]
+fn every_way_to_fork_exec_is_checked() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let finish = fixture.run(&script(
+        "import multiprocessing.util, shutil\n\
+         import _posixsubprocess\n\
+         assert sys.modules['_posixsubprocess'] is _posixsubprocess\n\
+         assert getattr(subprocess, '_fork_exec', _posixsubprocess.fork_exec) is _posixsubprocess.fork_exec\n\
+         subprocess.run(['true'], cwd=os.getcwd(), check=True)\n\
+         try:\n    multiprocessing.util.spawnv_passfds(shutil.which('id'), ['id'], ())\n\
+         except PermissionError:\n    pass",
+        "'done'",
+    ));
+    assert_eq!(says(failure(&finish)), "permission denied: id");
+}
+
+#[test]
+fn an_object_whose_class_runs_code_is_refused_unread() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let finish = fixture.run(&script(
+        "class Sneaky:\n    @property\n    def __class__(self):\n        \
+         open('ran', 'w').write('x')\n        return str\n\
+         try:\n    subprocess.Popen([Sneaky()])\nexcept PermissionError:\n    pass",
+        "'done'",
+    ));
+    assert_eq!(
+        says(failure(&finish)),
+        "permission denied: a program bongos cannot check"
+    );
+    assert!(!fixture.path("run-worktree/ran").exists());
+}
+
+#[test]
+fn fifos_and_changes_through_read_only_descriptors_are_checked() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(target_os = "linux")) {
+        return;
+    }
+    let task = fixture.task_worktree();
+    let target = task.join("target");
+    std::fs::write(&target, "x").unwrap();
+    let task = task.to_string_lossy().into_owned();
+    let finish = fixture.run(&script(
+        &format!(
+            "os.mkfifo('own-fifo')\n\
+             try:\n    os.mkfifo({fifo:?})\nexcept PermissionError:\n    pass",
+            fifo = format!("{task}/fifo"),
+        ),
+        "'done'",
+    ));
+    let detail = says(failure(&finish));
+    assert!(detail.starts_with("permission denied: write "), "{detail}");
+    assert!(detail.ends_with("task-worktree/fifo"), "{detail}");
+    assert!(!Path::new(&task).join("fifo").exists());
+    assert!(fixture.path("run-worktree/own-fifo").exists());
+
+    let finish = fixture.run(&script(
+        &format!(
+            "fd = os.open({target:?}, os.O_RDONLY)\n\
+             try:\n    os.fchmod(fd, 0o777)\nexcept PermissionError:\n    pass",
+            target = target.to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    let detail = says(failure(&finish));
+    assert!(detail.starts_with("permission denied: write "), "{detail}");
+    assert!(detail.ends_with("task-worktree/target"), "{detail}");
+}

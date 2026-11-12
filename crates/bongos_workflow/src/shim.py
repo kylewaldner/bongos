@@ -11,14 +11,19 @@
 # so closing the pipe cannot hide a denial.
 #
 # Denied: starting a program not in `commands` (subprocess.Popen, os.system,
-# os.exec*, os.posix_spawn*; the program is looked up on the PATH the call uses
-# and its real path must be the one a listed command had at startup, and nothing
-# may come from or resolve into a writable path), opening or changing a file
-# outside the writable paths or inside a protected one (relative to a directory
-# descriptor too), connecting a socket when the node declares no network (or to
-# a host it did not declare), and the introspection that reaches the hook's own
-# state (gc object walks, ctypes, frame walks into the shim, tracing). Reads are
-# never blocked.
+# os.exec*, os.posix_spawn*, and the fork_exec under subprocess, replaced by a
+# checking wrapper; the program is looked up on the PATH the call uses and its
+# real path must be the one a listed command had at startup, and nothing may come
+# from or resolve into a writable path; a shell only as `<shell> -c <line>` whose
+# line names a listed command; an environment that makes a shell, the dynamic
+# loader or Python run other code, set for a program or in the shim's own),
+# opening or changing a file outside the writable paths or inside a protected one
+# (relative to a directory descriptor or through a file descriptor too; FIFOs and
+# device nodes included), connecting a socket when the node declares no network
+# (or to a host it did not declare), and the introspection that reaches the hook's
+# own state (gc object walks, ctypes, frame walks into the shim, tracing). Reads
+# are never blocked. Only plain str and bytes (and their subclasses, read without
+# running their code) are accepted as paths and program arguments.
 #
 # This shim is a guardrail, not a security boundary: Python code in the same
 # process can always defeat an audit hook. The OS sandbox is the boundary; a run
@@ -30,12 +35,19 @@ import sys
 def _install(policy):
     import json
     import os
-    import pathlib
     import shlex
     import shutil
     import socket
     import subprocess  # loaded before the hook, so its own imports are not checked
     import threading
+    import types
+
+    fs_encoding = sys.getfilesystemencoding()
+    environ = os.environ
+    environ_data = getattr(environ, "_data", None)
+    # Names that make a shell, the dynamic loader or Python run code the script chose.
+    risky_names = frozenset(("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND"))
+    risky_prefixes = ("LD_", "BASH_FUNC_")
 
     def norm(path):
         return os.path.realpath(path).rstrip(os.sep) or os.sep
@@ -105,14 +117,6 @@ def _install(policy):
     proxies = frozenset(proxies)
 
     local = threading.local()
-    path_types = (
-        pathlib.PurePath,
-        pathlib.PurePosixPath,
-        pathlib.PureWindowsPath,
-        pathlib.Path,
-        pathlib.PosixPath,
-        pathlib.WindowsPath,
-    )
 
     def deny(what):
         line = json.dumps({"what": what}) + "\n"
@@ -122,21 +126,33 @@ def _install(policy):
             pass
         raise PermissionError("permission denied: " + what)
 
+    def decode(raw):
+        return bytes.decode(raw, fs_encoding, "surrogateescape")
+
     def text(value):
-        """`value` as a str without running any of the script's code, or None."""
+        """`value` as a str without running any of the script's code, or None. Only the type is
+        looked at (not `isinstance`, which reads a `__class__` the script may define), and a
+        subclass of str or bytes is copied by the built-in method, never its own."""
         kind = type(value)
         if kind is str:
             return value
-        if isinstance(value, str):
+        if kind is bytes:
+            return decode(value)
+        if issubclass(kind, str):
             return str.__str__(value)
-        if isinstance(value, bytes):
-            return os.fsdecode(bytes(bytearray(value)))
-        if kind in path_types or kind is os.DirEntry:
-            result = os.fspath(value)
-            return result if type(result) is str else None
+        if issubclass(kind, bytes):
+            return decode(bytes.__getitem__(value, slice(None)))
         return None
 
     # Writes.
+
+    def fd_path(fd):
+        """The file a descriptor names (Linux /proc), or None when unknown."""
+        try:
+            name = os.readlink("/proc/self/fd/%d" % fd)
+        except (OSError, OverflowError):
+            return None
+        return name if name.startswith(os.sep) and not name.endswith(" (deleted)") else None
 
     def dir_base(dir_fd):
         """The directory a descriptor names (Linux /proc), or None when unknown."""
@@ -150,8 +166,14 @@ def _install(policy):
             return None
 
     def resolve(path, dir_fd=None):
-        if type(path) is int or path is None:
+        if path is None:
             return None
+        if type(path) is int:
+            # fchmod, fchown, futimens, ftruncate, fsetxattr: the file the descriptor names.
+            name = fd_path(path)
+            if name is None:
+                deny("change through a file descriptor bongos cannot check")
+            return os.path.realpath(name)
         name = text(path)
         if name is None:
             deny("write to a path object bongos cannot check")
@@ -201,9 +223,37 @@ def _install(policy):
 
     # Programs.
 
+    def own_path():
+        if type(environ_data) is dict:
+            found = dict.get(environ_data, b"PATH")
+            if type(found) is bytes:
+                return decode(found)
+            if found is None:
+                return os.defpath
+        return launch_path
+
+    def risky(name, python):
+        if name in risky_names or name.startswith(risky_prefixes):
+            return True
+        return python and name.startswith("PYTHON")
+
+    def check_env(env, program):
+        """Denies an environment that makes the program run other code."""
+        if env is None or env is environ:
+            return
+        if type(env) is not dict:
+            deny("a program started with an environment bongos cannot check")
+        python = "python" in os.path.basename(program)
+        for name in dict.keys(env):
+            name = text(name)
+            if name is None:
+                deny("a program started with an environment bongos cannot check")
+            if risky(name, python):
+                deny("a program started with " + name + " set")
+
     def exec_path(env):
-        if env is None or env is os.environ:
-            return os.environ.get("PATH", os.defpath)
+        if env is None or env is environ:
+            return own_path()
         if type(env) is not dict:
             deny("a program started with an environment bongos cannot check")
         for name, value in dict.items(env):
@@ -223,7 +273,7 @@ def _install(policy):
             deny("a program started in a directory bongos cannot check")
         return os.path.abspath(os.path.join(base, program))
 
-    def check_shell_line(line):
+    def check_shell_line(line, env=None, cwd=None):
         if any(char in shell_syntax for char in line):
             deny("shell command: " + line.strip()[:80])
         try:
@@ -231,7 +281,8 @@ def _install(policy):
         except ValueError:
             deny("shell command: " + line.strip()[:80])
         if words:
-            check_argv(words[0], words)
+            # The shell looks the command up on the PATH of the environment it was given.
+            check_argv(words[0], words, env, cwd)
 
     def check_argv(program, argv, env=None, cwd=None):
         argv = [text(arg) for arg in argv or []]
@@ -243,6 +294,7 @@ def _install(policy):
             program = text(program)
         if program is None:
             deny("a program bongos cannot check")
+        check_env(env, program)
         found = resolve_program(program, env, cwd)
         name = os.path.basename(program)
         if found is not None and not under(found, writable):
@@ -252,13 +304,19 @@ def _install(policy):
                     # A multi-call binary picks its behavior from argv[0].
                     if not argv or argv[0] is None or os.path.basename(argv[0]) in command_names:
                         return
-                if real in shells and "-c" in argv:
-                    index = argv.index("-c")
-                    if index + 1 < len(argv):
-                        if argv[index + 1] is None:
-                            deny("shell command bongos cannot check")
-                        check_shell_line(argv[index + 1])
-                        return
+                # A shell only as `<shell> -c <line> [arg0 args...]`: any option or script before
+                # -c (a script file, --rcfile, -i, --init-file) is refused.
+                if (
+                    real in shells
+                    and len(argv) >= 3
+                    and argv[0] is not None
+                    and os.path.basename(argv[0]) in shell_names
+                    and argv[1] == "-c"
+                ):
+                    if argv[2] is None:
+                        deny("shell command bongos cannot check")
+                    check_shell_line(argv[2], env, cwd)
+                    return
         deny(name)
 
     def on_popen(args):
@@ -268,7 +326,7 @@ def _install(policy):
         if type(argv) in (str, bytes):
             argv = shlex.split(text(argv))
         elif type(argv) not in (list, tuple):
-            argv = [argv]
+            deny("a program bongos cannot check")
         check_argv(executable, list(argv), env, cwd)
 
     def on_system(args):
@@ -289,6 +347,113 @@ def _install(policy):
 
     def on_spawn(args):
         check_argv(args[1], argv_list(args[2]), args[3] if len(args) > 3 else None)
+
+    def on_putenv(args):
+        name, value = text(args[0]), text(args[1])
+        if name is None or value is None:
+            deny("an environment variable bongos cannot check")
+        if risky(name, True):
+            deny("setting " + name)
+        if name == "PATH":
+            for entry in value.split(os.pathsep):
+                if not entry or not os.path.isabs(entry) or under(norm(entry), writable):
+                    deny("a writable PATH entry: " + entry)
+
+    def plain(value):
+        """`value` as exact bytes, converted outside the hook (so the script's own __fspath__
+        may run, once) and passed on as checked; None stays None."""
+        if value is None:
+            return None
+        kind = type(value)
+        if kind is not str and kind is not bytes and not issubclass(kind, (str, bytes)):
+            value = os.fspath(value)
+            kind = type(value)
+        if kind is str or issubclass(kind, str):
+            return str.encode(str.__str__(value), fs_encoding, "surrogateescape")
+        if kind is bytes or issubclass(kind, bytes):
+            return bytes.__getitem__(value, slice(None))
+        deny("a program bongos cannot check")
+
+    def plain_list(values):
+        if values is None:
+            return None
+        if type(values) not in (list, tuple):
+            deny("a program bongos cannot check")
+        return [plain(value) for value in values]
+
+    def checked_fork_exec(real):
+        """The fork_exec under subprocess, which raises no audit event, with the checks of
+        subprocess.Popen in front: every way to it (subprocess._fork_exec, the
+        _posixsubprocess module, multiprocessing) starts only what Popen could."""
+
+        def fork_exec(*args):
+            args = list(args)
+            if len(args) < 6:
+                deny("a program bongos cannot check")
+            argv = plain_list(args[0])
+            candidates = plain_list(args[1]) or []
+            cwd = plain(args[4])
+            env_list = plain_list(args[5])
+            env = None
+            if env_list is not None:
+                env = {}
+                for item in env_list:
+                    name, _, value = item.partition(b"=")
+                    env[decode(name)] = decode(value)
+            base = decode(cwd) if cwd is not None else os.getcwd()
+            found = None
+            for candidate in candidates:
+                path = os.path.join(base, decode(candidate))
+                if under(norm(os.path.dirname(path)), writable):
+                    deny("command from a writable PATH entry: " + os.path.basename(path))
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    found = path
+                    break
+            if found is not None:
+                check_argv(found, [decode(arg) for arg in argv or []], env, base)
+            args[0] = tuple(argv) if argv is not None else None
+            args[1] = tuple(candidates)
+            args[4] = cwd
+            args[5] = env_list
+            return real(*args)
+
+        return fork_exec
+
+    real_fork_exec = getattr(subprocess, "_fork_exec", None)
+    real_module = sys.modules.get("_posixsubprocess")
+    if real_fork_exec is None and real_module is not None:
+        real_fork_exec = getattr(real_module, "fork_exec", None)
+    if real_fork_exec is not None:
+        fork_exec = checked_fork_exec(real_fork_exec)
+        stand_in = types.ModuleType("_posixsubprocess")
+        stand_in.fork_exec = fork_exec
+        sys.modules["_posixsubprocess"] = stand_in
+        if hasattr(subprocess, "_fork_exec"):
+            subprocess._fork_exec = fork_exec
+        if hasattr(subprocess, "_posixsubprocess"):
+            subprocess._posixsubprocess = stand_in
+    del real_module
+
+    # os.mkfifo and os.mknod raise no audit event: wrapped in os and posix.
+
+    def checked_make(real, default_mode):
+        def make(path, mode=default_mode, *rest, dir_fd=None, **options):
+            path = plain(path)
+            if dir_fd is not None and type(dir_fd) is not int:
+                deny("write relative to a directory descriptor bongos cannot check")
+            check_write(path, dir_fd)
+            return real(path, mode, *rest, dir_fd=dir_fd, **options)
+
+        return make
+
+    native = sys.modules.get(os.name)
+    for name, default_mode in (("mkfifo", 0o666), ("mknod", 0o600)):
+        real = getattr(os, name, None)
+        if real is not None:
+            wrapped = checked_make(real, default_mode)
+            setattr(os, name, wrapped)
+            if native is not None and getattr(native, name, None) is real:
+                setattr(native, name, wrapped)
 
     # Network.
 
@@ -377,6 +542,7 @@ def _install(policy):
         "os.exec": on_exec,
         "os.posix_spawn": on_exec,
         "os.spawn": on_spawn,
+        "os.putenv": on_putenv,
         "socket.getaddrinfo": on_getaddrinfo,
         "socket.connect": on_connect,
         "socket.sendto": on_connect,
@@ -395,17 +561,23 @@ def _install(policy):
         "object.__getattr__": on_getattr,
         "import": on_import,
     }
-    # The handlers never call the script's code (see `text`), so nothing the script defines runs
-    # while `busy` is set.
+    # The handlers never call the script's code (see `text`). An event raised while its own
+    # handler runs (the handler's own getaddrinfo or tb_frame read) is not checked again; any
+    # other event is, so code that did run inside a handler gains nothing.
     def hook(event, args):
         handler = handlers.get(event)
-        if handler is None or getattr(local, "busy", False):
+        if handler is None:
             return
-        local.busy = True
+        active = getattr(local, "active", None)
+        if active is None:
+            active = local.active = set()
+        if event in active:
+            return
+        active.add(event)
         try:
             handler(args)
         finally:
-            local.busy = False
+            active.discard(event)
 
     sys.addaudithook(hook)
 
