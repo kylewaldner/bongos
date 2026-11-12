@@ -146,6 +146,7 @@ step "9 hosts"
 if [ -z "$stock" ]; then
   assert_no_zed_hosts
   assert_no_marketplace_host
+  assert_no_manifest_host
 fi
 proxy_hosts=$(awk '{print $2}' "$RUN/proxy.log" | sort -u | xargs)
 proxy_count=$(wc -l <"$RUN/proxy.log")
