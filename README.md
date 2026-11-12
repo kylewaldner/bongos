@@ -59,6 +59,47 @@ Any other file in a task directory is an artifact, described and made visible or
   palette (`assets/keymaps/linux/emacs.json`). In the panel, `tab` expands a row inline and `^`
   goes up one level.
 
+### Worktrees
+
+`C-c w s` (`task: start`) makes a git worktree and a branch for a `pr-ship`, `pr-merge`, `spike` or
+`babysit` leaf. Nothing is added to your checkout unless you ask for it.
+
+- **Default location.** `<data dir>/worktrees/<repository>/<slug>`: on Linux
+  `~/.local/share/bongos/worktrees/...` (or under `$XDG_DATA_HOME`), on macOS
+  `~/Library/Application Support/bongos/worktrees/...`.
+- **Choosing a root.** A repository's `worktree_root` in `work.repositories` and
+  `work.default_worktree_root` (for repositories that name none) are path templates with two
+  tokens: `{repo}`, the repository's name, and `{slug}`, the task's slug. `{slug}` is appended
+  when missing, so a worktree never lands on the root itself. A leading `~` is your home directory;
+  any other path that is not absolute is relative to the parent of the checkout, so `{repo}.worktrees`
+  puts the worktrees of `~/src/api` in `~/src/api.worktrees/<slug>`. Unknown tokens, unbalanced braces and
+  `..` are refused with the setting named. A root inside the checkout works too; its top directory
+  is added to the repository's `.git/info/exclude`, never to `.gitignore`. A new root applies to
+  tasks started from then on.
+- **Fallback.** When the parent of the chosen path cannot be made or written, the worktree is made
+  in the default location instead, once, and the toast and the task's history say which parent
+  was not writable.
+- **Limits.** A slug longer than 48 characters is cut at a dash and gets `-` and six hex digits of
+  the task's id, so two long names with one prefix still get different folders; the task, its
+  directory and its branch keep the full slug. A whole worktree path is limited to 200 characters:
+  the slug is shortened further to find one that fits, and when none does the start is refused and
+  names the setting to shorten.
+- **Old worktrees stay.** Worktrees that older versions made under `<repository>/.bongos-worktrees/`
+  are never moved, renamed or deleted, and a task that records a worktree is never given another.
+  The `/.bongos-worktrees/` line stays in `info/exclude`.
+- **Repositories page.** Settings, Work, Repositories lists each entry of `work.repositories` with
+  where its new worktrees go, what is wrong with that (a bad template, a path over 200 characters,
+  an unwritable parent, a root inside the checkout) and a notice while tasks still have a worktree
+  under `.bongos-worktrees/`. `work: edit worktree root` writes the `worktree_root` of one
+  repository.
+- **Rebase needed.** A task stacked on a sibling reads "rebase needed" when the sibling's branch
+  moves past what the task was cut from and the task's branch does not contain it. bongos watches
+  the refs of repositories that have such a task, so the flag appears within a moment of a `git
+  commit` in the parent's worktree and clears the same way after a `git rebase`; nothing runs on a
+  timer. On a file system that delivers no change notifications (network mounts, most FUSE mounts)
+  the refs cannot be watched, so the check runs every 5 minutes instead. Starting bongos with
+  `ZED_FILE_WATCHER_MODE=poll` does the same for every repository.
+
 ## Chat sessions
 
 Chats run Claude Code and Codex in terminals bound to a task. They are on by default and need the
