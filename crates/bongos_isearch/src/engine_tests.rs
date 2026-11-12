@@ -140,6 +140,40 @@ fn test_find_in_singleton(cx: &mut TestAppContext) {
     assert_eq!(walk(&snapshot, &query, Direction::Backward).len(), 3);
 }
 
+/// A search from inside a line sees the whole line: a whole-word match needs real word
+/// boundaries and `^`/`$` anchor to the real line start and end, not to `from`.
+#[gpui::test]
+fn test_find_from_mid_line_sees_the_whole_line(cx: &mut TestAppContext) {
+    let mut spec = SearchSpec::new(false);
+    spec.string = "ab".to_string();
+    spec.symbol = true;
+    let whole_word = Engine::new().query(&spec).expect("valid pattern");
+
+    // "ab|ab ab": the "ab" after point is the end of a word, not a word.
+    let snapshot = singleton(cx, "abab ab\n");
+    assert_eq!(
+        find_at(&snapshot, &whole_word, 2, Direction::Forward, false),
+        Some(5..7)
+    );
+    // "ab ab|ab": the "ab" before point is the start of a word, not a word.
+    let snapshot = singleton(cx, "ab abab\n");
+    assert_eq!(
+        find_at(&snapshot, &whole_word, 5, Direction::Backward, false),
+        Some(0..2)
+    );
+
+    let snapshot = singleton(cx, "xfoo\nfoo\n");
+    assert_eq!(
+        find_at(&snapshot, &regexp("^foo"), 1, Direction::Forward, false),
+        Some(5..8)
+    );
+    let snapshot = singleton(cx, "foo\nfoox\n");
+    assert_eq!(
+        find_at(&snapshot, &regexp("foo$"), 7, Direction::Backward, false),
+        Some(0..3)
+    );
+}
+
 #[gpui::test]
 fn test_find_across_excerpts(cx: &mut TestAppContext) {
     let buffer_a = cx.new(|cx| {
@@ -365,6 +399,51 @@ fn test_multiline_pattern_across_window_boundaries(cx: &mut TestAppContext) {
         let mut backward = walk(&snapshot, &query, Direction::Backward);
         backward.reverse();
         assert_eq!(backward, expected);
+        let counted = count(&snapshot, &query, 100, &Cancel::new()).expect("not canceled");
+        assert_eq!(
+            counted.starts,
+            expected
+                .iter()
+                .copied()
+                .map(MultiBufferOffset)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// The overlap past a window ends inside a two-byte char; it is clipped to a char boundary.
+#[gpui::test]
+fn test_multiline_overlap_ending_inside_a_multibyte_char(cx: &mut TestAppContext) {
+    let mut text = dotted(15_000);
+    let len = text.len();
+    let find_boundary = window::plan(0, len, Direction::Forward, text_line_start(&text))[0].end;
+    let count_boundary = split(0..len, COUNT_WINDOW, text_line_start(&text))[0].end;
+    let mut expected = Vec::new();
+    for boundary in [find_boundary, count_boundary] {
+        let overlap_end = boundary + window::OVERLAP;
+        let line = text_line_start(&text)(overlap_end);
+        // 79 bytes of two-byte chars, shifted by a dot so `overlap_end` falls inside one.
+        let accented = if (overlap_end - line) % 2 == 1 {
+            format!("{}.", "é".repeat(39))
+        } else {
+            format!(".{}", "é".repeat(39))
+        };
+        text.replace_range(line..line + 79, &accented);
+        assert!(!text.is_char_boundary(overlap_end));
+        expected.push(straddle(&mut text, boundary));
+    }
+    let snapshot = singleton(cx, &text);
+
+    for query in [query("END\nSTART"), regexp(r"END\nSTART"), regexp(r"é\n")] {
+        let expected = if query.as_str() == r"é\n" {
+            match_ranges(&text, "é\n")
+                .into_iter()
+                .map(|range| range.start)
+                .collect()
+        } else {
+            expected.clone()
+        };
+        assert_eq!(walk(&snapshot, &query, Direction::Forward), expected);
         let counted = count(&snapshot, &query, 100, &Cancel::new()).expect("not canceled");
         assert_eq!(
             counted.starts,

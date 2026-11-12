@@ -74,6 +74,8 @@ fn test_perf_find_and_count_cancel(cx: &mut TestAppContext) {
     assert!(best < Duration::from_millis(8), "find took {best:?}");
 
     // A count of a common string stops within 5 ms of its cancel being set, best of the runs.
+    // The cancel comes 2 ms in, far less than reading 64 MB once takes at memory speed, so the
+    // count is always still running when it is canceled.
     let common = query("ab");
     let mut best = Duration::MAX;
     for _ in 0..RUNS {
@@ -83,7 +85,7 @@ fn test_perf_find_and_count_cancel(cx: &mut TestAppContext) {
                 let counted = count(&snapshot, &common, usize::MAX, &cancel);
                 (counted, Instant::now())
             });
-            thread::sleep(Duration::from_millis(30));
+            thread::sleep(Duration::from_millis(2));
             let canceled_at = Instant::now();
             cancel.cancel();
             let (counted, finished_at) = worker.join().expect("count does not panic");

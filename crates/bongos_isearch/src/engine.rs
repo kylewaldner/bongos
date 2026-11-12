@@ -6,7 +6,7 @@
 use bongos_isearch_model::{Compiled, Direction, SearchSpec, compile, window};
 use futures::executor::block_on;
 use language::{Bias, BufferSnapshot, Point};
-use multi_buffer::{Anchor, MultiBufferOffset, MultiBufferSnapshot, ToOffset as _};
+use multi_buffer::{Anchor, MultiBufferOffset, MultiBufferRow, MultiBufferSnapshot, ToOffset as _};
 use project::search::SearchQuery;
 use std::num::NonZeroUsize;
 use std::ops::Range;
@@ -197,9 +197,11 @@ struct Scan<'a> {
 }
 
 impl Scan<'_> {
-    /// Searches the windows in order. Matches must end at or before `bound`. A multiline pattern
-    /// searches each window extended by the overlap and keeps only the matches starting inside
-    /// the window, so a match across a boundary is found once.
+    /// Searches the windows in order. Matches must start at or after the window start and end at
+    /// or before `bound`. A window that starts or ends inside a line (the first one, at `from`) is
+    /// searched over its whole lines, so whole-word checks and `^`/`$` see the real neighbors.
+    /// A multiline pattern searches each window extended by the overlap and keeps only the
+    /// matches starting inside the window, so a match across a boundary is found once.
     fn run(
         &self,
         windows: &[Range<usize>],
@@ -210,16 +212,21 @@ impl Scan<'_> {
             if self.cancel.is_canceled() {
                 return FindOutcome::Canceled;
             }
-            let searched = if self.multiline {
-                window.start..window::overlapped(window, bound).end
+            let start = line_start(self.snapshot, window.start);
+            let mut end = if self.multiline {
+                clip_right(self.snapshot, window::overlapped(window, bound).end)
             } else {
-                window.clone()
+                window.end
             };
-            let matches = search_range(self.snapshot, self.query, searched)
+            if line_start(self.snapshot, window.end) != window.end {
+                end = end.max(line_end(self.snapshot, window.end));
+            }
+            let matches = search_range(self.snapshot, self.query, start..end)
                 .into_iter()
                 .filter(|found| {
-                    found.end <= bound
-                        && (!self.multiline || (window.start..window.end).contains(&found.start))
+                    found.start >= window.start
+                        && found.end <= bound
+                        && (!self.multiline || found.start < window.end)
                 });
             let chosen = match self.direction {
                 Direction::Forward => matches.min_by_key(|found| found.start),
@@ -253,6 +260,11 @@ impl Count {
 
 /// Counts the matches of the whole multibuffer, stopping at `cap`. Walks 1 MB windows, each split
 /// into pieces searched in parallel over the available cpus. `None` when canceled.
+///
+/// The parallel part runs on `std::thread::scope` workers, one 64 KB piece at a time, not on the
+/// gpui executor: the engine's functions are plain sync functions, callable both from tests and
+/// from inside a `cx.background_spawn` task, and scoped threads let the workers borrow the
+/// snapshot and query without spawning tasks or cloning them per piece.
 pub fn count(
     snapshot: &MultiBufferSnapshot,
     query: &SearchQuery,
@@ -321,7 +333,7 @@ fn count_pieces(
             }
             let piece = &pieces[index];
             let searched = if multiline {
-                window::overlapped(piece, len)
+                piece.start..clip_right(snapshot, window::overlapped(piece, len).end)
             } else {
                 piece.clone()
             };
@@ -396,6 +408,21 @@ fn line_start(snapshot: &MultiBufferSnapshot, offset: usize) -> usize {
     let offset = snapshot.clip_offset(MultiBufferOffset(offset), Bias::Left);
     let row = snapshot.offset_to_point(offset).row;
     snapshot.point_to_offset(Point::new(row, 0)).0
+}
+
+/// The end of the line containing `offset`, before its newline.
+fn line_end(snapshot: &MultiBufferSnapshot, offset: usize) -> usize {
+    let offset = snapshot.clip_offset(MultiBufferOffset(offset), Bias::Left);
+    let row = snapshot.offset_to_point(offset).row;
+    let column = snapshot.line_len(MultiBufferRow(row));
+    snapshot.point_to_offset(Point::new(row, column)).0
+}
+
+/// `offset` moved forward to a char boundary, so an overlap end never splits a char.
+fn clip_right(snapshot: &MultiBufferSnapshot, offset: usize) -> usize {
+    snapshot
+        .clip_offset(MultiBufferOffset(offset), Bias::Right)
+        .0
 }
 
 /// `range` cut into pieces of about `size` bytes, each inner boundary on a line start. A line
