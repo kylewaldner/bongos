@@ -208,8 +208,8 @@ mod notice_tests {
     use super::*;
 
     async fn window(cx: &mut TestAppContext) -> gpui::WindowHandle<Workspace> {
-        let fs = ::fs::FakeFs::new(cx.executor());
-        let project = Project::test(fs, [] as [&Path; 0], cx).await;
+        let app_state = cx.update(workspace::AppState::test);
+        let project = Project::test(app_state.fs.clone(), [] as [&Path; 0], cx).await;
         cx.add_window(|window, cx| Workspace::test_new(project, window, cx))
     }
 

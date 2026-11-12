@@ -163,6 +163,8 @@ pub enum KotlinUpdatesEvent {
 struct ActiveDownload {
     progress: DownloadProgress,
     cancel: Arc<AtomicBool>,
+    /// Ends the wait on the install even when its body stalls and no chunk comes to see `cancel`.
+    stop: Option<futures::channel::oneshot::Sender<()>>,
 }
 
 struct GlobalKotlinUpdates(Entity<KotlinUpdates>);
@@ -327,10 +329,13 @@ impl KotlinUpdates {
     /// releases the version lock; nothing is recorded, so the next check offers the build again.
     /// A running server is untouched. Returns whether a download was running.
     pub fn cancel_download(&mut self, _cx: &mut Context<Self>) -> bool {
-        let Some(download) = &self.download else {
+        let Some(download) = &mut self.download else {
             return false;
         };
         download.cancel.store(true, Ordering::SeqCst);
+        if let Some(stop) = download.stop.take() {
+            stop.send(()).ok();
+        }
         self.checker.note(&format!(
             "download: kotlin-lsp {} cancel requested",
             download.progress.version
@@ -372,6 +377,7 @@ impl KotlinUpdates {
                     let version = entry.version.clone();
                     checker.note(&format!("download: kotlin-lsp {version} started"));
                     let cancel = Arc::new(AtomicBool::new(false));
+                    let (stop_tx, stop_rx) = futures::channel::oneshot::channel();
                     let (progress_tx, mut progress_rx) = futures::channel::mpsc::unbounded();
                     let forwarder = this.update(cx, |this, cx| {
                         this.download = Some(ActiveDownload {
@@ -381,6 +387,7 @@ impl KotlinUpdates {
                                 total: None,
                             },
                             cancel: cancel.clone(),
+                            stop: Some(stop_tx),
                         });
                         cx.emit(KotlinUpdatesEvent::DownloadStarted {
                             version: version.clone(),
@@ -418,7 +425,16 @@ impl KotlinUpdates {
                         )
                     });
                     // The version lock is released when the install task returns.
-                    let result = install.await;
+                    let result = match select(install, stop_rx).await {
+                        Either::Left((result, _)) => result,
+                        // Dropping the install task stops it, removes its partial files and
+                        // releases its version lock.
+                        Either::Right((Ok(()), install)) => {
+                            drop(install);
+                            Err(InstallCancelled.into())
+                        }
+                        Either::Right((Err(_), install)) => install.await,
+                    };
                     // The progress sender went with the install: show what it reported last.
                     if let Some(forwarder) = forwarder {
                         forwarder.await;
@@ -1901,6 +1917,10 @@ mod tests {
             !updates.read_with(&reader, |updates, _| updates.downloading)
         });
         let dir = harness.server_dir();
+        // A dropped install removes its files as it unwinds; give it a moment.
+        wait_until(cx, "the partial files to go", || {
+            !dir.join(".263.3.0.download").exists() && !dir.join(".263.3.0.staging").exists()
+        });
         assert!(!dir.join(".263.3.0.download").exists());
         assert!(!dir.join(".263.3.0.staging").exists());
         assert!(!dir.join("263.3.0").exists());
