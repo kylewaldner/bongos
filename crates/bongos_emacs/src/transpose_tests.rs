@@ -484,16 +484,27 @@ async fn transpose_words_with_the_mark_in_another_excerpt_uses_the_plain_form(
         assert!(crate::mark::set_mark(&editor, mark, cx));
         editor.update(cx, |editor, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {
-                s.select_ranges([Point::new(4, 6)..Point::new(4, 6)])
+                s.select_ranges([Point::new(1, 6)..Point::new(1, 6)])
             })
         });
-        let before = editor.read(cx).text(cx);
+        assert_eq!(editor.read(cx).text(cx), "one two\nthree four");
         crate::transpose::transpose_words_command(
             &TransposeWords { count: None },
             &editor,
             window,
             cx,
         );
-        assert_eq!(editor.read(cx).text(cx), before);
+        // The plain form swaps "three" and "four"; the mark form would have swapped "two" with
+        // "four" across excerpts.
+        assert_eq!(editor.read(cx).text(cx), "one two\nfour three");
+        let buffer_text = editor
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .as_singleton()
+            .map(|buffer| buffer.read(cx).text());
+        if let Some(text) = buffer_text {
+            assert_eq!(text, "one two\nx\ny\nz\nfour three");
+        }
     });
 }
