@@ -42,6 +42,7 @@ use crate::outcomes::{self, Delivered, Reported, RunOutcome};
 use crate::process::ProcessRecord;
 use crate::runner_program::Interpreter;
 use crate::runtime::{Finish, Runner, Settlement};
+use crate::shipped::Template;
 use crate::task_link::{self, Completed, Finale, Next, StoreWrites, TaskWrites, WriteCommand};
 use crate::worktrees::{Git, RunWorktree, TaskCheckout, branch_worktree_path};
 
@@ -223,9 +224,14 @@ impl WorkflowEngine {
         definitions::validate_definitions(&self.dirs, name)
     }
 
-    /// Creates a definition from the minimal template in the profile layer.
-    pub fn new_definition(&self, name: Option<&str>) -> Result<NewDefinition, DefinitionError> {
-        definitions::new_definition(self.dirs.profile.as_deref(), name)
+    /// Creates a definition in the profile layer from the minimal template, or with `template`
+    /// from a shipped definition.
+    pub fn new_definition(
+        &self,
+        name: Option<&str>,
+        template: Option<&Template>,
+    ) -> Result<NewDefinition, DefinitionError> {
+        definitions::new_definition_from(self.dirs.profile.as_deref(), name, template)
     }
 
     /// The `workflow.toml` of the definition `name`, or of the first by name with no name (until
