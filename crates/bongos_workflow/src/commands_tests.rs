@@ -160,6 +160,25 @@ async fn new_writes_the_template_and_opens_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn shipped_templates_are_offered_by_workflow_new(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true).await;
+    dispatch("workflow::New", cx);
+    // The list opens on "Minimal"; the next row is the first shipped definition.
+    dispatch("menu::SelectNext", cx);
+    dispatch("menu::Confirm", cx);
+
+    let dir = env.profile.join("implement-pr");
+    let written = std::fs::read_to_string(dir.join(DEFINITION_FILE)).expect("a copy is written");
+    assert!(written.contains("name = \"implement PR\""), "{written}");
+    assert!(dir.join("triage.md").is_file());
+    assert!(dir.join("run_tests.py").is_file());
+    assert!(
+        !env.profile.join("new-workflow").exists(),
+        "not the minimal one"
+    );
+}
+
+#[gpui::test]
 async fn edit_definition_opens_the_resolved_file(cx: &mut TestAppContext) {
     let (env, cx) = env(cx, true).await;
     let file = env.profile.join("broken").join(DEFINITION_FILE);

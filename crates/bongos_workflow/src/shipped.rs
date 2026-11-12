@@ -30,12 +30,12 @@ pub const TEMPLATES: &[Template] = &[
     Template {
         name: "ship PR",
         dir: "ship-pr",
-        description: "Wait for CI and fix it, ask before merging, merge and wait for the deploy",
+        description: "Rebase when the parent PR merged, wait for CI and fix it, ask before merging, merge and wait for the deploy",
     },
     Template {
         name: "babysit PR",
         dir: "babysit-pr",
-        description: "Watch a pull request: fix red CI, ask before merging when it is green",
+        description: "Watch a pull request: fix red CI (at most five passes), ask before merging when it is green",
     },
 ];
 
