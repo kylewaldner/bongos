@@ -455,7 +455,7 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 46] = [
+const EMACS_ACTIONS: [(&str, &str); 48] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -501,6 +501,8 @@ const EMACS_ACTIONS: [(&str, &str); 46] = [
     ("emacs::CopyRegionOrLine", "emacs: copy region or line"),
     ("emacs::KillWholeLine", "emacs: kill whole line"),
     ("emacs::AppendNextKill", "emacs: append next kill"),
+    ("emacs::Yank", "emacs: yank"),
+    ("emacs::YankPop", "emacs: yank pop"),
     ("emacs::Recenter", "emacs: recenter"),
     ("emacs::Reposition", "emacs: reposition"),
     ("emacs::GotoLine", "emacs: goto line"),
@@ -733,6 +735,39 @@ async fn emacs_line_kills_at_three_carets_are_one_undo_step(cx: &mut TestAppCont
     cx.update(|window, cx| window.dispatch_action(Box::new(editor::actions::Undo), cx));
     cx.run_until_parked();
     assert_eq!(text(cx), "aa\nbb\ncc\ndd");
+}
+
+/// Yank puts back the newest kill and yank-pop swaps it for the one before, reached by action
+/// name with a count argument; neither writes the clipboard, and yank-pop after another command
+/// changes nothing.
+#[gpui::test]
+async fn emacs_yank_and_yank_pop_run_on_an_editor_by_name(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("one\ntwo", cx).await;
+    let text = |cx: &mut gpui::VisualTestContext| editor.update(cx, |editor, cx| editor.text(cx));
+
+    select_offsets(&editor, &[0..0], cx);
+    run_emacs("emacs::KillWord", serde_json::json!({}), cx);
+    select_offsets(&editor, &[1..1], cx);
+    run_emacs("emacs::KillWord", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "\n");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("two"));
+
+    run_emacs("emacs::Yank", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "\ntwo");
+    run_emacs("emacs::YankPop", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "\none");
+    run_emacs("emacs::YankPop", serde_json::json!({ "count": -1 }), cx);
+    assert_eq!(text(cx), "\ntwo");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("two"));
+
+    select_offsets(&editor, &[0..0], cx);
+    run_emacs("emacs::Yank", serde_json::json!({ "count": 2 }), cx);
+    assert_eq!(text(cx), "one\ntwo");
+
+    // Another command in between: yank-pop changes nothing.
+    run_emacs("emacs::ForwardWord", serde_json::json!({}), cx);
+    run_emacs("emacs::YankPop", serde_json::json!({}), cx);
+    assert_eq!(text(cx), "one\ntwo");
 }
 
 /// The zap commands run on an editor when dispatched by name with their count and character
