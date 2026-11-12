@@ -494,6 +494,66 @@ deactivated; set it to `true` to have typing replace the region, as in other edi
 { "emacs": { "delete_selection": true } }
 ```
 
+## Incremental search
+
+C-s and C-r search as you type, as in Emacs. The prompt opens in the minibuffer strip, the cursor
+moves to the nearest match with every character, and the matches near the visible text are
+highlighted. Folds that hide the match open while it is the current one. Under the Emacs base
+keymap (the default) these keys start a search in an editor:
+
+| Key | Command |
+|---|---|
+| C-s, C-r | search forward, search backward |
+| C-M-s, C-M-r | regexp search forward, backward |
+
+Inside a search these keys apply (Linux names; they are in `assets/keymaps/specific-overrides.json`
+and the macOS file):
+
+| Key | Command |
+|---|---|
+| C-s, C-r | next match, previous match; with an empty string, recall the last search |
+| DEL | remove the last character and go back to the match before it |
+| RET, C-RET | stop at the match: select it, or leave the cursor at its other end |
+| C-g, ESC | remove a failing end of the string, or else stop where the search began |
+| M-p, M-n | previous and next search of the history |
+| C-w, C-M-y, M-s C-e | add the word, the character or the rest of the line at the cursor |
+| M-s . | search for the symbol at the cursor, as a whole symbol |
+| C-y | add the top of the kill ring, or the clipboard |
+| C-j | add a newline |
+| M-e | edit the string freely; RET, C-s or C-r resume |
+| M-c, M-r, M-s SPC | toggle case, regexp, lax whitespace |
+| M-s M-<, M-s M-> | jump to the first or the last match |
+| C-l | recenter the match (middle, top, bottom) |
+| C-c C-o | occur: list every matching line in a results tab |
+
+Any other key stops the search at the match and then runs as it does in the editor, so C-a, C-n
+or a command key keep working. C-M-s and C-M-r inside a search stop it and start a regexp search.
+A stopped search pushes where it began onto the mark ring, so C-x C-SPC goes back.
+
+The prompt tells the state: `Failing` when nothing matches, `Wrapped` after the search passed an
+end of the buffer and `Overwrapped` when it went on past the place it started from, `case-sensitive` or
+`case-insensitive` once you toggled the case, `strict-space`, `Regexp` and `Symbol`, then
+`I-search` and `backward` for a backward search, as in `Wrapped Regexp I-search backward: `. The
+count of the matches shows in front of the prompt as `3/12`.
+
+Case is smart by default: a string with an uppercase letter is case-sensitive, any other is not.
+With lax whitespace (the default for text) a space matches any text on the line up to the next
+term; toggle it off for exact spaces. A regexp search uses the regexp syntax of the project
+search.
+
+Occur lists the lines that match in a read-only tab, up to 10,000 lines (a message says when it
+stopped); open a result with the open-excerpts command to jump to its line in the buffer.
+
+`minibuffer.enabled_for` names `isearch` by default, so the search prompt is in the strip. Remove
+`"isearch"` from that list to get the prompt as a centered modal; the keys are the same.
+
+On a large file typing never waits. A search runs in the background in line-aligned windows,
+nearest to the cursor first: the first is 64 KB and each next one doubles up to 4 MB, so a match
+close to the cursor shows at once and a search that you extend or cancel stops between windows.
+The match count runs apart from it, in 1 MB windows on every core. While it is still running the
+counter is blank, or shows an ellipsis while a search is pending, and it stops at 10,000 matches
+and reads `3/10000+`.
+
 ## Minibuffer
 
 As in Emacs, prompts open in a one-line strip at the bottom of the window, below the status bar,
@@ -503,7 +563,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json

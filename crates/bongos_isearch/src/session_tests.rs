@@ -318,13 +318,14 @@ async fn isearch_actions_are_listed_in_the_command_palette(cx: &mut TestAppConte
 #[gpui::test]
 async fn isearch_opens_in_the_strip_with_the_default_settings(cx: &mut TestAppContext) {
     let text = KOTLIN.to_string();
-    let (workspace, _editor, mut cx) = workspace_with_routes(None, cx, move |project, window, cx| {
-        let buffer = project.update(cx, |project, cx| {
-            project.create_local_buffer(&text, None, false, cx)
-        });
-        cx.new(|cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx))
-    })
-    .await;
+    let (workspace, _editor, mut cx) =
+        workspace_with_routes(None, cx, move |project, window, cx| {
+            let buffer = project.update(cx, |project, cx| {
+                project.create_local_buffer(&text, None, false, cx)
+            });
+            cx.new(|cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx))
+        })
+        .await;
     let cx = &mut cx;
     cx.update(|_, cx| {
         assert!(

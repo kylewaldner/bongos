@@ -40,7 +40,12 @@ const EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full"];
 const SESSION: [&str; 3] = ["Workspace", "Isearch", "Editor mode=full"];
 const STRIP_SESSION: [&str; 4] = ["Workspace", "Minibuffer", "Isearch", "Editor mode=full"];
 const TERMINAL: [&str; 4] = ["Workspace", "Dock", "TerminalPanel", "Terminal"];
-const SEARCH_BAR: [&str; 4] = ["Workspace", "Pane", "BufferSearchBar", "Editor mode=auto_height"];
+const SEARCH_BAR: [&str; 4] = [
+    "Workspace",
+    "Pane",
+    "BufferSearchBar",
+    "Editor mode=auto_height",
+];
 
 /// The keymaps in load order, with the sources the app loads them with (`load_default_keymap`).
 fn load_all(platform: &Platform, emacs: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
@@ -201,7 +206,9 @@ async fn a_session_binds_every_in_session_command_but_the_unbound_ones(cx: &mut 
     init_keymap_test(cx);
     for platform in [LINUX, MACOS] {
         let overrides = cx
-            .update(|cx| KeymapFile::load_asset(platform.overrides, Some(KeybindSource::Default), cx))
+            .update(|cx| {
+                KeymapFile::load_asset(platform.overrides, Some(KeybindSource::Default), cx)
+            })
             .unwrap();
         let bound: Vec<&str> = overrides
             .iter()
@@ -233,14 +240,10 @@ async fn another_base_keymap_gets_its_own_ctrl_s_back(cx: &mut TestAppContext) {
         cx.clear_key_bindings();
         super::load_default_keymap(cx);
     });
-    let bindings: Vec<KeyBinding> = cx.update(|cx| {
-        cx.key_bindings().borrow().bindings().cloned().collect()
-    });
+    let bindings: Vec<KeyBinding> =
+        cx.update(|cx| cx.key_bindings().borrow().bindings().cloned().collect());
     let keymap = Keymap::new(bindings);
-    assert_eq!(
-        first(&keymap, "ctrl-s", &EDITOR),
-        Some("workspace::Save")
-    );
+    assert_eq!(first(&keymap, "ctrl-s", &EDITOR), Some("workspace::Save"));
     for (input, _) in STARTERS {
         let names = resolve(&keymap, input, &EDITOR);
         assert!(
