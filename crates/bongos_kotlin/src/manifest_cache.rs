@@ -444,7 +444,7 @@ fn read_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::locks::{LockTimedOut, tests::thread_registry};
     use futures::{FutureExt as _, executor::block_on};
@@ -455,7 +455,7 @@ mod tests {
     const DIGEST: &str = "ae0c4b01e17ab73a4a5227a78ea99e6dcbe3e499600315b22759a4e4cddd11df";
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
-    fn key_pair(seed: u8) -> Ed25519KeyPair {
+    pub(crate) fn key_pair(seed: u8) -> Ed25519KeyPair {
         Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap()
     }
 
@@ -463,7 +463,7 @@ mod tests {
         TrustedKey::parse(id, &BASE64.encode(pair.public_key().as_ref())).unwrap()
     }
 
-    fn release_keys() -> Vec<TrustedKey> {
+    pub(crate) fn release_keys() -> Vec<TrustedKey> {
         vec![trusted("release-1", &key_pair(7))]
     }
 
@@ -471,7 +471,7 @@ mod tests {
         Url::parse("https://manifests.example.com/kotlin/servers.json").unwrap()
     }
 
-    fn servers(serial: u64, version: &str) -> Vec<u8> {
+    pub(crate) fn servers(serial: u64, version: &str) -> Vec<u8> {
         let url = format!(
             "https://download.jetbrains.com/language-server/kotlin-server/{version}/kotlin-server-{version}.tar.gz"
         );
@@ -489,7 +489,11 @@ mod tests {
         .unwrap()
     }
 
-    fn signed_with(servers: Vec<u8>, id: &str, pair: &Ed25519KeyPair) -> FetchedManifest {
+    pub(crate) fn signed_with(
+        servers: Vec<u8>,
+        id: &str,
+        pair: &Ed25519KeyPair,
+    ) -> FetchedManifest {
         let sig = serde_json::to_vec(&json!({
             "signatures": [{ "key": id, "ed25519": BASE64.encode(pair.sign(&servers)) }]
         }))
@@ -497,11 +501,11 @@ mod tests {
         FetchedManifest { servers, sig }
     }
 
-    fn signed(serial: u64, version: &str) -> FetchedManifest {
+    pub(crate) fn signed(serial: u64, version: &str) -> FetchedManifest {
         signed_with(servers(serial, version), "release-1", &key_pair(7))
     }
 
-    fn now() -> DateTime<Utc> {
+    pub(crate) fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-11-12T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc)

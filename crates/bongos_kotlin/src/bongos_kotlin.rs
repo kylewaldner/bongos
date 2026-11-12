@@ -16,6 +16,7 @@ mod resolve;
 mod status;
 mod status_item;
 mod unsupported;
+mod updates;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -72,6 +73,10 @@ pub use status_item::{KotlinStatusItem, cancel_installs, show_logs};
 pub use unsupported::{
     Feature, attach_unsupported_notices, not_supported_message, not_supported_notice_id,
     not_supported_text,
+};
+pub use updates::{
+    FETCH_TIMEOUT, KotlinUpdates, MAX_AGE, Refresh, STARTUP_DELAY, UpdateSetup, UpdateTimings,
+    WAKE_INTERVAL, WallClock,
 };
 
 actions!(
@@ -238,6 +243,7 @@ pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
         LanguageName::new_static("Kotlin"),
         Arc::new(KotlinAdapter::new(dirs.clone(), manifest)),
     );
+    KotlinUpdates::init(&dirs.install_root, &dirs.logs_dir, cx);
     attach_managers(dirs, cx);
     attach_notices(cx);
     attach_unsupported_notices(cx);
@@ -386,6 +392,19 @@ mod tests {
         );
         // Only the global view is read for a fetch, and it never sees the project's value.
         assert_eq!(global_manifest_url(cx), "https://example.com/servers.json");
+        // Positive control: the project's value did load, and a worktree-scoped read sees it.
+        let project_url = cx.update(|cx| {
+            KotlinSettings::get(
+                Some(SettingsLocation {
+                    worktree_id: worktree(),
+                    path: RelPath::empty(),
+                }),
+                cx,
+            )
+            .manifest_url
+            .clone()
+        });
+        assert_eq!(project_url, "https://evil.example.org/servers.json");
         clear_project(cx);
         assert_eq!(global_manifest_url(cx), "https://example.com/servers.json");
     }
