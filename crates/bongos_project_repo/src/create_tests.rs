@@ -107,8 +107,8 @@ fn a_failure_after_creating_folders_removes_them() {
     let folder = root.path().join("projects").join("invoicing");
     // A record path whose parent is a file: recording fails after everything else is made.
     let blocker = root.path().join("blocker");
-    std::fs::write(&blocker, "").unwrap();
     let mut locations = RepositoryLocations::load(blocker.join("record.toml")).unwrap();
+    std::fs::write(&blocker, "").unwrap();
     let result = block_on(ProjectRepo::create_with(request(&folder), &mut locations, isolated_git));
     assert!(result.is_err());
     assert!(!root.path().join("projects").exists());
