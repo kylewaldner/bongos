@@ -33,8 +33,8 @@ actions!(
     ]
 );
 
-/// The actions a session handles, which its key block binds. A key bound to anything else ends
-/// the session once the keystroke interceptor exists; the starters are not in it.
+/// The actions a session handles, which its key block binds. The keystroke interceptor ends the
+/// session with an implicit exit on a key bound to anything else; the starters are not in it.
 pub const IN_SESSION: &[&str] = &[
     "isearch::RepeatForward",
     "isearch::RepeatBackward",
