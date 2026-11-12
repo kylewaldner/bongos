@@ -57,8 +57,26 @@ routes = [{ to = "done" }]
 kind = "success"
 "#;
 
+/// One node that waits at a gate before it starts.
+const GATED_ONE: &str = r#"
+schema = 1
+name = "gatedone"
+start = "work"
+
+[nodes.work]
+kind = "agent"
+prompt = "work.md"
+gate = { when = "before", question = "Go ahead?" }
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
 fn world() -> World {
     let world = World::new();
+    write_definition(world.profile(), "gatedone", GATED_ONE);
     write_definition(world.profile(), "gatedfan", GATED_FAN);
     world
 }
@@ -274,16 +292,8 @@ fn the_engine_tells_the_sources_and_toasts_once(cx: &mut TestAppContext) {
         crate::gates::register(&engine, cx);
     });
     let run = cx
-        .update(|cx| engine.start_in(with_workflow("gatedfan"), &world.tree, cx))
+        .update(|cx| engine.start_in(with_workflow("gatedone"), &world.tree, cx))
         .unwrap();
-    for _ in 0..3 {
-        engine.lifecycle().tick();
-        cx.update(|cx| engine.publish(cx));
-    }
-    {
-        let mut lifecycle = engine.lifecycle();
-        lifecycle.runtime_mut().runner_mut().release_all();
-    }
     for _ in 0..3 {
         engine.lifecycle().tick();
         cx.update(|cx| engine.publish(cx));
