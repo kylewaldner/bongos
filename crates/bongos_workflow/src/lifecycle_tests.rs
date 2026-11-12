@@ -1138,3 +1138,6 @@ fn a_second_start_is_refused_through_can_start_run(cx: &mut TestAppContext) {
     cx.update(|cx| engine.cancel(&run, cx)).unwrap();
     assert!(cx.update(|cx| LiveModesRegistry::can_start_run(LEAF, cx).allowed));
 }
+
+#[path = "gates_tests.rs"]
+mod gates_tests;

@@ -364,7 +364,9 @@ pub struct Lifecycle<R: Runner> {
     worktrees: Box<dyn RunWorktrees>,
     settings: WorkflowsSettings,
     runs: Vec<RunEntry>,
-    statuses: BTreeMap<RunId, RunStatus>,
+    /// What the last event for a run said: its status and its open gates, so a second gate in a
+    /// run that already waits is an update too.
+    statuses: BTreeMap<RunId, (RunStatus, BTreeSet<NodeKey>)>,
     events: Vec<WorkflowEvent>,
 }
 
@@ -1100,14 +1102,17 @@ impl<R: Runner> Lifecycle<R> {
         self.status(run).ok_or_else(|| unknown_run(run))
     }
 
-    /// Queues a `Changed` event for `run` when its status changed since the last one.
+    /// Queues a `Changed` event for `run` when its status or its set of open gates changed since
+    /// the last one.
     fn note(&mut self, run: &str) {
-        let (Some(status), Ok(entry)) = (self.status(run), self.entry(run)) else {
+        let (Some(state), Ok(entry)) = (self.state(run), self.entry(run)) else {
             return;
         };
+        let status = RunStatus::of(&state);
+        let gates: BTreeSet<NodeKey> = state.open_gates.keys().cloned().collect();
         let task_id = entry.task_id.clone();
-        if self.statuses.get(run) != Some(&status) {
-            self.statuses.insert(run.to_string(), status);
+        if self.statuses.get(run) != Some(&(status, gates.clone())) {
+            self.statuses.insert(run.to_string(), (status, gates));
             self.events.push(WorkflowEvent::Changed {
                 run: run.to_string(),
                 task_id,
