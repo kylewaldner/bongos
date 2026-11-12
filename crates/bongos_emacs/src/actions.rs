@@ -198,6 +198,14 @@ actions!(
     ]
 );
 count_action!(
+    /// Inserts the newest kill ring entry at the cursor, or the Nth newest with a count.
+    Yank
+);
+count_action!(
+    /// Right after a yank, replaces the yanked text with the next older kill ring entry.
+    YankPop
+);
+count_action!(
     /// Scrolls the cursor line to the middle, top or bottom of the window, cycling.
     Recenter
 );

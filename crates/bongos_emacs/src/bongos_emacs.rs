@@ -24,6 +24,7 @@ pub mod snapshot_text;
 mod space;
 mod transpose;
 mod words;
+mod yank;
 mod zap;
 
 #[cfg(test)]
@@ -65,6 +66,8 @@ mod transpose_tests;
 #[cfg(test)]
 mod words_tests;
 #[cfg(test)]
+mod yank_tests;
+#[cfg(test)]
 mod zap_tests;
 
 use editor::Editor;
@@ -98,6 +101,8 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, kill::copy_region_or_line_command);
         register(editor, &weak, kill::kill_whole_line_command);
         register(editor, &weak, kill::append_next_kill_command);
+        register(editor, &weak, yank::yank_command);
+        register(editor, &weak, yank::yank_pop_command);
         register(editor, &weak, space::delete_horizontal_space_command);
         register(editor, &weak, space::just_one_space_command);
         register(editor, &weak, space::delete_blank_lines_command);

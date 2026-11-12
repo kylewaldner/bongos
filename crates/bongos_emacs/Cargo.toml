@@ -22,6 +22,7 @@ language.workspace = true
 multi_buffer.workspace = true
 schemars.workspace = true
 serde.workspace = true
+settings.workspace = true
 text.workspace = true
 theme.workspace = true
 workspace.workspace = true
