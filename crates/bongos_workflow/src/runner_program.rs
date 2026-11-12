@@ -431,8 +431,8 @@ impl Snap {
                 entries: Some(entries),
                 ..
             } => {
-                let is_dir = fs::symlink_metadata(path)
-                    .is_ok_and(|metadata| metadata.file_type().is_dir());
+                let is_dir =
+                    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir());
                 let made = if is_dir {
                     Ok(())
                 } else {
@@ -523,7 +523,11 @@ impl GitMetadata {
         });
         if let Some(dir) = git_dir {
             paths.push((dir.clone(), false));
-            paths.extend(PER_WORKTREE_FILES.iter().map(|name| (dir.join(name), false)));
+            paths.extend(
+                PER_WORKTREE_FILES
+                    .iter()
+                    .map(|name| (dir.join(name), false)),
+            );
         }
         Self {
             entries: paths

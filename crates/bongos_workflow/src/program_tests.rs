@@ -902,9 +902,7 @@ fn a_program_that_changes_git_metadata_fails_and_it_is_put_back() {
     let failure = failure(&finish);
     assert_eq!(failure.reason, FailureReason::PermissionDenied);
     assert!(
-        failure
-            .detail
-            .starts_with("program changed git metadata: "),
+        failure.detail.starts_with("program changed git metadata: "),
         "{}",
         failure.detail
     );
