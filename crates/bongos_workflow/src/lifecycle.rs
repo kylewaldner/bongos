@@ -390,6 +390,7 @@ impl<R: Runner> Lifecycle<R> {
 
     /// Takes the settings a later start or restart reads (free space, worktree directory).
     pub fn set_settings(&mut self, settings: WorkflowsSettings) {
+        self.runtime.set_limits(settings.limits);
         self.settings = settings;
     }
 
@@ -512,7 +513,8 @@ impl<R: Runner> Lifecycle<R> {
                 "Add one (todo: add), or reopen one.",
             )
         })?;
-        if let Some(refusal) = self.active_refusal(&request.task_id, context) {
+        let reported = context.active_run.clone();
+        if let Some(refusal) = self.active_refusal(&request.task_id, reported) {
             return Err(refusal);
         }
         let name = request
@@ -733,16 +735,35 @@ impl<R: Runner> Lifecycle<R> {
     /// cancelled first; earlier attempts stay on disk. The run keeps its id and its one record.
     pub fn restart(&mut self, run: &str, dirs: &LayerDirs) -> Result<RunId, Refusal> {
         let index = self.index(run)?;
+        let status = self.status_of(run)?;
+        if status == RunStatus::Succeeded {
+            return Err(wrong_state(status, "restart"));
+        }
+        if !status.is_active() {
+            let task = self.runs[index].task_id.clone();
+            if self.active_run_id(&task).is_some() {
+                if let Some(refusal) = self.active_refusal(&task, None) {
+                    return Err(refusal);
+                }
+            }
+        }
         let name = self.runs[index].record.workflow.clone();
         let (resolved, definition) = load_definition(dirs, &name, None)?;
         let attempt = self.runs[index].attempt() + 1;
         let checkout = self.runs[index].task.clone();
         let worktree = self.create_worktree(&checkout, run, attempt)?;
-        if self.status(run).is_some_and(RunStatus::is_active) {
+        let old_definition = self.runtime.definition(run).cloned();
+        let old_attempt_dir = self.runs[index].attempt_dir();
+        if status.is_active() {
             self.runtime.cancel(run).map_err(Refusal::runtime)?;
         }
         self.runtime.remove(run);
         let mut entry = self.runs.remove(index);
+        let (old_record, old_worktree, old_rev) = (
+            entry.record.clone(),
+            entry.worktree.clone(),
+            entry.rev,
+        );
         entry.worktree = worktree;
         entry.record.layer = resolved.layer.label().to_string();
         let result = self.begin_attempt(
@@ -752,6 +773,22 @@ impl<R: Runner> Lifecycle<R> {
             definition,
             now().to_string(),
         );
+        if result.is_err() {
+            // Put the old attempt back so the run does not drop out.
+            entry.record = old_record;
+            entry.worktree = old_worktree;
+            entry.rev = old_rev;
+            self.runtime.remove(run);
+            if let Some(definition) = old_definition {
+                self.runtime
+                    .add(RunSpec {
+                        id: run.to_string(),
+                        definition,
+                        attempt_dir: old_attempt_dir,
+                    })
+                    .ok();
+            }
+        }
         self.runs.insert(index, entry);
         result?;
         self.note(run);
@@ -863,11 +900,9 @@ impl<R: Runner> Lifecycle<R> {
         ))
     }
 
-    fn active_refusal(&self, task_id: &str, context: &StartContext<'_>) -> Option<Refusal> {
+    fn active_refusal(&self, task_id: &str, reported: Option<ActiveRun>) -> Option<Refusal> {
         let own = self.active_run_id(task_id);
-        let active = context
-            .active_run
-            .clone()
+        let active = reported
             .or_else(|| self.active_run(task_id))?;
         let at = if active.step.is_empty() {
             String::new()

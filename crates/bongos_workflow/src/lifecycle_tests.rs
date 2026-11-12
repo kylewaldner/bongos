@@ -962,6 +962,11 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
+    let refusal = lifecycle.restart(&run, &world.dirs).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::WrongState, "a succeeded run stays");
+    let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
+    settle(&mut lifecycle);
+    lifecycle.cancel(&run).unwrap();
     let first = lifecycle.worktree(&run).unwrap().clone();
     assert!(first.branch.ends_with("-1"), "{}", first.branch);
 
@@ -999,6 +1004,27 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
     let first_log = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1).join("events.jsonl");
     assert!(first_log.is_file());
+}
+
+#[test]
+fn restart_of_a_cancelled_run_is_refused_while_another_run_holds_the_task() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let first = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    settle(&mut lifecycle);
+    lifecycle.cancel(&first).unwrap();
+    let second = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    let refusal = lifecycle.restart(&first, &world.dirs).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::ActiveRun);
+    assert_eq!(
+        refusal.offers,
+        vec![Offer::Resume(second.clone()), Offer::Cancel(second)]
+    );
+    assert_eq!(lifecycle.status(&first), Some(RunStatus::Cancelled));
 }
 
 #[test]

@@ -273,6 +273,10 @@ impl<R: Runner> Runtime<R> {
         &mut self.runner
     }
 
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+    }
+
     pub fn limits(&self) -> &Limits {
         &self.limits
     }

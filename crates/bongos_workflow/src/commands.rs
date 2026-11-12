@@ -226,7 +226,13 @@ fn on_run<A: Action>(
 fn report(workspace: &mut Workspace, result: Result<&str, Refusal>, cx: &mut Context<Workspace>) {
     let message = match result {
         Ok(done) => done.to_string(),
-        Err(refusal) => refusal.to_string(),
+        Err(refusal) => {
+            let mut message = refusal.to_string();
+            if !refusal.offers.is_empty() {
+                message.push_str(" (workflow: resume, workflow: cancel)");
+            }
+            message
+        }
     };
     show_toast(workspace, message, cx);
 }
