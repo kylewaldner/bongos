@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bongos_chat::model::Agent;
 use bongos_chat::{ChatHealth, HealthState};
-use bongos_work::{ActiveRun, LiveModesRegistry, WorkStore};
+use bongos_work::{ActiveRun, LiveModesRegistry, NeedsYouRegistry, WorkStore};
 use bongos_work_model::store::WorkTree;
 use bongos_workflow_model::definition::AgentKind;
 use bongos_workflow_model::scheduler::Branch;
@@ -162,6 +162,7 @@ impl WorkflowEngine {
         let engine = Self::open(cx);
         cx.set_global(engine.clone());
         crate::sources::register(&engine, cx);
+        crate::gates::register(&engine, cx);
         Some(engine)
     }
 
@@ -344,6 +345,7 @@ impl WorkflowEngine {
             return;
         }
         LiveModesRegistry::changed(cx);
+        NeedsYouRegistry::changed(cx);
         let observers: Vec<_> = cx
             .try_global::<Observers>()
             .map(|observers| observers.0.clone())
