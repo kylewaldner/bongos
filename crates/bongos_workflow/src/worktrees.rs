@@ -49,9 +49,11 @@ impl Git {
     }
 
     /// Runs git with `args` in `directory` and returns its whole output, whatever the exit status.
+    /// Replace refs are ignored (`GIT_NO_REPLACE_OBJECTS`): a program node may write `refs/`.
     pub(crate) async fn output(&self, directory: &Path, args: &[&str]) -> Result<Output, GitError> {
         util::command::new_command(&self.binary)
             .current_dir(directory)
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(args.iter().map(OsString::from))
             .envs(self.envs.iter().map(|(key, value)| (key, value)))
             .output()

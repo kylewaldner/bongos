@@ -22,7 +22,7 @@
 //!   get around an audit hook. The OS sandbox is the boundary, so a run that is "not sandboxed"
 //!   is not hard-confined. Known gaps of the shim, accepted because the sandbox holds: a walk
 //!   through closures (`__closure__`, `cell_contents`) reaches its state; `os.link` checks only
-//!   the destination; binding a unix socket creates a file anywhere; the arguments and
+//!   the destination (and refuses one into the git paths); binding a unix socket creates a file anywhere; the arguments and
 //!   environment of a listed command are not checked (`git -c core.fsmonitor=...` runs).
 //! - Git: the common git directory itself is never writable (the sandbox's root is read-only),
 //!   so a script cannot change `config`, `hooks/`, `packed-refs`, plant `commondir` or touch
@@ -33,9 +33,25 @@
 //!   deletion, `pack-refs`, `git gc --auto` and `git config` writes are refused. In the main
 //!   worktree, whose `.git` is the common git directory, the whole git directory is read-only, so
 //!   a script there cannot commit. Elsewhere than Linux the sandbox cannot keep a path inside the
-//!   writable ones read-only, so only the shim refuses those writes. A run without the sandbox is
-//!   checked after every pass instead ([`GitMetadata`]): changed metadata is put back and fails
-//!   the node ("program changed git metadata"). This runner calls no host git itself.
+//!   writable ones read-only, so only the shim refuses those writes. A run without the sandbox, or
+//!   with a sandbox other than Bubblewrap, is checked after every pass instead ([`GitMetadata`],
+//!   [`git_metadata_needed`]): changed metadata is put back and fails the node ("program changed
+//!   git metadata"). This runner calls no host git itself; the crate's own git
+//!   (`worktrees::Git`) runs with `GIT_NO_REPLACE_OBJECTS=1`.
+//! - Inside the writable git paths a script could plant what a later host git follows: a symlink
+//!   (`logs/refs/heads/main` to a file outside, which git's reflog append writes through), a
+//!   replace ref (`refs/replace/*`) or an alternate object store (`objects/info/alternates`,
+//!   `objects/info/http-alternates`). The shim refuses creating any symlink, renaming or hard
+//!   linking one into the git paths, writing through a symlink that sits inside them, and writing
+//!   the replace refs and alternates ([`ProgramNode::git_forbidden_paths`]). After every pass,
+//!   sandboxed or not, [`GitGuard`] walks the git paths without following symlinks, removes every
+//!   symlink found ("program planted symlinks in git") and puts the replace refs and alternates
+//!   back as they were ("program changed git metadata"); either fails the node.
+//! - Accepted in the git paths, since the worktree is writable by design and bongos never resumes
+//!   them on the host: a nested repository the script makes in the worktree (`sub/.git/config`,
+//!   which a git command run inside `sub/` would read), and `rebase-merge/` or `sequencer/` todo
+//!   files in the worktree's own git directory (bongos never runs `rebase --continue` or
+//!   `cherry-pick --continue`). Which refs a pass changed is not recorded.
 //! - Caps: `max_minutes` (the node's, else `workflows.programs.max_minutes`), the captured output
 //!   (`workflows.programs.max_output_mb`; the rest is dropped and the process stopped) and the
 //!   result size ([`RESULT_CAP`]). Halt and cancel stop the process group within 5 s.
@@ -334,9 +350,18 @@ impl ProgramNode {
     /// `commondir`, `packed-refs`, other worktrees' git directories) is never writable.
     pub fn writable_paths(&self) -> Vec<PathBuf> {
         let mut paths = vec![self.worktree.clone(), self.scratch.clone()];
+        paths.extend(self.git_writable_paths());
+        paths
+    }
+
+    /// The git part of [`ProgramNode::writable_paths`]: the common git directory's `objects/`,
+    /// `refs/` and `logs/` and, in a linked worktree, the worktree's own git directory. Nothing
+    /// in the main worktree or without a common git directory.
+    pub fn git_writable_paths(&self) -> Vec<PathBuf> {
         let Some(common) = &self.git_common_dir else {
-            return paths;
+            return Vec::new();
         };
+        let mut paths: Vec<PathBuf> = Vec::new();
         let common_writable = COMMON_WRITABLE.iter().map(|name| common.join(name));
         match self.git_layout() {
             GitLayout::Linked { git_dir } => {
@@ -349,6 +374,20 @@ impl ProgramNode {
             GitLayout::Whole(_) => {}
         }
         paths
+    }
+
+    /// The paths inside the writable git ones that change which objects every later git command
+    /// sees: the replace refs (`refs/replace`) and the alternate object stores
+    /// (`objects/info/alternates`, `objects/info/http-alternates`). The shim refuses writing them
+    /// and [`GitGuard`] puts them back after every pass.
+    pub fn git_forbidden_paths(&self) -> Vec<PathBuf> {
+        if self.git_writable_paths().is_empty() {
+            return Vec::new();
+        }
+        let Some(common) = &self.git_common_dir else {
+            return Vec::new();
+        };
+        GIT_FORBIDDEN.iter().map(|name| common.join(name)).collect()
     }
 
     /// The paths inside the writable ones that stay read-only: the worktree's `.git` file and
@@ -429,6 +468,14 @@ const PER_WORKTREE_FILES: &[&str] = &["gitdir", "commondir", "config.worktree"];
 
 /// The parts of the common git directory a commit or a branch update writes.
 const COMMON_WRITABLE: &[&str] = &["objects", "refs", "logs"];
+
+/// The paths in the common git directory's writable parts that no script may write (see
+/// [`ProgramNode::git_forbidden_paths`]).
+const GIT_FORBIDDEN: &[&str] = &[
+    "refs/replace",
+    "objects/info/alternates",
+    "objects/info/http-alternates",
+];
 
 /// Where a worktree's git metadata lives.
 #[derive(Debug, Clone, PartialEq)]
@@ -593,11 +640,12 @@ fn remove_any(path: &Path) -> std::io::Result<()> {
 
 /// The git metadata a script must leave alone, as it was before the script started: the
 /// worktree's `.git`, the common git directory with its `config` and `hooks/`, and the worktree's
-/// git directory with its `gitdir`, `commondir` and `config.worktree`. Used only for a run
-/// without the OS sandbox (where a listed command writes past the shim): after the pass the
-/// runner compares, puts back what it can and fails the node. It is no boundary, since a host
-/// git command run while the script runs reads what the script planted; a sandboxed run relies
-/// on the sandbox's allowlist instead.
+/// git directory with its `gitdir`, `commondir` and `config.worktree`. Used for a run without
+/// the OS sandbox (where a listed command writes past the shim) and for a sandbox that cannot
+/// keep these paths read-only (elsewhere than Linux; see [`git_metadata_needed`]): after the pass
+/// the runner compares, puts back what it can and fails the node. It is no boundary, since a host
+/// git command run while the script runs reads what the script planted; a sandboxed run on Linux
+/// relies on the sandbox's allowlist instead.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitMetadata {
     entries: Vec<(PathBuf, bool, Snap)>,
@@ -657,16 +705,157 @@ impl GitMetadata {
     }
 }
 
-/// The failure of a pass that changed git metadata.
-fn git_metadata_failure(key: &NodeKey, changed: &[PathBuf]) -> Failure {
-    let paths: Vec<String> = changed
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect();
+/// Whether a pass takes [`GitMetadata`]: when it runs without the OS sandbox, or with one that is
+/// not Bubblewrap on Linux, which alone binds the git metadata read-only inside the writable
+/// paths.
+pub fn git_metadata_needed(sandboxed: bool, linux: bool) -> bool {
+    !sandboxed || !linux
+}
+
+/// Removes every symlink under `root`, never following one, and returns the paths it removed.
+/// `root` itself is only looked at: a symlink there is not walked.
+pub fn remove_symlinks(root: &Path) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    let is_dir = fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_dir());
+    if !is_dir {
+        return removed;
+    }
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            // `DirEntry::file_type` does not follow a symlink.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_symlink() {
+                if let Err(error) = fs::remove_file(&path) {
+                    log::error!("workflows: could not remove {}: {error}", path.display());
+                }
+                removed.push(path);
+            } else if kind.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    removed.sort();
+    removed
+}
+
+/// What a pass's script did to git that fails the node, found and undone by [`GitGuard`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GitChanges {
+    /// Git metadata, replace refs and alternates that changed and were put back.
+    pub metadata: Vec<PathBuf>,
+    /// Symlinks found in the writable git paths and removed.
+    pub symlinks: Vec<PathBuf>,
+}
+
+impl GitChanges {
+    pub fn is_empty(&self) -> bool {
+        self.metadata.is_empty() && self.symlinks.is_empty()
+    }
+}
+
+/// The git checks of one pass, taken before the script starts: the writable git paths to walk
+/// for symlinks (each with whether it was a symlink itself before), the replace refs and
+/// alternates as they were, and [`GitMetadata`] when [`git_metadata_needed`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GitGuard {
+    roots: Vec<(PathBuf, bool)>,
+    forbidden: GitMetadata,
+    metadata: Option<GitMetadata>,
+}
+
+impl GitGuard {
+    pub fn take(node: &ProgramNode, sandboxed: bool) -> Self {
+        let is_symlink = |path: &Path| {
+            fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        };
+        let roots = node
+            .git_writable_paths()
+            .into_iter()
+            .map(|path| {
+                let was = is_symlink(&path);
+                (path, was)
+            })
+            .collect();
+        let forbidden = GitMetadata {
+            entries: node
+                .git_forbidden_paths()
+                .into_iter()
+                .map(|path| {
+                    let list = path.ends_with("refs/replace");
+                    let snap = Snap::take(&path, list);
+                    (path, list, snap)
+                })
+                .collect(),
+        };
+        Self {
+            roots,
+            forbidden,
+            metadata: git_metadata_needed(sandboxed, cfg!(target_os = "linux"))
+                .then(|| GitMetadata::take(node)),
+        }
+    }
+
+    /// Removes planted symlinks first (so nothing after follows one), then puts back the git
+    /// metadata, replace refs and alternates; returns what it found.
+    pub fn check_and_restore(&self) -> GitChanges {
+        let mut symlinks = Vec::new();
+        for (root, was_symlink) in &self.roots {
+            if *was_symlink {
+                continue;
+            }
+            let now = fs::symlink_metadata(root);
+            if now.is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+                if let Err(error) = fs::remove_file(root) {
+                    log::error!("workflows: could not remove {}: {error}", root.display());
+                }
+                symlinks.push(root.clone());
+                continue;
+            }
+            symlinks.extend(remove_symlinks(root));
+        }
+        let mut metadata = self
+            .metadata
+            .as_ref()
+            .map(GitMetadata::check_and_restore)
+            .unwrap_or_default();
+        metadata.extend(self.forbidden.check_and_restore());
+        GitChanges { metadata, symlinks }
+    }
+}
+
+/// The failure of a pass that changed git metadata or planted symlinks in git.
+fn git_failure(key: &NodeKey, changes: &GitChanges) -> Failure {
+    let list = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    if !changes.symlinks.is_empty() {
+        parts.push(format!(
+            "program planted symlinks in git (removed): {}",
+            list(&changes.symlinks)
+        ));
+    }
+    if !changes.metadata.is_empty() {
+        parts.push(format!(
+            "program changed git metadata: {}",
+            list(&changes.metadata)
+        ));
+    }
     Failure::new(
         FailureReason::PermissionDenied,
         Some(key.clone()),
-        format!("program changed git metadata: {}", paths.join(", ")),
+        parts.join("; "),
     )
 }
 
@@ -992,8 +1181,8 @@ struct Pass {
     sandbox_note: String,
     /// Kept alive while the process runs: it owns the network proxy.
     sandbox: Option<Sandbox>,
-    /// The git metadata before an unsandboxed script started, checked after it ends.
-    git: Option<GitMetadata>,
+    /// The git checks taken before the script started, run after it ends.
+    git: GitGuard,
 }
 
 /// A polling node between passes: no process, no cost.
@@ -1109,7 +1298,12 @@ impl ProgramRunner {
             "commands": node.permissions.commands,
             "network": node.permissions.network,
             "writable": node.writable_paths(),
-            "protected": node.read_only_paths(),
+            "protected": node
+                .read_only_paths()
+                .into_iter()
+                .chain(node.git_forbidden_paths())
+                .collect::<Vec<_>>(),
+            "git": node.git_writable_paths(),
             "denials_fd": DENIALS_FD,
         });
         fs::write(
@@ -1134,7 +1328,7 @@ impl ProgramRunner {
             sandbox,
             sandbox_note,
         } = self.wrap(&node, path(&self.interpreter.program), args, env);
-        let git = sandbox.is_none().then(|| GitMetadata::take(&node));
+        let git = GitGuard::take(&node, sandbox.is_some());
         write_summary(&dir, &json!({ "pass": number, "sandbox": sandbox_note }));
 
         let (stdout_read, stdout_write) = std::io::pipe().map_err(|error| io(&dir, error))?;
@@ -1350,12 +1544,10 @@ impl ProgramRunner {
         }
         stop_all(&mut processes);
         drop(sandboxes);
-        for git in gits.into_iter().flatten() {
-            let changed = git.check_and_restore();
-            if !changed.is_empty() {
-                log::error!(
-                    "workflows: a stopped program changed git metadata (put back): {changed:?}"
-                );
+        for git in gits {
+            let changes = git.check_and_restore();
+            if !changes.is_empty() {
+                log::error!("workflows: a stopped program changed git (undone): {changes:?}");
             }
         }
     }
@@ -1389,11 +1581,7 @@ impl ProgramRunner {
         drop(pass.sandbox.take());
         let capped = pass.capture.capped.load(Ordering::SeqCst);
         let denials = read_denials(&pass.dir.join(DENIALS_FILE));
-        let git_changed = pass
-            .git
-            .as_ref()
-            .map(GitMetadata::check_and_restore)
-            .unwrap_or_default();
+        let git_changes = pass.git.check_and_restore();
         let classified = classify(
             &pass.key,
             &pass.node,
@@ -1403,10 +1591,10 @@ impl ProgramRunner {
             ResultFile::read(&pass.node.result_path()),
             &read_tail(&pass.dir.join(STDERR_FILE), STDERR_TAIL),
         );
-        let classified = if git_changed.is_empty() {
+        let classified = if git_changes.is_empty() {
             classified
         } else {
-            Err(git_metadata_failure(&pass.key, &git_changed))
+            Err(git_failure(&pass.key, &git_changes))
         };
         write_summary(
             &pass.dir,
@@ -1422,7 +1610,8 @@ impl ProgramRunner {
                 "output_capped": capped,
                 "denials": denials.denials,
                 "denial_log_ended": denials.ended,
-                "git_metadata_changed": git_changed,
+                "git_metadata_changed": git_changes.metadata,
+                "git_symlinks_removed": git_changes.symlinks,
             }),
         );
         let elapsed_ms = pass.started_wall.elapsed().as_millis() as u64;

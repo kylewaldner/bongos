@@ -18,9 +18,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::runner_program::{
-    Clock, DENIALS_END, DENIALS_FILE, INTERPRETER_FIX, Interpreter, MCP_REFUSAL, PollPlan,
-    ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe,
-    os_sandbox_probe,
+    Clock, DENIALS_END, DENIALS_FILE, GitGuard, INTERPRETER_FIX, Interpreter, MCP_REFUSAL,
+    PollPlan, ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe,
+    git_metadata_needed, os_sandbox_probe, remove_symlinks,
 };
 use crate::runtime::Finish;
 
@@ -814,7 +814,16 @@ fn a_fifo_result_fails_without_hanging() {
         "program result invalid: $BONGOS_RESULT is not a regular file"
     );
 
-    let finish = fixture.run("import os\nos.symlink('/dev/zero', os.environ['BONGOS_RESULT'])\n");
+    // The shim refuses os.symlink, so a listed `ln` makes it.
+    let mut node = fixture.node(
+        "import os, subprocess\n\
+         subprocess.run(['ln', '-s', '/dev/zero', os.environ['BONGOS_RESULT']], check=True)\n",
+    );
+    node.permissions = Permissions {
+        commands: vec!["ln".to_string()],
+        ..Permissions::default()
+    };
+    let finish = fixture.run_node(node);
     assert_eq!(
         says(failure(&finish)),
         "program result invalid: $BONGOS_RESULT is not a regular file"
@@ -1244,4 +1253,221 @@ fn the_sandbox_keeps_git_metadata_read_only_and_a_commit_still_works() {
         Some("inside")
     );
     assert!(git(home, &repo, &["rev-parse", "--verify", "-q", "side"]).is_some());
+}
+
+#[test]
+fn the_shim_refuses_symlinks_and_writes_through_them_in_git() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let worktree = fixture.path("run-worktree");
+    let inside = worktree.join("inside.txt");
+    std::fs::write(&inside, "kept\n").unwrap();
+    let planted = common.join("refs/heads/planted");
+    let moved = common.join("logs/refs/heads/moved");
+    let show = |path: &Path| path.to_string_lossy().into_owned();
+    let cases = [
+        (
+            format!("os.symlink({:?}, {:?})", show(&inside), show(&planted)),
+            "create a symlink ",
+        ),
+        (
+            "os.symlink('inside.txt', 'link-in-worktree')".to_string(),
+            "create a symlink ",
+        ),
+        (
+            format!("open({:?}, 'a').write('x')", show(&planted)),
+            "write through a symlink in git ",
+        ),
+        (
+            format!("os.replace('to-move', {:?})", show(&moved)),
+            "move a symlink into git ",
+        ),
+        (
+            format!(
+                "os.link('inside.txt', {:?})",
+                show(&common.join("refs/heads/hard"))
+            ),
+            "hard link into git ",
+        ),
+    ];
+    for (body, denied) in cases {
+        // Planted by the host, as a listed command could: the shim must not write through it.
+        std::os::unix::fs::symlink(&inside, &planted).ok();
+        std::os::unix::fs::symlink(&inside, worktree.join("to-move")).ok();
+        let mut node = fixture.node(&script(
+            &format!("try:\n    {body}\nexcept PermissionError:\n    pass"),
+            "'done'",
+        ));
+        node.git_common_dir = Some(common.clone());
+        let finish = fixture.run_node(node);
+        assert!(finish.outcome.is_err(), "{body}");
+        let denials = std::fs::read_to_string(fixture.path(TRY_DIR).join(DENIALS_FILE)).unwrap();
+        assert!(denials.contains(denied), "{body}: {denials}");
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "kept\n");
+        assert!(std::fs::symlink_metadata(&moved).is_err(), "{body}");
+        assert!(std::fs::symlink_metadata(worktree.join("link-in-worktree")).is_err());
+        std::fs::remove_file(worktree.join("to-move")).ok();
+    }
+}
+
+#[test]
+fn the_walk_removes_every_symlink_without_following_one() {
+    if cfg!(not(unix)) {
+        return;
+    }
+    let root = TempDir::new().unwrap();
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(outside.join("deep")).unwrap();
+    std::fs::write(outside.join("deep/file"), "x").unwrap();
+    let walked = root.path().join("refs");
+    std::fs::create_dir_all(walked.join("heads/nested")).unwrap();
+    std::fs::write(walked.join("heads/main"), "abc\n").unwrap();
+    let file_link = walked.join("heads/nested/evil");
+    let dir_link = walked.join("heads/to-outside");
+    std::os::unix::fs::symlink(outside.join("deep/file"), &file_link).unwrap();
+    std::os::unix::fs::symlink(&outside, &dir_link).unwrap();
+
+    let mut expected = vec![file_link, dir_link];
+    expected.sort();
+    assert_eq!(remove_symlinks(&walked), expected);
+    assert_eq!(
+        std::fs::read_to_string(walked.join("heads/main")).unwrap(),
+        "abc\n"
+    );
+    // The targets are left alone.
+    assert_eq!(
+        std::fs::read_to_string(outside.join("deep/file")).unwrap(),
+        "x"
+    );
+    assert!(remove_symlinks(&walked).is_empty());
+    // A root that is itself a symlink is not walked.
+    let root_link = root.path().join("root-link");
+    std::os::unix::fs::symlink(&outside, &root_link).unwrap();
+    std::os::unix::fs::symlink(outside.join("deep/file"), outside.join("deep/link")).unwrap();
+    assert!(remove_symlinks(&root_link).is_empty());
+    assert!(std::fs::symlink_metadata(outside.join("deep/link")).is_ok());
+}
+
+#[test]
+fn the_git_guard_undoes_symlinks_replace_refs_and_alternates() {
+    let Some(fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let mut node = fixture.node("pass\n");
+    node.git_common_dir = Some(common.clone());
+    assert_eq!(
+        node.git_forbidden_paths(),
+        vec![
+            common.join("refs/replace"),
+            common.join("objects/info/alternates"),
+            common.join("objects/info/http-alternates"),
+        ]
+    );
+    let bashrc = fixture.path("bashrc");
+    std::fs::write(&bashrc, "safe\n").unwrap();
+    let own = std::fs::canonicalize(common.join("worktrees/run-worktree")).unwrap();
+    let guard = GitGuard::take(&node, true);
+
+    let reflog = common.join("logs/refs/heads/main");
+    std::fs::remove_file(&reflog).unwrap();
+    std::os::unix::fs::symlink(&bashrc, &reflog).unwrap();
+    std::os::unix::fs::symlink(&bashrc, own.join("planted")).unwrap();
+    std::fs::create_dir_all(common.join("refs/replace")).unwrap();
+    std::fs::write(common.join("refs/replace/0123"), "4567\n").unwrap();
+    std::fs::create_dir_all(common.join("objects/info")).unwrap();
+    std::fs::write(common.join("objects/info/alternates"), "/elsewhere\n").unwrap();
+
+    let changes = guard.check_and_restore();
+    let mut symlinks = vec![reflog.clone(), own.join("planted")];
+    symlinks.sort();
+    let mut found = changes.symlinks.clone();
+    found.sort();
+    assert_eq!(found, symlinks);
+    assert_eq!(
+        changes.metadata,
+        vec![
+            common.join("refs/replace"),
+            common.join("objects/info/alternates")
+        ]
+    );
+    assert!(std::fs::symlink_metadata(&reflog).is_err());
+    assert!(std::fs::symlink_metadata(common.join("refs/replace")).is_err());
+    assert!(std::fs::symlink_metadata(common.join("objects/info/alternates")).is_err());
+    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "safe\n");
+    assert!(guard.check_and_restore().is_empty());
+}
+
+#[test]
+fn a_program_that_plants_a_symlink_or_alternates_in_git_fails() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let reflog = common.join("logs/refs/heads/run");
+    let alternates = common.join("objects/info/alternates");
+    let bashrc = fixture.path("bashrc");
+    std::fs::write(&bashrc, "safe\n").unwrap();
+    // `ln` and `cp` are listed, so their writes pass the shim; the runner still sees them.
+    let mut node = fixture.node(&script(
+        &format!(
+            "open('alternates', 'w').write('/elsewhere\\n')\n\
+             subprocess.run(['ln', '-sf', {bashrc:?}, {reflog:?}], check=True)\n\
+             subprocess.run(['cp', 'alternates', {alternates:?}], check=True)",
+            bashrc = bashrc.to_string_lossy(),
+            reflog = reflog.to_string_lossy(),
+            alternates = alternates.to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    node.permissions = Permissions {
+        commands: vec!["ln".to_string(), "cp".to_string()],
+        ..Permissions::default()
+    };
+    node.git_common_dir = Some(common);
+    let finish = fixture.run_node(node);
+    let failure = failure(&finish);
+    assert_eq!(failure.reason, FailureReason::PermissionDenied);
+    assert!(
+        failure
+            .detail
+            .starts_with("program planted symlinks in git (removed): "),
+        "{}",
+        failure.detail
+    );
+    assert!(
+        failure.detail.contains("; program changed git metadata: "),
+        "{}",
+        failure.detail
+    );
+    assert!(std::fs::symlink_metadata(&reflog).is_err());
+    assert!(std::fs::symlink_metadata(&alternates).is_err());
+    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "safe\n");
+    let summary = fixture.summary(TRY_DIR);
+    assert_eq!(summary["git_symlinks_removed"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn git_metadata_is_checked_unless_bubblewrap_sandboxes_the_run() {
+    assert!(git_metadata_needed(false, true));
+    assert!(git_metadata_needed(false, false));
+    assert!(git_metadata_needed(true, false));
+    assert!(!git_metadata_needed(true, true));
 }

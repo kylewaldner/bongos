@@ -20,9 +20,12 @@
 # opening or changing a file outside the writable paths or inside a protected one
 # (the OS sandbox's allowlist: the worktree, the scratch directory, the common git
 # directory's objects/, refs/ and logs/ and the worktree's own git directory; its
-# .git file, gitdir, commondir and config.worktree protected)
+# .git file, gitdir, commondir and config.worktree protected, and refs/replace,
+# objects/info/alternates and objects/info/http-alternates too)
 # (relative to a directory descriptor or through a file descriptor too; FIFOs and
-# device nodes included), connecting a socket when the node declares no network
+# device nodes included), creating any symlink, writing through a symlink that
+# sits inside the writable git paths, renaming a symlink or hard linking anything
+# into them (a later host git would write through it), connecting a socket when the node declares no network
 # (or to a host it did not declare), and the introspection that reaches the hook's
 # own state (gc object walks, ctypes, frame walks into the shim, tracing). Reads
 # are never blocked. Only plain str and bytes (and their subclasses, read without
@@ -32,7 +35,8 @@
 # process can always defeat an audit hook. The OS sandbox is the boundary; a run
 # without it ("not sandboxed" in the try's summary) is not hard-confined. Known
 # gaps, accepted for that reason: a walk through closures (__closure__,
-# cell_contents) reaches the hook's state; os.link checks only the destination;
+# cell_contents) reaches the hook's state; os.link checks only the destination
+# (and refuses one into the git paths);
 # binding a unix socket creates a file anywhere; the arguments and environment of
 # a listed command are not checked (git -c core.fsmonitor=... runs).
 
@@ -61,6 +65,7 @@ def _install(policy):
 
     writable = tuple(norm(path) for path in policy.get("writable") or [])
     protected = tuple(norm(path) for path in policy.get("protected") or [])
+    git_roots = tuple(norm(path) for path in policy.get("git") or [])
     hosts = tuple(host.lower().rstrip(".") for host in policy.get("network") or [])
     shell_names = frozenset(("sh", "bash", "dash", "zsh", "ksh"))
     shell_syntax = frozenset(";&|`$()<>\n\\*?{}[]~")
@@ -198,6 +203,39 @@ def _install(policy):
             return True
         return under(path, writable) and not under(path, protected)
 
+    def unresolved(path, dir_fd=None):
+        """The absolute path `path` names with no symlink resolved, or None (a descriptor)."""
+        if path is None or type(path) is int:
+            return None
+        name = text(path)
+        if name is None:
+            return None
+        if os.path.isabs(name):
+            return name
+        base = dir_base(dir_fd)
+        return None if base is None else os.path.join(base, name)
+
+    def git_symlink(name):
+        """The first symlink sitting inside the writable git paths that resolving `name` passes
+        (its last part included), or None. A later host git would follow it too."""
+        if not git_roots or name is None:
+            return None
+        current = os.sep
+        for part in name.split(os.sep):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                current = os.path.dirname(current)
+                continue
+            candidate = os.path.join(current, part)
+            if os.path.islink(candidate):
+                if under(candidate, git_roots):
+                    return candidate
+                current = os.path.realpath(candidate)
+            else:
+                current = candidate
+        return None
+
     def check_write(path, dir_fd=None):
         if type(path) in (str, bytes) and path in (
             "/dev/stdout",
@@ -209,6 +247,33 @@ def _install(policy):
         resolved = resolve(path, dir_fd)
         if not is_writable(resolved):
             deny("write " + resolved)
+        found = git_symlink(unresolved(path, dir_fd))
+        if found is not None:
+            deny("write through a symlink in git " + found)
+
+    def check_into_git(source, source_dir_fd, destination, destination_dir_fd, what):
+        """Denies moving or linking a symlink (or, for a hard link, anything) into the writable
+        git paths, where a later host git would write through it."""
+        target = resolve(destination, destination_dir_fd)
+        if target is None or not under(target, git_roots):
+            return
+        if what == "link":
+            deny("hard link into git " + target)
+        name = unresolved(source, source_dir_fd)
+        if name is None or os.path.islink(name):
+            deny("move a symlink into git " + target)
+
+    def on_rename(args):
+        check_write(args[0], args[2])
+        check_write(args[1], args[3])
+        check_into_git(args[0], args[2], args[1], args[3], "rename")
+
+    def on_link(args):
+        check_write(args[1], args[3])
+        check_into_git(args[0], args[2], args[1], args[3], "link")
+
+    def on_symlink(args):
+        deny("create a symlink " + (text(args[1]) or "bongos cannot check"))
 
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 
@@ -533,9 +598,9 @@ def _install(policy):
         "os.remove": lambda args: check_write(args[0], args[1]),
         "os.rmdir": lambda args: check_write(args[0], args[1]),
         "os.mkdir": lambda args: check_write(args[0], args[2]),
-        "os.rename": lambda args: (check_write(args[0], args[2]), check_write(args[1], args[3])),
-        "os.link": lambda args: check_write(args[1], args[3]),
-        "os.symlink": lambda args: check_write(args[1], args[2]),
+        "os.rename": on_rename,
+        "os.link": on_link,
+        "os.symlink": on_symlink,
         "os.truncate": lambda args: check_write(args[0]),
         "os.chmod": lambda args: check_write(args[0], args[2]),
         "os.chown": lambda args: check_write(args[0], args[3]),
