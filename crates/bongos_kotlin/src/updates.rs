@@ -2014,8 +2014,8 @@ mod tests {
             })
         });
         start(cx, &updates);
-        wait_until(cx, "the trial", || {
-            harness.cache().read_state().kotlin_lsp.trial.is_some()
+        wait_until(cx, "the download to finish", || {
+            events.lock().unwrap().len() == 2
         });
         let seen: Vec<DownloadProgress> = seen.lock().unwrap().iter().flatten().cloned().collect();
         let last = seen.last().expect("progress was shown");
@@ -2024,9 +2024,14 @@ mod tests {
         assert!(updates.read_with(cx, |updates, _| updates.download_progress().is_none()));
         assert_eq!(
             *events.lock().unwrap(),
-            [KotlinUpdatesEvent::DownloadStarted {
-                version: "263.3.0".into()
-            }]
+            [
+                KotlinUpdatesEvent::DownloadStarted {
+                    version: "263.3.0".into()
+                },
+                KotlinUpdatesEvent::DownloadFinished {
+                    version: "263.3.0".into()
+                }
+            ]
         );
     }
 
