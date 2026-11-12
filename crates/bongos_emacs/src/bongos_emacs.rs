@@ -96,6 +96,8 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, kill::kill_line_command);
         register(editor, &weak, kill::kill_region_or_line_command);
         register(editor, &weak, kill::copy_region_or_line_command);
+        register(editor, &weak, kill::kill_whole_line_command);
+        register(editor, &weak, kill::append_next_kill_command);
         register(editor, &weak, space::delete_horizontal_space_command);
         register(editor, &weak, space::just_one_space_command);
         register(editor, &weak, space::delete_blank_lines_command);

@@ -2,7 +2,7 @@ use editor::actions::{Paste, Undo};
 use editor::test::editor_test_context::EditorTestContext;
 use gpui::TestAppContext;
 
-use crate::actions::{CopyRegionOrLine, KillLine, KillRegionOrLine};
+use crate::actions::{CopyRegionOrLine, KillLine, KillRegionOrLine, KillWholeLine};
 use crate::apply_tests::{capture_kills, init_test};
 use crate::kill_sink::{KillDirection, KillKind};
 
@@ -390,4 +390,58 @@ async fn kill_region_or_line_ends_mark_mode_without_a_region(cx: &mut TestAppCon
     mark_mode(&mut cx);
     cx.dispatch_action(KillRegionOrLine { count: None });
     cx.update_editor(|editor, _, _| assert!(!editor.selection_mark_mode()));
+}
+
+#[gpui::test]
+async fn kill_whole_line_kills_the_line_with_its_newline_from_anywhere_on_it(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    let kills = capture_kills(&mut cx);
+
+    for state in ["one\ntˇwo\nthree", "one\nˇtwo\nthree", "one\ntwoˇ\nthree"] {
+        cx.set_state(state);
+        cx.dispatch_action(KillWholeLine { count: None });
+        cx.assert_editor_state("one\nˇthree");
+        let kills = kills.borrow();
+        let kill = kills.last().unwrap();
+        assert_eq!(kill.pieces, vec!["two\n".to_string()]);
+        assert_eq!(kill.kind, KillKind::Kill);
+        assert_eq!(kill.command, "emacs::KillWholeLine");
+        assert!(kill.metadata[0].is_entire_line);
+    }
+}
+
+#[gpui::test]
+async fn kill_whole_line_counts_three_zero_and_negative(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    let kills = capture_kills(&mut cx);
+
+    cx.set_state("one\ntˇwo\nthree\nfour\nfive");
+    cx.dispatch_action(KillWholeLine { count: Some(3) });
+    cx.assert_editor_state("one\nˇfive");
+    assert_eq!(
+        kills.borrow().last().unwrap().pieces,
+        vec!["two\nthree\nfour\n".to_string()]
+    );
+
+    // Zero kills the text of the line and leaves its newline.
+    cx.set_state("one\ntˇwo\nthree");
+    cx.dispatch_action(KillWholeLine { count: Some(0) });
+    cx.assert_editor_state("one\nˇ\nthree");
+    assert_eq!(
+        kills.borrow().last().unwrap().pieces,
+        vec!["two".to_string()]
+    );
+
+    // A negative count takes the line and the lines above it.
+    cx.set_state("aa\nbb\ncˇc\ndd");
+    cx.dispatch_action(KillWholeLine { count: Some(-2) });
+    cx.assert_editor_state("aa\nˇdd");
+    let kills = kills.borrow();
+    let kill = kills.last().unwrap();
+    assert_eq!(kill.pieces, vec!["bb\ncc\n".to_string()]);
+    assert_eq!(kill.direction, KillDirection::Backward);
 }

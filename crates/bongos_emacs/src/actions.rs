@@ -187,6 +187,17 @@ count_action!(
     CopyRegionOrLine
 );
 count_action!(
+    /// Kills N whole lines, newline included, wherever the cursor is on the line.
+    KillWholeLine
+);
+actions!(
+    emacs,
+    [
+        /// Makes the next kill append to the newest kill ring entry.
+        AppendNextKill,
+    ]
+);
+count_action!(
     /// Scrolls the cursor line to the middle, top or bottom of the window, cycling.
     Recenter
 );
