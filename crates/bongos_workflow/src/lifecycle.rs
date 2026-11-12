@@ -759,11 +759,8 @@ impl<R: Runner> Lifecycle<R> {
         }
         self.runtime.remove(run);
         let mut entry = self.runs.remove(index);
-        let (old_record, old_worktree, old_rev) = (
-            entry.record.clone(),
-            entry.worktree.clone(),
-            entry.rev,
-        );
+        let (old_record, old_worktree, old_rev) =
+            (entry.record.clone(), entry.worktree.clone(), entry.rev);
         entry.worktree = worktree;
         entry.record.layer = resolved.layer.label().to_string();
         let result = self.begin_attempt(
@@ -902,8 +899,7 @@ impl<R: Runner> Lifecycle<R> {
 
     fn active_refusal(&self, task_id: &str, reported: Option<ActiveRun>) -> Option<Refusal> {
         let own = self.active_run_id(task_id);
-        let active = reported
-            .or_else(|| self.active_run(task_id))?;
+        let active = reported.or_else(|| self.active_run(task_id))?;
         let at = if active.step.is_empty() {
             String::new()
         } else {

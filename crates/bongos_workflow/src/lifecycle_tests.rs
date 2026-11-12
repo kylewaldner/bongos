@@ -998,7 +998,11 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
     let refusal = lifecycle.restart(&run, &world.dirs).unwrap_err();
-    assert_eq!(refusal.kind, RefusalKind::WrongState, "a succeeded run stays");
+    assert_eq!(
+        refusal.kind,
+        RefusalKind::WrongState,
+        "a succeeded run stays"
+    );
     let first_log = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1).join("events.jsonl");
     assert!(first_log.is_file());
 }
