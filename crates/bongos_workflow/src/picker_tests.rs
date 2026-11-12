@@ -133,7 +133,9 @@ fn a_different_pick_leaves_the_task_as_it_is(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_missing_input_blocks_enter_until_it_is_supplied(cx: &mut TestAppContext) {
     let world = World::new();
-    write_definition(world.profile(), "needspr", REVIEWED_PR);
+    // MCP from program nodes is not available yet, so this one declares none.
+    let text = REVIEWED_PR.replace(", mcp = [\"github\"]", "");
+    write_definition(world.profile(), "needspr", &text);
     fs::write(world.profile().join("needspr").join("check.py"), "pass\n").unwrap();
     let linked = linked(&world, FakeRunner::new(), cx);
     let mut review = Review::new(LEAF, "needspr");
