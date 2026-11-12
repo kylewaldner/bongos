@@ -212,22 +212,39 @@ impl Scan<'_> {
             if self.cancel.is_canceled() {
                 return FindOutcome::Canceled;
             }
-            let start = line_start(self.snapshot, window.start);
-            let mut end = if self.multiline {
+            let truncated = window.start..if self.multiline {
                 clip_right(self.snapshot, window::overlapped(window, bound).end)
             } else {
                 window.end
             };
+            let mut searched = line_start(self.snapshot, window.start)..truncated.end;
             if line_start(self.snapshot, window.end) != window.end {
-                end = end.max(line_end(self.snapshot, window.end));
+                searched.end = searched.end.max(line_end(self.snapshot, window.end));
             }
-            let matches = search_range(self.snapshot, self.query, start..end)
-                .into_iter()
-                .filter(|found| {
-                    found.start >= window.start
-                        && found.end <= bound
-                        && (!self.multiline || found.start < window.end)
-                });
+            let keep = |found: &Range<usize>| {
+                found.start >= window.start
+                    && found.end <= bound
+                    && (!self.multiline || found.start < window.end)
+            };
+            let mut found = search_range(self.snapshot, self.query, searched.clone());
+            // The query returns non-overlapping matches, so a dropped match straddling `from`
+            // can hide one that starts (forward) or ends (backward) at a valid place, as "aa"
+            // from 1 in "aaa". Then the window is also searched without the line context, as
+            // before it was added: such a match may miss a whole-word or `^`/`$` check, but the
+            // result is never worse than searching from `from` alone.
+            if searched != truncated {
+                let pivot = match self.direction {
+                    Direction::Forward => window.start,
+                    Direction::Backward => window.end,
+                };
+                let straddles = found
+                    .iter()
+                    .any(|found| found.start < pivot && pivot < found.end && !keep(found));
+                if straddles {
+                    found.extend(search_range(self.snapshot, self.query, truncated));
+                }
+            }
+            let matches = found.into_iter().filter(|found| keep(found));
             let chosen = match self.direction {
                 Direction::Forward => matches.min_by_key(|found| found.start),
                 Direction::Backward => matches.max_by_key(|found| found.start),

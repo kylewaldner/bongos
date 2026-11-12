@@ -174,6 +174,32 @@ fn test_find_from_mid_line_sees_the_whole_line(cx: &mut TestAppContext) {
     );
 }
 
+/// A match straddling the search start, found by the whole-line search, does not hide the
+/// overlapping match that starts (forward) or ends (backward) at a valid place.
+#[gpui::test]
+fn test_find_from_mid_line_past_a_straddling_match(cx: &mut TestAppContext) {
+    let snapshot = singleton(cx, "aaa\n");
+    assert_eq!(
+        find_at(&snapshot, &query("aa"), 1, Direction::Forward, false),
+        Some(1..3)
+    );
+    let snapshot = singleton(cx, "aaaa\n");
+    assert_eq!(
+        find_at(&snapshot, &query("aa"), 1, Direction::Forward, false),
+        Some(1..3)
+    );
+    let snapshot = singleton(cx, "x\nfoooo\n");
+    assert_eq!(
+        find_at(&snapshot, &regexp("fo+"), 6, Direction::Backward, false),
+        Some(2..6)
+    );
+    let snapshot = singleton(cx, "aaa\naaa\n");
+    assert_eq!(
+        find_at(&snapshot, &regexp(r"a+\na"), 2, Direction::Forward, false),
+        Some(2..5)
+    );
+}
+
 #[gpui::test]
 fn test_find_across_excerpts(cx: &mut TestAppContext) {
     let buffer_a = cx.new(|cx| {
