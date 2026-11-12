@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use bongos_emacs::mark::push_mark;
 use editor::Editor;
-use gpui::{App, Entity, Global, Window};
+use gpui::{App, Entity, Global, WeakEntity, Window};
 use multi_buffer::Anchor;
 
 /// Pushes the search's origin onto the buffer's mark ring, so popping the mark returns there.
@@ -33,4 +33,36 @@ pub fn kill_text(cx: &App) -> Option<String> {
         Some(InstalledKillSource(source)) => source(cx),
         None => cx.read_from_clipboard().and_then(|item| item.text()),
     }
+}
+
+/// What a query replace starts from: the editor, where the replacement starts (the start of the
+/// match the search ended on), and the search's string and settings.
+#[derive(Clone, Debug)]
+pub struct QueryReplaceSeed {
+    pub editor: WeakEntity<Editor>,
+    pub start: Anchor,
+    pub from: String,
+    pub regexp: bool,
+    pub symbol: bool,
+    /// `None` is smart case.
+    pub case_sensitive: Option<bool>,
+    pub lax: bool,
+}
+
+/// Starts a query replace from a search. Feature 11 registers it.
+pub type QueryReplaceStarter = Rc<dyn Fn(QueryReplaceSeed, &mut Window, &mut App)>;
+
+struct InstalledStarter(QueryReplaceStarter);
+
+impl Global for InstalledStarter {}
+
+/// Registers what `isearch::QueryReplace` and `isearch::QueryReplaceRegexp` hand the search to.
+pub fn set_query_replace_starter(starter: QueryReplaceStarter, cx: &mut App) {
+    cx.set_global(InstalledStarter(starter));
+}
+
+/// The registered query replace starter, if any.
+pub(crate) fn query_replace_starter(cx: &App) -> Option<QueryReplaceStarter> {
+    cx.try_global::<InstalledStarter>()
+        .map(|InstalledStarter(starter)| starter.clone())
 }

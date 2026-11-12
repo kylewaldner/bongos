@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use bongos_emacs_model::recenter::Cycle;
 use bongos_isearch_model::{
-    AbortOutcome, COUNT_CAP, Compiled, Direction, Isearch, Request, SearchSpec, compile, counter,
-    from_input, prompt, to_input,
+    AbortOutcome, COUNT_CAP, CaseMode, Compiled, Direction, Isearch, Request, SearchSpec, compile,
+    counter, from_input, prompt, to_input,
 };
 use bongos_minibuffer::{HistoryStore, Session, SessionHandle};
 use editor::scroll::Autoscroll;
@@ -42,15 +42,16 @@ use workspace::Workspace;
 
 use crate::actions::{
     Abort, Backward, BackwardRegexp, DelChar, EditString, Exit, ExitOtherEnd, FirstMatch, Forward,
-    ForwardRegexp, LastMatch, QuoteNewline, Recenter, RepeatBackward, RepeatForward, RingNext,
-    RingPrevious, ToggleCaseFold, ToggleLaxWhitespace, ToggleRegexp, YankChar, YankKill, YankLine,
-    YankSymbol, YankWord,
+    ForwardRegexp, LastMatch, Occur, QueryReplace, QueryReplaceRegexp, QuoteNewline, Recenter,
+    RepeatBackward, RepeatForward, RingNext, RingPrevious, ToggleCaseFold, ToggleLaxWhitespace,
+    ToggleRegexp, YankChar, YankKill, YankLine, YankSymbol, YankWord,
 };
 use crate::commands;
 use crate::display::{self, Display};
 use crate::engine::{Cancel, Count, Engine, FindOutcome, InvalidPattern, count, find_outcome};
 use crate::intercept;
-use crate::seams::push_origin;
+use crate::occur;
+use crate::seams::{QueryReplaceSeed, push_origin, query_replace_starter};
 
 /// The name the session is routed by (`minibuffer.enabled_for`).
 pub const HOST: &str = "isearch";
@@ -82,6 +83,12 @@ enum ExitKind {
     /// A key that is not the session's: the cursor at the match end (its start going backward),
     /// no selection, and then the keys run again in the origin editor.
     Implicit(Vec<Keystroke>),
+    /// C-c C-o: the cursor at the match end like an implicit exit, then the matching lines open
+    /// in a results tab.
+    Occur,
+    /// A query replace: the cursor at the match start, then the registered starter takes over.
+    /// `regexp` forces a regexp replace whatever the search was.
+    QueryReplace { regexp: bool },
 }
 
 /// What an abort puts back.
@@ -245,6 +252,15 @@ pub(crate) fn init(cx: &mut App) {
         register_in_session::<FirstMatch>(workspace, commands::first_match);
         register_in_session::<LastMatch>(workspace, commands::last_match);
         register_in_session::<Recenter>(workspace, commands::recenter);
+        register_in_session::<Occur>(workspace, |state, window, cx| {
+            exit_command(state, ExitKind::Occur, window, cx)
+        });
+        register_in_session::<QueryReplace>(workspace, |state, window, cx| {
+            query_replace_command(state, false, window, cx)
+        });
+        register_in_session::<QueryReplaceRegexp>(workspace, |state, window, cx| {
+            query_replace_command(state, true, window, cx)
+        });
         register_in_session::<RingPrevious>(workspace, |state, window, cx| {
             walk_ring(state, true, window, cx)
         });
@@ -1057,6 +1073,16 @@ fn exit_command(state: &Shared, kind: ExitKind, window: &mut Window, cx: &mut Ap
     handle.close(window, cx);
 }
 
+/// M-% and C-M-%: with a query replace starter registered the session ends at the match start
+/// and the starter takes over; without one the echo area says so and the session goes on.
+fn query_replace_command(state: &Shared, regexp: bool, window: &mut Window, cx: &mut App) {
+    if crate::seams::query_replace_starter(cx).is_none() {
+        bongos_minibuffer::message(window, cx, "Query replace is not available yet");
+        return;
+    }
+    exit_command(state, ExitKind::QueryReplace { regexp }, window, cx);
+}
+
 /// Whether the search string is being edited (M-e), when every key goes to the input.
 pub(crate) fn is_editing(state: &Shared) -> bool {
     state.borrow().editing.is_some()
@@ -1152,7 +1178,7 @@ fn walk_ring(state: &Shared, older: bool, window: &mut Window, cx: &mut App) {
 /// it is, at the match end unless the click put it elsewhere. An implicit exit then runs its keys
 /// again, after this, where focus now is: the origin editor.
 fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &mut App) {
-    let (workspace, editor, exit, origin, saved, string, regexp, found, direction, mut folds) = {
+    let (workspace, editor, exit, origin, saved, spec, found, direction, mut folds) = {
         let mut state = state.borrow_mut();
         stop_find(&mut state);
         if let Some(counting) = state.counting.take() {
@@ -1170,8 +1196,10 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
             exit,
             state.origin,
             state.saved.clone(),
-            state.string.clone(),
-            state.model.spec().regexp,
+            SearchSpec {
+                string: state.string.clone(),
+                ..state.model.spec().clone()
+            },
             step.found.clone(),
             step.direction,
             std::mem::take(&mut state.display),
@@ -1198,7 +1226,7 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
     }
 
     push_origin(&editor, origin, window, cx);
-    if let (Some(found), Some(exit)) = (found, exit) {
+    if let (Some(found), Some(exit)) = (found, exit.clone()) {
         editor.update(cx, |editor, cx| {
             let len = editor.buffer().read(cx).snapshot(cx).len();
             let start = MultiBufferOffset(found.start).min(len);
@@ -1209,7 +1237,8 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
             };
             let range = match exit {
                 ExitKind::Select => other..point,
-                ExitKind::Implicit(_) => point..point,
+                ExitKind::Implicit(_) | ExitKind::Occur => point..point,
+                ExitKind::QueryReplace { .. } => start..start,
                 ExitKind::OtherEnd | ExitKind::Abort => other..other,
             };
             editor.change_selections(
@@ -1220,8 +1249,32 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
             );
         });
     }
-    if !string.is_empty() {
-        HistoryStore::global(cx).push(history_name(regexp), &string, cx);
+    if !spec.string.is_empty() {
+        HistoryStore::global(cx).push(history_name(spec.regexp), &spec.string, cx);
+    }
+    match exit {
+        Some(ExitKind::Occur) => occur::start(&editor, spec, window, cx),
+        Some(ExitKind::QueryReplace { regexp }) => {
+            if let Some(starter) = query_replace_starter(cx) {
+                let start = editor.read(cx).selections.newest_anchor().head();
+                let case_sensitive = match spec.case {
+                    CaseMode::Smart => None,
+                    CaseMode::Sensitive => Some(true),
+                    CaseMode::Insensitive => Some(false),
+                };
+                let seed = QueryReplaceSeed {
+                    editor: editor.downgrade(),
+                    start,
+                    from: spec.string,
+                    regexp: regexp || spec.regexp,
+                    symbol: spec.symbol,
+                    case_sensitive,
+                    lax: spec.lax,
+                };
+                starter(seed, window, cx);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -12,6 +12,7 @@ mod commands;
 mod display;
 pub mod engine;
 mod intercept;
+mod occur;
 pub mod seams;
 pub mod session;
 
@@ -24,7 +25,11 @@ mod engine_tests;
 #[cfg(test)]
 mod intercept_tests;
 #[cfg(test)]
+mod occur_tests;
+#[cfg(test)]
 mod perf_tests;
+#[cfg(test)]
+mod seams_tests;
 #[cfg(test)]
 mod session_tests;
 
