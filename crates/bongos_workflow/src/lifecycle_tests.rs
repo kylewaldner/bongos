@@ -736,9 +736,7 @@ fn retry_with_several_failed_steps_lists_them() {
         "Several steps failed: b[split=1]#1, c[split=2]#1. Pick the one to retry."
     );
     let c: NodeKey = "c[split=2]#1".parse().unwrap();
-    lifecycle
-        .retry(&run, Some(c.clone()), false, &world.dirs)
-        .unwrap();
+    lifecycle.retry(&run, Some(c), false, &world.dirs).unwrap();
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
@@ -802,7 +800,7 @@ fn revise_reruns_the_node_with_the_comment_and_approve_routes_on() {
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::WaitingOnYou));
     let key = NodeKey::new("work", 1);
-    assert_eq!(lifecycle.open_gates(&run), [key.clone()]);
+    assert_eq!(lifecycle.open_gates(&run), std::slice::from_ref(&key));
 
     let empty = lifecycle.revise(&run, &key, "  ".to_string()).unwrap_err();
     assert_eq!(empty.kind, RefusalKind::WrongState);
@@ -1013,14 +1011,14 @@ fn halt_then_resume_reruns_the_node_in_the_same_worktree_with_the_hand_edit() {
         .unwrap();
     settle(&mut lifecycle);
     let key = NodeKey::new("work", 1);
-    assert_eq!(lifecycle.runtime().in_flight(&run), [key.clone()]);
+    assert_eq!(
+        lifecycle.runtime().in_flight(&run),
+        std::slice::from_ref(&key)
+    );
 
     lifecycle.halt(&run).unwrap();
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Halted));
-    assert_eq!(
-        lifecycle.runtime().runner().stopped,
-        [(run.clone(), key.clone())]
-    );
+    assert_eq!(lifecycle.runtime().runner().stopped, [(run.clone(), key)]);
     let halted = lifecycle.halt_worktrees(&run).unwrap();
     let worktree = lifecycle.worktree(&run).unwrap().path.clone();
     assert_eq!(halted.run, worktree);
