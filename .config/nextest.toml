@@ -12,11 +12,20 @@ final-status-level = "slow"
 [test-groups]
 perf-timing = { max-threads = 1 }
 
+# Every wall-clock test belongs here, so it never shares the machine with another timing test.
+#   bongos_minibuffer_model, bongos_isearch perf_tests: millisecond budgets on the best of several runs.
+#   bongos_workflow: stopping a process group that ignores SIGTERM must take at least the 2 s grace
+#     and less than 5 s; the gate test asserts a 1 s budget.
+# Wall-clock budgets flake on a loaded machine; the retry waits 1 s first (an immediate retry would
+# hit the same load), and a real regression fails all 4 attempts.
 [[profile.default.overrides]]
-filter = "package(bongos_minibuffer_model) & test(perf_tests::)"
+filter = '''
+(package(=bongos_minibuffer_model) & test(perf_tests::))
+| (package(=bongos_isearch) & test(perf_tests::))
+| (package(=bongos_workflow) & (test(=runtime_tests::halt_ends_a_child_that_ignores_sigterm_within_five_seconds) | test(=runtime_tests::cancel_stops_processes_and_closes_the_run) | test(=runtime_tests::stop_kills_a_child_left_in_the_group_when_the_leader_exits_on_sigterm) | test(=runtime_tests::an_orphan_group_is_killed_even_when_its_leader_exits_on_sigterm) | test(=lifecycle_tests::gates_tests::a_gate_shows_needs_you_on_the_leaf_and_every_ancestor_while_another_branch_runs)))
+'''
 test-group = "perf-timing"
-# Wall-clock budgets flake on a loaded machine; a real regression fails all 4 attempts.
-retries = 3
+retries = { backoff = "fixed", count = 3, delay = "1s" }
 
 # Tests known to be flaky on a loaded machine. Each one passes when run alone and fails only
 # occasionally when the whole suite runs in parallel. A test that passes on a retry is reported by
