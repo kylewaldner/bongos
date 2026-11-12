@@ -385,7 +385,7 @@ async fn minibuffer_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `isearch` commands, with the palette text of each.
-const ISEARCH_ACTIONS: [(&str, &str); 12] = [
+const ISEARCH_ACTIONS: [(&str, &str); 25] = [
     ("isearch::Forward", "isearch: forward"),
     ("isearch::Backward", "isearch: backward"),
     ("isearch::ForwardRegexp", "isearch: forward regexp"),
@@ -398,6 +398,22 @@ const ISEARCH_ACTIONS: [(&str, &str); 12] = [
     ("isearch::ExitOtherEnd", "isearch: exit other end"),
     ("isearch::RingPrevious", "isearch: ring previous"),
     ("isearch::RingNext", "isearch: ring next"),
+    ("isearch::YankWord", "isearch: yank word"),
+    ("isearch::YankChar", "isearch: yank char"),
+    ("isearch::YankLine", "isearch: yank line"),
+    ("isearch::YankSymbol", "isearch: yank symbol"),
+    ("isearch::YankKill", "isearch: yank kill"),
+    ("isearch::QuoteNewline", "isearch: quote newline"),
+    ("isearch::EditString", "isearch: edit string"),
+    ("isearch::ToggleCaseFold", "isearch: toggle case fold"),
+    ("isearch::ToggleRegexp", "isearch: toggle regexp"),
+    (
+        "isearch::ToggleLaxWhitespace",
+        "isearch: toggle lax whitespace",
+    ),
+    ("isearch::FirstMatch", "isearch: first match"),
+    ("isearch::LastMatch", "isearch: last match"),
+    ("isearch::Recenter", "isearch: recenter"),
 ];
 
 #[gpui::test]

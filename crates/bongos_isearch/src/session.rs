@@ -22,6 +22,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bongos_emacs_model::recenter::Cycle;
 use bongos_isearch_model::{
     AbortOutcome, COUNT_CAP, Compiled, Direction, Isearch, Request, SearchSpec, compile, counter,
     from_input, prompt, to_input,
@@ -40,9 +41,12 @@ use project::search::SearchQuery;
 use workspace::Workspace;
 
 use crate::actions::{
-    Abort, Backward, BackwardRegexp, DelChar, Exit, ExitOtherEnd, Forward, ForwardRegexp,
-    RepeatBackward, RepeatForward, RingNext, RingPrevious,
+    Abort, Backward, BackwardRegexp, DelChar, EditString, Exit, ExitOtherEnd, FirstMatch, Forward,
+    ForwardRegexp, LastMatch, QuoteNewline, Recenter, RepeatBackward, RepeatForward, RingNext,
+    RingPrevious, ToggleCaseFold, ToggleLaxWhitespace, ToggleRegexp, YankChar, YankKill, YankLine,
+    YankSymbol, YankWord,
 };
+use crate::commands;
 use crate::display::{self, Display};
 use crate::engine::{Cancel, Count, Engine, FindOutcome, InvalidPattern, count, find_outcome};
 use crate::intercept;
@@ -115,7 +119,7 @@ pub(crate) struct Stats {
 
 pub(crate) struct SessionState {
     workspace: EntityId,
-    editor: WeakEntity<Editor>,
+    pub(crate) editor: WeakEntity<Editor>,
     /// Where the cursor was when the search started: the mark an exit pushes.
     origin: Anchor,
     saved: Saved,
@@ -123,9 +127,9 @@ pub(crate) struct SessionState {
     snapshot: MultiBufferSnapshot,
     /// The folds and collapsed buffers the session has opened.
     display: Display,
-    model: Isearch,
+    pub(crate) model: Isearch,
     engine: Engine,
-    handle: Option<SessionHandle>,
+    pub(crate) handle: Option<SessionHandle>,
     /// The string the model was last given, as the input shows it (with newlines).
     pub(crate) string: String,
     /// The prompt last shown.
@@ -136,13 +140,24 @@ pub(crate) struct SessionState {
     /// The exit waits for the running find, so it acts on the string as typed.
     exit_after_find: bool,
     /// Repeats pressed while a find was running, run in order as each find lands.
-    queued_repeats: Vec<Direction>,
+    pub(crate) queued_repeats: Vec<Direction>,
+    /// Yanks pressed while a find was running, run in order as each find lands.
+    pub(crate) queued_yanks: Vec<Command>,
     find: Option<Find>,
     counting: Option<Counting>,
     /// The history entry shown, while M-p and M-n walk the ring.
-    ring_position: Option<usize>,
+    pub(crate) ring_position: Option<usize>,
     /// The string typed before the ring was walked.
     ring_saved: String,
+    /// The string as it was when M-e began, while the input is being edited. The interceptor
+    /// lets every key through and the string is not searched until RET, C-s or C-r resume.
+    pub(crate) editing: Option<String>,
+    /// The input as edited, while editing.
+    pub(crate) edit_text: String,
+    /// The recenter position of the command before the one running, when that was C-l.
+    pub(crate) cycle_before: Option<Cycle>,
+    /// The recenter position the last command took, when it was C-l.
+    pub(crate) last_cycle: Option<Cycle>,
     _release: Option<Subscription>,
     /// The keystroke interceptor, for as long as the session is open.
     _intercept: Option<Subscription>,
@@ -153,6 +168,16 @@ pub(crate) struct SessionState {
 }
 
 pub(crate) type Shared = Rc<RefCell<SessionState>>;
+
+/// An in-session command, as a handler runs it.
+pub(crate) type Command = fn(&Shared, &mut Window, &mut App);
+
+impl SessionState {
+    /// Whether a find is running, so the string on show is not the one searched yet.
+    pub(crate) fn find_running(&self) -> bool {
+        self.find.as_ref().is_some_and(|find| find.running)
+    }
+}
 
 /// The open session of each workspace, by the workspace's entity id. A workspace shows one modal
 /// at a time, so it has at most one session.
@@ -188,20 +213,38 @@ pub(crate) fn init(cx: &mut App) {
     })
     .detach();
     cx.observe_new(|workspace: &mut Workspace, _, _| {
-        register_in_session::<RepeatForward>(workspace, |state, window, cx| {
+        // These three also act while the string is being edited: they resume or end the edit.
+        register_in_session_always::<RepeatForward>(workspace, |state, window, cx| {
             repeat_command(state, Direction::Forward, window, cx)
         });
-        register_in_session::<RepeatBackward>(workspace, |state, window, cx| {
+        register_in_session_always::<RepeatBackward>(workspace, |state, window, cx| {
             repeat_command(state, Direction::Backward, window, cx)
         });
-        register_in_session::<DelChar>(workspace, del_char);
-        register_in_session::<Abort>(workspace, abort);
-        register_in_session::<Exit>(workspace, |state, window, cx| {
-            exit_command(state, ExitKind::Select, window, cx)
+        register_in_session_always::<Abort>(workspace, abort);
+        register_in_session_always::<Exit>(workspace, |state, window, cx| {
+            if state.borrow().editing.is_some() {
+                commands::resume_editing(state, None, window, cx);
+            } else {
+                exit_command(state, ExitKind::Select, window, cx);
+            }
         });
+        register_in_session::<DelChar>(workspace, del_char);
         register_in_session::<ExitOtherEnd>(workspace, |state, window, cx| {
             exit_command(state, ExitKind::OtherEnd, window, cx)
         });
+        register_in_session::<YankWord>(workspace, commands::yank_word);
+        register_in_session::<YankChar>(workspace, commands::yank_char);
+        register_in_session::<YankLine>(workspace, commands::yank_line);
+        register_in_session::<YankSymbol>(workspace, commands::yank_symbol);
+        register_in_session::<YankKill>(workspace, commands::yank_kill);
+        register_in_session::<QuoteNewline>(workspace, commands::quote_newline);
+        register_in_session::<EditString>(workspace, commands::edit_string);
+        register_in_session::<ToggleCaseFold>(workspace, commands::toggle_case_fold);
+        register_in_session::<ToggleRegexp>(workspace, commands::toggle_regexp);
+        register_in_session::<ToggleLaxWhitespace>(workspace, commands::toggle_lax_whitespace);
+        register_in_session::<FirstMatch>(workspace, commands::first_match);
+        register_in_session::<LastMatch>(workspace, commands::last_match);
+        register_in_session::<Recenter>(workspace, commands::recenter);
         register_in_session::<RingPrevious>(workspace, |state, window, cx| {
             walk_ring(state, true, window, cx)
         });
@@ -232,9 +275,25 @@ fn register_starter<A: Action>(
 }
 
 /// An in-session command acts on its workspace's session and passes the key on when there is
-/// none.
+/// none, or while the string is being edited, so the key edits the input as in any prompt.
 fn register_in_session<A: Action>(
     workspace: &mut Workspace,
+    handler: impl Fn(&Shared, &mut Window, &mut App) + 'static,
+) {
+    register_in_session_with::<A>(workspace, false, handler);
+}
+
+/// Like [`register_in_session`], for the commands that also act while the string is edited.
+fn register_in_session_always<A: Action>(
+    workspace: &mut Workspace,
+    handler: impl Fn(&Shared, &mut Window, &mut App) + 'static,
+) {
+    register_in_session_with::<A>(workspace, true, handler);
+}
+
+fn register_in_session_with<A: Action>(
+    workspace: &mut Workspace,
+    while_editing: bool,
     handler: impl Fn(&Shared, &mut Window, &mut App) + 'static,
 ) {
     workspace.register_action(move |_, _: &A, window, cx| {
@@ -242,6 +301,16 @@ fn register_in_session<A: Action>(
             cx.propagate();
             return;
         };
+        {
+            let mut state = state.borrow_mut();
+            if state.editing.is_some() && !while_editing {
+                drop(state);
+                cx.propagate();
+                return;
+            }
+            // Only a command right after C-l continues its cycle (Recenter sets it again).
+            state.cycle_before = state.last_cycle.take();
+        }
         handler(&state, window, cx);
     });
 }
@@ -318,10 +387,15 @@ pub(crate) fn start(
         pending_exit: None,
         exit_after_find: false,
         queued_repeats: Vec::new(),
+        queued_yanks: Vec::new(),
         find: None,
         counting: None,
         ring_position: None,
         ring_saved: String::new(),
+        editing: None,
+        edit_text: String::new(),
+        cycle_before: None,
+        last_cycle: None,
         _release: None,
         _intercept: None,
         _editor_events: None,
@@ -409,7 +483,7 @@ pub(crate) fn start(
     }
 }
 
-fn handle_of(state: &Shared) -> Option<SessionHandle> {
+pub(crate) fn handle_of(state: &Shared) -> Option<SessionHandle> {
     state.borrow().handle.clone()
 }
 
@@ -426,6 +500,12 @@ fn input_changed(
     let started = std::time::Instant::now();
     let request = {
         let mut state = state.borrow_mut();
+        state.last_cycle = None;
+        if state.editing.is_some() {
+            // Edited freely: nothing is searched until the edit ends.
+            state.edit_text = string;
+            return;
+        }
         if state.string == string {
             // The session set this input itself and has searched for it already.
             return;
@@ -440,7 +520,7 @@ fn input_changed(
 }
 
 /// Cancels the running find. Its result, should it still arrive, is not applied.
-fn stop_find(state: &mut SessionState) {
+pub(crate) fn stop_find(state: &mut SessionState) {
     if let Some(find) = &mut state.find
         && find.running
     {
@@ -455,7 +535,7 @@ fn stop_find(state: &mut SessionState) {
 
 /// Carries out a request of the model: a find on the background executor, or, when the model
 /// already has the answer, showing it.
-fn run(
+pub(crate) fn run(
     state: &Shared,
     request: Request,
     handle: &SessionHandle,
@@ -662,6 +742,14 @@ fn found(
     };
     if let Some(direction) = repeat {
         repeat_command(state, direction, window, cx);
+    } else {
+        let yank = {
+            let mut state = state.borrow_mut();
+            (!state.queued_yanks.is_empty()).then(|| state.queued_yanks.remove(0))
+        };
+        if let Some(yank) = yank {
+            yank(state, window, cx);
+        }
     }
     // A waiting exit closes once no find is left to wait for, so it can never be stranded.
     let close = {
@@ -868,6 +956,10 @@ fn repeat_command(state: &Shared, direction: Direction, window: &mut Window, cx:
     let Some(handle) = handle_of(state) else {
         return;
     };
+    if state.borrow().editing.is_some() {
+        commands::resume_editing(state, Some(direction), window, cx);
+        return;
+    }
     let regexp = {
         let mut state = state.borrow_mut();
         if state.find.as_ref().is_some_and(|find| find.running) {
@@ -921,10 +1013,15 @@ fn abort(state: &Shared, window: &mut Window, cx: &mut App) {
     let Some(handle) = handle_of(state) else {
         return;
     };
+    if state.borrow().editing.is_some() {
+        commands::cancel_editing(state, window, cx);
+        return;
+    }
     let outcome = {
         let mut state = state.borrow_mut();
         stop_find(&mut state);
         state.queued_repeats.clear();
+        state.queued_yanks.clear();
         // An exit that waited for the find is called off with it: should C-g only trim, the
         // session goes on as if the exit had not been asked for.
         state.exit_after_find = false;
@@ -958,6 +1055,11 @@ fn exit_command(state: &Shared, kind: ExitKind, window: &mut Window, cx: &mut Ap
         }
     }
     handle.close(window, cx);
+}
+
+/// Whether the search string is being edited (M-e), when every key goes to the input.
+pub(crate) fn is_editing(state: &Shared) -> bool {
+    state.borrow().editing.is_some()
 }
 
 /// Whether the session is ending on a key that is not its own, so every later key is held to

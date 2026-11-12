@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 bongos_emacs.workspace = true
+bongos_emacs_model.workspace = true
 bongos_isearch_model.workspace = true
 bongos_minibuffer.workspace = true
 command_palette_hooks.workspace = true

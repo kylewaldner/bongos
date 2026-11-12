@@ -172,13 +172,24 @@ pub(crate) fn highlight(
     ));
 
     let mut ranges = in_range(&snapshot, query, start..end);
-    ranges.truncate(MAX_HIGHLIGHTS);
-    let active = current.and_then(|current| {
-        ranges.iter().position(|range| {
+    let is_current = |range: &Range<Anchor>| {
+        current.is_some_and(|current| {
             range.start.to_offset(&snapshot).0 == current.start
                 && range.end.to_offset(&snapshot).0 == current.end
         })
-    });
+    };
+    // The cap never drops the current match: it takes the last place of the capped set.
+    if ranges.len() > MAX_HIGHLIGHTS
+        && let Some(position) = ranges.iter().position(is_current)
+        && position >= MAX_HIGHLIGHTS
+    {
+        let current = ranges.swap_remove(position);
+        ranges.truncate(MAX_HIGHLIGHTS - 1);
+        ranges.push(current);
+    } else {
+        ranges.truncate(MAX_HIGHLIGHTS);
+    }
+    let active = ranges.iter().position(is_current);
     editor.highlight_background(
         HighlightKey::Isearch,
         &ranges,

@@ -18,6 +18,9 @@ use crate::session_tests::{
 /// Four lines with an `x` each, at 2, 6, 10 and 14.
 const XS: &str = "a x\nb x\nc x\nd x\n";
 
+/// The color the active match gets, in the form the theme settings take.
+const ACTIVE_COLOR: &str = "#ff0000ff";
+
 /// The fallback theme paints the active match like the others; this makes it red, so the two can
 /// be told apart.
 fn color_the_active_match(cx: &mut VisualTestContext) {
@@ -26,7 +29,7 @@ fn color_the_active_match(cx: &mut VisualTestContext) {
             settings.update_user_settings(cx, |settings| {
                 settings.theme.experimental_theme_overrides = Some(ThemeStyleContent {
                     colors: ThemeColorsContent {
-                        search_active_match_background: Some("#ff0000ff".to_string()),
+                        search_active_match_background: Some(ACTIVE_COLOR.to_string()),
                         ..Default::default()
                     },
                     ..Default::default()

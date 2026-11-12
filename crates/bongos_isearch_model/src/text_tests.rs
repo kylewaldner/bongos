@@ -73,3 +73,17 @@ fn newline_round_trip() {
     assert_eq!(from_input(&input), string);
     assert_eq!(from_input("plain"), "plain");
 }
+
+#[test]
+fn prompt_names_strict_spaces_in_a_text_search_only() {
+    let mut spec = SearchSpec::new(false);
+    spec.lax = false;
+    assert_eq!(
+        prompt(&step(Direction::Forward), &spec),
+        "strict-space I-search: "
+    );
+    spec.regexp = true;
+    let mut regexp = step(Direction::Forward);
+    regexp.regexp = true;
+    assert_eq!(prompt(&regexp, &spec), "Regexp I-search: ");
+}

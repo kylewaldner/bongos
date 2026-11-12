@@ -189,6 +189,11 @@ impl Isearch {
         spec.string = top.string.clone();
         self.spec = spec;
         if top.string.is_empty() {
+            // Nothing is searched, so the first step takes the mode as well: it is what the
+            // next string starts from.
+            if let Some(first) = self.steps.last_mut() {
+                first.regexp = self.spec.regexp;
+            }
             return Request::None;
         }
         let from = self.position(&top, self.direction, Some(top.string.len()));

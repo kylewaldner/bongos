@@ -12,6 +12,8 @@
 //! 4. Otherwise the key is stopped and the session ends with an implicit exit, which runs the
 //!    keys again in the origin editor once focus is back there.
 //!
+//! While the search string is being edited (M-e) every key goes through.
+//!
 //! The interceptor lives as long as the session: the session holds its subscription and drops
 //! it when it ends.
 
@@ -26,7 +28,7 @@ use gpui::{
 use workspace::Workspace;
 
 use crate::actions::IN_SESSION;
-use crate::session::{KEY_CONTEXT, SessionState, exit_implicitly, holds_keys};
+use crate::session::{KEY_CONTEXT, SessionState, exit_implicitly, holds_keys, is_editing};
 
 /// What becomes of a key typed in a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +126,10 @@ pub(crate) fn install(
         let Some(state) = state.upgrade() else {
             return;
         };
+        if is_editing(&state) {
+            // The string is edited as any input: every key is the input's.
+            return;
+        }
         let pending = current
             .pending_input_keystrokes()
             .map(<[Keystroke]>::to_vec)

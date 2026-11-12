@@ -22,6 +22,9 @@ pub fn prompt(step: &Step, spec: &SearchSpec) -> String {
         CaseMode::Insensitive => prompt.push_str("case-insensitive "),
         CaseMode::Smart => {}
     }
+    if !spec.lax && !spec.regexp && !spec.symbol {
+        prompt.push_str("strict-space ");
+    }
     if spec.symbol {
         prompt.push_str("Symbol ");
     } else if step.regexp {

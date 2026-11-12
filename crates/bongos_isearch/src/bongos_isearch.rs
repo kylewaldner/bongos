@@ -8,12 +8,15 @@
 //! in `bongos_isearch_model`.
 
 pub mod actions;
+mod commands;
 mod display;
 pub mod engine;
 mod intercept;
 pub mod seams;
 pub mod session;
 
+#[cfg(test)]
+mod commands_tests;
 #[cfg(test)]
 mod display_tests;
 #[cfg(test)]
