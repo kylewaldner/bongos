@@ -2337,6 +2337,10 @@ name = "bongos_emacs_model"
 version = "0.1.0"
 
 [[package]]
+name = "bongos_isearch_model"
+version = "0.1.0"
+
+[[package]]
 name = "bongos_kotlin"
 version = "0.1.0"
 dependencies = [
