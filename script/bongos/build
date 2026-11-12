@@ -26,7 +26,8 @@ start=$(date +%s)
 # Cargo's output is kept in $out so the memory-kill check reads only this attempt.
 run_build() {
   local rc=0
-  # One invocation, so the app's feature set is unified once; bongos_kotlin brings its fake server bin.
+  # One invocation, so the app's feature set is unified once; bongos_kotlin brings its fake server bin and the
+  # manifest signing tool (bongos-kotlin-manifest); -p builds every bin of a package.
   cargo_limited build -p bongos -p cli -p bongos_kotlin --locked --color never >"$out" 2>&1 || rc=$?
   cat "$out"
   return "$rc"

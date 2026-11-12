@@ -16,6 +16,10 @@ doctest = false
 name = "bongos-fake-kotlin-server"
 path = "src/bin/fake_kotlin_server.rs"
 
+[[bin]]
+name = "bongos-kotlin-manifest"
+path = "src/bin/manifest_tool.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-compression.workspace = true
