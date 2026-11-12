@@ -1,8 +1,9 @@
 //! The app side of bongos workflows (feature 20): the `workflows` settings, the `workflow`
 //! actions (hidden from the command palette while `workflows.enabled` is false), the engine with
 //! its run lifecycle, the `workflows` live-modes and needs-you sources, gate toasts and the
-//! status bar item. While `workflows.enabled` is false
-//! each handler only says that workflows are off, nothing is read or written and no run starts.
+//! status bar item. Workflows are on by default, and enabling starts nothing by itself. While
+//! `workflows.enabled` is false each handler only says that workflows are off, nothing is read or
+//! written and no run starts.
 
 mod actions;
 pub mod builtin_merge;

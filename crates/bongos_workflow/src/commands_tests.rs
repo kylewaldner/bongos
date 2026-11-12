@@ -1,5 +1,6 @@
 //! Tests of `workflow: validate`, `workflow: new` and `workflow: edit definition` through
-//! dispatching the actions: on while `workflows.enabled`, and nothing read or written while off.
+//! dispatching the actions: on by default, and nothing read or written while `workflows.enabled` is
+//! set to false.
 
 use std::path::{Path, PathBuf};
 
