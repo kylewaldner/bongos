@@ -42,16 +42,19 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use futures::{
-    AsyncReadExt as _,
+    AsyncReadExt as _, StreamExt as _,
     future::{Either, select},
 };
-use gpui::{App, AppContext as _, BackgroundExecutor, Context, Entity, Global, Task};
+use gpui::{App, AppContext as _, BackgroundExecutor, Context, Entity, EventEmitter, Global, Task};
 use http_client::{AsyncBody, HttpClient, Url, http::header::CONTENT_LENGTH};
 use settings::{KotlinServerKind, Settings as _, SettingsStore};
 
 use crate::{
     KotlinSettings,
-    install::{InstallMode, VersionBusy, pending_marker_path, prune, spawn_ensure_installed_with},
+    install::{
+        InstallCancelled, InstallMode, VersionBusy, pending_marker_path, prune,
+        spawn_ensure_installed_with,
+    },
     installed::{check_installed, server_name},
     locks::LockRegistry,
     log::KotlinLog,
@@ -141,6 +144,29 @@ impl Refresh {
     }
 }
 
+/// How far the background download of a newer build is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadProgress {
+    pub version: String,
+    pub done: u64,
+    pub total: Option<u64>,
+}
+
+/// What `KotlinUpdates` tells windows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KotlinUpdatesEvent {
+    /// A background download of kotlin-lsp `version` began.
+    DownloadStarted { version: String },
+}
+
+/// The background download in flight: its progress and the flag that stops it.
+struct ActiveDownload {
+    progress: DownloadProgress,
+    cancel: Arc<AtomicBool>,
+    /// Ends the wait on the install even when its body stalls and no chunk comes to see `cancel`.
+    stop: Option<futures::channel::oneshot::Sender<()>>,
+}
+
 struct GlobalKotlinUpdates(Entity<KotlinUpdates>);
 
 impl Global for GlobalKotlinUpdates {}
@@ -162,6 +188,8 @@ pub struct KotlinUpdates {
     start_requested: Arc<AtomicBool>,
     /// A background download (or its planning) is in flight.
     downloading: bool,
+    /// The download itself, once planned; cleared when it ends.
+    download: Option<ActiveDownload>,
     _settings: gpui::Subscription,
     _wake: Task<()>,
 }
@@ -191,6 +219,8 @@ enum DownloadPlan {
     /// This build is installed with a pending-trial marker (its recording failed before): record it.
     Record(ManifestEntry),
 }
+
+impl EventEmitter<KotlinUpdatesEvent> for KotlinUpdates {}
 
 impl KotlinUpdates {
     /// Creates the app's check: the app's HTTP client, the release keys (plus the debug-only key
@@ -270,6 +300,7 @@ impl KotlinUpdates {
             force_pending: false,
             start_requested,
             downloading: false,
+            download: None,
             _settings: cx.observe_global::<SettingsStore>(|this, cx| this.settings_changed(cx)),
             _wake: wake,
         }
@@ -287,6 +318,29 @@ impl KotlinUpdates {
         if let Some(updates) = Self::global(cx) {
             updates.update(cx, |updates, cx| updates.note_start(cx));
         }
+    }
+
+    /// The progress of the background download, `None` while none runs.
+    pub fn download_progress(&self) -> Option<&DownloadProgress> {
+        self.download.as_ref().map(|download| &download.progress)
+    }
+
+    /// Cancels the background download. It stops at its next chunk, removes its partial files and
+    /// releases the version lock; nothing is recorded, so the next check offers the build again.
+    /// A running server is untouched. Returns whether a download was running.
+    pub fn cancel_download(&mut self, _cx: &mut Context<Self>) -> bool {
+        let Some(download) = &mut self.download else {
+            return false;
+        };
+        download.cancel.store(true, Ordering::SeqCst);
+        if let Some(stop) = download.stop.take() {
+            stop.send(()).ok();
+        }
+        self.checker.note(&format!(
+            "download: kotlin-lsp {} cancel requested",
+            download.progress.version
+        ));
+        true
     }
 
     /// `start_requested` for this entity.
@@ -322,6 +376,39 @@ impl KotlinUpdates {
                 DownloadPlan::Download(entry) => {
                     let version = entry.version.clone();
                     checker.note(&format!("download: kotlin-lsp {version} started"));
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let (stop_tx, stop_rx) = futures::channel::oneshot::channel();
+                    let (progress_tx, mut progress_rx) = futures::channel::mpsc::unbounded();
+                    let forwarder = this.update(cx, |this, cx| {
+                        this.download = Some(ActiveDownload {
+                            progress: DownloadProgress {
+                                version: version.clone(),
+                                done: 0,
+                                total: None,
+                            },
+                            cancel: cancel.clone(),
+                            stop: Some(stop_tx),
+                        });
+                        cx.emit(KotlinUpdatesEvent::DownloadStarted {
+                            version: version.clone(),
+                        });
+                        cx.notify();
+                        cx.spawn(async move |this, cx| {
+                            while let Some((done, total)) = progress_rx.next().await {
+                                let updated = this.update(cx, |this, cx| {
+                                    if let Some(download) = &mut this.download {
+                                        download.progress.done = done;
+                                        download.progress.total = total;
+                                        cx.notify();
+                                    }
+                                });
+                                if updated.is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                    })
+                    .ok();
                     let install = cx.update(|cx| {
                         spawn_ensure_installed_with(
                             InstallMode::Background,
@@ -330,16 +417,34 @@ impl KotlinUpdates {
                             entry.clone(),
                             checker.server_dir(),
                             checker.http.clone(),
-                            Arc::new(|_, _| {}),
-                            Arc::new(AtomicBool::new(false)),
+                            Arc::new(move |done, total| {
+                                progress_tx.unbounded_send((done, total)).ok();
+                            }),
+                            cancel,
                             cx,
                         )
                     });
                     // The version lock is released when the install task returns.
-                    let result = install.await;
+                    let result = match select(install, stop_rx).await {
+                        Either::Left((result, _)) => result,
+                        // Dropping the install task stops it, removes its partial files and
+                        // releases its version lock.
+                        Either::Right((Ok(()), install)) => {
+                            drop(install);
+                            Err(InstallCancelled.into())
+                        }
+                        Either::Right((Err(_), install)) => install.await,
+                    };
+                    // The progress sender went with the install: show what it reported last.
+                    if let Some(forwarder) = forwarder {
+                        forwarder.await;
+                    }
                     cx.background_spawn(async move {
                         match result {
                             Ok(_) => checker.record_trial(&entry).await,
+                            Err(error) if error.downcast_ref::<InstallCancelled>().is_some() => {
+                                checker.note(&format!("download: kotlin-lsp {version} cancelled"))
+                            }
                             Err(error) if error.downcast_ref::<VersionBusy>().is_some() => checker
                                 .note(&format!(
                                     "download: kotlin-lsp {version} skipped: another install holds it"
@@ -352,7 +457,12 @@ impl KotlinUpdates {
                     .await
                 }
             }
-            this.update(cx, |this, _| this.downloading = false).ok();
+            this.update(cx, |this, cx| {
+                this.downloading = false;
+                this.download = None;
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -624,8 +734,6 @@ impl Checker {
     }
 }
 
-/// GET the manifest, then GET its `.sig`, following redirects. Nothing is added to the requests:
-/// no query, no cookie, no conditional or identifying header beyond what the client sends anyway.
 /// What `record_if_newer` did with a downloaded build.
 #[derive(Debug, PartialEq, Eq)]
 enum TrialRecord {
@@ -661,6 +769,8 @@ fn record_if_newer(builds: &mut KotlinLspBuilds, trial: BuildId) -> TrialRecord 
     TrialRecord::Recorded
 }
 
+/// GET the manifest, then GET its `.sig`, following redirects. Nothing is added to the requests:
+/// no query, no cookie, no conditional or identifying header beyond what the client sends anyway.
 async fn fetch_pair(http: &dyn HttpClient, url: &Url) -> Result<FetchedManifest> {
     let servers = get_capped(http, url, MAX_MANIFEST_BYTES, "manifest").await?;
     let sig = get_capped(http, &sig_url(url), MAX_SIGNATURE_BYTES, "signature").await?;
@@ -1718,5 +1828,144 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{error:#}").contains("more than"), "{error:#}");
+    }
+
+    /// A stalled download of build B beside an active build A.
+    fn start_stalled_download(
+        cx: &mut TestAppContext,
+        harness: &Harness,
+    ) -> (Entity<KotlinUpdates>, Arc<LockRegistry>, ManifestEntry) {
+        harness.serve_builds(A, 3, &["263.2.0", "263.3.0"]);
+        harness.server.serve(
+            &archive_url("263.3.0"),
+            Route::StallAfter(harness.archive.clone(), 64 * 1024),
+        );
+        set_user_url(cx, A);
+        let locks = Arc::new(LockRegistry::new(Arc::new(cx.executor())));
+        let updates = harness.updates_with(cx, locks.clone());
+        advance(cx, STARTUP_DELAY);
+        let active = harness.build(A, "263.2.0");
+        crate::installed::tests::install(&harness.install_root(), &active);
+        block_on(harness.cache().with_state(|state| {
+            state.kotlin_lsp.active = Some(BuildId {
+                version: active.version.clone(),
+                sha256: active.sha256.clone(),
+            })
+        }))
+        .unwrap();
+        start(cx, &updates);
+        let partial = harness.server_dir().join(".263.3.0.download");
+        wait_until(cx, "the stalled download", || {
+            fs::metadata(&partial).is_ok_and(|metadata| metadata.len() > 0)
+        });
+        (updates, locks, active)
+    }
+
+    #[gpui::test]
+    fn test_download_progress_reaches_the_status_snapshot(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["263.3.0"]);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _observe = cx.update(|cx| {
+            let seen = seen.clone();
+            cx.observe(&updates, move |updates, cx| {
+                seen.lock()
+                    .unwrap()
+                    .push(updates.read(cx).download_progress().cloned());
+            })
+        });
+        let _subscribe = cx.update(|cx| {
+            let events = events.clone();
+            cx.subscribe(&updates, move |_, event: &KotlinUpdatesEvent, _| {
+                events.lock().unwrap().push(event.clone());
+            })
+        });
+        start(cx, &updates);
+        wait_until(cx, "the trial", || {
+            harness.cache().read_state().kotlin_lsp.trial.is_some()
+        });
+        let seen: Vec<DownloadProgress> = seen.lock().unwrap().iter().flatten().cloned().collect();
+        let last = seen.last().expect("progress was shown");
+        assert_eq!(last.version, "263.3.0");
+        assert_eq!(last.done, harness.archive.len() as u64);
+        assert!(updates.read_with(cx, |updates, _| updates.download_progress().is_none()));
+        assert_eq!(
+            *events.lock().unwrap(),
+            [KotlinUpdatesEvent::DownloadStarted {
+                version: "263.3.0".into()
+            }]
+        );
+    }
+
+    #[gpui::test]
+    fn test_cancelling_a_download_cleans_up_and_the_next_refresh_offers_it_again(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        let (updates, locks, active) = start_stalled_download(cx, &harness);
+        assert!(updates.read_with(cx, |updates, _| updates.download_progress().is_some()));
+        let cancelled = updates.update(cx, |updates, cx| updates.cancel_download(cx));
+        assert!(cancelled);
+        let reader = cx.clone();
+        wait_until(cx, "the download to end", || {
+            !updates.read_with(&reader, |updates, _| updates.downloading)
+        });
+        let dir = harness.server_dir();
+        // A dropped install removes its files as it unwinds; give it a moment.
+        wait_until(cx, "the partial files to go", || {
+            !dir.join(".263.3.0.download").exists() && !dir.join(".263.3.0.staging").exists()
+        });
+        assert!(!dir.join(".263.3.0.download").exists());
+        assert!(!dir.join(".263.3.0.staging").exists());
+        assert!(!dir.join("263.3.0").exists());
+        assert!(locks.try_version_lock(&dir, "263.3.0").unwrap().is_some());
+        // The active build runs untouched and nothing was recorded.
+        assert!(
+            check_installed(
+                &harness.install_root(),
+                KotlinServerKind::KotlinLsp,
+                &active
+            )
+            .is_some()
+        );
+        assert_eq!(harness.cache().read_state().kotlin_lsp.trial, None);
+        assert!(updates.read_with(cx, |updates, _| updates.download_progress().is_none()));
+        assert!(
+            !updates.update(cx, |updates, cx| updates.cancel_download(cx)),
+            "nothing is left to cancel"
+        );
+
+        // The next refresh offers the build again.
+        harness.server.serve(
+            &archive_url("263.3.0"),
+            Route::Body(harness.archive.clone()),
+        );
+        refresh(cx, &updates);
+        wait_until(cx, "the trial", || {
+            harness.cache().read_state().kotlin_lsp.trial.is_some()
+        });
+        assert!(dir.join("263.3.0").exists());
+    }
+
+    #[gpui::test]
+    async fn test_cancel_install_sets_the_flag_of_the_download(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        let (updates, _locks, _active) = start_stalled_download(cx, &harness);
+        let flag = updates.read_with(cx, |updates, _| {
+            updates.download.as_ref().unwrap().cancel.clone()
+        });
+        assert!(!flag.load(Ordering::SeqCst));
+        cx.update(|cx| cx.set_global(GlobalKotlinUpdates(updates.clone())));
+        let fs = ::fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [] as [&Path; 0], cx).await;
+        assert!(cx.update(|cx| crate::cancel_installs(&project, cx)));
+        assert!(flag.load(Ordering::SeqCst));
     }
 }

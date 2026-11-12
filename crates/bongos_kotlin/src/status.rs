@@ -8,6 +8,7 @@ use crate::{
     intellij::EULA_NOT_ACCEPTED_REASON,
     jdk::{NO_JDK_REASON, SET_JDK_HOME_LABEL},
     manager::{EXPIRED_REASON, Fallback, FallbackReason, KotlinWorktreeState, ServerStatus},
+    updates::DownloadProgress,
 };
 
 /// The longest status text drawn in the status bar; the tooltip has all of it.
@@ -21,6 +22,8 @@ pub struct Snapshot {
     pub status: ServerStatus,
     pub fallback: Option<Fallback>,
     pub gradle_error: Option<String>,
+    /// The background download of a newer kotlin-lsp, if one runs.
+    pub download: Option<DownloadProgress>,
 }
 
 impl Snapshot {
@@ -31,6 +34,7 @@ impl Snapshot {
             status: state.status.clone()?,
             fallback: state.fallback.clone(),
             gradle_error: state.gradle_error.clone(),
+            download: None,
         })
     }
 }
@@ -54,6 +58,10 @@ fn megabytes(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
 }
 
+fn percent(done: u64, total: u64) -> u64 {
+    ((done.saturating_mul(100) + total / 2) / total).min(100)
+}
+
 pub fn status_line(snapshot: &Snapshot) -> StatusLine {
     let name = display_name(snapshot.effective);
     let mut text = format!("Kotlin: {name}");
@@ -73,7 +81,7 @@ pub fn status_line(snapshot: &Snapshot) -> StatusLine {
             match total {
                 Some(total) if *total > 0 => text.push_str(&format!(
                     " {}% ({}/{} MB)",
-                    ((done.saturating_mul(100) + total / 2) / total).min(100),
+                    percent(*done, *total),
                     megabytes(*done),
                     megabytes(*total)
                 )),
@@ -108,6 +116,17 @@ pub fn status_line(snapshot: &Snapshot) -> StatusLine {
         } => {
             color = Color::Warning;
             text = format!("Kotlin: no server (IntelliJ: {intellij}; kotlin-lsp: {kotlin_lsp})");
+        }
+    }
+    if let Some(download) = &snapshot.download
+        && !matches!(snapshot.status, ServerStatus::BothFailed { .. })
+    {
+        text.push_str(&format!(", downloading {}", download.version));
+        match download.total {
+            Some(total) if total > 0 => {
+                text.push_str(&format!(" ({}%)", percent(download.done, total)))
+            }
+            _ => {}
         }
     }
     StatusLine { text, color, busy }
@@ -202,6 +221,7 @@ mod tests {
             status,
             fallback: None,
             gradle_error: None,
+            download: None,
         }
     }
 
@@ -464,5 +484,26 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item, MenuItem::Note(_)))
         );
+    }
+
+    #[test]
+    fn test_a_background_download_appends_its_progress() {
+        let mut snapshot = lsp(ServerStatus::Ready);
+        snapshot.download = Some(DownloadProgress {
+            version: "263.3.0".into(),
+            done: 50,
+            total: Some(200),
+        });
+        assert_eq!(
+            status_line(&snapshot).text,
+            "Kotlin: kotlin-lsp, ready, downloading 263.3.0 (25%)"
+        );
+        snapshot.download.as_mut().unwrap().total = None;
+        assert_eq!(
+            status_line(&snapshot).text,
+            "Kotlin: kotlin-lsp, ready, downloading 263.3.0"
+        );
+        snapshot.download = None;
+        assert_eq!(status_line(&snapshot).text, "Kotlin: kotlin-lsp, ready");
     }
 }
