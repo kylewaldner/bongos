@@ -5488,6 +5488,7 @@ mod tests {
                 "icon_theme_selector",
                 "image_viewer",
                 "inline_assistant",
+                "isearch",
                 "journal",
                 "keymap_editor",
                 "keystroke_input",

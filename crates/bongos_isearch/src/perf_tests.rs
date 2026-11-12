@@ -1,7 +1,12 @@
-//! Performance gates on a 64 MB buffer of random 80-column lines.
+//! Performance gates on a 64 MB buffer of random 80-column lines: the engine's find and cancel,
+//! and typing through a session.
 
+use crate::actions::Forward;
 use crate::engine::{Cancel, Engine, count, find};
+use crate::session::test_session;
+use crate::session_tests::{input, selections, start, status, workspace_with};
 use bongos_isearch_model::{Direction, SearchSpec};
+use editor::Editor;
 use gpui::{AppContext as _, TestAppContext};
 use language::Buffer;
 use multi_buffer::{MultiBuffer, MultiBufferOffset, MultiBufferSnapshot};
@@ -14,9 +19,9 @@ const SIZE: usize = 64 * 1024 * 1024;
 const NEEDLE: &str = "isearchneedle";
 const RUNS: usize = 7;
 
-/// Random lowercase lines of 79 letters and a newline, from a fixed seed, with `NEEDLE` placed
+/// Random lowercase lines of 79 letters and a newline, from a fixed seed, with `needle` placed
 /// `needle_distance` bytes past the middle.
-fn synthetic_text(needle_distance: usize) -> String {
+fn synthetic_text(needle: &str, needle_distance: usize) -> String {
     let mut state: u64 = 0x2545_f491_4f6c_dd1d;
     let mut text = String::with_capacity(SIZE);
     while text.len() < SIZE {
@@ -29,7 +34,7 @@ fn synthetic_text(needle_distance: usize) -> String {
         text.push('\n');
     }
     let at = SIZE / 2 + needle_distance;
-    text.replace_range(at..at + NEEDLE.len(), NEEDLE);
+    text.replace_range(at..at + needle.len(), needle);
     text
 }
 
@@ -48,7 +53,7 @@ fn query(string: &str) -> Arc<SearchQuery> {
 #[gpui::test]
 fn test_perf_find_and_count_cancel(cx: &mut TestAppContext) {
     let needle_distance = 900 * 1024;
-    let snapshot = snapshot(cx, synthetic_text(needle_distance));
+    let snapshot = snapshot(cx, synthetic_text(NEEDLE, needle_distance));
     let middle = MultiBufferOffset(SIZE / 2);
 
     // A find of a match within 1 MB of the start returns in under 8 ms, best of the runs.
@@ -95,4 +100,56 @@ fn test_perf_find_and_count_cancel(cx: &mut TestAppContext) {
         best = best.min(latency);
     }
     assert!(best < Duration::from_millis(5), "cancel took {best:?}");
+}
+
+/// Typing 20 characters into a session on the 64 MB buffer: every character stays in the input,
+/// no `on_input` takes over 2 ms on the main thread, each character cancels the find before it,
+/// and the view ends on the match of the whole string.
+#[gpui::test]
+async fn test_perf_typing_through_a_session(cx: &mut TestAppContext) {
+    const TYPED: &str = "isearchtypingneedlez";
+    assert_eq!(TYPED.len(), 20);
+    let needle_distance = 900 * 1024;
+    let text = synthetic_text(TYPED, needle_distance);
+    let (workspace, editor, mut cx) = workspace_with(false, cx, move |project, window, cx| {
+        let buffer = cx.new(|cx| Buffer::local(text, cx));
+        let multibuffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        cx.new(|cx| Editor::for_multibuffer(multibuffer, Some(project.clone()), window, cx))
+    })
+    .await;
+    let cx = &mut cx;
+    editor.update_in(cx, |editor, window, cx| {
+        editor.change_selections(Default::default(), window, cx, |s| {
+            s.select_ranges([MultiBufferOffset(SIZE / 2)..MultiBufferOffset(SIZE / 2)])
+        })
+    });
+    cx.run_until_parked();
+
+    start(Forward, &workspace, cx);
+    // Every character is typed before any find runs, as a fast typist does.
+    cx.simulate_input(TYPED);
+    cx.run_until_parked();
+
+    assert_eq!(input(&workspace, cx), TYPED, "every character is kept");
+    let state = test_session(&workspace, cx).expect("the session is open");
+    let stats = state.borrow().stats.clone();
+    assert_eq!(stats.inputs.len(), TYPED.len());
+    let slowest = stats.inputs.iter().max().copied().unwrap_or_default();
+    assert!(
+        slowest < Duration::from_millis(2),
+        "on_input took {slowest:?}"
+    );
+    assert_eq!(
+        stats.canceled,
+        TYPED.len() - 1,
+        "each character cancels the find before it"
+    );
+    let at = SIZE / 2 + needle_distance;
+    assert_eq!(
+        selections(&editor, cx),
+        vec![at + TYPED.len()..at + TYPED.len()]
+    );
+    assert_eq!(status(&workspace, cx), "1/1");
+    cx.simulate_keystrokes("ctrl-g");
+    cx.run_until_parked();
 }
