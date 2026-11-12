@@ -1254,6 +1254,12 @@ impl App {
         self.platform.read_from_clipboard()
     }
 
+    /// Whether the item returned by the latest `read_from_clipboard` was marked
+    /// concealed by its owner, such as a password manager.
+    pub fn clipboard_is_concealed(&self) -> bool {
+        self.platform.clipboard_is_concealed()
+    }
+
     /// Sets the text rendering mode for the application.
     pub fn set_text_rendering_mode(&mut self, mode: TextRenderingMode) {
         self.text_rendering_mode.set(mode);
