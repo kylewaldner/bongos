@@ -16,6 +16,7 @@ mod open;
 mod panel;
 mod projects;
 mod rebase;
+mod ref_watch;
 mod registry;
 mod repositories;
 mod settings;
@@ -41,7 +42,8 @@ pub use commands::{ready, set_new_task_todos, show_toast, with_task};
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, focus_task, is_project_top, target};
 pub use modals::{MINIBUFFER_NAME, Then, ask, pick};
 pub use panel::{WorkPanel, init_panel, task_at_point};
-pub use rebase::{CHECK_INTERVAL, RebaseState};
+pub use rebase::RebaseState;
+pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};
 pub use registry::{
     ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
     NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart, observe_view_opened,
@@ -125,6 +127,8 @@ mod panel_tests;
 mod privacy_tests;
 #[cfg(test)]
 mod rebase_tests;
+#[cfg(test)]
+mod ref_watch_tests;
 #[cfg(test)]
 mod registry_tests;
 #[cfg(test)]

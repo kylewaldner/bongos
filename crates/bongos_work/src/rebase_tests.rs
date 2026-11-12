@@ -1,6 +1,7 @@
 //! "Rebase needed" and "retarget needed" (D16) against real git repositories in temporary
-//! directories, with the real git binary. The 30 s timer and the focus hook call the same
-//! `refresh_rebase` these tests call.
+//! directories, with the real git binary. Most tests call `refresh_rebase`, as the focus hook and
+//! every load or write do; the first one calls nothing and relies on the ref watcher, whose own
+//! tests are in `ref_watch_tests`.
 
 use bongos_work_model::{StackedOn, Status, UnblockPoint, layout, serialize_task};
 use gpui::{TestAppContext, VisualTestContext};
@@ -99,14 +100,43 @@ fn commit_alpha(setup: &Setup, cx: &mut VisualTestContext, message: &str) -> Str
     git(&setup.real, &["rev-parse", "alpha"])
 }
 
+/// Waits, without asking for a check, until `check` holds on beta's state: only the ref
+/// watcher can change it.
+async fn until_watched(
+    setup: &Setup,
+    cx: &mut VisualTestContext,
+    what: &str,
+    check: impl Fn(Option<&RebaseState>) -> bool,
+) {
+    wait_until(cx, what, |cx| {
+        setup
+            .harness
+            .store
+            .read_with(cx, |store, _| check(store.rebase_state(BETA)))
+    })
+    .await;
+}
+
 #[gpui::test]
 async fn moving_the_parent_flags_the_child_and_rebasing_clears_it(cx: &mut TestAppContext) {
     let (setup, cx) = setup(cx, None).await;
+    setup
+        .harness
+        .store
+        .update(cx, |store, _| store.set_poll_decider(|_| false));
     stacked(&setup, cx).await;
     until(&setup, cx, "no flag at first", |s| s.is_none()).await;
+    let common_dir = setup.real.join(".git");
+    wait_until(cx, "the repository to be watched", |cx| {
+        setup.harness.store.read_with(cx, |store, _| {
+            store.watched_git_dirs().get(&common_dir) == Some(&false)
+        })
+    })
+    .await;
 
+    // A commit made with the git binary in alpha's worktree; nobody asks for a check.
     let moved = commit_alpha(&setup, cx, "alpha moves");
-    until(&setup, cx, "the flag", |s| s.is_some()).await;
+    until_watched(&setup, cx, "the flag", |s| s.is_some()).await;
     assert_eq!(
         state(&setup, cx),
         Some(RebaseState::RebaseNeeded { parent_head: moved })
@@ -114,7 +144,7 @@ async fn moving_the_parent_flags_the_child_and_rebasing_clears_it(cx: &mut TestA
 
     let beta_worktree = worktree_of(&setup, cx, &["phase", "beta"]);
     git(&beta_worktree, &["rebase", "-q", "alpha"]);
-    until(&setup, cx, "the flag to clear", |s| s.is_none()).await;
+    until_watched(&setup, cx, "the flag to clear", |s| s.is_none()).await;
 }
 
 #[gpui::test]
