@@ -40,7 +40,8 @@ use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
 
 use crate::changes::ChangedCount;
-use crate::rebase::{CHECK_INTERVAL, RebaseState};
+use crate::rebase::{RebaseChecks, RebaseState};
+use crate::ref_watch::{GitDirInfo, RefWatches};
 use crate::{WorkDirs, WorkSettings};
 
 /// How long the watcher gathers events before delivering them.
@@ -98,6 +99,10 @@ pub struct Stats {
     pub writes: usize,
     /// Times a command was applied again because its files changed under it.
     pub retries: usize,
+    /// Stacked tasks whose parent branch was looked at in git by a rebase check.
+    pub rebase_probes: usize,
+    /// Ref watcher batches that touched a ref and started a rebase check.
+    pub ref_events: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,9 +127,17 @@ pub struct WorkStore {
     snapshot: Option<Arc<WorkTree>>,
     session: Option<Session>,
     disk_lock: Arc<Mutex<()>>,
-    stats: Stats,
+    pub(crate) stats: Stats,
     pub(crate) rebase: HashMap<String, RebaseState>,
-    pub(crate) rebase_check: Option<Task<()>>,
+    pub(crate) rebase_checks: RebaseChecks,
+    /// The common git dir of each repository path a probe named, found on the background
+    /// executor once per enabled period.
+    pub(crate) git_dirs: HashMap<PathBuf, GitDirInfo>,
+    /// Whether a common git dir gets the slow poll instead of a watcher (D10).
+    pub(crate) poll_decider: fn(&Path) -> bool,
+    /// Runs on the background executor after the probes of the next full rebase check.
+    #[cfg(test)]
+    pub(crate) after_full_probe: Option<Box<dyn FnOnce() + Send>>,
     /// Tasks that need the owner, by id, with the reasons sources gave (D13). Never stored.
     pub(crate) needs_you: BTreeMap<String, Vec<String>>,
     pub(crate) changed: HashMap<PathBuf, ChangedCount>,
@@ -138,8 +151,8 @@ struct Session {
     /// Cleared when the session ends, so a write that has not started yet never starts.
     alive: Arc<AtomicBool>,
     _run: Task<()>,
-    /// Rechecks the rebase states every [`CHECK_INTERVAL`].
-    _rebase_timer: Task<()>,
+    /// The ref watchers and slow-poll timers of the repositories with stacked tasks.
+    ref_watches: RefWatches,
 }
 
 impl Drop for Session {
@@ -168,7 +181,11 @@ impl WorkStore {
             disk_lock: Arc::new(Mutex::new(())),
             stats: Stats::default(),
             rebase: HashMap::new(),
-            rebase_check: None,
+            rebase_checks: RebaseChecks::default(),
+            git_dirs: HashMap::new(),
+            poll_decider: fs::requires_poll_watcher,
+            #[cfg(test)]
+            after_full_probe: None,
             needs_you: BTreeMap::new(),
             changed: HashMap::new(),
             status_runs: 0,
@@ -207,6 +224,24 @@ impl WorkStore {
         self.stats
     }
 
+    /// Replaces the check that decides which repositories get the slow poll (D10); tests use it
+    /// to put a repository on the slow poll without a network mount.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_poll_decider(&mut self, poll_decider: fn(&Path) -> bool) {
+        self.poll_decider = poll_decider;
+        self.git_dirs.clear();
+    }
+
+    pub(crate) fn ref_watches(&self) -> Option<&RefWatches> {
+        self.session.as_ref().map(|session| &session.ref_watches)
+    }
+
+    pub(crate) fn ref_watches_mut(&mut self) -> Option<&mut RefWatches> {
+        self.session
+            .as_mut()
+            .map(|session| &mut session.ref_watches)
+    }
+
     /// Queues `command` on the serial writer. The returned task resolves once the change is
     /// written and the snapshot includes it, or with why it was not.
     pub fn write(
@@ -239,9 +274,11 @@ impl WorkStore {
         if enabled {
             self.start(cx);
         } else {
-            // Dropping the session cancels its task and the watcher; queued writes answer `Off`.
+            // Dropping the session cancels its task, the watcher and the ref watches and timers;
+            // queued writes answer `Off`.
             self.session = None;
-            self.rebase_check = None;
+            self.rebase_checks = RebaseChecks::default();
+            self.git_dirs.clear();
             self.set_rebase(HashMap::new(), cx);
             if self.snapshot.take().is_some() {
                 cx.emit(WorkStoreEvent::Changed);
@@ -260,22 +297,11 @@ impl WorkStore {
             let alive = alive.clone();
             async move |this, cx| run(this, fs, root, lock, alive, receiver, cx).await
         });
-        let rebase_timer = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(CHECK_INTERVAL).await;
-                if this
-                    .update(cx, |store, cx| store.refresh_rebase(cx))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
         self.session = Some(Session {
             requests,
             alive,
             _run: run,
-            _rebase_timer: rebase_timer,
+            ref_watches: RefWatches::default(),
         });
     }
 
