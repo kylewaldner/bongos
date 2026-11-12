@@ -28,13 +28,13 @@ use bongos_isearch_model::{
 };
 use bongos_minibuffer::{HistoryStore, Session, SessionHandle};
 use editor::scroll::Autoscroll;
-use editor::{Editor, SelectionEffects};
+use editor::{Editor, EditorEvent, SelectionEffects};
 use futures::future::{Either, select};
 use gpui::{
     Action, App, AppContext as _, Entity, EntityId, Global, Keystroke, Subscription, Task,
     WeakEntity, Window,
 };
-use language::Selection;
+use language::{Bias, Selection};
 use multi_buffer::{Anchor, MultiBufferOffset, MultiBufferSnapshot, ToOffset as _};
 use project::search::SearchQuery;
 use workspace::Workspace;
@@ -43,6 +43,7 @@ use crate::actions::{
     Abort, Backward, BackwardRegexp, DelChar, Exit, ExitOtherEnd, Forward, ForwardRegexp,
     RepeatBackward, RepeatForward, RingNext, RingPrevious,
 };
+use crate::display::{self, Display};
 use crate::engine::{Cancel, Count, Engine, FindOutcome, InvalidPattern, count, find_outcome};
 use crate::intercept;
 use crate::seams::push_origin;
@@ -118,6 +119,10 @@ pub(crate) struct SessionState {
     /// Where the cursor was when the search started: the mark an exit pushes.
     origin: Anchor,
     saved: Saved,
+    /// The text the model's offsets are of, so a buffer change can move them.
+    snapshot: MultiBufferSnapshot,
+    /// The folds and collapsed buffers the session has opened.
+    display: Display,
     model: Isearch,
     engine: Engine,
     handle: Option<SessionHandle>,
@@ -141,6 +146,8 @@ pub(crate) struct SessionState {
     _release: Option<Subscription>,
     /// The keystroke interceptor, for as long as the session is open.
     _intercept: Option<Subscription>,
+    /// The editor's scrolls and edits, for as long as the session is open.
+    _editor_events: Option<Subscription>,
     #[cfg(test)]
     pub(crate) stats: Stats,
 }
@@ -300,6 +307,8 @@ pub(crate) fn start(
         editor: editor.downgrade(),
         origin,
         saved,
+        snapshot: editor.read(cx).buffer().read(cx).snapshot(cx),
+        display: Display::default(),
         model,
         engine: Engine::new(),
         handle: None,
@@ -315,6 +324,7 @@ pub(crate) fn start(
         ring_saved: String::new(),
         _release: None,
         _intercept: None,
+        _editor_events: None,
         #[cfg(test)]
         stats: Stats::default(),
     }));
@@ -364,11 +374,29 @@ pub(crate) fn start(
     let handle = workspace.update(cx, |workspace, cx| {
         bongos_minibuffer::open(workspace, session, window, cx)
     });
-    let interceptor = intercept::install(weak, window.window_handle(), workspace.downgrade(), cx);
+    let interceptor = intercept::install(
+        weak.clone(),
+        window.window_handle(),
+        workspace.downgrade(),
+        cx,
+    );
+    let editor_events = window.subscribe(editor, cx, {
+        move |_, event: &EditorEvent, window, cx| {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            match event {
+                EditorEvent::ScrollPositionChanged { .. } => scrolled(&state, cx),
+                EditorEvent::BufferEdited => buffer_edited(&state, window, cx),
+                _ => {}
+            }
+        }
+    });
     {
         let mut state = state.borrow_mut();
         state.handle = Some(handle.clone());
         state._intercept = Some(interceptor);
+        state._editor_events = Some(editor_events);
     }
 
     if let Some(seed) = seed {
@@ -654,7 +682,7 @@ fn show(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (target, text) = {
+    let (target, text, found) = {
         let state = state.borrow();
         let step = state.model.current();
         let target = match (&step.found, step.direction) {
@@ -662,9 +690,22 @@ fn show(
             (Some(found), Direction::Backward) => found.start,
             (None, _) => state.model.origin(),
         };
-        (target, prompt(step, state.model.spec()))
+        (target, prompt(step, state.model.spec()), step.found.clone())
     };
+    // The folds that hide the match open first, so the cursor lands on visible text; the ones
+    // the search has left behind close once it is there.
+    if let Some(found) = &found {
+        with_display(state, |display| {
+            editor.update(cx, |editor, cx| display.open(editor, found, cx))
+        });
+    }
     land(editor, target, window, cx);
+    with_display(state, |display| {
+        editor.update(cx, |editor, cx| {
+            display.refold(editor, found.as_ref(), window, cx)
+        })
+    });
+    refresh_highlights(state, editor, cx);
     let changed = {
         let mut state = state.borrow_mut();
         (state.prompt != text).then(|| {
@@ -676,6 +717,84 @@ fn show(
         handle.set_prompt(text, window, cx);
     }
     refresh_status(state, handle, cx);
+}
+
+/// Runs `f` on the session's folds, which are taken out of the state meanwhile so the editor
+/// events that come of it can look at the rest.
+fn with_display<R>(state: &Shared, f: impl FnOnce(&mut Display) -> R) -> R {
+    let mut display = std::mem::take(&mut state.borrow_mut().display);
+    let result = f(&mut display);
+    state.borrow_mut().display = display;
+    result
+}
+
+/// Highlights the matches near the visible text, the current one apart, as of the model's
+/// string; no highlights while there is nothing to search for.
+fn refresh_highlights(state: &Shared, editor: &Entity<Editor>, cx: &mut App) {
+    let (query, current) = {
+        let mut state = state.borrow_mut();
+        let spec = state.model.spec().clone();
+        let query = if spec.string.is_empty() {
+            None
+        } else {
+            state.engine.query(&spec).ok()
+        };
+        let step = state.model.current();
+        let current = if step.failing {
+            None
+        } else {
+            step.found.clone()
+        };
+        (query, current)
+    };
+    editor.update(cx, |editor, cx| {
+        display::highlight(editor, query.as_deref(), current.as_ref(), cx)
+    });
+}
+
+/// The editor scrolled: the matches near the new visible text are highlighted.
+fn scrolled(state: &Shared, cx: &mut App) {
+    let Some(editor) = state.borrow().editor.upgrade() else {
+        return;
+    };
+    refresh_highlights(state, &editor, cx);
+}
+
+/// The text changed under the search (a reload, a formatter, a collaborator): the model's offsets
+/// follow it through anchors taken in the text they were of, the highlights and the count start
+/// over, and the current match is looked for again from its moved start.
+fn buffer_edited(state: &Shared, window: &mut Window, cx: &mut App) {
+    let (Some(editor), Some(handle)) = (state.borrow().editor.upgrade(), handle_of(state)) else {
+        return;
+    };
+    let new = editor.read(cx).buffer().read(cx).snapshot(cx);
+    {
+        let mut state = state.borrow_mut();
+        let old = std::mem::replace(&mut state.snapshot, new.clone());
+        let len = old.len().0;
+        state.model.rebase(|offset| {
+            old.anchor_at(MultiBufferOffset(offset.min(len)), Bias::Right)
+                .to_offset(&new)
+                .0
+        });
+        stop_find(&mut state);
+    }
+    drop_count(state);
+    refresh_highlights(state, &editor, cx);
+    let request = {
+        let mut state = state.borrow_mut();
+        let spec = state.model.spec().clone();
+        state.model.set_spec(spec)
+    };
+    run(state, request, &handle, window, cx);
+    // An exit that waited for the find stopped above is not left stranded.
+    let close = {
+        let state = state.borrow();
+        state.exit_after_find && !state.find.as_ref().is_some_and(|find| find.running)
+    };
+    if close {
+        handle.close(window, cx);
+    }
 }
 
 /// Puts the one cursor at `offset`, scrolled into view, without a navigation history entry and
@@ -861,9 +980,14 @@ pub(crate) fn exit_implicitly(
     };
     {
         let mut state = state.borrow_mut();
-        if let Some(ExitKind::Implicit(held)) = &mut state.pending_exit {
-            held.extend(keys);
-            return;
+        match &mut state.pending_exit {
+            Some(ExitKind::Implicit(held)) => {
+                held.extend(keys);
+                return;
+            }
+            // RET (or C-g) is already waiting for the find: that exit stands.
+            Some(_) => return,
+            None => {}
         }
         state.pending_exit = Some(ExitKind::Implicit(keys));
         if state.find.as_ref().is_some_and(|find| find.running) {
@@ -926,7 +1050,7 @@ fn walk_ring(state: &Shared, older: bool, window: &mut Window, cx: &mut App) {
 /// it is, at the match end unless the click put it elsewhere. An implicit exit then runs its keys
 /// again, after this, where focus now is: the origin editor.
 fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &mut App) {
-    let (workspace, editor, exit, origin, saved, string, regexp, found, direction) = {
+    let (workspace, editor, exit, origin, saved, string, regexp, found, direction, mut folds) = {
         let mut state = state.borrow_mut();
         stop_find(&mut state);
         if let Some(counting) = state.counting.take() {
@@ -934,6 +1058,7 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
         }
         state._release = None;
         state._intercept = None;
+        state._editor_events = None;
         state.handle = None;
         let exit = state.pending_exit.take().or(fallback);
         let step = state.model.current();
@@ -947,6 +1072,7 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
             state.model.spec().regexp,
             step.found.clone(),
             step.direction,
+            std::mem::take(&mut state.display),
         )
     };
     forget(state, workspace, cx);
@@ -963,8 +1089,9 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
     let Some(editor) = editor.upgrade() else {
         return;
     };
+    editor.update(cx, |editor, cx| display::clear(editor, cx));
     if exit == Some(ExitKind::Abort) {
-        restore(&editor, &saved, window, cx);
+        restore(&editor, &saved, &mut folds, window, cx);
         return;
     }
 
@@ -996,8 +1123,15 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
     }
 }
 
-/// Puts back every selection, mark mode and the scroll position as they were before the search.
-fn restore(editor: &Entity<Editor>, saved: &Saved, window: &mut Window, cx: &mut App) {
+/// Puts back every selection, mark mode, the folds and the scroll position as they were before
+/// the search.
+fn restore(
+    editor: &Entity<Editor>,
+    saved: &Saved,
+    folds: &mut Display,
+    window: &mut Window,
+    cx: &mut App,
+) {
     editor.update(cx, |editor, cx| {
         editor.change_selections(
             SelectionEffects::no_scroll().nav_history(false),
@@ -1005,6 +1139,9 @@ fn restore(editor: &Entity<Editor>, saved: &Saved, window: &mut Window, cx: &mut
             cx,
             |s| s.select_anchors(saved.selections.to_vec()),
         );
+        // The folds the search opened close before the scroll goes back, which counts rows with
+        // them closed; the cursor is back outside them by now.
+        folds.restore(editor, window, cx);
         editor.set_selection_mark_mode(saved.mark_mode, cx);
         editor.set_scroll_position(saved.scroll, window, cx);
         cx.notify();

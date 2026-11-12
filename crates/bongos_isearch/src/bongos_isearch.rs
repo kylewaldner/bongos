@@ -3,14 +3,19 @@
 //! snapshot in windows, so a search can be canceled between them, and the session, which hosts a
 //! search in the minibuffer and moves the editor's cursor with every change of the string, and
 //! its keystroke interceptor, which ends the session on a key that is not the session's and runs
-//! that key in the editor. The search state and its text logic live in `bongos_isearch_model`.
+//! that key in the editor. The display shows the matches near the visible text as highlights and
+//! opens the folds that hide the match the cursor is on. The search state and its text logic live
+//! in `bongos_isearch_model`.
 
 pub mod actions;
+mod display;
 pub mod engine;
 mod intercept;
 pub mod seams;
 pub mod session;
 
+#[cfg(test)]
+mod display_tests;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]

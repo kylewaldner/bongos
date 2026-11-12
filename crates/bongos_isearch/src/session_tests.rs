@@ -646,6 +646,24 @@ async fn isearch_ctrl_g_that_trims_calls_off_a_waiting_exit(cx: &mut TestAppCont
     assert_eq!(text(&editor, cx), content);
 }
 
+/// RET while a find runs waits for it; a key that is not the session's typed meanwhile does not
+/// turn that exit into an implicit one, so the match is still selected.
+#[gpui::test]
+async fn isearch_a_waiting_ret_stays_a_ret_when_another_key_follows(cx: &mut TestAppContext) {
+    let content = long_text();
+    let (workspace, editor, mut cx) = workspace_text(&content, true, cx).await;
+    let cx = &mut cx;
+    set_selections(&editor, vec![4..4], cx);
+    let needle = content.find("needle").unwrap();
+
+    start(Forward, &workspace, cx);
+    type_slowly("needle", cx);
+    keys("z enter ctrl-e", cx);
+    assert!(!session_open(&workspace, cx));
+    assert_eq!(selections(&editor, cx), vec![needle..needle + 6]);
+    assert_eq!(text(&editor, cx), content);
+}
+
 #[gpui::test]
 async fn isearch_escape_aborts(cx: &mut TestAppContext) {
     let content = long_text();

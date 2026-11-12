@@ -169,7 +169,7 @@ impl Editor {
             .collect()
     }
 
-    pub(super) fn visible_buffer_ranges(
+    pub fn visible_buffer_ranges(
         &self,
         cx: &mut Context<Editor>,
     ) -> Vec<(
