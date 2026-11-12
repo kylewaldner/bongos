@@ -4,6 +4,7 @@
 
 mod actions;
 pub mod builtin_merge;
+pub mod builtin_wait;
 mod commands;
 pub mod definitions;
 mod engine;
@@ -32,6 +33,8 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod builtin_wait_tests;
 #[cfg(test)]
 mod commands_tests;
 #[cfg(test)]
