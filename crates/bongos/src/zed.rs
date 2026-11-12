@@ -652,6 +652,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                 bongos_kotlin::review_intellij_eula(workspace, show_kotlin_text, window, cx);
             },
         );
+        workspace.register_action(
+            |workspace, _: &bongos_kotlin::CheckForServerUpdates, _, cx| {
+                bongos_kotlin::check_for_server_updates(workspace, cx);
+            },
+        );
         workspace.register_action(|workspace, _: &bongos_kotlin::CancelInstall, _, cx| {
             let project = workspace.project().clone();
             bongos_kotlin::cancel_installs(&project, cx);

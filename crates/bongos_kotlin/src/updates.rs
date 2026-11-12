@@ -67,6 +67,7 @@ use crate::{
         MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, TrustedKey, compare_versions, sig_url,
         trusted_keys,
     },
+    status::UpdatesInfo,
 };
 
 /// How long after startup the first check runs.
@@ -132,6 +133,22 @@ pub enum Refresh {
 }
 
 impl Refresh {
+    /// The one message `kotlin: check for server updates` shows.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Off => "Server updates are off".into(),
+            Self::Finished(FetchOutcome::Stored { serial }) => {
+                format!("Server updates: checked, manifest serial {serial}")
+            }
+            Self::Finished(outcome) => {
+                let text = outcome.describe();
+                let text = text.strip_prefix("manifest: ").unwrap_or(&text);
+                format!("Server updates: {text}")
+            }
+            other => format!("Server updates: {}", other.describe()),
+        }
+    }
+
     /// One line for whoever asked for the check.
     pub fn describe(&self) -> String {
         match self {
@@ -183,6 +200,10 @@ pub struct KotlinUpdates {
     url: Option<Url>,
     /// Whether the "off" line was written since the setting last changed.
     off_logged: bool,
+    /// What the status menu shows, kept in memory so rendering reads no disk.
+    info: UpdatesInfo,
+    /// The last finished check's failure; a check that stored or found nothing newer clears it.
+    last_error: Option<String>,
     /// A check of this entity is in flight.
     running: bool,
     /// A setting change found a check in flight: check again, forced, when a check can run.
@@ -294,11 +315,20 @@ impl KotlinUpdates {
                 cx.background_executor().timer(timings.wake_interval).await;
             }
         });
+        let last_error = checker
+            .cache
+            .read_state()
+            .last_outcome
+            .as_deref()
+            .and_then(logged_error);
+        let info = checker.build_info(url.as_ref(), last_error.clone());
         Self {
             checker,
             raw_url,
             url,
             off_logged: false,
+            info,
+            last_error,
             running: false,
             force_pending: false,
             start_requested,
@@ -327,6 +357,11 @@ impl KotlinUpdates {
     /// what a worktree stopped by an expired build shows as "checking for a newer Kotlin server".
     pub fn is_checking(&self) -> bool {
         (self.running || self.downloading) && self.download.is_none()
+    }
+
+    /// What the status menu shows about the check, from memory.
+    pub fn status_info(&self) -> UpdatesInfo {
+        self.info.clone()
     }
 
     /// The progress of the background download, `None` while none runs.
@@ -517,6 +552,10 @@ impl KotlinUpdates {
         cx: &mut Context<Self>,
     ) -> Task<Refresh> {
         let Some(url) = self.url.clone() else {
+            if self.info != UpdatesInfo::Off {
+                self.info = UpdatesInfo::Off;
+                cx.notify();
+            }
             if force || !self.off_logged {
                 if self.raw_url.trim().is_empty() {
                     self.checker.log.manifest_off();
@@ -539,12 +578,32 @@ impl KotlinUpdates {
         self.running = true;
         cx.notify();
         let checker = self.checker.clone();
+        let previous_error = self.last_error.clone();
         let (sender, receiver) = futures::channel::oneshot::channel();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { checker.check(url, force).await })
+            let checked_url = url.clone();
+            let (result, error, info) = cx
+                .background_spawn(async move {
+                    let result = checker.check(url.clone(), force).await;
+                    let error = match &result {
+                        Refresh::Finished(
+                            FetchOutcome::Stored { .. } | FetchOutcome::NotNewer { .. },
+                        ) => None,
+                        Refresh::Finished(outcome) => Some(outcome_error(outcome)),
+                        Refresh::Skipped(reason) => Some(reason.clone()),
+                        _ => previous_error,
+                    };
+                    let info = checker.build_info(Some(&url), error.clone());
+                    (result, error, info)
+                })
                 .await;
             this.update(cx, |this, cx| {
+                // Apply the result only while the URL is still the one that was checked; a
+                // cleared or changed URL keeps the state its own check or the Off branch set.
+                if this.url.as_ref() == Some(&checked_url) {
+                    this.last_error = error;
+                    this.info = info;
+                }
                 this.running = false;
                 cx.notify();
                 this.maybe_download(cx);
@@ -568,7 +627,50 @@ impl KotlinUpdates {
     }
 }
 
+/// The failure a finished check shows as "Last error", without the `manifest: ` prefix.
+fn outcome_error(outcome: &FetchOutcome) -> String {
+    let text = outcome.describe();
+    text.strip_prefix("manifest: ").unwrap_or(&text).to_string()
+}
+
+/// The failure in a logged outcome line from an earlier run, `None` for a fetch or an unchanged
+/// serial.
+fn logged_error(outcome: &str) -> Option<String> {
+    if outcome.starts_with("manifest: fetched") || outcome.contains(" is not newer than ") {
+        return None;
+    }
+    Some(
+        outcome
+            .strip_prefix("manifest: ")
+            .unwrap_or(outcome)
+            .to_string(),
+    )
+}
+
 impl Checker {
+    /// The menu's view of the check. Reads `state.json` and the cache, so it runs off the UI
+    /// thread once the app runs.
+    fn build_info(&self, url: Option<&Url>, error: Option<String>) -> UpdatesInfo {
+        let Some(url) = url else {
+            return UpdatesInfo::Off;
+        };
+        let Some(last_check) = self.cache.read_state().last_check else {
+            return UpdatesInfo::NotChecked;
+        };
+        let serial = self
+            .cache
+            .load(url, &self.keys)
+            .map(|cached| cached.manifest.serial);
+        UpdatesInfo::Checked {
+            when: last_check
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            serial,
+            error,
+        }
+    }
+
     fn server_dir(&self) -> PathBuf {
         self.install_root
             .join(server_name(KotlinServerKind::KotlinLsp))
@@ -1567,6 +1669,106 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_check_command_with_an_empty_url_makes_no_request_and_says_off(cx: &mut TestAppContext) {
+        let harness = Harness::new(cx);
+        let updates = harness.updates(cx);
+        let result = refresh(cx, &updates);
+        assert_eq!(result, Refresh::Off);
+        assert!(result.message().contains("off"));
+        assert!(harness.server.urls().is_empty());
+        assert_eq!(
+            updates.read_with(cx, |updates, _| updates.status_info()),
+            UpdatesInfo::Off
+        );
+    }
+
+    #[gpui::test]
+    fn test_clearing_the_url_during_a_check_keeps_the_menu_off(cx: &mut TestAppContext) {
+        let harness = Harness::new(cx);
+        harness.server.serve(A, Route::Stall);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        assert_eq!(harness.fetches(), 1);
+
+        set_user(cx, "{}");
+        cx.run_until_parked();
+        assert_eq!(
+            updates.read_with(cx, |updates, _| updates.status_info()),
+            UpdatesInfo::Off
+        );
+        advance(cx, FETCH_TIMEOUT);
+        cx.run_until_parked();
+        assert_eq!(
+            updates.read_with(cx, |updates, _| updates.status_info()),
+            UpdatesInfo::Off
+        );
+    }
+
+    #[gpui::test]
+    fn test_check_command_fetches_once_and_the_menu_reports_it(cx: &mut TestAppContext) {
+        let harness = Harness::new(cx);
+        harness.server.serve_pair(A, signed(3, "263.3.0"));
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        assert_eq!(
+            updates.read_with(cx, |updates, _| updates.status_info()),
+            UpdatesInfo::NotChecked
+        );
+        let result = refresh(cx, &updates);
+        assert_eq!(harness.fetches(), 1);
+        assert_eq!(
+            result.message(),
+            "Server updates: checked, manifest serial 3"
+        );
+        let UpdatesInfo::Checked { serial, error, .. } =
+            updates.read_with(cx, |updates, _| updates.status_info())
+        else {
+            panic!("checked");
+        };
+        assert_eq!((serial, error), (Some(3), None));
+    }
+
+    #[gpui::test]
+    fn test_check_command_unchanged_server_shows_no_error(cx: &mut TestAppContext) {
+        let harness = Harness::new(cx);
+        harness.server.serve_pair(A, signed(3, "263.3.0"));
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        refresh(cx, &updates);
+        let second = refresh(cx, &updates);
+        assert!(matches!(
+            second,
+            Refresh::Finished(FetchOutcome::NotNewer { .. })
+        ));
+        assert_eq!(
+            second.message(),
+            "Server updates: rejected: serial 3 is not newer than 3"
+        );
+        let UpdatesInfo::Checked { serial, error, .. } =
+            updates.read_with(cx, |updates, _| updates.status_info())
+        else {
+            panic!("checked");
+        };
+        assert_eq!((serial, error), (Some(3), None));
+    }
+
+    #[gpui::test]
+    fn test_check_command_failed_check_shows_error_in_menu(cx: &mut TestAppContext) {
+        let harness = Harness::new(cx);
+        harness.server.serve(A, Route::Offline);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        refresh(cx, &updates);
+        let UpdatesInfo::Checked { error, .. } =
+            updates.read_with(cx, |updates, _| updates.status_info())
+        else {
+            panic!("checked");
+        };
+        assert!(error.is_some());
+    }
+
+    #[gpui::test]
     fn test_a_project_manifest_url_is_ignored(cx: &mut TestAppContext) {
         let harness = Harness::new(cx);
         const EVIL: &str = "https://evil.example.org/servers.json";
@@ -2117,6 +2319,7 @@ mod tests {
             gradle_error: None,
             download: updates.download_progress().cloned(),
             checking: updates.is_checking(),
+            updates: UpdatesInfo::Off,
         };
         crate::status::status_line(&snapshot).text
     }

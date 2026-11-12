@@ -26,6 +26,49 @@ pub struct Snapshot {
     pub download: Option<DownloadProgress>,
     /// A manifest check or the planning of a download runs.
     pub checking: bool,
+    /// The manifest check, for the menu's "Server updates" lines.
+    pub updates: UpdatesInfo,
+}
+
+/// What the status menu says about the server-update manifest check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdatesInfo {
+    /// `kotlin.manifest_url` is empty or refused.
+    Off,
+    /// Updates are on and no check has finished yet.
+    NotChecked,
+    Checked {
+        /// The time of the last check, already formatted.
+        when: String,
+        /// The serial of the cached manifest, if one is cached.
+        serial: Option<u64>,
+        /// The last check's failure, if it failed.
+        error: Option<String>,
+    },
+}
+
+impl UpdatesInfo {
+    pub fn lines(&self) -> Vec<String> {
+        match self {
+            Self::Off => vec!["Server updates: off".into()],
+            Self::NotChecked => vec!["Server updates: not checked yet".into()],
+            Self::Checked {
+                when,
+                serial,
+                error,
+            } => {
+                let mut text = format!("Server updates: checked {when}");
+                if let Some(serial) = serial {
+                    text.push_str(&format!(", serial {serial}"));
+                }
+                let mut lines = vec![text];
+                if let Some(error) = error {
+                    lines.push(format!("Last error: {error}"));
+                }
+                lines
+            }
+        }
+    }
 }
 
 impl Snapshot {
@@ -38,6 +81,7 @@ impl Snapshot {
             gradle_error: state.gradle_error.clone(),
             download: None,
             checking: false,
+            updates: UpdatesInfo::Off,
         })
     }
 }
@@ -180,6 +224,7 @@ pub enum Command {
     LicenseActivate,
     LicenseTrial,
     CancelInstall,
+    CheckForServerUpdates,
     ReviewEula,
     /// Opens the settings file, where `kotlin.jdk_home` is set.
     SetJdkHome,
@@ -218,6 +263,14 @@ pub fn menu_items(snapshot: &Snapshot) -> Vec<MenuItem> {
     items.push(entry("License status", Command::LicenseStatus));
     items.push(entry("Activate license...", Command::LicenseActivate));
     items.push(entry("Start license trial", Command::LicenseTrial));
+    items.push(MenuItem::Separator);
+    for line in snapshot.updates.lines() {
+        items.push(MenuItem::Note(line));
+    }
+    items.push(entry(
+        "Check for server updates",
+        Command::CheckForServerUpdates,
+    ));
 
     let failure = match &snapshot.status {
         ServerStatus::Failed { reason } => Some(reason.as_str()),
@@ -259,7 +312,49 @@ mod tests {
             gradle_error: None,
             download: None,
             checking: false,
+            updates: UpdatesInfo::Off,
         }
+    }
+
+    #[test]
+    fn test_check_command_menu_labels_for_updates_off_checked_and_error() {
+        let notes = |info: UpdatesInfo| {
+            let mut snapshot = lsp(ServerStatus::Ready);
+            snapshot.updates = info;
+            let items = menu_items(&snapshot);
+            assert!(items.contains(&entry(
+                "Check for server updates",
+                Command::CheckForServerUpdates
+            )));
+            items
+                .into_iter()
+                .filter_map(|item| match item {
+                    MenuItem::Note(text) => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(notes(UpdatesInfo::Off), ["Server updates: off"]);
+        assert_eq!(
+            notes(UpdatesInfo::NotChecked),
+            ["Server updates: not checked yet"]
+        );
+        let checked = |error: Option<&str>| UpdatesInfo::Checked {
+            when: "2026-11-12 09:30".into(),
+            serial: Some(7),
+            error: error.map(str::to_string),
+        };
+        assert_eq!(
+            notes(checked(None)),
+            ["Server updates: checked 2026-11-12 09:30, serial 7"]
+        );
+        assert_eq!(
+            notes(checked(Some("rejected: bad signature"))),
+            [
+                "Server updates: checked 2026-11-12 09:30, serial 7",
+                "Last error: rejected: bad signature"
+            ]
+        );
     }
 
     fn lsp(status: ServerStatus) -> Snapshot {
@@ -296,7 +391,7 @@ mod tests {
             .collect()
     }
 
-    const BASE: [&str; 8] = [
+    const BASE: [&str; 10] = [
         "Switch server...",
         "Restart server",
         "Reimport project",
@@ -305,6 +400,8 @@ mod tests {
         "License status",
         "Activate license...",
         "Start license trial",
+        "Server updates: off",
+        "Check for server updates",
     ];
 
     #[test]
@@ -436,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn test_the_base_menu_has_the_eight_entries_in_order() {
+    fn test_the_base_menu_has_the_ten_entries_in_order() {
         for status in [
             ServerStatus::Starting,
             ServerStatus::Ready,
@@ -509,18 +606,15 @@ mod tests {
                 "Gradle: Gradle import failed: Could not resolve x".into()
             ))
         );
+        let has_gradle_note = |snapshot: &Snapshot| {
+            menu_items(snapshot)
+                .iter()
+                .any(|item| matches!(item, MenuItem::Note(text) if text.starts_with("Gradle: ")))
+        };
         snapshot.status = ServerStatus::Ready;
-        assert!(
-            menu_items(&snapshot)
-                .iter()
-                .any(|item| matches!(item, MenuItem::Note(_)))
-        );
+        assert!(has_gradle_note(&snapshot));
         snapshot.gradle_error = None;
-        assert!(
-            !menu_items(&snapshot)
-                .iter()
-                .any(|item| matches!(item, MenuItem::Note(_)))
-        );
+        assert!(!has_gradle_note(&snapshot));
     }
 
     #[test]

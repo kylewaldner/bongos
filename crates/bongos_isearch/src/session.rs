@@ -11,6 +11,10 @@
 //! reads the exit the command stored (none for a click outside or another modal, which exits at
 //! the match), pushes the origin onto the mark ring and sets the final selection, or, for an
 //! abort, puts everything back.
+//!
+//! While the session is open, a keystroke interceptor (`intercept`) watches its window. A key
+//! that is not the session's ends it with an implicit exit: the session closes at the match and
+//! the key runs again, once, in the origin editor.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -27,7 +31,8 @@ use editor::scroll::Autoscroll;
 use editor::{Editor, SelectionEffects};
 use futures::future::{Either, select};
 use gpui::{
-    Action, App, AppContext as _, Entity, EntityId, Global, Subscription, Task, WeakEntity, Window,
+    Action, App, AppContext as _, Entity, EntityId, Global, Keystroke, Subscription, Task,
+    WeakEntity, Window,
 };
 use language::Selection;
 use multi_buffer::{Anchor, MultiBufferOffset, MultiBufferSnapshot, ToOffset as _};
@@ -39,6 +44,7 @@ use crate::actions::{
     RepeatBackward, RepeatForward, RingNext, RingPrevious,
 };
 use crate::engine::{Cancel, Count, Engine, FindOutcome, InvalidPattern, count, find_outcome};
+use crate::intercept;
 use crate::seams::push_origin;
 
 /// The name the session is routed by (`minibuffer.enabled_for`).
@@ -60,7 +66,7 @@ pub fn history_name(regexp: bool) -> &'static str {
 }
 
 /// How the session is to end, stored by the command before it closes the session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ExitKind {
     /// RET: the match selected, the cursor at its end (its start going backward).
     Select,
@@ -68,6 +74,9 @@ enum ExitKind {
     OtherEnd,
     /// C-g: everything as it was before the search.
     Abort,
+    /// A key that is not the session's: the cursor at the match end (its start going backward),
+    /// no selection, and then the keys run again in the origin editor.
+    Implicit(Vec<Keystroke>),
 }
 
 /// What an abort puts back.
@@ -130,11 +139,13 @@ pub(crate) struct SessionState {
     /// The string typed before the ring was walked.
     ring_saved: String,
     _release: Option<Subscription>,
+    /// The keystroke interceptor, for as long as the session is open.
+    _intercept: Option<Subscription>,
     #[cfg(test)]
     pub(crate) stats: Stats,
 }
 
-type Shared = Rc<RefCell<SessionState>>;
+pub(crate) type Shared = Rc<RefCell<SessionState>>;
 
 /// The open session of each workspace, by the workspace's entity id. A workspace shows one modal
 /// at a time, so it has at most one session.
@@ -303,6 +314,7 @@ pub(crate) fn start(
         ring_position: None,
         ring_saved: String::new(),
         _release: None,
+        _intercept: None,
         #[cfg(test)]
         stats: Stats::default(),
     }));
@@ -340,16 +352,24 @@ pub(crate) fn start(
 
     // Registered before it opens: a session this one replaces ends later, deferred.
     cx.default_global::<Sessions>().0.insert(id, state.clone());
-    let release = cx.observe_release(&workspace, move |_, cx| {
-        if let Some(state) = weak.upgrade() {
-            forget(&state, id, cx);
+    let release = cx.observe_release(&workspace, {
+        let weak = weak.clone();
+        move |_, cx| {
+            if let Some(state) = weak.upgrade() {
+                forget(&state, id, cx);
+            }
         }
     });
     state.borrow_mut()._release = Some(release);
     let handle = workspace.update(cx, |workspace, cx| {
         bongos_minibuffer::open(workspace, session, window, cx)
     });
-    state.borrow_mut().handle = Some(handle.clone());
+    let interceptor = intercept::install(weak, window.window_handle(), workspace.downgrade(), cx);
+    {
+        let mut state = state.borrow_mut();
+        state.handle = Some(handle.clone());
+        state._intercept = Some(interceptor);
+    }
 
     if let Some(seed) = seed {
         let request = {
@@ -614,7 +634,13 @@ fn found(
     };
     if let Some(direction) = repeat {
         repeat_command(state, direction, window, cx);
-    } else if state.borrow().exit_after_find {
+    }
+    // A waiting exit closes once no find is left to wait for, so it can never be stranded.
+    let close = {
+        let state = state.borrow();
+        state.exit_after_find && !state.find.as_ref().is_some_and(|find| find.running)
+    };
+    if close {
         handle.close(window, cx);
     }
 }
@@ -780,7 +806,10 @@ fn abort(state: &Shared, window: &mut Window, cx: &mut App) {
         let mut state = state.borrow_mut();
         stop_find(&mut state);
         state.queued_repeats.clear();
+        // An exit that waited for the find is called off with it: should C-g only trim, the
+        // session goes on as if the exit had not been asked for.
         state.exit_after_find = false;
+        state.pending_exit = None;
         state.model.abort()
     };
     match outcome {
@@ -804,6 +833,39 @@ fn exit_command(state: &Shared, kind: ExitKind, window: &mut Window, cx: &mut Ap
     {
         let mut state = state.borrow_mut();
         state.pending_exit = Some(kind);
+        if state.find.as_ref().is_some_and(|find| find.running) {
+            state.exit_after_find = true;
+            return;
+        }
+    }
+    handle.close(window, cx);
+}
+
+/// Whether the session is ending on a key that is not its own, so every later key is held to
+/// run after it.
+pub(crate) fn holds_keys(state: &Shared) -> bool {
+    matches!(state.borrow().pending_exit, Some(ExitKind::Implicit(_)))
+}
+
+/// A key that is not the session's (see `intercept`): the session ends at the match and `keys`
+/// run again in the origin editor. While a find runs the exit waits for it, so the keys act on the
+/// match of the string as typed; keys typed meanwhile join them.
+pub(crate) fn exit_implicitly(
+    state: &Shared,
+    keys: Vec<Keystroke>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(handle) = handle_of(state) else {
+        return;
+    };
+    {
+        let mut state = state.borrow_mut();
+        if let Some(ExitKind::Implicit(held)) = &mut state.pending_exit {
+            held.extend(keys);
+            return;
+        }
+        state.pending_exit = Some(ExitKind::Implicit(keys));
         if state.find.as_ref().is_some_and(|find| find.running) {
             state.exit_after_find = true;
             return;
@@ -861,7 +923,8 @@ fn walk_ring(state: &Shared, older: bool, window: &mut Window, cx: &mut App) {
 /// restores the selections, mark mode and scroll and records nothing. Every other exit pushes the
 /// origin onto the mark ring first, then sets the final selection, and records the string. A
 /// session that ends without a command (a click outside, another modal) leaves the cursor where
-/// it is, at the match end unless the click put it elsewhere.
+/// it is, at the match end unless the click put it elsewhere. An implicit exit then runs its keys
+/// again, after this, where focus now is: the origin editor.
 fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &mut App) {
     let (workspace, editor, exit, origin, saved, string, regexp, found, direction) = {
         let mut state = state.borrow_mut();
@@ -870,6 +933,7 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
             counting.cancel.cancel();
         }
         state._release = None;
+        state._intercept = None;
         state.handle = None;
         let exit = state.pending_exit.take().or(fallback);
         let step = state.model.current();
@@ -886,6 +950,16 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
         )
     };
     forget(state, workspace, cx);
+    if let Some(ExitKind::Implicit(keys)) = &exit {
+        // Deferred, so the exit below is done first; scheduled before it, so the keys run even
+        // when the origin editor is gone.
+        let keys = keys.clone();
+        window.defer(cx, move |window, cx| {
+            for key in keys {
+                window.dispatch_keystroke(key, cx);
+            }
+        });
+    }
     let Some(editor) = editor.upgrade() else {
         return;
     };
@@ -906,7 +980,8 @@ fn finish(state: &Shared, fallback: Option<ExitKind>, window: &mut Window, cx: &
             };
             let range = match exit {
                 ExitKind::Select => other..point,
-                _ => other..other,
+                ExitKind::Implicit(_) => point..point,
+                ExitKind::OtherEnd | ExitKind::Abort => other..other,
             };
             editor.change_selections(
                 SelectionEffects::scroll(Autoscroll::fit()).nav_history(false),

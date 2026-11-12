@@ -13,7 +13,7 @@ use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
 use workspace::{ModalView, Toast, Workspace, notifications::NotificationId};
 
 use crate::{
-    KotlinProjectManager, installed::server_name, resolve::settings_server,
+    KotlinProjectManager, KotlinUpdates, installed::server_name, resolve::settings_server,
     status_item::managers_of,
 };
 
@@ -59,6 +59,23 @@ fn show_message(workspace: &mut Workspace, message: String, cx: &mut Context<Wor
         Toast::new(NotificationId::unique::<SwitchServerPicker>(), message),
         cx,
     );
+}
+
+/// `kotlin: check for server updates`: refreshes the manifest at once and shows the result in one
+/// message. With `kotlin.manifest_url` empty nothing is requested.
+pub fn check_for_server_updates(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    let Some(updates) = KotlinUpdates::global(cx) else {
+        show_message(workspace, "Server updates are not available".into(), cx);
+        return;
+    };
+    let task = updates.update(cx, |updates, cx| updates.refresh(cx));
+    cx.spawn(async move |workspace, cx| {
+        let message = task.await.message();
+        workspace
+            .update(cx, |workspace, cx| show_message(workspace, message, cx))
+            .ok();
+    })
+    .detach();
 }
 
 pub fn restart_server(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
