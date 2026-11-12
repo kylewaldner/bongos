@@ -3,7 +3,8 @@
 //! A remote manifest lists newer kotlin-lsp builds than the pin embedded in `servers.toml`. It is
 //! used only after one of its Ed25519 signatures verifies the exact manifest bytes with a key
 //! compiled into the binary (`RELEASE_KEYS`). A debug build also trusts one key from
-//! `BONGOS_KOTLIN_MANIFEST_KEY` (`<id>:<base64>`); a release build never reads the variable.
+//! `BONGOS_KOTLIN_MANIFEST_KEY` (`<id>:<base64>`) and accepts loopback `http://` archive URLs; a
+//! release build never reads the variable and refuses `http://` entirely.
 //!
 //! Parsing is lenient so that older builds can read newer manifests: unknown keys and fields are
 //! ignored, and an entry the build does not understand or that fails a check is skipped. A
@@ -71,10 +72,14 @@ impl TrustedKey {
     }
 }
 
-/// The keys this build trusts: `RELEASE_KEYS`, plus in a debug build (`allow_override`, from
-/// `cfg!(debug_assertions)`) the key `BONGOS_KOTLIN_MANIFEST_KEY` names.
+/// The keys this build trusts: `RELEASE_KEYS`, plus in a debug build (and only if `allow_override`)
+/// the key `BONGOS_KOTLIN_MANIFEST_KEY` names. A release build does not read the variable at all.
 pub fn trusted_keys(allow_override: bool) -> Vec<TrustedKey> {
-    trusted_keys_with(allow_override, std::env::var(KEY_VAR).ok())
+    #[cfg(debug_assertions)]
+    let override_key = std::env::var(KEY_VAR).ok();
+    #[cfg(not(debug_assertions))]
+    let override_key = None;
+    trusted_keys_with(allow_override && cfg!(debug_assertions), override_key)
 }
 
 fn trusted_keys_with(allow_override: bool, override_key: Option<String>) -> Vec<TrustedKey> {
@@ -109,7 +114,8 @@ fn trusted_keys_with(allow_override: bool, override_key: Option<String>) -> Vec<
 
 #[derive(Deserialize)]
 struct SignatureFile {
-    signatures: Vec<Signature>,
+    /// Each entry is read on its own, so one unreadable entry does not hide the others.
+    signatures: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +141,13 @@ pub fn verify_signature(
     let file: SignatureFile =
         serde_json::from_slice(signature).context("parsing the manifest signature file")?;
     for listed in &file.signatures {
+        let listed = match Signature::deserialize(listed) {
+            Ok(listed) => listed,
+            Err(error) => {
+                log::warn!("skipping an unreadable manifest signature entry: {error}");
+                continue;
+            }
+        };
         let Ok(bytes) = BASE64.decode(listed.ed25519.trim()) else {
             log::warn!("manifest signature for key {} is not base64", listed.key);
             continue;
@@ -239,8 +252,16 @@ impl RemoteManifest {
         let (args, env) = Manifest::embedded()
             .args_and_env(KotlinServerKind::KotlinLsp)
             .ok_or_else(|| anyhow!("the embedded manifest has no kotlin-lsp pin"))?;
-        let kotlin_lsp = raw
-            .kotlin_lsp
+        let entries = match raw.kotlin_lsp {
+            serde_json::Value::Array(entries) => entries,
+            other => {
+                if !other.is_null() {
+                    log::info!("ignoring a remote kotlin-lsp list that is not an array");
+                }
+                Vec::new()
+            }
+        };
+        let kotlin_lsp = entries
             .into_iter()
             .take(MAX_ENTRIES)
             .filter_map(
@@ -266,8 +287,9 @@ struct RawManifest {
     schema: u64,
     kind: String,
     serial: u64,
+    /// An array of entries; any other shape (a later schema may change it) reads as no entries.
     #[serde(rename = "kotlin-lsp", default)]
-    kotlin_lsp: Vec<serde_json::Value>,
+    kotlin_lsp: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -403,8 +425,8 @@ fn platform_entry(
 }
 
 /// Whether a manifest fetched from `manifest_url` may name `url` as an archive: `https://` on
-/// `download.jetbrains.com` or on the manifest's own host and port, or `http://` on `127.0.0.1` or
-/// `localhost` (tests). A URL with a user name or password is refused.
+/// `download.jetbrains.com` or on the manifest's own host and port, or, in a debug build only,
+/// `http://` on `127.0.0.1` or `localhost` (tests). A URL with a user name or password is refused.
 pub fn is_allowed_archive_url(url: &str, manifest_url: &Url) -> bool {
     let Ok(url) = Url::parse(url) else {
         return false;
@@ -421,21 +443,21 @@ pub fn is_allowed_archive_url(url: &str, manifest_url: &Url) -> bool {
                 || (manifest_url.host_str() == Some(host)
                     && manifest_url.port_or_known_default() == url.port_or_known_default())
         }
-        "http" => host == "127.0.0.1" || host == "localhost",
+        "http" => cfg!(debug_assertions) && (host == "127.0.0.1" || host == "localhost"),
         _ => false,
     }
 }
 
-/// The integers of a version made only of dot-separated whole numbers, or `None`.
+/// The integers of a version made only of dot-separated whole numbers without leading zeros, or
+/// `None`.
 pub fn parse_version(version: &str) -> Option<Vec<u64>> {
     version
         .split('.')
         .map(|part| {
-            if !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()) {
-                part.parse().ok()
-            } else {
-                None
-            }
+            let plain = !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part == "0" || !part.starts_with('0'));
+            if plain { part.parse().ok() } else { None }
         })
         .collect()
 }
@@ -747,6 +769,55 @@ mod tests {
     }
 
     #[test]
+    fn test_unreadable_signature_entries_are_skipped() {
+        let pair = key_pair(7);
+        let keys = [trusted("release-1", &pair)];
+        let bytes = manifest(vec![build("263.8000.0", &jetbrains("263.8000.0"))]);
+        let good = json!({"key": "release-1", "ed25519": BASE64.encode(pair.sign(&bytes))});
+        let sig = serde_json::to_vec(&json!({"signatures": [
+            {"key": "release-1"}, 7, "text", {"key": 3, "ed25519": 4}, good
+        ]}))
+        .unwrap();
+        verify_signature(&bytes, Some(&sig), &keys).unwrap();
+        // Only unreadable entries: still no verified signature.
+        let none =
+            serde_json::to_vec(&json!({"signatures": [{"key": "release-1"}, null]})).unwrap();
+        assert!(verify_signature(&bytes, Some(&none), &keys).is_err());
+        // The list itself must be an array.
+        let object = br#"{"signatures": {"key": "release-1"}}"#;
+        assert!(verify_signature(&bytes, Some(object), &keys).is_err());
+    }
+
+    #[test]
+    fn test_a_kotlin_lsp_list_that_is_not_an_array_reads_as_empty() {
+        for shape in [
+            json!("a new shape"),
+            json!({"263.1.0": {}}),
+            json!(null),
+            json!(7),
+        ] {
+            let bytes = serde_json::to_vec(&json!({
+                "schema": 2, "kind": KIND, "serial": 9, "kotlin-lsp": shape
+            }))
+            .unwrap();
+            let parsed = parse(&bytes);
+            assert_eq!(parsed.serial, 9);
+            assert!(parsed.kotlin_lsp.is_empty());
+        }
+        let missing = serde_json::to_vec(&json!({"schema": 1, "kind": KIND, "serial": 3})).unwrap();
+        assert!(parse(&missing).kotlin_lsp.is_empty());
+    }
+
+    #[test]
+    fn test_versions_with_leading_zeros_are_skipped() {
+        let parsed = parse(&manifest(vec![
+            build("263.08.0", &jetbrains("263.08.0")),
+            build("263.8000.0", &jetbrains("263.8000.0")),
+        ]));
+        assert_eq!(versions(&parsed), ["263.8000.0"]);
+    }
+
+    #[test]
     fn test_release_keys_are_well_formed() {
         for (id, base64) in RELEASE_KEYS {
             TrustedKey::parse(id, base64).unwrap();
@@ -773,6 +844,9 @@ mod tests {
         assert_eq!(parse_version(""), None);
         assert_eq!(parse_version("1.99999999999999999999999"), None);
         assert_eq!(parse_version("263.10.0"), Some(vec![263, 10, 0]));
+        assert_eq!(parse_version("0.0.0"), Some(vec![0, 0, 0]));
+        assert_eq!(parse_version("263.01.0"), None);
+        assert_eq!(parse_version("00.1"), None);
     }
 
     #[test]
@@ -783,8 +857,19 @@ mod tests {
         assert!(allowed(
             "https://manifests.example.com/kotlin/kotlin-server.tar.gz"
         ));
-        assert!(allowed("http://127.0.0.1:8123/kotlin-server.tar.gz"));
-        assert!(allowed("http://localhost:8123/kotlin-server.tar.gz"));
+        // Loopback over http is for debug builds only.
+        let debug = cfg!(debug_assertions);
+        assert_eq!(allowed("http://127.0.0.1:8123/kotlin-server.tar.gz"), debug);
+        assert_eq!(allowed("http://localhost:8123/kotlin-server.tar.gz"), debug);
+        // The URL parser lowercases the host and drops a default port; these cases pin that down.
+        assert!(allowed("https://DOWNLOAD.JETBRAINS.COM/x.tar.gz"));
+        assert!(allowed("https://download.jetbrains.com:443/x.tar.gz"));
+        assert!(!allowed("https://download.jetbrains.com./x.tar.gz"));
+        assert!(!allowed("https://manifests.example.com./x.tar.gz"));
+        assert!(!allowed("http://foo.localhost:8123/x.tar.gz"));
+        assert!(!allowed("http://localhost.:8123/x.tar.gz"));
+        assert!(!allowed("http://[::1]:8123/x.tar.gz"));
+        assert!(!allowed("https://[::1]/x.tar.gz"));
         assert!(!allowed(
             "http://manifests.example.com/kotlin-server.tar.gz"
         ));
@@ -808,6 +893,13 @@ mod tests {
             "http://127.0.0.1:8123/kotlin-server.tar.gz",
         )]);
         let parsed = RemoteManifest::parse_unverified(&bytes, &loopback).unwrap();
-        assert_eq!(versions(&parsed), ["263.8000.0"]);
+        assert_eq!(
+            versions(&parsed),
+            if cfg!(debug_assertions) {
+                vec!["263.8000.0"]
+            } else {
+                vec![]
+            }
+        );
     }
 }
