@@ -14,6 +14,7 @@ pub mod failure;
 pub mod fake;
 pub mod inputs;
 pub mod layers;
+pub mod layout;
 pub mod record;
 pub mod scheduler;
 pub mod schema;
@@ -25,6 +26,7 @@ pub use definition::{Definition, ParseError, Warning, parse};
 pub use failure::{Failure, FailureClass, FailureReason};
 pub use inputs::{InputValue, resolve};
 pub use layers::{Layer, LayerDirs, Resolution, Resolved};
+pub use layout::{GraphLayout, LayoutArc, LayoutEdge, LayoutNode, layout};
 pub use record::{Event, NodeKey, ParsedLog, RunState, RunToml, append, parse_log, repair, replay};
 pub use scheduler::{
     Command, FreshRetryRefusal, Limits, Plan, check_fresh_retry, plan, resume_set, retry_set, step,
@@ -42,6 +44,8 @@ mod failure_tests;
 mod inputs_tests;
 #[cfg(test)]
 mod layers_tests;
+#[cfg(test)]
+mod layout_tests;
 #[cfg(test)]
 mod record_tests;
 #[cfg(test)]
