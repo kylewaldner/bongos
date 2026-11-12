@@ -307,14 +307,7 @@ pub(crate) fn run_picker(
             let Some(name) = names.get(index).cloned() else {
                 return;
             };
-            probe_then_review(
-                engine,
-                Review::new(task_id, name),
-                true,
-                workspace,
-                window,
-                cx,
-            );
+            probe_then_review(engine, Review::new(task_id, name), true, window, cx);
         }),
         window,
         cx,
@@ -341,7 +334,6 @@ fn probe_then_review(
     engine: WorkflowEngine,
     review: Review,
     show_summary: bool,
-    workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
