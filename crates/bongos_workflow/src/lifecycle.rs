@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::WorkflowsSettings;
 use crate::definitions::{self, DefinitionError};
 use crate::mcp;
-use crate::runtime::{RunSpec, Runner, Runtime, RuntimeError};
+use crate::runtime::{RunSpec, Runner, Runtime, RuntimeError, Settlement};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError, branch_worktree_path};
 
 /// A run's id: a UUID v7, the same for every attempt.
@@ -480,6 +480,40 @@ impl<R: Runner> Lifecycle<R> {
         self.state(run)
             .map(|state| state.open_gates.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// The task checkout `run` was started from (its worktree and branch).
+    pub fn task_checkout(&self, run: &str) -> Option<&TaskCheckout> {
+        self.entry(run).ok().map(|entry| &entry.task)
+    }
+
+    /// The directory of the current attempt of `run`.
+    pub fn current_attempt_dir(&self, run: &str) -> Option<PathBuf> {
+        self.entry(run).ok().map(RunEntry::attempt_dir)
+    }
+
+    /// The runs held at a succeeded end for the engine since the last call
+    /// ([`Runtime::take_settling`]).
+    pub fn take_settling(&mut self) -> Vec<RunId> {
+        self.runtime.take_settling()
+    }
+
+    /// Ends or holds a run taken with [`Lifecycle::take_settling`].
+    pub fn settle(&mut self, run: &str, settlement: Settlement) -> Result<(), Refusal> {
+        self.entry(run)?;
+        self.runtime
+            .settle(run, settlement)
+            .map_err(Refusal::runtime)?;
+        self.note(run);
+        Ok(())
+    }
+
+    /// Records the engine's final merge of `run` ([`Runtime::record_merge`]).
+    pub fn record_merge(&mut self, run: &str, join: &str, sha: String) -> Result<(), Refusal> {
+        self.entry(run)?;
+        self.runtime
+            .record_merge(run, join, sha)
+            .map_err(Refusal::runtime)
     }
 
     /// Starts a run on the task and todo of `request`. Refused, in this order: a group, no open

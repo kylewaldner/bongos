@@ -38,6 +38,7 @@ util.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
+bongos_builder_model.workspace = true
 editor = { workspace = true, features = ["test-support"] }
 fs.workspace = true
 gpui = { workspace = true, features = ["test-support"] }

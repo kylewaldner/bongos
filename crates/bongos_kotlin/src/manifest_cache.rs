@@ -191,21 +191,12 @@ impl ManifestCache {
     /// The cached manifest, verified again with `keys`. A missing, corrupt, foreign or unknown-key
     /// cache is `None` (and logged). Takes no lock.
     pub fn load(&self, manifest_url: &Url, keys: &[TrustedKey]) -> Option<CachedManifest> {
-        match load_cache(&self.cache_path(), manifest_url, keys) {
-            Ok(cached) => cached,
-            Err(error) => {
-                log::info!("manifest: ignoring the cached manifest: {error:#}");
-                None
-            }
-        }
+        load_logged(&self.cache_path(), manifest_url, keys)
     }
 
     /// `state.json` as it is now. Takes no lock; for a read, modify and write use `with_state`.
     pub fn read_state(&self) -> ServerState {
-        read_state(&self.state_path()).unwrap_or_else(|error| {
-            log::info!("manifest: {error:#}");
-            ServerState::default()
-        })
+        read_state_logged(&self.state_path())
     }
 
     /// Runs `f` on `state.json` under the state lock and writes the result if it changed. When
@@ -296,6 +287,38 @@ impl ManifestCache {
         }
         Ok(result)
     }
+}
+
+/// What a start reads under `install_root`: the cached manifest (verified again with `keys`) and
+/// `state.json`, as `ManifestCache::load` and `ManifestCache::read_state` read them. Takes no lock
+/// and needs no lock registry: both files are only ever replaced by a rename.
+pub fn read_for_start(
+    install_root: &Path,
+    manifest_url: &Url,
+    keys: &[TrustedKey],
+) -> (Option<CachedManifest>, ServerState) {
+    let dir = install_root.join(MANIFEST_DIR);
+    (
+        load_logged(&dir.join(CACHE_FILE), manifest_url, keys),
+        read_state_logged(&dir.join(STATE_FILE)),
+    )
+}
+
+fn load_logged(path: &Path, manifest_url: &Url, keys: &[TrustedKey]) -> Option<CachedManifest> {
+    match load_cache(path, manifest_url, keys) {
+        Ok(cached) => cached,
+        Err(error) => {
+            log::info!("manifest: ignoring the cached manifest: {error:#}");
+            None
+        }
+    }
+}
+
+fn read_state_logged(path: &Path) -> ServerState {
+    read_state(path).unwrap_or_else(|error| {
+        log::info!("manifest: {error:#}");
+        ServerState::default()
+    })
 }
 
 fn load_cache(

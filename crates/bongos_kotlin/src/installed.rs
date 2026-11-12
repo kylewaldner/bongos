@@ -86,7 +86,7 @@ pub fn not_installed(server: KotlinServerKind) -> anyhow::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
