@@ -540,11 +540,11 @@ pub fn log_file(attempt: &Path, key: &NodeKey, try_number: u32) -> Option<PathBu
         .find(|path| path.exists())
 }
 
-fn format_cost(cost: f64) -> String {
+pub(crate) fn format_cost(cost: f64) -> String {
     format!("${cost:.2}")
 }
 
-fn format_ms(ms: u64) -> String {
+pub(crate) fn format_ms(ms: u64) -> String {
     let seconds = ms / 1000;
     match (seconds / 3600, seconds / 60 % 60, seconds % 60) {
         (0, 0, seconds) => format!("{seconds}s"),

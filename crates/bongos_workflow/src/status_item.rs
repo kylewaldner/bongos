@@ -70,6 +70,15 @@ pub(crate) fn changed(cx: &mut App) {
     cx.set_global(Revision(next));
 }
 
+/// Calls `f` whenever the engine reports a change.
+pub(crate) fn observe_changes<T: 'static>(
+    cx: &mut Context<T>,
+    mut f: impl FnMut(&mut T, &mut Context<T>) + 'static,
+) -> Subscription {
+    cx.default_global::<Revision>();
+    cx.observe_global::<Revision>(move |this, cx| f(this, cx))
+}
+
 /// The status bar item. One per workspace; every one shows the same runs.
 pub struct WorkflowStatus {
     _subscription: Subscription,

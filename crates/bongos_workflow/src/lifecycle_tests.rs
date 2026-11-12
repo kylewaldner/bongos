@@ -1147,5 +1147,7 @@ mod outcomes_tests;
 mod picker_tests;
 #[path = "run_view_tests.rs"]
 mod run_view_tests;
+#[path = "runs_panel_tests.rs"]
+mod runs_panel_tests;
 #[path = "task_link_tests.rs"]
 mod task_link_tests;

@@ -448,6 +448,11 @@ impl<R: Runner> Lifecycle<R> {
             .map(|entry| entry.id.clone())
     }
 
+    /// Every run, active or finished, in start order.
+    pub fn all_runs(&self) -> Vec<RunId> {
+        self.runs.iter().map(|entry| entry.id.clone()).collect()
+    }
+
     /// Every active run, in start order.
     pub fn active_runs(&self) -> Vec<RunId> {
         self.runs
