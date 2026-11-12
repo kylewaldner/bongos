@@ -22,7 +22,7 @@ mod versions;
 use std::{path::PathBuf, sync::Arc};
 
 pub use adapter::{INTELLIJ_DOWNLOAD_HINT, KotlinAdapter, server_command};
-pub use commands::{reimport_project, restart_server, switch_server};
+pub use commands::{check_for_server_updates, reimport_project, restart_server, switch_server};
 pub use glue::{attach_managers, attach_notices, fallback_notice_id};
 use gpui::{App, Global, actions};
 pub use install::{
@@ -71,7 +71,9 @@ pub use resolve::{
     project_override, resolve, set_project_override,
 };
 use settings::{KotlinServerKind, RegisterSetting, Settings, SettingsContent};
-pub use status::{Command, MenuItem, Snapshot, StatusLine, menu_items, status_line};
+pub use status::{
+    Command, MenuItem, Snapshot, StatusLine, UpdatesInfo, menu_items, status_line,
+};
 pub use status_item::{KotlinStatusItem, cancel_installs, show_logs};
 pub use unsupported::{
     Feature, attach_unsupported_notices, not_supported_message, not_supported_notice_id,
@@ -102,6 +104,8 @@ actions!(
         ShowStatusMenu,
         /// Cancels the Kotlin server download in progress.
         CancelInstall,
+        /// Checks for newer Kotlin server builds now and reports the result.
+        CheckForServerUpdates,
         /// Shows the IntelliJ server's license status.
         LicenseStatus,
         /// Activates an IntelliJ server license in a terminal tab: JetBrains account, activation
