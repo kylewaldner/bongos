@@ -1,0 +1,42 @@
+schema = 1
+name = "implement tasks"
+description = "One agent implements the current todo"
+start = "implement"
+
+[inputs]
+goal = { type = "text", from = "task.goal" }
+todo = { type = "text", from = "todo.name" }
+
+[defaults]
+agent = "claude"
+model = "sonnet"
+permission_mode = "acceptEdits"
+allowed_tools = [
+  "Read",
+  "Edit",
+  "Write",
+  "Glob",
+  "Grep",
+  "Bash(git diff:*)",
+  "Bash(git status:*)",
+  "Bash(git add:*)",
+  "Bash(git commit:*)",
+  "Bash(cargo test:*)",
+  "Bash(gradle test:*)",
+  "Bash(npm test:*)",
+  "Bash(make test:*)",
+]
+max_turns = 40
+max_cost_usd = 5.0
+max_minutes = 30
+retries = 2
+
+[nodes.implement]
+kind = "agent"
+purpose = "Implement the current todo"
+prompt = "implement.md"
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"

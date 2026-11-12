@@ -1,0 +1,107 @@
+schema = 1
+name = "babysit PR"
+description = "Watch a pull request: fix red CI (at most five passes), ask before merging when it is green"
+start = "check"
+
+[inputs]
+pr = { type = "text", from = "task.pr" }
+
+[defaults]
+agent = "claude"
+model = "sonnet"
+permission_mode = "acceptEdits"
+allowed_tools = [
+  "Read",
+  "Edit",
+  "Write",
+  "Glob",
+  "Grep",
+  "Bash(git diff:*)",
+  "Bash(git status:*)",
+  "Bash(git add:*)",
+  "Bash(git commit:*)",
+  "Bash(gh pr checks:*)",
+  "Bash(gh run view:*)",
+  "Bash(cargo test:*)",
+  "Bash(gradle test:*)",
+  "Bash(npm test:*)",
+  "Bash(make test:*)",
+]
+max_turns = 40
+max_cost_usd = 5.0
+max_minutes = 30
+retries = 2
+
+# `waiting` never routes: while the script reports it the node sleeps and checks again with no
+# agent running, so a run can wait for days. The run gives up after workflows.wait_give_up_days.
+[nodes.check]
+kind = "program"
+purpose = "Check CI and report green, red, waiting, merged or closed"
+script = "check_ci.py"
+language = "python"
+permissions = { commands = ["gh"], network = ["github.com", "*.github.com"], mcp = [] }
+polls = { value = "waiting" }
+output = { result = { type = "choice", values = ["green", "red", "waiting", "merged", "closed"] } }
+routes = [
+  { when = { result = "green" }, to = "merge" },
+  { when = { result = "red" }, to = "fix", max_passes = 5, on_bound = "red_ci" },
+  { when = { result = "waiting" }, to = "waiting" },
+  { when = { result = "merged" }, to = "done" },
+  { when = { result = "closed" }, to = "closed" },
+]
+
+[nodes.fix]
+kind = "agent"
+purpose = "Fix the failing CI checks"
+prompt = "fix.md"
+output = { summary = { type = "text" } }
+routes = [{ to = "push" }]
+
+[nodes.push]
+kind = "program"
+purpose = "Push the fix to the pull request"
+script = "push.py"
+language = "python"
+permissions = { commands = ["gh", "git"], network = ["github.com", "*.github.com"], mcp = [] }
+output = { result = { type = "choice", values = ["pushed", "rejected"] } }
+routes = [
+  { when = { result = "pushed" }, to = "check" },
+  { when = { result = "rejected" }, to = "rejected" },
+]
+
+[nodes.merge]
+kind = "program"
+purpose = "Merge the pull request"
+script = "merge_pr.py"
+language = "python"
+gate = { when = "before", question = "CI is green. Merge this pull request?" }
+permissions = { commands = ["gh"], network = ["github.com", "*.github.com"], mcp = [] }
+with = { method = "squash" }
+output = { result = { type = "choice", values = ["merged", "blocked"] } }
+routes = [
+  { when = { result = "merged" }, to = "done" },
+  { when = { result = "blocked" }, to = "blocked" },
+]
+
+[ends.done]
+kind = "success"
+
+[ends.closed]
+kind = "failure"
+reason = "the pull request was closed without merging"
+
+[ends.rejected]
+kind = "failure"
+reason = "the push was rejected; the pull request branch has changes this run does not have"
+
+[ends.red_ci]
+kind = "failure"
+reason = "CI is still red after five fix passes"
+
+[ends.blocked]
+kind = "failure"
+reason = "the pull request could not be merged"
+
+[ends.waiting]
+kind = "failure"
+reason = "gave up waiting"
