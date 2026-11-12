@@ -6,9 +6,11 @@ mod installed;
 mod intellij;
 mod jdk;
 mod license;
+mod locks;
 mod log;
 mod manager;
 mod manifest;
+mod manifest_cache;
 mod remote_manifest;
 mod resolve;
 mod status;
@@ -40,6 +42,10 @@ pub use license::{
     is_license_lost_exit, is_license_lost_signal, license_activate, license_status, license_trial,
     review_intellij_eula,
 };
+pub use locks::{
+    LockClock, LockGuard, LockRegistry, LockTimedOut, LockWaitCancelled, STATE_LOCK_LIMIT,
+    state_lock_path, version_lock_path,
+};
 pub use log::{KotlinLog, MAX_LOG_BYTES, StderrMirror};
 pub use manager::{
     ADAPTER_NAME, CRASH_LOOP_REASON, CRASH_WINDOW, EXPIRED_REASON, Fallback, FallbackReason,
@@ -47,6 +53,10 @@ pub use manager::{
     ServerStatus, fallback_message,
 };
 pub use manifest::{ArchiveKind, Manifest, ManifestEntry, OVERRIDE_VAR, current_platform};
+pub use manifest_cache::{
+    BuildId, CachedManifest, Claim, FETCH_LEASE, FetchOutcome, FetchedManifest, KotlinLspBuilds,
+    Lease, ManifestCache, ServerState,
+};
 pub use remote_manifest::{
     KEY_VAR as MANIFEST_KEY_VAR, RELEASE_KEYS, RemoteBuild, RemoteManifest, TrustedKey,
     compare_versions, is_allowed_archive_url, parse_version, trusted_keys, verify_signature,
