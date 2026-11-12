@@ -22,7 +22,7 @@ use bongos_work::WriteError;
 use bongos_work_model::commands::{self, Change, Context, Outcome};
 use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{Extra, HistoryEntry, SessionContext, TodoRole, TodoState};
-use bongos_workflow_model::definition::NodeKind;
+use bongos_workflow_model::definition::{Node, NodeKind};
 use bongos_workflow_model::inputs::Input;
 use bongos_workflow_model::record::TodoRef;
 use bongos_workflow_model::template::{Scope, TemplateError, render};
@@ -216,6 +216,14 @@ pub fn cancelled_change(tree: &WorkTree, ctx: &Context, task_id: &str) -> Outcom
     commands::record_event(tree, ctx, task_id, RUN_CANCELLED, None)
 }
 
+/// The program nodes of `definition` that use the shipped program `name`.
+fn uses<'a>(definition: &'a Definition, name: &'a str) -> impl Iterator<Item = &'a Node> + 'a {
+    definition.nodes.iter().filter(move |node| {
+        node.kind.value == NodeKind::Program
+            && node.use_node.as_ref().is_some_and(|used| used.value == name)
+    })
+}
+
 /// What the end of a successful run must still do, read from its definition and task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Finale {
@@ -231,13 +239,7 @@ pub struct Finale {
 
 impl Finale {
     pub fn read(definition: &Definition, task: Option<&Task>, todo: &TodoRef, merge_is_ship: bool) -> Self {
-        let uses = |name: &str| {
-            definition.nodes.iter().filter(move |node| {
-                node.kind.value == NodeKind::Program
-                    && node.use_node.as_ref().is_some_and(|used| used.value == name)
-            })
-        };
-        let deploy_wait = uses("wait").any(|node| {
+        let deploy_wait = uses(definition, "wait").any(|node| {
             node.with
                 .get("condition")
                 .and_then(|value| value.as_str())
@@ -252,7 +254,7 @@ impl Finale {
             })
             .is_some_and(|found| found.role == Some(TodoRole::Ships));
         Self {
-            merge_node: uses("merge").next().is_some(),
+            merge_node: uses(definition, "merge").next().is_some(),
             deploy_wait,
             ship_todo,
             merge_is_ship,

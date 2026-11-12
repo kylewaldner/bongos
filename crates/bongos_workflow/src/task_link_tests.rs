@@ -14,7 +14,7 @@ use bongos_work_model::{TodoRole, session_context};
 use bongos_workflow_model::inputs::resolve;
 use bongos_workflow_model::record::TodoRef;
 use bongos_workflow_model::state_doc::{self, Paths, RunIdentity};
-use bongos_workflow_model::{FailureReason, RunState, parse};
+use bongos_workflow_model::{RunState, parse};
 use gpui::TestAppContext;
 
 use super::*;
