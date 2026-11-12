@@ -389,11 +389,15 @@ async fn transpose_words_with_a_mark_but_another_state_uses_the_plain_form(
     cx.assert_editor_state("one three four twoˇ");
 
     // A non-empty region.
+    cx.set_state("ˇone two three four");
+    set_mark_here(&mut cx);
     cx.set_selections_state("one «twoˇ» three four");
     cx.dispatch_action(TransposeWords { count: None });
     cx.assert_editor_state("one three twoˇ four");
 
     // Two carets.
+    cx.set_state("ˇone two three four five six");
+    set_mark_here(&mut cx);
     cx.set_selections_state("one twoˇ three fourˇ five six");
     cx.dispatch_action(TransposeWords { count: None });
     cx.assert_editor_state("one three twoˇ five fourˇ six");

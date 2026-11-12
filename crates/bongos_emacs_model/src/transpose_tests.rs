@@ -321,7 +321,7 @@ fn transpose_words_with_mark_keeps_multi_byte_text() {
 
 #[test]
 fn transpose_words_with_mark_does_nothing_for_one_word() {
-    for marked in ["o‸neˇ two", "‸oneˇ two", "one ‸ˇtwo", "‸ˇ", "‸ ˇ", "ˇ ‸"] {
+    for marked in ["o‸nˇe two", "‸onˇe two", "one ‸ˇtwo", "‸ˇ", "‸ ˇ", "ˇ ‸"] {
         let (text, point, mark) = parse_pm(marked);
         let plan = transpose_words_with_mark(text.as_str(), point, mark);
         assert!(plan.edits.is_empty() && plan.carets.is_empty(), "{marked}");

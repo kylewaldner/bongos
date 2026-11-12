@@ -381,7 +381,9 @@ fn swap_units<T: TextSource + ?Sized>(
     mark_unit: Range<usize>,
     caret_after: impl FnOnce(bool, &str, &Range<usize>) -> usize,
 ) -> Plan {
-    if point_unit.start < mark_unit.end && mark_unit.start < point_unit.end {
+    if point_unit == mark_unit
+        || (point_unit.start < mark_unit.end && mark_unit.start < point_unit.end)
+    {
         return Plan::default();
     }
     let point_first = point_unit.start < mark_unit.start;
