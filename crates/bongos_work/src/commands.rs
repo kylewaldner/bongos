@@ -85,6 +85,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::OpenFolder>(),
         TypeId::of::<project::Focus>(),
         TypeId::of::<work::AddRepository>(),
+        TypeId::of::<work::EditWorktreeRoot>(),
         TypeId::of::<task::SetDefaultVisibility>(),
         TypeId::of::<task::Think>(),
         TypeId::of::<task::Mode>(),
@@ -106,6 +107,7 @@ pub fn action_types() -> Vec<TypeId> {
     {
         types.push(TypeId::of::<work::DumpSessionContext>());
         types.push(TypeId::of::<work::DumpView>());
+        types.push(TypeId::of::<work::DumpRepositories>());
     }
     types
 }

@@ -40,7 +40,7 @@ pub(crate) fn group_toml(id: &str, goal: &str) -> String {
 
 /// A project `invoicing` with the leaf `backfill` (`l1`, pr-ship) and the group `phase` (`g2`)
 /// holding the open leaves `alpha` (`l2`) and `beta` (`l3`).
-fn seed(root: &Path) {
+pub(crate) fn seed(root: &Path) {
     let project = layout::project_dir(root, "invoicing");
     write(&layout::project_file(&project), &project_toml("Invoicing"));
     write(&layout::task_file(&project), &group_toml("g1", "Invoicing"));
@@ -638,8 +638,8 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
 }
 
 /// Every action these commands register, but the debug-only `work::DumpSessionContext` and
-/// `work::DumpView`.
-const NAMES: [&str; 58] = [
+/// `work::DumpView` and `work::DumpRepositories`.
+const NAMES: [&str; 59] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -682,6 +682,7 @@ const NAMES: [&str; 58] = [
     "project::OpenFolder",
     "project::Focus",
     "work::AddRepository",
+    "work::EditWorktreeRoot",
     "task::SetDefaultVisibility",
     "task::Think",
     "task::Mode",
@@ -706,6 +707,7 @@ fn names() -> Vec<&'static str> {
     if cfg!(debug_assertions) {
         names.push("work::DumpSessionContext");
         names.push("work::DumpView");
+        names.push("work::DumpRepositories");
     }
     names
 }

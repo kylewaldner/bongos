@@ -2551,6 +2551,8 @@ dependencies = [
  "paths",
  "picker",
  "project",
+ "schemars 1.0.4",
+ "serde",
  "serde_json",
  "settings",
  "task",
@@ -2580,6 +2582,7 @@ name = "bongos_workflow"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_chat",
  "bongos_work_model",
  "bongos_workflow_model",
  "command_palette_hooks",
@@ -14575,6 +14578,7 @@ dependencies = [
  "anyhow",
  "audio",
  "bongos_linear",
+ "bongos_work",
  "cloud_api_types",
  "codestral",
  "collections",

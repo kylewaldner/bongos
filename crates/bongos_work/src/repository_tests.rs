@@ -317,3 +317,199 @@ async fn merge_is_ship_is_the_task_override_then_the_repository_then_true(cx: &m
     overridden.file.as_mut().unwrap().merge_is_ship = Some(false);
     assert!(!ask(&overridden, cx));
 }
+
+fn entry(name: &str, worktree_root: Option<&str>) -> WorkRepositoryContent {
+    WorkRepositoryContent {
+        name: name.to_string(),
+        path: format!("/srv/{name}"),
+        setup_command: None,
+        merge_is_ship: None,
+        deployments: None,
+        branch_template: None,
+        worktree_root: worktree_root.map(str::to_string),
+    }
+}
+
+/// Writes `entries` as `work.repositories` to the user settings file, as the app would.
+async fn write_repositories(
+    harness: &crate::command_tests::Harness,
+    cx: &mut gpui::VisualTestContext,
+    entries: Vec<WorkRepositoryContent>,
+) {
+    let fs = harness
+        .workspace
+        .read_with(cx, |workspace, _| workspace.app_state().fs.clone());
+    let written = cx.update(|_, cx| {
+        settings::update_settings_file_with_completion(fs, cx, move |content, _| {
+            content.work.get_or_insert_default().repositories = Some(entries);
+        })
+    });
+    cx.run_until_parked();
+    written.await.unwrap().unwrap();
+}
+
+/// The `worktree_root` of each repository in the settings, by name.
+fn roots(cx: &mut gpui::VisualTestContext) -> Vec<(String, Option<String>)> {
+    cx.update(|_, cx| {
+        WorkSettings::get_global(cx)
+            .repositories
+            .iter()
+            .map(|repository| (repository.name.clone(), repository.worktree_root.clone()))
+            .collect()
+    })
+}
+
+fn owned(roots: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+    roots
+        .iter()
+        .map(|(name, root)| (name.to_string(), root.map(str::to_string)))
+        .collect()
+}
+
+/// Dispatches `work::EditWorktreeRoot` for `repository`, as the Repositories page does.
+fn edit_root_of(cx: &mut gpui::VisualTestContext, repository: &str) {
+    let action = cx.update(|_, cx| {
+        cx.build_action(
+            "work::EditWorktreeRoot",
+            Some(serde_json::json!({ "repository": repository })),
+        )
+        .unwrap()
+    });
+    cx.update(|window, cx| window.dispatch_action(action, cx));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn edit_worktree_root_writes_the_named_entry_only(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, false).await;
+    write_repositories(
+        &harness,
+        cx,
+        vec![
+            entry("invoicing", None),
+            entry("site", Some("~/trees/{repo}")),
+        ],
+    )
+    .await;
+
+    edit_root_of(cx, "invoicing");
+    let prompt = harness.prompt(cx).expect("the root prompt is open");
+    let initial = prompt.update_in(cx, |prompt, _, cx| prompt.editor.read(cx).text(cx));
+    assert_eq!(initial, "", "invoicing has no root of its own");
+    harness.answer(cx, &Input::Text("{repo}.worktrees")).await;
+    wait_until(cx, "the root in the settings", |cx| {
+        roots(cx)[0].1.is_some()
+    })
+    .await;
+    assert_eq!(
+        roots(cx),
+        owned(&[
+            ("invoicing", Some("{repo}.worktrees")),
+            ("site", Some("~/trees/{repo}")),
+        ])
+    );
+    assert!(!harness.has_toast(cx));
+}
+
+#[gpui::test]
+async fn edit_worktree_root_picks_a_repository_and_empty_input_clears_the_root(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = harness(cx, true, false).await;
+    write_repositories(
+        &harness,
+        cx,
+        vec![
+            entry("invoicing", Some("{repo}-wt")),
+            entry("site", Some("~/trees/{repo}")),
+        ],
+    )
+    .await;
+
+    dispatch(cx, "work::EditWorktreeRoot");
+    assert_eq!(harness.choices(cx), ["invoicing", "site"]);
+    harness.answer(cx, &Input::Pick("site")).await;
+    let prompt = harness.prompt(cx).expect("the root prompt is open");
+    let initial = prompt.update_in(cx, |prompt, _, cx| prompt.editor.read(cx).text(cx));
+    assert_eq!(
+        initial, "~/trees/{repo}",
+        "the prompt starts with the current root"
+    );
+    harness.answer(cx, &Input::Text("")).await;
+    wait_until(cx, "the root to be cleared", |cx| roots(cx)[1].1.is_none()).await;
+    assert_eq!(
+        roots(cx),
+        owned(&[("invoicing", Some("{repo}-wt")), ("site", None)])
+    );
+    let fs = harness
+        .workspace
+        .read_with(cx, |workspace, _| workspace.app_state().fs.clone());
+    let text = fs.load(paths::settings_file()).await.unwrap();
+    assert_eq!(
+        text.matches("worktree_root").count(),
+        1,
+        "the key is removed, not set to null: {text}"
+    );
+}
+
+#[gpui::test]
+async fn edit_worktree_root_refuses_an_invalid_template_with_the_error_as_worded(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = harness(cx, true, false).await;
+    write_repositories(&harness, cx, vec![entry("invoicing", None)]).await;
+
+    edit_root_of(cx, "invoicing");
+    let prompt = harness.prompt(cx).expect("the root prompt is open");
+    let hint = |cx: &mut gpui::VisualTestContext| {
+        prompt.read_with(cx, |prompt, _| {
+            (
+                prompt.hint.as_ref().map(|hint| hint.to_string()),
+                prompt.hint_is_error,
+            )
+        })
+    };
+    let (status, is_error) = hint(cx);
+    assert!(!is_error);
+    assert!(
+        status.as_deref().is_some_and(|status| status
+            .starts_with("Applies to tasks started from now on; new worktrees go to ")),
+        "{status:?}"
+    );
+
+    let error = bongos_work_model::worktree_path::TemplateError::UnknownToken("nope".to_string())
+        .to_string();
+    prompt.update_in(cx, |prompt, window, cx| {
+        prompt
+            .editor
+            .update(cx, |editor, cx| editor.set_text("{nope}/trees", window, cx))
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        hint(cx),
+        (Some(error.clone()), true),
+        "checked on every edit"
+    );
+
+    cx.dispatch_action(menu::Confirm);
+    cx.run_until_parked();
+    assert!(
+        harness.prompt(cx).is_some(),
+        "an invalid root is not confirmed"
+    );
+    assert_eq!(hint(cx), (Some(error), true));
+    assert_eq!(roots(cx), owned(&[("invoicing", None)]));
+
+    prompt.update_in(cx, |prompt, window, cx| {
+        prompt
+            .editor
+            .update(cx, |editor, cx| editor.set_text("{repo}-wt", window, cx))
+    });
+    cx.run_until_parked();
+    let (status, is_error) = hint(cx);
+    assert!(!is_error);
+    assert_eq!(
+        status.as_deref(),
+        Some("Applies to tasks started from now on; new worktrees go to /srv/invoicing-wt/<task>")
+    );
+}

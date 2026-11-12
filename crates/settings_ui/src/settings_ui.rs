@@ -920,6 +920,8 @@ pub struct SettingsWindow {
     /// mouse, where `focus_visible` styling would otherwise be suppressed).
     pub(crate) external_agent_add_focus_handle: FocusHandle,
     skill_creator_page: Option<(Entity<pages::SkillCreatorPage>, Subscription)>,
+    /// The work store the Repositories page reads, observed so the page follows it.
+    pub(crate) work_store: Option<(Entity<bongos_work::WorkStore>, Subscription)>,
 }
 
 struct SearchDocument {
@@ -1931,6 +1933,10 @@ impl SettingsWindow {
             custom_agent_form: None,
             external_agent_add_focus_handle: cx.focus_handle(),
             skill_creator_page: None,
+            work_store: bongos_work::WorkStore::global(cx).map(|store| {
+                let observation = cx.observe(&store, |_, _, cx| cx.notify());
+                (store, observation)
+            }),
         };
 
         this.fetch_files(window, cx);
@@ -5203,6 +5209,7 @@ pub mod test {
                 custom_agent_form: None,
                 external_agent_add_focus_handle: cx.focus_handle(),
                 skill_creator_page: None,
+                work_store: None,
             }
         }
     }
@@ -5339,6 +5346,7 @@ pub mod test {
             custom_agent_form: None,
             external_agent_add_focus_handle: cx.focus_handle(),
             skill_creator_page: None,
+            work_store: None,
         };
 
         settings_window.build_filter_table();

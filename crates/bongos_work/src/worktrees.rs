@@ -48,10 +48,6 @@ use crate::{WorkSettings, WorkStore, modals};
 
 /// The directory under a repository's root that held the worktrees of its tasks before the
 /// worktree root settings. Worktrees already there stay there.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the tests read the old layout's name so far")
-)]
 pub const WORKTREES_DIR: &str = ".bongos-worktrees";
 /// The line in `info/exclude` that keeps [`WORKTREES_DIR`] out of `git status`. It is still added
 /// for every repository a task starts in, and never removed.
@@ -271,19 +267,7 @@ pub(crate) fn plan(
         .filter(|task| task.dir != place.task.dir)
         .filter_map(|task| task.file.as_ref()?.worktree.as_deref().map(expand_home))
         .collect();
-    let template = repository
-        .worktree_root
-        .as_deref()
-        .map(|text| Configured {
-            text,
-            layer: TemplateLayer::Own,
-        })
-        .or_else(|| {
-            layout.default_root.as_deref().map(|text| Configured {
-                text,
-                layer: TemplateLayer::Default,
-            })
-        });
+    let template = configured(repository, layout);
     let spot = |template| Spot {
         template,
         repository,
@@ -403,6 +387,27 @@ pub(crate) fn remote_names(url: &str, github: &str) -> bool {
     let github = github.to_lowercase();
     url.strip_suffix(&github)
         .is_some_and(|rest| rest.ends_with('/') || rest.ends_with(':'))
+}
+
+/// The template that decides where `repository`'s worktrees go: its own `worktree_root`, else
+/// the default root, else `None` for the central directory.
+pub(crate) fn configured<'a>(
+    repository: &'a Repository,
+    layout: &'a Layout,
+) -> Option<Configured<'a>> {
+    repository
+        .worktree_root
+        .as_deref()
+        .map(|text| Configured {
+            text,
+            layer: TemplateLayer::Own,
+        })
+        .or_else(|| {
+            layout.default_root.as_deref().map(|text| Configured {
+                text,
+                layer: TemplateLayer::Default,
+            })
+        })
 }
 
 /// `path` with a leading `~` replaced by the home directory.
@@ -670,12 +675,18 @@ fn exclude_for(repository: &Path, worktree: &Path) -> Result<()> {
 /// Makes the parent of `worktree` and checks that a file can be made in it, with a probe file
 /// that is removed at once.
 pub(crate) fn prepare_parent(worktree: &Path) -> Result<()> {
-    static PROBES: AtomicU64 = AtomicU64::new(0);
     let parent = worktree
         .parent()
         .with_context(|| format!("{} has no parent directory", worktree.display()))?;
     std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    let probe = parent.join(format!(
+    probe_writable(parent)
+}
+
+/// Checks that files can be made in `directory` by making one with a unique name (`create_new`)
+/// and removing it at once.
+pub(crate) fn probe_writable(directory: &Path) -> Result<()> {
+    static PROBES: AtomicU64 = AtomicU64::new(0);
+    let probe = directory.join(format!(
         ".bongos-probe-{}-{}",
         std::process::id(),
         PROBES.fetch_add(1, Ordering::Relaxed)
@@ -684,7 +695,7 @@ pub(crate) fn prepare_parent(worktree: &Path) -> Result<()> {
         .write(true)
         .create_new(true)
         .open(&probe)
-        .with_context(|| format!("{} is not writable", parent.display()))?;
+        .with_context(|| format!("{} is not writable", directory.display()))?;
     std::fs::remove_file(&probe).with_context(|| format!("removing {}", probe.display()))
 }
 

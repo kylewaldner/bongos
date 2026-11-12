@@ -1,0 +1,127 @@
+#!/bin/sh
+# A stand-in for `codex exec --json` in tests. Codex is not installed where this was written, so
+# the version, the help texts and the events are the design's assumptions about the Codex CLI.
+# Knobs come as extra arguments, since the runner clears the environment:
+#   --fake-scenario NAME  success (default), invalid, free-text, turns, mcp-failed, logged-out,
+#                         crash, sleep
+#   --fake-log DIR        writes DIR/argv (one argument per line), DIR/env and DIR/stdin
+# `--version`, `--help`, `exec --help` and `mcp list` answer like a recent Codex CLI.
+
+here=$(cd "$(dirname "$0")" && pwd)
+
+case "$1" in
+--version)
+    echo "codex-cli 0.46.0"
+    exit 0
+    ;;
+--help)
+    cat <<'EOF'
+Codex CLI
+
+Usage: codex [OPTIONS] [PROMPT]
+       codex [OPTIONS] <COMMAND> [ARGS]
+
+Commands:
+  exec        Run Codex non-interactively [aliases: e]
+  login       Manage login
+  mcp         Run Codex as an MCP server and manage MCP servers
+  resume      Resume a previous session
+
+Options:
+  -c, --config <key=value>     Override a configuration value
+  -m, --model <MODEL>          Model the agent should use
+  -s, --sandbox <SANDBOX_MODE> Select the sandbox policy
+  -C, --cd <DIR>               Tell the agent to use DIR as its working root
+EOF
+    exit 0
+    ;;
+exec)
+    if [ "$2" = "--help" ]; then
+        cat <<'EOF'
+Run Codex non-interactively
+
+Usage: codex exec [OPTIONS] [PROMPT]
+
+Options:
+  -c, --config <key=value>        Override a configuration value
+  -m, --model <MODEL>             Model the agent should use
+  -s, --sandbox <SANDBOX_MODE>    Select the sandbox policy [possible values: read-only, workspace-write, danger-full-access]
+  -C, --cd <DIR>                  Tell the agent to use DIR as its working root
+      --skip-git-repo-check       Allow running outside a Git repository
+      --output-schema <FILE>      Path to a JSON Schema file describing the model's final response shape
+      --json                      Print events to stdout as JSONL
+  -o, --output-last-message <FILE> Write the last message to FILE
+EOF
+        exit 0
+    fi
+    ;;
+mcp)
+    if [ "$2" = "list" ]; then
+        cat "$here/codex-mcp-list.txt"
+        exit 0
+    fi
+    exit 2
+    ;;
+esac
+
+scenario=success
+log=
+for arg in "$@"; do
+    case "$want" in
+    scenario) scenario=$arg ;;
+    log) log=$arg ;;
+    esac
+    want=
+    case "$arg" in
+    --fake-scenario) want=scenario ;;
+    --fake-log) want=log ;;
+    esac
+done
+
+if [ -n "$log" ]; then
+    mkdir -p "$log"
+    : > "$log/argv"
+    for arg in "$@"; do
+        printf '%s\n' "$arg" >> "$log/argv"
+    done
+    env > "$log/env"
+    cat > "$log/stdin"
+else
+    cat > /dev/null
+fi
+
+case "$scenario" in
+success)
+    cat "$here/codex-success.jsonl"
+    ;;
+invalid)
+    cat "$here/codex-invalid.jsonl"
+    ;;
+free-text)
+    cat "$here/codex-free-text.jsonl"
+    ;;
+turns)
+    cat "$here/codex-turns.jsonl"
+    sleep 600
+    ;;
+mcp-failed)
+    cat "$here/codex-mcp-failed.jsonl"
+    ;;
+logged-out)
+    cat "$here/codex-logged-out.jsonl"
+    echo "Not logged in. Please run codex login." >&2
+    exit 1
+    ;;
+crash)
+    echo "boom: the fake crashed" >&2
+    exit 3
+    ;;
+sleep)
+    echo '{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000200000009"}'
+    sleep 600
+    ;;
+*)
+    echo "unknown fake scenario: $scenario" >&2
+    exit 2
+    ;;
+esac

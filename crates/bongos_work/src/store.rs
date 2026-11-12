@@ -31,6 +31,7 @@ use bongos_work_model::files::content_hash;
 use bongos_work_model::layout::{self, OP_FILE, TASKS_DIR, is_temp_file};
 use bongos_work_model::rules::Refusal;
 use bongos_work_model::store::{self as model_store, WorkTree};
+use db::kvp::KeyValueStore;
 use fs::{Fs, PathEvent, PathEventKind, Watcher};
 use futures::channel::{mpsc, oneshot};
 use futures::{StreamExt as _, select_biased};
@@ -40,10 +41,18 @@ use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
 
 use crate::changes::ChangedCount;
-use crate::rebase::{CHECK_INTERVAL, RebaseState};
+use crate::overview::{self, Inputs, RepositoryRow};
+use crate::rebase::{RebaseChecks, RebaseState};
+use crate::ref_watch::{GitDirInfo, RefWatches};
+use crate::settings::Repository;
+use crate::worktrees::Layout;
 use crate::{WorkDirs, WorkSettings};
 
 /// How long the watcher gathers events before delivering them.
+/// The key value store key (in [`crate::KVP_NAMESPACE`]) set once the notice about worktrees
+/// left under the old `.bongos-worktrees` directories is dismissed.
+pub const OLD_WORKTREE_NOTICE_KEY: &str = "old_worktree_notice_dismissed";
+
 pub const WATCH_LATENCY: Duration = Duration::from_millis(200);
 
 /// How many times a write is reapplied after its files changed under it.
@@ -98,6 +107,10 @@ pub struct Stats {
     pub writes: usize,
     /// Times a command was applied again because its files changed under it.
     pub retries: usize,
+    /// Stacked tasks whose parent branch was looked at in git by a rebase check.
+    pub rebase_probes: usize,
+    /// Ref watcher batches that touched a ref and started a rebase check.
+    pub ref_events: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,14 +135,39 @@ pub struct WorkStore {
     snapshot: Option<Arc<WorkTree>>,
     session: Option<Session>,
     disk_lock: Arc<Mutex<()>>,
-    stats: Stats,
+    pub(crate) stats: Stats,
     pub(crate) rebase: HashMap<String, RebaseState>,
-    pub(crate) rebase_check: Option<Task<()>>,
+    pub(crate) rebase_checks: RebaseChecks,
+    /// The common git dir of each repository path a probe named, found on the background
+    /// executor once per enabled period.
+    pub(crate) git_dirs: HashMap<PathBuf, GitDirInfo>,
+    /// Whether a common git dir gets the slow poll instead of a watcher (D10).
+    pub(crate) poll_decider: fn(&Path) -> bool,
+    /// The repository overview (D13), recomputed on the background executor.
+    overview: Vec<RepositoryRow>,
+    overview_task: Option<Task<()>>,
+    /// The settings the overview was last computed from, to skip unrelated settings changes.
+    overview_settings: Option<(Vec<Repository>, Option<String>)>,
+    /// Whether the old worktree root notice was dismissed, read from the key value store.
+    old_worktree_notice_dismissed: bool,
+    /// Runs on the background executor after the probes of the next full rebase check.
+    #[cfg(test)]
+    pub(crate) after_full_probe: Option<Box<dyn FnOnce() + Send>>,
     /// Tasks that need the owner, by id, with the reasons sources gave (D13). Never stored.
     pub(crate) needs_you: BTreeMap<String, Vec<String>>,
     pub(crate) changed: HashMap<PathBuf, ChangedCount>,
     pub(crate) status_runs: usize,
     _settings: Subscription,
+}
+
+/// Whether the old worktree root notice was dismissed in an earlier run.
+fn read_notice_dismissed(cx: &gpui::App) -> bool {
+    KeyValueStore::global(cx)
+        .scoped(crate::KVP_NAMESPACE)
+        .read(OLD_WORKTREE_NOTICE_KEY)
+        .log_err()
+        .flatten()
+        .is_some()
 }
 
 /// An enabled period: the queue of writes and the task doing all disk work.
@@ -138,8 +176,8 @@ struct Session {
     /// Cleared when the session ends, so a write that has not started yet never starts.
     alive: Arc<AtomicBool>,
     _run: Task<()>,
-    /// Rechecks the rebase states every [`CHECK_INTERVAL`].
-    _rebase_timer: Task<()>,
+    /// The ref watchers and slow-poll timers of the repositories with stacked tasks.
+    ref_watches: RefWatches,
 }
 
 impl Drop for Session {
@@ -158,7 +196,10 @@ impl EventEmitter<WorkStoreEvent> for WorkStore {}
 
 impl WorkStore {
     pub fn new(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut gpui::Context<Self>) -> Self {
-        let settings = cx.observe_global::<SettingsStore>(|this, cx| this.sync_enabled(cx));
+        let settings = cx.observe_global::<SettingsStore>(|this, cx| {
+            this.sync_enabled(cx);
+            this.refresh_overview_for_settings(cx);
+        });
         let mut this = Self {
             fs,
             dirs,
@@ -168,13 +209,22 @@ impl WorkStore {
             disk_lock: Arc::new(Mutex::new(())),
             stats: Stats::default(),
             rebase: HashMap::new(),
-            rebase_check: None,
+            rebase_checks: RebaseChecks::default(),
+            git_dirs: HashMap::new(),
+            poll_decider: fs::requires_poll_watcher,
+            overview: Vec::new(),
+            overview_task: None,
+            overview_settings: None,
+            old_worktree_notice_dismissed: read_notice_dismissed(cx),
+            #[cfg(test)]
+            after_full_probe: None,
             needs_you: BTreeMap::new(),
             changed: HashMap::new(),
             status_runs: 0,
             _settings: settings,
         };
         this.sync_enabled(cx);
+        this.refresh_overview_for_settings(cx);
         this
     }
 
@@ -205,6 +255,108 @@ impl WorkStore {
 
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// One row per `work.repositories` entry: where its worktrees go, what is wrong with that,
+    /// and its old-root tasks (D13). Empty while disabled. Computed on the background executor
+    /// when the snapshot or the repository settings change, so it can lag them briefly.
+    pub fn repository_overview(&self) -> &[RepositoryRow] {
+        &self.overview
+    }
+
+    /// Whether the Repositories page shows the notice that worktrees under the old
+    /// `.bongos-worktrees` directories stay where they are: some repository has old-root tasks
+    /// and the notice was never dismissed.
+    pub fn shows_old_worktree_notice(&self) -> bool {
+        !self.old_worktree_notice_dismissed
+            && self.overview.iter().any(|row| !row.old_root.is_empty())
+    }
+
+    /// Hides the old worktree root notice for good: the key value store remembers it.
+    pub fn dismiss_old_worktree_notice(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.old_worktree_notice_dismissed {
+            return;
+        }
+        self.old_worktree_notice_dismissed = true;
+        let db = KeyValueStore::global(cx);
+        db::write_and_log(cx, move || async move {
+            db.scoped(crate::KVP_NAMESPACE)
+                .write(OLD_WORKTREE_NOTICE_KEY.to_string(), "true".to_string())
+                .await
+        });
+        cx.notify();
+    }
+
+    /// Recomputes the overview when the repositories or the default root differ from what it was
+    /// last computed from.
+    fn refresh_overview_for_settings(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        let settings = WorkSettings::get_global(cx);
+        let current = (
+            settings.repositories.clone(),
+            settings.default_worktree_root.clone(),
+        );
+        if self.overview_settings.as_ref() != Some(&current) {
+            self.refresh_overview(cx);
+        }
+    }
+
+    /// Recomputes [`Self::repository_overview`] from the snapshot and the settings.
+    pub(crate) fn refresh_overview(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        let settings = WorkSettings::get_global(cx);
+        self.overview_settings = Some((
+            settings.repositories.clone(),
+            settings.default_worktree_root.clone(),
+        ));
+        let inputs = Inputs {
+            repositories: settings.repositories.clone(),
+            layout: Layout {
+                default_root: settings.default_worktree_root.clone(),
+                home: util::paths::home_dir().clone(),
+                central: self.dirs.worktrees.clone(),
+            },
+            tree: self.snapshot(),
+            known: self.git_dirs.clone(),
+            poll_decider: self.poll_decider,
+        };
+        let fs = self.fs();
+        // A newer request replaces (and so cancels) one still running.
+        self.overview_task = Some(cx.spawn(async move |this, cx| {
+            let (rows, learned) = cx
+                .background_spawn(async move { overview::compute(fs.as_ref(), inputs).await })
+                .await;
+            this.update(cx, |store, cx| {
+                store.git_dirs.extend(learned);
+                if store.overview != rows {
+                    store.overview = rows;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Replaces the check that decides which repositories get the slow poll (D10); tests use it
+    /// to put a repository on the slow poll without a network mount.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_poll_decider(&mut self, poll_decider: fn(&Path) -> bool) {
+        self.poll_decider = poll_decider;
+        self.git_dirs.clear();
+    }
+
+    pub(crate) fn ref_watches(&self) -> Option<&RefWatches> {
+        self.session.as_ref().map(|session| &session.ref_watches)
+    }
+
+    pub(crate) fn ref_watches_mut(&mut self) -> Option<&mut RefWatches> {
+        self.session
+            .as_mut()
+            .map(|session| &mut session.ref_watches)
     }
 
     /// Queues `command` on the serial writer. The returned task resolves once the change is
@@ -239,9 +391,14 @@ impl WorkStore {
         if enabled {
             self.start(cx);
         } else {
-            // Dropping the session cancels its task and the watcher; queued writes answer `Off`.
+            // Dropping the session cancels its task, the watcher and the ref watches and timers;
+            // queued writes answer `Off`.
             self.session = None;
-            self.rebase_check = None;
+            self.rebase_checks = RebaseChecks::default();
+            self.git_dirs.clear();
+            self.overview.clear();
+            self.overview_task = None;
+            self.overview_settings = None;
             self.set_rebase(HashMap::new(), cx);
             if self.snapshot.take().is_some() {
                 cx.emit(WorkStoreEvent::Changed);
@@ -260,22 +417,11 @@ impl WorkStore {
             let alive = alive.clone();
             async move |this, cx| run(this, fs, root, lock, alive, receiver, cx).await
         });
-        let rebase_timer = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(CHECK_INTERVAL).await;
-                if this
-                    .update(cx, |store, cx| store.refresh_rebase(cx))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
         self.session = Some(Session {
             requests,
             alive,
             _run: run,
-            _rebase_timer: rebase_timer,
+            ref_watches: RefWatches::default(),
         });
     }
 
@@ -305,6 +451,7 @@ impl WorkStore {
             cx.emit(WorkStoreEvent::Changed);
             cx.notify();
             self.refresh_rebase(cx);
+            self.refresh_overview(cx);
         }
         // After the snapshot, so a caller that awaits the write sees its change.
         if let Some(reply) = done.reply {
