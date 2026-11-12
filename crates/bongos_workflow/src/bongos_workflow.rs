@@ -4,6 +4,7 @@
 
 mod actions;
 pub mod builtin_merge;
+pub mod builtin_wait;
 mod commands;
 pub mod definitions;
 mod engine;
@@ -11,6 +12,7 @@ pub mod mcp;
 pub mod process;
 pub mod runner_claude;
 pub mod runner_codex;
+pub mod runner_program;
 pub mod runtime;
 mod settings;
 pub mod worktrees;
@@ -32,11 +34,15 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 mod actions_tests;
 #[cfg(test)]
+mod builtin_wait_tests;
+#[cfg(test)]
 mod commands_tests;
 #[cfg(test)]
 mod definitions_tests;
 #[cfg(test)]
 mod mcp_tests;
+#[cfg(test)]
+mod program_tests;
 #[cfg(test)]
 mod runner_claude_tests;
 #[cfg(test)]
