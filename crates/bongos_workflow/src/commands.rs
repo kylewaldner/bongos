@@ -88,7 +88,11 @@ fn register_run_commands(workspace: &mut Workspace) {
     });
     on_run::<workflow::Pause>(workspace, |engine, run, workspace, _, cx| {
         let paused = engine.pause(&run, cx);
-        report(workspace, paused.map(|()| "Pausing: running steps finish first"), cx);
+        report(
+            workspace,
+            paused.map(|()| "Pausing: running steps finish first"),
+            cx,
+        );
     });
     on_run::<workflow::Halt>(workspace, |engine, run, workspace, window, cx| {
         if let Err(refusal) = engine.halt(&run, cx) {
@@ -137,7 +141,11 @@ fn register_run_commands(workspace: &mut Workspace) {
     });
     on_run::<workflow::Approve>(workspace, |engine, run, workspace, _, cx| {
         let Some(key) = engine.open_gates(&run).into_iter().next() else {
-            show_toast(workspace, "The run is not waiting at a gate".to_string(), cx);
+            show_toast(
+                workspace,
+                "The run is not waiting at a gate".to_string(),
+                cx,
+            );
             return;
         };
         let approved = engine.approve(&run, &key, None, cx);
@@ -145,7 +153,11 @@ fn register_run_commands(workspace: &mut Workspace) {
     });
     on_run::<workflow::Revise>(workspace, |engine, run, workspace, window, cx| {
         let Some(key) = engine.open_gates(&run).into_iter().next() else {
-            show_toast(workspace, "The run is not waiting at a gate".to_string(), cx);
+            show_toast(
+                workspace,
+                "The run is not waiting at a gate".to_string(),
+                cx,
+            );
             return;
         };
         bongos_work::ask(
@@ -161,14 +173,14 @@ fn register_run_commands(workspace: &mut Workspace) {
             cx,
         );
     });
-    on_run::<workflow::CopyResumeCommand>(workspace, |engine, run, workspace, _, cx| {
-        match engine.resume_command(&run) {
-            Ok(command) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
-                show_toast(workspace, format!("Copied: {command}"), cx);
-            }
-            Err(refusal) => show_toast(workspace, refusal.to_string(), cx),
+    on_run::<workflow::CopyResumeCommand>(workspace, |engine, run, workspace, _, cx| match engine
+        .resume_command(&run)
+    {
+        Ok(command) => {
+            cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+            show_toast(workspace, format!("Copied: {command}"), cx);
         }
+        Err(refusal) => show_toast(workspace, refusal.to_string(), cx),
     });
 }
 
@@ -192,8 +204,7 @@ fn on<A: Action>(
 /// [`on`] for a command on a run: the active run of the task at point, or the only active run.
 fn on_run<A: Action>(
     workspace: &mut Workspace,
-    then: impl Fn(WorkflowEngine, RunId, &mut Workspace, &mut Window, &mut Context<Workspace>)
-    + 'static,
+    then: impl Fn(WorkflowEngine, RunId, &mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) {
     on::<A>(workspace, move |engine, workspace, window, cx| {
         let at_point = bongos_work::task_at_point(workspace, window, cx);
@@ -212,11 +223,7 @@ fn on_run<A: Action>(
 }
 
 /// Shows `done` as a toast, or the refusal with its fix.
-fn report(
-    workspace: &mut Workspace,
-    result: Result<&str, Refusal>,
-    cx: &mut Context<Workspace>,
-) {
+fn report(workspace: &mut Workspace, result: Result<&str, Refusal>, cx: &mut Context<Workspace>) {
     let message = match result {
         Ok(done) => done.to_string(),
         Err(refusal) => refusal.to_string(),

@@ -14,8 +14,8 @@ use bongos_work_model::layout::{WORKFLOWS_DIR, project_dir};
 use bongos_work_model::slug::slugify;
 use bongos_workflow_model::layers::{self, DEFINITION_FILE};
 use bongos_workflow_model::{
-    Definition, Diagnostic, Layer, LayerDirs, Resolved, Severity, ValidationContext, Warning, parse,
-    validate,
+    Definition, Diagnostic, Layer, LayerDirs, Resolved, Severity, ValidationContext, Warning,
+    parse, validate,
 };
 
 /// The work directory under the home directory (`<home>/.bongos`, as `bongos_work::WorkDirs`).

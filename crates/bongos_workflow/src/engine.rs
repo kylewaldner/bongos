@@ -31,8 +31,8 @@ use crate::definitions::{
     shipped_dir,
 };
 use crate::lifecycle::{
-    GitWorktrees, HaltWorktrees, Lifecycle, Refusal, RefusalKind, RunId, StartChecks,
-    StartContext, StartRequest, WorkflowEvent,
+    GitWorktrees, HaltWorktrees, Lifecycle, Refusal, RefusalKind, RunId, StartChecks, StartContext,
+    StartRequest, WorkflowEvent,
 };
 use crate::process::ProcessRecord;
 use crate::runner_program::Interpreter;
@@ -371,8 +371,10 @@ impl AppChecks {
         if let Some(health) = ChatHealth::global(cx) {
             let health = health.read(cx);
             env = health.env().clone();
-            for (kind, agent) in [(AgentKind::Claude, Agent::Claude), (AgentKind::Codex, Agent::Codex)]
-            {
+            for (kind, agent) in [
+                (AgentKind::Claude, Agent::Claude),
+                (AgentKind::Codex, Agent::Codex),
+            ] {
                 let health = health.health(agent);
                 let verdict = match health.state {
                     HealthState::NotFound | HealthState::LoggedOut => Err(health.fix.clone()),

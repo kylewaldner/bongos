@@ -37,9 +37,7 @@ use crate::WorkflowsSettings;
 use crate::definitions::{self, DefinitionError};
 use crate::mcp;
 use crate::runtime::{RunSpec, Runner, Runtime, RuntimeError};
-use crate::worktrees::{
-    self, Git, RunWorktree, TaskCheckout, WorktreeError, branch_worktree_path,
-};
+use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError, branch_worktree_path};
 
 /// A run's id: a UUID v7, the same for every attempt.
 pub type RunId = String;
@@ -747,7 +745,13 @@ impl<R: Runner> Lifecycle<R> {
         let mut entry = self.runs.remove(index);
         entry.worktree = worktree;
         entry.record.layer = resolved.layer.label().to_string();
-        let result = self.begin_attempt(&mut entry, attempt, &resolved.dir, definition, now().to_string());
+        let result = self.begin_attempt(
+            &mut entry,
+            attempt,
+            &resolved.dir,
+            definition,
+            now().to_string(),
+        );
         self.runs.insert(index, entry);
         result?;
         self.note(run);
@@ -799,7 +803,11 @@ impl<R: Runner> Lifecycle<R> {
         let Some(state) = self.state(run) else {
             return base.to_string();
         };
-        let last_gate = state.closed_gates.iter().rev().find(|gate| &gate.key == key);
+        let last_gate = state
+            .closed_gates
+            .iter()
+            .rev()
+            .find(|gate| &gate.key == key);
         match last_gate.and_then(|gate| gate.comment.as_deref()) {
             Some(comment) => {
                 let previous = state
@@ -819,7 +827,10 @@ impl<R: Runner> Lifecycle<R> {
     pub fn resume_command(&self, run: &str, key: Option<&NodeKey>) -> Result<String, Refusal> {
         let entry = self.entry(run)?;
         let state = self.state_of(run)?;
-        let definition = self.runtime.definition(run).ok_or_else(|| unknown_run(run))?;
+        let definition = self
+            .runtime
+            .definition(run)
+            .ok_or_else(|| unknown_run(run))?;
         let finished = state
             .finished
             .iter()
@@ -981,7 +992,10 @@ impl<R: Runner> Lifecycle<R> {
         field: String,
         value: Value,
     ) -> Result<Value, Refusal> {
-        let definition = self.runtime.definition(run).ok_or_else(|| unknown_run(run))?;
+        let definition = self
+            .runtime
+            .definition(run)
+            .ok_or_else(|| unknown_run(run))?;
         let node = definition.node(&key.node).ok_or_else(|| unknown_run(run))?;
         if !node.output.iter().any(|output| output.name == field) {
             return Err(Refusal::new(
@@ -1011,7 +1025,10 @@ impl<R: Runner> Lifecycle<R> {
         schema::check(&node.output, &Value::Object(result)).map_err(|detail| {
             Refusal::new(
                 RefusalKind::InvalidEdit,
-                format!("The new '{field}' does not fit the output of '{}': {detail}.", key.node),
+                format!(
+                    "The new '{field}' does not fit the output of '{}': {detail}.",
+                    key.node
+                ),
                 "Give a value of the field's type.",
             )
         })?;
@@ -1119,7 +1136,11 @@ fn load_definition(
             }
             let tools = allowed_tools(definition, node);
             let servers = context.mcp_servers.entry(kind).or_default();
-            servers.extend(mcp::allowed_servers(&tools).into_iter().map(|(server, _)| server));
+            servers.extend(
+                mcp::allowed_servers(&tools)
+                    .into_iter()
+                    .map(|(server, _)| server),
+            );
         }
     });
     let errors = report.error_count();
@@ -1184,7 +1205,10 @@ fn check_machine(definition: &Definition, checks: &dyn StartChecks) -> Result<()
     {
         return Err(Refusal::new(
             RefusalKind::InterpreterMissing,
-            format!("Node '{}' needs a program interpreter, which is missing.", node.name),
+            format!(
+                "Node '{}' needs a program interpreter, which is missing.",
+                node.name
+            ),
             fix,
         ));
     }

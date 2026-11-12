@@ -299,7 +299,11 @@ impl World {
             todo("implement", Some("single"), TodoState::Open),
         ];
         let project_dir = root.join("work").join("app");
-        let leaf = task(project_dir.join("tasks").join("login"), leaf_file, Vec::new());
+        let leaf = task(
+            project_dir.join("tasks").join("login"),
+            leaf_file,
+            Vec::new(),
+        );
         let mut group_file = TaskFile::new("App", Kind::Other);
         group_file.id = GROUP.to_string();
         let group = task(project_dir, group_file, vec![leaf]);
@@ -330,7 +334,10 @@ impl World {
     }
 
     fn leaf_file(&mut self) -> &mut TaskFile {
-        self.tree.projects[0].task.children[0].file.as_mut().unwrap()
+        self.tree.projects[0].task.children[0]
+            .file
+            .as_mut()
+            .unwrap()
     }
 
     fn settings(&self) -> WorkflowsSettings {
@@ -546,7 +553,10 @@ fn start_refusals_come_in_order_with_their_fix() {
 
     let (kind, message) = text(world.start(&mut lifecycle, request.clone()));
     assert_eq!(kind, RefusalKind::LowDiskSpace);
-    assert!(message.starts_with("Not enough free space: only 10 MB free"), "{message}");
+    assert!(
+        message.starts_with("Not enough free space: only 10 MB free"),
+        "{message}"
+    );
     assert!(
         message.ends_with("Free some space, or lower workflows.min_free_disk_mb."),
         "{message}"
@@ -651,7 +661,9 @@ fn after_cancel_another_workflow_starts() {
         state: RunStatus::Cancelled,
     }));
 
-    let second = world.start(&mut lifecycle, with_workflow("single")).unwrap();
+    let second = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
     assert_ne!(first, second);
     let active = lifecycle.active_run(LEAF).unwrap();
     assert_eq!(active.workflow, "single");
@@ -668,7 +680,9 @@ fn cancel_closes_out_a_failed_run() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();
     lifecycle.runtime_mut().runner_mut().fail("work", 1);
-    let run = world.start(&mut lifecycle, with_workflow("single")).unwrap();
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
@@ -705,7 +719,11 @@ fn retry_after_one_of_three_branches_failed_reruns_only_that_node() {
 fn retry_with_several_failed_steps_lists_them() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();
-    lifecycle.runtime_mut().runner_mut().fail("b", 1).fail("c", 1);
+    lifecycle
+        .runtime_mut()
+        .runner_mut()
+        .fail("b", 1)
+        .fail("c", 1);
     let run = world.start(&mut lifecycle, with_workflow("fan")).unwrap();
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
@@ -751,7 +769,11 @@ fn retry_fresh_refuses_a_definition_that_drops_a_completed_node() {
 
     // A definition that keeps `plan` is copied to `definition/1/` and the run continues on it.
     write_definition(world.profile(), "two", TWO);
-    fs::write(world.profile().join("two").join("work.md"), "Do it better\n").unwrap();
+    fs::write(
+        world.profile().join("two").join("work.md"),
+        "Do it better\n",
+    )
+    .unwrap();
     lifecycle.retry(&run, None, true, &world.dirs).unwrap();
     assert_eq!(
         fs::read_to_string(definition_copy_dir(&attempt, 1).join("work.md")).unwrap(),
@@ -769,11 +791,13 @@ fn retry_fresh_refuses_a_definition_that_drops_a_completed_node() {
 fn revise_reruns_the_node_with_the_comment_and_approve_routes_on() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();
-    lifecycle
-        .runtime_mut()
-        .runner_mut()
-        .script("work", json!({ "summary": "first draft", "verdict": "ship" }));
-    let run = world.start(&mut lifecycle, with_workflow("reviewed")).unwrap();
+    lifecycle.runtime_mut().runner_mut().script(
+        "work",
+        json!({ "summary": "first draft", "verdict": "ship" }),
+    );
+    let run = world
+        .start(&mut lifecycle, with_workflow("reviewed"))
+        .unwrap();
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::WaitingOnYou));
@@ -797,7 +821,10 @@ fn revise_reruns_the_node_with_the_comment_and_approve_routes_on() {
     assert_eq!(lifecycle.status(&run), Some(RunStatus::WaitingOnYou));
     // Not a revision any more once the gate is approved.
     lifecycle.approve(&run, &key, None).unwrap();
-    assert_eq!(lifecycle.prompt_for(&run, &key, "Do the work"), "Do the work");
+    assert_eq!(
+        lifecycle.prompt_for(&run, &key, "Do the work"),
+        "Do the work"
+    );
     settle(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
     // A gate that is not open refuses.
@@ -815,7 +842,9 @@ fn approve_may_set_one_output_field_checked_against_the_schema() {
         .runtime_mut()
         .runner_mut()
         .script("work", json!({ "summary": "done", "verdict": "hold" }));
-    let run = world.start(&mut lifecycle, with_workflow("reviewed")).unwrap();
+    let run = world
+        .start(&mut lifecycle, with_workflow("reviewed"))
+        .unwrap();
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
     let key = NodeKey::new("work", 1);
@@ -830,7 +859,11 @@ fn approve_may_set_one_output_field_checked_against_the_schema() {
             .starts_with("The new 'verdict' does not fit the output of 'work': "),
         "{invalid}"
     );
-    assert!(invalid.to_string().ends_with("Give a value of the field's type."));
+    assert!(
+        invalid
+            .to_string()
+            .ends_with("Give a value of the field's type.")
+    );
     let unknown = lifecycle
         .approve(&run, &key, Some(("color".to_string(), json!("red"))))
         .unwrap_err();
@@ -856,7 +889,9 @@ fn approve_may_set_one_output_field_checked_against_the_schema() {
 fn copy_resume_command_resumes_the_last_session_in_its_worktree() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();
-    let run = world.start(&mut lifecycle, with_workflow("single")).unwrap();
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
     assert_eq!(
         lifecycle.resume_command(&run, None).unwrap_err().kind,
         RefusalKind::NoSession
@@ -932,7 +967,11 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
     let first = lifecycle.worktree(&run).unwrap().clone();
     assert!(first.branch.ends_with("-1"), "{}", first.branch);
 
-    write_definition(world.profile(), "two", SINGLE.replace("single", "two").as_str());
+    write_definition(
+        world.profile(),
+        "two",
+        SINGLE.replace("single", "two").as_str(),
+    );
     let restarted = lifecycle.restart(&run, &world.dirs).unwrap();
     assert_eq!(restarted, run, "a restart keeps the one run record");
     let second = lifecycle.worktree(&run).unwrap().clone();
@@ -943,7 +982,11 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
     assert!(first.path.is_dir(), "the earlier attempt's worktree stays");
     let record = lifecycle.record(&run).unwrap();
     assert_eq!(
-        record.attempts.iter().map(|attempt| attempt.n).collect::<Vec<_>>(),
+        record
+            .attempts
+            .iter()
+            .map(|attempt| attempt.n)
+            .collect::<Vec<_>>(),
         [1, 2]
     );
     assert_eq!(record.todo.name, "implement");
@@ -965,7 +1008,9 @@ fn halt_then_resume_reruns_the_node_in_the_same_worktree_with_the_hand_edit() {
     let mut world = World::new();
     let worktrees = real_git(&mut world);
     let mut lifecycle = Lifecycle::new(FakeRunner::new(), Box::new(worktrees), world.settings());
-    let run = world.start(&mut lifecycle, with_workflow("single")).unwrap();
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
     settle(&mut lifecycle);
     let key = NodeKey::new("work", 1);
     assert_eq!(lifecycle.runtime().in_flight(&run), [key.clone()]);
