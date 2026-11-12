@@ -3,14 +3,17 @@
 
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Entity, WeakEntity};
+use gpui::{App, AppContext as _, Context, Entity, WeakEntity};
 use lsp::{LanguageServerId, LanguageServerName};
 use project::{Project, worktree_store::WorktreeStoreEvent};
 use settings::WorktreeId;
-use workspace::{Toast, Workspace, notifications::NotificationId};
+use workspace::{
+    Toast, Workspace,
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
+};
 
 use crate::{
-    KotlinDirs,
+    KotlinDirs, KotlinUpdates, KotlinUpdatesEvent,
     manager::{ADAPTER_NAME, KotlinEvent, KotlinHost, KotlinProjectManager, KotlinRegistry},
 };
 
@@ -131,10 +134,46 @@ pub fn fallback_notice_id(worktree_id: WorktreeId) -> NotificationId {
     NotificationId::composite::<FallbackNotice>(worktree_id.to_usize())
 }
 
+/// The id of the download notification: one per window, replaced rather than stacked.
+struct DownloadNotice;
+
+pub fn download_notice_id() -> NotificationId {
+    NotificationId::unique::<DownloadNotice>()
+}
+
+/// Shows the one dismissible "newer server is downloading" notification of a window, with a
+/// Cancel button that cancels the background download.
+pub fn show_download_notice(workspace: &mut Workspace, version: &str, cx: &mut Context<Workspace>) {
+    let message = format!("A newer Kotlin server (kotlin-lsp {version}) is downloading");
+    workspace.show_notification(download_notice_id(), cx, |cx| {
+        cx.new(|cx| {
+            MessageNotification::new(message, cx)
+                .primary_message("Cancel")
+                .primary_on_click(|_, cx| {
+                    if let Some(updates) = KotlinUpdates::global(cx) {
+                        updates.update(cx, |updates, cx| updates.cancel_download(cx));
+                    }
+                })
+        })
+    });
+}
+
 /// Shows each fallback of a workspace's project as one toast (the fallback policy: one notice line
-/// per fallback, never a modal). Call after `attach_managers`, before any workspace is created.
+/// per fallback, never a modal), and each background download of a newer server once per window.
+/// Call after `attach_managers`, before any workspace is created.
 pub fn attach_notices(cx: &mut App) {
     cx.observe_new::<Workspace>(|workspace, _window, cx| {
+        if let Some(updates) = KotlinUpdates::global(cx) {
+            cx.subscribe(
+                &updates,
+                |workspace, _, event: &KotlinUpdatesEvent, cx| match event {
+                    KotlinUpdatesEvent::DownloadStarted { version } => {
+                        show_download_notice(workspace, version, cx)
+                    }
+                },
+            )
+            .detach();
+        }
         let project = workspace.project().entity_id();
         let Some(manager) = cx
             .try_global::<KotlinRegistry>()
@@ -157,4 +196,50 @@ pub fn attach_notices(cx: &mut App) {
         .detach();
     })
     .detach();
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use std::path::Path;
+
+    use gpui::TestAppContext;
+    use project::Project;
+
+    use super::*;
+
+    async fn window(cx: &mut TestAppContext) -> gpui::WindowHandle<Workspace> {
+        let fs = ::fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [] as [&Path; 0], cx).await;
+        cx.add_window(|window, cx| Workspace::test_new(project, window, cx))
+    }
+
+    #[gpui::test]
+    async fn test_the_download_notice_shows_once_per_window_and_can_be_dismissed(
+        cx: &mut TestAppContext,
+    ) {
+        let first = window(cx).await;
+        let second = window(cx).await;
+        for window in [first, second] {
+            window
+                .update(cx, |workspace, _, cx| {
+                    show_download_notice(workspace, "263.3.0", cx);
+                    // The same download again does not stack a second one.
+                    show_download_notice(workspace, "263.3.0", cx);
+                    assert_eq!(workspace.notification_ids(), [download_notice_id()]);
+                })
+                .unwrap();
+        }
+        // Dismissing it in one window leaves the other window's.
+        first
+            .update(cx, |workspace, _, cx| {
+                workspace.dismiss_notification(&download_notice_id(), cx);
+                assert!(workspace.notification_ids().is_empty());
+            })
+            .unwrap();
+        second
+            .update(cx, |workspace, _, _| {
+                assert_eq!(workspace.notification_ids().len(), 1);
+            })
+            .unwrap();
+    }
 }
