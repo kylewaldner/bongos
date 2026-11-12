@@ -391,7 +391,7 @@ mod tests {
             .collect()
     }
 
-    const BASE: [&str; 8] = [
+    const BASE: [&str; 10] = [
         "Switch server...",
         "Restart server",
         "Reimport project",
@@ -400,6 +400,8 @@ mod tests {
         "License status",
         "Activate license...",
         "Start license trial",
+        "Server updates: off",
+        "Check for server updates",
     ];
 
     #[test]
@@ -531,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn test_the_base_menu_has_the_eight_entries_in_order() {
+    fn test_the_base_menu_has_the_ten_entries_in_order() {
         for status in [
             ServerStatus::Starting,
             ServerStatus::Ready,
@@ -604,18 +606,15 @@ mod tests {
                 "Gradle: Gradle import failed: Could not resolve x".into()
             ))
         );
+        let has_gradle_note = |snapshot: &Snapshot| {
+            menu_items(snapshot)
+                .iter()
+                .any(|item| matches!(item, MenuItem::Note(text) if text.starts_with("Gradle: ")))
+        };
         snapshot.status = ServerStatus::Ready;
-        assert!(
-            menu_items(&snapshot)
-                .iter()
-                .any(|item| matches!(item, MenuItem::Note(_)))
-        );
+        assert!(has_gradle_note(&snapshot));
         snapshot.gradle_error = None;
-        assert!(
-            !menu_items(&snapshot)
-                .iter()
-                .any(|item| matches!(item, MenuItem::Note(_)))
-        );
+        assert!(!has_gradle_note(&snapshot));
     }
 
     #[test]
