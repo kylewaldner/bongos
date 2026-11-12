@@ -5,6 +5,7 @@ mod case;
 pub mod comment;
 pub mod goto;
 mod kill;
+pub mod kill_ring;
 mod lines;
 pub mod mark_ring;
 pub mod recenter;
@@ -20,6 +21,8 @@ mod case_tests;
 mod comment_tests;
 #[cfg(test)]
 mod goto_tests;
+#[cfg(test)]
+mod kill_ring_tests;
 #[cfg(test)]
 mod kill_tests;
 #[cfg(test)]
@@ -41,7 +44,7 @@ pub use case::{
     capitalize_previous_word, capitalize_word, downcase_previous_word, downcase_word,
     upcase_previous_word, upcase_word,
 };
-pub use kill::{copy_region_or_line, kill_line, kill_region_or_line};
+pub use kill::{copy_region_or_line, kill_line, kill_region_or_line, kill_whole_line};
 pub use lines::{copy_from_above, duplicate_line, whole_line_span};
 pub use space::{delete_blank_lines, delete_horizontal_space, just_one_space};
 pub use text::{
