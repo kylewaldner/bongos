@@ -104,6 +104,13 @@ pub struct KotlinSettingsContent {
     /// Default: null (detected from the project's toolchain, JAVA_HOME and common locations)
     pub jdk_home: Option<String>,
 
+    /// Where bongos looks for a signed list of Kotlin server builds. Empty means bongos never
+    /// checks for server updates. Only `https://` URLs are used (and `http://` on loopback in
+    /// debug builds). Read from user settings only: a project's settings cannot change it.
+    ///
+    /// Default: ""
+    pub manifest_url: Option<String>,
+
     /// Settings for the IntelliJ language server.
     pub intellij: Option<KotlinIntellijSettingsContent>,
 }

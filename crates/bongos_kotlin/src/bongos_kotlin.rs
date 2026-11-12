@@ -57,6 +57,7 @@ pub use manifest_cache::{
     BuildId, CachedManifest, Claim, FETCH_LEASE, FetchOutcome, FetchedManifest, KotlinLspBuilds,
     Lease, ManifestCache, ServerState,
 };
+pub use remote_manifest::sig_url;
 pub use remote_manifest::{
     KEY_VAR as MANIFEST_KEY_VAR, RELEASE_KEYS, RemoteBuild, RemoteManifest, TrustedKey,
     compare_versions, is_allowed_archive_url, parse_version, trusted_keys, verify_signature,
@@ -156,6 +157,10 @@ pub const SHOW_JDK_TITLE: &str = "Kotlin JDK";
 pub struct KotlinSettings {
     pub server: KotlinServerKind,
     pub jdk_home: Option<PathBuf>,
+    /// Where bongos looks for the signed server manifest; empty means never. Read it only through
+    /// `KotlinSettings::get_global` (see `manifest_url_for_fetch`), never with a `SettingsLocation`,
+    /// so a project's `.bongos/settings.json` cannot direct a fetch.
+    pub manifest_url: String,
     /// Whether bongos may download the IntelliJ server (decision D16).
     pub intellij_download: bool,
 }
@@ -170,12 +175,39 @@ impl Settings for KotlinSettings {
         Self {
             server: kotlin.server.expect("default.json defines `kotlin.server`"),
             jdk_home: kotlin.jdk_home.map(PathBuf::from),
+            manifest_url: kotlin
+                .manifest_url
+                .expect("default.json defines `kotlin.manifest_url`"),
             intellij_download: kotlin
                 .intellij
                 .expect("default.json defines `kotlin.intellij`")
                 .download
                 .expect("default.json defines `kotlin.intellij.download`"),
         }
+    }
+}
+
+impl KotlinSettings {
+    /// The manifest URL to fetch, or `None` when the setting is empty (bongos never checks for
+    /// updates) or names a URL that may not be fetched: unparsable, not `https`, or `http`
+    /// anywhere but loopback in a debug build. A refused value is logged once per call.
+    pub fn manifest_url_for_fetch(&self) -> Option<http_client::Url> {
+        let text = self.manifest_url.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let url = match http_client::Url::parse(text) {
+            Ok(url) => url,
+            Err(error) => {
+                ::log::warn!("ignoring kotlin.manifest_url: it is not a URL ({error})");
+                return None;
+            }
+        };
+        if let Some(problem) = remote_manifest::manifest_url_problem(&url) {
+            ::log::warn!("ignoring kotlin.manifest_url: {problem}");
+            return None;
+        }
+        Some(url)
     }
 }
 
@@ -295,6 +327,124 @@ mod tests {
         let settings = cx.update(|cx| KotlinSettings::get_global(cx).clone());
         assert_eq!(settings.server, KotlinServerKind::KotlinLsp);
         assert_eq!(settings.jdk_home, None);
+    }
+
+    fn global_manifest_url(cx: &mut TestAppContext) -> String {
+        cx.update(|cx| KotlinSettings::get_global(cx).manifest_url.clone())
+    }
+
+    fn settings_with_manifest_url(url: &str) -> KotlinSettings {
+        KotlinSettings {
+            server: KotlinServerKind::KotlinLsp,
+            jdk_home: None,
+            manifest_url: url.to_string(),
+            intellij_download: false,
+        }
+    }
+
+    fn fetch_url(url: &str) -> Option<String> {
+        let url = settings_with_manifest_url(url).manifest_url_for_fetch();
+        url.map(|url| url.to_string())
+    }
+
+    #[gpui::test]
+    fn test_manifest_url_is_empty_by_default_and_read_from_user_and_profile(
+        cx: &mut TestAppContext,
+    ) {
+        setup(cx);
+        assert_eq!(global_manifest_url(cx), "");
+        assert_eq!(
+            cx.update(|cx| KotlinSettings::get_global(cx).manifest_url_for_fetch()),
+            None
+        );
+
+        set_user(
+            cx,
+            r#"{
+                "kotlin": { "manifest_url": "https://example.com/servers.json" },
+                "profiles": { "mirror": { "settings": { "kotlin": { "manifest_url": "https://mirror.example.com/servers.json" } } } }
+            }"#,
+        );
+        assert_eq!(global_manifest_url(cx), "https://example.com/servers.json");
+        set_profile(cx, "mirror");
+        assert_eq!(
+            global_manifest_url(cx),
+            "https://mirror.example.com/servers.json"
+        );
+    }
+
+    #[gpui::test]
+    fn test_a_project_cannot_change_the_manifest_url(cx: &mut TestAppContext) {
+        setup(cx);
+        set_user(
+            cx,
+            r#"{ "kotlin": { "manifest_url": "https://example.com/servers.json" } }"#,
+        );
+        set_project(
+            cx,
+            Some(r#"{ "kotlin": { "manifest_url": "https://evil.example.org/servers.json" } }"#),
+        );
+        // Only the global view is read for a fetch, and it never sees the project's value.
+        assert_eq!(global_manifest_url(cx), "https://example.com/servers.json");
+        clear_project(cx);
+        assert_eq!(global_manifest_url(cx), "https://example.com/servers.json");
+    }
+
+    #[gpui::test]
+    fn test_a_project_manifest_url_does_not_reach_the_global_settings(cx: &mut TestAppContext) {
+        setup(cx);
+        set_project(
+            cx,
+            Some(r#"{ "kotlin": { "manifest_url": "https://evil.example.org/servers.json" } }"#),
+        );
+        assert_eq!(global_manifest_url(cx), "");
+        assert_eq!(
+            cx.update(|cx| KotlinSettings::get_global(cx).manifest_url_for_fetch()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_manifest_url_for_fetch_rules() {
+        assert_eq!(fetch_url(""), None);
+        assert_eq!(fetch_url("   "), None);
+        assert_eq!(fetch_url("not a url"), None);
+        assert_eq!(fetch_url("ftp://example.com/servers.json"), None);
+        assert_eq!(fetch_url("file:///tmp/servers.json"), None);
+        assert_eq!(fetch_url("http://example.com/x"), None);
+        assert_eq!(fetch_url("https://user:pw@example.com/servers.json"), None);
+        assert_eq!(
+            fetch_url("https://example.com/kotlin/servers.json").as_deref(),
+            Some("https://example.com/kotlin/servers.json")
+        );
+        // Loopback over http is for debug builds only.
+        let loopback = fetch_url("http://127.0.0.1:8123/servers.json");
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                loopback.as_deref(),
+                Some("http://127.0.0.1:8123/servers.json")
+            );
+            assert!(fetch_url("http://localhost:8123/servers.json").is_some());
+        } else {
+            assert_eq!(loopback, None);
+        }
+        assert_eq!(fetch_url("http://[::1]:8123/servers.json"), None);
+    }
+
+    #[test]
+    fn test_sig_url_derives_from_the_manifest_url() {
+        let sig = |url: &str| {
+            let url = settings_with_manifest_url(url).manifest_url_for_fetch();
+            sig_url(&url.unwrap()).to_string()
+        };
+        assert_eq!(
+            sig("https://example.com/servers.json"),
+            "https://example.com/servers.json.sig"
+        );
+        assert_eq!(
+            sig("https://example.com/a/b/servers.json"),
+            "https://example.com/a/b/servers.json.sig"
+        );
     }
 
     fn project_intellij_download(cx: &mut TestAppContext) -> bool {
