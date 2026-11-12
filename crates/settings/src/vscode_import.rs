@@ -228,6 +228,7 @@ impl VsCodeSettings {
             chats: None,
             prompts: None,
             task_builder: None,
+            project_repository: None,
             linear: None,
             workflows: None,
             modeline_lines: None,

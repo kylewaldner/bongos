@@ -2702,6 +2702,45 @@
     // data directory.
     "default_worktree_root": null,
   },
+  // Projects kept in a git repository, one folder per project. Off until the feature is
+  // finished; while it is off, projects keep the old format.
+  "project_repository": {
+    "enabled": false,
+    "projects_dir": null, // null: <data dir>/projects
+    "layout": {
+      "repository": "{folder}/repository",
+      "working_copies": "{folder}/working-copies",
+      "state": "{folder}/state",
+      "files": "{folder}/files",
+    },
+    "branch_prefix": "work/",
+    "state_branch": "bongos/state",
+    "squash": true,
+    "keep_landed": false,
+    "stale_after_days": 14,
+    "queue_limit_seconds": 120,
+    "text_file_limit_bytes": 1048576,
+    "image_limit_bytes": 5242880,
+    "secret_patterns": [
+      "AKIA[0-9A-Z]{16}",
+      "gh[pousr]_[A-Za-z0-9]{36}",
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "xox[abprs]-[A-Za-z0-9-]{10,}",
+      "sk-ant-[A-Za-z0-9_-]{20,}",
+      "sk-[A-Za-z0-9]{32,}",
+    ],
+    "judgment_survives_unrelated": true,
+    "min_snapshot_gap_seconds": 60,
+    "push_retry_min_minutes": 5,
+    "push_retry_max_minutes": 60,
+    "thinning_after_days": 30,
+    "replaced_keep_days": 30,
+    "run_record_copy_dir": null,
+    "run_record_copy_interval_minutes": 60,
+    "oneoffs_project": "One-offs",
+    "ask_work_kind": false,
+    "default_snapshot_interval_minutes": 15,
+  },
   "chats": {
     // Whether chat sessions are on. While they are off, bongos neither indexes
     // chat records nor seeds the session types, and the chat commands are hidden.

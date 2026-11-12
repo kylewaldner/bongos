@@ -98,6 +98,7 @@ impl Global for GlobalWorkStore {}
 /// reads nothing until `work.enabled` is true.
 pub fn init(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut App) {
     WorkSettings::register(cx);
+    bongos_project_repo::init(cx);
     let store = cx.new(|cx| WorkStore::new(fs, dirs, cx));
     cx.set_global(GlobalWorkStore(store));
     focus::init(cx);

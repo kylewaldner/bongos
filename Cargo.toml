@@ -218,6 +218,7 @@ members = [
     "crates/bongos_minibuffer",
     "crates/bongos_minibuffer_model",
     "crates/bongos_net",
+    "crates/bongos_project_repo",
     "crates/bongos_project_repo_model",
     "crates/bongos_prompts",
     "crates/bongos_prompts_model",
@@ -481,6 +482,7 @@ bongos_isearch_model = { path = "crates/bongos_isearch_model" }
 bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
 bongos_net = { path = "crates/bongos_net" }
+bongos_project_repo = { path = "crates/bongos_project_repo" }
 bongos_project_repo_model = { path = "crates/bongos_project_repo_model" }
 bongos_prompts = { path = "crates/bongos_prompts" }
 bongos_prompts_model = { path = "crates/bongos_prompts_model" }

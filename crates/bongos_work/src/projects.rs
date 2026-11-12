@@ -1,7 +1,12 @@
 //! The handlers of the `project` actions: `new`, `archive`, `unarchive` and `open folder`.
 
+use bongos_project_repo::{
+    CreateRequest, ProjectRepo, ProjectRepositorySettings, RepositoryLocations,
+};
 use bongos_work_model::commands::{self as model, NewProject};
-use gpui::{Context, Window};
+use bongos_work_model::slug::slugify;
+use gpui::{AppContext as _, Context, Window};
+use settings::Settings as _;
 use workspace::Workspace;
 
 use crate::actions::project;
@@ -26,6 +31,10 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         "",
         false,
         Box::new(|title, workspace, _, cx| {
+            if ProjectRepositorySettings::get_global(cx).enabled {
+                new_repository_project(title, cx);
+                return;
+            }
             submit(workspace, cx, move |tree, ctx| {
                 model::project_new(
                     tree,
@@ -40,6 +49,34 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         window,
         cx,
     );
+}
+
+/// `project: new` while `project_repository.enabled`: makes the project folder with its
+/// repository instead of an old-format project.
+fn new_repository_project(title: String, cx: &mut Context<Workspace>) {
+    let settings = ProjectRepositorySettings::get_global(cx).clone();
+    let request = CreateRequest {
+        folder: settings.project_folder(&slugify(&title)),
+        layout: settings.layout,
+        title: title.clone(),
+        repositories: Vec::new(),
+        remote: None,
+    };
+    let created = cx.background_spawn(async move {
+        let mut locations = RepositoryLocations::load(RepositoryLocations::default_path())?;
+        ProjectRepo::create(request, &mut locations).await?;
+        anyhow::Ok(())
+    });
+    cx.spawn(async move |workspace, cx| {
+        let message = match created.await {
+            Ok(()) => format!("Created project {title}"),
+            Err(error) => error.to_string(),
+        };
+        workspace
+            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+            .ok();
+    })
+    .detach();
 }
 
 fn archive(

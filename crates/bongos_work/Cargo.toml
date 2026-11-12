@@ -18,6 +18,7 @@ test-support = []
 [dependencies]
 anyhow.workspace = true
 bongos_minibuffer.workspace = true
+bongos_project_repo.workspace = true
 bongos_work_model.workspace = true
 chrono.workspace = true
 command_palette_hooks.workspace = true
