@@ -303,18 +303,20 @@ impl<R: Runner> Runtime<R> {
         let index = self.live(id)?;
         let state = self.runs[index].state();
         let free = self.limits.free_sessions(self.sessions_in_flight());
-        let ends_succeeded = scheduler::step(&self.runs[index].definition, &state, &self.limits, free)
-            .iter()
-            .any(|command| {
-                matches!(
-                    command,
-                    Command::End {
-                        state: record::EndState::Succeeded,
-                        ..
-                    }
-                )
-            });
-        if !ends_succeeded || !state.open_gates.is_empty() || !self.runs[index].in_flight.is_empty() {
+        let ends_succeeded =
+            scheduler::step(&self.runs[index].definition, &state, &self.limits, free)
+                .iter()
+                .any(|command| {
+                    matches!(
+                        command,
+                        Command::End {
+                            state: record::EndState::Succeeded,
+                            ..
+                        }
+                    )
+                });
+        if !ends_succeeded || !state.open_gates.is_empty() || !self.runs[index].in_flight.is_empty()
+        {
             return Err(RuntimeError::Io(format!(
                 "run {id} is not waiting to end succeeded"
             )));

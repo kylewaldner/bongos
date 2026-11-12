@@ -71,10 +71,16 @@ pub struct Reported {
 /// What delivering one outcome left on the task, for the run's record.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Delivered {
-    Pr { url: String },
+    Pr {
+        url: String,
+    },
     /// The file name in the task directory (its artifact key).
-    Document { name: String },
-    Proposal { path: PathBuf },
+    Document {
+        name: String,
+    },
+    Proposal {
+        path: PathBuf,
+    },
 }
 
 /// The outcomes in the results of `state`: the last successful try of each key (with the edit of
@@ -88,7 +94,12 @@ pub fn collect(definition: &Definition, state: &RunState) -> Vec<Reported> {
     }
     let mut found = Vec::new();
     for key in keys {
-        let Some(last) = state.finished.iter().rev().find(|finished| &finished.key == key) else {
+        let Some(last) = state
+            .finished
+            .iter()
+            .rev()
+            .find(|finished| &finished.key == key)
+        else {
             continue;
         };
         let (Some(Value::Object(result)), None) = (&last.result, &last.failure) else {
@@ -184,7 +195,10 @@ pub fn pr_result(
         extra.insert("title".to_string(), toml::Value::String(title.to_string()));
     }
     if let Some(branch) = branch {
-        extra.insert("branch".to_string(), toml::Value::String(branch.to_string()));
+        extra.insert(
+            "branch".to_string(),
+            toml::Value::String(branch.to_string()),
+        );
     }
     if let Some(draft) = draft {
         extra.insert("draft".to_string(), toml::Value::Boolean(draft));
@@ -302,7 +316,8 @@ pub fn manifest_change(
     let task = tree
         .task_by_id(id)
         .ok_or_else(|| format!("no task {id} is loaded"))?;
-    task.check_writable().map_err(|refused| refused.to_string())?;
+    task.check_writable()
+        .map_err(|refused| refused.to_string())?;
     let dir = task.dir.clone();
     Ok(Change {
         dir: dir.clone(),

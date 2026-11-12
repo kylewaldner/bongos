@@ -68,7 +68,8 @@ pub fn is_engine_gate(key: &NodeKey) -> bool {
 /// Whether Kyle approved the engine gate `gate` (it closed and was not opened again).
 pub fn approved(state: &RunState, gate: &str) -> bool {
     let key = gate_key(gate);
-    !state.open_gates.contains_key(&key) && state.closed_gates.iter().any(|closed| closed.key == key)
+    !state.open_gates.contains_key(&key)
+        && state.closed_gates.iter().any(|closed| closed.key == key)
 }
 
 /// The values a prompt may name: `inputs.<name>` for every input with a value.
@@ -197,7 +198,13 @@ pub fn failed_change(
     task_id: &str,
     failure: Option<&Failure>,
 ) -> Outcome {
-    commands::record_event(tree, ctx, task_id, RUN_FAILED, Some(failure_detail(failure)))
+    commands::record_event(
+        tree,
+        ctx,
+        task_id,
+        RUN_FAILED,
+        Some(failure_detail(failure)),
+    )
 }
 
 /// `<reason> at <node>`, or the reason alone when no node failed.
@@ -220,7 +227,10 @@ pub fn cancelled_change(tree: &WorkTree, ctx: &Context, task_id: &str) -> Outcom
 fn uses<'a>(definition: &'a Definition, name: &'a str) -> impl Iterator<Item = &'a Node> + 'a {
     definition.nodes.iter().filter(move |node| {
         node.kind.value == NodeKind::Program
-            && node.use_node.as_ref().is_some_and(|used| used.value == name)
+            && node
+                .use_node
+                .as_ref()
+                .is_some_and(|used| used.value == name)
     })
 }
 
@@ -238,7 +248,12 @@ pub struct Finale {
 }
 
 impl Finale {
-    pub fn read(definition: &Definition, task: Option<&Task>, todo: &TodoRef, merge_is_ship: bool) -> Self {
+    pub fn read(
+        definition: &Definition,
+        task: Option<&Task>,
+        todo: &TodoRef,
+        merge_is_ship: bool,
+    ) -> Self {
         let deploy_wait = uses(definition, "wait").any(|node| {
             node.with
                 .get("condition")
@@ -249,7 +264,9 @@ impl Finale {
         let ship_todo = task
             .and_then(|task| task.file.as_ref())
             .and_then(|file| {
-                let index = task.and_then(|task| locate_todo(task, todo)).unwrap_or(todo.index);
+                let index = task
+                    .and_then(|task| locate_todo(task, todo))
+                    .unwrap_or(todo.index);
                 file.todos.get(index)
             })
             .is_some_and(|found| found.role == Some(TodoRole::Ships));

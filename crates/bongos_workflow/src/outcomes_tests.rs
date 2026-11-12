@@ -67,7 +67,13 @@ fn run_deliver(
     );
     let linked = linked(world, runner, cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
-    let worktree = linked.engine.lifecycle().worktree(&run).unwrap().path.clone();
+    let worktree = linked
+        .engine
+        .lifecycle()
+        .worktree(&run)
+        .unwrap()
+        .path
+        .clone();
     for (path, text) in files {
         let path = worktree.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -175,7 +181,10 @@ fn outcomes_a_proposal_is_pending_and_creates_no_task(cx: &mut TestAppContext) {
     assert!(leaf.file.as_ref().unwrap().proposals.is_empty());
     assert_eq!(leaf.children.len(), 0);
     assert_eq!(
-        linked.writes.tree.lock().unwrap().projects[0].task.children.len(),
+        linked.writes.tree.lock().unwrap().projects[0]
+            .task
+            .children
+            .len(),
         children_before
     );
     assert!(!leaf_dir.join("tasks").exists(), "no task directory");
@@ -211,7 +220,13 @@ async fn outcomes_report_outcome_records_a_document(cx: &mut TestAppContext) {
     let world = deliver_world();
     let linked = linked(&world, FakeRunner::new(), cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
-    let worktree = linked.engine.lifecycle().worktree(&run).unwrap().path.clone();
+    let worktree = linked
+        .engine
+        .lifecycle()
+        .worktree(&run)
+        .unwrap()
+        .path
+        .clone();
     fs::write(worktree.join("report.md"), "reported\n").unwrap();
     let key = NodeKey::new("work", 1);
     let task = cx.update(|cx| {

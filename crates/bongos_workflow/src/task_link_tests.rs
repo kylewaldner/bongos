@@ -151,7 +151,10 @@ impl Runner for SharedRunner {
         key: &NodeKey,
         try_number: u32,
     ) -> Result<crate::process::ProcessRecord, bongos_workflow_model::Failure> {
-        self.0.lock().unwrap().start(run, definition, key, try_number)
+        self.0
+            .lock()
+            .unwrap()
+            .start(run, definition, key, try_number)
     }
 
     fn poll(&mut self) -> Vec<crate::runtime::Finish> {
@@ -307,8 +310,14 @@ fn task_link_success_checks_off_exactly_one_todo(cx: &mut TestAppContext) {
     assert_eq!(
         linked.writes.history(),
         [
-            ("todo started: implement".to_string(), "workflow:single".to_string()),
-            ("run started: single".to_string(), "workflow:single".to_string()),
+            (
+                "todo started: implement".to_string(),
+                "workflow:single".to_string()
+            ),
+            (
+                "run started: single".to_string(),
+                "workflow:single".to_string()
+            ),
         ]
     );
     assert_eq!(linked.writes.changes.lock().unwrap().len(), 1, "one write");
@@ -318,7 +327,10 @@ fn task_link_success_checks_off_exactly_one_todo(cx: &mut TestAppContext) {
     assert_eq!(linked.status(&run), RunStatus::WaitingOnYou);
     assert_eq!(
         linked.open_gates(&run),
-        [(MERGE_GATE.to_string(), task_link::MERGE_QUESTION.to_string())]
+        [(
+            MERGE_GATE.to_string(),
+            task_link::MERGE_QUESTION.to_string()
+        )]
     );
     assert_eq!(linked.writes.todo_states()[1].1, TodoState::Open);
     assert!(linked.merges.lock().unwrap().is_empty());
@@ -354,9 +366,10 @@ fn task_link_a_moved_todo_is_found_by_name(cx: &mut TestAppContext) {
     let linked = linked(&world, auto_runner(), cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
     // Kyle adds a todo in front while the run works: the run's todo is now at index 2.
-    linked
-        .writes
-        .edit_leaf(|file| file.todos.insert(0, todo("research", None, TodoState::Open)));
+    linked.writes.edit_leaf(|file| {
+        file.todos
+            .insert(0, todo("research", None, TodoState::Open))
+    });
     linked.drive(cx);
     linked.approve(&run, MERGE_GATE, cx);
     assert_eq!(linked.status(&run), RunStatus::Succeeded);
@@ -377,7 +390,9 @@ fn task_link_a_todo_done_by_hand_waits_on_you(cx: &mut TestAppContext) {
     three_todos(&mut world);
     let linked = linked(&world, auto_runner(), cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
-    linked.writes.edit_leaf(|file| file.todos[1].state = TodoState::Done);
+    linked
+        .writes
+        .edit_leaf(|file| file.todos[1].state = TodoState::Done);
     let before = linked.writes.leaf().file.unwrap().todos;
 
     linked.drive(cx);

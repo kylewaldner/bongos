@@ -23,19 +23,17 @@ use bongos_work_model::store::{Task, WorkTree};
 use bongos_workflow_model::definition::{AgentKind, Outcome};
 use bongos_workflow_model::record::TodoRef;
 use bongos_workflow_model::scheduler::Branch;
-use bongos_workflow_model::{
-    Definition, Failure, FailureReason, LayerDirs, NodeKey, RunState,
-};
+use bongos_workflow_model::{Definition, Failure, FailureReason, LayerDirs, NodeKey, RunState};
 use gpui::{App, AppContext as _, AsyncApp, Global};
 use serde_json::Value;
 use settings::Settings as _;
 
 use crate::WorkflowsSettings;
+use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged};
 use crate::definitions::{
     self, DefinitionError, NewDefinition, Report, SHIPPED_FILES, materialize, profile_dir,
     shipped_dir,
 };
-use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged};
 use crate::lifecycle::{
     GitWorktrees, HaltWorktrees, Lifecycle, Refusal, RefusalKind, RunId, RunStatus, StartChecks,
     StartContext, StartRequest, WorkflowEvent,
@@ -44,9 +42,7 @@ use crate::outcomes::{self, Delivered, Reported, RunOutcome};
 use crate::process::ProcessRecord;
 use crate::runner_program::Interpreter;
 use crate::runtime::{Finish, Runner, Settlement};
-use crate::task_link::{
-    self, Completed, Finale, Next, StoreWrites, TaskWrites, WriteCommand,
-};
+use crate::task_link::{self, Completed, Finale, Next, StoreWrites, TaskWrites, WriteCommand};
 use crate::worktrees::{Git, RunWorktree, TaskCheckout, branch_worktree_path};
 
 /// The runner the engine's runs use.
@@ -72,11 +68,11 @@ pub struct WorkflowEngine {
 
 fn git_merger() -> Merger {
     Arc::new(|request| {
-        futures::executor::block_on(builtin_merge::merge(&Git::new("git"), request)).map(
-            |merged| match merged {
+        futures::executor::block_on(builtin_merge::merge(&Git::new("git"), request)).map(|merged| {
+            match merged {
                 Merged::FastForward { head } | Merged::MergeCommit { head } => head,
-            },
-        )
+            }
+        })
     })
 }
 
@@ -460,7 +456,11 @@ impl WorkflowEngine {
             return;
         }
         for event in &events {
-            let WorkflowEvent::Changed { run, task_id, state } = event;
+            let WorkflowEvent::Changed {
+                run,
+                task_id,
+                state,
+            } = event;
             let failure = match state {
                 RunStatus::Failed => self
                     .lifecycle()
@@ -604,16 +604,13 @@ impl WorkflowEngine {
                         ));
                     };
                     let merger = self.merger.clone();
-                    let merged = cx
-                        .background_spawn(async move { merger(&request) })
-                        .await;
+                    let merged = cx.background_spawn(async move { merger(&request) }).await;
                     match merged {
                         Ok(head) => {
-                            if let Err(refusal) = self.lifecycle().record_merge(
-                                run,
-                                task_link::MERGE_GATE,
-                                head,
-                            ) {
+                            if let Err(refusal) =
+                                self.lifecycle()
+                                    .record_merge(run, task_link::MERGE_GATE, head)
+                            {
                                 return Settlement::Fail(Failure::new(
                                     FailureReason::WorktreeUnavailable,
                                     None,
@@ -724,8 +721,7 @@ impl WorkflowEngine {
                 branch,
                 draft,
             } => {
-                let result =
-                    outcomes::pr_result(url, title.as_deref(), branch.as_deref(), *draft);
+                let result = outcomes::pr_result(url, title.as_deref(), branch.as_deref(), *draft);
                 let write = cx.update(|cx| {
                     self.writes.write(
                         by,
@@ -739,7 +735,10 @@ impl WorkflowEngine {
                 Ok(Delivered::Pr { url: url.clone() })
             }
             RunOutcome::Document { path } => {
-                let task = context.task.as_ref().ok_or("the run's task is not loaded")?;
+                let task = context
+                    .task
+                    .as_ref()
+                    .ok_or("the run's task is not loaded")?;
                 let root = source_root(&context.worktree, &reported.key, path);
                 let source = outcomes::source_file(&root, path)?;
                 let name = outcomes::copy_document(&source, &task.dir)?;
@@ -758,7 +757,10 @@ impl WorkflowEngine {
                 Ok(Delivered::Document { name })
             }
             RunOutcome::Tasks { path } => {
-                let task = context.task.as_ref().ok_or("the run's task is not loaded")?;
+                let task = context
+                    .task
+                    .as_ref()
+                    .ok_or("the run's task is not loaded")?;
                 let root = source_root(&context.worktree, &reported.key, path);
                 let source = outcomes::source_file(&root, path)?;
                 let written = outcomes::copy_proposal(task, &source, &context.workflow)?;
