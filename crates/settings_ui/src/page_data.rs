@@ -320,13 +320,122 @@ fn work_page(token_set: bool) -> SettingsPage {
         ]
     }
 
+    fn workflows_section() -> [SettingsPageItem; 6] {
+        [
+            SettingsPageItem::SectionHeader("Workflows"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Workflows",
+                description: "Whether workflows are on. While they are off, bongos starts no run, loads no definition and every workflow command is hidden.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.enabled"),
+                    pick: |settings_content| settings_content.workflows.as_ref()?.enabled.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.workflows.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Max Concurrent Runs",
+                description: "Runs executing at once; the rest wait queued, in start order.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.max_concurrent_runs"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .max_concurrent_runs
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .max_concurrent_runs = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Max Concurrent Sessions",
+                description: "Agent sessions plus programs executing at once across all runs. Empty means twice the concurrent runs.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.max_concurrent_sessions"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .max_concurrent_sessions
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .max_concurrent_sessions = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Max Parallel Branches",
+                description: "Fan-out branches of one run executing at once.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.max_parallel_branches"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .max_parallel_branches
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .max_parallel_branches = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Programs",
+                description: "How program nodes run, and every other workflow setting. Edit in settings.json.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("workflows.programs"),
+                        pick: |settings_content| {
+                            settings_content.workflows.as_ref()?.programs.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.workflows.get_or_insert_default().programs = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: "Work",
         items: concat_sections![
             work_section(),
             thresholds_and_repositories_section(),
             task_builder_section(),
-            linear_section(token_set)
+            linear_section(token_set),
+            workflows_section()
         ],
     }
 }
@@ -10656,6 +10765,30 @@ mod tests {
             assert!(paths.contains(&path.as_str()), "no Work item for {path}");
         }
         assert_eq!(paths.len(), keys.len(), "{paths:?} against {keys:?}");
+    }
+
+    #[test]
+    fn test_work_page_lists_the_workflows_settings() {
+        let page = work_page(false);
+        let paths: Vec<&str> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                _ => None,
+            })
+            .filter(|path| path.starts_with("workflows."))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "workflows.enabled",
+                "workflows.max_concurrent_runs",
+                "workflows.max_concurrent_sessions",
+                "workflows.max_parallel_branches",
+                "workflows.programs",
+            ]
+        );
     }
 
     #[test]
