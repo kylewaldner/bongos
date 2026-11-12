@@ -16,6 +16,7 @@ use theme::ActiveTheme as _;
 
 use crate::actions::GotoLine;
 use crate::lines::propagate_in_single_line;
+use crate::mark::push_mark;
 
 /// The name the prompt is routed under (`minibuffer.enabled_for`).
 const MINIBUFFER_NAME: &str = "goto_line";
@@ -56,7 +57,8 @@ pub(crate) fn goto_line_command(
     }
 }
 
-/// Moves the one caret to the line, clears the region and records the jump.
+/// Pushes the mark, then moves the one caret to the line, clears the region and records the
+/// jump.
 fn jump(
     editor: &Entity<Editor>,
     line: usize,
@@ -64,6 +66,7 @@ fn jump(
     window: &mut Window,
     cx: &mut App,
 ) {
+    push_mark(editor, None, false, window, cx);
     editor.update(cx, |editor, cx| {
         editor.clear_row_highlights::<GotoLinePreview>();
         let snapshot = editor.buffer().read(cx).snapshot(cx);

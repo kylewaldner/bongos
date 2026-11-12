@@ -385,7 +385,7 @@ async fn minibuffer_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 40] = [
+const EMACS_ACTIONS: [(&str, &str); 44] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -441,6 +441,13 @@ const EMACS_ACTIONS: [(&str, &str); 40] = [
     ),
     ("emacs::PopMark", "emacs: pop mark"),
     ("emacs::PopGlobalMark", "emacs: pop global mark"),
+    ("emacs::BeginningOfBuffer", "emacs: beginning of buffer"),
+    ("emacs::EndOfBuffer", "emacs: end of buffer"),
+    ("emacs::XrefFindDefinitions", "emacs: xref find definitions"),
+    (
+        "emacs::XrefFindImplementations",
+        "emacs: xref find implementations",
+    ),
 ];
 
 #[gpui::test]
