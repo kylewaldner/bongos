@@ -13,7 +13,7 @@ use gpui::{
 use settings::KeymapFile;
 use workspace::{SaveAll, Workspace};
 
-use crate::actions::{Backward, Forward, ForwardRegexp, RepeatForward};
+use crate::actions::{Backward, Forward, ForwardRegexp};
 use crate::intercept::{Decision, decide};
 use crate::session::{TEXT_HISTORY, test_session};
 use crate::session_tests::{
@@ -35,8 +35,8 @@ fn keystrokes(text: &str) -> Vec<Keystroke> {
 }
 
 /// The rows of a base keymap the session's keys are decided against: an editor motion, an
-/// editor prefix, the regexp starter above `workspace::SaveAll`, an editor `alt-s` binding (no
-/// session row has `alt-s` before the commands step) and a workspace `alt-x`.
+/// editor prefix, the regexp starter above `workspace::SaveAll`, an editor `alt-s x` binding
+/// that shares the prefix of the session's `alt-s` rows and a workspace `alt-x`.
 fn base_rows() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("ctrl-f", editor::actions::MoveRight, Some("Editor")),
@@ -95,7 +95,7 @@ async fn the_key_rule_follows_the_first_binding(routed: bool, cx: &mut TestAppCo
     let overrides = cx.update(|_, cx| {
         KeymapFile::load_asset_allow_partial_failure("keymaps/specific-overrides.json", cx).unwrap()
     });
-    let keymap = Keymap::new(base_rows().into_iter().chain(overrides.clone()).collect());
+    let keymap = Keymap::new(base_rows().into_iter().chain(overrides).collect());
     let decide_keys = |keymap: &Keymap, pending: &str, typed: &str| {
         let pending = if pending.is_empty() {
             Vec::new()
@@ -125,6 +125,14 @@ async fn the_key_rule_follows_the_first_binding(routed: bool, cx: &mut TestAppCo
         "ctrl-enter",
         "alt-p",
         "alt-n",
+        "ctrl-w",
+        "ctrl-alt-y",
+        "ctrl-y",
+        "ctrl-j",
+        "alt-e",
+        "alt-c",
+        "alt-r",
+        "ctrl-l",
     ] {
         assert_eq!(
             decide_keys(&keymap, "", typed),
@@ -133,15 +141,13 @@ async fn the_key_rule_follows_the_first_binding(routed: bool, cx: &mut TestAppCo
         );
     }
     // Everything else exits and runs: a motion, a prefix, the starters (whose fallthrough in
-    // the input would be `workspace::SaveAll`), `alt-s` before it has a session row, M-x, keys of
-    // the minibuffer itself, and keys bound to nothing.
+    // the input would be `workspace::SaveAll`), M-x, keys of the minibuffer itself, and keys
+    // bound to nothing.
     for typed in [
         "ctrl-f",
         "ctrl-x",
         "ctrl-alt-s",
-        "alt-s",
         "alt-x",
-        "ctrl-j",
         "tab",
         "ctrl-n",
         "ctrl-q",
@@ -152,24 +158,19 @@ async fn the_key_rule_follows_the_first_binding(routed: bool, cx: &mut TestAppCo
         assert_eq!(decide_keys(&keymap, "", typed), exits(typed), "{typed}");
     }
 
-    // Once an `alt-s` row is the session's, `alt-s` waits for the next key: a session pair goes
+    // `alt-s` is the prefix of session rows, so it waits for the next key: a session pair goes
     // through, any other pair exits with both keys, a printable one too.
-    let with_prefix = Keymap::new(
-        base_rows()
-            .into_iter()
-            .chain(overrides)
-            .chain([KeyBinding::new(
-                "alt-s .",
-                RepeatForward,
-                Some("Isearch > Editor"),
-            )])
-            .collect(),
-    );
-    assert_eq!(decide_keys(&with_prefix, "", "alt-s"), Decision::Through);
-    assert_eq!(decide_keys(&with_prefix, "alt-s", "."), Decision::Through);
-    assert_eq!(decide_keys(&with_prefix, "alt-s", "x"), exits("alt-s x"));
+    assert_eq!(decide_keys(&keymap, "", "alt-s"), Decision::Through);
+    for typed in [".", "ctrl-e", "space", "alt-<", "alt->"] {
+        assert_eq!(
+            decide_keys(&keymap, "alt-s", typed),
+            Decision::Through,
+            "alt-s {typed}"
+        );
+    }
+    assert_eq!(decide_keys(&keymap, "alt-s", "x"), exits("alt-s x"));
     assert_eq!(
-        decide_keys(&with_prefix, "alt-s", "ctrl-f"),
+        decide_keys(&keymap, "alt-s", "ctrl-f"),
         exits("alt-s ctrl-f")
     );
     keys("ctrl-g", cx);
@@ -303,8 +304,8 @@ async fn isearch_a_starter_exits_and_never_falls_through(cx: &mut TestAppContext
     assert_eq!(text(&editor, cx), XS);
 }
 
-/// `alt-s` has no session row yet, so it exits and runs in the editor, where `x` completes its
-/// binding: both keys run there, once, and neither reaches the string.
+/// `alt-s` is the prefix of session rows, and `x` is none of them: the session exits and both keys
+/// run in the editor, where they complete its binding, once, and neither reaches the string.
 #[gpui::test]
 async fn isearch_alt_s_x_exits_and_runs_both_keys(cx: &mut TestAppContext) {
     let (workspace, editor, mut cx) = session_on_x(true, cx).await;

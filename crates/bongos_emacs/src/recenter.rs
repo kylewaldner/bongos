@@ -84,6 +84,39 @@ fn cycle_row(cycle: Cycle, rows: u32, margin: u32) -> u32 {
     }
 }
 
+/// Scrolls so that display row `row` stands where `cycle` puts it in the window (the middle, the
+/// top margin or the bottom margin), moving no cursor. False when the window has no rows yet.
+pub fn scroll_row_to(
+    editor: &mut Editor,
+    row: DisplayRow,
+    cycle: Cycle,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) -> bool {
+    let Some(rows) = editor.visible_row_count().filter(|rows| *rows > 0) else {
+        return false;
+    };
+    let margin = margin(editor, rows);
+    place(editor, row, cycle_row(cycle, rows, margin), window, cx);
+    true
+}
+
+/// Scrolls so that `row` stands at `window_row` rows below the top of the window.
+fn place(
+    editor: &mut Editor,
+    row: DisplayRow,
+    window_row: u32,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) {
+    let top = row.0.saturating_sub(window_row);
+    editor.set_scroll_position(
+        gpui::point(editor.scroll_position(cx).x, top as f64),
+        window,
+        cx,
+    );
+}
+
 pub(crate) fn recenter_command(
     action: &Recenter,
     editor: &gpui::Entity<Editor>,
@@ -114,18 +147,13 @@ pub(crate) fn recenter_command(
                 .saturating_sub(count.unsigned_abs())
                 .clamp(margin, rows - 1 - margin),
         };
-        let top = head.row().0.saturating_sub(row);
         // The region goes; collapsing the selections emits a change that the stored carets
         // below already account for.
         editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
             s.select_display_ranges(heads.iter().map(|head| *head..*head));
         });
         editor.set_selection_mark_mode(false, cx);
-        editor.set_scroll_position(
-            gpui::point(editor.scroll_position(cx).x, top as f64),
-            window,
-            cx,
-        );
+        place(editor, head.row(), row, window, cx);
         if count.is_none() {
             store(editor, id, cycle, cx);
         } else {

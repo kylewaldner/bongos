@@ -16,7 +16,7 @@ mod lines;
 pub mod mark;
 mod motion;
 pub mod quit;
-mod recenter;
+pub mod recenter;
 pub mod region;
 mod region_commands;
 pub mod snapshot_text;

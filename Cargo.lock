@@ -2342,6 +2342,7 @@ name = "bongos_isearch"
 version = "0.1.0"
 dependencies = [
  "bongos_emacs",
+ "bongos_emacs_model",
  "bongos_isearch_model",
  "bongos_minibuffer",
  "buffer_diff",

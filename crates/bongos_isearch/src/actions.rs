@@ -30,6 +30,32 @@ actions!(
         RingPrevious,
         /// Puts the next search of the history in the search string.
         RingNext,
+        /// Appends the text from the cursor to the end of the next word to the search string.
+        YankWord,
+        /// Appends the character at the cursor to the search string.
+        YankChar,
+        /// Appends the rest of the line to the search string.
+        YankLine,
+        /// Replaces the search string with the symbol at the cursor, matched as a whole symbol.
+        YankSymbol,
+        /// Appends the top of the kill ring, or the clipboard, to the search string.
+        YankKill,
+        /// Appends a newline to the search string.
+        QuoteNewline,
+        /// Edits the search string freely; Enter resumes the search.
+        EditString,
+        /// Switches the search between smart case, case-sensitive and case-insensitive.
+        ToggleCaseFold,
+        /// Switches the search between text and regexp.
+        ToggleRegexp,
+        /// Switches the search between lax and strict spaces.
+        ToggleLaxWhitespace,
+        /// Jumps to the first match of the buffer.
+        FirstMatch,
+        /// Jumps to the last match of the buffer.
+        LastMatch,
+        /// Scrolls the current match to the middle, top or bottom of the window.
+        Recenter,
     ]
 );
 
@@ -44,4 +70,17 @@ pub const IN_SESSION: &[&str] = &[
     "isearch::ExitOtherEnd",
     "isearch::RingPrevious",
     "isearch::RingNext",
+    "isearch::YankWord",
+    "isearch::YankChar",
+    "isearch::YankLine",
+    "isearch::YankSymbol",
+    "isearch::YankKill",
+    "isearch::QuoteNewline",
+    "isearch::EditString",
+    "isearch::ToggleCaseFold",
+    "isearch::ToggleRegexp",
+    "isearch::ToggleLaxWhitespace",
+    "isearch::FirstMatch",
+    "isearch::LastMatch",
+    "isearch::Recenter",
 ];
