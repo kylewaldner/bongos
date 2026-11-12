@@ -1141,3 +1141,7 @@ fn a_second_start_is_refused_through_can_start_run(cx: &mut TestAppContext) {
 
 #[path = "gates_tests.rs"]
 mod gates_tests;
+#[path = "outcomes_tests.rs"]
+mod outcomes_tests;
+#[path = "task_link_tests.rs"]
+mod task_link_tests;

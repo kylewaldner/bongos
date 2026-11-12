@@ -239,6 +239,18 @@ impl RuntimeError {
     }
 }
 
+/// How the engine settles a run the scheduler would end succeeded ([`Runtime::hold_success`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Settlement {
+    /// End it succeeded.
+    Succeed,
+    /// End it failed with this failure.
+    Fail(Failure),
+    /// Open a gate on `key` (a key of no node, so the scheduler never walks it) and wait on Kyle;
+    /// once it closes, the scheduler offers the end again and the engine settles it again.
+    Wait { key: NodeKey, question: String },
+}
+
 /// The live runs and the loop that drives them.
 pub struct Runtime<R: Runner> {
     limits: Limits,
@@ -249,6 +261,10 @@ pub struct Runtime<R: Runner> {
     queue: VecDeque<String>,
     /// Set by [`Runtime::quit`]: nothing starts after it.
     quitting: bool,
+    /// Whether a succeeded end waits for the engine ([`Runtime::hold_success`]).
+    hold_success: bool,
+    /// Runs whose succeeded end waits for [`Runtime::settle`], oldest first, not yet taken.
+    settling: Vec<String>,
 }
 
 /// The most rounds one [`Runtime::tick`] runs; a round that changes nothing ends it sooner.
@@ -262,7 +278,63 @@ impl<R: Runner> Runtime<R> {
             runs: Vec::new(),
             queue: VecDeque::new(),
             quitting: false,
+            hold_success: false,
+            settling: Vec::new(),
         }
+    }
+
+    /// With `hold` on, a run the scheduler ends succeeded is not ended: it is held for the engine,
+    /// which takes it with [`Runtime::take_settling`] (to deliver its outcomes, offer the final
+    /// merge and complete its todo) and ends it with [`Runtime::settle`]. Off by default, when the
+    /// scheduler's end is appended as it comes.
+    pub fn hold_success(&mut self, hold: bool) {
+        self.hold_success = hold;
+    }
+
+    /// The runs held at a succeeded end since the last call, oldest first. Each is taken once:
+    /// it is offered again only after a [`Settlement::Wait`] gate closes.
+    pub fn take_settling(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.settling)
+    }
+
+    /// Ends or holds a run taken with [`Runtime::take_settling`]. Refused when the run is over
+    /// (cancelled meanwhile, say) or the scheduler would no longer end it succeeded.
+    pub fn settle(&mut self, id: &str, settlement: Settlement) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        let state = self.runs[index].state();
+        let free = self.limits.free_sessions(self.sessions_in_flight());
+        let ends_succeeded =
+            scheduler::step(&self.runs[index].definition, &state, &self.limits, free)
+                .iter()
+                .any(|command| {
+                    matches!(
+                        command,
+                        Command::End {
+                            state: record::EndState::Succeeded,
+                            ..
+                        }
+                    )
+                });
+        if !ends_succeeded || !state.open_gates.is_empty() || !self.runs[index].in_flight.is_empty()
+        {
+            return Err(RuntimeError::Io(format!(
+                "run {id} is not waiting to end succeeded"
+            )));
+        }
+        let run = &mut self.runs[index];
+        match settlement {
+            Settlement::Succeed => run.append(Event::Ended {
+                state: record::EndState::Succeeded,
+                failure: None,
+            }),
+            Settlement::Fail(failure) => run.append(Event::Ended {
+                state: record::EndState::Failed,
+                failure: Some(failure),
+            }),
+            Settlement::Wait { key, question } => run.append(Event::GateOpened { key, question }),
+        }
+        self.hold(index);
+        Ok(())
     }
 
     pub fn runner(&self) -> &R {
@@ -509,6 +581,19 @@ impl<R: Runner> Runtime<R> {
         Ok(())
     }
 
+    /// Records a merge the engine made for run `id` itself, outside any join (the final merge
+    /// of a definition with no merge node): `BranchMerged` with `join` and no branch. The
+    /// scheduler matches merges to its joins by name, so it never counts this one.
+    pub fn record_merge(&mut self, id: &str, join: &str, sha: String) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        self.runs[index].append(Event::BranchMerged {
+            join: join.to_string(),
+            branch: Vec::new(),
+            sha,
+        });
+        Ok(())
+    }
+
     /// Drops run `id` from the runtime, stopping its tries in flight first. Its log stays on
     /// disk. Whether it was loaded.
     pub fn remove(&mut self, id: &str) -> bool {
@@ -517,6 +602,7 @@ impl<R: Runner> Runtime<R> {
         };
         self.stop_in_flight(&[index]);
         self.queue.retain(|queued| queued != id);
+        self.settling.retain(|settling| settling != id);
         self.runs.remove(index);
         true
     }
@@ -785,6 +871,17 @@ impl<R: Runner> Runtime<R> {
                 }
             }
             Command::CancelBranch { branch, .. } => self.cancel_branch(index, &branch),
+            Command::End {
+                state: record::EndState::Succeeded,
+                ..
+            } if self.hold_success => {
+                let id = self.runs[index].id.clone();
+                if !self.settling.contains(&id) {
+                    self.settling.push(id);
+                }
+                self.hold(index);
+                return false;
+            }
             Command::End { state, failure } => {
                 self.runs[index].append(Event::Ended { state, failure });
             }
