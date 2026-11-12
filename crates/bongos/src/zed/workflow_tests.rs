@@ -2,7 +2,7 @@
 //! started the way `task: mode` starts it, by the name `workflow::Run`, finds a handler and says
 //! that workflows are off, instead of "Workflows arrive with feature 20".
 
-use gpui::TestAppContext;
+use gpui::{BorrowAppContext as _, TestAppContext};
 use serde_json::json;
 use util::path;
 use workspace::MultiWorkspace;
@@ -97,7 +97,7 @@ async fn the_runs_panel_is_absent_while_workflows_are_off_and_follows_the_settin
 
     let set_enabled = |cx: &mut TestAppContext, enabled: bool| {
         cx.update(|cx| {
-            settings::SettingsStore::update_global(cx, |store, cx| {
+            cx.update_global::<settings::SettingsStore, _>(|store, cx| {
                 store.update_user_settings(cx, |content| {
                     content.workflows.get_or_insert_default().enabled = Some(enabled);
                 });

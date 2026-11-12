@@ -32,7 +32,7 @@ fn world() -> World {
     world
 }
 
-fn engine_of(world: &World, cx: &mut TestAppContext) -> WorkflowEngine {
+pub(super) fn engine_of(world: &World, cx: &mut TestAppContext) -> WorkflowEngine {
     cx.update(|cx| {
         let store = SettingsStore::test(cx);
         cx.set_global(store);

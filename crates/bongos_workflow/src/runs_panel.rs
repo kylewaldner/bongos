@@ -9,8 +9,8 @@ use std::path::Path;
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, WeakEntity, Window, div, px,
+    KeyDownEvent, ParentElement as _, Pixels, Render, Styled as _, Subscription, WeakEntity,
+    Window, div, px,
 };
 use settings::{Settings as _, SettingsStore};
 use ui::{Color, IconName, Label, LabelCommon as _, LabelSize, h_flex, prelude::*, v_flex};
@@ -438,16 +438,17 @@ impl Render for RunsPanel {
             .on_action(
                 cx.listener(|this, _: &menu::SelectPrevious, _, cx| this.select_offset(-1, cx)),
             )
-            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
-                this.open_selected(window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &menu::Confirm, window, cx| this.open_selected(window, cx)),
+            )
             .on_key_down(cx.listener(Self::on_key))
             .size_full()
             .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .child(Label::new(header).size(LabelSize::Small).color(Color::Muted)),
+                div().px_2().py_1().child(
+                    Label::new(header)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
             )
             .child(body)
     }

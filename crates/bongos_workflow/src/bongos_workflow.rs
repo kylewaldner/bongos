@@ -35,8 +35,8 @@ use gpui::App;
 pub use actions::{WorkflowToast, action_types, init_palette, register, workflow};
 pub use engine::{EngineRunner, SharedLifecycle, WorkflowEngine};
 pub use lifecycle::{Refusal, RefusalKind, RunId, RunStatus, StartRequest, WorkflowEvent};
-pub use settings::WorkflowsSettings;
 pub use runs_panel::{RunsPanel, init_panel};
+pub use settings::WorkflowsSettings;
 pub use status_item::WorkflowStatus;
 
 /// Registers the `workflows` settings and, when `workflows.enabled` is already true, creates the

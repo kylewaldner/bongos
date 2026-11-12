@@ -4,6 +4,7 @@
 
 use bongos_work_model::store::Task;
 
+use super::run_view_tests::engine_of;
 use super::*;
 use crate::lifecycle::RunStatus;
 use crate::runs_panel::{Filters, RunRow};
@@ -20,7 +21,12 @@ fn two_task_world() -> World {
     file.branch = Some("task/logout".to_string());
     file.worktree = Some(worktree.to_string_lossy().into_owned());
     file.todos = vec![todo("implement", Some("single"), TodoState::Open)];
-    let dir = world.root.join("work").join("app").join("tasks").join("logout");
+    let dir = world
+        .root
+        .join("work")
+        .join("app")
+        .join("tasks")
+        .join("logout");
     let leaf: Task = task(dir, file, Vec::new());
     world.tree.projects[0].task.children.push(leaf);
     world
@@ -85,7 +91,11 @@ fn rows_filter_by_task_project_and_state(cx: &mut TestAppContext) {
     cx.update(|cx| engine.cancel(&second, cx)).unwrap();
     let rows = rows_of(&engine);
     let runs = |filters: &Filters| -> Vec<String> {
-        filters.apply(&rows).into_iter().map(|row| row.run).collect()
+        filters
+            .apply(&rows)
+            .into_iter()
+            .map(|row| row.run)
+            .collect()
     };
 
     assert_eq!(runs(&Filters::default()).len(), 2);
@@ -101,14 +111,20 @@ fn rows_filter_by_task_project_and_state(cx: &mut TestAppContext) {
     assert_eq!(runs(&by_task), vec![second.clone()]);
 
     let mut by_project = Filters::default();
-    by_project.project = Some(rows.iter().find(|r| r.run == first).unwrap().project.clone());
-    assert_eq!(runs(&by_project), vec![first.clone()]);
+    by_project.project = Some(
+        rows.iter()
+            .find(|r| r.run == first)
+            .unwrap()
+            .project
+            .clone(),
+    );
+    assert_eq!(runs(&by_project), vec![first]);
 
     let by_state = Filters {
         state: Some(RunStatus::Cancelled),
         ..Filters::default()
     };
-    assert_eq!(runs(&by_state), vec![second.clone()]);
+    assert_eq!(runs(&by_state), vec![second]);
 
     // Filters combine: the cancelled run is not in the first task.
     let both = Filters {
