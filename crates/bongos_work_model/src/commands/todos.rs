@@ -40,10 +40,24 @@ fn require_todo_open(todo: &Todo) -> Result<(), Refusal> {
 /// that is not Done is refused unless `override_ship` (`task: advance override`), which completes
 /// it and writes the `ship_overridden` marker with the parent's state.
 pub fn advance(tree: &WorkTree, ctx: &Context, id: &str, override_ship: bool) -> Outcome {
+    advance_todo(tree, ctx, id, None, override_ship)
+}
+
+/// [`advance`] on the todo at `index` (which must be open), or on the current todo when it is
+/// `None`. A workflow completes its own todo with it, which need not be the current one; the
+/// ships rule applies the same.
+pub fn advance_todo(
+    tree: &WorkTree,
+    ctx: &Context,
+    id: &str,
+    index: Option<usize>,
+    override_ship: bool,
+) -> Outcome {
     edit_task(tree, ctx, id, |place, file| {
         require_leaf(place, tree, "todos")?;
         require_open(place.slug(), file)?;
-        let index = todo_index(place, file, None)?;
+        let index = todo_index(place, file, index)?;
+        require_todo_open(&file.todos[index])?;
         let mut event = "todo done";
         if let Some((parent, state)) = rules::ship_waits_on(place, tree, file, index) {
             if !override_ship {
@@ -227,4 +241,16 @@ pub fn todo_start(tree: &WorkTree, ctx: &Context, id: &str, index: Option<usize>
         todo.started = Some(ctx.at);
         Ok(("todo started", Some(todo.name.clone())))
     })
+}
+
+/// Records `event` with `detail` in the history of the task with `id`, changing nothing else: how
+/// a workflow notes a run that started, failed or was cancelled on a todo it leaves as it is.
+pub fn record_event(
+    tree: &WorkTree,
+    ctx: &Context,
+    id: &str,
+    event: &'static str,
+    detail: Option<String>,
+) -> Outcome {
+    edit_task(tree, ctx, id, |_, _| Ok((event, detail)))
 }
