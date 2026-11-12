@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use bongos_project_repo_model::{layout, split};
-use bongos_work_model::{Kind, TaskFile, new_id, serialize_project};
 use bongos_work_model::ProjectFile;
+use bongos_work_model::{Kind, TaskFile, new_id, serialize_project};
 
 use crate::git::{Git, GitError, Identity};
 use crate::locations::{Location, LocationError, RepositoryLocations};
@@ -36,7 +36,10 @@ impl Default for LayoutTemplates {
 
 impl LayoutTemplates {
     fn resolve(&self, template: &str, folder: &Path) -> PathBuf {
-        PathBuf::from(layout::resolve_template(template, &folder.to_string_lossy()))
+        PathBuf::from(layout::resolve_template(
+            template,
+            &folder.to_string_lossy(),
+        ))
     }
 }
 
@@ -149,7 +152,10 @@ impl ProjectRepo {
 
         let definitions = repository.join(layout::DEFINITIONS_DIR);
         make_dir(&definitions, made)?;
-        write(&repository.join(layout::GITATTRIBUTES_FILE), layout::GITATTRIBUTES_CONTENTS)?;
+        write(
+            &repository.join(layout::GITATTRIBUTES_FILE),
+            layout::GITATTRIBUTES_CONTENTS,
+        )?;
         write(&definitions.join(layout::PROJECT_FILE), &project_text)?;
         write(&definitions.join(layout::TASK_FILE), &task_text)?;
         write(&definitions.join(layout::PLAN_FILE), "")?;

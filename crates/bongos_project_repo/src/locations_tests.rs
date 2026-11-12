@@ -21,7 +21,8 @@ fn location(id: &str) -> Location {
 #[test]
 fn a_missing_record_is_empty() {
     let dir = TempDir::new().unwrap();
-    let locations = RepositoryLocations::load(dir.path().join("project-repositories.toml")).unwrap();
+    let locations =
+        RepositoryLocations::load(dir.path().join("project-repositories.toml")).unwrap();
     assert!(locations.locations().is_empty());
     assert!(locations.location("x").is_none());
 }

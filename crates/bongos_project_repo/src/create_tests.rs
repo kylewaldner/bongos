@@ -4,7 +4,9 @@ use std::path::Path;
 use futures::executor::block_on;
 use tempfile::TempDir;
 
-use crate::{CreateError, CreateRequest, Git, GitError, LayoutTemplates, ProjectRepo, RepositoryLocations};
+use crate::{
+    CreateError, CreateRequest, Git, GitError, LayoutTemplates, ProjectRepo, RepositoryLocations,
+};
 
 fn request(folder: &Path) -> CreateRequest {
     CreateRequest {
@@ -33,14 +35,23 @@ fn create_makes_the_folder_layout_and_the_first_commit() {
     let mut locations =
         RepositoryLocations::load(root.path().join("state").join("project-repositories.toml"))
             .unwrap();
-    let repo = block_on(ProjectRepo::create_with(request(&folder), &mut locations, isolated_git))
-        .unwrap();
+    let repo = block_on(ProjectRepo::create_with(
+        request(&folder),
+        &mut locations,
+        isolated_git,
+    ))
+    .unwrap();
 
     for part in ["repository", "working-copies", "state", "files"] {
         assert!(folder.join(part).is_dir(), "{part}");
     }
     assert_eq!(std::fs::read_dir(folder.join("state")).unwrap().count(), 0);
-    assert_eq!(std::fs::read_dir(folder.join("working-copies")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(folder.join("working-copies"))
+            .unwrap()
+            .count(),
+        0
+    );
 
     let repository = folder.join("repository");
     let git = isolated_git().unwrap();
@@ -74,9 +85,15 @@ fn create_makes_the_folder_layout_and_the_first_commit() {
             .contains("goal = \"Invoicing\"")
     );
     // The working tree is clean after the commit.
-    assert_eq!(block_on(git.run(&repository, &["status", "--porcelain"])).unwrap(), "");
+    assert_eq!(
+        block_on(git.run(&repository, &["status", "--porcelain"])).unwrap(),
+        ""
+    );
 
-    assert_eq!(locations.location(&repo.location().id), Some(repo.location()));
+    assert_eq!(
+        locations.location(&repo.location().id),
+        Some(repo.location())
+    );
     assert_eq!(repo.location().repository, repository);
 }
 
@@ -88,13 +105,18 @@ fn without_git_nothing_is_created_and_the_error_names_git() {
     let record = root.path().join("state").join("project-repositories.toml");
     let mut locations = RepositoryLocations::load(&record).unwrap();
 
-    let error = block_on(ProjectRepo::create_with(request(&folder), &mut locations, || {
-        Git::locate_in(&OsString::from(no_git_dir.path()))
-    }))
+    let error = block_on(ProjectRepo::create_with(
+        request(&folder),
+        &mut locations,
+        || Git::locate_in(&OsString::from(no_git_dir.path())),
+    ))
     .unwrap_err();
 
     assert!(matches!(error, CreateError::Git(GitError::GitMissing)));
-    assert!(error.to_string().contains("git is not installed"), "{error}");
+    assert!(
+        error.to_string().contains("git is not installed"),
+        "{error}"
+    );
     assert!(!folder.exists());
     assert!(!root.path().join("projects").exists());
     assert!(!record.exists());
@@ -109,7 +131,11 @@ fn a_failure_after_creating_folders_removes_them() {
     let blocker = root.path().join("blocker");
     let mut locations = RepositoryLocations::load(blocker.join("record.toml")).unwrap();
     std::fs::write(&blocker, "").unwrap();
-    let result = block_on(ProjectRepo::create_with(request(&folder), &mut locations, isolated_git));
+    let result = block_on(ProjectRepo::create_with(
+        request(&folder),
+        &mut locations,
+        isolated_git,
+    ));
     assert!(result.is_err());
     assert!(!root.path().join("projects").exists());
 }
@@ -120,8 +146,12 @@ fn a_changed_layout_does_not_move_an_existing_project() {
     let record = root.path().join("project-repositories.toml");
     let mut locations = RepositoryLocations::load(&record).unwrap();
     let first_folder = root.path().join("first");
-    let first = block_on(ProjectRepo::create_with(request(&first_folder), &mut locations, isolated_git))
-        .unwrap();
+    let first = block_on(ProjectRepo::create_with(
+        request(&first_folder),
+        &mut locations,
+        isolated_git,
+    ))
+    .unwrap();
 
     let second_folder = root.path().join("second");
     let mut changed = request(&second_folder);
@@ -132,7 +162,12 @@ fn a_changed_layout_does_not_move_an_existing_project() {
         state: "{folder}/live".to_string(),
         files: "{folder}/task-files".to_string(),
     };
-    let second = block_on(ProjectRepo::create_with(changed, &mut locations, isolated_git)).unwrap();
+    let second = block_on(ProjectRepo::create_with(
+        changed,
+        &mut locations,
+        isolated_git,
+    ))
+    .unwrap();
 
     let reread = RepositoryLocations::load(&record).unwrap();
     let kept = reread.location(&first.location().id).unwrap();
@@ -152,8 +187,12 @@ fn an_existing_folder_is_refused_and_left_alone() {
     std::fs::write(folder.join("mine.txt"), "x").unwrap();
     let mut locations =
         RepositoryLocations::load(root.path().join("project-repositories.toml")).unwrap();
-    let error = block_on(ProjectRepo::create_with(request(&folder), &mut locations, isolated_git))
-        .unwrap_err();
+    let error = block_on(ProjectRepo::create_with(
+        request(&folder),
+        &mut locations,
+        isolated_git,
+    ))
+    .unwrap_err();
     assert!(matches!(error, CreateError::Exists(_)));
     assert!(folder.join("mine.txt").exists());
 }

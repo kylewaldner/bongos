@@ -1,6 +1,8 @@
 //! The handlers of the `project` actions: `new`, `archive`, `unarchive` and `open folder`.
 
-use bongos_project_repo::{CreateRequest, ProjectRepo, ProjectRepositorySettings, RepositoryLocations};
+use bongos_project_repo::{
+    CreateRequest, ProjectRepo, ProjectRepositorySettings, RepositoryLocations,
+};
 use bongos_work_model::commands::{self as model, NewProject};
 use bongos_work_model::slug::slugify;
 use gpui::{AppContext as _, Context, Window};
@@ -51,11 +53,7 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
 
 /// `project: new` while `project_repository.enabled`: makes the project folder with its
 /// repository instead of an old-format project.
-fn new_repository_project(
-    title: String,
-    workspace: &mut Workspace,
-    cx: &mut Context<Workspace>,
-) {
+fn new_repository_project(title: String, workspace: &mut Workspace, cx: &mut Context<Workspace>) {
     let settings = ProjectRepositorySettings::get_global(cx).clone();
     let request = CreateRequest {
         folder: settings.project_folder(&slugify(&title)),

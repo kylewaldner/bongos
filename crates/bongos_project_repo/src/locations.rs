@@ -68,10 +68,11 @@ impl RepositoryLocations {
         let path = path.into();
         let locations = match std::fs::read_to_string(&path) {
             Ok(text) => {
-                let record: Record = toml::from_str(&text).map_err(|error| LocationError::Parse {
-                    path: path.clone(),
-                    message: error.to_string(),
-                })?;
+                let record: Record =
+                    toml::from_str(&text).map_err(|error| LocationError::Parse {
+                        path: path.clone(),
+                        message: error.to_string(),
+                    })?;
                 if record.schema != SCHEMA {
                     return Err(LocationError::Schema {
                         path,
@@ -95,7 +96,9 @@ impl RepositoryLocations {
     }
 
     pub fn location(&self, project_id: &str) -> Option<&Location> {
-        self.locations.iter().find(|location| location.id == project_id)
+        self.locations
+            .iter()
+            .find(|location| location.id == project_id)
     }
 
     /// Adds `location`, or replaces the one with its id, and writes the record atomically. On a
