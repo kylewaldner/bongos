@@ -65,7 +65,7 @@ fn run_deliver(
             "proposal": "out/next.proposal.txt",
         }),
     );
-    let linked = linked(world, runner);
+    let linked = linked(world, runner, cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
     let worktree = linked.engine.lifecycle().worktree(&run).unwrap().path.clone();
     for (path, text) in files {
@@ -209,7 +209,7 @@ fn outcomes_a_missing_promised_outcome_fails_the_run(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn outcomes_report_outcome_records_a_document(cx: &mut TestAppContext) {
     let world = deliver_world();
-    let linked = linked(&world, FakeRunner::new());
+    let linked = linked(&world, FakeRunner::new(), cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
     let worktree = linked.engine.lifecycle().worktree(&run).unwrap().path.clone();
     fs::write(worktree.join("report.md"), "reported\n").unwrap();

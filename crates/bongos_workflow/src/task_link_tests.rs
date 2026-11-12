@@ -181,7 +181,14 @@ pub(super) struct Linked {
     pub merges: Arc<Mutex<Vec<MergeRequest>>>,
 }
 
-pub(super) fn linked(world: &World, runner: FakeRunner) -> Linked {
+pub(super) fn linked(world: &World, runner: FakeRunner, cx: &mut TestAppContext) -> Linked {
+    cx.update(|cx| {
+        if !cx.has_global::<SettingsStore>() {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            WorkflowsSettings::register(cx);
+        }
+    });
     let worktrees = DirWorktrees {
         root: world.root.join("runs"),
         error: world.worktree_error.clone(),
@@ -291,7 +298,7 @@ fn three_todos(world: &mut World) {
 fn task_link_success_checks_off_exactly_one_todo(cx: &mut TestAppContext) {
     let mut world = World::new();
     three_todos(&mut world);
-    let linked = linked(&world, auto_runner());
+    let linked = linked(&world, auto_runner(), cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
 
     // The start marks the todo started and says so, by the workflow.
@@ -344,7 +351,7 @@ fn task_link_success_checks_off_exactly_one_todo(cx: &mut TestAppContext) {
 fn task_link_a_moved_todo_is_found_by_name(cx: &mut TestAppContext) {
     let mut world = World::new();
     three_todos(&mut world);
-    let linked = linked(&world, auto_runner());
+    let linked = linked(&world, auto_runner(), cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
     // Kyle adds a todo in front while the run works: the run's todo is now at index 2.
     linked
@@ -368,7 +375,7 @@ fn task_link_a_moved_todo_is_found_by_name(cx: &mut TestAppContext) {
 fn task_link_a_todo_done_by_hand_waits_on_you(cx: &mut TestAppContext) {
     let mut world = World::new();
     three_todos(&mut world);
-    let linked = linked(&world, auto_runner());
+    let linked = linked(&world, auto_runner(), cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
     linked.writes.edit_leaf(|file| file.todos[1].state = TodoState::Done);
     let before = linked.writes.leaf().file.unwrap().todos;
@@ -420,8 +427,8 @@ fn task_link_a_refused_completion_waits_with_the_reason() {
 fn task_link_history_on_fail_and_cancel(cx: &mut TestAppContext) {
     let world = World::new();
     let mut runner = auto_runner();
-    runner.fail("work", 1);
-    let linked = linked(&world, runner);
+    runner.fail("work", 100);
+    let linked = linked(&world, runner, cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
     linked.drive(cx);
     assert_eq!(linked.status(&run), RunStatus::Failed);
@@ -468,7 +475,7 @@ kind = "success"
 fn task_link_missing_inputs_refuse_and_overrides_win(cx: &mut TestAppContext) {
     let world = World::new();
     write_definition(world.profile(), "needspr", NEEDS_PR);
-    let linked = linked(&world, FakeRunner::new());
+    let linked = linked(&world, FakeRunner::new(), cx);
     let tree = world.tree.clone();
     let refusal = cx
         .update(|cx| linked.engine.start_in(with_workflow("needspr"), &tree, cx))
@@ -538,7 +545,7 @@ fn task_link_merge_is_ship_off_keeps_the_ship_todo_open_until_the_deploy_wait(
     let mut runner = FakeRunner::new();
     runner.script("merge", json!({ "result": "merged" }));
     runner.script("deploy", json!({ "result": "satisfied" }));
-    let linked = linked(&world, runner);
+    let linked = linked(&world, runner, cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
     linked.drive(cx);
 
@@ -564,7 +571,7 @@ fn task_link_merge_is_ship_off_without_a_deploy_wait_asks_to_confirm_the_deploy(
 ) {
     let mut world = ship_world();
     world.leaf_file().todos[2].workflow = Some("single".to_string());
-    let linked = linked(&world, auto_runner());
+    let linked = linked(&world, auto_runner(), cx);
     let run = linked.start(StartRequest::new(LEAF), cx);
     linked.drive(cx);
     linked.approve(&run, MERGE_GATE, cx);
