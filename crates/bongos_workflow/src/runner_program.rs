@@ -26,8 +26,10 @@
 //!   environment of a listed command are not checked (`git -c core.fsmonitor=...` runs).
 //! - Git: the common git directory itself is never writable (the sandbox's root is read-only),
 //!   so a script cannot change `config`, `hooks/`, `packed-refs`, plant `commondir` or touch
-//!   another worktree's git directory; a host git command run while the script runs reads only
-//!   what bongos left there. Inside the writable paths the worktree's `.git` file and its git
+//!   another worktree's git directory. Host git does run while a script runs (another run's
+//!   worktree setup, a merge, an agent node, the owner's IDE), all sharing the common git
+//!   directory, so what the sandbox keeps read-only is what such a git can trust. Inside the
+//!   writable paths the worktree's `.git` file and its git
 //!   directory's `gitdir`, `commondir` and `config.worktree` (made empty first when missing) stay
 //!   read-only ([`ProgramNode::read_only_paths`]). A commit and a branch ref update work; branch
 //!   deletion, `pack-refs`, `git gc --auto` and `git config` writes are refused. In the main
@@ -38,20 +40,37 @@
 //!   [`git_metadata_needed`]): changed metadata is put back and fails the node ("program changed
 //!   git metadata"). This runner calls no host git itself; the crate's own git
 //!   (`worktrees::Git`) runs with `GIT_NO_REPLACE_OBJECTS=1`.
-//! - Inside the writable git paths a script could plant what a later host git follows: a symlink
-//!   (`logs/refs/heads/main` to a file outside, which git's reflog append writes through), a
-//!   replace ref (`refs/replace/*`) or an alternate object store (`objects/info/alternates`,
-//!   `objects/info/http-alternates`). The shim refuses creating any symlink, renaming or hard
-//!   linking one into the git paths, writing through a symlink that sits inside them, and writing
-//!   the replace refs and alternates ([`ProgramNode::git_forbidden_paths`]). After every pass,
-//!   sandboxed or not, [`GitGuard`] walks the git paths without following symlinks, removes every
-//!   symlink found ("program planted symlinks in git") and puts the replace refs and alternates
-//!   back as they were ("program changed git metadata"); either fails the node.
-//! - Accepted in the git paths, since the worktree is writable by design and bongos never resumes
-//!   them on the host: a nested repository the script makes in the worktree (`sub/.git/config`,
-//!   which a git command run inside `sub/` would read), and `rebase-merge/` or `sequencer/` todo
-//!   files in the worktree's own git directory (bongos never runs `rebase --continue` or
-//!   `cherry-pick --continue`). Which refs a pass changed is not recorded.
+//! - Inside the writable git paths a script could plant what a host git follows, during the pass
+//!   or after it: a symlink (`logs/refs/heads/main` to a file outside, which git's reflog append
+//!   writes through), a replace ref (`refs/replace/*`) or an alternate object store
+//!   (`objects/info/alternates`, `objects/info/http-alternates`). Under Bubblewrap the sandbox
+//!   keeps all three out of reach while the script runs: the reflog directories (the common
+//!   `logs/` and the worktree git directory's `logs/`, [`ProgramNode::hidden_git_paths`]) are
+//!   covered by an empty read-only tmpfs and the program's git runs with
+//!   `core.logAllRefUpdates=false`, so a commit or a branch update writes no reflog (an existing
+//!   one is not appended to; the host's stay as they were), and the replace refs and alternates
+//!   ([`ProgramNode::git_forbidden_paths`]) are bound read-only, made first when missing (an
+//!   empty `refs/replace/` and empty alternates files change nothing). The shim refuses creating
+//!   a symlink inside the git paths, renaming or hard linking one into them, writing through a
+//!   symlink that sits inside them, and writing the replace refs and alternates. After every pass
+//!   [`GitGuard`] walks the git paths without following symlinks and removes every symlink found
+//!   ("program planted symlinks in git"); without Bubblewrap it also puts the replace refs and
+//!   alternates back as they were ("program changed git metadata"); either fails the node. A git
+//!   path that is already a symlink when a pass starts refuses the start.
+//! - Accepted risks. Without Bubblewrap (no sandbox, or elsewhere than Linux) the git paths are
+//!   plainly writable: a host git run during the pass can follow what the script planted before
+//!   the walk removes it, and concurrent passes on one repository snapshot each other's replace
+//!   refs and alternates. Under Bubblewrap a symlink in `refs/` or `objects/` stays until the
+//!   walk (git replaces a ref file by renaming over it and reads objects only, so it writes
+//!   through neither). The checks run when a pass ends: after an app crash mid-pass nothing puts
+//!   the git paths back or removes what was planted (the orphan cleanup stops processes only).
+//!   While `objects/` is writable the integrity of loose objects, packs, `commit-graph` and
+//!   `multi-pack-index` cannot be protected: a script can write a corrupt or misleading one.
+//!   Since the worktree is writable by design and bongos never resumes them on the host: a nested
+//!   repository the script makes in the worktree (`sub/.git/config`, which a git command run
+//!   inside `sub/` would read), and `rebase-merge/` or `sequencer/` todo files in the worktree's
+//!   own git directory (bongos never runs `rebase --continue` or `cherry-pick --continue`). Which
+//!   refs a pass changed is not recorded.
 //! - Caps: `max_minutes` (the node's, else `workflows.programs.max_minutes`), the captured output
 //!   (`workflows.programs.max_output_mb`; the rest is dropped and the process stopped) and the
 //!   result size ([`RESULT_CAP`]). Halt and cancel stop the process group within 5 s.
@@ -378,8 +397,9 @@ impl ProgramNode {
 
     /// The paths inside the writable git ones that change which objects every later git command
     /// sees: the replace refs (`refs/replace`) and the alternate object stores
-    /// (`objects/info/alternates`, `objects/info/http-alternates`). The shim refuses writing them
-    /// and [`GitGuard`] puts them back after every pass.
+    /// (`objects/info/alternates`, `objects/info/http-alternates`). The shim refuses writing them,
+    /// Bubblewrap binds them read-only, and without it [`GitGuard`] puts them back after every
+    /// pass.
     pub fn git_forbidden_paths(&self) -> Vec<PathBuf> {
         if self.git_writable_paths().is_empty() {
             return Vec::new();
@@ -388,6 +408,37 @@ impl ProgramNode {
             return Vec::new();
         };
         GIT_FORBIDDEN.iter().map(|name| common.join(name)).collect()
+    }
+
+    /// The reflog directories, which Bubblewrap covers with an empty read-only tmpfs so that no
+    /// host git appending a reflog follows what a script planted there: the common git
+    /// directory's `logs/` and, in a linked worktree, its own git directory's `logs/`.
+    pub fn hidden_git_paths(&self) -> Vec<PathBuf> {
+        let Some(common) = &self.git_common_dir else {
+            return Vec::new();
+        };
+        match self.git_layout() {
+            GitLayout::Linked { git_dir } => vec![common.join("logs"), git_dir.join("logs")],
+            GitLayout::None => vec![common.join("logs")],
+            GitLayout::Whole(_) => Vec::new(),
+        }
+    }
+
+    /// The git paths a pass binds or walks that are symlinks already, which refuse the start:
+    /// the sandbox would bind their targets and the walk could not tell what a script planted.
+    pub fn symlinked_git_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .git_writable_paths()
+            .into_iter()
+            .chain(self.hidden_git_paths())
+            .chain(self.git_forbidden_paths())
+            .filter(|path| {
+                fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            })
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
     }
 
     /// The paths inside the writable ones that stay read-only: the worktree's `.git` file and
@@ -406,45 +457,74 @@ impl ProgramNode {
         }
     }
 
-    /// Makes what the sandbox must bind before it starts: `logs/` in the common git directory
-    /// (writable) and an empty `config.worktree` in a linked worktree's git directory, since a
-    /// missing path cannot be bound read-only and the script could then create it.
-    fn prepare_git(&self) {
-        let GitLayout::Linked { git_dir } = self.git_layout() else {
-            return;
+    /// Makes what the sandbox must bind before it starts, since a missing path cannot be bound
+    /// and the script could then create it: `logs/` in the common git directory and in a linked
+    /// worktree's git directory, and an empty `config.worktree` there; on Linux also
+    /// `refs/replace/` and empty `objects/info/alternates` and `objects/info/http-alternates`
+    /// (an existing one is left as it is).
+    fn prepare_git(&self) -> std::io::Result<()> {
+        let missing = |path: &Path| fs::symlink_metadata(path).is_err();
+        let add = |path: &Path, error: std::io::Error| {
+            std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
         };
-        let mut made = Vec::new();
-        if let Some(common) = &self.git_common_dir {
-            let logs = common.join("logs");
-            if fs::symlink_metadata(&logs).is_err() {
-                made.push((logs.clone(), fs::create_dir(&logs)));
+        let make_file = |path: &Path| {
+            if !missing(path) {
+                return Ok(());
             }
-        }
-        let config = git_dir.join("config.worktree");
-        if fs::symlink_metadata(&config).is_err() {
-            let created = fs::OpenOptions::new()
+            match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&config)
-                .map(drop);
-            made.push((config, created));
+                .open(path)
+            {
+                Ok(_) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(error) => Err(add(path, error)),
+            }
+        };
+        let make_dir = |path: &Path| {
+            if missing(path) {
+                fs::create_dir_all(path).map_err(|error| add(path, error))?;
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        if self.git_writable_paths().is_empty() {
+            return Ok(());
         }
-        for (path, result) in made {
-            if let Err(error) = result {
-                log::error!("workflows: could not create {}: {error}", path.display());
+        for logs in self.hidden_git_paths() {
+            make_dir(&logs)?;
+        }
+        if let GitLayout::Linked { git_dir } = self.git_layout() {
+            make_file(&git_dir.join("config.worktree"))?;
+        }
+        if cfg!(target_os = "linux") {
+            for path in self.git_forbidden_paths() {
+                if path.ends_with("refs/replace") {
+                    make_dir(&path)?;
+                } else {
+                    if let Some(parent) = path.parent() {
+                        make_dir(parent)?;
+                    }
+                    make_file(&path)?;
+                }
             }
         }
+        Ok(())
     }
 
     /// The OS sandbox policy of the node: [`ProgramNode::writable_paths`] writable, and on Linux
-    /// [`ProgramNode::read_only_paths`] as protected git directories, which Bubblewrap binds
-    /// read-only over the writable ones. Elsewhere a protected path cannot be read either (git
-    /// needs them), so there only the allowlist applies.
+    /// [`ProgramNode::read_only_paths`] and [`ProgramNode::git_forbidden_paths`] as protected git
+    /// directories, which Bubblewrap binds read-only over the writable ones (the reflog
+    /// directories are covered in [`ProgramRunner`]'s wrap). Elsewhere a protected path cannot be
+    /// read either (git needs them), so there only the allowlist applies.
     pub fn sandbox_policy(&self) -> SandboxPolicy {
         let writable_paths = self.writable_paths();
         let git = if cfg!(target_os = "linux") {
             GitSandboxPolicy::Denied {
-                git_dirs: self.read_only_paths(),
+                git_dirs: self
+                    .read_only_paths()
+                    .into_iter()
+                    .chain(self.git_forbidden_paths())
+                    .collect(),
             }
         } else {
             GitSandboxPolicy::default()
@@ -761,44 +841,40 @@ impl GitChanges {
 }
 
 /// The git checks of one pass, taken before the script starts: the writable git paths to walk
-/// for symlinks (each with whether it was a symlink itself before), the replace refs and
-/// alternates as they were, and [`GitMetadata`] when [`git_metadata_needed`].
+/// for symlinks (none of them a symlink itself: such a path refuses the start, see
+/// [`ProgramNode::symlinked_git_paths`]), and when [`git_metadata_needed`] the replace refs and
+/// alternates as they were and [`GitMetadata`]. Under Bubblewrap on Linux the sandbox keeps the
+/// replace refs and alternates read-only, so no snapshot is taken: a snapshot there would see
+/// what a concurrent pass on the same repository planted as the baseline.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitGuard {
-    roots: Vec<(PathBuf, bool)>,
+    roots: Vec<PathBuf>,
     forbidden: GitMetadata,
     metadata: Option<GitMetadata>,
 }
 
 impl GitGuard {
     pub fn take(node: &ProgramNode, sandboxed: bool) -> Self {
-        let is_symlink = |path: &Path| {
-            fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
-        };
-        let roots = node
-            .git_writable_paths()
-            .into_iter()
-            .map(|path| {
-                let was = is_symlink(&path);
-                (path, was)
-            })
-            .collect();
-        let forbidden = GitMetadata {
-            entries: node
-                .git_forbidden_paths()
-                .into_iter()
-                .map(|path| {
-                    let list = path.ends_with("refs/replace");
-                    let snap = Snap::take(&path, list);
-                    (path, list, snap)
-                })
-                .collect(),
+        let needed = git_metadata_needed(sandboxed, cfg!(target_os = "linux"));
+        let forbidden = if needed {
+            GitMetadata {
+                entries: node
+                    .git_forbidden_paths()
+                    .into_iter()
+                    .map(|path| {
+                        let list = path.ends_with("refs/replace");
+                        let snap = Snap::take(&path, list);
+                        (path, list, snap)
+                    })
+                    .collect(),
+            }
+        } else {
+            GitMetadata::default()
         };
         Self {
-            roots,
+            roots: node.git_writable_paths(),
             forbidden,
-            metadata: git_metadata_needed(sandboxed, cfg!(target_os = "linux"))
-                .then(|| GitMetadata::take(node)),
+            metadata: needed.then(|| GitMetadata::take(node)),
         }
     }
 
@@ -806,10 +882,7 @@ impl GitGuard {
     /// metadata, replace refs and alternates; returns what it found.
     pub fn check_and_restore(&self) -> GitChanges {
         let mut symlinks = Vec::new();
-        for (root, was_symlink) in &self.roots {
-            if *was_symlink {
-                continue;
-            }
+        for root in &self.roots {
             let now = fs::symlink_metadata(root);
             if now.is_ok_and(|metadata| metadata.file_type().is_symlink()) {
                 if let Err(error) = fs::remove_file(root) {
@@ -828,6 +901,32 @@ impl GitGuard {
         metadata.extend(self.forbidden.check_and_restore());
         GitChanges { metadata, symlinks }
     }
+}
+
+/// Covers each of `hidden` with an empty read-only tmpfs in Bubblewrap's arguments, after every
+/// bind (later mounts win) and before the `--` that ends its options. The script's processes
+/// hold no capabilities, so they cannot unmount it.
+pub fn hide_in_bubblewrap(args: &mut Vec<String>, hidden: &[PathBuf]) -> Result<(), String> {
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let Some(end) = args.iter().position(|arg| arg == "--") else {
+        return Err("the sandbox's arguments have no end of options".to_string());
+    };
+    let mut mounts = Vec::new();
+    for path in hidden {
+        let canonical =
+            fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let canonical = canonical.to_string_lossy().into_owned();
+        mounts.extend([
+            "--tmpfs".to_string(),
+            canonical.clone(),
+            "--remount-ro".to_string(),
+            canonical,
+        ]);
+    }
+    args.splice(end..end, mounts);
+    Ok(())
 }
 
 /// The failure of a pass that changed git metadata or planted symlinks in git.
@@ -1286,7 +1385,26 @@ impl ProgramRunner {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io(&result_path, error)),
         }
-        node.prepare_git();
+        let symlinked = node.symlinked_git_paths();
+        if !symlinked.is_empty() {
+            let list: Vec<String> = symlinked
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            return Err(refuse(
+                FailureReason::PermissionDenied,
+                format!(
+                    "git paths are symlinks, so bongos will not make them writable: {}",
+                    list.join(", ")
+                ),
+            ));
+        }
+        node.prepare_git().map_err(|error| {
+            refuse(
+                FailureReason::WorktreeUnavailable,
+                format!("could not prepare git for the sandbox: {error}"),
+            )
+        })?;
         let shim = dir.join(SHIM_FILE);
         fs::write(&shim, SHIM).map_err(|error| io(&shim, error))?;
         let state_file = dir.join(STATE_FILE);
@@ -1410,14 +1528,32 @@ impl ProgramRunner {
         let policy = node.sandbox_policy();
         let wrapped = (self.probe)(&policy, &node.worktree).and_then(|()| {
             let mut sandbox = Sandbox::new(policy).map_err(|error| error.to_string())?;
+            let hidden = if cfg!(target_os = "linux") {
+                node.hidden_git_paths()
+            } else {
+                Vec::new()
+            };
+            let mut env = env.clone();
+            if !hidden.is_empty() {
+                // The reflog directories are read-only and empty: git must not try to make one.
+                env.extend(
+                    [
+                        ("GIT_CONFIG_COUNT", "1"),
+                        ("GIT_CONFIG_KEY_0", "core.logAllRefUpdates"),
+                        ("GIT_CONFIG_VALUE_0", "false"),
+                    ]
+                    .map(|(name, value)| (name.to_string(), value.to_string())),
+                );
+            }
             let command = CommandAndArgs {
                 program: program.clone(),
                 args: args.clone(),
-                env: env.clone().into_iter().collect::<HashMap<_, _>>(),
+                env: env.into_iter().collect::<HashMap<_, _>>(),
                 cwd: Some(node.worktree.clone()),
             };
-            let wrapped = futures::executor::block_on(sandbox.wrap(&command))
+            let mut wrapped = futures::executor::block_on(sandbox.wrap(&command))
                 .map_err(|error| error.to_string())?;
+            hide_in_bubblewrap(&mut wrapped.args, &hidden)?;
             Ok((wrapped, sandbox))
         });
         match wrapped {

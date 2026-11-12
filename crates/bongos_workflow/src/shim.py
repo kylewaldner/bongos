@@ -23,7 +23,8 @@
 # .git file, gitdir, commondir and config.worktree protected, and refs/replace,
 # objects/info/alternates and objects/info/http-alternates too)
 # (relative to a directory descriptor or through a file descriptor too; FIFOs and
-# device nodes included), creating any symlink, writing through a symlink that
+# device nodes included), creating a symlink inside the writable git paths (one
+# elsewhere in the writable paths is allowed), writing through a symlink that
 # sits inside the writable git paths, renaming a symlink or hard linking anything
 # into them (a later host git would write through it), connecting a socket when the node declares no network
 # (or to a host it did not declare), and the introspection that reaches the hook's
@@ -273,7 +274,18 @@ def _install(policy):
         check_into_git(args[0], args[2], args[1], args[3], "link")
 
     def on_symlink(args):
-        deny("create a symlink " + (text(args[1]) or "bongos cannot check"))
+        """A symlink may be made where writes are allowed (a virtual environment makes some), but
+        not inside the writable git paths, where a host git would follow it."""
+        destination, dir_fd = (list(args) + [None, None, None])[1:3]
+        name = unresolved(destination, dir_fd)
+        if name is None:
+            deny("create a symlink bongos cannot check")
+        # The link itself is not followed: only its directory is resolved.
+        name = name.rstrip(os.sep) or os.sep
+        place = os.path.join(norm(os.path.dirname(name)), os.path.basename(name))
+        if under(place, git_roots):
+            deny("create a symlink in git " + place)
+        check_write(destination, dir_fd)
 
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 
