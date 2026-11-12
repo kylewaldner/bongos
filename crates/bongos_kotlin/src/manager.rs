@@ -33,6 +33,7 @@ use crate::{
     log::{KotlinLog, StderrMirror},
     manifest_cache::{BuildId, KotlinLspBuilds, ManifestCache},
     resolve::{Resolved, clear_project_override, project_key, resolve, set_project_override},
+    updates::{KotlinUpdates, KotlinUpdatesEvent},
 };
 
 /// The name of the language server Kotlin buffers use, whichever server runs behind it.
@@ -370,6 +371,8 @@ pub struct KotlinProjectManager {
     cache: Arc<ManifestCache>,
     locks: Arc<LockRegistry>,
     _settings_subscription: Subscription,
+    /// Hears when a newer kotlin-lsp build is downloaded.
+    _updates_subscription: Option<Subscription>,
 }
 
 impl EventEmitter<KotlinEvent> for KotlinProjectManager {}
@@ -381,6 +384,14 @@ impl KotlinProjectManager {
             cx.observe_global::<SettingsStore>(|this, cx| this.refresh_all(cx));
         let locks = LockRegistry::global(cx);
         let cache = Arc::new(ManifestCache::new(&dirs.install_root, locks.clone()));
+        let _updates_subscription = KotlinUpdates::global(cx).map(|updates| {
+            cx.subscribe(&updates, |this, _, event, cx| match event {
+                KotlinUpdatesEvent::DownloadFinished { version } => {
+                    this.newer_build_ready(version, cx)
+                }
+                KotlinUpdatesEvent::DownloadStarted { .. } => {}
+            })
+        });
         Self {
             host,
             dirs,
@@ -389,6 +400,7 @@ impl KotlinProjectManager {
             cache,
             locks,
             _settings_subscription,
+            _updates_subscription,
         }
     }
 
@@ -588,6 +600,38 @@ impl KotlinProjectManager {
             .is_some_and(|state| state.expired.contains(&server))
     }
 
+    /// A newer kotlin-lsp build `version` is installed and recorded as the trial. Each worktree
+    /// stopped by an expired kotlin-lsp build forgets the expired mark and restarts; that start
+    /// runs the new build as a trial. A worktree running a build that has not expired is left
+    /// alone: it picks the build up at its next start.
+    pub fn newer_build_ready(&mut self, version: &str, cx: &mut Context<Self>) {
+        let stopped: Vec<WorktreeId> = self
+            .worktrees
+            .iter()
+            .filter(|(_, state)| {
+                state.effective == KotlinServerKind::KotlinLsp
+                    && state.expired.contains(&KotlinServerKind::KotlinLsp)
+                    && matches!(
+                        &state.status,
+                        Some(ServerStatus::Failed { reason }) if reason == EXPIRED_REASON
+                    )
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for worktree_id in stopped {
+            if let Some(state) = self.worktrees.get_mut(&worktree_id) {
+                state
+                    .expired
+                    .retain(|server| *server != KotlinServerKind::KotlinLsp);
+                self.log.line(&format!(
+                    "restart {}: kotlin-lsp {version} replaces the expired build",
+                    state.root.display()
+                ));
+            }
+            self.restart(worktree_id, cx);
+        }
+    }
+
     /// Marks `server` expired for the worktree: status `Failed`, and no restart from here on.
     pub fn mark_expired(
         &mut self,
@@ -740,6 +784,8 @@ impl KotlinProjectManager {
                 .line(&format!("fallback ended {}", state.root.display()));
         }
         state.crashes.clear();
+        // A trial this worktree launched ends with the restart: its exit is the user's doing.
+        state.trial = None;
         state.effective = target;
         self.log.line("restart requested");
         self.restart(worktree_id, cx);
@@ -3218,5 +3264,97 @@ mod tests {
         assert!(notices.borrow().is_empty());
         assert!(harness.builds().rejected.is_empty());
         assert_eq!(harness.builds().trial, Some(build_id(TRIAL)));
+    }
+
+    /// A newer build downloaded: the worktree stopped by an expired build forgets the mark and
+    /// restarts; the worktree running a build that has not expired is left alone.
+    #[gpui::test]
+    async fn test_a_newer_build_restarts_only_the_expired_worktree(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        let second = WorktreeId::from_usize(2);
+        let second_root = harness.root.parent().unwrap().join("project2");
+        fs::create_dir_all(&second_root).unwrap();
+        harness.manager.update(cx, |manager, cx| {
+            manager.add_worktree(second, second_root, cx)
+        });
+        harness.first_start(cx);
+        let server = harness
+            .manager
+            .update(cx, |manager, cx| manager.begin_start(second, cx))
+            .unwrap();
+        let server_id = harness.host.0.record_start(server);
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_added(server_id, second, cx);
+            manager.mark_expired(second, KotlinServerKind::KotlinLsp, cx);
+        });
+        let expired = Some(ServerStatus::Failed {
+            reason: EXPIRED_REASON.into(),
+        });
+        let status_of = |cx: &mut TestAppContext, id| {
+            harness
+                .manager
+                .read_with(cx, |manager, _| manager.status(id).cloned())
+        };
+        assert_eq!(status_of(cx, second), expired);
+        assert_eq!(harness.events(), ["start kotlin-lsp", "start kotlin-lsp"]);
+
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.newer_build_ready("9.1.0", cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            harness.events(),
+            [
+                "start kotlin-lsp",
+                "start kotlin-lsp",
+                "stop",
+                "start kotlin-lsp"
+            ],
+            "only the expired worktree restarted"
+        );
+        assert_eq!(status_of(cx, worktree()), Some(ServerStatus::Ready));
+        assert_eq!(status_of(cx, second), Some(ServerStatus::Ready));
+        harness.manager.read_with(cx, |manager, _| {
+            assert!(!manager.is_expired(second, KotlinServerKind::KotlinLsp));
+        });
+    }
+
+    /// A user restart during a trial start ends the launched mark, so the trial is not blamed
+    /// for what the restart does to its server.
+    #[gpui::test]
+    async fn test_a_restart_forgets_a_launched_trial(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.first_start(cx);
+        let build = BuildId {
+            version: "9.1.0".into(),
+            sha256: "b".repeat(64),
+        };
+        harness.manager.update(cx, |manager, cx| {
+            manager.trial_launched(
+                worktree(),
+                TrialLaunch {
+                    build: build.clone(),
+                    fallback: "the previous build".into(),
+                    pin_version: "9.0.0".into(),
+                },
+                cx,
+            )
+        });
+        assert_eq!(
+            harness
+                .manager
+                .read_with(cx, |manager, _| manager.launched_trial(worktree()).cloned()),
+            Some(build)
+        );
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.restart_server(worktree(), cx));
+        assert_eq!(
+            harness
+                .manager
+                .read_with(cx, |manager, _| manager.launched_trial(worktree()).cloned()),
+            None
+        );
     }
 }

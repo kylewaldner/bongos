@@ -24,6 +24,8 @@ pub struct Snapshot {
     pub gradle_error: Option<String>,
     /// The background download of a newer kotlin-lsp, if one runs.
     pub download: Option<DownloadProgress>,
+    /// A manifest check or the planning of a download runs.
+    pub checking: bool,
 }
 
 impl Snapshot {
@@ -35,6 +37,7 @@ impl Snapshot {
             fallback: state.fallback.clone(),
             gradle_error: state.gradle_error.clone(),
             download: None,
+            checking: false,
         })
     }
 }
@@ -62,7 +65,40 @@ fn percent(done: u64, total: u64) -> u64 {
     ((done.saturating_mul(100) + total / 2) / total).min(100)
 }
 
+/// A server stopped by an expired build, while a newer build may be on its way: the text is the
+/// work in progress, which never says "expired". Once the work ends the item shows the expired
+/// status again.
+fn expired_progress(snapshot: &Snapshot) -> Option<StatusLine> {
+    let expired =
+        matches!(&snapshot.status, ServerStatus::Failed { reason } if reason == EXPIRED_REASON);
+    if !expired || snapshot.fallback.is_some() {
+        return None;
+    }
+    let text = if let Some(download) = &snapshot.download {
+        let mut text = format!("Kotlin: downloading kotlin-lsp {}", download.version);
+        match download.total {
+            Some(total) if total > 0 => {
+                text.push_str(&format!(" ({}%)", percent(download.done, total)))
+            }
+            _ => {}
+        }
+        text
+    } else if snapshot.checking {
+        "Kotlin: checking for a newer Kotlin server".to_string()
+    } else {
+        return None;
+    };
+    Some(StatusLine {
+        text,
+        color: Color::Default,
+        busy: true,
+    })
+}
+
 pub fn status_line(snapshot: &Snapshot) -> StatusLine {
+    if let Some(line) = expired_progress(snapshot) {
+        return line;
+    }
     let name = display_name(snapshot.effective);
     let mut text = format!("Kotlin: {name}");
     if let Some(fallback) = &snapshot.fallback {
@@ -222,6 +258,7 @@ mod tests {
             fallback: None,
             gradle_error: None,
             download: None,
+            checking: false,
         }
     }
 
@@ -505,5 +542,45 @@ mod tests {
         );
         snapshot.download = None;
         assert_eq!(status_line(&snapshot).text, "Kotlin: kotlin-lsp, ready");
+    }
+
+    /// A worktree stopped by an expired build shows the check and the download without saying
+    /// "expired", and the expired text again once neither runs.
+    #[test]
+    fn test_an_expired_worktree_shows_its_refresh_and_download() {
+        let expired = || {
+            lsp(ServerStatus::Failed {
+                reason: EXPIRED_REASON.into(),
+            })
+        };
+        let text = |snapshot: &Snapshot| status_line(snapshot).text;
+        let mut snapshot = expired();
+        let idle = text(&snapshot);
+        assert_eq!(idle, "Kotlin: kotlin-lsp, server expired, update bongos");
+
+        snapshot.checking = true;
+        assert_eq!(
+            text(&snapshot),
+            "Kotlin: checking for a newer Kotlin server"
+        );
+
+        snapshot.checking = false;
+        snapshot.download = Some(DownloadProgress {
+            version: "263.3.0".into(),
+            done: 25,
+            total: Some(100),
+        });
+        assert_eq!(
+            text(&snapshot),
+            "Kotlin: downloading kotlin-lsp 263.3.0 (25%)"
+        );
+        assert!(!text(&snapshot).to_lowercase().contains("expired"));
+
+        snapshot.download = None;
+        assert_eq!(text(&snapshot), idle);
+        // A running server shows the check or download the usual way.
+        let mut ready = lsp(ServerStatus::Ready);
+        ready.checking = true;
+        assert_eq!(text(&ready), "Kotlin: kotlin-lsp, ready");
     }
 }

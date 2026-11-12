@@ -87,8 +87,13 @@ impl KotlinStatusItem {
     /// The state to show: the active file's worktree if a server has started for it, else the first
     /// worktree with one. `None` hides the item.
     fn snapshot(&self, cx: &App) -> Option<Snapshot> {
-        let download = KotlinUpdates::global(cx)
+        let updates = KotlinUpdates::global(cx);
+        let download = updates
+            .as_ref()
             .and_then(|updates| updates.read(cx).download_progress().cloned());
+        let checking = updates
+            .as_ref()
+            .is_some_and(|updates| updates.read(cx).is_checking());
         let mut first = None;
         for (manager, _) in &self.managers {
             for (worktree_id, state) in manager.read(cx).worktrees() {
@@ -96,6 +101,7 @@ impl KotlinStatusItem {
                     continue;
                 };
                 snapshot.download = download.clone();
+                snapshot.checking = checking;
                 if Some(worktree_id) == self.active_worktree {
                     return Some(snapshot);
                 }
