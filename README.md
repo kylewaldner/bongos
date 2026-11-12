@@ -586,8 +586,11 @@ Linear (`api.linear.app`) is contacted only when `linear.enabled` is on (the def
 is set, for a linked task or a Linear command. The token is stored in the credential store and
 never written to a log or a file.
 
+bongos never contacts bongos.rocks. The list of kotlin-lsp builds is compiled in.
+
 kotlin-lsp builds are early access and expire about 29 days after build, so bongos pins one
-build per release and releases roughly monthly. If the pinned build has expired, update bongos.
+build per release and releases roughly monthly. A new Kotlin build needs a new bongos release. If
+the pinned build has expired, update bongos.
 
 ## JetBrains servers and their terms
 

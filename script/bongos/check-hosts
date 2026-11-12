@@ -12,7 +12,7 @@ cd "$BONGOS_ROOT"
 [ "${1:-}" = "--list" ] || log_init check-hosts
 
 allow="$here/hosts-allow.txt"
-pattern='[A-Za-z0-9._-]*(zed\\?\.dev|zed\\?\.industries|agentclientprotocol\\?\.com)|MINIDUMP_ENDPOINT|CIMD_URL'
+pattern='[A-Za-z0-9._-]*(bongos\\?\.rocks|zed\\?\.dev|zed\\?\.industries|agentclientprotocol\\?\.com)|MINIDUMP_ENDPOINT|CIMD_URL'
 
 found() {
   grep -rnoE --binary-files=without-match \
