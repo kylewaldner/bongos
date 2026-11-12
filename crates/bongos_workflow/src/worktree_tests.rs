@@ -113,6 +113,7 @@ fn settings() -> WorkflowsSettings {
         min_free_disk_mb: 2048,
         keep_finished_days: 14,
         limits: Default::default(),
+        programs: Default::default(),
     }
 }
 

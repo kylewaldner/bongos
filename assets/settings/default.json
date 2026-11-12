@@ -2780,6 +2780,23 @@
     "fan_out_width": 8,
     // Automatic retries of a node that sets none.
     "retries": 2,
+    // Minutes between the runs of a polling node whose `polls` sets no
+    // `interval_minutes`.
+    "poll_interval_minutes": 5,
+    // Days after which a polling node whose `polls` sets no `give_up_days` fails "wait
+    // timed out".
+    "wait_give_up_days": 7,
+    // How program nodes run.
+    "programs": {
+      // The Python interpreter, 3.8 or newer. Null looks up `python3`, then `python`, on
+      // `PATH`.
+      "python": null,
+      // Minutes a program node may run when it sets no `max_minutes`.
+      "max_minutes": 10,
+      // MB of output (stdout and stderr together) a program may print; past it the output
+      // is dropped and the node fails "output cap hit".
+      "max_output_mb": 10,
+    },
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.

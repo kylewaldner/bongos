@@ -1551,6 +1551,36 @@ pub struct WorkflowsSettingsContent {
     ///
     /// Default: 2
     pub retries: Option<u32>,
+    /// Minutes between the runs of a polling node whose `polls` sets no `interval_minutes`.
+    ///
+    /// Default: 5
+    pub poll_interval_minutes: Option<u32>,
+    /// Days after which a polling node whose `polls` sets no `give_up_days` fails "wait timed
+    /// out".
+    ///
+    /// Default: 7
+    pub wait_give_up_days: Option<u32>,
+    /// How program nodes run.
+    pub programs: Option<WorkflowProgramsSettingsContent>,
+}
+
+/// How workflow program nodes run.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowProgramsSettingsContent {
+    /// The Python interpreter, 3.8 or newer. Null looks up `python3`, then `python`, on `PATH`.
+    ///
+    /// Default: null
+    pub python: Option<String>,
+    /// Minutes a program node may run when it sets no `max_minutes`.
+    ///
+    /// Default: 10
+    pub max_minutes: Option<u32>,
+    /// MB of output (stdout and stderr together) a program may print; past it the output is
+    /// dropped and the node fails "output cap hit".
+    ///
+    /// Default: 10
+    pub max_output_mb: Option<u64>,
 }
 
 /// Settings for chat sessions.
