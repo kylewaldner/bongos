@@ -66,6 +66,9 @@ mod config;
 mod diagnostics;
 mod edit_prediction;
 mod input;
+pub mod kill_ring;
+#[cfg(test)]
+mod kill_ring_tests;
 mod markdown_actions;
 mod navigation;
 mod rewrap;
@@ -162,9 +165,9 @@ use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, AppContext, AsyncWindowContext,
     AvailableSpace, Background, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context,
     DispatchPhase, Edges, Entity, EntityId, EntityInputHandler, EventEmitter, FocusHandle,
-    FocusOutEvent, Focusable, FontId, FontStyle, FontWeight, Global, HighlightStyle, Hsla,
-    KeyContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, ParentElement,
-    Pixels, PressureStage, Render, ScrollHandle, SharedString, SharedUri, Size, Stateful, Styled,
+    FocusOutEvent, Focusable, FontId, FontStyle, FontWeight, HighlightStyle, Hsla, KeyContext,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, ParentElement, Pixels,
+    PressureStage, Render, ScrollHandle, SharedString, SharedUri, Size, Stateful, Styled,
     Subscription, Task, TextRun, TextStyle, TextStyleRefinement, UTF16Selection, UnderlineStyle,
     UniformListScrollHandle, WeakEntity, WeakFocusHandle, Window, div, point, prelude::*,
     pulsating_between, px, relative, size,
@@ -8529,6 +8532,11 @@ impl Editor {
         self.minimap
             .as_ref()
             .filter(|_| self.minimap_visibility.visible())
+    }
+
+    /// Whether the editor shows its text masked, as in a password field.
+    pub fn is_masked(&self, cx: &App) -> bool {
+        self.display_map.read(cx).masked
     }
 
     pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {

@@ -1179,7 +1179,8 @@ impl Editor {
                 });
             }
             let item = this.cut_common(false, window, cx);
-            cx.write_to_clipboard(item);
+            cx.write_to_clipboard(item.clone());
+            this.push_to_kill_ring(&item, cx);
         });
     }
 
