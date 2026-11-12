@@ -1,0 +1,11 @@
+model = "example-model"
+
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@example/gh-mcp"]
+
+[mcp_servers.github.env]
+EXAMPLE_TOKEN = "not-a-real-token"
+
+[mcp_servers.sentry]
+url = "https://example.test/mcp"

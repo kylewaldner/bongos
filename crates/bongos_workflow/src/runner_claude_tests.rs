@@ -139,6 +139,10 @@ fn node(definition: &Definition, name: &str, root: &Path, try_number: u32) -> Cl
         caps: NodeCaps::resolve(definition, declared, &AgentDefaults::default()),
         output: declared.output.clone(),
         mcp_exclude: Vec::new(),
+        mcp_installed: ["broken", "github", "linear"]
+            .iter()
+            .map(|server| server.to_string())
+            .collect(),
         prompt: format!("Triage the task ({name}).\n"),
         system: "Task context: the goal.\n".to_string(),
         worktree,

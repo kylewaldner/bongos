@@ -5,7 +5,8 @@
 #   --fake-scenario NAME  success (default), permission-denied, max-turns, max-budget, invalid,
 #                         missing, logged-out, crash, sleep
 #   --fake-log DIR        writes DIR/argv (one argument per line), DIR/env and DIR/stdin
-# `--version` and `--help` answer like Claude Code 2.1.322.
+# `--version`, `--help` and `mcp list` answer like Claude Code 2.1.322 (`mcp list` replays a
+# recorded output).
 
 here=$(cd "$(dirname "$0")" && pwd)
 
@@ -31,8 +32,18 @@ Options:
   -p, --print                           Print response and exit
   --session-id <uuid>                   Use a specific session ID
   --verbose                             Override verbose mode setting
+
+Commands:
+  mcp                                   Configure and manage MCP servers
 EOF
     exit 0
+    ;;
+mcp)
+    if [ "$2" = "list" ]; then
+        cat "$here/claude-mcp-list.txt"
+        exit 0
+    fi
+    exit 2
     ;;
 esac
 

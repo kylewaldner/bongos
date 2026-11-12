@@ -27,7 +27,7 @@
 //! runner also passes `--permission-prompts none` when the CLI lists it, which denies whatever
 //! would have asked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -36,10 +36,11 @@ use std::time::{Duration, Instant};
 
 use bongos_chat::model::{Agent, Capabilities, HiddenFlag, version_at_least};
 use bongos_chat::{AgentCommand, Health, HealthState, find_program, fix_logged_out, fix_not_found};
-use bongos_workflow_model::definition::{Node, OutputField};
+use bongos_workflow_model::definition::{AgentKind, Node, OutputField};
 use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey, schema};
 use serde_json::Value;
 
+use crate::mcp;
 use crate::process::{NodeProcess, ProcessRecord, group_alive, stop_all};
 use crate::runtime::Finish;
 
@@ -186,6 +187,9 @@ pub struct ClaudeNode {
     pub output: Vec<OutputField>,
     /// Servers `workflows.mcp_exclude` removes (`--disallowedTools mcp__<name>__*`).
     pub mcp_exclude: Vec<String>,
+    /// The MCP servers discovered for Claude (`mcp::discover`); a start that allows one that is not
+    /// here, or that is excluded, is refused naming it.
+    pub mcp_installed: BTreeSet<String>,
     pub prompt: String,
     /// The task context appended to the system prompt (D6).
     pub system: String,
@@ -343,6 +347,33 @@ pub fn launch_env(
     key: &NodeKey,
     node: &ClaudeNode,
 ) -> BTreeMap<String, String> {
+    node_env(
+        base,
+        run,
+        key,
+        &NodeEnv {
+            task_id: &node.task_id,
+            task_dir: &node.task_dir,
+            worktree: &node.worktree,
+            node_result: &node.node_result,
+        },
+    )
+}
+
+/// The per-node values behind [`ENV_NAMES`]; shared with the Codex runner.
+pub(crate) struct NodeEnv<'a> {
+    pub task_id: &'a str,
+    pub task_dir: &'a Path,
+    pub worktree: &'a Path,
+    pub node_result: &'a Path,
+}
+
+pub(crate) fn node_env(
+    base: &BTreeMap<String, String>,
+    run: &str,
+    key: &NodeKey,
+    node: &NodeEnv<'_>,
+) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = base
         .iter()
         .filter(|(name, _)| PASSED_ENV.contains(&name.as_str()))
@@ -352,10 +383,10 @@ pub fn launch_env(
     for (name, value) in [
         ("BONGOS_RUN_ID", run.to_string()),
         ("BONGOS_RUN_NODE", key.to_string()),
-        ("BONGOS_TASK_ID", node.task_id.clone()),
-        ("BONGOS_TASK_DIR", path(&node.task_dir)),
-        ("BONGOS_WORKTREE", path(&node.worktree)),
-        ("BONGOS_NODE_RESULT", path(&node.node_result)),
+        ("BONGOS_TASK_ID", node.task_id.to_string()),
+        ("BONGOS_TASK_DIR", path(node.task_dir)),
+        ("BONGOS_WORKTREE", path(node.worktree)),
+        ("BONGOS_NODE_RESULT", path(node.node_result)),
     ] {
         env.insert(name.to_string(), value);
     }
@@ -556,7 +587,7 @@ fn unavailable_server(init: &Value, caps: &NodeCaps) -> Option<String> {
         .map(str::to_string)
 }
 
-fn says_logged_out(text: &str) -> bool {
+pub(crate) fn says_logged_out(text: &str) -> bool {
     let text = text.to_lowercase();
     text.contains("not logged in")
         || text.contains("invalid api key")
@@ -575,7 +606,7 @@ fn exit_detail(exit: Exit, stderr: &str) -> String {
 }
 
 /// How much of the end of stderr [`classify`] gets.
-const STDERR_TAIL: u64 = 64 * 1024;
+pub(crate) const STDERR_TAIL: u64 = 64 * 1024;
 
 /// Reads a stream file line by line and keeps only what [`classify`] looks at: the first init
 /// event and the last result event, so a long stream is never held in memory.
@@ -615,7 +646,7 @@ fn read_stream(path: &Path) -> String {
 }
 
 /// The last `limit` bytes of a file (lossy UTF-8), or nothing when it cannot be read.
-fn read_tail(path: &Path, limit: u64) -> String {
+pub(crate) fn read_tail(path: &Path, limit: u64) -> String {
     let Ok(mut file) = File::open(path) else {
         return String::new();
     };
@@ -633,7 +664,7 @@ fn read_tail(path: &Path, limit: u64) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-fn minutes(duration: Duration) -> String {
+pub(crate) fn minutes(duration: Duration) -> String {
     let seconds = duration.as_secs();
     if seconds >= 60 && seconds.is_multiple_of(60) {
         format!("{} min", seconds / 60)
@@ -685,6 +716,13 @@ impl ClaudeRunner {
     ) -> Result<ProcessRecord, Failure> {
         let refuse =
             |reason: FailureReason, detail: String| Failure::new(reason, Some(key.clone()), detail);
+        mcp::check_start(
+            AgentKind::Claude,
+            Some(key),
+            &node.caps.allowed_tools,
+            &node.mcp_installed,
+            &node.mcp_exclude,
+        )?;
         if !node.mcp_exclude.is_empty() && !self.cli.has_flag("--disallowedTools") {
             return Err(refuse(
                 FailureReason::AgentNotInstalledOrLoggedOut,

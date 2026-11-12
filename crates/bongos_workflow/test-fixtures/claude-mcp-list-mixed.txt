@@ -1,0 +1,5 @@
+Checking MCP server health…
+
+github: npx -y @example/gh-mcp - ✓ Connected
+sentry: https://example.test/mcp (HTTP) - ⚠ Needs authentication
+broken: /bin/false  - ✘ Failed to connect — CONNECTION_CLOSED: Connection closed
