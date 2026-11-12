@@ -5,6 +5,7 @@ use editor::{Editor, MultiBufferOffset, ToPoint as _};
 use gpui::{
     AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle,
 };
+use multi_buffer::ToOffset as _;
 use project::Project;
 use workspace::{AppState, MinibufferRouting, MultiWorkspace, Workspace};
 
@@ -312,4 +313,53 @@ async fn goto_line_opens_in_the_strip_with_the_default_settings(cx: &mut TestApp
     });
     open_prompt(&workspace, true, cx);
     press("cancel", cx);
+}
+
+/// The offset of the editor's mark, `None` when the buffer has none.
+fn mark_offset(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Option<usize> {
+    cx.update(|_, cx| {
+        let anchor = crate::mark::mark_for(editor, cx)?;
+        let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+        Some(anchor.to_offset(&snapshot).0)
+    })
+}
+
+#[gpui::test]
+async fn goto_line_confirm_pushes_the_mark_at_the_origin(cx: &mut TestAppContext) {
+    let (workspace, editor, mut cx) = workspace_editor(false, cx).await;
+    let cx = &mut cx;
+    assert_eq!(mark_offset(&editor, cx), None);
+
+    open_prompt(&workspace, false, cx);
+    cx.simulate_keystrokes("4 2");
+    cx.run_until_parked();
+    assert_eq!(mark_offset(&editor, cx), None, "the preview pushes nothing");
+    press("confirm", cx);
+    assert_eq!(caret_row(&editor, cx), 41);
+    // The caret was at the start of line 10, byte 63.
+    assert_eq!(mark_offset(&editor, cx), Some(63));
+}
+
+#[gpui::test]
+async fn goto_line_with_a_count_pushes_the_mark_at_the_origin(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) = workspace_editor(false, cx).await;
+    let cx = &mut cx;
+
+    cx.dispatch_action(GotoLine { count: Some(42) });
+    cx.run_until_parked();
+    assert_eq!(caret_row(&editor, cx), 41);
+    assert_eq!(mark_offset(&editor, cx), Some(63));
+}
+
+#[gpui::test]
+async fn goto_line_cancel_pushes_no_mark(cx: &mut TestAppContext) {
+    let (workspace, editor, mut cx) = workspace_editor(false, cx).await;
+    let cx = &mut cx;
+
+    open_prompt(&workspace, false, cx);
+    cx.simulate_keystrokes("9 0");
+    cx.run_until_parked();
+    press("cancel", cx);
+    assert_eq!(caret_row(&editor, cx), 9);
+    assert_eq!(mark_offset(&editor, cx), None);
 }

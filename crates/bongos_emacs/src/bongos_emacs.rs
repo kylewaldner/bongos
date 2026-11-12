@@ -8,6 +8,7 @@ mod comments;
 mod cursor;
 mod global_mark;
 mod goto_line;
+mod jumps;
 mod kill;
 pub mod kill_sink;
 pub mod last_command;
@@ -34,6 +35,8 @@ mod cursor_tests;
 mod global_mark_tests;
 #[cfg(test)]
 mod goto_line_tests;
+#[cfg(test)]
+mod jumps_tests;
 #[cfg(test)]
 mod kill_sink_tests;
 #[cfg(test)]
@@ -115,6 +118,10 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, mark::set_mark_command);
         register(editor, &weak, mark::exchange_point_and_mark_command);
         register(editor, &weak, mark::pop_mark_command);
+        register(editor, &weak, jumps::beginning_of_buffer_command);
+        register(editor, &weak, jumps::end_of_buffer_command);
+        register(editor, &weak, jumps::xref_find_definitions_command);
+        register(editor, &weak, jumps::xref_find_implementations_command);
         recenter::init_editor(cx);
         mark::init_editor(window, cx);
     })

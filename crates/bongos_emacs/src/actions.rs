@@ -211,6 +211,14 @@ actions!(
         PopMark,
         /// Goes back to the newest earlier location in another file.
         PopGlobalMark,
+        /// Moves the cursor to the start of the buffer, pushing the mark first.
+        BeginningOfBuffer,
+        /// Moves the cursor to the end of the buffer, pushing the mark first.
+        EndOfBuffer,
+        /// Goes to the definition of the symbol at the cursor, pushing the mark first.
+        XrefFindDefinitions,
+        /// Goes to the implementation of the symbol at the cursor, pushing the mark first.
+        XrefFindImplementations,
     ]
 );
 count_action!(
