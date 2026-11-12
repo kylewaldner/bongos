@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use bongos_workflow_model::Limits;
 use settings::{RegisterSetting, Settings, SettingsContent};
 
+use crate::runner_program::ProgramSettings;
+
 /// The `workflows` settings (user level only).
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
 pub struct WorkflowsSettings {
@@ -18,6 +20,9 @@ pub struct WorkflowsSettings {
     pub keep_finished_days: u64,
     /// The run, session and branch limits and the retry and width defaults.
     pub limits: Limits,
+    /// How program nodes run and poll (`workflows.programs`, `workflows.poll_interval_minutes`,
+    /// `workflows.wait_give_up_days`).
+    pub programs: ProgramSettings,
 }
 
 impl Settings for WorkflowsSettings {
@@ -27,6 +32,8 @@ impl Settings for WorkflowsSettings {
             .clone()
             .expect("default.json defines `workflows`");
         let defaults = Limits::default();
+        let program_defaults = ProgramSettings::default();
+        let programs = workflows.programs.clone().unwrap_or_default();
         Self {
             enabled: workflows
                 .enabled
@@ -58,6 +65,24 @@ impl Settings for WorkflowsSettings {
                     .unwrap_or(defaults.fan_out_width)
                     .max(1),
                 retries: workflows.retries.unwrap_or(defaults.retries),
+            },
+            programs: ProgramSettings {
+                python: programs.python.filter(|python| !python.trim().is_empty()),
+                max_minutes: programs
+                    .max_minutes
+                    .unwrap_or(program_defaults.max_minutes)
+                    .max(1),
+                max_output_mb: programs
+                    .max_output_mb
+                    .unwrap_or(program_defaults.max_output_mb)
+                    .max(1),
+                poll_interval_minutes: workflows
+                    .poll_interval_minutes
+                    .unwrap_or(program_defaults.poll_interval_minutes)
+                    .max(1),
+                wait_give_up_days: workflows
+                    .wait_give_up_days
+                    .unwrap_or(program_defaults.wait_give_up_days),
             },
         }
     }
