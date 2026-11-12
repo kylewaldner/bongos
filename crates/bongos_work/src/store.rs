@@ -40,8 +40,11 @@ use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
 
 use crate::changes::ChangedCount;
+use crate::overview::{self, Inputs, RepositoryRow};
 use crate::rebase::{RebaseChecks, RebaseState};
 use crate::ref_watch::{GitDirInfo, RefWatches};
+use crate::settings::Repository;
+use crate::worktrees::Layout;
 use crate::{WorkDirs, WorkSettings};
 
 /// How long the watcher gathers events before delivering them.
@@ -135,6 +138,11 @@ pub struct WorkStore {
     pub(crate) git_dirs: HashMap<PathBuf, GitDirInfo>,
     /// Whether a common git dir gets the slow poll instead of a watcher (D10).
     pub(crate) poll_decider: fn(&Path) -> bool,
+    /// The repository overview (D13), recomputed on the background executor.
+    overview: Vec<RepositoryRow>,
+    overview_task: Option<Task<()>>,
+    /// The settings the overview was last computed from, to skip unrelated settings changes.
+    overview_settings: Option<(Vec<Repository>, Option<String>)>,
     /// Runs on the background executor after the probes of the next full rebase check.
     #[cfg(test)]
     pub(crate) after_full_probe: Option<Box<dyn FnOnce() + Send>>,
@@ -171,7 +179,10 @@ impl EventEmitter<WorkStoreEvent> for WorkStore {}
 
 impl WorkStore {
     pub fn new(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut gpui::Context<Self>) -> Self {
-        let settings = cx.observe_global::<SettingsStore>(|this, cx| this.sync_enabled(cx));
+        let settings = cx.observe_global::<SettingsStore>(|this, cx| {
+            this.sync_enabled(cx);
+            this.refresh_overview_for_settings(cx);
+        });
         let mut this = Self {
             fs,
             dirs,
@@ -184,6 +195,9 @@ impl WorkStore {
             rebase_checks: RebaseChecks::default(),
             git_dirs: HashMap::new(),
             poll_decider: fs::requires_poll_watcher,
+            overview: Vec::new(),
+            overview_task: None,
+            overview_settings: None,
             #[cfg(test)]
             after_full_probe: None,
             needs_you: BTreeMap::new(),
@@ -192,6 +206,7 @@ impl WorkStore {
             _settings: settings,
         };
         this.sync_enabled(cx);
+        this.refresh_overview_for_settings(cx);
         this
     }
 
@@ -222,6 +237,67 @@ impl WorkStore {
 
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// One row per `work.repositories` entry: where its worktrees go, what is wrong with that,
+    /// and its old-root tasks (D13). Empty while disabled. Computed on the background executor
+    /// when the snapshot or the repository settings change, so it can lag them briefly.
+    pub fn repository_overview(&self) -> &[RepositoryRow] {
+        &self.overview
+    }
+
+    /// Recomputes the overview when the repositories or the default root differ from what it was
+    /// last computed from.
+    fn refresh_overview_for_settings(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        let settings = WorkSettings::get_global(cx);
+        let current = (
+            settings.repositories.clone(),
+            settings.default_worktree_root.clone(),
+        );
+        if self.overview_settings.as_ref() != Some(&current) {
+            self.refresh_overview(cx);
+        }
+    }
+
+    /// Recomputes [`Self::repository_overview`] from the snapshot and the settings.
+    pub(crate) fn refresh_overview(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        let settings = WorkSettings::get_global(cx);
+        self.overview_settings = Some((
+            settings.repositories.clone(),
+            settings.default_worktree_root.clone(),
+        ));
+        let inputs = Inputs {
+            repositories: settings.repositories.clone(),
+            layout: Layout {
+                default_root: settings.default_worktree_root.clone(),
+                home: util::paths::home_dir().clone(),
+                central: self.dirs.worktrees.clone(),
+            },
+            tree: self.snapshot(),
+            known: self.git_dirs.clone(),
+            poll_decider: self.poll_decider,
+        };
+        let fs = self.fs();
+        // A newer request replaces (and so cancels) one still running.
+        self.overview_task = Some(cx.spawn(async move |this, cx| {
+            let (rows, learned) = cx
+                .background_spawn(async move { overview::compute(fs.as_ref(), inputs).await })
+                .await;
+            this.update(cx, |store, cx| {
+                store.git_dirs.extend(learned);
+                if store.overview != rows {
+                    store.overview = rows;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     /// Replaces the check that decides which repositories get the slow poll (D10); tests use it
@@ -279,6 +355,9 @@ impl WorkStore {
             self.session = None;
             self.rebase_checks = RebaseChecks::default();
             self.git_dirs.clear();
+            self.overview.clear();
+            self.overview_task = None;
+            self.overview_settings = None;
             self.set_rebase(HashMap::new(), cx);
             if self.snapshot.take().is_some() {
                 cx.emit(WorkStoreEvent::Changed);
@@ -331,6 +410,7 @@ impl WorkStore {
             cx.emit(WorkStoreEvent::Changed);
             cx.notify();
             self.refresh_rebase(cx);
+            self.refresh_overview(cx);
         }
         // After the snapshot, so a caller that awaits the write sees its change.
         if let Some(reply) = done.reply {

@@ -70,6 +70,36 @@ pub fn default_kind(
 pub fn register(workspace: &mut Workspace) {
     workspace
         .register_action(|w, _: &work::AddRepository, window, cx| add_repository(w, window, cx));
+    #[cfg(debug_assertions)]
+    workspace.register_action(|w, _: &work::DumpRepositories, _, cx| dump_repositories(w, cx));
+}
+
+/// The file `work: dump repositories` writes in the logs directory.
+#[cfg(debug_assertions)]
+pub(crate) const DUMP_FILE: &str = "work-repositories.txt";
+
+/// `work: dump repositories`: writes the repository overview and the store's counters to
+/// [`DUMP_FILE`] in the logs directory.
+#[cfg(debug_assertions)]
+fn dump_repositories(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    if crate::commands::ready(workspace, cx).is_none() {
+        return;
+    }
+    let Some(store) = WorkStore::global(cx) else {
+        return;
+    };
+    let text = {
+        let store = store.read(cx);
+        crate::overview::dump_text(store.repository_overview(), &store.stats())
+    };
+    let logs_dir = paths::logs_dir();
+    let written = std::fs::create_dir_all(logs_dir)
+        .and_then(|()| std::fs::write(logs_dir.join(DUMP_FILE), &text));
+    let message = match written {
+        Ok(()) => format!("Wrote {}", logs_dir.join(DUMP_FILE).display()),
+        Err(error) => format!("Could not write the repositories: {error}"),
+    };
+    show_toast(workspace, message, cx);
 }
 
 /// `work: add repository`: picks a folder, asks for a name (the folder's name to start with) and
