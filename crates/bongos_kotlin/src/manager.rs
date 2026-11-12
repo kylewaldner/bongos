@@ -3356,5 +3356,6 @@ mod tests {
                 .read_with(cx, |manager, _| manager.launched_trial(worktree()).cloned()),
             None
         );
+        cx.run_until_parked();
     }
 }
