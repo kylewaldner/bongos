@@ -48,6 +48,7 @@ const UNBOUND: &[&str] = &[
     "work::ShowStale",
     "work::ShowClosed",
     "work::AddRepository",
+    "work::EditWorktreeRoot",
     "task::AdvanceOverride",
     "task::Drop",
     "task::Reopen",
