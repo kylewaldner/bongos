@@ -717,7 +717,45 @@ impl Checker {
             }
         };
         self.log.manifest_outcome(&host, &outcome);
+        if matches!(outcome, FetchOutcome::Stored { .. }) {
+            self.forget_unlisted_rejections(&url).await;
+        }
         Refresh::Finished(outcome)
+    }
+
+    /// Drops the `rejected` entries the newly cached manifest no longer lists with that version
+    /// and digest (D8): a different build is eligible again, and the same build never is.
+    async fn forget_unlisted_rejections(&self, url: &Url) {
+        let Some(platform) = &self.platform else {
+            return;
+        };
+        let Some(cached) = self.cache.load(url, &self.keys) else {
+            return;
+        };
+        let listed: Vec<BuildId> = cached
+            .manifest
+            .kotlin_lsp
+            .iter()
+            .filter_map(|build| build.entry(platform))
+            .map(|entry| BuildId {
+                version: entry.version.clone(),
+                sha256: entry.sha256.clone(),
+            })
+            .collect();
+        let result = self
+            .cache
+            .with_state(|state| {
+                state.kotlin_lsp.rejected.retain(|rejected| {
+                    listed.iter().any(|listed| {
+                        listed.version == rejected.version
+                            && listed.sha256.eq_ignore_ascii_case(&rejected.sha256)
+                    })
+                })
+            })
+            .await;
+        if let Err(error) = result {
+            ::log::warn!("manifest: keeping the rejected list as it was: {error:#}");
+        }
     }
 
     /// The manifest and its signature, both requests together capped at `fetch_timeout`.
@@ -1805,6 +1843,53 @@ mod tests {
         // Older than the active build: not recorded either.
         assert!(record(cx, &harness, &updates, "263.0.9"));
         assert_eq!(trial_version(&harness), None);
+    }
+
+    /// A rejected build is named by version and digest: a rebuild of the same version with a new
+    /// digest is recorded as the trial, and a stored manifest drops the rejections it no longer
+    /// lists while the listed rejected build stays rejected.
+    #[gpui::test]
+    fn test_a_trial_of_the_same_version_with_a_new_digest_is_eligible_again(cx: &mut TestAppContext) {
+        let id = |version: &str, sha256: &str| BuildId {
+            version: version.into(),
+            sha256: sha256.into(),
+        };
+        let mut builds = KotlinLspBuilds {
+            active: Some(id("263.1.0", &"1".repeat(64))),
+            rejected: vec![id("263.5.0", &"2".repeat(64))],
+            ..Default::default()
+        };
+        assert_eq!(
+            record_if_newer(&mut builds, id("263.5.0", &"2".repeat(64))),
+            TrialRecord::Rejected
+        );
+        assert_eq!(
+            record_if_newer(&mut builds, id("263.5.0", &"3".repeat(64))),
+            TrialRecord::Recorded
+        );
+        assert_eq!(builds.trial, Some(id("263.5.0", &"3".repeat(64))));
+
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["263.5.0"]);
+        set_user_url(cx, A);
+        let digest = sha256(&harness.archive);
+        block_on(harness.cache().with_state(|state| {
+            state.kotlin_lsp.rejected = vec![
+                id("263.5.0", &digest),
+                id("263.5.0", &"0".repeat(64)),
+                id("263.4.0", &digest),
+            ];
+        }))
+        .unwrap();
+        let updates = harness.updates(cx);
+        assert_eq!(
+            refresh(cx, &updates),
+            Refresh::Finished(FetchOutcome::Stored { serial: 3 })
+        );
+        assert_eq!(
+            harness.cache().read_state().kotlin_lsp.rejected,
+            [id("263.5.0", &digest)]
+        );
     }
 
     #[test]

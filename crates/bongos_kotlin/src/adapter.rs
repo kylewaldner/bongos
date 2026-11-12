@@ -30,10 +30,13 @@ use crate::{
     intellij::{LICENSE_TIMEOUT, bundle_eula_hash, eula_accepted, eula_argument, license_check},
     jdk,
     license::fallback_for,
-    manager::{ADAPTER_NAME, EXPIRED_REASON, FallbackReason, KotlinProjectManager, KotlinRegistry},
+    manager::{
+        ADAPTER_NAME, EXPIRED_REASON, FallbackReason, KotlinProjectManager, KotlinRegistry,
+        RejectedTrials, TrialLaunch,
+    },
     manifest::{Manifest, ManifestEntry, current_platform},
-    manifest_cache::{ServerState, read_for_start},
-    remote_manifest::trusted_keys,
+    manifest_cache::{BuildId, ServerState, read_for_start},
+    remote_manifest::{TrustedKey, trusted_keys},
     resolve::resolve,
     updates::KotlinUpdates,
     versions::{Resolution, resolve_build},
@@ -254,18 +257,34 @@ async fn start_command(
     };
 
     // kotlin-lsp may run a downloaded build instead of the pin (`versions.rs`); IntelliJ runs its pin.
+    let mut trial_fallback = None;
     let resolution = match server {
         KotlinServerKind::KotlinLsp => {
             // From now on the background check may download a newer build for the next start.
             cx.update(KotlinUpdates::start_requested);
-            let manifest_url =
-                cx.update(|cx| KotlinSettings::get_global(cx).manifest_url_for_fetch());
+            let (manifest_url, keys, rejected) = cx.update(|cx| {
+                (
+                    KotlinSettings::get_global(cx).manifest_url_for_fetch(),
+                    manifest_keys(cx),
+                    RejectedTrials::builds(cx),
+                )
+            });
             let (install_root, pin) = (dirs.install_root.clone(), pin.clone());
-            let resolution = cx
+            let choice = cx
                 .background_spawn(async move {
-                    kotlin_lsp_resolution(&install_root, manifest_url, platform, pin, today)
+                    kotlin_lsp_choice(
+                        &install_root,
+                        manifest_url,
+                        &keys,
+                        &rejected,
+                        platform,
+                        pin,
+                        today,
+                    )
                 })
                 .await;
+            trial_fallback = choice.fallback;
+            let resolution = choice.resolution;
             let text = match &resolution {
                 Resolution::Trial(entry) => Some(format!("kotlin-lsp {} (trial)", entry.version)),
                 Resolution::Active(entry) => {
@@ -280,6 +299,7 @@ async fn start_command(
         }
         KotlinServerKind::Intellij => Resolution::Pin(pin.clone()),
     };
+    let pin_version = pin.version.clone();
     let entry = match &resolution {
         Resolution::Trial(entry) | Resolution::Active(entry) | Resolution::Pin(entry) => {
             entry.clone()
@@ -384,37 +404,104 @@ async fn start_command(
     };
     let binary = with_java_home(binary, &detection);
     match server {
-        KotlinServerKind::KotlinLsp => Ok(binary),
+        KotlinServerKind::KotlinLsp => {
+            // The launched mark (D8): only now, with the JDK, expiry and install checks passed,
+            // can this start fail the trial.
+            if let Resolution::Trial(trial) = &resolution {
+                let launch = TrialLaunch {
+                    build: BuildId {
+                        version: trial.version.clone(),
+                        sha256: trial.sha256.clone(),
+                    },
+                    fallback: trial_fallback.unwrap_or_else(|| "the previous build".into()),
+                    pin_version: pin_version.clone(),
+                };
+                cx.update(|cx| {
+                    if let Some(manager) = manager_of(worktree_root, cx) {
+                        manager.update(cx, |manager, cx| {
+                            manager.trial_launched(worktree_id, launch, cx)
+                        });
+                    }
+                });
+            }
+            Ok(binary)
+        }
         KotlinServerKind::Intellij => intellij_gates(dirs, &entry, binary, worktree_root, cx).await,
     }
 }
 
+/// The keys a cached manifest must verify with: the release keys (plus the debug-only override),
+/// or the keys a test set.
+fn manifest_keys(cx: &App) -> Vec<TrustedKey> {
+    cx.try_global::<ManifestKeys>()
+        .map(|keys| keys.0.clone())
+        .unwrap_or_else(|| trusted_keys(true))
+}
+
+/// Replaces the trusted manifest keys of starts, for tests.
+pub struct ManifestKeys(pub Vec<TrustedKey>);
+
+impl gpui::Global for ManifestKeys {}
+
+/// What a kotlin-lsp start runs, and for a trial what runs once it is rejected.
+struct KotlinLspChoice {
+    resolution: Resolution,
+    /// For a trial: the next choice, as the rejection notice names it.
+    fallback: Option<String>,
+}
+
 /// The kotlin-lsp build a start runs. Without a manifest URL nothing is read and the pin runs, as
 /// before any manifest was cached; with one, `cache.json` and `state.json` are read as files, with
-/// no lock, and no download is waited for.
-fn kotlin_lsp_resolution(
+/// no lock, and no download is waited for. `rejected` (the trials rejected in this run) counts as
+/// rejected even when `state.json` does not list it yet.
+fn kotlin_lsp_choice(
     install_root: &Path,
     manifest_url: Option<http_client::Url>,
+    keys: &[TrustedKey],
+    rejected: &[BuildId],
     platform: &str,
     pin: ManifestEntry,
     today: NaiveDate,
-) -> Resolution {
+) -> KotlinLspChoice {
     let Some(manifest_url) = manifest_url else {
-        return resolve_build(&pin, &[], &ServerState::default(), |_| false, today);
+        return KotlinLspChoice {
+            resolution: resolve_build(&pin, &[], &ServerState::default(), |_| false, today),
+            fallback: None,
+        };
     };
-    let (cached, state) = read_for_start(install_root, &manifest_url, &trusted_keys(true));
+    let (cached, mut state) = read_for_start(install_root, &manifest_url, keys);
+    for build in rejected {
+        if !state.kotlin_lsp.rejected.contains(build) {
+            state.kotlin_lsp.rejected.push(build.clone());
+        }
+    }
     let entries: Vec<ManifestEntry> = cached
         .iter()
         .flat_map(|cached| &cached.manifest.kotlin_lsp)
         .filter_map(|build| build.entry(platform).cloned())
         .collect();
-    resolve_build(
-        &pin,
-        &entries,
-        &state,
-        |entry| check_installed(install_root, KotlinServerKind::KotlinLsp, entry).is_some(),
-        today,
-    )
+    let installed = |entry: &ManifestEntry| {
+        check_installed(install_root, KotlinServerKind::KotlinLsp, entry).is_some()
+    };
+    let resolution = resolve_build(&pin, &entries, &state, installed, today);
+    let fallback = match &resolution {
+        Resolution::Trial(trial) => {
+            state.kotlin_lsp.rejected.push(BuildId {
+                version: trial.version.clone(),
+                sha256: trial.sha256.clone(),
+            });
+            let next = match resolve_build(&pin, &entries, &state, installed, today) {
+                Resolution::Trial(next) | Resolution::Active(next) | Resolution::Pin(next) => next,
+                Resolution::Expired => pin.clone(),
+            };
+            Some(format!("kotlin-lsp {}", next.version))
+        }
+        _ => None,
+    };
+    KotlinLspChoice {
+        resolution,
+        fallback,
+    }
 }
 
 /// The binary with the import JDK as `JAVA_HOME`; unchanged when the bundled runtime imports.
@@ -1774,5 +1861,242 @@ launcher = "bin/launcher"
             })
             .unwrap();
         assert_eq!(start(cx).await.unwrap().path, kotlin_lsp);
+    }
+
+    const MANIFEST_URL: &str = "https://manifests.example.com/kotlin/servers.json";
+
+    fn build_id(entry: &ManifestEntry) -> BuildId {
+        BuildId {
+            version: entry.version.clone(),
+            sha256: entry.sha256.clone(),
+        }
+    }
+
+    /// A verified cached manifest listing an active build (9.0.0) and a pending trial (9.1.0), both
+    /// installed and named in `state.json`, with `kotlin.manifest_url` set and the test key trusted.
+    /// Returns the active build and the trial.
+    fn seed_trial(cx: &mut TestAppContext, fixture: &Fixture) -> (ManifestEntry, ManifestEntry) {
+        use crate::manifest_cache::{
+            Claim, ManifestCache,
+            tests::{key_pair, now, release_keys, signed_with},
+        };
+        set_user_settings(
+            cx,
+            &format!(r#"{{ "kotlin": {{ "manifest_url": "{MANIFEST_URL}" }} }}"#),
+        );
+        cx.update(|cx| cx.set_global(ManifestKeys(release_keys())));
+        let platform = current_platform().unwrap();
+        let builds: Vec<serde_json::Value> = [("9.0.0", "a"), ("9.1.0", "b")]
+            .iter()
+            .map(|(version, digit)| {
+                serde_json::json!({
+                    "version": version, "built": "2026-11-01", "expires": "2027-01-01",
+                    "requires": 1,
+                    "platform": { platform: {
+                        "url": format!("https://download.jetbrains.com/kotlin-server-{version}.tar.gz"),
+                        "sha256": digit.repeat(64), "archive": "tar.gz", "strip_components": 1,
+                        "launcher": "bin/launcher"
+                    } }
+                })
+            })
+            .collect();
+        let servers = serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "kind": "bongos-kotlin-servers", "serial": 1,
+            "published": "2026-11-01", "kotlin-lsp": builds
+        }))
+        .unwrap();
+        let url = http_client::Url::parse(MANIFEST_URL).unwrap();
+        let cache = ManifestCache::new(
+            &fixture.dirs.install_root,
+            crate::locks::tests::thread_registry(),
+        );
+        let Claim::Claimed(lease) = futures::executor::block_on(cache.claim_fetch(
+            now(),
+            std::time::Duration::from_secs(60),
+            true,
+        ))
+        .unwrap() else {
+            panic!("no claim");
+        };
+        futures::executor::block_on(cache.finish_fetch(
+            lease,
+            now(),
+            Ok(signed_with(servers, "release-1", &key_pair(7))),
+            &url,
+            &release_keys(),
+        ))
+        .unwrap();
+        let cached = cache.load(&url, &release_keys()).unwrap();
+        let entries: Vec<ManifestEntry> = cached
+            .manifest
+            .kotlin_lsp
+            .iter()
+            .filter_map(|build| build.entry(platform).cloned())
+            .collect();
+        let (active, trial) = (entries[0].clone(), entries[1].clone());
+        for entry in [&active, &trial] {
+            crate::installed::tests::install(&fixture.dirs.install_root, entry);
+        }
+        futures::executor::block_on(cache.with_state(|state| {
+            state.kotlin_lsp.active = Some(build_id(&active));
+            state.kotlin_lsp.trial = Some(build_id(&trial));
+        }))
+        .unwrap();
+        (active, trial)
+    }
+
+    impl Fixture {
+        fn builds(&self) -> crate::manifest_cache::KotlinLspBuilds {
+            crate::manifest_cache::ManifestCache::new(
+                &self.dirs.install_root,
+                crate::locks::tests::thread_registry(),
+            )
+            .read_state()
+            .kotlin_lsp
+        }
+
+        fn launcher_of(&self, entry: &ManifestEntry) -> PathBuf {
+            self.server_dir().join(&entry.version).join("bin/launcher")
+        }
+
+        fn launched_trial(&self, cx: &mut TestAppContext) -> Option<BuildId> {
+            self.manager
+                .read_with(cx, |manager, _| manager.launched_trial(worktree()).cloned())
+        }
+
+        fn trial_notices(&self, cx: &mut TestAppContext) -> Rc<std::cell::RefCell<Vec<String>>> {
+            let notices = Rc::new(std::cell::RefCell::new(Vec::new()));
+            cx.update(|cx| {
+                let notices = notices.clone();
+                cx.subscribe(
+                    &self.manager,
+                    move |_, event: &crate::manager::KotlinEvent, _| {
+                        if let crate::manager::KotlinEvent::TrialFailed { message, .. } = event {
+                            notices.borrow_mut().push(message.clone());
+                        }
+                    },
+                )
+                .detach();
+            });
+            notices
+        }
+    }
+
+    /// A start that fails before the trial's process is launched (no JDK satisfies the Gradle
+    /// toolchain) is a project problem: the trial is not rejected, no notice shows, and a later
+    /// start whose JDK resolves runs the trial.
+    #[gpui::test]
+    async fn test_a_jdk_failure_before_launch_leaves_the_trial_pending(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let fixture = fixture(cx, Rc::new(NoHost), "2027-01-01");
+        let (_, trial) = seed_trial(cx, &fixture);
+        let notices = fixture.trial_notices(cx);
+        let gradle = fixture.root.join("build.gradle.kts");
+        fs::write(&gradle, "kotlin { jvmToolchain(99) }").unwrap();
+        let down = net_down();
+
+        let error = fixture.command(cx, &down, today()).await.unwrap_err();
+        assert_eq!(error.to_string(), "no JDK for Gradle import (toolchain 99)");
+        assert_eq!(
+            fixture.status(cx),
+            Some(ServerStatus::Failed {
+                reason: "no JDK for Gradle import (toolchain 99)".into()
+            })
+        );
+        assert_eq!(fixture.launched_trial(cx), None);
+        // Zed reports the refused start as a start failure too; it is still not the trial's.
+        fixture.manager.update(cx, |manager, cx| {
+            manager.server_start_failed(worktree(), "no JDK for Gradle import (toolchain 99)", cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(fixture.builds().trial, Some(build_id(&trial)));
+        assert!(fixture.builds().rejected.is_empty());
+        assert!(notices.borrow().is_empty());
+
+        fs::remove_file(&gradle).unwrap();
+        let binary = fixture.command(cx, &down, today()).await.unwrap();
+        assert_eq!(binary.path, fixture.launcher_of(&trial));
+        assert_eq!(fixture.launched_trial(cx), Some(build_id(&trial)));
+        assert_eq!(down.requests(), 0);
+    }
+
+    /// A trial that exits 2 s after it was added is rejected and the worktree restarts with the
+    /// previous (active) build. The rejected build is not started again: neither by a later start
+    /// in this run nor after a relaunch, which reads `rejected` from `state.json`.
+    #[gpui::test]
+    async fn test_a_rejected_trial_restarts_the_previous_build_and_is_never_retried(
+        cx: &mut TestAppContext,
+    ) {
+        use std::os::unix::process::ExitStatusExt as _;
+        cx.executor().allow_parking();
+        let host = Rc::new(StartingHost::default());
+        let fixture = fixture(cx, host.clone(), "2027-01-01");
+        let (active, trial) = seed_trial(cx, &fixture);
+        let down = net_down();
+        *host.fixture.borrow_mut() = Some((
+            fixture.dirs.clone(),
+            fixture.manifest.clone(),
+            fixture.root.clone(),
+        ));
+        *host.http.borrow_mut() = Some(down.client.clone());
+        *host.manager.borrow_mut() = Some(fixture.manager.downgrade());
+        let notices = fixture.trial_notices(cx);
+
+        let binary = fixture.command(cx, &down, today()).await.unwrap();
+        assert_eq!(binary.path, fixture.launcher_of(&trial));
+        let server_id = lsp::LanguageServerId(1);
+        fixture.manager.update(cx, |manager, cx| {
+            manager.server_added(server_id, worktree(), cx)
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        fixture.manager.update(cx, |manager, cx| {
+            manager.server_terminated(
+                server_id,
+                Some(std::process::ExitStatus::from_raw(1 << 8)),
+                cx,
+            )
+        });
+        wait_until(cx, "the restart", |_| !host.started.borrow().is_empty());
+        cx.run_until_parked();
+        assert_eq!(*host.started.borrow(), [fixture.launcher_of(&active)]);
+        assert_eq!(fixture.status(cx), Some(ServerStatus::Ready));
+        assert_eq!(
+            *notices.borrow(),
+            ["Kotlin: kotlin-lsp 9.1.0 failed its first start; using kotlin-lsp 9.0.0 again"]
+        );
+        let builds = fixture.builds();
+        assert_eq!(builds.rejected, [build_id(&trial)]);
+        assert_eq!(builds.active, Some(build_id(&active)));
+        assert_eq!(builds.trial, None);
+
+        // A restart in this run.
+        let binary = fixture.command(cx, &down, today()).await.unwrap();
+        assert_eq!(binary.path, fixture.launcher_of(&active));
+        assert_eq!(fixture.launched_trial(cx), None);
+
+        // A relaunch: nothing in memory, a new manager, the trial named again in `state.json`
+        // (an older process recorded it); `rejected` still keeps it from running.
+        cx.update(|cx| cx.set_global(RejectedTrials::default()));
+        futures::executor::block_on(
+            crate::manifest_cache::ManifestCache::new(
+                &fixture.dirs.install_root,
+                crate::locks::tests::thread_registry(),
+            )
+            .with_state(|state| state.kotlin_lsp.trial = Some(build_id(&trial))),
+        )
+        .unwrap();
+        let relaunched =
+            cx.new(|cx| KotlinProjectManager::new(Rc::new(NoHost), fixture.dirs.clone(), cx));
+        relaunched.update(cx, |manager, cx| {
+            manager.add_worktree(worktree(), fixture.root.clone(), cx)
+        });
+        let binary = fixture.command(cx, &down, today()).await.unwrap();
+        assert_eq!(binary.path, fixture.launcher_of(&active));
+        assert!(relaunched.read_with(cx, |manager, _| {
+            manager.launched_trial(worktree()).is_none()
+        }));
+        assert_eq!(notices.borrow().len(), 1);
+        assert_eq!(down.requests(), 0);
     }
 }

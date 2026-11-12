@@ -134,6 +134,14 @@ pub fn fallback_notice_id(worktree_id: WorktreeId) -> NotificationId {
     NotificationId::composite::<FallbackNotice>(worktree_id.to_usize())
 }
 
+/// The id of a worktree's rejected-trial notice: a later rejection replaces it, never stacks.
+struct TrialNotice;
+
+/// The notification id of the rejected-trial notice of a worktree.
+pub fn trial_notice_id(worktree_id: WorktreeId) -> NotificationId {
+    NotificationId::composite::<TrialNotice>(worktree_id.to_usize())
+}
+
 /// The id of the download notification: one per window, replaced rather than stacked.
 struct DownloadNotice;
 
@@ -159,7 +167,8 @@ pub fn show_download_notice(workspace: &mut Workspace, version: &str, cx: &mut C
 }
 
 /// Shows each fallback of a workspace's project as one toast (the fallback policy: one notice line
-/// per fallback, never a modal), and each background download of a newer server once per window.
+/// per fallback, never a modal), each rejected trial build as one toast, and each background
+/// download of a newer server once per window.
 /// Call after `attach_managers`, before any workspace is created.
 pub fn attach_notices(cx: &mut App) {
     cx.observe_new::<Workspace>(|workspace, _window, cx| {
@@ -189,6 +198,13 @@ pub fn attach_notices(cx: &mut App) {
                     message,
                 } => workspace.show_toast(
                     Toast::new(fallback_notice_id(*worktree_id), message.clone()),
+                    cx,
+                ),
+                KotlinEvent::TrialFailed {
+                    worktree_id,
+                    message,
+                } => workspace.show_toast(
+                    Toast::new(trial_notice_id(*worktree_id), message.clone()),
                     cx,
                 ),
             },

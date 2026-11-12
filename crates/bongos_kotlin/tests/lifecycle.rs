@@ -467,8 +467,9 @@ async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppCon
     cx.update(|_, cx| {
         let notices = notices.clone();
         cx.subscribe(&setup.manager, move |_, event: &KotlinEvent, _| {
-            let KotlinEvent::FellBack { message, .. } = event;
-            notices.borrow_mut().push(message.clone());
+            if let KotlinEvent::FellBack { message, .. } = event {
+                notices.borrow_mut().push(message.clone());
+            }
         })
         .detach();
     });

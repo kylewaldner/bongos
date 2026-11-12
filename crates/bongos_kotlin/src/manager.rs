@@ -11,10 +11,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
-use gpui::{App, Context, Entity, EntityId, EventEmitter, Global, Subscription, WeakEntity};
+use gpui::{
+    App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, Subscription, Task,
+    WeakEntity,
+};
 use lsp::{IoKind, LanguageServerId, LanguageServerName};
 use project::{LspStore, LspStoreEvent, lsp_store::LanguageServerLogType};
 use rpc::proto;
@@ -22,10 +25,13 @@ use settings::{KotlinServerKind, SettingsStore, WorktreeId};
 
 use crate::{
     KotlinDirs,
+    install::prune,
     installed::server_name,
     intellij::{EULA_NOT_ACCEPTED_REASON, LicenseOutcome},
     license::{is_license_lost_exit, is_license_lost_signal, restarts_after},
+    locks::LockRegistry,
     log::{KotlinLog, StderrMirror},
+    manifest_cache::{BuildId, KotlinLspBuilds, ManifestCache},
     resolve::{Resolved, clear_project_override, project_key, resolve, set_project_override},
 };
 
@@ -45,6 +51,10 @@ const EXPIRED_EXIT_CODE: i32 = 7;
 /// Unexpected exits closer together than this are a crash loop: the first restarts the server, the
 /// second ends it (a fallback for IntelliJ, `Failed` for kotlin-lsp).
 pub const CRASH_WINDOW: Duration = Duration::from_secs(60);
+
+/// How long the first start of a trial build must run, once added, without an unexpected exit to
+/// pass (decision D8). The same length as `CRASH_WINDOW`.
+pub const TRIAL_WINDOW: Duration = CRASH_WINDOW;
 
 /// The status text of a kotlin-lsp that crashed twice within `CRASH_WINDOW`.
 pub const CRASH_LOOP_REASON: &str = "crashed twice within a minute";
@@ -86,6 +96,111 @@ pub enum KotlinEvent {
         worktree_id: WorktreeId,
         message: String,
     },
+    /// A trial build failed its first start and was rejected: one notice line.
+    TrialFailed {
+        worktree_id: WorktreeId,
+        message: String,
+    },
+}
+
+/// The one-line notice of a rejected trial build.
+pub fn trial_failed_message(version: &str, fallback: &str) -> String {
+    format!("Kotlin: kotlin-lsp {version} failed its first start; using {fallback} again")
+}
+
+/// A trial build whose command `start_command` returned (the launched mark of decision D8). Only
+/// a start with this mark can fail the trial.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrialLaunch {
+    pub build: BuildId,
+    /// What the next start runs once this build is rejected, as the notice names it.
+    pub fallback: String,
+    /// The embedded pin's version, which the prune after a pass keeps.
+    pub pin_version: String,
+}
+
+/// A launched trial of a worktree, until it passes, fails or its server is stopped.
+struct LaunchedTrial {
+    launch: TrialLaunch,
+    /// The launched process, once it was added.
+    server_id: Option<LanguageServerId>,
+    /// Passes the trial when `TRIAL_WINDOW` has gone by since the server was added.
+    _window: Option<Task<()>>,
+}
+
+/// The trial builds rejected in this run, in any project. A start skips them even when writing
+/// `rejected` to `state.json` failed, so a failing build is never started again in this run.
+#[derive(Default)]
+pub struct RejectedTrials(Vec<BuildId>);
+
+impl Global for RejectedTrials {}
+
+impl RejectedTrials {
+    pub fn builds(cx: &App) -> Vec<BuildId> {
+        cx.try_global::<Self>()
+            .map(|rejected| rejected.0.clone())
+            .unwrap_or_default()
+    }
+}
+
+fn same_build(a: &BuildId, b: &BuildId) -> bool {
+    a.version == b.version && a.sha256.eq_ignore_ascii_case(&b.sha256)
+}
+
+/// A passed trial becomes the active build and the old active build the previous one. Runs under
+/// the state lock. Returns false when the build was rejected meanwhile (by another process).
+fn promote_trial(builds: &mut KotlinLspBuilds, build: &BuildId) -> bool {
+    if builds
+        .rejected
+        .iter()
+        .any(|rejected| same_build(rejected, build))
+    {
+        return false;
+    }
+    if builds
+        .trial
+        .as_ref()
+        .is_some_and(|trial| same_build(trial, build))
+    {
+        builds.trial = None;
+    }
+    if !builds
+        .active
+        .as_ref()
+        .is_some_and(|active| same_build(active, build))
+    {
+        if let Some(active) = builds.active.take() {
+            builds.previous = Some(active);
+        }
+        builds.active = Some(build.clone());
+    }
+    true
+}
+
+/// A failed trial goes into `rejected` and stops being the trial. Should another process have
+/// passed it meanwhile, the previous build becomes active again. Runs under the state lock.
+fn reject_trial(builds: &mut KotlinLspBuilds, build: &BuildId) {
+    if !builds
+        .rejected
+        .iter()
+        .any(|rejected| same_build(rejected, build))
+    {
+        builds.rejected.push(build.clone());
+    }
+    if builds
+        .trial
+        .as_ref()
+        .is_some_and(|trial| same_build(trial, build))
+    {
+        builds.trial = None;
+    }
+    if builds
+        .active
+        .as_ref()
+        .is_some_and(|active| same_build(active, build))
+    {
+        builds.active = builds.previous.take();
+    }
 }
 
 /// The one-line notice of a fallback.
@@ -176,6 +291,8 @@ pub struct KotlinWorktreeState {
     /// A fallback was caused by the stderr of a start that had not finished: that start's own
     /// failure, which `LspStore` reports right after the stderr, is not kotlin-lsp's.
     stale_start: bool,
+    /// The trial build this worktree's current start launched, until it passes or fails.
+    trial: Option<LaunchedTrial>,
 }
 
 /// A server that runs because the one the user asked for could not. Sticky for the session
@@ -249,6 +366,9 @@ pub struct KotlinProjectManager {
     dirs: KotlinDirs,
     log: KotlinLog,
     worktrees: BTreeMap<WorktreeId, KotlinWorktreeState>,
+    /// `state.json`, where a trial's pass or rejection is written.
+    cache: Arc<ManifestCache>,
+    locks: Arc<LockRegistry>,
     _settings_subscription: Subscription,
 }
 
@@ -259,11 +379,15 @@ impl KotlinProjectManager {
         let log = KotlinLog::new(&dirs.logs_dir);
         let _settings_subscription =
             cx.observe_global::<SettingsStore>(|this, cx| this.refresh_all(cx));
+        let locks = LockRegistry::global(cx);
+        let cache = Arc::new(ManifestCache::new(&dirs.install_root, locks.clone()));
         Self {
             host,
             dirs,
             log,
             worktrees: BTreeMap::new(),
+            cache,
+            locks,
             _settings_subscription,
         }
     }
@@ -307,6 +431,7 @@ impl KotlinProjectManager {
                 gradle_error: None,
                 crashes: Vec::new(),
                 stale_start: false,
+                trial: None,
             },
         );
         cx.notify();
@@ -332,6 +457,8 @@ impl KotlinProjectManager {
         let requested = resolve(&self.dirs.state_dir, &state.root, worktree_id, cx);
         state.requested = requested;
         state.stale_start = false;
+        // A new start ends the launched mark of the last one; this start sets its own.
+        state.trial = None;
         // A fallback only stands in for IntelliJ; once kotlin-lsp is asked for there is none.
         if requested.server != KotlinServerKind::Intellij {
             state.fallback = None;
@@ -755,6 +882,152 @@ impl KotlinProjectManager {
         cx.notify();
     }
 
+    /// `start_command` returned the command of the trial build `launch` for the worktree (after
+    /// the JDK, expiry and install checks passed). From here on, until the trial passes, a start
+    /// failure or an exit of this process fails the trial.
+    pub fn trial_launched(
+        &mut self,
+        worktree_id: WorktreeId,
+        launch: TrialLaunch,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return;
+        };
+        self.log
+            .line(&format!("trial: {} started", launch.build.version));
+        state.trial = Some(LaunchedTrial {
+            launch,
+            server_id: None,
+            _window: None,
+        });
+    }
+
+    /// The trial build the worktree's current start launched, while it is neither passed nor
+    /// failed.
+    pub fn launched_trial(&self, worktree_id: WorktreeId) -> Option<&BuildId> {
+        self.worktree(worktree_id)?
+            .trial
+            .as_ref()
+            .map(|trial| &trial.launch.build)
+    }
+
+    /// `TRIAL_WINDOW` went by since the trial's server was added: if it still runs, it passed.
+    fn trial_window_ended(
+        &mut self,
+        worktree_id: WorktreeId,
+        server_id: LanguageServerId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return;
+        };
+        let current = state.trial.as_ref().is_some_and(|trial| {
+            trial.server_id == Some(server_id) && state.server_id == Some(server_id)
+        });
+        if !current {
+            return;
+        }
+        let Some(trial) = state.trial.take() else {
+            return;
+        };
+        self.trial_passed(trial.launch, cx);
+    }
+
+    /// The trial passed: under the state lock it becomes the active build and the old active build
+    /// the previous one; then the builds nothing refers to any more are pruned.
+    fn trial_passed(&mut self, launch: TrialLaunch, cx: &mut Context<Self>) {
+        let version = launch.build.version.clone();
+        self.log.line(&format!("trial: {version} passed"));
+        let (cache, locks, log) = (self.cache.clone(), self.locks.clone(), self.log.clone());
+        let server_dir = self
+            .dirs
+            .install_root
+            .join(server_name(KotlinServerKind::KotlinLsp));
+        cx.background_spawn(async move {
+            match cache
+                .with_state(|state| promote_trial(&mut state.kotlin_lsp, &launch.build))
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    log.line(&format!(
+                        "trial: {version} was rejected meanwhile; not made active"
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    // The trial stays pending and runs again at the next start.
+                    log.line(&format!("trial: {version} pass not recorded: {error:#}"));
+                    return;
+                }
+            }
+            match prune(
+                &cache,
+                &locks,
+                &server_dir,
+                Some(&launch.pin_version),
+                SystemTime::now(),
+            )
+            .await
+            {
+                Ok(pruned) => {
+                    for removed in &pruned.removed {
+                        log.line(&format!("prune: removed kotlin-lsp {removed}"));
+                    }
+                }
+                Err(error) => ::log::warn!("prune: skipped: {error:#}"),
+            }
+        })
+        .detach();
+    }
+
+    /// The launched trial failed for `reason`: it is rejected (in this run at once, in
+    /// `state.json` under the state lock), one notice shows, and the worktree restarts with the
+    /// resolver's next choice. The crash-restart policy does not apply.
+    fn fail_trial(
+        &mut self,
+        worktree_id: WorktreeId,
+        launch: TrialLaunch,
+        reason: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let version = launch.build.version.clone();
+        self.log.line(&format!(
+            "trial: {version} failed: {reason}; using {}",
+            launch.fallback
+        ));
+        let rejected = &mut cx.default_global::<RejectedTrials>().0;
+        if !rejected
+            .iter()
+            .any(|rejected| same_build(rejected, &launch.build))
+        {
+            rejected.push(launch.build.clone());
+        }
+        let (cache, log, build) = (self.cache.clone(), self.log.clone(), launch.build.clone());
+        cx.background_spawn(async move {
+            if let Err(error) = cache
+                .with_state(|state| reject_trial(&mut state.kotlin_lsp, &build))
+                .await
+            {
+                log.line(&format!(
+                    "trial: {} rejection not recorded: {error:#}",
+                    build.version
+                ));
+            }
+        })
+        .detach();
+        if let Some(state) = self.worktrees.get_mut(&worktree_id) {
+            state.crashes.clear();
+            state.pending.clear();
+        }
+        cx.emit(KotlinEvent::TrialFailed {
+            worktree_id,
+            message: trial_failed_message(&version, &launch.fallback),
+        });
+        self.restart(worktree_id, cx);
+    }
+
     fn worktree_of_server(&self, server_id: LanguageServerId) -> Option<WorktreeId> {
         self.worktrees
             .iter()
@@ -775,7 +1048,28 @@ impl KotlinProjectManager {
         state.server_id = Some(server_id);
         state.pending.clear();
         state.stale_start = false;
+        let starts_window = state
+            .trial
+            .as_ref()
+            .is_some_and(|trial| trial.server_id.is_none());
         self.set_status(worktree_id, Some(ServerStatus::Ready), cx);
+        if starts_window {
+            let window = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TRIAL_WINDOW).await;
+                this.update(cx, |this, cx| {
+                    this.trial_window_ended(worktree_id, server_id, cx)
+                })
+                .ok();
+            });
+            if let Some(trial) = self
+                .worktrees
+                .get_mut(&worktree_id)
+                .and_then(|state| state.trial.as_mut())
+            {
+                trial.server_id = Some(server_id);
+                trial._window = Some(window);
+            }
+        }
     }
 
     pub fn server_removed(&mut self, server_id: LanguageServerId, cx: &mut Context<Self>) {
@@ -789,6 +1083,21 @@ impl KotlinProjectManager {
         state.pending.clear();
         state.io_subscription = None;
         state.stderr_mirror = None;
+        // A stop or restart is never a trial failure: the trial stays pending for the next start.
+        if state
+            .trial
+            .as_ref()
+            .is_some_and(|trial| trial.server_id == Some(server_id))
+            && let Some(trial) = state.trial.take()
+        {
+            self.log.line(&format!(
+                "trial: {} stopped before its window ended; still pending",
+                trial.launch.build.version
+            ));
+        }
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return;
+        };
         // A restart already says `starting`, and a failure stays failed.
         if matches!(
             state.status,
@@ -835,6 +1144,16 @@ impl KotlinProjectManager {
             exit_status.map_or_else(|| "unknown status".into(), |status| status.to_string());
         let code = exit_status.and_then(|status| status.code());
         self.log.line(&format!("exit {detail}"));
+
+        // Any exit of a launched trial within its window, code 7 included, rejects the build; the
+        // crash-restart policy and the expired mark are for builds that already passed.
+        let trial = state
+            .trial
+            .take_if(|trial| trial.server_id == Some(server_id));
+        if let Some(trial) = trial {
+            self.fail_trial(worktree_id, trial.launch, &format!("exited ({detail})"), cx);
+            return;
+        }
 
         if code == Some(EXPIRED_EXIT_CODE) {
             if let Some(state) = self.worktrees.get_mut(&worktree_id)
@@ -914,6 +1233,17 @@ impl KotlinProjectManager {
         if std::mem::take(&mut state.stale_start) {
             self.log
                 .line(&format!("start failed after the fallback: {error}"));
+            return;
+        }
+        // The launched trial's process did not spawn or did not answer `initialize`.
+        let trial = state.trial.take_if(|trial| trial.server_id.is_none());
+        if let Some(trial) = trial {
+            self.fail_trial(
+                worktree_id,
+                trial.launch,
+                &format!("failed to start: {error}"),
+                cx,
+            );
             return;
         }
         if !matches!(state.status, None | Some(ServerStatus::Starting)) {
@@ -1141,6 +1471,15 @@ impl KotlinProjectManager {
                     EXPIRED_MESSAGE,
                     cx,
                 );
+            } else if let Some(state) = self.worktrees.get_mut(&worktree_id)
+                && state.trial.is_some()
+            {
+                // An expired trial is the trial's failure, not the end of kotlin-lsp for the run.
+                // Its own start failure or exit 7 follows and is not counted again.
+                if let Some(trial) = state.trial.take_if(|trial| trial.server_id.is_none()) {
+                    state.stale_start = true;
+                    self.fail_trial(worktree_id, trial.launch, "expired", cx);
+                }
             } else {
                 self.mark_expired(worktree_id, effective, cx);
             }
@@ -2595,5 +2934,288 @@ mod tests {
             ]
         );
         assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
+    }
+
+    const TRIAL: &str = "263.2.0";
+    const ACTIVE: &str = "263.1.0";
+    const PREVIOUS: &str = "263.0.0";
+    const PIN: &str = "262.0.0";
+
+    fn build_id(version: &str) -> BuildId {
+        BuildId {
+            version: version.into(),
+            sha256: format!("{:0>64}", version.replace('.', "")),
+        }
+    }
+
+    fn trial_launch() -> TrialLaunch {
+        TrialLaunch {
+            build: build_id(TRIAL),
+            fallback: format!("kotlin-lsp {ACTIVE}"),
+            pin_version: PIN.into(),
+        }
+    }
+
+    impl Harness {
+        /// `state.json`, read and written the way another process would.
+        fn cache(&self) -> ManifestCache {
+            ManifestCache::new(
+                &self.dirs.install_root,
+                crate::locks::tests::thread_registry(),
+            )
+        }
+
+        fn builds(&self) -> KotlinLspBuilds {
+            self.cache().read_state().kotlin_lsp
+        }
+
+        /// Active, previous and a pending trial, each installed, plus an older build and the pin.
+        fn seed_trial(&self) {
+            futures::executor::block_on(self.cache().with_state(|state| {
+                state.kotlin_lsp.active = Some(build_id(ACTIVE));
+                state.kotlin_lsp.previous = Some(build_id(PREVIOUS));
+                state.kotlin_lsp.trial = Some(build_id(TRIAL));
+            }))
+            .unwrap();
+            let long_ago = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+            for version in ["261.0.0", PIN, PREVIOUS, ACTIVE, TRIAL] {
+                let dir = self.server_dir().join(version);
+                fs::create_dir_all(&dir).unwrap();
+                let marker = fs::File::create(dir.join(crate::installed::MARKER)).unwrap();
+                marker.set_modified(long_ago).unwrap();
+            }
+        }
+
+        fn server_dir(&self) -> PathBuf {
+            self.dirs.install_root.join("kotlin-lsp")
+        }
+
+        fn versions(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.server_dir())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| !name.starts_with('.'))
+                .collect();
+            names.sort();
+            names
+        }
+
+        /// A start that `start_command` answered with the trial's command; the server is added
+        /// when `added`.
+        fn trial_start(&self, added: bool, cx: &mut TestAppContext) -> LanguageServerId {
+            let server = self
+                .manager
+                .update(cx, |manager, cx| manager.begin_start(worktree(), cx))
+                .unwrap();
+            self.manager.update(cx, |manager, cx| {
+                manager.trial_launched(worktree(), trial_launch(), cx)
+            });
+            let server_id = self.host.0.record_start(server);
+            if added {
+                self.manager.update(cx, |manager, cx| {
+                    manager.server_added(server_id, worktree(), cx)
+                });
+            }
+            server_id
+        }
+
+        fn crash_count(&self, cx: &mut TestAppContext) -> usize {
+            self.manager
+                .read_with(cx, |manager, _| manager.crash_count(worktree()))
+        }
+
+        fn launched_trial(&self, cx: &mut TestAppContext) -> Option<BuildId> {
+            self.manager
+                .read_with(cx, |manager, _| manager.launched_trial(worktree()).cloned())
+        }
+
+        /// Every trial notice the manager emits from now on.
+        fn trial_notices(&self, cx: &mut TestAppContext) -> Rc<RefCell<Vec<String>>> {
+            let notices = Rc::new(RefCell::new(Vec::new()));
+            cx.update(|cx| {
+                let notices = notices.clone();
+                cx.subscribe(&self.manager, move |_, event: &KotlinEvent, _| {
+                    if let KotlinEvent::TrialFailed { message, .. } = event {
+                        notices.borrow_mut().push(message.clone());
+                    }
+                })
+                .detach();
+            });
+            notices
+        }
+    }
+
+    #[gpui::test]
+    fn test_a_trial_that_runs_through_its_window_passes_and_prunes(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.seed_trial();
+        let notices = harness.trial_notices(cx);
+        harness.trial_start(true, cx);
+
+        cx.executor()
+            .advance_clock(TRIAL_WINDOW - Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(harness.launched_trial(cx), Some(build_id(TRIAL)));
+        assert_eq!(harness.builds().active, Some(build_id(ACTIVE)));
+
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(harness.launched_trial(cx), None);
+        assert_eq!(
+            harness.builds(),
+            KotlinLspBuilds {
+                active: Some(build_id(TRIAL)),
+                previous: Some(build_id(ACTIVE)),
+                trial: None,
+                rejected: Vec::new(),
+            }
+        );
+        // The old previous build and the stray one are gone; the pin stays.
+        assert_eq!(harness.versions(), [PIN, ACTIVE, TRIAL]);
+        assert!(notices.borrow().is_empty());
+        assert_eq!(harness.events(), ["start kotlin-lsp"]);
+        let log = harness.log();
+        assert!(log.contains("trial: 263.2.0 started"), "{log}");
+        assert!(log.contains("trial: 263.2.0 passed"), "{log}");
+        assert!(log.contains("prune: removed kotlin-lsp 263.0.0"), "{log}");
+    }
+
+    /// What every rejection leaves: the build in `rejected` (on disk and for this run), the active
+    /// build unchanged, one notice, one restart, no crash counted and nothing marked expired.
+    fn assert_rejected(harness: &Harness, notices: &RefCell<Vec<String>>, cx: &mut TestAppContext) {
+        cx.run_until_parked();
+        assert_eq!(harness.launched_trial(cx), None);
+        assert_eq!(
+            harness.builds(),
+            KotlinLspBuilds {
+                active: Some(build_id(ACTIVE)),
+                previous: Some(build_id(PREVIOUS)),
+                trial: None,
+                rejected: vec![build_id(TRIAL)],
+            }
+        );
+        assert_eq!(
+            cx.update(|cx| RejectedTrials::builds(cx)),
+            [build_id(TRIAL)]
+        );
+        assert_eq!(
+            *notices.borrow(),
+            [trial_failed_message(TRIAL, &format!("kotlin-lsp {ACTIVE}"))]
+        );
+        assert_eq!(
+            *notices.borrow(),
+            ["Kotlin: kotlin-lsp 263.2.0 failed its first start; using kotlin-lsp 263.1.0 again"]
+        );
+        assert_eq!(
+            harness.events(),
+            ["start kotlin-lsp", "stop", "start kotlin-lsp"]
+        );
+        assert_eq!(harness.status(cx), Some(ServerStatus::Ready));
+        assert_eq!(harness.crash_count(cx), 0);
+        assert!(!harness.expired(cx));
+
+        // The restarted server is no trial: the window passes nothing, and no second notice shows.
+        cx.executor().advance_clock(TRIAL_WINDOW * 2);
+        cx.run_until_parked();
+        assert_eq!(harness.builds().active, Some(build_id(ACTIVE)));
+        assert_eq!(notices.borrow().len(), 1);
+        assert!(harness.log().contains("trial: 263.2.0 failed: "));
+    }
+
+    #[gpui::test]
+    fn test_an_exit_two_seconds_after_start_rejects_the_trial(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.seed_trial();
+        let notices = harness.trial_notices(cx);
+        let server_id = harness.trial_start(true, cx);
+        cx.executor().advance_clock(Duration::from_secs(2));
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_terminated(server_id, exited_with(1), cx)
+        });
+        assert_rejected(&harness, &notices, cx);
+    }
+
+    #[gpui::test]
+    fn test_a_failed_start_of_the_launched_trial_rejects_it(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.seed_trial();
+        let notices = harness.trial_notices(cx);
+        harness.trial_start(false, cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_start_failed(worktree(), "initialize timed out", cx)
+        });
+        // The same failure reported again is not a second rejection.
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_start_failed(worktree(), "initialize timed out", cx)
+        });
+        assert_rejected(&harness, &notices, cx);
+    }
+
+    #[gpui::test]
+    fn test_an_expired_exit_within_the_window_rejects_the_trial(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.seed_trial();
+        let notices = harness.trial_notices(cx);
+        let server_id = harness.trial_start(true, cx);
+        cx.executor().advance_clock(Duration::from_secs(30));
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_terminated(server_id, exited_with(EXPIRED_EXIT_CODE), cx)
+        });
+        assert_rejected(&harness, &notices, cx);
+    }
+
+    #[gpui::test]
+    fn test_an_expired_message_while_the_trial_starts_rejects_it_once(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.seed_trial();
+        let notices = harness.trial_notices(cx);
+        harness.trial_start(false, cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.startup_stderr(worktree(), "This build of kotlin-server has expired.\n", cx);
+            // The start failure that follows the message belongs to the rejected trial.
+            manager.server_start_failed(worktree(), "server exited", cx);
+        });
+        assert_rejected(&harness, &notices, cx);
+    }
+
+    #[gpui::test]
+    fn test_a_restart_within_the_window_does_not_reject_the_trial(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.seed_trial();
+        let notices = harness.trial_notices(cx);
+        let server_id = harness.trial_start(true, cx);
+        cx.executor().advance_clock(Duration::from_secs(10));
+        // `kotlin: restart server`: the store stops the server and reports it removed.
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.server_removed(server_id, cx));
+        cx.executor().advance_clock(TRIAL_WINDOW);
+        cx.run_until_parked();
+        assert_eq!(harness.launched_trial(cx), None);
+        // Neither rejected nor passed: the trial stays pending for the next start.
+        assert_eq!(harness.builds().trial, Some(build_id(TRIAL)));
+        assert_eq!(harness.builds().active, Some(build_id(ACTIVE)));
+        assert!(harness.builds().rejected.is_empty());
+        assert!(cx.update(|cx| RejectedTrials::builds(cx)).is_empty());
+        assert!(notices.borrow().is_empty());
+        assert!(harness.log().contains("still pending"));
+    }
+
+    /// The crash-restart policy is bypassed only while a launched trial is in its window: a start
+    /// without a launched trial crashes and restarts once, as before.
+    #[gpui::test]
+    fn test_only_a_launched_trial_skips_the_crash_policy(cx: &mut TestAppContext) {
+        let harness = setup(cx);
+        harness.seed_trial();
+        let notices = harness.trial_notices(cx);
+        harness.first_start(cx);
+        harness.manager.update(cx, |manager, cx| {
+            manager.server_terminated(LanguageServerId(1), exited_with(1), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(harness.crash_count(cx), 1);
+        assert!(notices.borrow().is_empty());
+        assert!(harness.builds().rejected.is_empty());
+        assert_eq!(harness.builds().trial, Some(build_id(TRIAL)));
     }
 }
