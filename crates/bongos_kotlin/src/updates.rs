@@ -1849,7 +1849,9 @@ mod tests {
     /// digest is recorded as the trial, and a stored manifest drops the rejections it no longer
     /// lists while the listed rejected build stays rejected.
     #[gpui::test]
-    fn test_a_trial_of_the_same_version_with_a_new_digest_is_eligible_again(cx: &mut TestAppContext) {
+    fn test_a_trial_of_the_same_version_with_a_new_digest_is_eligible_again(
+        cx: &mut TestAppContext,
+    ) {
         let id = |version: &str, sha256: &str| BuildId {
             version: version.into(),
             sha256: sha256.into(),
