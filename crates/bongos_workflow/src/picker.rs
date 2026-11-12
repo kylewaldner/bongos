@@ -11,12 +11,12 @@ use std::collections::BTreeMap;
 
 use bongos_work::WorkStore;
 use bongos_work_model::store::WorkTree;
-use gpui::{AppContext as _, Context, Window};
-use settings::Settings as _;
-use workspace::Workspace;
 use bongos_workflow_model::inputs::resolve;
 use bongos_workflow_model::layers::{self, DEFINITION_FILE};
 use bongos_workflow_model::{InputValue, LayerDirs, parse};
+use gpui::{AppContext as _, Context, Window};
+use settings::Settings as _;
+use workspace::Workspace;
 
 use crate::WorkflowsSettings;
 use crate::actions::show_toast;
@@ -122,7 +122,10 @@ pub enum Choice {
     /// Enter is refused until these inputs have a value.
     Blocked(Vec<String>),
     /// Ask for a new value of this input, starting from `initial`.
-    Ask { name: String, initial: String },
+    Ask {
+        name: String,
+        initial: String,
+    },
 }
 
 /// A workflow chosen for a task, with the inputs overridden so far.
@@ -187,12 +190,19 @@ impl Review {
         let mut rows = vec![(Row::Start, start)];
         for input in &summary.inputs {
             let value = match &input.value {
-                Some(value) => value.to_text().split_whitespace().collect::<Vec<_>>().join(" "),
+                Some(value) => value
+                    .to_text()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 None => "(no value)".to_string(),
             };
             rows.push((
                 Row::Override(input.name.clone()),
-                format!("Override input {}: {value} [from {}]", input.name, input.source),
+                format!(
+                    "Override input {}: {value} [from {}]",
+                    input.name, input.source
+                ),
             ));
         }
         rows
@@ -264,7 +274,11 @@ pub(crate) fn run_picker(
     cx: &mut Context<Workspace>,
 ) {
     let Some(tree) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()) else {
-        show_toast(workspace, "The task tree is not loaded yet.".to_string(), cx);
+        show_toast(
+            workspace,
+            "The task tree is not loaded yet.".to_string(),
+            cx,
+        );
         return;
     };
     let picker = Picker::new(
@@ -293,7 +307,14 @@ pub(crate) fn run_picker(
             let Some(name) = names.get(index).cloned() else {
                 return;
             };
-            probe_then_review(engine, Review::new(task_id, name), true, workspace, window, cx);
+            probe_then_review(
+                engine,
+                Review::new(task_id, name),
+                true,
+                workspace,
+                window,
+                cx,
+            );
         }),
         window,
         cx,
@@ -349,7 +370,11 @@ fn review_step(
     cx: &mut Context<Workspace>,
 ) {
     let Some(tree) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()) else {
-        show_toast(workspace, "The task tree is not loaded yet.".to_string(), cx);
+        show_toast(
+            workspace,
+            "The task tree is not loaded yet.".to_string(),
+            cx,
+        );
         return;
     };
     let programs = WorkflowsSettings::get_global(cx).programs.clone();

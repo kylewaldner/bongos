@@ -5,8 +5,8 @@
 
 use bongos_workflow_model::layers::DEFINITION_FILE;
 
-use super::*;
 use super::task_link_tests::linked;
+use super::*;
 use crate::picker::{Choice, Picker, Review, Row, candidates, todo_workflow};
 use crate::runner_claude::AgentDefaults;
 use crate::runner_program::ProgramSettings;
@@ -121,7 +121,10 @@ fn a_different_pick_leaves_the_task_as_it_is(cx: &mut TestAppContext) {
 
     // Starting it runs `two` and still leaves the todo's own `workflow` as it was.
     let run = linked.start(review.request(), cx);
-    assert_eq!(linked.engine.lifecycle().record(&run).unwrap().workflow, "two");
+    assert_eq!(
+        linked.engine.lifecycle().record(&run).unwrap().workflow,
+        "two"
+    );
     let todos_after = linked.writes.leaf().file.unwrap().todos;
     let workflows = |todos: &[bongos_work_model::Todo]| -> Vec<Option<String>> {
         todos.iter().map(|todo| todo.workflow.clone()).collect()
@@ -143,10 +146,17 @@ fn a_missing_input_blocks_enter_until_it_is_supplied(cx: &mut TestAppContext) {
 
     let summary = review_summary(&world, &review, &sandbox);
     assert!(!summary.can_start());
-    assert_eq!(review.choose(&Row::Start, &summary), Choice::Blocked(vec!["pr".to_string()]));
+    assert_eq!(
+        review.choose(&Row::Start, &summary),
+        Choice::Blocked(vec!["pr".to_string()])
+    );
     let rows = review.rows(&summary);
     assert!(rows[0].1.contains("blocked, missing: pr"), "{rows:?}");
-    assert_eq!(review.first_row(&summary), 1, "the missing input is highlighted first");
+    assert_eq!(
+        review.first_row(&summary),
+        1,
+        "the missing input is highlighted first"
+    );
     assert_eq!(
         review.choose(&Row::Override("pr".to_string()), &summary),
         Choice::Ask {
@@ -159,7 +169,11 @@ fn a_missing_input_blocks_enter_until_it_is_supplied(cx: &mut TestAppContext) {
     review.set_override("pr", " https://example.com/pr/9 ");
     let summary = review_summary(&world, &review, &sandbox);
     assert!(summary.can_start());
-    assert!(summary.text().contains("pr: https://example.com/pr/9 [from override]"));
+    assert!(
+        summary
+            .text()
+            .contains("pr: https://example.com/pr/9 [from override]")
+    );
     let Choice::Start(request) = review.choose(&Row::Start, &summary) else {
         panic!("Enter starts once the input has a value");
     };
@@ -204,5 +218,11 @@ fn the_summary_dump_lists_permissions_sandbox_caps_and_inputs() {
     let sandboxed = review_summary(&world, &review, &SandboxState::Sandboxed).text();
     assert!(sandboxed.contains("sandbox: sandboxed"));
     // The definition file is only read.
-    assert!(world.profile().join("needspr").join(DEFINITION_FILE).exists());
+    assert!(
+        world
+            .profile()
+            .join("needspr")
+            .join(DEFINITION_FILE)
+            .exists()
+    );
 }
