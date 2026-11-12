@@ -5,6 +5,9 @@
 //! ends the node with "wait timed out". `elapsed` and `give_up` on the request model that same
 //! bound here, so each condition has a [`WaitOutcome::TimedOut`] case.
 //!
+//! A hung `gh` or command is not bounded here: `wait` sets no timeout of its own, so the program
+//! runner's `max_minutes` cap (runner_program.rs) stops it.
+//!
 //! Conditions (`with.condition`):
 //! - `ci_green`: `gh pr checks <pr> --json bucket`. Every bucket `pass` or `skipping` is
 //!   satisfied; any `fail` or `cancel` fails the wait at once with the reason (a red check will
@@ -63,7 +66,8 @@ pub struct WaitRequest {
     pub give_up: Option<Duration>,
 }
 
-/// The `polls` value of the node's `result` field while the wait is not yet over.
+/// The `result` value strings a pass reports: `waiting` is what the runner's `polls` setting
+/// matches to sleep and poll again, `satisfied` ends the node successfully.
 pub const WAITING: &str = "waiting";
 pub const SATISFIED: &str = "satisfied";
 
@@ -166,14 +170,18 @@ async fn ci_green(request: &WaitRequest) -> WaitOutcome {
             WaitOutcome::Satisfied
         };
     }
+    // With no checks yet, gh prints "no checks reported" and exits 1: CI has not started.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.to_lowercase().contains("no checks reported")
+        || stdout.to_lowercase().contains("no checks reported")
+    {
+        return WaitOutcome::Waiting;
+    }
     match output.status.code() {
         Some(0) => WaitOutcome::Satisfied,
         Some(8) => WaitOutcome::Waiting,
         Some(1) => WaitOutcome::Failed(format!("checks failed on {}", request.pr)),
-        _ => WaitOutcome::Failed(format!(
-            "gh pr checks failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
+        _ => WaitOutcome::Failed(format!("gh pr checks failed: {}", stderr.trim())),
     }
 }
 

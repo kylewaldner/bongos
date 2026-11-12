@@ -29,6 +29,19 @@ fn fake_gh(stdout: &str, code: i32) -> (TempDir, PathBuf) {
     (temp, script)
 }
 
+/// Like [`fake_gh`], but also prints `stderr`.
+fn fake_gh_stderr(stdout: &str, stderr: &str, code: i32) -> (TempDir, PathBuf) {
+    let (temp, script) = fake_gh(stdout, code);
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\ncat >&2 <<'EOF'\n{stderr}\nEOF\nexit {code}\n"
+        ),
+    )
+    .unwrap();
+    (temp, script)
+}
+
 fn request(condition: WaitCondition, gh: PathBuf) -> WaitRequest {
     WaitRequest {
         condition,
@@ -137,4 +150,49 @@ async fn deploy_cases(cx: &mut TestAppContext) {
     assert!(is_timed_out(&wait(&timed_out(with_command.clone())).await));
     with_command.command = vec!["true".to_string()];
     assert_eq!(wait(&with_command).await, WaitOutcome::Satisfied);
+}
+
+#[gpui::test]
+async fn edge_cases(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    // No checks yet: gh exits 1 with "no checks reported" on stderr; that is waiting.
+    let (_a, gh) = fake_gh_stderr("", "no checks reported on the 'x' branch", 1);
+    assert_eq!(
+        wait(&request(WaitCondition::CiGreen, gh)).await,
+        WaitOutcome::Waiting
+    );
+    let (_b, gh) = fake_gh_stderr("", "No Checks Reported", 1);
+    assert_eq!(
+        wait(&request(WaitCondition::CiGreen, gh)).await,
+        WaitOutcome::Waiting
+    );
+    // A cancelled check fails.
+    let (_c, gh) = fake_gh(r#"[{"bucket":"cancel"}]"#, 1);
+    assert!(matches!(
+        wait(&request(WaitCondition::CiGreen, gh)).await,
+        WaitOutcome::Failed(_)
+    ));
+    // A draft pull request is waiting.
+    let (_d, gh) = fake_gh(r#"{"state":"DRAFT"}"#, 0);
+    assert_eq!(
+        wait(&request(WaitCondition::PrMerged, gh.clone())).await,
+        WaitOutcome::Waiting
+    );
+    // Bad pull request names are refused.
+    for pr in ["-x", ""] {
+        let mut bad = request(WaitCondition::PrMerged, gh.clone());
+        bad.pr = pr.to_string();
+        assert!(matches!(wait(&bad).await, WaitOutcome::Failed(_)));
+        let mut bad = request(WaitCondition::CiGreen, gh.clone());
+        bad.pr = pr.to_string();
+        assert!(matches!(wait(&bad).await, WaitOutcome::Failed(_)));
+    }
+    // A command wait with no command fails.
+    for condition in [WaitCondition::Command] {
+        let none = request(condition, gh.clone());
+        assert_eq!(
+            wait(&none).await,
+            WaitOutcome::Failed("the wait declares no command".to_string())
+        );
+    }
 }
