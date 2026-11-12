@@ -28,7 +28,7 @@ collections.workspace = true
 editor.workspace = true
 futures.workspace = true
 gpui.workspace = true
-http_client.workspace = true
+http_client = { workspace = true, features = ["github-download"] }
 language.workspace = true
 log.workspace = true
 lsp.workspace = true
