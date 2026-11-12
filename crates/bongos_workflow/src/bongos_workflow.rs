@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod outcomes;
 pub mod picker;
 pub mod process;
+pub mod run_view;
 pub mod runner_claude;
 pub mod runner_codex;
 pub mod runner_program;

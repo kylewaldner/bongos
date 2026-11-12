@@ -184,7 +184,7 @@ fn register_run_commands(workspace: &mut Workspace) {
 
 /// Registers the handler of `A`: the off toast while `workflows.enabled` is false, else `then`
 /// with the engine.
-fn on<A: Action>(
+pub(crate) fn on<A: Action>(
     workspace: &mut Workspace,
     then: impl Fn(WorkflowEngine, &mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) {
@@ -200,15 +200,18 @@ fn on<A: Action>(
 }
 
 /// [`on`] for a command on a run: the active run of the task at point, or the only active run.
-fn on_run<A: Action>(
+pub(crate) fn on_run<A: Action>(
     workspace: &mut Workspace,
     then: impl Fn(WorkflowEngine, RunId, &mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) {
     on::<A>(workspace, move |engine, workspace, window, cx| {
+        // A run view in front is the run asked about; else the task at point.
+        let in_view = crate::run_view::active_run(workspace, cx);
         let at_point = bongos_work::task_at_point(workspace, window, cx);
-        let run = match at_point {
-            Some(task_id) => engine.active_run_id(&task_id),
-            None => match engine.active_runs().as_slice() {
+        let run = match (in_view, at_point) {
+            (Some(run), _) => Some(run),
+            (None, Some(task_id)) => engine.active_run_id(&task_id),
+            (None, None) => match engine.active_runs().as_slice() {
                 [only] => Some(only.clone()),
                 _ => None,
             },
@@ -236,7 +239,7 @@ fn report(workspace: &mut Workspace, result: Result<&str, Refusal>, cx: &mut Con
 }
 
 /// Opens `path` as a workspace of this window and activates it (03 D21's way of focusing).
-fn open_worktree(path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
+pub(crate) fn open_worktree(path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
         return;
     };
