@@ -552,8 +552,10 @@ impl KotlinUpdates {
         cx: &mut Context<Self>,
     ) -> Task<Refresh> {
         let Some(url) = self.url.clone() else {
-            self.info = UpdatesInfo::Off;
-            cx.notify();
+            if self.info != UpdatesInfo::Off {
+                self.info = UpdatesInfo::Off;
+                cx.notify();
+            }
             if force || !self.off_logged {
                 if self.raw_url.trim().is_empty() {
                     self.checker.log.manifest_off();
@@ -579,6 +581,7 @@ impl KotlinUpdates {
         let previous_error = self.last_error.clone();
         let (sender, receiver) = futures::channel::oneshot::channel();
         cx.spawn(async move |this, cx| {
+            let checked_url = url.clone();
             let (result, error, info) = cx
                 .background_spawn(async move {
                     let result = checker.check(url.clone(), force).await;
@@ -595,8 +598,12 @@ impl KotlinUpdates {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.last_error = error;
-                this.info = info;
+                // Apply the result only while the URL is still the one that was checked; a
+                // cleared or changed URL keeps the state its own check or the Off branch set.
+                if this.url.as_ref() == Some(&checked_url) {
+                    this.last_error = error;
+                    this.info = info;
+                }
                 this.running = false;
                 cx.notify();
                 this.maybe_download(cx);
@@ -1669,6 +1676,29 @@ mod tests {
         assert_eq!(result, Refresh::Off);
         assert!(result.message().contains("off"));
         assert!(harness.server.urls().is_empty());
+        assert_eq!(
+            updates.read_with(cx, |updates, _| updates.status_info()),
+            UpdatesInfo::Off
+        );
+    }
+
+    #[gpui::test]
+    fn test_clearing_the_url_during_a_check_keeps_the_menu_off(cx: &mut TestAppContext) {
+        let harness = Harness::new(cx);
+        harness.server.serve(A, Route::Stall);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        assert_eq!(harness.fetches(), 1);
+
+        set_user(cx, "{}");
+        cx.run_until_parked();
+        assert_eq!(
+            updates.read_with(cx, |updates, _| updates.status_info()),
+            UpdatesInfo::Off
+        );
+        advance(cx, FETCH_TIMEOUT);
+        cx.run_until_parked();
         assert_eq!(
             updates.read_with(cx, |updates, _| updates.status_info()),
             UpdatesInfo::Off
