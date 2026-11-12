@@ -12,6 +12,8 @@ mod emacs_keymap_tests;
 mod linear_keymap_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
+#[cfg(test)]
+mod mark_keymap_tests;
 mod migrate;
 #[cfg(test)]
 mod minibuffer_keymap_tests;

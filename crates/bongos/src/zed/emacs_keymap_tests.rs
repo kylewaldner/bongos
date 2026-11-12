@@ -199,6 +199,14 @@ const EDITOR_KEYS: &[(&str, &str)] = &[
     ("ctrl-=", "emacs::ExpandRegion"),
     ("ctrl--", "emacs::ContractRegion"),
     ("ctrl-y", "editor::Paste"),
+    ("ctrl-space", "emacs::SetMarkCommand"),
+    ("ctrl-@", "emacs::SetMarkCommand"),
+    ("ctrl-.", "emacs::SetMarkCommand"),
+    ("ctrl-x ctrl-space", "emacs::PopMark"),
+    ("ctrl-x ctrl-x", "emacs::ExchangePointAndMark"),
+    ("alt-<", "emacs::BeginningOfBuffer"),
+    ("alt->", "emacs::EndOfBuffer"),
+    ("alt-.", "emacs::XrefFindDefinitions"),
 ];
 
 /// Keys where the Emacs action replaces Zed's inside editors, with Zed's Linux action in an
@@ -297,10 +305,12 @@ async fn every_emacs_key_resolves_in_an_editor(cx: &mut gpui::TestAppContext) {
         let keymap = Keymap::new(load_all(&platform, true, cx));
         for (input, action) in EDITOR_KEYS {
             for contexts in [&EDITOR, &MARK_MODE_EDITOR] {
-                // Mark mode extends the region with Zed's line motions.
+                // Mark mode extends the region with Zed's line and buffer motions.
                 let action = match (*input, contexts == &MARK_MODE_EDITOR) {
                     ("ctrl-a", true) => &"editor::SelectToBeginningOfLine",
                     ("ctrl-e", true) => &"editor::SelectToEndOfLine",
+                    ("alt-<", true) => &"editor::SelectToBeginning",
+                    ("alt->", true) => &"editor::SelectToEnd",
                     _ => action,
                 };
                 let (names, pending) = resolve(&keymap, input, contexts);
@@ -332,19 +342,10 @@ async fn the_key_table_covers_every_emacs_action(cx: &mut gpui::TestAppContext) 
     super::tests::init_keymap_test(cx);
     cx.update(|cx| {
         let names = cx.all_action_names();
-        // Every emacs action has a key; the cursor toggle is left unbound on purpose.
-        // The mark commands and the jumps that push the mark are registered unbound until
-        // their keys are added.
-        const UNBOUND: [&str; 8] = [
-            "emacs::SetMarkCommand",
-            "emacs::ExchangePointAndMark",
-            "emacs::PopMark",
-            "emacs::PopGlobalMark",
-            "emacs::BeginningOfBuffer",
-            "emacs::EndOfBuffer",
-            "emacs::XrefFindDefinitions",
-            "emacs::XrefFindImplementations",
-        ];
+        // Every emacs action has an editor key; the cursor toggle is left unbound on purpose.
+        // `pop-global-mark` is a workspace key (`mark_keymap_tests`) and the implementations
+        // jump stays in the palette.
+        const UNBOUND: [&str; 2] = ["emacs::PopGlobalMark", "emacs::XrefFindImplementations"];
         for name in names
             .iter()
             .filter(|name| name.starts_with("emacs::") && !UNBOUND.contains(name))
@@ -597,9 +598,6 @@ const RESERVED: &[(&str, &[&str])] = &[
         "ctrl-r",
         &["buffer_search::Deploy", "search::SelectPreviousMatch"],
     ),
-    ("ctrl-space", &["editor::SetMark"]),
-    ("ctrl-@", &["editor::SetMark"]),
-    ("ctrl-x ctrl-x", &["editor::SwapSelectionEnds"]),
     ("ctrl-y", &["editor::Paste"]),
     ("alt-shift-y", &[]),
     ("ctrl-/", &["editor::Undo"]),
