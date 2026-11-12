@@ -354,6 +354,12 @@ pub fn check_start(
     let refuse =
         |detail: String| Failure::new(FailureReason::McpServerUnavailable, key.cloned(), detail);
     let cli = cli_name(agent);
+    if let Some(bad) = exclude.iter().find(|name| !is_name(name)) {
+        return Err(refuse(format!(
+            "workflows.mcp_exclude: '{bad}' is not a server name; use letters, digits, '_', '-' \
+             or '.'"
+        )));
+    }
     for (server, tool) in allowed_servers(allowed_tools) {
         if server.is_empty() || tool.is_empty() {
             let entry = if tool.is_empty() && !server.is_empty() {

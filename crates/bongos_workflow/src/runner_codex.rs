@@ -98,7 +98,7 @@ pub fn own_model(definition: &Definition, node: &Node) -> Option<String> {
 pub fn sandbox_for(mode: &str) -> Result<&'static str, String> {
     match mode {
         "plan" => Ok("read-only"),
-        "acceptEdits" | "auto" | "manual" | "dontAsk" => Ok("workspace-write"),
+        "acceptEdits" | "auto" | "default" | "manual" | "dontAsk" => Ok("workspace-write"),
         "bypassPermissions" => Ok("danger-full-access"),
         other => Err(format!("permission mode '{other}' has no Codex sandbox")),
     }
@@ -339,6 +339,22 @@ pub fn classify(
         return turn_cap();
     }
     let errors: Vec<String> = events.iter().filter_map(error_message).collect();
+    // An `error` event is fatal only when it is terminal: no turn completed, or it came after the
+    // last completed turn. A reconnect notice followed by a completed turn is not. `turn.failed`
+    // is always fatal.
+    let last_completed = events
+        .iter()
+        .rposition(|event| kind(event) == "turn.completed");
+    let fatal: Vec<String> = events
+        .iter()
+        .enumerate()
+        .filter(|(index, event)| {
+            kind(event) == "turn.failed"
+                || (kind(event) == "error" && last_completed.is_none_or(|last| *index > last))
+        })
+        .filter_map(|(_, event)| error_message(event))
+        .filter(|message| failed_server(message).is_none())
+        .collect();
     let allowed = node.caps.mcp_servers();
     if let Some(server) = errors
         .iter()
@@ -370,7 +386,7 @@ pub fn classify(
         };
         return fail(FailureReason::AgentExitedNonzero, detail);
     }
-    if let Some(message) = errors.last() {
+    if let Some(message) = fatal.last() {
         return fail(
             FailureReason::NodeOutputInvalid,
             format!("the agent reported an error: {message}"),
@@ -555,8 +571,8 @@ impl CodexRunner {
         let prompt_file = node.try_dir.join(PROMPT_FILE);
         fs::write(&prompt_file, &node.prompt).map_err(io)?;
         fs::write(node.try_dir.join(SYSTEM_FILE), &node.system).map_err(io)?;
-        let schema_text =
-            serde_json::to_string_pretty(&schema::json_schema(&node.output)).unwrap_or_default();
+        let schema_text = serde_json::to_string_pretty(&schema::json_schema_strict(&node.output))
+            .unwrap_or_default();
         fs::write(&schema_file, schema_text).map_err(io)?;
         let stdin_file = node.try_dir.join("stdin.txt");
         fs::write(&stdin_file, stdin_text(&node)).map_err(io)?;

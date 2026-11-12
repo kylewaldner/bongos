@@ -943,23 +943,24 @@ fn permission_modes_are_the_ones_claude_accepts() {
             "acceptEdits",
             "auto",
             "bypassPermissions",
+            "default",
             "manual",
             "dontAsk",
             "plan"
         ]
     );
-    // `default` was replaced by `manual`.
     let text = mutate(
         r#"permission_mode = "acceptEdits""#,
-        r#"permission_mode = "default""#,
+        r#"permission_mode = "nonsense""#,
     );
     assert_error(
         &text,
         Some("triage"),
         "permission_mode = ",
-        "unknown permission mode 'default'",
+        "unknown permission mode 'nonsense'",
     );
-    for mode in ["auto", "manual", "dontAsk", "plan"] {
+    // `default` stays accepted next to `manual`.
+    for mode in ["auto", "default", "manual", "dontAsk", "plan"] {
         let text = mutate(
             r#"permission_mode = "acceptEdits""#,
             &format!("permission_mode = \"{mode}\""),

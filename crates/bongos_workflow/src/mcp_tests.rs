@@ -407,3 +407,19 @@ fn a_single_tool_entry_on_codex_is_rejected_at_validation_and_at_start() {
     )
     .unwrap();
 }
+
+#[test]
+fn a_malformed_exclude_name_refuses_the_start() {
+    for agent in [AgentKind::Claude, AgentKind::Codex] {
+        for bad in ["", "a b", "x__y\"", "a/b"] {
+            let refusal =
+                check_start(agent, None, &[], &BTreeSet::new(), &[bad.to_string()]).unwrap_err();
+            assert_eq!(refusal.reason, FailureReason::McpServerUnavailable);
+            assert!(
+                refusal.detail.starts_with("workflows.mcp_exclude:"),
+                "{bad}"
+            );
+        }
+        assert!(check_start(agent, None, &[], &BTreeSet::new(), &list(&["ok-name_1.x"])).is_ok());
+    }
+}

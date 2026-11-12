@@ -18,11 +18,13 @@ use crate::definition::{
 pub const SHIPPED_PROGRAMS: &[&str] = &["merge", "wait"];
 
 /// The permission modes an agent node may declare: the modes Claude Code accepts (checked on
-/// 2.1.322, where `manual` replaced `default`).
+/// 2.1.322, where `manual` replaced `default`) and `default`, which stays accepted and means
+/// workspace-write on Codex.
 pub const PERMISSION_MODES: &[&str] = &[
     "acceptEdits",
     "auto",
     "bypassPermissions",
+    "default",
     "manual",
     "dontAsk",
     "plan",

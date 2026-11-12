@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use bongos_chat::model::{Agent, Capabilities};
 use bongos_chat::{AgentCommand, Health, HealthState};
-use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey, json_schema, parse};
+use bongos_workflow_model::{
+    Definition, Failure, FailureReason, NodeKey, json_schema_strict, parse,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -221,6 +223,7 @@ fn argv_per_permission_mode() {
         ("plan", "read-only"),
         ("acceptEdits", "workspace-write"),
         ("auto", "workspace-write"),
+        ("default", "workspace-write"),
         ("manual", "workspace-write"),
         ("dontAsk", "workspace-write"),
         ("bypassPermissions", "danger-full-access"),
@@ -234,20 +237,18 @@ fn argv_per_permission_mode() {
         assert_eq!(sandbox_for(mode), Ok(sandbox));
     }
 
-    // A model the node names is passed; the old Claude mode `default` and unknown ones have no sandbox.
+    // A model the node names is passed; unknown modes have no sandbox.
     codex_node.caps.permission_mode = "plan".to_string();
     codex_node.model = Some("example-model".to_string());
     assert_eq!(
         cli.args(&codex_node, schema).unwrap(),
         expected("read-only", &["-m", "example-model"], &off)
     );
-    for mode in ["default", "yolo"] {
-        codex_node.caps.permission_mode = mode.to_string();
-        assert_eq!(
-            cli.args(&codex_node, schema).unwrap_err(),
-            format!("permission mode '{mode}' has no Codex sandbox")
-        );
-    }
+    codex_node.caps.permission_mode = "yolo".to_string();
+    assert_eq!(
+        cli.args(&codex_node, schema).unwrap_err(),
+        "permission mode 'yolo' has no Codex sandbox"
+    );
 }
 
 #[test]
@@ -289,6 +290,36 @@ fn an_excluded_server_is_disabled_even_when_the_node_names_it() {
 }
 
 #[test]
+fn the_schema_file_requires_every_property_for_strict_mode() {
+    let (finish, root) = run_one("success", |node| {
+        node.output = parse(&TRIAGE.replace(
+            r#"why = { type = "text" }"#,
+            r#"why = { type = "text", optional = true }"#,
+        ))
+        .unwrap()
+        .node("triage")
+        .unwrap()
+        .output
+        .clone();
+    });
+    assert!(finish.outcome.is_ok());
+    let written: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            root.path()
+                .join("record/nodes/triage/1-1")
+                .join(SCHEMA_FILE),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written["required"], json!(["mode", "why"]));
+    assert_eq!(
+        written["properties"]["why"]["type"],
+        json!(["string", "null"])
+    );
+}
+
+#[test]
 fn the_schema_file_holds_the_declared_output() {
     let (finish, root) = run_one("success", |_| {});
     assert!(finish.outcome.is_ok());
@@ -304,7 +335,7 @@ fn the_schema_file_holds_the_declared_output() {
     let declared = definition();
     assert_eq!(
         written,
-        json_schema(&declared.node("triage").unwrap().output)
+        json_schema_strict(&declared.node("triage").unwrap().output)
     );
     assert_eq!(written["additionalProperties"], json!(false));
     assert_eq!(
@@ -441,6 +472,38 @@ fn the_time_cap_stops_the_process() {
 }
 
 #[test]
+fn a_transient_error_event_before_a_completed_turn_does_not_fail_the_try() {
+    let root = TempDir::new().unwrap();
+    let node = node(&definition(), root.path());
+    let transient = classify(
+        &key(),
+        &node,
+        "codex",
+        &fixture("codex-transient-error.jsonl"),
+        "",
+        Exit::Code(0),
+    );
+    assert!(transient.outcome.is_ok(), "{:?}", transient.outcome);
+
+    // The same error with no completed turn after it is terminal.
+    let terminal = fixture("codex-transient-error.jsonl")
+        .lines()
+        .filter(|line| !line.contains("turn.completed"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let failed = classify(&key(), &node, "codex", &terminal, "", Exit::Code(0));
+    assert!(says(&failed.outcome.unwrap_err()).contains("Reconnecting"));
+
+    // A turn.failed is fatal even when an earlier turn completed.
+    let with_failed = format!(
+        "{}{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"boom\"}}}}\n",
+        fixture("codex-transient-error.jsonl")
+    );
+    let failed = classify(&key(), &node, "codex", &with_failed, "", Exit::Code(0));
+    assert!(says(&failed.outcome.unwrap_err()).contains("boom"));
+}
+
+#[test]
 fn failures_name_themselves() {
     // An allowed server that failed to start; a failed server the node does not name is ignored.
     let (finish, _root) = run_one("mcp-failed", |node| {
@@ -501,7 +564,7 @@ fn an_uninstalled_or_single_tool_mcp_entry_refuses_the_start() {
 
     // A mode with no sandbox is refused before anything runs.
     codex_node.mcp_exclude.clear();
-    codex_node.caps.permission_mode = "default".to_string();
+    codex_node.caps.permission_mode = "yolo".to_string();
     let refusal = runner.start("run-1", &key(), 1, codex_node).unwrap_err();
     assert_eq!(refusal.reason, FailureReason::PermissionDenied);
     assert!(runner.in_flight().is_empty());
