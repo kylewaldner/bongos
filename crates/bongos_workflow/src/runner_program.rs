@@ -50,19 +50,24 @@
 //!   `core.logAllRefUpdates=false`, so a commit or a branch update writes no reflog (an existing
 //!   one is not appended to; the host's stay as they were), and the replace refs and alternates
 //!   ([`ProgramNode::git_forbidden_paths`]) are bound read-only, made first when missing (an
-//!   empty `refs/replace/` and empty alternates files change nothing). The shim refuses creating
-//!   a symlink inside the git paths, renaming or hard linking one into them, writing through a
-//!   symlink that sits inside them, and writing the replace refs and alternates. After every pass
-//!   [`GitGuard`] walks the git paths without following symlinks and removes every symlink found
-//!   ("program planted symlinks in git"); without Bubblewrap it also puts the replace refs and
-//!   alternates back as they were ("program changed git metadata"); either fails the node. A git
-//!   path that is already a symlink when a pass starts refuses the start.
+//!   empty `refs/replace/` and empty alternates files change nothing); the `objects/info`
+//!   directory holding the alternates is bound to itself first ([`ProgramNode::git_mount_points`]),
+//!   so it cannot be renamed away with the read-only files inside and replaced. The shim refuses
+//!   creating a symlink inside the git paths, renaming or hard linking one into them, writing
+//!   through a symlink that sits inside them, and writing the replace refs and alternates. After
+//!   every pass [`GitGuard`] walks the git paths without following symlinks and removes every
+//!   symlink found ("program planted symlinks in git") and puts the replace refs and alternates
+//!   back as they were ("program changed git metadata"); either fails the node. A git path that
+//!   is already a symlink when a pass starts, `objects/info` included, refuses the start.
 //! - Accepted risks. Without Bubblewrap (no sandbox, or elsewhere than Linux) the git paths are
 //!   plainly writable: a host git run during the pass can follow what the script planted before
 //!   the walk removes it, and concurrent passes on one repository snapshot each other's replace
 //!   refs and alternates. Under Bubblewrap a symlink in `refs/` or `objects/` stays until the
-//!   walk (git replaces a ref file by renaming over it and reads objects only, so it writes
-//!   through neither). The checks run when a pass ends: after an app crash mid-pass nothing puts
+//!   walk, and a host git run meanwhile can follow it: a symlink to a file is replaced (git
+//!   renames a new ref over it and only reads objects), but a symlink to a directory
+//!   (`objects/ab` or `refs/heads/team` naming a directory outside) is followed, so git writes a
+//!   loose object or a ref and its lock file into that directory. The checks run when a pass
+//!   ends: after an app crash mid-pass nothing puts
 //!   the git paths back or removes what was planted (the orphan cleanup stops processes only).
 //!   While `objects/` is writable the integrity of loose objects, packs, `commit-graph` and
 //!   `multi-pack-index` cannot be protected: a script can write a corrupt or misleading one.
@@ -370,6 +375,27 @@ impl ProgramNode {
     pub fn writable_paths(&self) -> Vec<PathBuf> {
         let mut paths = vec![self.worktree.clone(), self.scratch.clone()];
         paths.extend(self.git_writable_paths());
+        if cfg!(target_os = "linux") {
+            paths.extend(self.git_mount_points());
+        }
+        paths
+    }
+
+    /// The directories holding [`ProgramNode::git_forbidden_paths`] that are not writable roots
+    /// themselves (`objects/info`). On Linux each is bound to itself after the writable roots and
+    /// before the read-only binds of the alternates, so it is a mountpoint: a script cannot rename
+    /// it away with the read-only files inside and plant a new one in its place (a mountpoint
+    /// cannot be renamed or removed).
+    pub fn git_mount_points(&self) -> Vec<PathBuf> {
+        let roots = self.git_writable_paths();
+        let mut paths: Vec<PathBuf> = self
+            .git_forbidden_paths()
+            .into_iter()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .filter(|parent| !roots.contains(parent))
+            .collect();
+        paths.sort();
+        paths.dedup();
         paths
     }
 
@@ -426,11 +452,14 @@ impl ProgramNode {
 
     /// The git paths a pass binds or walks that are symlinks already, which refuse the start:
     /// the sandbox would bind their targets and the walk could not tell what a script planted.
+    /// The directories between the writable roots and the forbidden paths
+    /// ([`ProgramNode::git_mount_points`]) count too.
     pub fn symlinked_git_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = self
             .git_writable_paths()
             .into_iter()
             .chain(self.hidden_git_paths())
+            .chain(self.git_mount_points())
             .chain(self.git_forbidden_paths())
             .filter(|path| {
                 fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -842,10 +871,10 @@ impl GitChanges {
 
 /// The git checks of one pass, taken before the script starts: the writable git paths to walk
 /// for symlinks (none of them a symlink itself: such a path refuses the start, see
-/// [`ProgramNode::symlinked_git_paths`]), and when [`git_metadata_needed`] the replace refs and
-/// alternates as they were and [`GitMetadata`]. Under Bubblewrap on Linux the sandbox keeps the
-/// replace refs and alternates read-only, so no snapshot is taken: a snapshot there would see
-/// what a concurrent pass on the same repository planted as the baseline.
+/// [`ProgramNode::symlinked_git_paths`]), the replace refs and alternates as they were, and when
+/// [`git_metadata_needed`] [`GitMetadata`]. Under Bubblewrap on Linux the sandbox keeps the
+/// replace refs and alternates read-only; their snapshot is put back there too, as a second
+/// line should a bind be got around.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitGuard {
     roots: Vec<PathBuf>,
@@ -856,20 +885,16 @@ pub struct GitGuard {
 impl GitGuard {
     pub fn take(node: &ProgramNode, sandboxed: bool) -> Self {
         let needed = git_metadata_needed(sandboxed, cfg!(target_os = "linux"));
-        let forbidden = if needed {
-            GitMetadata {
-                entries: node
-                    .git_forbidden_paths()
-                    .into_iter()
-                    .map(|path| {
-                        let list = path.ends_with("refs/replace");
-                        let snap = Snap::take(&path, list);
-                        (path, list, snap)
-                    })
-                    .collect(),
-            }
-        } else {
-            GitMetadata::default()
+        let forbidden = GitMetadata {
+            entries: node
+                .git_forbidden_paths()
+                .into_iter()
+                .map(|path| {
+                    let list = path.ends_with("refs/replace");
+                    let snap = Snap::take(&path, list);
+                    (path, list, snap)
+                })
+                .collect(),
         };
         Self {
             roots: node.git_writable_paths(),
@@ -927,6 +952,19 @@ pub fn hide_in_bubblewrap(args: &mut Vec<String>, hidden: &[PathBuf]) -> Result<
     }
     args.splice(end..end, mounts);
     Ok(())
+}
+
+/// Adds `key = value` to the configuration git reads from the environment, after the entries
+/// already there (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`), so a later
+/// entry wins without wiping the earlier ones.
+pub fn add_git_config(env: &mut BTreeMap<String, String>, key: &str, value: &str) {
+    let count: usize = env
+        .get("GIT_CONFIG_COUNT")
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0);
+    env.insert(format!("GIT_CONFIG_KEY_{count}"), key.to_string());
+    env.insert(format!("GIT_CONFIG_VALUE_{count}"), value.to_string());
+    env.insert("GIT_CONFIG_COUNT".to_string(), (count + 1).to_string());
 }
 
 /// The failure of a pass that changed git metadata or planted symlinks in git.
@@ -1445,7 +1483,14 @@ impl ProgramRunner {
             env,
             sandbox,
             sandbox_note,
-        } = self.wrap(&node, path(&self.interpreter.program), args, env);
+        } = self
+            .wrap(&node, path(&self.interpreter.program), args, env)
+            .map_err(|error| {
+                refuse(
+                    FailureReason::PermissionDenied,
+                    format!("could not hide the reflogs in the sandbox: {error}"),
+                )
+            })?;
         let git = GitGuard::take(&node, sandbox.is_some());
         write_summary(&dir, &json!({ "pass": number, "sandbox": sandbox_note }));
 
@@ -1517,15 +1562,17 @@ impl ProgramRunner {
     }
 
     /// The command to spawn: inside the OS sandbox when it can be created, else as it is with
-    /// the reason it is not sandboxed.
+    /// the reason it is not sandboxed. A sandbox that can be created but whose reflog directories
+    /// cannot be covered refuses the start (the error) rather than running without it.
     fn wrap(
         &self,
         node: &ProgramNode,
         program: String,
         args: Vec<String>,
         env: BTreeMap<String, String>,
-    ) -> Launch {
+    ) -> Result<Launch, String> {
         let policy = node.sandbox_policy();
+        let mut refused = None;
         let wrapped = (self.probe)(&policy, &node.worktree).and_then(|()| {
             let mut sandbox = Sandbox::new(policy).map_err(|error| error.to_string())?;
             let hidden = if cfg!(target_os = "linux") {
@@ -1536,14 +1583,7 @@ impl ProgramRunner {
             let mut env = env.clone();
             if !hidden.is_empty() {
                 // The reflog directories are read-only and empty: git must not try to make one.
-                env.extend(
-                    [
-                        ("GIT_CONFIG_COUNT", "1"),
-                        ("GIT_CONFIG_KEY_0", "core.logAllRefUpdates"),
-                        ("GIT_CONFIG_VALUE_0", "false"),
-                    ]
-                    .map(|(name, value)| (name.to_string(), value.to_string())),
-                );
+                add_git_config(&mut env, "core.logAllRefUpdates", "false");
             }
             let command = CommandAndArgs {
                 program: program.clone(),
@@ -1553,10 +1593,16 @@ impl ProgramRunner {
             };
             let mut wrapped = futures::executor::block_on(sandbox.wrap(&command))
                 .map_err(|error| error.to_string())?;
-            hide_in_bubblewrap(&mut wrapped.args, &hidden)?;
+            if let Err(error) = hide_in_bubblewrap(&mut wrapped.args, &hidden) {
+                refused = Some(error.clone());
+                return Err(error);
+            }
             Ok((wrapped, sandbox))
         });
-        match wrapped {
+        if let Some(reason) = refused {
+            return Err(reason);
+        }
+        Ok(match wrapped {
             Ok((wrapped, sandbox)) => Launch {
                 program: wrapped.program,
                 args: wrapped.args,
@@ -1574,7 +1620,7 @@ impl ProgramRunner {
                     sandbox_note: format!("not sandboxed: {reason}"),
                 }
             }
-        }
+        })
     }
 
     /// The passes that ended since the last call (a `waiting` result included: it is recorded,
