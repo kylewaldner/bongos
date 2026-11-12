@@ -4,9 +4,7 @@ use std::rc::Rc;
 use editor::Editor;
 use editor::test::editor_test_context::EditorTestContext;
 use futures::StreamExt as _;
-use gpui::{
-    App, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle,
-};
+use gpui::{App, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle};
 use language::{FakeLspAdapter, rust_lang};
 use multi_buffer::ToOffset as _;
 use project::{Fs as _, Project, ProjectPath};
