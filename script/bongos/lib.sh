@@ -351,7 +351,7 @@ sandbox_env() {
 # to create. It pins the base keymap to VSCode, because the base flow presses VS Code keys while
 # the app default is Emacs (a scenario drops the pin to test the default). It also points the
 # Kotlin language server at the fake server, so opening a .kt file starts the fake and never
-# downloads anything.
+# downloads anything, and it empties kotlin.manifest_url, so the app never asks for a server manifest.
 BONGOS_FAKE_KOTLIN_SERVER=${BONGOS_FAKE_KOTLIN_SERVER:-$CARGO_TARGET_DIR/debug/bongos-fake-kotlin-server}
 seed_settings() {
   mkdir -p "$HOME/$BONGOS_CONFIG_PATH"
@@ -361,7 +361,8 @@ seed_settings() {
   "base_keymap": "VSCode",
   "cursor_blink": false,
   "terminal": { "blinking": "off" },
-  "lsp": { "kotlin": { "binary": { "path": "$BONGOS_FAKE_KOTLIN_SERVER" } } }
+  "lsp": { "kotlin": { "binary": { "path": "$BONGOS_FAKE_KOTLIN_SERVER" } } },
+  "kotlin": { "manifest_url": "" }
 }
 JSON
 }
@@ -484,6 +485,15 @@ assert_no_zed_hosts() {
 assert_no_marketplace_host() {
   if awk '{print $2}' "$RUN/proxy.log" | grep -qE '(^|\.)api\.zed\.dev$'; then
     say "smoke: FAIL api.zed.dev in proxy.log: the marketplace is off"
+    exit 1
+  fi
+}
+
+# The Kotlin server manifest is off in the base flow (the seed empties kotlin.manifest_url): bongos
+# must never reach its default host. Not for stock, which has no such setting.
+assert_no_manifest_host() {
+  if awk '{print $2}' "$RUN/proxy.log" | grep -qE '(^|\.)bongos\.rocks$'; then
+    say "smoke: FAIL bongos.rocks in proxy.log: kotlin.manifest_url is empty in the base flow"
     exit 1
   fi
 }
