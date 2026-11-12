@@ -58,7 +58,6 @@ use crate::{
     installed::{check_installed, server_name},
     locks::LockRegistry,
     log::KotlinLog,
-    status::UpdatesInfo,
     manifest::{Manifest, ManifestEntry, current_platform},
     manifest_cache::{
         BuildId, Claim, FetchOutcome, FetchedManifest, KotlinLspBuilds, ManifestCache,
@@ -68,6 +67,7 @@ use crate::{
         MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, TrustedKey, compare_versions, sig_url,
         trusted_keys,
     },
+    status::UpdatesInfo,
 };
 
 /// How long after startup the first check runs.

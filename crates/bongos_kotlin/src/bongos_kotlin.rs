@@ -71,9 +71,7 @@ pub use resolve::{
     project_override, resolve, set_project_override,
 };
 use settings::{KotlinServerKind, RegisterSetting, Settings, SettingsContent};
-pub use status::{
-    Command, MenuItem, Snapshot, StatusLine, UpdatesInfo, menu_items, status_line,
-};
+pub use status::{Command, MenuItem, Snapshot, StatusLine, UpdatesInfo, menu_items, status_line};
 pub use status_item::{KotlinStatusItem, cancel_installs, show_logs};
 pub use unsupported::{
     Feature, attach_unsupported_notices, not_supported_message, not_supported_notice_id,

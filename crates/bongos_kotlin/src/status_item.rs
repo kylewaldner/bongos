@@ -15,9 +15,9 @@ use util::truncate_and_trailoff;
 use workspace::{OpenOptions, StatusItemView, Workspace};
 
 use crate::{
-    CancelInstall, CheckForServerUpdates, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSetup, KotlinUpdates,
-    LicenseActivate, LicenseStatus, LicenseTrial, ReimportProject, RestartServer,
-    ReviewIntellijEula, ShowLogs, SwitchServer,
+    CancelInstall, CheckForServerUpdates, KotlinLog, KotlinProjectManager, KotlinRegistry,
+    KotlinSetup, KotlinUpdates, LicenseActivate, LicenseStatus, LicenseTrial, ReimportProject,
+    RestartServer, ReviewIntellijEula, ShowLogs, SwitchServer,
     status::{self, Command, MAX_TEXT_CHARS, MenuItem, Snapshot},
 };
 
