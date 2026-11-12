@@ -139,7 +139,7 @@ pub fn id_of(tree: &WorkTree, slug: &str) -> TaskId {
 
 /// Kyle at a fixed time.
 pub fn ctx() -> Context {
-    Context::new("kyle", at("2026-11-08T12:00:00Z"))
+    Context::new("person", at("2026-11-08T12:00:00Z"))
 }
 
 /// Applies the task writes of `change` to the tasks already in `tree`, in memory.

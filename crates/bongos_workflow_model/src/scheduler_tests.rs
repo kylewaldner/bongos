@@ -639,7 +639,7 @@ fn a_revised_gate_reruns_the_node() {
         },
         Event::GateClosed {
             key: review.clone(),
-            by: "kyle".to_string(),
+            by: "person".to_string(),
             edit: None,
             comment: Some("add a test".to_string()),
         },
@@ -699,7 +699,7 @@ fn resume_reruns_only_the_in_flight_keys() {
     assert_eq!(
         step(&definition, &state, &Limits::default(), 6),
         Vec::new(),
-        "an interrupted run waits for Kyle"
+        "an interrupted run waits for a person"
     );
     assert_eq!(resume_set(&state), vec![second.clone(), third.clone()]);
 

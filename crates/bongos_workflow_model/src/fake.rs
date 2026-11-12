@@ -178,7 +178,7 @@ impl FakeRunner {
                 });
                 self.events.push(Event::GateClosed {
                     key: key.clone(),
-                    by: "kyle".to_string(),
+                    by: "person".to_string(),
                     edit: None,
                     comment: None,
                 });

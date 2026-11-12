@@ -55,7 +55,7 @@ fn new_child_under_a_group_gets_the_default_todos_and_a_history_entry() {
     assert_eq!(names, ["implement", "review", "ship"]);
     assert_eq!(file.history, vec![change.entry.clone()]);
     assert_eq!(change.entry.event, "created");
-    assert_eq!(change.entry.by, "kyle");
+    assert_eq!(change.entry.by, "person");
 
     // A sibling with the same goal gets a suffix.
     let t = tree(vec![pr_ship("backfill")]);

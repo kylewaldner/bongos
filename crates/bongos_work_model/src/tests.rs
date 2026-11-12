@@ -27,7 +27,7 @@ branch = "backfill-usage-events"
 base = "main"
 base_sha = "4be1"
 rebase_ack_sha = "9ac0"
-worktree = "/home/kyle/src/invoicing/.bongos-worktrees/backfill-usage-events"
+worktree = "/home/user/src/invoicing/.bongos-worktrees/backfill-usage-events"
 ship_overridden = { at = 2026-11-09T12:00:00Z, parent_state = "review" }
 after = [{ task = "schema-change", unblock = "merged" }]
 stacked_on = { task = "backfill", unblock = "implemented" }
