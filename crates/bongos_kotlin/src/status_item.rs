@@ -15,9 +15,9 @@ use util::truncate_and_trailoff;
 use workspace::{OpenOptions, StatusItemView, Workspace};
 
 use crate::{
-    CancelInstall, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSetup, LicenseActivate,
-    LicenseStatus, LicenseTrial, ReimportProject, RestartServer, ReviewIntellijEula, ShowLogs,
-    SwitchServer,
+    CancelInstall, KotlinLog, KotlinProjectManager, KotlinRegistry, KotlinSetup, KotlinUpdates,
+    LicenseActivate, LicenseStatus, LicenseTrial, ReimportProject, RestartServer,
+    ReviewIntellijEula, ShowLogs, SwitchServer,
     status::{self, Command, MAX_TEXT_CHARS, MenuItem, Snapshot},
 };
 
@@ -30,6 +30,7 @@ pub struct KotlinStatusItem {
     active_worktree: Option<WorktreeId>,
     managers: Vec<(Entity<KotlinProjectManager>, Subscription)>,
     _project_subscription: Subscription,
+    _updates_subscription: Option<Subscription>,
 }
 
 impl KotlinStatusItem {
@@ -46,12 +47,15 @@ impl KotlinStatusItem {
                 this.refresh_managers(cx);
             }
         });
+        let _updates_subscription =
+            KotlinUpdates::global(cx).map(|updates| cx.observe(&updates, |_, _, cx| cx.notify()));
         let mut this = Self {
             project: project.downgrade(),
             menu_handle,
             active_worktree: None,
             managers: Vec::new(),
             _project_subscription,
+            _updates_subscription,
         };
         this.refresh_managers(cx);
         this
@@ -83,12 +87,15 @@ impl KotlinStatusItem {
     /// The state to show: the active file's worktree if a server has started for it, else the first
     /// worktree with one. `None` hides the item.
     fn snapshot(&self, cx: &App) -> Option<Snapshot> {
+        let download = KotlinUpdates::global(cx)
+            .and_then(|updates| updates.read(cx).download_progress().cloned());
         let mut first = None;
         for (manager, _) in &self.managers {
             for (worktree_id, state) in manager.read(cx).worktrees() {
-                let Some(snapshot) = Snapshot::of(state) else {
+                let Some(mut snapshot) = Snapshot::of(state) else {
                     continue;
                 };
+                snapshot.download = download.clone();
                 if Some(worktree_id) == self.active_worktree {
                     return Some(snapshot);
                 }
@@ -209,8 +216,8 @@ fn build_menu(snapshot: &Snapshot, window: &mut Window, cx: &mut App) -> Entity<
     })
 }
 
-/// `kotlin: cancel install`: cancels every install running for the project's worktrees. Returns
-/// whether one was. The installer stops at its next chunk, removes its partial files and the
+/// `kotlin: cancel install`: cancels every install running for the project's worktrees and the
+/// background download of a newer build. Returns whether one was. The installer stops at its next chunk, removes its partial files and the
 /// status becomes `Failed("install cancelled")`; the same code serves both servers.
 pub fn cancel_installs(project: &Entity<Project>, cx: &mut App) -> bool {
     let mut cancelled = false;
@@ -221,6 +228,9 @@ pub fn cancel_installs(project: &Entity<Project>, cx: &mut App) -> bool {
                 cancelled |= manager.cancel_install(id);
             }
         });
+    }
+    if let Some(updates) = KotlinUpdates::global(cx) {
+        cancelled |= updates.update(cx, |updates, cx| updates.cancel_download(cx));
     }
     cancelled
 }
