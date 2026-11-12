@@ -737,6 +737,7 @@ fn main() {
         which_key::init(cx);
         bongos_minibuffer::init(cx);
         bongos_emacs::init(cx);
+        bongos_isearch::init(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);
 

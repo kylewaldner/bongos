@@ -213,6 +213,7 @@ members = [
     "crates/bongos_linear_model",
     "crates/bongos_emacs",
     "crates/bongos_emacs_model",
+    "crates/bongos_isearch",
     "crates/bongos_isearch_model",
     "crates/bongos_minibuffer",
     "crates/bongos_minibuffer_model",
@@ -474,6 +475,7 @@ bongos_linear_model = { path = "crates/bongos_linear_model" }
 bongos_languages = { path = "crates/bongos_languages" }
 bongos_emacs = { path = "crates/bongos_emacs" }
 bongos_emacs_model = { path = "crates/bongos_emacs_model" }
+bongos_isearch = { path = "crates/bongos_isearch" }
 bongos_isearch_model = { path = "crates/bongos_isearch_model" }
 bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
@@ -965,6 +967,12 @@ nucleo = { opt-level = 3 }
 nucleo-matcher = { opt-level = 3 }
 memchr = { opt-level = 3 }
 bongos_minibuffer_model = { opt-level = 3 }
+# The incremental search perf gate (bongos_isearch perf_tests) needs these optimized.
+bongos_isearch = { opt-level = 3 }
+aho-corasick = { opt-level = 3 }
+regex-automata = { opt-level = 3 }
+fancy-regex = { opt-level = 3 }
+rope = { opt-level = 3 }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 activity_indicator = { codegen-units = 1 }
 assets = { codegen-units = 1 }

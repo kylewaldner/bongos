@@ -165,6 +165,7 @@ bongos_app.workspace = true
 bongos_builder.workspace = true
 bongos_chat.workspace = true
 bongos_emacs.workspace = true
+bongos_isearch.workspace = true
 bongos_kotlin.workspace = true
 bongos_languages.workspace = true
 bongos_linear.workspace = true
