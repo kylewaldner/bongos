@@ -17,8 +17,16 @@ use crate::definition::{
 /// The program nodes bongos ships, named by `use` (D10).
 pub const SHIPPED_PROGRAMS: &[&str] = &["merge", "wait"];
 
-/// The permission modes an agent node may declare.
-pub const PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "plan", "bypassPermissions"];
+/// The permission modes an agent node may declare: the modes Claude Code accepts (checked on
+/// 2.1.322, where `manual` replaced `default`).
+pub const PERMISSION_MODES: &[&str] = &[
+    "acceptEdits",
+    "auto",
+    "bypassPermissions",
+    "manual",
+    "dontAsk",
+    "plan",
+];
 
 const BYPASS_PERMISSIONS: &str = "bypassPermissions";
 const ON_BOUND_FAIL: &str = "fail";
