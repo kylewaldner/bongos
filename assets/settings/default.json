@@ -1544,6 +1544,10 @@
     // The JDK used for the Gradle import. Null detects one from the project's
     // toolchain, JAVA_HOME and common locations.
     "jdk_home": null,
+    // Where bongos looks for a signed list of Kotlin server builds. Empty means bongos
+    // never checks for server updates. Read from user settings only: a project's
+    // settings cannot change it.
+    "manifest_url": "",
     // Settings for the IntelliJ language server.
     "intellij": {
       // Whether bongos may download the IntelliJ language server, which is proprietary

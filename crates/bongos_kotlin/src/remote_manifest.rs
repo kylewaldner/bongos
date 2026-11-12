@@ -443,9 +443,42 @@ pub fn is_allowed_archive_url(url: &str, manifest_url: &Url) -> bool {
                 || (manifest_url.host_str() == Some(host)
                     && manifest_url.port_or_known_default() == url.port_or_known_default())
         }
-        "http" => cfg!(debug_assertions) && (host == "127.0.0.1" || host == "localhost"),
+        "http" => is_debug_loopback_host(host),
         _ => false,
     }
+}
+
+/// Whether plain `http://` may be used for `host`: `127.0.0.1` or `localhost`, in a debug build
+/// only (tests).
+fn is_debug_loopback_host(host: &str) -> bool {
+    cfg!(debug_assertions) && (host == "127.0.0.1" || host == "localhost")
+}
+
+/// Why `url` cannot be fetched as the manifest URL, or `None` when it can: `https://`, or, in a
+/// debug build only, `http://` on `127.0.0.1` or `localhost`. A user name or password is refused.
+pub(crate) fn manifest_url_problem(url: &Url) -> Option<&'static str> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Some("it has a user name or password");
+    }
+    let Some(host) = url.host_str() else {
+        return Some("it has no host");
+    };
+    match url.scheme() {
+        "https" => None,
+        "http" if is_debug_loopback_host(host) => None,
+        "http" => Some("it is not https"),
+        _ => Some("its scheme is not https"),
+    }
+}
+
+/// The URL of the detached signature for the manifest at `manifest_url`: the same URL with `.sig`
+/// appended to the path (`.../servers.json` becomes `.../servers.json.sig`). A query or fragment
+/// is kept.
+pub fn sig_url(manifest_url: &Url) -> Url {
+    let mut url = manifest_url.clone();
+    let path = format!("{}.sig", url.path());
+    url.set_path(&path);
+    url
 }
 
 /// The integers of a version made only of dot-separated whole numbers without leading zeros, or
@@ -847,6 +880,23 @@ mod tests {
         assert_eq!(parse_version("0.0.0"), Some(vec![0, 0, 0]));
         assert_eq!(parse_version("263.01.0"), None);
         assert_eq!(parse_version("00.1"), None);
+    }
+
+    #[test]
+    fn test_sig_url_appends_to_the_path() {
+        let sig = |url: &str| sig_url(&Url::parse(url).unwrap()).to_string();
+        assert_eq!(
+            sig("https://example.com/servers.json"),
+            "https://example.com/servers.json.sig"
+        );
+        assert_eq!(
+            sig("https://example.com/a/b/servers.json"),
+            "https://example.com/a/b/servers.json.sig"
+        );
+        assert_eq!(
+            sig("http://127.0.0.1:8123/servers.json?v=2"),
+            "http://127.0.0.1:8123/servers.json.sig?v=2"
+        );
     }
 
     #[test]
