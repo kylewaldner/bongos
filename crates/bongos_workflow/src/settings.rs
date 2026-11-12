@@ -25,6 +25,20 @@ pub struct WorkflowsSettings {
     pub programs: ProgramSettings,
 }
 
+/// The values of `default.json`, for an engine made before the settings are read.
+impl Default for WorkflowsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            worktrees_dir: None,
+            min_free_disk_mb: 2048,
+            keep_finished_days: 14,
+            limits: Limits::default(),
+            programs: ProgramSettings::default(),
+        }
+    }
+}
+
 impl Settings for WorkflowsSettings {
     fn from_settings(content: &SettingsContent) -> Self {
         let workflows = content
