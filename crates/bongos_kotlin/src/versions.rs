@@ -260,6 +260,34 @@ mod tests {
         assert_eq!(resolution, Resolution::Pin(pin()));
     }
 
+    /// `rejected` names a build by version and digest: the same version rebuilt with another digest
+    /// is a different build and may run as the trial, while the rejected one never does.
+    #[test]
+    fn test_a_trial_of_the_same_version_with_a_new_digest_is_eligible_again() {
+        let rebuilt = expiring("264.0.0", OLD_SHA, "2027-01-01");
+        let mut state = state(Some(&newer()), Some(&rebuilt));
+        state.kotlin_lsp.rejected.push(id(&trial()));
+        let resolution = resolve_build(
+            &pin(),
+            &[newer(), rebuilt.clone()],
+            &state,
+            installed(&[NEW_SHA, OLD_SHA]),
+            today(),
+        );
+        assert_eq!(resolution, Resolution::Trial(rebuilt));
+
+        // The rejected digest itself, listed again, is still skipped.
+        state.kotlin_lsp.trial = Some(id(&trial()));
+        let resolution = resolve_build(
+            &pin(),
+            &[newer(), trial()],
+            &state,
+            installed(&[NEW_SHA, TRIAL_SHA]),
+            today(),
+        );
+        assert_eq!(resolution, Resolution::Active(newer()));
+    }
+
     #[test]
     fn test_an_expired_active_build_falls_back_to_the_pin() {
         let expired = expiring("263.2.0", NEW_SHA, "2026-11-11");

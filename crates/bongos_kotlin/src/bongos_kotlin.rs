@@ -53,7 +53,8 @@ pub use log::{KotlinLog, MAX_LOG_BYTES, StderrMirror};
 pub use manager::{
     ADAPTER_NAME, CRASH_LOOP_REASON, CRASH_WINDOW, EXPIRED_REASON, Fallback, FallbackReason,
     KotlinEvent, KotlinHost, KotlinProjectManager, KotlinRegistry, KotlinWorktreeState,
-    ServerStatus, fallback_message,
+    RejectedTrials, ServerStatus, TRIAL_WINDOW, TrialLaunch, fallback_message,
+    trial_failed_message,
 };
 pub use manifest::{ArchiveKind, Manifest, ManifestEntry, OVERRIDE_VAR, current_platform};
 pub use manifest_cache::{
@@ -77,8 +78,8 @@ pub use unsupported::{
     not_supported_text,
 };
 pub use updates::{
-    FETCH_TIMEOUT, KotlinUpdates, MAX_AGE, Refresh, STARTUP_DELAY, UpdateSetup, UpdateTimings,
-    WAKE_INTERVAL, WallClock,
+    DownloadProgress, FETCH_TIMEOUT, KotlinUpdates, KotlinUpdatesEvent, MAX_AGE, Refresh,
+    STARTUP_DELAY, UpdateSetup, UpdateTimings, WAKE_INTERVAL, WallClock,
 };
 pub use versions::{Resolution, resolve_build};
 
