@@ -2,28 +2,29 @@
 //! an archive reaches the disk as a runnable server, and it only extracts a download whose SHA-256
 //! equals the manifest's: a tampered archive is never extracted, let alone run.
 //!
-//! Layout under `dir` (`<install root>/<server>`): the body streams to `.download` while it is
-//! hashed, a verified archive unpacks into `.staging`, and the unpacked root is renamed to
-//! `<version>`. Every other entry of `dir` is deleted afterwards, so one version stays. Failure,
-//! cancellation and dropping the future all remove `.download` and `.staging`.
+//! Layout under `dir` (`<install root>/<server>`): the body streams to `.<version>.download` while
+//! it is hashed, a verified archive unpacks into `.<version>.staging`, and the unpacked root is
+//! renamed to `<version>`. Failure, cancellation and dropping the future all remove both partial
+//! paths. kotlin-lsp keeps every other version (a running server or another process may use it;
+//! `prune` removes the unused ones at startup); IntelliJ keeps one version.
 //!
-//! Installs of one `dir` take turns: a process-wide lock per directory keeps two of them (two
-//! projects starting Kotlin at once) from sharing `.download` and `.staging`. `ensure_installed`
-//! checks for the pinned build once it holds the lock, so the second caller finds the first one's
-//! result instead of downloading again.
+//! An install holds the version's lock (`locks.rs`, `<dir>/.<version>.lock`), so two installs of
+//! one version (two projects or two processes starting Kotlin at once) take turns, while installs
+//! of different versions run side by side. `ensure_installed` checks for the build again once it
+//! holds the lock, so the second caller finds the first one's result instead of downloading again.
 
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, LazyLock,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context as _, Result, bail, ensure};
 use async_compression::futures::bufread::GzipDecoder;
-use collections::HashMap;
 use futures::{AsyncWriteExt as _, StreamExt as _, io::BufReader};
 use gpui::{App, AppContext as _, Task};
 use http_client::{
@@ -34,14 +35,55 @@ use settings::KotlinServerKind;
 
 use crate::{
     installed::{MARKER, Marker, check_dir, server_name},
+    locks::{LockRegistry, LockWaitCancelled},
     manifest::{ArchiveKind, ManifestEntry},
+    manifest_cache::ManifestCache,
 };
 
 /// Progress is reported each time this many more bytes have arrived.
 pub const PROGRESS_STEP: u64 = http_client::github_download::VERIFIED_DOWNLOAD_PROGRESS_STEP;
 
-const DOWNLOAD_FILE: &str = ".download";
-const STAGING_DIR: &str = ".staging";
+/// `prune` keeps a version whose install marker is younger than this: it may have just been
+/// installed by a process that has not recorded it yet.
+pub const PRUNE_GRACE: Duration = Duration::from_secs(10 * 60);
+
+fn download_file(dir: &Path, version: &str) -> PathBuf {
+    dir.join(format!(".{version}.download"))
+}
+
+fn staging_dir(dir: &Path, version: &str) -> PathBuf {
+    dir.join(format!(".{version}.staging"))
+}
+
+/// `<dir>/.<version>.pending`: a background download installed this build and has not recorded it
+/// as the trial yet. `prune` keeps a version with this marker.
+pub fn pending_marker_path(dir: &Path, version: &str) -> PathBuf {
+    dir.join(format!(".{version}.pending"))
+}
+
+/// How an install takes its version lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstallMode {
+    /// A start: waits for the version lock until it is free or the install is cancelled.
+    Start,
+    /// A background download: one try for the version lock (busy gives `VersionBusy`), and a fresh
+    /// install leaves a pending-trial marker, written before the lock is released.
+    Background,
+}
+
+/// A background install found its version locked by another install.
+#[derive(Debug)]
+pub struct VersionBusy {
+    pub version: String,
+}
+
+impl std::fmt::Display for VersionBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} is being installed elsewhere", self.version)
+    }
+}
+
+impl std::error::Error for VersionBusy {}
 
 /// Called with the bytes downloaded and the total from `Content-Length`, when the server sent one.
 pub type ProgressFn = dyn Fn(u64, Option<u64>) + Send + Sync;
@@ -78,9 +120,9 @@ struct PartialFiles {
 }
 
 impl PartialFiles {
-    fn new(dir: &Path) -> Self {
+    fn new(dir: &Path, version: &str) -> Self {
         let this = Self {
-            paths: vec![dir.join(DOWNLOAD_FILE), dir.join(STAGING_DIR)],
+            paths: vec![download_file(dir, version), staging_dir(dir, version)],
         };
         this.remove();
         this
@@ -120,9 +162,37 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-/// Starts `ensure_installed` on the background executor. Dropping the task cancels the install
-/// and removes its partial files; setting `cancel` stops it at the next chunk.
+/// Starts `ensure_installed` on the background executor, with the process's lock registry.
+/// Dropping the task cancels the install and removes its partial files; setting `cancel` stops it
+/// at the next chunk, or ends its wait for the version lock.
 pub fn spawn_ensure_installed(
+    server: KotlinServerKind,
+    entry: ManifestEntry,
+    dir: PathBuf,
+    http: Arc<dyn HttpClient>,
+    progress: Arc<ProgressFn>,
+    cancel: Arc<AtomicBool>,
+    cx: &mut App,
+) -> Task<Result<InstalledServer>> {
+    let locks = LockRegistry::global(cx);
+    spawn_ensure_installed_with(
+        InstallMode::Start,
+        locks,
+        server,
+        entry,
+        dir,
+        http,
+        progress,
+        cancel,
+        cx,
+    )
+}
+
+/// `spawn_ensure_installed` with an explicit mode and lock registry.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_ensure_installed_with(
+    mode: InstallMode,
+    locks: Arc<LockRegistry>,
     server: KotlinServerKind,
     entry: ManifestEntry,
     dir: PathBuf,
@@ -132,7 +202,9 @@ pub fn spawn_ensure_installed(
     cx: &App,
 ) -> Task<Result<InstalledServer>> {
     cx.background_spawn(async move {
-        ensure_installed(
+        ensure_installed_with(
+            mode,
+            &locks,
             server,
             &entry,
             &dir,
@@ -144,23 +216,10 @@ pub fn spawn_ensure_installed(
     })
 }
 
-type DirLock = Arc<futures::lock::Mutex<()>>;
-
-/// The lock every install of `dir` holds. Never freed: there is one per installed server.
-fn dir_lock(dir: &Path) -> DirLock {
-    static LOCKS: LazyLock<std::sync::Mutex<HashMap<PathBuf, DirLock>>> =
-        LazyLock::new(Default::default);
-    LOCKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .entry(dir.to_path_buf())
-        .or_default()
-        .clone()
-}
-
 /// The pinned build of `server` under `dir`, installing it first when it is missing. An installed
-/// build costs no network: this is what a start calls.
+/// build costs no network and no lock: this is what a start calls.
 pub async fn ensure_installed(
+    locks: &LockRegistry,
     server: KotlinServerKind,
     entry: &ManifestEntry,
     dir: &Path,
@@ -168,18 +227,48 @@ pub async fn ensure_installed(
     progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
     cancel: &AtomicBool,
 ) -> Result<InstalledServer> {
-    let lock = dir_lock(dir);
-    let _turn = lock.lock().await;
+    ensure_installed_with(
+        InstallMode::Start,
+        locks,
+        server,
+        entry,
+        dir,
+        http,
+        progress,
+        cancel,
+    )
+    .await
+}
+
+/// `ensure_installed` taking the version lock as `mode` says.
+#[allow(clippy::too_many_arguments)]
+pub async fn ensure_installed_with(
+    mode: InstallMode,
+    locks: &LockRegistry,
+    server: KotlinServerKind,
+    entry: &ManifestEntry,
+    dir: &Path,
+    http: &dyn HttpClient,
+    progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    cancel: &AtomicBool,
+) -> Result<InstalledServer> {
     check_cancel(cancel)?;
     let final_dir = dir.join(&entry.version);
     if check_dir(&final_dir, entry).is_some() {
         return Ok(installed_server(server, entry, final_dir));
     }
-    install_locked(server, entry, dir, http, progress, cancel).await
+    let _lock = lock_version(mode, locks, dir, &entry.version, cancel).await?;
+    // Another install of this version, in this process or another, may have finished meanwhile.
+    check_cancel(cancel)?;
+    if check_dir(&final_dir, entry).is_some() {
+        return Ok(installed_server(server, entry, final_dir));
+    }
+    install_locked(mode, server, entry, dir, http, progress, cancel).await
 }
 
 /// Installs the pinned build `entry` of `server` under `dir`, replacing any copy already there.
 pub async fn install(
+    locks: &LockRegistry,
     server: KotlinServerKind,
     entry: &ManifestEntry,
     dir: &Path,
@@ -187,9 +276,47 @@ pub async fn install(
     progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
     cancel: &AtomicBool,
 ) -> Result<InstalledServer> {
-    let lock = dir_lock(dir);
-    let _turn = lock.lock().await;
-    install_locked(server, entry, dir, http, progress, cancel).await
+    check_cancel(cancel)?;
+    let _lock = lock_version(InstallMode::Start, locks, dir, &entry.version, cancel).await?;
+    install_locked(
+        InstallMode::Start,
+        server,
+        entry,
+        dir,
+        http,
+        progress,
+        cancel,
+    )
+    .await
+}
+
+/// The version lock of `version` under `dir`: waited for (until `cancel`) by a start, tried once
+/// by a background download.
+async fn lock_version(
+    mode: InstallMode,
+    locks: &LockRegistry,
+    dir: &Path,
+    version: &str,
+    cancel: &AtomicBool,
+) -> Result<crate::locks::LockGuard> {
+    match mode {
+        InstallMode::Start => locks
+            .version_lock(dir, version, cancel)
+            .await
+            .map_err(|error| {
+                if error.downcast_ref::<LockWaitCancelled>().is_some() {
+                    InstallCancelled.into()
+                } else {
+                    error
+                }
+            }),
+        InstallMode::Background => locks.try_version_lock(dir, version)?.ok_or_else(|| {
+            VersionBusy {
+                version: version.to_string(),
+            }
+            .into()
+        }),
+    }
 }
 
 fn installed_server(
@@ -205,8 +332,9 @@ fn installed_server(
     }
 }
 
-/// `install` for a caller that holds the lock of `dir`.
+/// `install` for a caller that holds the version lock.
 async fn install_locked(
+    mode: InstallMode,
     server: KotlinServerKind,
     entry: &ManifestEntry,
     dir: &Path,
@@ -216,9 +344,9 @@ async fn install_locked(
 ) -> Result<InstalledServer> {
     check_cancel(cancel)?;
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let _partial = PartialFiles::new(dir);
+    let _partial = PartialFiles::new(dir, &entry.version);
 
-    let download = dir.join(DOWNLOAD_FILE);
+    let download = download_file(dir, &entry.version);
     download_verified_file(http, &entry.url, &entry.sha256, &download, progress, cancel)
         .await
         .map_err(|error| {
@@ -231,7 +359,7 @@ async fn install_locked(
     let archive = VerifiedArchive(download);
     check_cancel(cancel)?;
 
-    let staging = dir.join(STAGING_DIR);
+    let staging = staging_dir(dir, &entry.version);
     fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
     extract(entry, &archive, &staging, cancel)
         .await
@@ -262,13 +390,22 @@ async fn install_locked(
     remove_path(&final_dir).with_context(|| format!("replacing {}", final_dir.display()))?;
     fs::rename(&root, &final_dir)
         .with_context(|| format!("moving the unpacked server to {}", final_dir.display()))?;
-    remove_other_versions(dir, &entry.version);
+    if server == KotlinServerKind::Intellij {
+        remove_other_versions(dir, &entry.version);
+    }
 
     ensure!(
         check_dir(&final_dir, entry).is_some(),
         "{} did not install correctly",
         server_name(server)
     );
+    if mode == InstallMode::Background {
+        // Written while the version lock is held. A crash between the rename and this write leaves
+        // a fresh install marker, which `prune` respects for `PRUNE_GRACE`.
+        let pending = pending_marker_path(dir, &entry.version);
+        fs::write(&pending, &entry.sha256)
+            .with_context(|| format!("writing {}", pending.display()))?;
+    }
     Ok(installed_server(server, entry, final_dir))
 }
 
@@ -381,8 +518,9 @@ fn strip_components(staging: &Path, count: usize) -> Result<PathBuf> {
     Ok(root)
 }
 
-/// Deletes every entry of `dir` except `keep`. Best effort: a version that cannot be removed is
-/// logged and left for the next install.
+/// Deletes every entry of `dir` except `keep` and the dot-files (lock files, other installs'
+/// partial files). Best effort: a version that cannot be removed is logged and left for the next
+/// install.
 fn remove_other_versions(dir: &Path, keep: &str) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -393,6 +531,7 @@ fn remove_other_versions(dir: &Path, keep: &str) {
     };
     for entry in entries.flatten() {
         if entry.file_name() != keep
+            && !entry.file_name().to_string_lossy().starts_with('.')
             && let Err(error) = remove_path(&entry.path())
         {
             log::warn!(
@@ -400,6 +539,82 @@ fn remove_other_versions(dir: &Path, keep: &str) {
                 entry.path().display()
             );
         }
+    }
+}
+
+/// What `prune` did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// The versions deleted.
+    pub removed: Vec<String>,
+    /// The versions skipped because another install held their lock.
+    pub busy: Vec<String>,
+}
+
+/// Deletes every kotlin-lsp version directory of `dir` except the active, previous and trial builds
+/// of `state.json` and `pin_version`. A version with a pending-trial marker, or an install marker
+/// younger than `PRUNE_GRACE` at `now`, stays too. Runs under the state lock and takes each version
+/// lock with one `try_lock`: a busy version is skipped, never waited for. Dot-files (lock files,
+/// markers, partial files) are never touched.
+pub async fn prune(
+    cache: &ManifestCache,
+    locks: &LockRegistry,
+    dir: &Path,
+    pin_version: Option<&str>,
+    now: SystemTime,
+) -> Result<Pruned> {
+    cache
+        .with_state(|state| {
+            let builds = &state.kotlin_lsp;
+            let keep: Vec<&str> = [&builds.active, &builds.previous, &builds.trial]
+                .into_iter()
+                .filter_map(|build| build.as_ref().map(|build| build.version.as_str()))
+                .chain(pin_version)
+                .collect();
+            let mut pruned = Pruned::default();
+            let entries = match fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        log::warn!("listing {}: {error}", dir.display());
+                    }
+                    return pruned;
+                }
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                if name.starts_with('.') || !is_dir || keep.contains(&name.as_str()) {
+                    continue;
+                }
+                let path = entry.path();
+                if pending_marker_path(dir, &name).exists() || recently_installed(&path, now) {
+                    continue;
+                }
+                match locks.try_version_lock(dir, &name) {
+                    Ok(Some(_lock)) => match remove_path(&path) {
+                        Ok(()) => pruned.removed.push(name),
+                        Err(error) => log::warn!("removing {}: {error}", path.display()),
+                    },
+                    Ok(None) => pruned.busy.push(name),
+                    Err(error) => log::warn!("not pruning {}: {error:#}", path.display()),
+                }
+            }
+            pruned
+        })
+        .await
+}
+
+/// Whether the install marker in `version_dir` was written less than `PRUNE_GRACE` before `now`
+/// (or after it: the clock moved back).
+fn recently_installed(version_dir: &Path, now: SystemTime) -> bool {
+    let Ok(modified) = fs::metadata(version_dir.join(MARKER)).and_then(|meta| meta.modified())
+    else {
+        return false;
+    };
+    match now.duration_since(modified) {
+        Ok(age) => age < PRUNE_GRACE,
+        Err(_) => true,
     }
 }
 
@@ -412,13 +627,17 @@ pub(crate) mod tests {
         task::{Context, Poll},
     };
 
-    use futures::{AsyncRead, AsyncReadExt as _, executor::block_on, io::Cursor};
+    use futures::{AsyncRead, AsyncReadExt as _, FutureExt as _, executor::block_on, io::Cursor};
     use gpui::TestAppContext;
     use http_client::{AsyncBody, FakeHttpClient, Response};
     use sha2::{Digest as _, Sha256};
 
     use super::*;
-    use crate::installed::check_installed;
+    use crate::{
+        installed::check_installed,
+        locks::tests::thread_registry,
+        manifest_cache::{BuildId, ManifestCache},
+    };
 
     const SERVER: KotlinServerKind = KotlinServerKind::KotlinLsp;
     const VERSION: &str = "1.2.3";
@@ -565,6 +784,7 @@ pub(crate) mod tests {
         let events = Mutex::new(Vec::new());
         let record = |done, total| events.lock().unwrap().push((done, total));
         let result = block_on(install(
+            &thread_registry(),
             SERVER,
             entry,
             dir,
@@ -578,12 +798,14 @@ pub(crate) mod tests {
         }
     }
 
+    /// The entries of `dir`, lock files left out (they are never deleted).
     fn names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
             .map(|entries| {
                 entries
                     .flatten()
                     .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| !name.ends_with(".lock"))
                     .collect()
             })
             .unwrap_or_default();
@@ -852,13 +1074,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_other_versions_and_stale_partials_are_deleted() {
+    fn test_an_existing_version_survives_and_stale_partials_are_deleted() {
         let root = tempfile::tempdir().unwrap();
         let dir = server_dir(root.path());
         fs::create_dir_all(dir.join("0.9/bin")).unwrap();
         fs::write(dir.join("0.9/bin/launcher"), "old").unwrap();
-        fs::create_dir_all(dir.join(".staging/leftover")).unwrap();
-        fs::write(dir.join(".download"), "half").unwrap();
+        fs::create_dir_all(staging_dir(&dir, VERSION).join("leftover")).unwrap();
+        fs::write(download_file(&dir, VERSION), "half").unwrap();
 
         let archive = tar_gz(&files(0, true));
         let entry = entry_for(&archive, ArchiveKind::TarGz);
@@ -868,7 +1090,33 @@ pub(crate) mod tests {
             &dir,
             &AtomicBool::new(false),
         );
-        assert_installed(&dir, &run.result.unwrap(), &entry);
+        run.result.unwrap();
+        assert_eq!(names(&dir), ["0.9", VERSION]);
+        assert_eq!(fs::read(dir.join("0.9/bin/launcher")).unwrap(), b"old");
+        assert!(dir.join(".1.2.3.lock").is_file());
+    }
+
+    #[test]
+    fn test_intellij_keeps_one_version_but_never_a_lock_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(server_name(KotlinServerKind::Intellij));
+        fs::create_dir_all(dir.join("0.9/bin")).unwrap();
+        fs::write(dir.join(".0.9.lock"), "").unwrap();
+        let archive = tar_gz(&files(0, true));
+        let entry = entry_for(&archive, ArchiveKind::TarGz);
+        let client = serving(archive, None);
+        block_on(install(
+            &thread_registry(),
+            KotlinServerKind::Intellij,
+            &entry,
+            &dir,
+            client.as_ref(),
+            &|_, _| {},
+            &AtomicBool::new(false),
+        ))
+        .unwrap();
+        assert_eq!(names(&dir), [VERSION]);
+        assert!(dir.join(".0.9.lock").is_file());
     }
 
     #[test]
@@ -912,7 +1160,9 @@ pub(crate) mod tests {
         let polls = Mutex::new(0);
         block_on(async {
             let progress = |_done, _total| *polls.lock().unwrap() += 1;
+            let registry = thread_registry();
             let mut future = Box::pin(install(
+                &registry,
                 SERVER,
                 &entry,
                 &dir,
@@ -923,7 +1173,7 @@ pub(crate) mod tests {
             // Poll until the download has produced a file, then drop the future.
             futures::future::poll_fn(|cx| {
                 let _ = future.as_mut().poll(cx);
-                if dir.join(DOWNLOAD_FILE).exists() && *polls.lock().unwrap() > 0 {
+                if download_file(&dir, VERSION).exists() && *polls.lock().unwrap() > 0 {
                     Poll::Ready(())
                 } else {
                     cx.waker().wake_by_ref();
@@ -931,7 +1181,7 @@ pub(crate) mod tests {
                 }
             })
             .await;
-            assert!(dir.join(DOWNLOAD_FILE).exists());
+            assert!(download_file(&dir, VERSION).exists());
             drop(future);
         });
         assert!(names(&dir).is_empty(), "left behind: {:?}", names(&dir));
@@ -1036,9 +1286,11 @@ pub(crate) mod tests {
         let entry = entry_for(&archive, ArchiveKind::TarGz);
         let served = counting(archive);
         let cancel = AtomicBool::new(false);
+        let registry = thread_registry();
         let (first, second) = block_on(async {
             futures::join!(
                 install(
+                    &registry,
                     SERVER,
                     &entry,
                     &dir,
@@ -1047,6 +1299,7 @@ pub(crate) mod tests {
                     &cancel
                 ),
                 install(
+                    &registry,
                     SERVER,
                     &entry,
                     &dir,
@@ -1068,15 +1321,59 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_concurrent_ensure_downloads_once_and_a_later_one_not_at_all() {
+    fn test_concurrent_ensure_in_two_processes_downloads_once_and_a_later_one_not_at_all() {
         let root = tempfile::tempdir().unwrap();
         let dir = server_dir(root.path());
         let archive = tar_gz(&files(512 * 1024, true));
         let entry = entry_for(&archive, ArchiveKind::TarGz);
         let served = counting(archive);
         let cancel = AtomicBool::new(false);
+        // One registry per simulated process.
+        let (first_process, second_process) = (thread_registry(), thread_registry());
+        let ensure = |registry: &Arc<LockRegistry>| {
+            let registry = registry.clone();
+            let (entry, dir, served, cancel) = (&entry, &dir, &served, &cancel);
+            async move {
+                ensure_installed(
+                    &registry,
+                    SERVER,
+                    entry,
+                    dir,
+                    served.client.as_ref(),
+                    &|_, _| {},
+                    cancel,
+                )
+                .await
+            }
+        };
+        let (first, second) =
+            block_on(async { futures::join!(ensure(&first_process), ensure(&second_process)) });
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(first.dir, second.dir);
+        assert_installed(&dir, &first, &entry);
+        assert_eq!(served.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(served.most_in_flight.load(Ordering::SeqCst), 1);
+
+        block_on(ensure(&first_process)).unwrap();
+        assert_eq!(
+            served.requests.load(Ordering::SeqCst),
+            1,
+            "installed: no network"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_ensure_in_one_process_downloads_once() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = tar_gz(&files(512 * 1024, true));
+        let entry = entry_for(&archive, ArchiveKind::TarGz);
+        let served = counting(archive);
+        let cancel = AtomicBool::new(false);
+        let registry = thread_registry();
         let ensure = || {
             ensure_installed(
+                &registry,
                 SERVER,
                 &entry,
                 &dir,
@@ -1120,6 +1417,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let installed = block_on(ensure_installed(
+            &thread_registry(),
             SERVER,
             &entry,
             &dir,
@@ -1266,6 +1564,7 @@ pub(crate) mod tests {
         let client = reqwest_client::ReqwestClient::new();
         let events = Mutex::new(Vec::new());
         let installed = block_on(install(
+            &thread_registry(),
             SERVER,
             &entry,
             &dir,
@@ -1283,5 +1582,199 @@ pub(crate) mod tests {
         let length = archive.len() as u64;
         assert_eq!(events.first(), Some(&(0, Some(length))));
         assert_eq!(events.last(), Some(&(length, Some(length))));
+    }
+
+    #[gpui::test]
+    fn test_a_start_waiting_on_a_busy_version_lock_can_be_cancelled(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = tar_gz(&files(0, true));
+        let entry = entry_for(&archive, ArchiveKind::TarGz);
+        let served = counting(archive);
+        let other_process = thread_registry();
+        let this_process = Arc::new(LockRegistry::new(Arc::new(cx.executor())));
+        let held = other_process
+            .try_version_lock(&dir, VERSION)
+            .unwrap()
+            .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let task = cx.executor().spawn({
+            let (this_process, dir, cancel) = (this_process.clone(), dir.clone(), cancel.clone());
+            let client = served.client.clone();
+            async move {
+                ensure_installed(
+                    &this_process,
+                    SERVER,
+                    &entry,
+                    &dir,
+                    client.as_ref(),
+                    &|_, _| {},
+                    &cancel,
+                )
+                .await
+                .map(drop)
+            }
+        });
+        // The wait has no time limit.
+        cx.executor().advance_clock(Duration::from_secs(60 * 60));
+        cx.run_until_parked();
+        let mut task = Some(task);
+        assert!(task.as_mut().unwrap().now_or_never().is_none());
+
+        cancel.store(true, Ordering::SeqCst);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let error = task.take().unwrap().now_or_never().unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "install cancelled");
+        assert!(error.downcast_ref::<InstallCancelled>().is_some());
+        assert_eq!(served.requests.load(Ordering::SeqCst), 0);
+
+        // The cancelled wait freed the registry's mutex: once the other process lets go, this one
+        // takes the same lock at once.
+        assert!(
+            this_process
+                .try_version_lock(&dir, VERSION)
+                .unwrap()
+                .is_none()
+        );
+        drop(held);
+        assert!(
+            this_process
+                .try_version_lock(&dir, VERSION)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_a_background_install_does_not_wait_for_a_busy_version() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = tar_gz(&files(0, true));
+        let entry = entry_for(&archive, ArchiveKind::TarGz);
+        let served = counting(archive);
+        let other_process = thread_registry();
+        let held = other_process
+            .try_version_lock(&dir, VERSION)
+            .unwrap()
+            .unwrap();
+        let background = || {
+            block_on(ensure_installed_with(
+                InstallMode::Background,
+                &thread_registry(),
+                SERVER,
+                &entry,
+                &dir,
+                served.client.as_ref(),
+                &|_, _| {},
+                &AtomicBool::new(false),
+            ))
+        };
+        let error = background().unwrap_err();
+        assert!(error.downcast_ref::<VersionBusy>().is_some(), "{error:#}");
+        assert_eq!(served.requests.load(Ordering::SeqCst), 0);
+
+        // Free, it installs and leaves the pending-trial marker; a start leaves none.
+        drop(held);
+        background().unwrap();
+        assert_eq!(
+            fs::read_to_string(pending_marker_path(&dir, VERSION)).unwrap(),
+            entry.sha256
+        );
+        assert_eq!(names(&dir), [".1.2.3.pending", VERSION]);
+    }
+
+    /// A version directory with an install marker last written at `modified`.
+    fn version_at(dir: &Path, version: &str, modified: SystemTime) {
+        let version_dir = dir.join(version);
+        fs::create_dir_all(&version_dir).unwrap();
+        let marker = fs::File::create(version_dir.join(MARKER)).unwrap();
+        marker.set_modified(modified).unwrap();
+    }
+
+    fn build(version: &str) -> Option<BuildId> {
+        Some(BuildId {
+            version: version.into(),
+            sha256: "0".repeat(64),
+        })
+    }
+
+    #[test]
+    fn test_startup_prune_keeps_the_recorded_builds_and_skips_a_busy_version() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let now = SystemTime::now() + Duration::from_secs(60 * 60);
+        let old = now - Duration::from_secs(24 * 60 * 60);
+        for version in ["1.0", "2.0", "3.0", "4.0", "5.0", "6.0"] {
+            version_at(&dir, version, old);
+        }
+        fs::write(dir.join("stray-file"), "").unwrap();
+        let registry = thread_registry();
+        let cache = ManifestCache::new(root.path(), registry.clone());
+        block_on(cache.with_state(|state| {
+            state.kotlin_lsp.active = build("1.0");
+            state.kotlin_lsp.previous = build("2.0");
+            state.kotlin_lsp.trial = build("3.0");
+        }))
+        .unwrap();
+        let other_process = thread_registry();
+        let _busy = other_process
+            .try_version_lock(&dir, "6.0")
+            .unwrap()
+            .unwrap();
+
+        let pruned = block_on(prune(&cache, &registry, &dir, Some("4.0"), now)).unwrap();
+        assert_eq!(
+            pruned,
+            Pruned {
+                removed: vec!["5.0".into()],
+                busy: vec!["6.0".into()],
+            }
+        );
+        assert_eq!(
+            names(&dir),
+            ["1.0", "2.0", "3.0", "4.0", "6.0", "stray-file"]
+        );
+        // Lock files stay, for the pruned version too.
+        assert!(dir.join(".5.0.lock").is_file());
+        assert!(dir.join(".6.0.lock").is_file());
+    }
+
+    #[test]
+    fn test_prune_keeps_a_pending_trial_and_a_fresh_install() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let now = SystemTime::now() + Duration::from_secs(60 * 60);
+        let old = now - Duration::from_secs(11 * 60);
+        version_at(&dir, "7.0", old);
+        fs::write(pending_marker_path(&dir, "7.0"), "digest").unwrap();
+        version_at(&dir, "8.0", now - Duration::from_secs(9 * 60));
+        version_at(&dir, "9.0", old);
+        let registry = thread_registry();
+        let cache = ManifestCache::new(root.path(), registry.clone());
+
+        let pruned = block_on(prune(&cache, &registry, &dir, None, now)).unwrap();
+        assert_eq!(pruned.removed, ["9.0"]);
+        assert!(pruned.busy.is_empty());
+        assert_eq!(names(&dir), [".7.0.pending", "7.0", "8.0"]);
+        // No lock was taken for the kept versions; their locks are free.
+        assert!(registry.try_version_lock(&dir, "7.0").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_prune_without_a_server_dir_does_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = thread_registry();
+        let cache = ManifestCache::new(root.path(), registry.clone());
+        let pruned = block_on(prune(
+            &cache,
+            &registry,
+            &server_dir(root.path()),
+            None,
+            SystemTime::now(),
+        ))
+        .unwrap();
+        assert_eq!(pruned, Pruned::default());
     }
 }

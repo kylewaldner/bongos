@@ -35,6 +35,7 @@ use crate::{
     manifest_cache::{ServerState, read_for_start},
     remote_manifest::trusted_keys,
     resolve::resolve,
+    updates::KotlinUpdates,
     versions::{Resolution, resolve_build},
 };
 
@@ -255,6 +256,8 @@ async fn start_command(
     // kotlin-lsp may run a downloaded build instead of the pin (`versions.rs`); IntelliJ runs its pin.
     let resolution = match server {
         KotlinServerKind::KotlinLsp => {
+            // From now on the background check may download a newer build for the next start.
+            cx.update(KotlinUpdates::start_requested);
             let manifest_url =
                 cx.update(|cx| KotlinSettings::get_global(cx).manifest_url_for_fetch());
             let (install_root, pin) = (dirs.install_root.clone(), pin.clone());
@@ -875,6 +878,7 @@ launcher = "bin/launcher"
         let mut siblings: Vec<_> = fs::read_dir(fixture.server_dir())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.ends_with(".lock"))
             .collect();
         siblings.sort();
         assert_eq!(siblings, ["1.2.3"], "no .download or .staging left");
@@ -1026,7 +1030,7 @@ launcher = "bin/launcher"
             panic!("expected Failed, got {:?}", fixture.status(cx));
         };
         assert!(reason.starts_with("install failed: "), "{reason}");
-        assert!(!fixture.server_dir().join(".download").exists());
+        assert!(!fixture.server_dir().join(".1.2.3.download").exists());
     }
 
     #[gpui::test]
@@ -1044,7 +1048,7 @@ launcher = "bin/launcher"
                 Some(ServerStatus::Installing { done, .. }) if done >= crate::PROGRESS_STEP
             )
         });
-        assert!(fixture.server_dir().join(".download").exists());
+        assert!(fixture.server_dir().join(".1.2.3.download").exists());
         assert!(
             fixture
                 .manager
@@ -1059,8 +1063,8 @@ launcher = "bin/launcher"
                 reason: "install cancelled".into()
             })
         );
-        assert!(!fixture.server_dir().join(".download").exists());
-        assert!(!fixture.server_dir().join(".staging").exists());
+        assert!(!fixture.server_dir().join(".1.2.3.download").exists());
+        assert!(!fixture.server_dir().join(".1.2.3.staging").exists());
         assert!(!fixture.server_dir().join("1.2.3").exists());
 
         // The next start begins again from zero and succeeds.

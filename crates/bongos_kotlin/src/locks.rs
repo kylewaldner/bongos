@@ -135,6 +135,10 @@ impl fmt::Debug for LockGuard {
     }
 }
 
+struct GlobalLockRegistry(Arc<LockRegistry>);
+
+impl gpui::Global for GlobalLockRegistry {}
+
 /// The process-wide lock registry. The app creates one; a test creates one per simulated process.
 pub struct LockRegistry {
     clock: Arc<dyn LockClock>,
@@ -149,6 +153,17 @@ impl LockRegistry {
             state_limit: STATE_LOCK_LIMIT,
             slots: Mutex::default(),
         }
+    }
+
+    /// The registry every task of this process shares (the installer and the background updates),
+    /// made on first use on the background executor.
+    pub fn global(cx: &mut gpui::App) -> Arc<Self> {
+        if let Some(global) = cx.try_global::<GlobalLockRegistry>() {
+            return global.0.clone();
+        }
+        let registry = Arc::new(Self::new(Arc::new(cx.background_executor().clone())));
+        cx.set_global(GlobalLockRegistry(registry.clone()));
+        registry
     }
 
     /// Replaces `STATE_LOCK_LIMIT`, for tests.
@@ -329,7 +344,8 @@ pub(crate) mod tests {
     use gpui::TestAppContext;
     use std::sync::atomic::AtomicUsize;
 
-    /// Real time, for tests that run on plain threads.
+    /// Real time, for tests that run on plain threads. A sleep blocks the thread, then yields once,
+    /// so other futures joined on the same thread (another task of this "process") get polled.
     pub(crate) struct ThreadClock;
 
     impl LockClock for ThreadClock {
@@ -338,7 +354,17 @@ pub(crate) mod tests {
         }
 
         fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
-            async move { std::thread::sleep(duration) }.boxed()
+            let mut slept = false;
+            futures::future::poll_fn(move |cx| {
+                if slept {
+                    return std::task::Poll::Ready(());
+                }
+                std::thread::sleep(duration);
+                slept = true;
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            })
+            .boxed()
         }
     }
 
