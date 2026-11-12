@@ -2520,6 +2520,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_project_repo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_project_repo_model",
+ "bongos_work_model",
+ "futures 0.3.32",
+ "gpui",
+ "paths",
+ "serde",
+ "settings",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "util",
+ "which 6.0.3",
+]
+
+[[package]]
 name = "bongos_project_repo_model"
 version = "0.1.0"
 dependencies = [
@@ -2579,6 +2598,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bongos_minibuffer",
+ "bongos_project_repo",
  "bongos_work_model",
  "chrono",
  "command_palette_hooks",
