@@ -395,8 +395,9 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   worktrees of those older than `workflows.keep_finished_days`; not connected yet). `C-c f n`, `C-c f e` and `C-c f V`
   are `workflow: new`, `edit definition` and `validate`. A run waiting at a gate or failed marks its
   task as needing you. A run survives a restart of bongos; a run that was running comes back
-  interrupted and waits for `resume`. In this build the node runners are not yet connected to the
-  engine, so a started run cannot execute its nodes.
+  interrupted and waits for `resume`. Runs do not execute yet: the node runners are not
+  connected to the engine in this build, so `workflow: run` refuses with "Workflow runs are not
+  connected to an agent runner yet" and starts nothing.
 - **Settings.** All under `workflows`, the main ones also on the Work page of the settings window:
   `enabled` (true), `worktrees_dir` (null), `min_free_disk_mb` (2048), `keep_finished_days` (14),
   `max_concurrent_runs` (3), `max_concurrent_sessions` (null, twice the runs), `max_parallel_branches`
