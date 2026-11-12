@@ -6,6 +6,7 @@ pub mod actions;
 pub mod apply;
 mod comments;
 mod cursor;
+mod global_mark;
 mod goto_line;
 mod kill;
 pub mod kill_sink;
@@ -29,6 +30,8 @@ mod apply_tests;
 mod comments_tests;
 #[cfg(test)]
 mod cursor_tests;
+#[cfg(test)]
+mod global_mark_tests;
 #[cfg(test)]
 mod goto_line_tests;
 #[cfg(test)]
@@ -70,6 +73,7 @@ pub fn init(cx: &mut App) {
     last_command::init(cx);
     quit::init(cx);
     cursor::init(cx);
+    global_mark::init(cx);
     cx.observe_new(|editor: &mut Editor, window, cx| {
         let weak = cx.entity().downgrade();
         register(editor, &weak, motion::forward_word);
