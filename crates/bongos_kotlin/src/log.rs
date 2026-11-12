@@ -1,5 +1,5 @@
-//! `kotlin.log`: one timestamped line per Kotlin event (install, start, stop, switch, crash) and the
-//! Kotlin server's stderr. It outlives switches, which the per-server LSP log does not. The file
+//! `kotlin.log`: one timestamped line per Kotlin event (install, start, stop, switch, crash, manifest
+//! check) and the Kotlin server's stderr. It outlives switches, which the per-server LSP log does not. The file
 //! rotates to `kotlin.log.old` at 5 MB.
 
 use std::{
@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+
+use crate::manifest_cache::FetchOutcome;
 
 const FILE_NAME: &str = "kotlin.log";
 const OLD_FILE_NAME: &str = "kotlin.log.old";
@@ -63,6 +65,35 @@ impl KotlinLog {
         if let Err(error) = self.append(text) {
             log::warn!("cannot write {}: {error}", self.path.display());
         }
+    }
+
+    /// `manifest: off (kotlin.manifest_url is empty)`: bongos does not check for servers.
+    pub fn manifest_off(&self) {
+        self.manifest_line("manifest: off (kotlin.manifest_url is empty)");
+    }
+
+    /// `manifest: off (kotlin.manifest_url is refused)`: the setting names a URL bongos may not
+    /// fetch; the app log has the reason.
+    pub fn manifest_refused(&self) {
+        self.manifest_line("manifest: off (kotlin.manifest_url is refused)");
+    }
+
+    /// The outcome of one manifest check, with the manifest's host: `manifest: fetched serial N`
+    /// or `manifest: rejected: <reason>`.
+    pub fn manifest_outcome(&self, host: &str, outcome: &FetchOutcome) {
+        self.manifest_line(&format!("{} (host {host})", outcome.describe()));
+    }
+
+    /// A manifest check that could not read or write its state; nothing was fetched or stored.
+    pub fn manifest_skipped(&self, host: &str, reason: &str) {
+        self.manifest_line(&format!("manifest: skipped: {reason} (host {host})"));
+    }
+
+    /// One manifest line, folded onto a single line, in this log and in the app log.
+    fn manifest_line(&self, text: &str) {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        log::info!("{text}");
+        self.line(&text);
     }
 
     fn append(&self, text: &str) -> std::io::Result<()> {
