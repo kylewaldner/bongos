@@ -47,7 +47,10 @@ pub use space::{delete_blank_lines, delete_horizontal_space, just_one_space};
 pub use text::{
     Caret, KilledPiece, Place, Plan, Target, TextSource, apply, build_plan, merge_targets,
 };
-pub use transpose::{transpose_chars, transpose_lines, transpose_words, transpose_words_reverse};
+pub use transpose::{
+    transpose_chars, transpose_lines, transpose_lines_with_mark, transpose_words,
+    transpose_words_reverse, transpose_words_with_mark,
+};
 pub use words::{
     backward_kill_word, backward_word_carets, backward_word_target, forward_word_carets,
     forward_word_target, kill_word,

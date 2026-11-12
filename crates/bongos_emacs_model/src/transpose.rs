@@ -349,3 +349,100 @@ fn transpose_lines_at<T: TextSource + ?Sized>(text: &T, head: usize, n: i32) -> 
         Some(rotate(text, &spans, false))
     }
 }
+
+/// The word containing `offset`, else the next word, else the previous one.
+fn word_unit<T: TextSource + ?Sized>(text: &T, offset: usize) -> Option<Range<usize>> {
+    if is_word_at(text, offset) {
+        let mut start = offset;
+        for c in text.reversed_chars_at(offset) {
+            if !is_word_at(text, start - c.len_utf8()) {
+                break;
+            }
+            start -= c.len_utf8();
+        }
+        let mut end = offset;
+        for c in text.chars_at(offset) {
+            if !text.is_word_char(c, end) {
+                break;
+            }
+            end += c.len_utf8();
+        }
+        return Some(start..end);
+    }
+    word_after(text, offset).or_else(|| word_before(text, offset))
+}
+
+/// Swaps two units (`point_unit` holds point, `mark_unit` the mark) in one rewrite. The caller's
+/// closure gets whether point's unit comes first, the new text and its range, and returns where
+/// the caret lands inside the new text.
+fn swap_units<T: TextSource + ?Sized>(
+    text: &T,
+    point_unit: Range<usize>,
+    mark_unit: Range<usize>,
+    caret_after: impl FnOnce(bool, &str, &Range<usize>) -> usize,
+) -> Plan {
+    if point_unit.start < mark_unit.end && mark_unit.start < point_unit.end {
+        return Plan::default();
+    }
+    let point_first = point_unit.start < mark_unit.start;
+    let (lo, hi) = if point_first {
+        (point_unit, mark_unit)
+    } else {
+        (mark_unit, point_unit)
+    };
+    let new = format!(
+        "{}{}{}",
+        slice(text, &hi),
+        slice(text, &(lo.end..hi.start)),
+        slice(text, &lo)
+    );
+    let range = lo.start..hi.end;
+    let caret = caret_after(point_first, &new, &range);
+    let rewrite = Rewrite { range, new, caret };
+    rewrite_plan(text, vec![rewrite], Vec::new())
+}
+
+/// transpose-words with a mark: the word at point and the word at the mark swap (the word at an
+/// offset is the word containing it, else the next word, else the previous one). Point ends
+/// after the word now at its site. The same word, or no second word, is an empty plan.
+pub fn transpose_words_with_mark<T: TextSource + ?Sized>(
+    text: &T,
+    point: usize,
+    mark: usize,
+) -> Plan {
+    let (Some(point_unit), Some(mark_unit)) = (word_unit(text, point), word_unit(text, mark))
+    else {
+        return Plan::default();
+    };
+    let mark_len = mark_unit.len();
+    swap_units(text, point_unit, mark_unit, |point_first, new, _| {
+        if point_first {
+            // The old mark word now sits first.
+            mark_len
+        } else {
+            new.len()
+        }
+    })
+}
+
+/// transpose-lines with a mark: the line at point and the line at the mark swap, without their
+/// newlines. Point ends at the start of the line after point's line (the end of the text when
+/// that is the last line). The same line is an empty plan.
+pub fn transpose_lines_with_mark<T: TextSource + ?Sized>(
+    text: &T,
+    point: usize,
+    mark: usize,
+) -> Plan {
+    let unit = |offset: usize| line_start(text, offset)..line_end(text, offset);
+    let total = text.len();
+    let mark_len = unit(mark).len();
+    swap_units(text, unit(point), unit(mark), |point_first, new, range| {
+        if point_first {
+            mark_len + 1
+        } else if range.end < total {
+            new.len() + 1
+        } else {
+            new.len()
+        }
+    })
+}

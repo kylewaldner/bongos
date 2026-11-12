@@ -276,3 +276,125 @@ fn randomized_transpose_plans_are_consistent() {
         }
     }
 }
+
+/// Splits `ˇ` (point) and `‸` (mark) out of `marked`: the text, point and mark.
+fn parse_pm(marked: &str) -> (String, usize, usize) {
+    let (mut text, mut point, mut mark) = (String::new(), None, None);
+    for c in marked.chars() {
+        match c {
+            'ˇ' => point = Some(text.len()),
+            '‸' => mark = Some(text.len()),
+            _ => text.push(c),
+        }
+    }
+    (text, point.unwrap(), mark.unwrap())
+}
+
+fn with_mark(marked: &str, f: fn(&dyn TextSource, usize, usize) -> Plan) -> (String, Vec<Caret>) {
+    let (text, point, mark) = parse_pm(marked);
+    let plan = f(text.as_str() as &dyn TextSource, point, mark);
+    (apply(&text, &plan), plan.carets)
+}
+
+fn words_mark(marked: &str) -> String {
+    let (text, carets) = with_mark(marked, |t, p, m| transpose_words_with_mark(t, p, m));
+    show(&text, &carets)
+}
+
+fn lines_mark(marked: &str) -> String {
+    let (text, carets) = with_mark(marked, |t, p, m| transpose_lines_with_mark(t, p, m));
+    show(&text, &carets)
+}
+
+#[test]
+fn transpose_words_with_mark_swaps_the_words_at_point_and_mark() {
+    // Mark before point, and after point.
+    assert_eq!(words_mark("one ‸two three ˇfour"), "one four three twoˇ");
+    assert_eq!(words_mark("one ˇtwo three ‸four"), "one fourˇ three two");
+    // Inside the words, adjacent words, punctuation kept.
+    assert_eq!(words_mark("a‸b, cˇd"), "cd, abˇ");
+    assert_eq!(words_mark("‸one twoˇ"), "two oneˇ");
+    // Between words the next word counts; with none after, the previous one.
+    assert_eq!(words_mark("one ‸ two ˇ three"), "one  three  twoˇ");
+}
+
+#[test]
+fn transpose_words_with_mark_keeps_multi_byte_text() {
+    assert_eq!(words_mark("‸héllo wörld ˇñandú"), "ñandú wörld hélloˇ");
+}
+
+#[test]
+fn transpose_words_with_mark_does_nothing_for_one_word() {
+    for marked in ["o‸neˇ two", "‸oneˇ two", "one ‸ˇtwo", "‸ˇ", "‸ ˇ", "ˇ ‸"] {
+        let (text, point, mark) = parse_pm(marked);
+        let plan = transpose_words_with_mark(text.as_str(), point, mark);
+        assert!(plan.edits.is_empty() && plan.carets.is_empty(), "{marked}");
+    }
+}
+
+#[test]
+fn transpose_lines_with_mark_swaps_the_lines_at_point_and_mark() {
+    // Mark above point: point goes to the start of the line after its line.
+    assert_eq!(
+        lines_mark("‸one\ntwo\nthˇree\nfour"),
+        "three\ntwo\none\nˇfour"
+    );
+    // Mark below point.
+    assert_eq!(
+        lines_mark("oˇne\ntwo\n‸three\nfour"),
+        "three\nˇtwo\none\nfour"
+    );
+    // Adjacent, differing lengths.
+    assert_eq!(lines_mark("‸a\nbbbbˇ\nc"), "bbbb\na\nˇc");
+    // Last line without a newline: point lands at the end of the text.
+    assert_eq!(lines_mark("‸one\ntwo\nthrˇee"), "three\ntwo\noneˇ");
+    assert_eq!(lines_mark("‸one\nˇtwo"), "two\noneˇ");
+    // Multi-byte text and empty lines.
+    assert_eq!(lines_mark("‸héllo\n\nwörˇld\nx"), "wörld\n\nhéllo\nˇx");
+}
+
+#[test]
+fn transpose_lines_with_mark_does_nothing_for_one_line() {
+    for marked in ["o‸neˇ\ntwo", "‸ˇone", "one\n‸ˇ"] {
+        let (text, point, mark) = parse_pm(marked);
+        let plan = transpose_lines_with_mark(text.as_str(), point, mark);
+        assert!(plan.edits.is_empty() && plan.carets.is_empty(), "{marked}");
+    }
+}
+
+fn sorted_chars(text: &str) -> Vec<char> {
+    let mut chars: Vec<char> = text.chars().collect();
+    chars.sort_unstable();
+    chars
+}
+
+#[test]
+fn randomized_mark_transposes_keep_every_character() {
+    let alphabet = ['a', 'b', 'é', 'ñ', ' ', ' ', '\n', ',', '1'];
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |bound: usize| {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 33) as usize) % bound
+    };
+    for _ in 0..3000 {
+        let len = next(20);
+        let text: String = (0..len).map(|_| alphabet[next(alphabet.len())]).collect();
+        let bounds: Vec<usize> = (0..=text.len())
+            .filter(|&i| text.is_char_boundary(i))
+            .collect();
+        let point = bounds[next(bounds.len())];
+        let mark = bounds[next(bounds.len())];
+        for plan in [
+            transpose_words_with_mark(text.as_str(), point, mark),
+            transpose_lines_with_mark(text.as_str(), point, mark),
+        ] {
+            let result = apply(&text, &plan);
+            assert_eq!(sorted_chars(&result), sorted_chars(&text), "{text:?}");
+            for caret in &plan.carets {
+                assert!(result.is_char_boundary(caret.head), "{text:?}");
+            }
+        }
+    }
+}
