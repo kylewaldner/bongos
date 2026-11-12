@@ -1613,7 +1613,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_the_command_with_an_empty_url_makes_no_request_and_says_off(cx: &mut TestAppContext) {
+    fn test_check_command_with_an_empty_url_makes_no_request_and_says_off(cx: &mut TestAppContext) {
         let harness = Harness::new(cx);
         let updates = harness.updates(cx);
         let result = refresh(cx, &updates);
@@ -1627,7 +1627,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_the_command_fetches_once_and_the_menu_reports_it(cx: &mut TestAppContext) {
+    fn test_check_command_fetches_once_and_the_menu_reports_it(cx: &mut TestAppContext) {
         let harness = Harness::new(cx);
         harness.server.serve_pair(A, signed(3, "263.3.0"));
         set_user_url(cx, A);
@@ -1651,7 +1651,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_a_failed_check_shows_its_error_in_the_menu(cx: &mut TestAppContext) {
+    fn test_check_command_failed_check_shows_error_in_menu(cx: &mut TestAppContext) {
         let harness = Harness::new(cx);
         harness.server.serve(A, Route::Offline);
         set_user_url(cx, A);

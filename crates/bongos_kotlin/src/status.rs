@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn test_menu_labels_for_updates_off_checked_and_error() {
+    fn test_check_command_menu_labels_for_updates_off_checked_and_error() {
         let notes = |info: UpdatesInfo| {
             let mut snapshot = lsp(ServerStatus::Ready);
             snapshot.updates = info;
