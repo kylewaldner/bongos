@@ -26,8 +26,9 @@ pub use commands::{reimport_project, restart_server, switch_server};
 pub use glue::{attach_managers, attach_notices, fallback_notice_id};
 use gpui::{App, Global, actions};
 pub use install::{
-    InstallCancelled, InstalledServer, PROGRESS_STEP, ProgressFn, ensure_installed, install,
-    spawn_ensure_installed,
+    InstallCancelled, InstallMode, InstalledServer, PROGRESS_STEP, PRUNE_GRACE, ProgressFn, Pruned,
+    VersionBusy, ensure_installed, ensure_installed_with, install, pending_marker_path, prune,
+    spawn_ensure_installed, spawn_ensure_installed_with,
 };
 pub use installed::{MARKER as INSTALLED_MARKER, check_installed, server_name};
 pub use intellij::{
@@ -243,9 +244,9 @@ pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
     });
     languages.register_lsp_adapter(
         LanguageName::new_static("Kotlin"),
-        Arc::new(KotlinAdapter::new(dirs.clone(), manifest)),
+        Arc::new(KotlinAdapter::new(dirs.clone(), manifest.clone())),
     );
-    KotlinUpdates::init(&dirs.install_root, &dirs.logs_dir, cx);
+    KotlinUpdates::init(&dirs.install_root, &dirs.logs_dir, &manifest, cx);
     attach_managers(dirs, cx);
     attach_notices(cx);
     attach_unsupported_notices(cx);

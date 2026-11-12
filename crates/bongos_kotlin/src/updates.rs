@@ -14,12 +14,29 @@
 //!
 //! The setting is read only from the global settings (`KotlinSettings::get_global`), never with a
 //! worktree location: a project's `.bongos/settings.json` cannot point bongos at another server.
+//!
+//! Once a kotlin-lsp start was requested in this run (`KotlinUpdates::start_requested`), each check
+//! is followed by a background download of the newest build in the cached manifest that is newer
+//! than the pin, the active build and the trial, not rejected and not installed. One download runs
+//! at a time, through `spawn_ensure_installed_with` in `InstallMode::Background`: it holds only that
+//! version's lock, tried once (a busy lock skips the download until the next check), so a start of
+//! another build never waits on it. The install leaves a pending-trial marker; once the version lock
+//! is released the build is recorded as the trial under the state lock and the marker removed.
+//! Without a verified cached manifest (an empty URL, or no trusted key) nothing downloads.
+//!
+//! At startup, before this process starts a server, `prune` deletes the kotlin-lsp builds nothing
+//! refers to.
 
 use std::{
+    cmp::Ordering as VersionOrder,
+    fs,
     path::{Path, PathBuf},
     pin::pin,
-    sync::Arc,
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -30,14 +47,23 @@ use futures::{
 };
 use gpui::{App, AppContext as _, BackgroundExecutor, Context, Entity, Global, Task};
 use http_client::{AsyncBody, HttpClient, Url, http::header::CONTENT_LENGTH};
-use settings::{Settings as _, SettingsStore};
+use settings::{KotlinServerKind, Settings as _, SettingsStore};
 
 use crate::{
     KotlinSettings,
+    install::{InstallMode, VersionBusy, pending_marker_path, prune, spawn_ensure_installed_with},
+    installed::{check_installed, server_name},
     locks::LockRegistry,
     log::KotlinLog,
-    manifest_cache::{Claim, FetchOutcome, FetchedManifest, ManifestCache},
-    remote_manifest::{MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, TrustedKey, sig_url, trusted_keys},
+    manifest::{Manifest, ManifestEntry, current_platform},
+    manifest_cache::{
+        BuildId, Claim, FetchOutcome, FetchedManifest, KotlinLspBuilds, ManifestCache,
+        read_for_start,
+    },
+    remote_manifest::{
+        MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, TrustedKey, compare_versions, sig_url,
+        trusted_keys,
+    },
 };
 
 /// How long after startup the first check runs.
@@ -81,6 +107,10 @@ pub struct UpdateSetup {
     pub keys: Vec<TrustedKey>,
     pub clock: WallClock,
     pub timings: UpdateTimings,
+    /// This machine's platform key, `None` where no Kotlin server runs.
+    pub platform: Option<String>,
+    /// The embedded kotlin-lsp pin for `platform`.
+    pub pin: Option<ManifestEntry>,
 }
 
 /// What one check did.
@@ -128,6 +158,10 @@ pub struct KotlinUpdates {
     running: bool,
     /// A setting change found a check in flight: check again, forced, when a check can run.
     force_pending: bool,
+    /// A kotlin-lsp start was requested in this run; only then does a build download.
+    start_requested: Arc<AtomicBool>,
+    /// A background download (or its planning) is in flight.
+    downloading: bool,
     _settings: gpui::Subscription,
     _wake: Task<()>,
 }
@@ -142,22 +176,38 @@ struct Checker {
     executor: BackgroundExecutor,
     max_age: Duration,
     fetch_timeout: Duration,
+    install_root: PathBuf,
+    locks: Arc<LockRegistry>,
+    platform: Option<String>,
+    pin: Option<ManifestEntry>,
+}
+
+/// What a background download pass does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DownloadPlan {
+    Nothing,
+    /// Download and install this build.
+    Download(ManifestEntry),
+    /// This build is installed with a pending-trial marker (its recording failed before): record it.
+    Record(ManifestEntry),
 }
 
 impl KotlinUpdates {
     /// Creates the app's check: the app's HTTP client, the release keys (plus the debug-only key
-    /// override), and the process-wide lock registry, which runs on the background executor.
-    pub fn init(install_root: &Path, logs_dir: &Path, cx: &mut App) {
+    /// override), the process-wide lock registry the installer shares, and the embedded pin.
+    pub fn init(install_root: &Path, logs_dir: &Path, manifest: &Manifest, cx: &mut App) {
+        let platform = current_platform();
         let setup = UpdateSetup {
             install_root: install_root.to_path_buf(),
             logs_dir: logs_dir.to_path_buf(),
             http: cx.http_client(),
-            locks: Arc::new(LockRegistry::new(Arc::new(
-                cx.background_executor().clone(),
-            ))),
+            locks: LockRegistry::global(cx),
             keys: trusted_keys(true),
             clock: Arc::new(Utc::now),
             timings: UpdateTimings::default(),
+            platform: platform.map(str::to_string),
+            pin: platform
+                .and_then(|platform| manifest.entry(KotlinServerKind::KotlinLsp, platform).ok()),
         };
         let updates = cx.new(|cx| Self::new(setup, cx));
         cx.set_global(GlobalKotlinUpdates(updates));
@@ -174,7 +224,7 @@ impl KotlinUpdates {
         let raw_url = settings.manifest_url.clone();
         let url = settings.manifest_url_for_fetch();
         let checker = Arc::new(Checker {
-            cache: ManifestCache::new(&setup.install_root, setup.locks),
+            cache: ManifestCache::new(&setup.install_root, setup.locks.clone()),
             http: setup.http,
             log: KotlinLog::new(&setup.logs_dir),
             keys: setup.keys,
@@ -182,7 +232,23 @@ impl KotlinUpdates {
             executor: cx.background_executor().clone(),
             max_age: setup.timings.max_age,
             fetch_timeout: setup.timings.fetch_timeout,
+            install_root: setup.install_root,
+            locks: setup.locks,
+            platform: setup.platform,
+            pin: setup.pin,
         });
+        let start_requested = Arc::new(AtomicBool::new(false));
+        // The startup pass: prune unused kotlin-lsp builds, unless a start came first.
+        cx.background_spawn({
+            let checker = checker.clone();
+            let start_requested = start_requested.clone();
+            async move {
+                if !start_requested.load(Ordering::SeqCst) {
+                    checker.prune().await;
+                }
+            }
+        })
+        .detach();
         let timings = setup.timings;
         let wake = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(timings.startup_delay).await;
@@ -202,6 +268,8 @@ impl KotlinUpdates {
             off_logged: false,
             running: false,
             force_pending: false,
+            start_requested,
+            downloading: false,
             _settings: cx.observe_global::<SettingsStore>(|this, cx| this.settings_changed(cx)),
             _wake: wake,
         }
@@ -211,6 +279,82 @@ impl KotlinUpdates {
     /// gives `Refresh::Busy` ("a check is already running"). Shows nothing; the caller reports.
     pub fn refresh(&mut self, cx: &mut Context<Self>) -> Task<Refresh> {
         self.start_check(true, false, cx)
+    }
+
+    /// Notes that a kotlin-lsp start was requested in this run, which allows background downloads,
+    /// and looks for one now. Does nothing before `init`.
+    pub fn start_requested(cx: &mut App) {
+        if let Some(updates) = Self::global(cx) {
+            updates.update(cx, |updates, cx| updates.note_start(cx));
+        }
+    }
+
+    /// `start_requested` for this entity.
+    pub fn note_start(&mut self, cx: &mut Context<Self>) {
+        self.start_requested.store(true, Ordering::SeqCst);
+        self.maybe_download(cx);
+    }
+
+    /// Starts a background download pass if a start was requested, a manifest URL is set and no
+    /// pass is in flight.
+    fn maybe_download(&mut self, cx: &mut Context<Self>) {
+        if !self.start_requested.load(Ordering::SeqCst) || self.downloading {
+            return;
+        }
+        let Some(url) = self.url.clone() else {
+            return;
+        };
+        self.downloading = true;
+        let checker = self.checker.clone();
+        cx.spawn(async move |this, cx| {
+            let plan = cx
+                .background_spawn({
+                    let checker = checker.clone();
+                    async move { checker.plan_download(&url) }
+                })
+                .await;
+            match plan {
+                DownloadPlan::Nothing => {}
+                DownloadPlan::Record(entry) => {
+                    cx.background_spawn(async move { checker.record_trial(&entry).await })
+                        .await
+                }
+                DownloadPlan::Download(entry) => {
+                    let version = entry.version.clone();
+                    checker.note(&format!("download: kotlin-lsp {version} started"));
+                    let install = cx.update(|cx| {
+                        spawn_ensure_installed_with(
+                            InstallMode::Background,
+                            checker.locks.clone(),
+                            KotlinServerKind::KotlinLsp,
+                            entry.clone(),
+                            checker.server_dir(),
+                            checker.http.clone(),
+                            Arc::new(|_, _| {}),
+                            Arc::new(AtomicBool::new(false)),
+                            cx,
+                        )
+                    });
+                    // The version lock is released when the install task returns.
+                    let result = install.await;
+                    cx.background_spawn(async move {
+                        match result {
+                            Ok(_) => checker.record_trial(&entry).await,
+                            Err(error) if error.downcast_ref::<VersionBusy>().is_some() => checker
+                                .note(&format!(
+                                    "download: kotlin-lsp {version} skipped: another install holds it"
+                                )),
+                            Err(error) => checker.note(&format!(
+                                "download: kotlin-lsp {version} failed: {error:#}"
+                            )),
+                        }
+                    })
+                    .await
+                }
+            }
+            this.update(cx, |this, _| this.downloading = false).ok();
+        })
+        .detach();
     }
 
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
@@ -261,6 +405,7 @@ impl KotlinUpdates {
                 .await;
             this.update(cx, |this, cx| {
                 this.running = false;
+                this.maybe_download(cx);
                 if url_changed && result == Refresh::Busy {
                     // Another process holds the lease: the next wake-up checks the new URL.
                     this.force_pending = true;
@@ -282,6 +427,135 @@ impl KotlinUpdates {
 }
 
 impl Checker {
+    fn server_dir(&self) -> PathBuf {
+        self.install_root
+            .join(server_name(KotlinServerKind::KotlinLsp))
+    }
+
+    /// One line in `kotlin.log` and the app log.
+    fn note(&self, text: &str) {
+        ::log::info!("{text}");
+        self.log.line(text);
+    }
+
+    /// The startup prune of unused kotlin-lsp builds.
+    async fn prune(&self) {
+        let pin = self.pin.as_ref().map(|pin| pin.version.as_str());
+        match prune(
+            &self.cache,
+            &self.locks,
+            &self.server_dir(),
+            pin,
+            SystemTime::now(),
+        )
+        .await
+        {
+            Ok(pruned) => {
+                for version in &pruned.removed {
+                    self.note(&format!("prune: removed kotlin-lsp {version}"));
+                }
+                for version in &pruned.busy {
+                    ::log::info!("prune: kept kotlin-lsp {version}: its lock is busy");
+                }
+            }
+            Err(error) => ::log::warn!("prune: skipped: {error:#}"),
+        }
+    }
+
+    /// The build a background download pass handles, from the cached manifest and `state.json`
+    /// read as files.
+    fn plan_download(&self, url: &Url) -> DownloadPlan {
+        let (Some(platform), Some(pin)) = (&self.platform, &self.pin) else {
+            return DownloadPlan::Nothing;
+        };
+        let (cached, state) = read_for_start(&self.install_root, url, &self.keys);
+        let Some(cached) = cached else {
+            return DownloadPlan::Nothing;
+        };
+        let builds = &state.kotlin_lsp;
+        let mut best = pin.version.as_str();
+        for build in [&builds.active, &builds.trial].into_iter().flatten() {
+            if compare_versions(&build.version, best) == Some(VersionOrder::Greater) {
+                best = &build.version;
+            }
+        }
+        let today = (self.clock)().date_naive();
+        let rejected = |entry: &ManifestEntry| {
+            builds.rejected.iter().any(|id| {
+                id.version == entry.version && id.sha256.eq_ignore_ascii_case(&entry.sha256)
+            })
+        };
+        let newest = cached
+            .manifest
+            .kotlin_lsp
+            .iter()
+            .filter_map(|build| build.entry(platform))
+            .filter(|entry| {
+                compare_versions(&entry.version, best) == Some(VersionOrder::Greater)
+                    && !entry.is_expired(today)
+                    && !rejected(entry)
+            })
+            .max_by(|a, b| compare_versions(&a.version, &b.version).unwrap_or(VersionOrder::Equal));
+        let Some(entry) = newest else {
+            return DownloadPlan::Nothing;
+        };
+        if check_installed(&self.install_root, KotlinServerKind::KotlinLsp, entry).is_none() {
+            DownloadPlan::Download(entry.clone())
+        } else if pending_marker_path(&self.server_dir(), &entry.version).exists() {
+            DownloadPlan::Record(entry.clone())
+        } else {
+            DownloadPlan::Nothing
+        }
+    }
+
+    /// Records an installed build with a pending-trial marker as the trial, then removes the
+    /// marker. Called with no version lock held; takes the state lock only for the write. Under
+    /// that lock the build is recorded only when it is not rejected and is newer than the active
+    /// build and the trial, so a process planning from an older manifest never replaces a newer
+    /// trial. A build not recorded loses its marker too, so the startup prune can delete it.
+    async fn record_trial(&self, entry: &ManifestEntry) {
+        let marker = pending_marker_path(&self.server_dir(), &entry.version);
+        if !marker.exists() {
+            // Another install of this build finished first; its process records it.
+            return;
+        }
+        let trial = BuildId {
+            version: entry.version.clone(),
+            sha256: entry.sha256.clone(),
+        };
+        let version = &entry.version;
+        match self
+            .cache
+            .with_state(|state| record_if_newer(&mut state.kotlin_lsp, trial))
+            .await
+        {
+            Ok(outcome) => {
+                if let Err(error) = fs::remove_file(&marker)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    ::log::warn!("removing {}: {error}", marker.display());
+                }
+                self.note(&match outcome {
+                    TrialRecord::Recorded => {
+                        format!("download: kotlin-lsp {version} installed as the trial")
+                    }
+                    TrialRecord::AlreadyRecorded => {
+                        format!("download: kotlin-lsp {version} is already recorded")
+                    }
+                    TrialRecord::Rejected => {
+                        format!("download: kotlin-lsp {version} not recorded: it was rejected")
+                    }
+                    TrialRecord::NotNewer(other) => format!(
+                        "download: kotlin-lsp {version} not recorded: {other} is as new or newer"
+                    ),
+                });
+            }
+            Err(error) => self.note(&format!(
+                "download: kotlin-lsp {version} is installed but not recorded yet: {error:#}"
+            )),
+        }
+    }
+
     async fn check(&self, url: Url, force: bool) -> Refresh {
         let host = url.host_str().unwrap_or_default().to_string();
         // Phase 1: claim the fetch under the state lock.
@@ -352,6 +626,41 @@ impl Checker {
 
 /// GET the manifest, then GET its `.sig`, following redirects. Nothing is added to the requests:
 /// no query, no cookie, no conditional or identifying header beyond what the client sends anyway.
+/// What `record_if_newer` did with a downloaded build.
+#[derive(Debug, PartialEq, Eq)]
+enum TrialRecord {
+    Recorded,
+    /// The build already is the trial or the active build.
+    AlreadyRecorded,
+    Rejected,
+    /// The active build or the trial, this version, is as new or newer.
+    NotNewer(String),
+}
+
+/// Makes `trial` the trial of `builds` when it is not rejected and is newer than the active build
+/// and the current trial. Runs under the state lock.
+fn record_if_newer(builds: &mut KotlinLspBuilds, trial: BuildId) -> TrialRecord {
+    let same =
+        |id: &BuildId| id.version == trial.version && id.sha256.eq_ignore_ascii_case(&trial.sha256);
+    if builds.rejected.iter().any(&same) {
+        return TrialRecord::Rejected;
+    }
+    if [&builds.active, &builds.trial]
+        .into_iter()
+        .flatten()
+        .any(&same)
+    {
+        return TrialRecord::AlreadyRecorded;
+    }
+    for build in [&builds.active, &builds.trial].into_iter().flatten() {
+        if compare_versions(&trial.version, &build.version) != Some(VersionOrder::Greater) {
+            return TrialRecord::NotNewer(build.version.clone());
+        }
+    }
+    builds.trial = Some(trial);
+    TrialRecord::Recorded
+}
+
 async fn fetch_pair(http: &dyn HttpClient, url: &Url) -> Result<FetchedManifest> {
     let servers = get_capped(http, url, MAX_MANIFEST_BYTES, "manifest").await?;
     let sig = get_capped(http, &sig_url(url), MAX_SIGNATURE_BYTES, "signature").await?;
@@ -395,7 +704,12 @@ async fn get_capped(http: &dyn HttpClient, url: &Url, cap: usize, what: &str) ->
 mod tests {
     use super::*;
     use crate::{
+        install::{
+            ensure_installed,
+            tests::{entry_for, files, sha256, tar_gz},
+        },
         locks::tests::thread_registry,
+        manifest::ArchiveKind,
         manifest_cache::tests::{key_pair, now, release_keys, servers, signed, signed_with},
     };
     use collections::HashMap;
@@ -410,6 +724,8 @@ mod tests {
     use util::rel_path::RelPath;
 
     const HOUR: Duration = Duration::from_secs(60 * 60);
+    const PLATFORM: &str = "linux-x64";
+    const PIN_VERSION: &str = "262.1.0";
     const A: &str = "https://a.example.com/kotlin/servers.json";
     const B: &str = "https://b.example.com/kotlin/servers.json";
 
@@ -419,6 +735,8 @@ mod tests {
         Offline,
         /// Headers arrive, the body never ends.
         Stall,
+        /// The first bytes arrive, then the body never ends.
+        StallAfter(Vec<u8>, usize),
     }
 
     #[derive(Clone, Debug)]
@@ -475,6 +793,13 @@ mod tests {
                             .status(200)
                             .body(AsyncBody::from_reader(Endless))
                             .unwrap()),
+                        Some(Route::StallAfter(bytes, sent)) => Ok(Response::builder()
+                            .status(200)
+                            .body(AsyncBody::from_reader(futures::AsyncReadExt::chain(
+                                futures::io::Cursor::new(bytes[..sent].to_vec()),
+                                Endless,
+                            )))
+                            .unwrap()),
                         Some(Route::Offline) => Err(anyhow!("network is unreachable")),
                         None => Ok(Response::builder()
                             .status(404)
@@ -503,6 +828,8 @@ mod tests {
         root: tempfile::TempDir,
         server: Arc<Server>,
         start: std::time::Instant,
+        /// The archive every test build is served as.
+        archive: Vec<u8>,
     }
 
     impl Harness {
@@ -516,7 +843,86 @@ mod tests {
                 root: tempfile::tempdir().unwrap(),
                 server: Arc::default(),
                 start: cx.executor().now(),
+                archive: tar_gz(&files(256 * 1024, true)),
             }
+        }
+
+        /// The embedded kotlin-lsp pin of the test process.
+        fn pin(&self) -> ManifestEntry {
+            ManifestEntry {
+                version: PIN_VERSION.into(),
+                url: "https://download.jetbrains.com/pin/kotlin-server.tar.gz".into(),
+                ..entry_for(&self.archive, ArchiveKind::TarGz)
+            }
+        }
+
+        /// The manifest entry of `version`, as the manifest at `url` gives it.
+        fn build(&self, url: &str, version: &str) -> ManifestEntry {
+            let cached = self
+                .cache()
+                .load(&Url::parse(url).unwrap(), &release_keys());
+            cached
+                .unwrap()
+                .manifest
+                .kotlin_lsp
+                .iter()
+                .find(|build| build.version == version)
+                .and_then(|build| build.entry(PLATFORM))
+                .unwrap()
+                .clone()
+        }
+
+        /// Serves a signed manifest at `url` listing `versions`, each an archive of `self.archive`,
+        /// and serves each archive.
+        fn serve_builds(&self, url: &str, serial: u64, versions: &[&str]) {
+            let digest = sha256(&self.archive);
+            let builds: Vec<serde_json::Value> = versions
+                .iter()
+                .map(|version| {
+                    serde_json::json!({
+                        "version": version, "built": "2026-11-10", "expires": "2026-12-09",
+                        "requires": 1,
+                        "platform": { PLATFORM: {
+                            "url": archive_url(version), "sha256": digest, "archive": "tar.gz",
+                            "strip_components": 1, "launcher": "bin/launcher"
+                        } }
+                    })
+                })
+                .collect();
+            let servers = serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "kind": "bongos-kotlin-servers", "serial": serial,
+                "published": "2026-11-11", "kotlin-lsp": builds
+            }))
+            .unwrap();
+            self.server
+                .serve_pair(url, signed_with(servers, "release-1", &key_pair(7)));
+            for version in versions {
+                self.server
+                    .serve(&archive_url(version), Route::Body(self.archive.clone()));
+            }
+            self.server
+                .serve(&self.pin().url, Route::Body(self.archive.clone()));
+        }
+
+        fn server_dir(&self) -> PathBuf {
+            self.install_root().join("kotlin-lsp")
+        }
+
+        fn archive_requests(&self) -> usize {
+            self.server
+                .urls()
+                .iter()
+                .filter(|url| url.ends_with(".tar.gz"))
+                .count()
+        }
+
+        fn download_lines(&self) -> Vec<String> {
+            let text =
+                fs::read_to_string(self.root.path().join("logs/kotlin.log")).unwrap_or_default();
+            text.lines()
+                .filter_map(|line| line.split_once(' ').map(|(_, rest)| rest.to_string()))
+                .filter(|line| line.starts_with("download:"))
+                .collect()
         }
 
         fn install_root(&self) -> PathBuf {
@@ -547,6 +953,8 @@ mod tests {
                 keys: release_keys(),
                 clock: self.clock(cx),
                 timings: UpdateTimings::default(),
+                platform: Some(PLATFORM.into()),
+                pin: Some(self.pin()),
             };
             cx.new(|cx| KotlinUpdates::new(setup, cx))
         }
@@ -610,6 +1018,29 @@ mod tests {
         for _ in 0..hours {
             advance(cx, HOUR);
         }
+    }
+
+    fn archive_url(version: &str) -> String {
+        format!(
+            "https://download.jetbrains.com/language-server/kotlin-server/{version}/kotlin-server-{version}.tar.gz"
+        )
+    }
+
+    /// Runs the app until `done`, sleeping between tries: an install also waits on file system
+    /// threads. Fake time does not move, so nothing done here waited on a lock's timer.
+    fn wait_until(cx: &mut TestAppContext, what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            cx.run_until_parked();
+            if done() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    fn start(cx: &mut TestAppContext, updates: &Entity<KotlinUpdates>) {
+        updates.update(cx, |updates, cx| updates.note_start(cx));
     }
 
     fn refresh(cx: &mut TestAppContext, updates: &Entity<KotlinUpdates>) -> Refresh {
@@ -983,6 +1414,287 @@ mod tests {
                 .iter()
                 .all(|url| !url.contains("evil"))
         );
+    }
+
+    #[gpui::test]
+    fn test_a_newer_build_downloads_only_after_a_start_request(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["263.3.0"]);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        assert_eq!(harness.cached_serial(A), Some(3));
+        advance_hours(cx, 48);
+        assert_eq!(harness.archive_requests(), 0);
+        assert!(!harness.server_dir().join("263.3.0").exists());
+
+        start(cx, &updates);
+        wait_until(cx, "the trial", || {
+            harness.cache().read_state().kotlin_lsp.trial.is_some()
+        });
+        let entry = harness.build(A, "263.3.0");
+        assert_eq!(
+            harness.cache().read_state().kotlin_lsp.trial,
+            Some(BuildId {
+                version: "263.3.0".into(),
+                sha256: entry.sha256.clone(),
+            })
+        );
+        assert_eq!(harness.archive_requests(), 1);
+        assert!(
+            check_installed(&harness.install_root(), KotlinServerKind::KotlinLsp, &entry).is_some()
+        );
+        assert!(!pending_marker_path(&harness.server_dir(), "263.3.0").exists());
+        assert_eq!(
+            harness.download_lines(),
+            [
+                "download: kotlin-lsp 263.3.0 started",
+                "download: kotlin-lsp 263.3.0 installed as the trial",
+            ]
+        );
+
+        // Nothing is newer than the trial now: later checks and starts download nothing.
+        start(cx, &updates);
+        refresh(cx, &updates);
+        cx.run_until_parked();
+        assert_eq!(harness.archive_requests(), 1);
+    }
+
+    #[gpui::test]
+    fn test_a_checksum_mismatch_deletes_the_file_and_records_nothing(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["263.3.0"]);
+        let mut tampered = harness.archive.clone();
+        tampered[1000] ^= 0xff;
+        harness
+            .server
+            .serve(&archive_url("263.3.0"), Route::Body(tampered));
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        start(cx, &updates);
+        wait_until(cx, "the failure", || {
+            harness
+                .download_lines()
+                .iter()
+                .any(|line| line.contains("failed"))
+        });
+        cx.run_until_parked();
+        assert_eq!(harness.archive_requests(), 1);
+        let lines = harness.download_lines();
+        assert!(lines.last().unwrap().contains("SHA-256"), "{lines:?}");
+        assert_eq!(harness.cache().read_state().kotlin_lsp.trial, None);
+        let mut left: Vec<String> = fs::read_dir(harness.server_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, [".263.3.0.lock"]);
+    }
+
+    #[gpui::test]
+    fn test_a_start_never_waits_on_a_download(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["263.2.0", "263.3.0"]);
+        // Build B stalls mid-body, holding B's version lock.
+        harness.server.serve(
+            &archive_url("263.3.0"),
+            Route::StallAfter(harness.archive.clone(), 64 * 1024),
+        );
+        set_user_url(cx, A);
+        let locks = Arc::new(LockRegistry::new(Arc::new(cx.executor())));
+        let updates = harness.updates_with(cx, locks.clone());
+        advance(cx, STARTUP_DELAY);
+        let active = harness.build(A, "263.2.0");
+        crate::installed::tests::install(&harness.install_root(), &active);
+        block_on(harness.cache().with_state(|state| {
+            state.kotlin_lsp.active = Some(BuildId {
+                version: active.version.clone(),
+                sha256: active.sha256.clone(),
+            })
+        }))
+        .unwrap();
+
+        start(cx, &updates);
+        let partial = harness.server_dir().join(".263.3.0.download");
+        wait_until(cx, "the stalled download", || {
+            fs::metadata(&partial).is_ok_and(|metadata| metadata.len() > 0)
+        });
+        assert!(
+            locks
+                .try_version_lock(&harness.server_dir(), "263.3.0")
+                .unwrap()
+                .is_none()
+        );
+
+        // Starts in this process, through the same lock registry, with no fake time passing.
+        let mut run_start = |entry: ManifestEntry| {
+            let (locks, dir, http) = (locks.clone(), harness.server_dir(), harness.server.client());
+            let mut task = cx.executor().spawn(async move {
+                ensure_installed(
+                    &locks,
+                    KotlinServerKind::KotlinLsp,
+                    &entry,
+                    &dir,
+                    http.as_ref(),
+                    &|_, _| {},
+                    &AtomicBool::new(false),
+                )
+                .await
+            });
+            let mut result = None;
+            wait_until(cx, "the start", || {
+                result = (&mut task).now_or_never();
+                result.is_some()
+            });
+            result.unwrap().unwrap()
+        };
+        // The pin, not installed yet, then installed; then the active build.
+        let pin = run_start(harness.pin());
+        assert_eq!(pin.version, PIN_VERSION);
+        run_start(harness.pin());
+        assert_eq!(run_start(active).version, "263.2.0");
+        assert_eq!(harness.archive_requests(), 2);
+
+        // The state lock is free too.
+        let cache = ManifestCache::new(&harness.install_root(), locks.clone());
+        let write = cx.executor().spawn(async move {
+            cache
+                .with_state(|state| state.last_outcome = Some("other".into()))
+                .await
+        });
+        cx.run_until_parked();
+        write.now_or_never().expect("the write finished").unwrap();
+
+        // The download is still in flight and recorded nothing.
+        assert!(partial.exists());
+        assert_eq!(harness.cache().read_state().kotlin_lsp.trial, None);
+        assert!(updates.read_with(cx, |updates, _| updates.downloading));
+    }
+
+    #[gpui::test]
+    fn test_a_download_skips_a_version_another_process_holds(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        harness.serve_builds(A, 3, &["263.3.0"]);
+        set_user_url(cx, A);
+        let updates = harness.updates(cx);
+        advance(cx, STARTUP_DELAY);
+        let other_process = thread_registry();
+        let held = other_process
+            .try_version_lock(&harness.server_dir(), "263.3.0")
+            .unwrap()
+            .unwrap();
+
+        // No fake time passes: the download gives up at once instead of waiting.
+        start(cx, &updates);
+        cx.run_until_parked();
+        assert_eq!(harness.archive_requests(), 0);
+        assert_eq!(
+            harness.download_lines(),
+            [
+                "download: kotlin-lsp 263.3.0 started",
+                "download: kotlin-lsp 263.3.0 skipped: another install holds it",
+            ]
+        );
+        assert!(!updates.read_with(cx, |updates, _| updates.downloading));
+
+        // The next check tries again.
+        drop(held);
+        refresh(cx, &updates);
+        wait_until(cx, "the trial", || {
+            harness.cache().read_state().kotlin_lsp.trial.is_some()
+        });
+        assert_eq!(harness.archive_requests(), 1);
+    }
+
+    /// Installs nothing, but leaves the pending-trial marker of `version` and records it the way a
+    /// finished background download does. Returns whether the marker is gone.
+    fn record(
+        cx: &mut TestAppContext,
+        harness: &Harness,
+        updates: &Entity<KotlinUpdates>,
+        version: &str,
+    ) -> bool {
+        let entry = ManifestEntry {
+            version: version.into(),
+            ..harness.pin()
+        };
+        let marker = pending_marker_path(&harness.server_dir(), version);
+        fs::create_dir_all(harness.server_dir()).unwrap();
+        fs::write(&marker, &entry.sha256).unwrap();
+        let checker = updates.read_with(cx, |updates, _| updates.checker.clone());
+        block_on(checker.record_trial(&entry));
+        !marker.exists()
+    }
+
+    fn trial_version(harness: &Harness) -> Option<String> {
+        harness
+            .cache()
+            .read_state()
+            .kotlin_lsp
+            .trial
+            .map(|trial| trial.version)
+    }
+
+    #[gpui::test]
+    fn test_an_older_build_does_not_replace_a_newer_trial(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        let updates = harness.updates(cx);
+        assert!(record(cx, &harness, &updates, "263.4.0"));
+        assert!(record(cx, &harness, &updates, "263.3.0"));
+        assert!(record(cx, &harness, &updates, "263.4.0"));
+        assert_eq!(trial_version(&harness).as_deref(), Some("263.4.0"));
+        assert_eq!(
+            harness.download_lines(),
+            [
+                "download: kotlin-lsp 263.4.0 installed as the trial",
+                "download: kotlin-lsp 263.3.0 not recorded: 263.4.0 is as new or newer",
+                "download: kotlin-lsp 263.4.0 is already recorded",
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn test_a_newer_build_replaces_an_older_trial(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        let updates = harness.updates(cx);
+        assert!(record(cx, &harness, &updates, "263.3.0"));
+        assert!(record(cx, &harness, &updates, "263.10.0"));
+        assert_eq!(trial_version(&harness).as_deref(), Some("263.10.0"));
+    }
+
+    #[gpui::test]
+    fn test_a_rejected_build_is_not_recorded(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let harness = Harness::new(cx);
+        let updates = harness.updates(cx);
+        let digest = harness.pin().sha256;
+        block_on(harness.cache().with_state(|state| {
+            state.kotlin_lsp.active = Some(BuildId {
+                version: "263.1.0".into(),
+                sha256: digest.clone(),
+            });
+            state.kotlin_lsp.rejected.push(BuildId {
+                version: "263.5.0".into(),
+                sha256: digest.to_uppercase(),
+            });
+        }))
+        .unwrap();
+        assert!(record(cx, &harness, &updates, "263.5.0"));
+        assert_eq!(trial_version(&harness), None);
+        assert_eq!(
+            harness.download_lines(),
+            ["download: kotlin-lsp 263.5.0 not recorded: it was rejected"]
+        );
+        // Older than the active build: not recorded either.
+        assert!(record(cx, &harness, &updates, "263.0.9"));
+        assert_eq!(trial_version(&harness), None);
     }
 
     #[test]
