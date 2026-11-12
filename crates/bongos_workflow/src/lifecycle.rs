@@ -80,6 +80,8 @@ impl StartRequest {
 /// Why a command was refused, in the order start checks them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalKind {
+    /// The node runners are not connected to the engine, so a run could not execute.
+    RunnerNotConnected,
     UnknownTask,
     Group,
     NoOpenTodo,
