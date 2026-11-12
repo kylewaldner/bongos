@@ -1,6 +1,9 @@
 use editor::actions::Undo;
 use editor::test::editor_test_context::EditorTestContext;
-use gpui::TestAppContext;
+use editor::{Editor, EditorMode};
+use gpui::{AppContext as _, TestAppContext};
+use multi_buffer::MultiBuffer;
+use text::Point;
 
 use crate::actions::{
     SetMarkCommand, TransposeChars, TransposeLines, TransposeWords, TransposeWordsReverse,
@@ -453,4 +456,44 @@ async fn transpose_lines_with_a_mark_but_another_state_uses_the_plain_form(
     cx.set_selections_state("one\ntwoˇ\nthree\nfour");
     cx.dispatch_action(TransposeLines { count: Some(2) });
     cx.assert_editor_state("two\nthree\noneˇ\nfour");
+}
+
+#[gpui::test]
+async fn transpose_words_with_the_mark_in_another_excerpt_uses_the_plain_form(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+
+    let editor = cx.update(|window, cx| {
+        let multibuffer = MultiBuffer::build_multi(
+            [(
+                "one two\nx\ny\nz\nthree four",
+                vec![
+                    Point::new(0, 0)..Point::new(0, 7),
+                    Point::new(4, 0)..Point::new(4, 10),
+                ],
+            )],
+            cx,
+        );
+        cx.new(|cx| Editor::new(EditorMode::full(), multibuffer, None, window, cx))
+    });
+    cx.update(|window, cx| {
+        let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+        let mark = snapshot.anchor_after(Point::new(0, 4));
+        assert!(crate::mark::set_mark(&editor, mark, cx));
+        editor.update(cx, |editor, cx| {
+            editor.change_selections(Default::default(), window, cx, |s| {
+                s.select_ranges([Point::new(4, 6)..Point::new(4, 6)])
+            })
+        });
+        let before = editor.read(cx).text(cx);
+        crate::transpose::transpose_words_command(
+            &TransposeWords { count: None },
+            &editor,
+            window,
+            cx,
+        );
+        assert_eq!(editor.read(cx).text(cx), before);
+    });
 }

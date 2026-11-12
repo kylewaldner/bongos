@@ -59,6 +59,11 @@ fn mark_form_offset(editor: &Entity<Editor>, count: Option<i32>, cx: &mut App) -
         return None;
     }
     let mark = mark.to_offset(&snapshot).0;
+    // One rewrite spans point to mark, so both must sit in one excerpt; across excerpts the
+    // plain form runs.
+    snapshot.excerpt_containing(
+        multi_buffer::MultiBufferOffset(head.min(mark))..multi_buffer::MultiBufferOffset(head.max(mark)),
+    )?;
     // A mark at point has nothing to swap with: the plain form runs.
     (mark != head).then_some(mark)
 }
@@ -85,7 +90,7 @@ macro_rules! transpose_with_mark {
                     }
                 },
             );
-            if !applied && mark.is_some() {
+            if !applied && mark.is_some() && !editor.read(cx).read_only(cx) {
                 bongos_minibuffer::message(window, cx, "Don't have two things to transpose");
             }
         }
