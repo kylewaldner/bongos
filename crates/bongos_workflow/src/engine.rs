@@ -93,6 +93,10 @@ impl Global for WorkflowEngine {}
 struct UnwiredRunner;
 
 impl Runner for UnwiredRunner {
+    fn is_connected(&self) -> bool {
+        false
+    }
+
     fn start(
         &mut self,
         _run: &str,
@@ -277,6 +281,13 @@ impl WorkflowEngine {
         tree: &WorkTree,
         cx: &mut App,
     ) -> Result<RunId, Refusal> {
+        if !self.lifecycle().runtime().runner().is_connected() {
+            return Err(Refusal::new(
+                RefusalKind::RunnerNotConnected,
+                "Workflow runs are not connected to an agent runner yet.",
+                "Nothing was started.",
+            ));
+        }
         let start = LiveModesRegistry::can_start_run(&request.task_id, cx);
         let active_run = if start.allowed {
             None

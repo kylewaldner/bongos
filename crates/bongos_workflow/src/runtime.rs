@@ -107,6 +107,12 @@ impl Finish {
 /// What runs node tries: the agent runners, the program runner and the built-ins, or a fake in
 /// tests. The runtime decides; the runner only starts, reports and stops.
 pub trait Runner {
+    /// Whether this runner can execute nodes. The app's stand-in says no, so a start from the app
+    /// refuses before it creates anything.
+    fn is_connected(&self) -> bool {
+        true
+    }
+
     /// Starts try `try_number` of `key` of run `run`; the process it started, or why it could not.
     fn start(
         &mut self,
@@ -129,6 +135,10 @@ pub trait Runner {
 }
 
 impl<R: Runner + ?Sized> Runner for Box<R> {
+    fn is_connected(&self) -> bool {
+        (**self).is_connected()
+    }
+
     fn start(
         &mut self,
         run: &str,

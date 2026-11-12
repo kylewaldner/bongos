@@ -1153,3 +1153,42 @@ mod run_view_tests;
 mod runs_panel_tests;
 #[path = "task_link_tests.rs"]
 mod task_link_tests;
+
+#[gpui::test]
+fn the_app_engine_refuses_a_start_while_no_runner_is_connected(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        WorkflowsSettings::register(cx);
+    });
+    let world = World::new();
+    let engine = WorkflowEngine::new(world.dirs.clone());
+    let runs_dir = world.tree.projects[0].task.children[0].dir.join("runs");
+    let todos_before = world.tree.projects[0].task.children[0]
+        .file
+        .as_ref()
+        .unwrap()
+        .todos
+        .clone();
+
+    let refusal = cx
+        .update(|cx| engine.start_in(StartRequest::new(LEAF), &world.tree, cx))
+        .unwrap_err();
+
+    assert_eq!(refusal.kind, RefusalKind::RunnerNotConnected);
+    assert!(
+        refusal
+            .to_string()
+            .starts_with("Workflow runs are not connected to an agent runner yet.")
+    );
+    assert!(!runs_dir.exists());
+    assert!(engine.active_run_id(LEAF).is_none());
+    assert_eq!(
+        world.tree.projects[0].task.children[0]
+            .file
+            .as_ref()
+            .unwrap()
+            .todos,
+        todos_before
+    );
+}
