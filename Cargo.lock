@@ -5322,6 +5322,7 @@ dependencies = [
  "anyhow",
  "assets",
  "base64 0.22.1",
+ "bongos_emacs_model",
  "breadcrumbs",
  "buffer_diff",
  "client",

@@ -1,4 +1,6 @@
 use super::*;
+use crate::kill_ring;
+use bongos_emacs_model::kill_ring::Entry;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClipboardSelection {
@@ -342,7 +344,8 @@ impl Editor {
             return;
         }
         let item = self.cut_common(true, window, cx);
-        cx.write_to_clipboard(item);
+        cx.write_to_clipboard(item.clone());
+        self.push_to_kill_ring(&item, cx);
     }
 
     pub(super) fn kill_ring_cut(
@@ -365,12 +368,33 @@ impl Editor {
             });
         });
         let item = self.cut_common(false, window, cx);
-        cx.set_global(KillRing(item))
+        if self.is_masked(cx) {
+            return;
+        }
+        if let Some(entry) = kill_ring::entry_from_clipboard(&item) {
+            kill_ring::update(cx, |ring| ring.push(entry));
+            kill_ring::write_newest_to_clipboard(cx);
+        }
     }
 
     /// Puts `text` on the Emacs kill ring, so the next `KillRingYank` inserts it.
     pub fn set_kill_ring_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        cx.set_global(KillRing(ClipboardItem::new_string(text.into())));
+        let entry = Entry::plain(text.into());
+        kill_ring::update(cx, |ring| ring.push(entry));
+    }
+
+    /// Pushes an item this editor wrote to the clipboard onto the kill ring.
+    /// A masked editor pushes nothing and marks the text as ignored instead,
+    /// so a later clipboard capture skips it too.
+    fn push_to_kill_ring(&self, item: &ClipboardItem, cx: &mut Context<Self>) {
+        let Some(entry) = kill_ring::entry_from_clipboard(item) else {
+            return;
+        };
+        if self.is_masked(cx) {
+            kill_ring::ignore_clipboard_text(&entry.text, cx);
+        } else {
+            kill_ring::update(cx, |ring| ring.push(entry));
+        }
     }
 
     pub(super) fn kill_ring_yank(
@@ -379,16 +403,12 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (text, metadata) = if let Some(KillRing(item)) = cx.try_global() {
-            if let Some(ClipboardEntry::String(kill_ring)) = item.entries().first() {
-                (kill_ring.text().to_string(), kill_ring.metadata_json())
-            } else {
-                return;
-            }
-        } else {
+        let Some(entry) = kill_ring::read(cx).and_then(|ring| ring.newest()) else {
             return;
         };
-        self.do_paste(&text, metadata, false, window, cx);
+        let text = entry.text.clone();
+        let selections = kill_ring::clipboard_selections(entry);
+        self.do_paste(&text, Some(selections), false, window, cx);
     }
 
     pub(super) fn copy_and_trim(
@@ -534,15 +554,12 @@ impl Editor {
             ));
         }
 
-        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
-            text,
-            clipboard_selections,
-        ));
+        drop(buffer);
+        let item = ClipboardItem::new_string_with_json_metadata(text, clipboard_selections);
+        cx.write_to_clipboard(item.clone());
+        self.push_to_kill_ring(&item, cx);
     }
 }
-
-struct KillRing(ClipboardItem);
-impl Global for KillRing {}
 
 fn edit_for_markdown_paste<'a>(
     buffer: &MultiBufferSnapshot,
