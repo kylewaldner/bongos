@@ -11,7 +11,7 @@ use collections::VecDeque;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
@@ -26,6 +26,7 @@ pub(crate) struct TestPlatform {
     active_display: Rc<dyn PlatformDisplay>,
     active_cursor: Mutex<CursorStyle>,
     current_clipboard_item: Mutex<Option<ClipboardItem>>,
+    clipboard_concealed: Cell<bool>,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     current_primary_item: Mutex<Option<ClipboardItem>>,
     #[cfg(target_os = "macos")]
@@ -93,6 +94,13 @@ pub(crate) struct TestPrompts {
 }
 
 impl TestPlatform {
+    /// Writes an item to the test clipboard and marks it concealed, as a
+    /// password manager's copy would be. The next normal write clears the mark.
+    pub(crate) fn write_concealed_to_clipboard(&self, item: ClipboardItem) {
+        *self.current_clipboard_item.lock() = Some(item);
+        self.clipboard_concealed.set(true);
+    }
+
     pub fn new(executor: BackgroundExecutor, foreground_executor: ForegroundExecutor) -> Rc<Self> {
         Self::with_platform(
             executor,
@@ -128,6 +136,7 @@ impl TestPlatform {
             active_window: Default::default(),
             expect_restart: Default::default(),
             current_clipboard_item: Mutex::new(None),
+            clipboard_concealed: Cell::new(false),
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             current_primary_item: Mutex::new(None),
             #[cfg(target_os = "macos")]
@@ -453,6 +462,11 @@ impl Platform for TestPlatform {
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
         *self.current_clipboard_item.lock() = Some(item);
+        self.clipboard_concealed.set(false);
+    }
+
+    fn clipboard_is_concealed(&self) -> bool {
+        self.clipboard_concealed.get()
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

@@ -6,6 +6,7 @@
 #   BONGOS_TEST_FILTER=s  only tests whose name contains s (a positional nextest filter)
 #   BONGOS_TEST_NO_NET=1  cargo runs offline (CARGO_NET_OFFLINE=true)
 #   BONGOS_TEST_PARTITION=K/N  run only slice K of N of the tests (nextest --partition hash:K/N)
+#   BONGOS_NEXTEST_PROFILE=p   nextest profile (default gate: everything except the timing tests; perf runs only them)
 # The extension_host dev-extension test (test_extension_store_with_test_extension) expects a wasi-sdk
 # in the repository's own target/wasi-sdk and tries to download one when it is missing; in a fresh
 # worktree that failed on 2026-11-07 (the test's HTTP client is a fake), so a failure of that one
@@ -74,4 +75,4 @@ if [ -n "${BONGOS_TEST_PARTITION:-}" ]; then
   fi
 fi
 
-cargo_limited nextest run "${scope[@]}" "${filter[@]}" ${partition[@]+"${partition[@]}"} --lib --bins --tests --locked --no-fail-fast --color never
+cargo_limited nextest run "${scope[@]}" "${filter[@]}" ${partition[@]+"${partition[@]}"} --profile "${BONGOS_NEXTEST_PROFILE:-gate}" --lib --bins --tests --locked --no-fail-fast --color never

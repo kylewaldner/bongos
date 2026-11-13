@@ -221,6 +221,9 @@ pub struct X11ClientState {
     pub(crate) common: LinuxCommon,
     pub(crate) clipboard: Clipboard,
     pub(crate) clipboard_item: Option<ClipboardItem>,
+    /// Whether the item last returned by `read_from_clipboard` carried the
+    /// concealed hint.
+    pub(crate) clipboard_read_concealed: bool,
     pub(crate) xdnd_state: Xdnd,
 }
 
@@ -548,6 +551,7 @@ impl X11Client {
 
             clipboard,
             clipboard_item: None,
+            clipboard_read_concealed: false,
             xdnd_state: Xdnd::default(),
         }))))
     }
@@ -1756,7 +1760,8 @@ impl LinuxClient for X11Client {
     }
 
     fn read_from_clipboard(&self) -> Option<gpui::ClipboardItem> {
-        let state = self.0.borrow_mut();
+        let mut state = self.0.borrow_mut();
+        state.clipboard_read_concealed = false;
         // if the last copy was from this app, return our cached item
         // which has metadata attached.
         if state
@@ -1765,11 +1770,17 @@ impl LinuxClient for X11Client {
         {
             return state.clipboard_item.clone();
         }
-        state
+        let (item, concealed) = state
             .clipboard
-            .get_any(clipboard::ClipboardKind::Clipboard)
+            .get_any_with_concealed(clipboard::ClipboardKind::Clipboard)
             .context("X11: Failed to read from clipboard (clipboard)")
-            .log_with_level(log::Level::Debug)
+            .log_with_level(log::Level::Debug)?;
+        state.clipboard_read_concealed = concealed;
+        Some(item)
+    }
+
+    fn clipboard_is_concealed(&self) -> bool {
+        self.0.borrow().clipboard_read_concealed
     }
 
     fn run(&self) {

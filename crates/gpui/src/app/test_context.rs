@@ -322,6 +322,13 @@ impl TestAppContext {
         self.test_platform.write_to_clipboard(item)
     }
 
+    /// Simulates another application (such as a password manager) writing to
+    /// the platform clipboard with the concealed hint, so
+    /// `clipboard_is_concealed` reports true until the next normal write.
+    pub fn write_concealed_to_clipboard(&self, item: ClipboardItem) {
+        self.test_platform.write_concealed_to_clipboard(item)
+    }
+
     /// Simulates reading from the platform clipboard.
     /// This will return the most recent value from `write_to_clipboard`.
     pub fn read_from_clipboard(&self) -> Option<ClipboardItem> {
@@ -1115,8 +1122,27 @@ impl AnyWindowHandle {
 
 #[cfg(test)]
 mod tests {
-    use crate::{PathPromptOptions, TestAppContext};
+    use crate::{ClipboardItem, PathPromptOptions, TestAppContext};
     use std::path::PathBuf;
+
+    #[gpui::test]
+    fn test_concealed_clipboard_flag(cx: &mut TestAppContext) {
+        assert!(!cx.update(|cx| cx.clipboard_is_concealed()));
+
+        cx.write_concealed_to_clipboard(ClipboardItem::new_string("hunter2".into()));
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hunter2".to_string())
+        );
+        assert!(cx.update(|cx| cx.clipboard_is_concealed()));
+
+        cx.write_to_clipboard(ClipboardItem::new_string("plain".into()));
+        assert!(!cx.update(|cx| cx.clipboard_is_concealed()));
+
+        cx.write_concealed_to_clipboard(ClipboardItem::new_string("hunter3".into()));
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("from app".into())));
+        assert!(!cx.update(|cx| cx.clipboard_is_concealed()));
+    }
 
     #[gpui::test]
     async fn test_simulate_path_prompt_response(cx: &mut TestAppContext) {
