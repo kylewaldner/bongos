@@ -45,11 +45,27 @@ use crate::{
 pub struct KotlinAdapter {
     dirs: KotlinDirs,
     manifest: Arc<Manifest>,
+    /// Tests pin the date the expiry check sees; production reads the clock.
+    #[cfg(test)]
+    pinned_today: Option<NaiveDate>,
 }
 
 impl KotlinAdapter {
     pub fn new(dirs: KotlinDirs, manifest: Arc<Manifest>) -> Self {
-        Self { dirs, manifest }
+        Self {
+            dirs,
+            manifest,
+            #[cfg(test)]
+            pinned_today: None,
+        }
+    }
+
+    fn today(&self) -> NaiveDate {
+        #[cfg(test)]
+        if let Some(today) = self.pinned_today {
+            return today;
+        }
+        chrono::Utc::now().date_naive()
     }
 }
 
@@ -88,7 +104,7 @@ impl DynLspInstaller for KotlinAdapter {
                 delegate.http_client(),
                 &root,
                 delegate.worktree_id(),
-                chrono::Utc::now().date_naive(),
+                self.today(),
                 &mut cx,
             )
             .await;
@@ -1835,7 +1851,9 @@ launcher = "bin/launcher"
             manager.add_worktree(worktree(), root.clone(), cx)
         });
 
-        let adapter = Arc::new(KotlinAdapter::new(dirs, Arc::new(manifest)));
+        let mut adapter = KotlinAdapter::new(dirs, Arc::new(manifest));
+        adapter.pinned_today = Some(today());
+        let adapter = Arc::new(adapter);
         let cached = Arc::new(futures::lock::Mutex::new(None));
         let start = |cx: &mut TestAppContext| {
             let (adapter, cached, root) = (adapter.clone(), cached.clone(), root.clone());
