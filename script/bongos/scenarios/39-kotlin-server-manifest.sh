@@ -422,6 +422,75 @@ quit_app
 say "smoke: the fake host logged $HOST_REQUESTS_BEFORE requests in all, none with an empty URL, and the proxy got only the requests of every launch ($HOST_LOG)"
 cp "$HOST_LOG" "$RUN/fake-manifest-host-final.log"
 
+# ---------------------------------------------------------------------------------------------
+# The user manifest file: <config dir>/kotlin-server-manifest.toml. BONGOS_KOTLIN_SERVERS wins over
+# it, so it is dropped here; the built-in table is then the real one, whose builds are never
+# fetched (the file replaces the kotlin-lsp table whole, and the builds already installed above
+# stay on disk). The signed manifest is off (empty kotlin.manifest_url).
+USER_MANIFEST="$CONFIG_DIR/kotlin-server-manifest.toml"
+unset BONGOS_KOTLIN_SERVERS
+build_archive "$HOST_ROOT/a/b7.tar.gz" ok 0
+build_archive "$HOST_ROOT/a/b8.tar.gz" ok 0
+
+# write_user_manifest <version> <archive file under a/> <sha256>: a kotlin-lsp entry for every
+# platform, with a loopback URL of the fake host.
+write_user_manifest() {
+  local version=$1 file=$2 sha=$3 platform
+  {
+    printf '[kotlin-lsp]\nversion = "%s"\nexpires = "2099-12-31"\n\n' "$version"
+    for platform in linux-x64 linux-arm64 macos-arm64 macos-x64; do
+      printf '[kotlin-lsp.platform.%s]\nurl = "http://127.0.0.1:%s/a/%s"\nsha256 = "%s"\narchive = "tar.gz"\nstrip_components = 0\nlauncher = "bin/launcher.sh"\n\n' \
+        "$platform" "$HOST_PORT" "$file" "$sha"
+    done
+  } >"$USER_MANIFEST"
+}
+
+step "User manifest 1: a valid file with a loopback URL and a correct sha256 installs its build"
+write_user_manifest 0.0.7 b7.tar.gz "$(sha256sum "$HOST_ROOT/a/b7.tar.gz" | cut -d' ' -f1)"
+rm -f "$KOTLIN_LOG"
+launch_ready
+wait_for_kotlin_log 'state .* kotlin-lsp installing'
+wait_for_kotlin_log 'state .* kotlin-lsp ready' 120
+wait_for_settled
+[ "$(host_requests '^GET /a/b7\.tar\.gz 200$')" = 1 ] || fail "the user manifest build was not fetched once: $(cat "$HOST_LOG")"
+if kotlin_log_has 'ignoring the user manifest'; then fail "kotlin.log says the valid user manifest was ignored"; fi
+[ -d "$SERVER_DIR/0.0.7" ] || fail "$SERVER_DIR/0.0.7 is not installed"
+shot kotlin-user-manifest-installed
+frame_has_ui kotlin-user-manifest-installed
+quit_app
+
+step "User manifest 2: a wrong sha256 is refused and nothing is installed"
+write_user_manifest 0.0.8 b8.tar.gz "0000000000000000000000000000000000000000000000000000000000000000"
+rm -f "$KOTLIN_LOG"
+launch_ready
+wait_for_kotlin_log 'state .* kotlin-lsp failed: .*SHA-256' 120
+wait_for_settled
+if [ -e "$SERVER_DIR/0.0.8" ]; then fail "$SERVER_DIR/0.0.8 exists after a wrong sha256"; fi
+if kotlin_log_has 'kotlin-lsp ready'; then fail "a server started after a wrong sha256: $(cat "$KOTLIN_LOG")"; fi
+shot kotlin-user-manifest-refused
+frame_has_ui kotlin-user-manifest-refused
+quit_app
+
+step "User manifest 3: a malformed file is ignored with a toast, a log line and a status menu line"
+printf 'this is [not valid toml\n' >"$USER_MANIFEST"
+rm -f "$KOTLIN_LOG"
+launch_ready
+wait_for_kotlin_log 'manifest: ignoring the user manifest, using the built-in one: .*kotlin-server-manifest\.toml'
+wait_for_settled
+[ "$(kotlin_log_count 'ignoring the user manifest')" = 1 ] || fail "the malformed file was not logged exactly once: $(cat "$KOTLIN_LOG")"
+shot kotlin-user-manifest-toast
+frame_has_ui kotlin-user-manifest-toast
+# Open the status menu (the Kotlin status item, bottom left): its first line names the file.
+xdo mousemove --window "$WIN" 200 758 click 1
+wait_for_settled
+shot kotlin-user-manifest-menu
+frame_has_ui kotlin-user-manifest-menu
+keys Escape
+assert_no_manifest_host
+quit_app
+rm -f "$USER_MANIFEST"
+say "smoke: user manifest file: $RUN/kotlin-user-manifest-installed.png, $RUN/kotlin-user-manifest-refused.png, $RUN/kotlin-user-manifest-toast.png, $RUN/kotlin-user-manifest-menu.png"
+
 trap - EXIT
 cp "$RUN/config-backup/global_settings.json" "$GLOBAL_SETTINGS_FILE"
 cp "$RUN/config-backup/settings-39.json" "$SETTINGS_FILE"
