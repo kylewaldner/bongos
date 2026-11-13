@@ -168,23 +168,16 @@ target_free_gb() {
   echo $(( $(df --output=avail -k "$CARGO_TARGET_DIR" | tail -n1 | tr -d ' ') / 1024 / 1024 ))
 }
 
-# Under 100 GB free, sweep stale artifacts once (script/bongos/sweep) and measure again; under 40 GB,
-# also drop incremental output; under 30 GB, stop.
+# Hard stop only: when the target drive has less than BONGOS_HARD_FREE_GIB GB free (an integer,
+# default 15), print an error and return 1. It never deletes anything; to reclaim space by hand, run
+# script/bongos/sweep (stale artifacts) or remove build output you no longer need.
 require_space() {
-  local avail_gb
+  local avail_gb floor_gb="${BONGOS_HARD_FREE_GIB:-15}"
   avail_gb=$(target_free_gb)
-  if [ "$avail_gb" -lt 100 ]; then
-    say "bongos: ${avail_gb} GB free for $CARGO_TARGET_DIR; sweeping stale build artifacts"
-    "$BONGOS_ROOT/script/bongos/sweep" || echo "bongos: sweep failed; continuing"
-    avail_gb=$(target_free_gb)
-  fi
-  if [ "$avail_gb" -lt 30 ]; then
-    echo "bongos: only ${avail_gb} GB free for $CARGO_TARGET_DIR; need at least 30 GB" >&2
+  if [ "$avail_gb" -lt "$floor_gb" ]; then
+    echo "bongos: only ${avail_gb} GB free for $CARGO_TARGET_DIR; need at least ${floor_gb} GB" >&2
+    echo "bongos: free space by hand, for example with script/bongos/sweep, or lower BONGOS_HARD_FREE_GIB" >&2
     return 1
-  fi
-  if [ "$avail_gb" -lt 40 ]; then
-    echo "bongos: ${avail_gb} GB free; removing target/debug/incremental" >&2
-    rm -rf "$CARGO_TARGET_DIR/debug/incremental"
   fi
 }
 
