@@ -1,0 +1,8 @@
+#!/bin/sh
+# Linker driver for x86_64 Linux dev builds: the C compiler driver with mold as the linker. env.sh
+# points CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER here when mold is installed. A wrapper is used because
+# cargo takes the linker from its own setting, while RUSTFLAGS would replace .cargo/config.toml's rustflags.
+# The driver is $CC (env.sh sets clang), else cc; gcc 12+ and clang both accept -fuse-ld=mold.
+# The flag goes last on purpose: rustc itself passes -fuse-ld=lld (its default linker since Rust 1.90), and
+# with two -fuse-ld flags the driver uses the later one.
+exec "${CC:-cc}" "$@" -fuse-ld=mold

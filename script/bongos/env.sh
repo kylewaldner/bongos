@@ -75,9 +75,50 @@ export PATH="$BONGOS_WORKSPACE/bin:$CARGO_HOME/bin:$HOME/.cargo/bin:$PATH"
 # Compiler: clang, as upstream builds with it (g++ 11 failed on C++ dependencies that have since left the build).
 export CC=clang CXX=clang++
 
-# Tuning with no manifest diff. Never set RUSTFLAGS: it replaces .cargo/config.toml's flags.
+# Tuning with no manifest diff. Never set RUSTFLAGS: it replaces .cargo/config.toml's flags (cargo uses
+# the first of CARGO_ENCODED_RUSTFLAGS, RUSTFLAGS, target.*.rustflags, build.rustflags, and never merges them).
 export CARGO_PROFILE_DEV_DEBUG=line-tables-only
 export CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=0
+
+# Faster dev builds on Linux, two switches with no manifest diff. Both are for dev and test builds only:
+# a caller that builds a release or the reference app sets BONGOS_RELEASE_BUILD=1 before sourcing this file
+# (bundle-linux and stock-build do), which skips both and removes a value an earlier sourcing set.
+#   1. mold links x86_64 Linux builds when `mold` is on PATH: CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+#      names script/bongos/mold-linker, a two-line wrapper around $CC -fuse-ld=mold. Linking is the slow
+#      step of a test build with hundreds of binaries and of every app relink, and cargo never links
+#      incrementally. The linker setting is separate from the rustflags, so .cargo/config.toml's flags
+#      (symbol-mangling-version=v0, --cfg tokio_unstable) still apply. A linker already set in the
+#      environment wins. Opt out with BONGOS_NO_MOLD=1.
+#   2. Dev builds write no separate debug files: CARGO_PROFILE_DEV_SPLIT_DEBUGINFO and the build-override
+#      variant are `off`, where Cargo.toml says `unpacked` (one .dwo file per codegen unit, which is a lot of
+#      small writes). With line-tables-only the file and line tables stay in the binary, so backtraces and
+#      panic locations are unchanged; variable inspection in gdb or lldb was already not available with
+#      line-tables-only (use the `dbg` profile for that). Opt out with BONGOS_KEEP_SPLIT_DEBUGINFO=1.
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  _bongos_mold_linker="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mold-linker"
+else
+  _bongos_mold_linker=""
+fi
+if [ -z "${BONGOS_RELEASE_BUILD:-}" ] && [ -z "${BONGOS_NO_MOLD:-}" ] && [ -n "$_bongos_mold_linker" ] &&
+   [ "$(uname -s 2>/dev/null)" = Linux ] && [ "$(uname -m 2>/dev/null)" = x86_64 ] && command -v mold >/dev/null 2>&1; then
+  if [ -z "${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-}" ]; then
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$_bongos_mold_linker"
+    export BONGOS_SET_MOLD_LINKER="$_bongos_mold_linker"  # marks the value as ours, so opting out later removes only that
+  fi
+elif [ -n "${BONGOS_SET_MOLD_LINKER:-}" ]; then
+  if [ "${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-}" = "$BONGOS_SET_MOLD_LINKER" ]; then
+    unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+  fi
+  unset BONGOS_SET_MOLD_LINKER
+fi
+unset _bongos_mold_linker
+if [ -z "${BONGOS_RELEASE_BUILD:-}" ] && [ -z "${BONGOS_KEEP_SPLIT_DEBUGINFO:-}" ]; then
+  export CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off
+  export CARGO_PROFILE_DEV_BUILD_OVERRIDE_SPLIT_DEBUGINFO=off
+  export BONGOS_SET_SPLIT_DEBUGINFO=1
+elif [ -n "${BONGOS_SET_SPLIT_DEBUGINFO:-}" ]; then
+  unset CARGO_PROFILE_DEV_SPLIT_DEBUGINFO CARGO_PROFILE_DEV_BUILD_OVERRIDE_SPLIT_DEBUGINFO BONGOS_SET_SPLIT_DEBUGINFO
+fi
 
 # Unified features, off by default. BONGOS_UNIFIED_FEATURES=1 makes every cargo command use the
 # workspace-wide feature set, so callers that run many differently shaped cargo commands (different
