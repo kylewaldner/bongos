@@ -107,13 +107,20 @@ mod tests {
     const NEW_SHA: &str = "3333333333333333333333333333333333333333333333333333333333333333";
     const TRIAL_SHA: &str = "4444444444444444444444444444444444444444444444444444444444444444";
 
+    /// The date every resolution here sees. No test reads the wall clock or writes a calendar date
+    /// for `expires`: an entry expires a number of days after `today()`.
     fn today() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 11, 12).unwrap()
     }
 
-    fn expiring(version: &str, sha256: &str, expires: &str) -> ManifestEntry {
+    /// An entry that is still good at `today()`, for weeks.
+    const FAR: i64 = 50;
+    /// An entry whose last good day was the day before `today()`.
+    const EXPIRED: i64 = -1;
+
+    fn expiring(version: &str, sha256: &str, days_after_today: i64) -> ManifestEntry {
         ManifestEntry {
-            expires: Some(expires.parse().unwrap()),
+            expires: Some(today() + chrono::Duration::days(days_after_today)),
             ..entry(version, sha256)
         }
     }
@@ -126,19 +133,19 @@ mod tests {
     }
 
     fn pin() -> ManifestEntry {
-        expiring("262.1.0", PIN_SHA, "2027-01-01")
+        expiring("262.1.0", PIN_SHA, FAR)
     }
 
     fn older() -> ManifestEntry {
-        expiring("261.5.0", OLD_SHA, "2027-01-01")
+        expiring("261.5.0", OLD_SHA, FAR)
     }
 
     fn newer() -> ManifestEntry {
-        expiring("263.2.0", NEW_SHA, "2027-01-01")
+        expiring("263.2.0", NEW_SHA, FAR)
     }
 
     fn trial() -> ManifestEntry {
-        expiring("264.0.0", TRIAL_SHA, "2027-01-01")
+        expiring("264.0.0", TRIAL_SHA, FAR)
     }
 
     fn state(active: Option<&ManifestEntry>, trial: Option<&ManifestEntry>) -> ServerState {
@@ -203,7 +210,7 @@ mod tests {
         );
         assert_eq!(resolution, Resolution::Pin(pin()));
 
-        let tied = expiring("262.1.0", NEW_SHA, "2027-01-01");
+        let tied = expiring("262.1.0", NEW_SHA, FAR);
         let resolution = resolve_build(
             &pin(),
             std::slice::from_ref(&tied),
@@ -249,7 +256,7 @@ mod tests {
         );
         assert_eq!(resolution, Resolution::Active(newer()));
 
-        let expired_trial = expiring("264.0.0", TRIAL_SHA, "2026-11-11");
+        let expired_trial = expiring("264.0.0", TRIAL_SHA, EXPIRED);
         let resolution = resolve_build(
             &pin(),
             std::slice::from_ref(&expired_trial),
@@ -264,7 +271,7 @@ mod tests {
     /// is a different build and may run as the trial, while the rejected one never does.
     #[test]
     fn test_a_trial_of_the_same_version_with_a_new_digest_is_eligible_again() {
-        let rebuilt = expiring("264.0.0", OLD_SHA, "2027-01-01");
+        let rebuilt = expiring("264.0.0", OLD_SHA, FAR);
         let mut state = state(Some(&newer()), Some(&rebuilt));
         state.kotlin_lsp.rejected.push(id(&trial()));
         let resolution = resolve_build(
@@ -290,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_an_expired_active_build_falls_back_to_the_pin() {
-        let expired = expiring("263.2.0", NEW_SHA, "2026-11-11");
+        let expired = expiring("263.2.0", NEW_SHA, EXPIRED);
         let resolution = resolve_build(
             &pin(),
             std::slice::from_ref(&expired),
@@ -303,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_an_active_build_starts_when_the_pin_expired() {
-        let expired_pin = expiring("262.1.0", PIN_SHA, "2026-11-11");
+        let expired_pin = expiring("262.1.0", PIN_SHA, EXPIRED);
         let resolution = resolve_build(
             &expired_pin,
             &[older()],
@@ -316,8 +323,8 @@ mod tests {
 
     #[test]
     fn test_everything_expired_gives_the_expired_reason() {
-        let expired_pin = expiring("262.1.0", PIN_SHA, "2026-11-11");
-        let expired_active = expiring("263.2.0", NEW_SHA, "2026-11-11");
+        let expired_pin = expiring("262.1.0", PIN_SHA, EXPIRED);
+        let expired_active = expiring("263.2.0", NEW_SHA, EXPIRED);
         let resolution = resolve_build(
             &expired_pin,
             std::slice::from_ref(&expired_active),
@@ -341,7 +348,7 @@ mod tests {
         );
         assert_eq!(resolution, Resolution::Pin(pin()));
 
-        let expired_pin = expiring("262.1.0", PIN_SHA, "2026-11-11");
+        let expired_pin = expiring("262.1.0", PIN_SHA, EXPIRED);
         let resolution = resolve_build(
             &expired_pin,
             &[newer()],
