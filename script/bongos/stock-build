@@ -9,6 +9,8 @@ set -euo pipefail
 here="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Release and reference builds never use unified features, whatever the caller exported.
 export BONGOS_UNIFIED_FEATURES=0
+# Nor the dev-build speedups of env.sh (mold, no split debuginfo): the reference app builds as upstream does.
+export BONGOS_RELEASE_BUILD=1
 . "$here/env.sh"
 . "$here/lib.sh"
 
