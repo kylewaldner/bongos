@@ -8,7 +8,7 @@
 # it reuses an artifact, which refreshes the atime. The file system's relatime option refreshes an
 # atime at most once a day, so a unit used in the last 24 hours has an atime under 48 hours old:
 # 2 days is the smallest safe limit, and it keeps the directory to about two days of build churn.
-# require_space in lib.sh runs this by itself when free space is low.
+# Run it by hand when the target drive is filling up.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/env.sh"
