@@ -1828,7 +1828,16 @@ launcher = "bin/launcher"
             install_root: temp.path().join("languages"),
             config_dir: temp.path().join("config"),
         };
-        let manifest = Manifest::embedded();
+        // The embedded builds expire about a month after `built`; this test is about switching, not expiry.
+        let far_future: String = crate::manifest::EMBEDDED
+            .lines()
+            .map(|line| match line.starts_with("expires = ") {
+                true => "expires = \"2999-01-01\"",
+                false => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let manifest = Manifest::parse(&far_future).unwrap();
         let kotlin_lsp = install(&dirs, &manifest, KotlinServerKind::KotlinLsp);
         let intellij = install(&dirs, &manifest, KotlinServerKind::Intellij);
         // The user accepted the bundle's agreement; the launcher exits 0 for `license status`.
