@@ -92,6 +92,9 @@ x11rb::atom_manager! {
         // This is just some random name for the property on our window, into which
         // the clipboard owner writes the data we requested.
         ARBOARD_CLIPBOARD,
+
+        // Set by password managers on entries to keep out of clipboard histories.
+        CONCEALED_HINT: gpui::CONCEALED_CLIPBOARD_HINT.as_bytes(),
     }
 }
 
@@ -282,7 +285,10 @@ impl Inner {
     /// `formats` must be a slice of atoms, where each atom represents a target format.
     /// The first format from `formats`, which the clipboard owner supports will be the
     /// format of the return value.
-    fn read(&self, formats: &[Atom], selection: ClipboardKind) -> Result<ClipboardData> {
+    ///
+    /// The returned flag is true when the owner's `TARGETS` list (queried by this
+    /// same read) carries the concealed hint.
+    fn read(&self, formats: &[Atom], selection: ClipboardKind) -> Result<(ClipboardData, bool)> {
         // if we are the current owner, we can get the current clipboard ourselves
         if self.is_owner(selection)? {
             let data = self.selection_of(selection).data.read();
@@ -290,7 +296,7 @@ impl Inner {
                 for data in data_list {
                     for format in formats {
                         if *format == data.format {
-                            return Ok(data.clone());
+                            return Ok((data.clone(), false));
                         }
                     }
                 }
@@ -298,6 +304,7 @@ impl Inner {
             return Err(Error::ContentNotAvailable);
         }
         let reader = XContext::new()?;
+        let mut concealed = false;
 
         let highest_precedence_format =
             match self.read_single(&reader, selection, self.atoms.TARGETS) {
@@ -308,6 +315,7 @@ impl Inner {
                 Ok(ClipboardData { bytes, format }) => {
                     if format == self.atoms.ATOM {
                         let available_formats = Self::parse_formats(&bytes);
+                        concealed = available_formats.contains(&self.atoms.CONCEALED_HINT);
                         formats
                             .iter()
                             .find(|format| available_formats.contains(format))
@@ -332,7 +340,7 @@ impl Inner {
                 );
                 return Err(Error::ConversionFailure);
             }
-            return Ok(data);
+            return Ok((data, concealed));
         }
 
         log::trace!("Falling back on attempting to convert clipboard to each format.");
@@ -340,7 +348,7 @@ impl Inner {
             match self.read_single(&reader, selection, *format) {
                 Ok(data) => {
                     if formats.contains(&data.format) {
-                        return Ok(data);
+                        return Ok((data, concealed));
                     } else {
                         log::trace!(
                             "Conversion to {} responded with {} which is not supported",
@@ -1020,6 +1028,15 @@ impl Clipboard {
     }
 
     pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
+        self.get_any_with_concealed(selection).map(|(item, _)| item)
+    }
+
+    /// Reads the selection like `get_any`, and also returns whether the owner
+    /// marked it with the concealed hint in the `TARGETS` of this same read.
+    pub(crate) fn get_any_with_concealed(
+        &self,
+        selection: ClipboardKind,
+    ) -> Result<(ClipboardItem, bool)> {
         let image_entries = ImageFormat::iter()
             .map(|format| (self.image_format_atom(format), format))
             .collect::<Vec<_>>();
@@ -1039,7 +1056,7 @@ impl Clipboard {
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
         format_atoms.extend_from_slice(text_format_atoms);
 
-        let result = self.inner.read(&format_atoms, selection)?;
+        let (result, concealed) = self.inner.read(&format_atoms, selection)?;
 
         log::trace!(
             "read clipboard as format {:?}",
@@ -1050,11 +1067,14 @@ impl Clipboard {
             if result.format == format_atom {
                 let bytes = result.bytes;
                 let id = hash(&bytes);
-                return Ok(ClipboardItem::new_image(&Image {
-                    id,
-                    format: image_format,
-                    bytes,
-                }));
+                return Ok((
+                    ClipboardItem::new_image(&Image {
+                        id,
+                        format: image_format,
+                        bytes,
+                    }),
+                    concealed,
+                ));
             }
         }
 
@@ -1065,7 +1085,7 @@ impl Clipboard {
         } else {
             String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?
         };
-        Ok(ClipboardItem::new_string(text))
+        Ok((ClipboardItem::new_string(text), concealed))
     }
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {

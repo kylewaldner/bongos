@@ -129,15 +129,19 @@ pub fn write_newest_to_clipboard(cx: &mut App) {
 }
 
 /// Pushes the system clipboard's text as a new entry when it is not empty,
-/// differs from the newest entry's text and is not the ignored text.
-/// Returns whether it pushed.
+/// differs from the newest entry's text and is not the ignored text. The entry
+/// is secret when the clipboard owner (such as a password manager) marked the
+/// text concealed. Returns whether it pushed.
 pub fn capture_clipboard(cx: &mut App) -> bool {
     let Some(item) = cx.read_from_clipboard() else {
         return false;
     };
-    let Some(entry) = entry_from_clipboard(&item) else {
+    // Asked right after the read, so the platform answers for this same item.
+    let concealed = cx.clipboard_is_concealed();
+    let Some(mut entry) = entry_from_clipboard(&item) else {
         return false;
     };
+    entry.secret = concealed;
     if entry.text.is_empty() {
         return false;
     }

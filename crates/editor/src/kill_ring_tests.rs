@@ -157,6 +157,27 @@ async fn test_masked_editor_pushes_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_capture_concealed_clipboard(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+
+    // A password manager's copy is captured as a secret entry.
+    cx.write_concealed_to_clipboard(ClipboardItem::new_string("hunter2".to_string()));
+    assert!(cx.update(|_, cx| capture_clipboard(cx)));
+    let entry = newest(&mut cx).unwrap();
+    assert_eq!(entry.text, "hunter2");
+    assert!(entry.secret);
+
+    // An ordinary copy that follows is not secret.
+    cx.write_to_clipboard(ClipboardItem::new_string("plain".to_string()));
+    assert!(cx.update(|_, cx| capture_clipboard(cx)));
+    let entry = newest(&mut cx).unwrap();
+    assert_eq!(entry.text, "plain");
+    assert!(!entry.secret);
+    assert_eq!(ring_texts(&mut cx), ["plain", "hunter2"]);
+}
+
+#[gpui::test]
 async fn test_capture_clipboard(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
     let mut cx = EditorTestContext::new(cx).await;

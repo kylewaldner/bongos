@@ -14,7 +14,7 @@ use crate::linux::{
     WaylandClientStatePtr,
     platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout},
 };
-use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
+use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash, is_concealed_hint};
 
 /// Text mime types that we'll offer to other programs.
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
@@ -35,6 +35,9 @@ pub(crate) struct Clipboard {
 
     // External clipboard
     cached_read: Option<ClipboardItem>,
+    /// Whether the item last returned by `read` came from an offer carrying the
+    /// concealed hint.
+    read_concealed: bool,
     current_offer: Option<DataOffer<WlDataOffer>>,
     cached_primary_read: Option<ClipboardItem>,
     current_primary_offer: Option<DataOffer<ZwpPrimarySelectionOfferV1>>,
@@ -77,6 +80,10 @@ impl<T: ReceiveData> DataOffer<T> {
 
     fn has_mime_type(&self, mime_type: &str) -> bool {
         self.mime_types.iter().any(|t| t == mime_type)
+    }
+
+    fn is_concealed(&self) -> bool {
+        is_concealed_hint(&self.mime_types)
     }
 
     fn read_bytes(&self, connection: &Connection, mime_type: &str) -> Option<Vec<u8>> {
@@ -152,6 +159,7 @@ impl Clipboard {
             primary_contents: None,
 
             cached_read: None,
+            read_concealed: false,
             current_offer: None,
             cached_primary_read: None,
             current_primary_offer: None,
@@ -197,13 +205,18 @@ impl Clipboard {
     }
 
     pub fn read(&mut self) -> Option<ClipboardItem> {
+        self.read_concealed = false;
         let offer = self.current_offer.as_ref()?;
-        if let Some(cached) = self.cached_read.clone() {
-            return Some(cached);
-        }
-
         if offer.has_mime_type(&self.self_mime) {
             return self.contents.clone();
+        }
+
+        // The cached item was read from this same offer, so the offer's mime
+        // types describe it too.
+        let concealed = offer.is_concealed();
+        if let Some(cached) = self.cached_read.clone() {
+            self.read_concealed = concealed;
+            return Some(cached);
         }
 
         let item = offer
@@ -211,7 +224,13 @@ impl Clipboard {
             .or_else(|| offer.read_image(&self.connection))?;
 
         self.cached_read = Some(item.clone());
+        self.read_concealed = concealed;
         Some(item)
+    }
+
+    /// Whether the item last returned by `read` carried the concealed hint.
+    pub fn read_concealed(&self) -> bool {
+        self.read_concealed
     }
 
     pub fn read_primary(&mut self) -> Option<ClipboardItem> {
