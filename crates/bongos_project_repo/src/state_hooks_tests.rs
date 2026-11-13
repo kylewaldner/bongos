@@ -84,10 +84,10 @@ impl StateApplyHook for FakeHook {
     }
 }
 
-fn hooks_with(hooks: &[Arc<FakeHook>]) -> StateApplyHooks {
+fn hooks_with(hooks: &[&Arc<FakeHook>]) -> StateApplyHooks {
     let registry = StateApplyHooks::new();
     for hook in hooks {
-        registry.register(hook.clone());
+        registry.register((*hook).clone());
     }
     registry
 }
@@ -105,7 +105,7 @@ fn done_set_op(task: &str) -> StateOp {
 async fn a_hook_kv_write_commits_with_a_local_sink_write(cx: &mut TestAppContext) {
     let root = TempDir::new().unwrap();
     let hook = FakeHook::new("checks", Behavior::WriteKv);
-    let writer = writer(&location(&root), &hooks_with(&[hook.clone()]));
+    let writer = writer(&location(&root), &hooks_with(&[&hook]));
     writer
         .transact(|tx| tx.set_task("a", TaskStateRecord::default()))
         .unwrap();
@@ -139,7 +139,7 @@ async fn a_hook_kv_write_commits_with_a_local_sink_write(cx: &mut TestAppContext
 fn a_todos_only_write_gives_a_touch_whose_todo_states_differ() {
     let root = TempDir::new().unwrap();
     let hook = FakeHook::new("checks", Behavior::WriteKv);
-    let writer = writer(&location(&root), &hooks_with(&[hook.clone()]));
+    let writer = writer(&location(&root), &hooks_with(&[&hook]));
     writer
         .transact(|tx| {
             tx.set_task(
@@ -176,7 +176,7 @@ fn a_todos_only_write_gives_a_touch_whose_todo_states_differ() {
 fn a_hook_namespace_is_in_the_one_event_with_one_generation_bump() {
     let root = TempDir::new().unwrap();
     let hook = FakeHook::new("checks", Behavior::WriteKv);
-    let writer = writer(&location(&root), &hooks_with(&[hook]));
+    let writer = writer(&location(&root), &hooks_with(&[&hook]));
     let mut events = writer.subscribe();
 
     writer
@@ -213,7 +213,7 @@ fn a_failing_hook_changes_nothing_and_is_named() {
     let root = TempDir::new().unwrap();
     let first = FakeHook::new("checks", Behavior::WriteKv);
     let failing = FakeHook::new("evidence", Behavior::Fail);
-    let writer = writer(&location(&root), &hooks_with(&[first, failing]));
+    let writer = writer(&location(&root), &hooks_with(&[&first, &failing]));
 
     let error = writer
         .transact(|tx| {
@@ -238,7 +238,7 @@ fn a_failing_hook_changes_nothing_and_is_named() {
 fn a_hook_that_writes_a_task_row_fails() {
     let root = TempDir::new().unwrap();
     let hook = FakeHook::new("rogue", Behavior::WriteTask);
-    let writer = writer(&location(&root), &hooks_with(&[hook]));
+    let writer = writer(&location(&root), &hooks_with(&[&hook]));
 
     let error = writer
         .transact(|tx| tx.set_task("a", TaskStateRecord::default()))
@@ -255,7 +255,7 @@ fn a_hook_that_writes_a_task_row_fails() {
 fn no_hook_runs_when_no_task_row_is_touched() {
     let root = TempDir::new().unwrap();
     let hook = FakeHook::new("checks", Behavior::WriteKv);
-    let writer = writer(&location(&root), &hooks_with(&[hook.clone()]));
+    let writer = writer(&location(&root), &hooks_with(&[&hook]));
 
     writer
         .transact(|tx| tx.kv("notes").put("k", toml::Value::Integer(1)))

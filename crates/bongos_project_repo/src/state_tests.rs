@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::io::{BufRead as _, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 
 use anyhow::anyhow;
 use bongos_project_repo_model::TaskStateRecord;
@@ -226,17 +225,14 @@ fn concurrent_reads_never_see_half_a_transaction() {
             tx.set_task("b", with_branch("0"))
         })
         .unwrap();
-    let reader = Arc::new(StateStore::open_reader(&location).unwrap());
+    let reader = StateStore::open_reader(&location).unwrap();
 
-    let reading = std::thread::spawn({
-        let reader = reader.clone();
-        move || {
-            for _ in 0..200 {
-                let (a, b) = reader
-                    .read(|read| Ok((read.task("a")?, read.task("b")?)))
-                    .unwrap();
-                assert_eq!(branch(&a), branch(&b));
-            }
+    let reading = std::thread::spawn(move || {
+        for _ in 0..200 {
+            let (a, b) = reader
+                .read(|read| Ok((read.task("a")?, read.task("b")?)))
+                .unwrap();
+            assert_eq!(branch(&a), branch(&b));
         }
     });
     for n in 1..=200 {
