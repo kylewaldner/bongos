@@ -114,6 +114,29 @@ pub struct TaskStateRecord {
     pub todos: Vec<TodoStateRecord>,
 }
 
+/// A task with no state row: open, no work, todos open by their definitions.
+impl Default for TaskStateRecord {
+    fn default() -> Self {
+        Self {
+            status: Status::Open,
+            closed: None,
+            linear: None,
+            linear_state: None,
+            branch: None,
+            base: None,
+            base_sha: None,
+            rebase_ack_sha: None,
+            worktree: None,
+            ship_overridden: None,
+            result: None,
+            default_visibility: Visibility::default(),
+            proposals: Vec::new(),
+            history: Vec::new(),
+            todos: Vec::new(),
+        }
+    }
+}
+
 /// The state and start time of one todo.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TodoStateRecord {
