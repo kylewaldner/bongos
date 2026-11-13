@@ -6,6 +6,7 @@
 
 pub mod activity;
 pub mod artifacts;
+pub mod author;
 pub mod commands;
 pub mod derive;
 mod error;
@@ -23,6 +24,7 @@ pub mod store;
 mod types;
 pub mod worktree_path;
 
+pub use author::{Author, AuthorKind, PersonAtKeyboard};
 pub use artifacts::{SessionContext, SharedArtifact, session_context, shared_artifacts};
 pub use error::{Error, ErrorKind, Result};
 pub use io::{
@@ -37,6 +39,9 @@ mod activity_tests;
 
 #[cfg(test)]
 mod artifacts_tests;
+
+#[cfg(test)]
+mod author_tests;
 
 #[cfg(test)]
 mod commands_tests;
