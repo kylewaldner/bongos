@@ -378,7 +378,10 @@ impl StateReader {
 fn read_on<T>(connection: &Connection, f: impl FnOnce(&StateRead) -> Result<T>) -> Result<T> {
     exec(connection, "BEGIN").context("starting a state read")?;
     let result = f(&StateRead { connection });
-    let end = exec(connection, if result.is_ok() { "COMMIT" } else { "ROLLBACK" });
+    let end = exec(
+        connection,
+        if result.is_ok() { "COMMIT" } else { "ROLLBACK" },
+    );
     let value = result?;
     end.context("ending a state read")?;
     Ok(value)
@@ -643,10 +646,12 @@ impl KvTx<'_, '_> {
     pub fn delete(&mut self, key: &str) -> Result<()> {
         self.tx
             .connection
-            .exec_bound::<(&str, &str)>("DELETE FROM kv WHERE namespace = ?1 AND key = ?2")?((
+            .exec_bound::<(&str, &str)>("DELETE FROM kv WHERE namespace = ?1 AND key = ?2")?(
+            (
             &self.namespace,
             key,
-        ))?;
+        )
+        )?;
         self.written();
         Ok(())
     }
@@ -684,7 +689,9 @@ fn insert_history(connection: &Connection, task_id: &str, entry: &HistoryEntry) 
 
 fn read_task(connection: &Connection, id: &str) -> Result<Option<TaskStateRecord>> {
     let state = connection
-        .select_row_bound::<&str, String>("SELECT state_toml FROM tasks WHERE id = ?")?(id)?;
+        .select_row_bound::<&str, String>("SELECT state_toml FROM tasks WHERE id = ?")?(
+        id
+    )?;
     let todos = connection.select_bound::<&str, (Option<String>, String, Option<String>)>(
         "SELECT todo_id, state, started FROM todos WHERE task_id = ? ORDER BY position",
     )?(id)?;
@@ -732,7 +739,7 @@ fn read_task_ids(connection: &Connection) -> Result<Vec<TaskId>> {
 fn read_generation(connection: &Connection) -> Result<u64> {
     let value = connection
         .select_row_bound::<&str, String>("SELECT value FROM meta WHERE key = ?")?(
-        GENERATION_KEY,
+        GENERATION_KEY
     )?;
     match value {
         Some(text) => text
@@ -743,9 +750,10 @@ fn read_generation(connection: &Connection) -> Result<u64> {
 }
 
 fn read_staged(connection: &Connection, change_id: &str) -> Result<Option<Vec<StateOp>>> {
-    let ops = connection.select_row_bound::<&str, String>(
-        "SELECT ops FROM staged_state WHERE change_id = ?",
-    )?(change_id)?;
+    let ops = connection
+        .select_row_bound::<&str, String>("SELECT ops FROM staged_state WHERE change_id = ?")?(
+        change_id,
+    )?;
     ops.map(|json| {
         serde_json::from_str(&json)
             .with_context(|| format!("reading the staged state of {change_id}"))

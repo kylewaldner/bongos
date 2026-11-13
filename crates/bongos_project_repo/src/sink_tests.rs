@@ -20,5 +20,8 @@ fn a_refusing_sink_refuses_with_the_pid() {
 #[test]
 fn repo_reply_round_trips_through_json() {
     let json = serde_json::to_string(&RepoReply::Done).unwrap();
-    assert_eq!(serde_json::from_str::<RepoReply>(&json).unwrap(), RepoReply::Done);
+    assert_eq!(
+        serde_json::from_str::<RepoReply>(&json).unwrap(),
+        RepoReply::Done
+    );
 }

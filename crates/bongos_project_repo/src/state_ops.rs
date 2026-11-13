@@ -20,7 +20,10 @@ pub enum StateOp {
     },
     /// Moves the work of a task (branch, base, base SHA, rebase acknowledgement, worktree,
     /// result and ship override), whatever it is when applied.
-    MoveWork { from_task: TaskId, to_task: TaskId },
+    MoveWork {
+        from_task: TaskId,
+        to_task: TaskId,
+    },
     /// Sets one field of a task's state record, only if it still holds `expected`; `None` is an
     /// absent field.
     Set {
@@ -29,11 +32,19 @@ pub enum StateOp {
         expected: Option<toml::Value>,
         value: Option<toml::Value>,
     },
-    AppendHistory { task: TaskId, entry: HistoryEntry },
+    AppendHistory {
+        task: TaskId,
+        entry: HistoryEntry,
+    },
     /// Removes every state row of a task.
-    Delete { task: TaskId },
+    Delete {
+        task: TaskId,
+    },
     /// Records a settled proposal on the root task, unless a record with its number is there.
-    RecordProposal { root: TaskId, record: ProposalRecord },
+    RecordProposal {
+        root: TaskId,
+        record: ProposalRecord,
+    },
 }
 
 /// Applies `ops` in order. Returns a note for each op that kept a newer value.

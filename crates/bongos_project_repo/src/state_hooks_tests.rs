@@ -222,10 +222,7 @@ fn a_failing_hook_changes_nothing_and_is_named() {
         })
         .unwrap_err();
 
-    assert_eq!(
-        error.to_string(),
-        "state hook evidence failed: no evidence"
-    );
+    assert_eq!(error.to_string(), "state hook evidence failed: no evidence");
     writer
         .read(|read| {
             assert_eq!(read.task("a")?, None);

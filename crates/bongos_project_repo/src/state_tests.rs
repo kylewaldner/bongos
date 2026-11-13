@@ -71,7 +71,10 @@ fn orphans_are_state_rows_of_unknown_tasks() {
         .unwrap();
     let known = BTreeSet::from(["kept".to_string()]);
     let orphans = writer.read(|read| read.orphans(&known)).unwrap();
-    assert_eq!(orphans, vec!["gone".to_string(), "history-only".to_string()]);
+    assert_eq!(
+        orphans,
+        vec!["gone".to_string(), "history-only".to_string()]
+    );
 }
 
 #[test]
@@ -117,6 +120,8 @@ fn dropping_the_writer_releases_the_lock() {
 }
 
 const HOLDER_STATE_DIR: &str = "BONGOS_STATE_TEST_HOLDER_STATE_DIR";
+/// Printed by the holder once it holds the writer; libtest prints it after the test name.
+const HOLDER_MARKER: &str = "state-writer-held-by-child";
 const HOLDER_TEST: &str = "state_tests::hold_the_writer_for_another_test";
 
 /// Not a test of its own: `a_killed_holder_releases_the_lock` runs the test binary again with
@@ -139,7 +144,7 @@ fn hold_the_writer_for_another_test() {
         converted_from: None,
     };
     let _writer = StateStore::open_writer_with_hooks(&location, &StateApplyHooks::new()).unwrap();
-    println!("holding");
+    println!("{HOLDER_MARKER}");
     loop {
         std::thread::park();
     }
@@ -162,7 +167,7 @@ fn a_killed_holder_releases_the_lock() {
     let holding = BufReader::new(stdout)
         .lines()
         .map_while(Result::ok)
-        .any(|line| line.trim() == "holding");
+        .any(|line| line.contains(HOLDER_MARKER));
     assert!(holding, "the holder exited before it held the writer");
 
     match StateStore::open_writer_with_hooks(&location, &StateApplyHooks::new()) {
@@ -193,7 +198,10 @@ fn a_reader_during_a_write_sees_the_old_state() {
         .transact(|tx| {
             tx.set_task("a", with_branch("new"))?;
             let (a, b) = reader.read(|read| Ok((read.task("a")?, read.task("b")?)))?;
-            assert_eq!((branch(&a), branch(&b)), (Some("old".into()), Some("old".into())));
+            assert_eq!(
+                (branch(&a), branch(&b)),
+                (Some("old".into()), Some("old".into()))
+            );
             tx.set_task("b", with_branch("new"))
         })
         .unwrap();
@@ -201,7 +209,10 @@ fn a_reader_during_a_write_sees_the_old_state() {
     let (a, b) = reader
         .read(|read| Ok((read.task("a")?, read.task("b")?)))
         .unwrap();
-    assert_eq!((branch(&a), branch(&b)), (Some("new".into()), Some("new".into())));
+    assert_eq!(
+        (branch(&a), branch(&b)),
+        (Some("new".into()), Some("new".into()))
+    );
 }
 
 #[test]
@@ -313,7 +324,10 @@ fn generation_bumps_once_per_transaction() {
             namespaces: vec![],
         }
     );
-    assert!(events.try_recv().is_err(), "no event for an empty transaction");
+    assert!(
+        events.try_recv().is_err(),
+        "no event for an empty transaction"
+    );
 }
 
 #[test]
@@ -364,7 +378,12 @@ fn scan_returns_keys_in_order_and_only_under_the_prefix() {
     assert_eq!(all.len(), 6);
     assert_eq!(all.first().unwrap().0, "a/9");
     // A `%` or `_` in the prefix is not a pattern.
-    assert!(writer.read(|read| read.kv("queues").scan("b_")).unwrap().is_empty());
+    assert!(
+        writer
+            .read(|read| read.kv("queues").scan("b_"))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

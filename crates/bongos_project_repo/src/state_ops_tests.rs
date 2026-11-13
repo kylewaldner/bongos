@@ -95,7 +95,9 @@ fn every_state_op_round_trips_through_json() {
 fn staged_ops_round_trip_through_the_store() {
     let root = TempDir::new().unwrap();
     let writer = store(&root);
-    writer.transact(|tx| tx.stage("change-1", &every_op())).unwrap();
+    writer
+        .transact(|tx| tx.stage("change-1", &every_op()))
+        .unwrap();
     assert_eq!(
         writer.read(|read| read.staged("change-1")).unwrap(),
         Some(every_op())
@@ -115,7 +117,10 @@ fn move_todo_moves_the_todo_as_it_is_now() {
                 task_with_todos(&[("t1", TodoState::Open), ("t2", TodoState::Open)]),
             )?;
             // The todo was skipped while the split waited.
-            tx.set_todo("parent", crate::test_support::todo("t2", TodoState::Skipped))
+            tx.set_todo(
+                "parent",
+                crate::test_support::todo("t2", TodoState::Skipped),
+            )
         })
         .unwrap();
 
@@ -174,7 +179,10 @@ fn move_work_moves_the_work_as_it_is_now() {
         })
         .unwrap();
     // The branch changed while the change waited.
-    apply(&writer, vec![set_branch("parent", Some("work/old"), "work/new")]);
+    apply(
+        &writer,
+        vec![set_branch("parent", Some("work/old"), "work/new")],
+    );
 
     apply(
         &writer,
@@ -207,13 +215,25 @@ fn set_applies_only_when_the_value_is_still_expected() {
         })
         .unwrap();
 
-    let notes = apply(&writer, vec![set_branch("a", Some("work/old"), "work/staged")]);
+    let notes = apply(
+        &writer,
+        vec![set_branch("a", Some("work/old"), "work/staged")],
+    );
     assert_eq!(notes, ["kept newer branch of a"]);
-    assert_eq!(task(&writer, "a").unwrap().branch.as_deref(), Some("work/newer"));
+    assert_eq!(
+        task(&writer, "a").unwrap().branch.as_deref(),
+        Some("work/newer")
+    );
 
-    let notes = apply(&writer, vec![set_branch("a", Some("work/newer"), "work/staged")]);
+    let notes = apply(
+        &writer,
+        vec![set_branch("a", Some("work/newer"), "work/staged")],
+    );
     assert!(notes.is_empty(), "{notes:?}");
-    assert_eq!(task(&writer, "a").unwrap().branch.as_deref(), Some("work/staged"));
+    assert_eq!(
+        task(&writer, "a").unwrap().branch.as_deref(),
+        Some("work/staged")
+    );
 
     // An absent field is expected as `None`, and `None` removes it.
     let notes = apply(

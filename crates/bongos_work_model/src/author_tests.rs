@@ -35,8 +35,7 @@ fn other_kinds_round_trip() {
         Author::healer("healer"),
         Author::unattributed("state store"),
     ] {
-        let back: Author =
-            serde_json::from_str(&serde_json::to_string(&author).unwrap()).unwrap();
+        let back: Author = serde_json::from_str(&serde_json::to_string(&author).unwrap()).unwrap();
         assert_eq!(back, author);
     }
 }
