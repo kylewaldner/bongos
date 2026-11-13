@@ -732,6 +732,23 @@ mod tests {
         WorktreeId::from_usize(1)
     }
 
+    /// The embedded manifest with every expiry moved far ahead: the adapter reads the real
+    /// clock, and the pinned build's expiry must not decide these tests.
+    fn unexpired_embedded() -> Manifest {
+        let text = crate::manifest::EMBEDDED
+            .lines()
+            .map(|line| {
+                if line.starts_with("expires = ") {
+                    "expires = \"2999-01-01\"".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Manifest::parse(&text).unwrap()
+    }
+
     fn today() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 11, 7).unwrap()
     }
@@ -1718,7 +1735,7 @@ launcher = "bin/launcher"
             install_root: temp.path().join("languages"),
         };
         let root = temp.path().to_path_buf();
-        let manifest = Manifest::embedded();
+        let manifest = unexpired_embedded();
         let net = net_with(|| {
             Ok(http_client::Response::builder()
                 .status(404)
@@ -1825,7 +1842,7 @@ launcher = "bin/launcher"
             logs_dir: temp.path().join("logs"),
             install_root: temp.path().join("languages"),
         };
-        let manifest = Manifest::embedded();
+        let manifest = unexpired_embedded();
         let kotlin_lsp = install(&dirs, &manifest, KotlinServerKind::KotlinLsp);
         let intellij = install(&dirs, &manifest, KotlinServerKind::Intellij);
         // The user accepted the bundle's agreement; the launcher exits 0 for `license status`.
