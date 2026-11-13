@@ -170,9 +170,12 @@ target_free_gb() {
 
 # Hard stop only: when the target drive has less than BONGOS_HARD_FREE_GIB GB free (an integer,
 # default 15), print an error and return 1. It never deletes anything; to reclaim space by hand, run
-# script/bongos/sweep (stale artifacts) or remove build output you no longer need.
+# script/bongos/sweep (stale artifacts) or remove build output you no longer need. An empty or
+# non-integer value falls back to 15; 0 turns the stop off. The check runs only when a command
+# starts, so a cold workspace compile can still write tens of GB after a start at 16 GB free.
 require_space() {
   local avail_gb floor_gb="${BONGOS_HARD_FREE_GIB:-15}"
+  case $floor_gb in ''|*[!0-9]*) floor_gb=15 ;; esac
   avail_gb=$(target_free_gb)
   if [ "$avail_gb" -lt "$floor_gb" ]; then
     echo "bongos: only ${avail_gb} GB free for $CARGO_TARGET_DIR; need at least ${floor_gb} GB" >&2
