@@ -2528,9 +2528,14 @@ dependencies = [
  "bongos_work_model",
  "futures 0.3.32",
  "gpui",
+ "libc",
+ "log",
+ "parking_lot",
  "paths",
  "serde",
+ "serde_json",
  "settings",
+ "sqlez",
  "tempfile",
  "thiserror 2.0.17",
  "toml 0.8.23",
@@ -2633,6 +2638,7 @@ name = "bongos_work_model"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "gpui",
  "serde",
  "serde_json",
  "tempfile",

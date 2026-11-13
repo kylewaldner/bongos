@@ -6,6 +6,7 @@
 
 pub mod activity;
 pub mod artifacts;
+pub mod author;
 pub mod commands;
 pub mod derive;
 mod error;
@@ -24,6 +25,7 @@ mod types;
 pub mod worktree_path;
 
 pub use artifacts::{SessionContext, SharedArtifact, session_context, shared_artifacts};
+pub use author::{Author, AuthorKind, PersonAtKeyboard};
 pub use error::{Error, ErrorKind, Result};
 pub use io::{
     SchemaFile, parse_artifacts, parse_history, parse_link, parse_project, parse_task,
@@ -37,6 +39,9 @@ mod activity_tests;
 
 #[cfg(test)]
 mod artifacts_tests;
+
+#[cfg(test)]
+mod author_tests;
 
 #[cfg(test)]
 mod commands_tests;
