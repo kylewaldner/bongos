@@ -6,7 +6,7 @@ use futures::lock::OwnedMutexGuard;
 use gpui::{App, AppContext, AsyncApp, Entity, SharedString, Task};
 use http_client::github::AssetKind;
 use http_client::github::{GitHubLspBinaryVersion, latest_github_release};
-use http_client::github_download::{GithubBinaryMetadata, download_server_binary};
+use http_client::github_download::{GithubBinaryMetadata, download_server_binary_with_progress};
 pub use language::*;
 use lsp::{InitializeParams, LanguageServerBinary, LanguageServerBinaryOptions};
 use project::lsp_store::lsp_ext_command;
@@ -811,6 +811,7 @@ impl LspInstaller for RustLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
+        let server_name = self.name();
 
         async move {
             let GitHubLspBinaryVersion {
@@ -866,12 +867,13 @@ impl LspInstaller for RustLspAdapter {
                 }
             }
 
-            download_server_binary(
+            download_server_binary_with_progress(
                 &*delegate.http_client(),
                 &url,
                 expected_digest.as_deref(),
                 &destination_path,
                 Self::GITHUB_ASSET_KIND,
+                &|done, total| delegate.report_download_progress(server_name.clone(), done, total),
             )
             .await?;
             make_file_executable(&server_path).await?;

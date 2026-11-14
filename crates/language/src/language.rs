@@ -25,6 +25,8 @@ mod toolchain;
 
 #[cfg(test)]
 pub mod buffer_tests;
+#[cfg(test)]
+mod server_download_tests;
 
 pub use crate::language_settings::{
     AutoIndentMode, EditPredictionPromptFormat, EditPredictionsMode, IndentGuideSettings,
@@ -37,7 +39,7 @@ use futures::Future;
 use futures::future::LocalBoxFuture;
 use futures::lock::OwnedMutexGuard;
 use gpui::{App, AsyncApp, Entity};
-use http_client::HttpClient;
+use http_client::{DownloadCancelled, HttpClient};
 
 pub use language_core::highlight_map::{HighlightId, HighlightMap};
 
@@ -75,7 +77,11 @@ use std::{
     ops::{DerefMut, Range},
     path::{Path, PathBuf},
     str,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 use syntax_map::{QueryCursorHandle, SyntaxSnapshot};
 use task::RunnableTag;
@@ -91,7 +97,7 @@ pub use toolchain::{
     ToolchainMetadata, ToolchainScope,
 };
 use tree_sitter::{self, QueryCursor, WasmStore, wasmtime};
-use util::rel_path::RelPath;
+use util::{ResultExt as _, rel_path::RelPath};
 
 pub use buffer::Operation;
 pub use buffer::*;
@@ -233,7 +239,7 @@ pub struct Location {
 }
 
 type ServerBinaryCache = futures::lock::Mutex<Option<(bool, LanguageServerBinary)>>;
-type DownloadableLanguageServerBinary = LocalBoxFuture<'static, Result<LanguageServerBinary>>;
+pub type DownloadableLanguageServerBinary = LocalBoxFuture<'static, Result<LanguageServerBinary>>;
 pub type LanguageServerBinaryLocations = LocalBoxFuture<
     'static,
     (
@@ -417,6 +423,142 @@ pub trait LspAdapterDelegate: Send + Sync {
     async fn shell_env(&self) -> HashMap<String, String>;
     async fn read_text_file(&self, path: &RelPath) -> Result<String>;
     async fn try_exec(&self, binary: LanguageServerBinary) -> Result<()>;
+
+    /// Reports how far `server`'s download got: `done` bytes of `total`, when the size is known.
+    fn report_download_progress(
+        &self,
+        _server: LanguageServerName,
+        _done: u64,
+        _total: Option<u64>,
+    ) {
+    }
+
+    /// The flag that cancels `server`'s download once set. A download asks for it as it starts,
+    /// which resets it.
+    fn download_cancel_flag(&self, _server: LanguageServerName) -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+}
+
+/// How often a running download looks at its cancel flag.
+const DOWNLOAD_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The binary a start runs. The last downloaded binary is returned at once, and the download
+/// (which first checks for a newer version) keeps running beside it, so a cached server never
+/// waits for the network. Without a cached binary it is what the download gives.
+pub async fn binary_to_start(
+    (existing, download): (
+        Result<LanguageServerBinary>,
+        Option<DownloadableLanguageServerBinary>,
+    ),
+    cx: &AsyncApp,
+) -> Result<LanguageServerBinary> {
+    match (existing, download) {
+        (binary, None) => binary,
+        (Err(_), Some(download)) => download.await,
+        (Ok(existing), Some(download)) => {
+            cx.foreground_executor()
+                .spawn(async move {
+                    download.await.log_err();
+                })
+                .detach();
+            Ok(existing)
+        }
+    }
+}
+
+/// Runs `download` until it finishes or `cancel` is set. A cancel drops the download, which
+/// stops it (an npm install is killed with it), and is the error `DownloadCancelled`.
+async fn download_unless_cancelled<T>(
+    download: impl Future<Output = Result<T>>,
+    cancel: &AtomicBool,
+    executor: &gpui::BackgroundExecutor,
+) -> Result<T> {
+    let mut download = std::pin::pin!(download);
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(anyhow::Error::new(DownloadCancelled));
+        }
+        let tick = executor.timer(DOWNLOAD_CANCEL_POLL_INTERVAL);
+        if let futures::future::Either::Left((result, _)) =
+            futures::future::select(download.as_mut(), tick).await
+        {
+            return result;
+        }
+    }
+}
+
+/// Whether `binary`'s program and every absolute path among its arguments (an npm server's
+/// script, run by node) are on disk.
+fn binary_files_exist(binary: &LanguageServerBinary) -> bool {
+    binary.path.exists()
+        && binary.arguments.iter().all(|argument| {
+            let path = Path::new(argument);
+            !path.is_absolute() || path.exists()
+        })
+}
+
+/// The lock a download into `container_dir` holds while it runs.
+fn download_lock(container_dir: &Path) -> Arc<futures::lock::Mutex<()>> {
+    static LOCKS: LazyLock<std::sync::Mutex<HashMap<PathBuf, Arc<futures::lock::Mutex<()>>>>> =
+        LazyLock::new(Default::default);
+    LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(container_dir.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// The names of the entries in `dir`.
+fn dir_entry_names(dir: &Path) -> HashSet<std::ffi::OsString> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| Some(entry.ok()?.file_name()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Removes what a failed, cancelled or dropped download left in `dir` when dropped while armed:
+/// every entry not in `before`.
+struct RemoveNewEntriesOnDrop {
+    dir: PathBuf,
+    before: HashSet<std::ffi::OsString>,
+    armed: bool,
+}
+
+impl Drop for RemoveNewEntriesOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_new_entries(&self.dir, &self.before);
+        }
+    }
+}
+
+/// Removes every entry of `dir` not in `before`.
+fn remove_new_entries(dir: &Path, before: &HashSet<std::ffi::OsString>) {
+    for name in dir_entry_names(dir).difference(before) {
+        let path = dir.join(name);
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(error) = result {
+            log::warn!("removing the partial download {path:?}: {error}");
+        }
+    }
+}
+
+/// The text of a download error in a `BinaryStatus::Failed`.
+fn download_error_text(error: &anyhow::Error) -> String {
+    if error.downcast_ref::<DownloadCancelled>().is_some() {
+        DownloadCancelled.to_string()
+    } else {
+        format!("{error:?}")
+    }
 }
 
 #[async_trait(?Send)]
@@ -682,6 +824,14 @@ where
     ) -> Result<LanguageServerBinary> {
         let name = self.name();
 
+        // Held until the download and its cleanup are done, so downloads into one directory
+        // run one at a time and none removes what another is writing. Taken before the cancel
+        // flag, so a cancel while this one waits stops the download that is running.
+        let download_lock = download_lock(&container_dir).lock_owned().await;
+
+        // Asked for before the version check, so a cancel during the check stops the download.
+        let cancel = delegate.download_cancel_flag(name.clone());
+
         log::debug!("fetching latest version of language server {:?}", name.0);
         delegate.update_status(name.clone(), BinaryStatus::CheckingForUpdate);
 
@@ -697,12 +847,34 @@ where
             log::debug!("language server {:?} is already installed", name.0);
             delegate.update_status(name.clone(), BinaryStatus::None);
             Ok(binary)
+        } else if cancel.load(Ordering::SeqCst) {
+            delegate.update_status(name.clone(), BinaryStatus::None);
+            Err(anyhow::Error::new(DownloadCancelled))
         } else {
             log::debug!("downloading language server {:?}", name.0);
             delegate.update_status(name.clone(), BinaryStatus::Downloading);
+            let download =
+                self.fetch_server_binary(latest_version, container_dir.clone(), delegate);
+            let executor = cx.background_executor().clone();
             let binary = cx
                 .background_executor()
-                .spawn(self.fetch_server_binary(latest_version, container_dir, delegate))
+                .spawn(async move {
+                    // Declared first, so it is released after the cleanup below has run.
+                    let _download_lock = download_lock;
+                    // Armed until the download succeeds, so a failure, a cancel, or dropping
+                    // the start (a restart or stop while it downloads) all remove what it wrote,
+                    // and the next start downloads again instead of finding a partial install.
+                    // The download future is a later local, so it is dropped first and a killed
+                    // installer has stopped writing before the cleanup runs.
+                    let mut cleanup = RemoveNewEntriesOnDrop {
+                        before: dir_entry_names(&container_dir),
+                        dir: container_dir,
+                        armed: true,
+                    };
+                    let binary = download_unless_cancelled(download, &cancel, &executor).await;
+                    cleanup.armed = binary.is_err();
+                    binary
+                })
                 .await;
 
             delegate.update_status(name.clone(), BinaryStatus::None);
@@ -744,8 +916,12 @@ where
                 return (Ok(binary), None);
             }
 
+            // A cached binary an update has since removed (a GitHub download replaces the old
+            // version's directory, a cancelled npm update removes its package) is looked up on
+            // disk again below.
             if let Some((pre_release, cached_binary)) = cached_binary_deref
                 && *pre_release == binary_options.pre_release
+                && binary_files_exist(cached_binary)
             {
                 return (Ok(cached_binary.clone()), None);
             }
@@ -771,6 +947,17 @@ where
                 .context(
                     "did not find existing language server binary, falling back to downloading",
                 );
+            // With a binary on disk the start runs it at once and the update goes on beside it,
+            // so the cache is filled now and released: a second start of this server must not
+            // wait on the lock for as long as the network takes. The update's binary is found
+            // on disk by a later start once the cached one is gone, or at the next launch.
+            let mut cached_binary = match &last_downloaded_binary {
+                Ok(existing) => {
+                    *cached_binary = Some((binary_options.pre_release, existing.clone()));
+                    None
+                }
+                Err(_) => Some(cached_binary),
+            };
             let download_binary = async move {
                 let mut binary = self
                     .try_fetch_server_binary(
@@ -798,14 +985,16 @@ where
                         delegate.update_status(
                             self.name(),
                             BinaryStatus::Failed {
-                                error: format!("{error:?}"),
+                                error: download_error_text(error),
                             },
                         );
                     }
                 }
 
-                if let Ok(binary) = &binary {
-                    *cached_binary = Some((binary_options.pre_release, binary.clone()));
+                if let Ok(binary) = &binary
+                    && let Some(cached_binary) = cached_binary.as_mut()
+                {
+                    **cached_binary = Some((binary_options.pre_release, binary.clone()));
                 }
 
                 binary

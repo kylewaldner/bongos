@@ -46,29 +46,126 @@ pub async fn download_server_binary(
     destination_path: &Path,
     asset_kind: AssetKind,
 ) -> Result<(), anyhow::Error> {
+    download_server_binary_with_progress(
+        http_client,
+        url,
+        digest,
+        destination_path,
+        asset_kind,
+        &|_, _| {},
+    )
+    .await
+}
+
+/// `download_server_binary` that also reports the bytes of the response read so far and the
+/// `Content-Length` total (when the server sent one) to `progress`: once at the start, every
+/// `VERIFIED_DOWNLOAD_PROGRESS_STEP` bytes, and at the end of the body. An error, or dropping the
+/// future (a cancelled download), removes the staging directory or file.
+pub async fn download_server_binary_with_progress(
+    http_client: &dyn HttpClient,
+    url: &str,
+    digest: Option<&str>,
+    destination_path: &Path,
+    asset_kind: AssetKind,
+    progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+) -> Result<(), anyhow::Error> {
     log::info!("downloading github artifact from {url}");
     let Some(destination_parent) = destination_path.parent() else {
         anyhow::bail!("destination path has no parent: {destination_path:?}");
     };
 
     let staging_path = staging_path(destination_parent, asset_kind)?;
+    let mut staging = RemoveStagingOnDrop {
+        path: &staging_path,
+        armed: true,
+    };
     let mut response = http_client
         .get(url, Default::default(), true)
         .await
         .with_context(|| format!("downloading release from {url}"))?;
-    let body = response.body_mut();
+    let total = response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let body = ProgressReader::new(response.body_mut(), total, progress);
 
-    if let Err(err) = extract_to_staging(body, digest, url, &staging_path, asset_kind).await {
-        cleanup_staging_path(&staging_path, asset_kind).await;
-        return Err(err);
-    }
-
-    if let Err(err) = finalize_download(&staging_path, destination_path).await {
-        cleanup_staging_path(&staging_path, asset_kind).await;
-        return Err(err);
-    }
-
+    extract_to_staging(body, digest, url, &staging_path, asset_kind).await?;
+    finalize_download(&staging_path, destination_path).await?;
+    staging.armed = false;
     Ok(())
+}
+
+/// Deletes a staging directory or file when dropped, unless disarmed.
+struct RemoveStagingOnDrop<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl Drop for RemoveStagingOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let result = if self.path.is_dir() {
+            std::fs::remove_dir_all(self.path)
+        } else {
+            std::fs::remove_file(self.path)
+        };
+        if let Err(error) = result
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("failed to remove staging path {:?}: {error}", self.path);
+        }
+    }
+}
+
+/// Reports the bytes read through it to `progress`, the way `download_verified_file` does.
+struct ProgressReader<'a, R> {
+    inner: R,
+    done: u64,
+    reported: u64,
+    total: Option<u64>,
+    progress: &'a (dyn Fn(u64, Option<u64>) + Send + Sync),
+}
+
+impl<'a, R> ProgressReader<'a, R> {
+    fn new(
+        inner: R,
+        total: Option<u64>,
+        progress: &'a (dyn Fn(u64, Option<u64>) + Send + Sync),
+    ) -> Self {
+        progress(0, total);
+        Self {
+            inner,
+            done: 0,
+            reported: 0,
+            total,
+            progress,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<'_, R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buffer);
+        if let Poll::Ready(Ok(read)) = &result {
+            this.done += *read as u64;
+            // A decoder may stop reading at the last byte without the read that returns 0.
+            let at_end =
+                (*read == 0 || this.total == Some(this.done)) && this.reported != this.done;
+            if at_end || this.done - this.reported >= VERIFIED_DOWNLOAD_PROGRESS_STEP {
+                this.reported = this.done;
+                (this.progress)(this.done, this.total);
+            }
+        }
+        result
+    }
 }
 
 pub async fn download_server_raw_binary(
@@ -135,17 +232,7 @@ pub const VERIFIED_DOWNLOAD_PROGRESS_STEP: u64 = 1024 * 1024;
 /// `download_verified_file` checks its cancel flag before reading each chunk of this size.
 const VERIFIED_DOWNLOAD_CHUNK_SIZE: usize = 64 * 1024;
 
-/// The error of a `download_verified_file` stopped by its cancel flag.
-#[derive(Debug)]
-pub struct DownloadCancelled;
-
-impl std::fmt::Display for DownloadCancelled {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("download cancelled")
-    }
-}
-
-impl std::error::Error for DownloadCancelled {}
+pub use crate::DownloadCancelled;
 
 /// Deletes the file at its path when dropped, unless disarmed.
 struct RemoveOnDrop<'a> {
@@ -329,21 +416,6 @@ fn staging_path(parent: &Path, asset_kind: AssetKind) -> Result<PathBuf> {
                 .keep()
                 .with_context(|| format!("persisting staging file in {parent:?}"))?;
             Ok(path)
-        }
-    }
-}
-
-async fn cleanup_staging_path(staging_path: &Path, asset_kind: AssetKind) {
-    match asset_kind {
-        AssetKind::TarGz | AssetKind::TarBz2 | AssetKind::Zip => {
-            if let Err(err) = async_fs::remove_dir_all(staging_path).await {
-                log::warn!("failed to remove staging directory {staging_path:?}: {err:?}");
-            }
-        }
-        AssetKind::Gz => {
-            if let Err(err) = async_fs::remove_file(staging_path).await {
-                log::warn!("failed to remove staging file {staging_path:?}: {err:?}");
-            }
         }
     }
 }
@@ -738,6 +810,89 @@ mod tests {
             "{done:?}"
         );
         assert!(done.len() >= 4, "{done:?}");
+    }
+
+    #[test]
+    fn server_download_reports_progress_up_to_the_size() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let destination = temp_dir.path().join("server");
+        let contents = noise(3 * 1024 * 1024 + 5);
+        let mut compressed = Vec::new();
+        futures::executor::block_on(
+            async_compression::futures::bufread::GzipEncoder::new(futures::io::Cursor::new(
+                contents.clone(),
+            ))
+            .read_to_end(&mut compressed),
+        )
+        .unwrap();
+        let size = compressed.len() as u64;
+        let client = TrickleClient {
+            body: compressed,
+            cancel: None,
+        };
+        let events = std::sync::Mutex::new(Vec::new());
+        let record = |done, total| events.lock().unwrap().push((done, total));
+        futures::executor::block_on(download_server_binary_with_progress(
+            &client,
+            URL,
+            None,
+            &destination,
+            AssetKind::Gz,
+            &record,
+        ))
+        .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), contents);
+        let events = events.into_inner().unwrap();
+        assert_eq!(events.first(), Some(&(0, Some(size))));
+        assert_eq!(events.last(), Some(&(size, Some(size))));
+        let done: Vec<u64> = events.iter().map(|(done, _)| *done).collect();
+        assert!(done.windows(2).all(|pair| pair[1] > pair[0]), "{done:?}");
+    }
+
+    struct NeverAnswers;
+
+    impl HttpClient for NeverAnswers {
+        fn send(
+            &self,
+            _req: http::Request<AsyncBody>,
+        ) -> BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> {
+            Box::pin(futures::future::pending())
+        }
+
+        fn user_agent(&self) -> Option<&HeaderValue> {
+            None
+        }
+
+        fn proxy(&self) -> Option<&Url> {
+            None
+        }
+    }
+
+    #[test]
+    fn dropping_a_server_download_removes_its_staging_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let destination = temp_dir.path().join("server-1.0");
+        futures::executor::block_on(async {
+            let mut download = std::pin::pin!(download_server_binary(
+                &NeverAnswers,
+                URL,
+                None,
+                &destination,
+                AssetKind::TarGz,
+            ));
+            assert!(futures::poll!(download.as_mut()).is_pending());
+            assert_eq!(
+                std::fs::read_dir(temp_dir.path()).unwrap().count(),
+                1,
+                "the download made its staging directory"
+            );
+        });
+        assert_eq!(
+            std::fs::read_dir(temp_dir.path()).unwrap().count(),
+            0,
+            "the dropped download left its staging directory"
+        );
     }
 
     #[test]
