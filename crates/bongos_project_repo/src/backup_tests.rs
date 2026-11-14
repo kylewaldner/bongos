@@ -425,7 +425,7 @@ fn thinning_keeps_the_last_snapshot_of_each_old_day_with_the_same_trees() {
 
     // The remote still has the old history; the next push replaces it through the lease.
     let old_remote = remote_tip(&repo, &remote).unwrap();
-    assert_ne!(Some(old_remote.clone()), tip(&repo));
+    assert_ne!(Some(old_remote), tip(&repo));
     assert!(block_on(repo.push_if_due(now)).unwrap());
     assert_eq!(remote_tip(&repo, &remote), tip(&repo));
     assert!(block_on(git.rev_parse(&remote, "refs/heads/main")).is_err());
