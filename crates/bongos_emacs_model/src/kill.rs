@@ -303,7 +303,15 @@ pub fn copy_region_or_line<T: TextSource + ?Sized>(
         .collect();
     Plan {
         edits: Vec::new(),
-        carets: carets.to_vec(),
+        // Like Emacs, the copy ends the region: the cursor stays and the selection is gone.
+        carets: carets
+            .iter()
+            .map(|caret| Caret {
+                head: caret.head,
+                tail: caret.head,
+                active: false,
+            })
+            .collect(),
         killed,
     }
 }
