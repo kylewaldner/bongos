@@ -28,7 +28,7 @@ struct OpenedFold {
 
 /// The folds and the collapsed buffers the session has opened and not closed again.
 #[derive(Default)]
-pub(crate) struct Display {
+pub struct Display {
     folds: Vec<OpenedFold>,
     buffers: Vec<BufferId>,
 }
@@ -56,12 +56,7 @@ fn buffers_of(
 
 impl Display {
     /// Opens the folds and collapsed buffers that hide `found`, before the cursor lands on it.
-    pub(crate) fn open(
-        &mut self,
-        editor: &mut Editor,
-        found: &Range<usize>,
-        cx: &mut Context<Editor>,
-    ) {
+    pub fn open(&mut self, editor: &mut Editor, found: &Range<usize>, cx: &mut Context<Editor>) {
         let snapshot = editor.buffer().read(cx).snapshot(cx);
         let range = clamp(&snapshot, found);
 
@@ -91,7 +86,7 @@ impl Display {
 
     /// Closes again the folds and buffers the session opened that do not hide `keep`, the match
     /// the cursor is on now (`None`: no match, so all of them).
-    pub(crate) fn refold(
+    pub fn refold(
         &mut self,
         editor: &mut Editor,
         keep: Option<&Range<usize>>,
@@ -135,12 +130,7 @@ impl Display {
     }
 
     /// Closes everything the session opened, for an abort.
-    pub(crate) fn restore(
-        &mut self,
-        editor: &mut Editor,
-        window: &mut Window,
-        cx: &mut Context<Editor>,
-    ) {
+    pub fn restore(&mut self, editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
         self.refold(editor, None, window, cx);
     }
 }

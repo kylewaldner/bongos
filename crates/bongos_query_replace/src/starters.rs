@@ -177,6 +177,7 @@ fn answered(
 
     let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
     let from = origin.from.to_offset(&snapshot);
+    let bounded = origin.scope.is_some();
     let region = origin
         .scope
         .as_ref()
@@ -214,6 +215,7 @@ fn answered(
                     template,
                     from: answer.from,
                     regexp: answer.regexp,
+                    region: bounded,
                 },
                 window,
                 cx,

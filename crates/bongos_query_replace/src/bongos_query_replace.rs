@@ -6,6 +6,7 @@
 //! the replacement templates and the case transfer live in `bongos_query_replace_model`.
 
 pub mod actions;
+pub mod display;
 pub mod edits;
 pub mod engine;
 pub mod prompts;
@@ -15,6 +16,8 @@ pub mod view;
 
 #[cfg(test)]
 mod commands_tests;
+#[cfg(test)]
+mod display_tests;
 #[cfg(test)]
 mod edits_tests;
 #[cfg(test)]

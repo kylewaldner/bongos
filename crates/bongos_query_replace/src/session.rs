@@ -18,21 +18,24 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
 
+use bongos_isearch::display::Display;
 use bongos_isearch::engine::Cancel;
 use bongos_query_replace_model::session::{Effect, End, Found, Key, Phase, Reason, Session};
 use bongos_query_replace_model::template::Template;
 use bongos_query_replace_model::text::{counter, decision_prompt, end_message, help};
-use editor::{Addon, Editor, SelectionEffects, scroll::Autoscroll};
+use editor::{Addon, Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{
-    Action, App, AppContext as _, Entity, EntityId, Global, KeyContext, WeakEntity, Window,
+    Action, App, AppContext as _, Entity, EntityId, Global, KeyContext, Subscription, WeakEntity,
+    Window,
 };
 use multi_buffer::{Anchor, MultiBufferOffset};
 use project::search::SearchQuery;
 use workspace::Workspace;
 
 use crate::actions::{Abort, Exit, Help, No, ThisAndExit, Yes};
+use crate::display::{self, Shown};
 use crate::edits::{Edits, READ_ONLY, Replace, match_anchors};
 use crate::engine::{self, Replacer, ScanEnd};
 use crate::view::QueryReplaceView;
@@ -263,6 +266,8 @@ pub(crate) struct InteractiveRequest {
     /// The string to replace, as typed.
     pub from: String,
     pub regexp: bool,
+    /// Whether the scope is a region the user made, which is kept visible.
+    pub region: bool,
 }
 
 /// One thing the user asked for in the decision view.
@@ -283,6 +288,11 @@ struct Interactive {
     from: String,
     regexp: bool,
     edits: Option<Edits>,
+    /// The replacement of the last decision, highlighted until the next one.
+    replacement: Option<Range<Anchor>>,
+    /// The folds and collapsed excerpts the session opened.
+    folds: Display,
+    _editor_events: Option<Subscription>,
     /// The match asked about, found and on show.
     current: Option<(Found, Range<Anchor>)>,
     /// Where the cursor goes when the session runs out of matches or ends on a replacement: the end
@@ -350,6 +360,7 @@ pub(crate) fn open(
         template,
         from,
         regexp,
+        region,
     } = request;
     let mut model = Session::new(preserve_case, template);
     model.on_match(Some(first.clone()));
@@ -365,6 +376,9 @@ pub(crate) fn open(
         from,
         regexp,
         edits: Some(edits),
+        replacement: None,
+        folds: Display::default(),
+        _editor_events: None,
         current: None,
         rest: None,
         queued: VecDeque::new(),
@@ -400,6 +414,27 @@ pub(crate) fn open(
         return;
     };
     state.borrow_mut().view = view.downgrade();
+    let events = window.subscribe(editor, cx, {
+        let state = Rc::downgrade(&state);
+        move |_, event: &EditorEvent, _, cx| {
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            if matches!(
+                event,
+                EditorEvent::ScrollPositionChanged { .. } | EditorEvent::BufferEdited
+            ) {
+                refresh_highlights(&state, cx);
+            }
+        }
+    });
+    state.borrow_mut()._editor_events = Some(events);
+    if region {
+        let scope = state.borrow().scope.clone();
+        editor.update(cx, |editor, cx| {
+            display::highlight_region(editor, &scope, cx)
+        });
+    }
     cx.default_global::<Sessions>()
         .0
         .insert(workspace_id, state.clone());
@@ -510,6 +545,7 @@ fn apply(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
         Input::Key(key) => {
             let effects = {
                 let mut state = state.borrow_mut();
+                state.replacement = None;
                 // A skipped match is where the cursor ends if no more come.
                 if key == Key::No && state.model.phase() == &Phase::Asking {
                     state.rest = state.current.as_ref().map(|(_, anchors)| anchors.end);
@@ -589,6 +625,7 @@ fn replace(state: &Shared, with: &str, window: &mut Window, cx: &mut App) -> Res
                 .model
                 .on_replaced(replacement.model_id(), replacement.range.clone());
             state.rest = Some(replacement.anchors.end);
+            state.replacement = Some(replacement.anchors.clone());
         }
         Ok(Replace::Changed(_)) => state.rest = Some(anchors.end),
         Err(_) => return Err(READ_ONLY.to_string()),
@@ -665,7 +702,11 @@ fn land(state: &Shared, found: Found, window: &mut Window, cx: &mut App) {
     let Some(editor) = state.borrow().editor.upgrade() else {
         return;
     };
+    // The folds are taken out of the state meanwhile so the editor events that come of the folding
+    // can look at the rest.
+    let mut folds = std::mem::take(&mut state.borrow_mut().folds);
     let anchors = editor.update(cx, |editor, cx| {
+        folds.open(editor, &found.range, cx);
         let snapshot = editor.buffer().read(cx).snapshot(cx);
         let anchors = match_anchors(&snapshot, &found.range);
         let start = snapshot.offset_to_point(MultiBufferOffset(found.range.start));
@@ -683,8 +724,10 @@ fn land(state: &Shared, found: Found, window: &mut Window, cx: &mut App) {
             .nav_history(false)
             .from_search(true);
         editor.change_selections(effects, window, cx, |s| s.select_ranges([offset..offset]));
+        folds.refold(editor, Some(&found.range), window, cx);
         anchors
     });
+    state.borrow_mut().folds = folds;
     let (view, prompt) = {
         let mut state = state.borrow_mut();
         let replacement = state.model.replacement_for(&found);
@@ -694,6 +737,41 @@ fn land(state: &Shared, found: Found, window: &mut Window, cx: &mut App) {
     };
     view.update(cx, |view, cx| view.set_prompt(prompt, cx)).ok();
     refresh_status(state, window, cx);
+    refresh_highlights(state, cx);
+}
+
+/// Highlights the matches near the visible text, from the current match (or the last replacement)
+/// on.
+fn refresh_highlights(state: &Shared, cx: &mut App) {
+    let (editor, query, scope, from, current, replacement) = {
+        let state = state.borrow();
+        if state.done {
+            return;
+        }
+        let Some(editor) = state.editor.upgrade() else {
+            return;
+        };
+        let current = state.current.as_ref().map(|(_, anchors)| anchors.clone());
+        let from = current.as_ref().map(|anchors| anchors.start).or(state.rest);
+        (
+            editor,
+            state.query.clone(),
+            state.scope.clone(),
+            from,
+            current,
+            state.replacement.clone(),
+        )
+    };
+    editor.update(cx, |editor, cx| {
+        let shown = Shown {
+            query: &query,
+            scope: &scope,
+            from,
+            current: current.as_ref(),
+            replacement: replacement.as_ref(),
+        };
+        display::highlight(editor, shown, cx)
+    });
 }
 
 fn finish(state: &Shared, end: End, hide: bool, window: &mut Window, cx: &mut App) {
@@ -710,7 +788,7 @@ fn finish_with(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (editor, workspace, view, edits, current, rest) = {
+    let (editor, workspace, view, edits, current, rest, mut folds) = {
         let mut state = state.borrow_mut();
         if std::mem::replace(&mut state.done, true) {
             return;
@@ -726,8 +804,10 @@ fn finish_with(
             state.edits.take(),
             state.current.take(),
             state.rest,
+            std::mem::take(&mut state.folds),
         )
     };
+    state.borrow_mut()._editor_events = None;
     if let Some(workspace) = workspace.upgrade() {
         forget(state, workspace.entity_id(), cx);
     }
@@ -747,6 +827,18 @@ fn finish_with(
             if let Some(edits) = edits {
                 edits.finish(editor, cx);
             }
+            display::clear(editor, cx);
+            // The folds the session opened close again, but those around the cursor stay open.
+            let cursor = editor
+                .selections
+                .newest::<MultiBufferOffset>(&editor.display_snapshot(cx));
+            let cursor = cursor.head().0;
+            folds.refold(
+                editor,
+                Some(&(cursor.saturating_sub(1)..cursor + 1)),
+                window,
+                cx,
+            );
         });
     }
     let message = message.unwrap_or_else(|| end_message(&end));
