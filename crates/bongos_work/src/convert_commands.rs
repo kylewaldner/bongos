@@ -68,11 +68,17 @@ pub(crate) fn previews(setup: &ConversionSetup) -> Result<Vec<ConversionPreview>
     )
 }
 
-/// Converts the old project at `only`, or every unconverted one when `None`. Each result is
-/// named by its old folder.
+/// What a person is told when the old projects changed between the preview and the run.
+pub(crate) const PREVIEW_CHANGED: &str = "the old projects changed since the preview was shown; \
+     nothing was converted. Run project: convert again to see what it would do now";
+
+/// Converts the old project at `only`, or every unconverted one when `None`, provided what it
+/// would do is still `confirmed`, the previews the person agreed to. Each result is named by its
+/// old folder.
 pub(crate) async fn run_conversion(
     setup: &ConversionSetup,
     only: Option<&Path>,
+    confirmed: &[ConversionPreview],
     git: &Git,
 ) -> Result<Vec<(PathBuf, Result<ConvertedProject, ConvertError>)>> {
     let tree = load(&setup.root);
@@ -80,7 +86,13 @@ pub(crate) async fn run_conversion(
     let hooks = StateApplyHooks::global();
     let options = setup.options(hooks);
     let new_id = bongos_work_model::new_id;
+    let sources = unconverted_sources(&tree, &locations, &setup.oneoffs_title, setup.now);
     let Some(only) = only else {
+        let now: Vec<ConversionPreview> = sources
+            .iter()
+            .map(|source| preview(source, options, &locations))
+            .collect();
+        anyhow::ensure!(now == confirmed, PREVIEW_CHANGED);
         return Ok(convert_all(
             &tree,
             &setup.oneoffs_title,
@@ -92,13 +104,16 @@ pub(crate) async fn run_conversion(
         )
         .await);
     };
-    let sources = unconverted_sources(&tree, &locations, &setup.oneoffs_title, setup.now);
     let Some(source) = sources.iter().find(|source| source.old_dir() == only) else {
         anyhow::bail!(
             "{} is not an old-format project that still needs converting",
             only.display()
         );
     };
+    anyhow::ensure!(
+        [preview(source, options, &locations)] == confirmed,
+        PREVIEW_CHANGED
+    );
     let result = convert(source, options, &mut locations, git, new_id).await;
     Ok(vec![(only.to_path_buf(), result)])
 }
@@ -336,7 +351,7 @@ fn preview_and_ask(
             }
             let converting = cx.background_spawn(async move {
                 let git = Git::locate()?;
-                run_conversion(&setup, only.as_deref(), &git).await
+                run_conversion(&setup, only.as_deref(), &shown, &git).await
             });
             cx.spawn(async move |workspace, cx| {
                 let message = match converting.await {

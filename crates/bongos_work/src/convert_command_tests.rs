@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use bongos_project_repo::router::{DefinitionOp, Routed, route};
 use bongos_project_repo::{
-    ConvertError, DEFAULT_ONEOFFS_TITLE, Git, LayoutTemplates, Location, ProjectRepositorySettings,
-    RepositoryLocations, claim_old_project_start,
+    ConversionPreview, ConvertError, DEFAULT_ONEOFFS_TITLE, Git, LayoutTemplates, Location,
+    ProjectRepositorySettings, RepositoryLocations, claim_old_project_start,
 };
 use bongos_work_model::commands::{self, Change, Context, NewTask, TaskEdit, Write};
 use bongos_work_model::store::{NEEDS_CONVERSION, Project, Task, WorkTree, load};
@@ -23,7 +23,7 @@ use tempfile::TempDir;
 use crate::convert_commands::{
     ConversionSetup, conversion_message, previews, render_previews, run_conversion,
 };
-use crate::oneoffs::{ensure_oneoffs_project, oneoffs_project};
+use crate::oneoffs::{ensure_oneoffs_project, old_oneoffs_block, oneoffs_project};
 use crate::store::hide_converted;
 use crate::store_tests::{canonical, project_toml, set_enabled, task_toml, write};
 use crate::view::OLD_FORMAT_MARK;
@@ -418,17 +418,25 @@ fn project_convert_from_the_preview_to_the_hidden_project() {
         assert!(text.contains(expected), "{expected:?} missing from\n{text}");
     }
 
+    let shown: Vec<ConversionPreview> = found
+        .iter()
+        .filter(|preview| preview.summary.old_dir == project)
+        .cloned()
+        .collect();
+
     // Work starting in the project holds it: the conversion refuses and makes nothing.
     let claim = claim_old_project_start(&project).unwrap();
     let results =
-        futures::executor::block_on(run_conversion(&setup, Some(&project), &git())).unwrap();
+        futures::executor::block_on(run_conversion(&setup, Some(&project), &shown, &git()))
+            .unwrap();
     assert!(matches!(results[0].1, Err(ConvertError::Busy(_))));
     assert!(conversion_message(&results).starts_with("Not converted"));
     assert!(!setup.projects_dir.join("invoicing").exists());
     drop(claim);
 
     let results =
-        futures::executor::block_on(run_conversion(&setup, Some(&project), &git())).unwrap();
+        futures::executor::block_on(run_conversion(&setup, Some(&project), &shown, &git()))
+            .unwrap();
     let message = conversion_message(&results);
     assert!(message.starts_with("Converted "), "{message}");
     let converted = results[0].1.as_ref().unwrap();
@@ -450,8 +458,8 @@ fn project_convert_from_the_preview_to_the_hidden_project() {
     assert_eq!(previews(&setup).unwrap().len(), 1);
 
     // Converting it again is refused.
-    let error =
-        futures::executor::block_on(run_conversion(&setup, Some(&project), &git())).unwrap_err();
+    let error = futures::executor::block_on(run_conversion(&setup, Some(&project), &shown, &git()))
+        .unwrap_err();
     assert!(
         error.to_string().contains("still needs converting"),
         "{error}"
@@ -652,4 +660,88 @@ fn one_offs_asked_for_at_once_make_one_project() {
             .len(),
         1
     );
+}
+
+#[test]
+fn a_conversion_refuses_when_the_old_projects_changed_since_the_preview() {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let setup = setup(&base);
+    let project = seed(&setup.root);
+    let shown = previews(&setup).unwrap();
+    let shown_project: Vec<ConversionPreview> = shown
+        .iter()
+        .filter(|preview| preview.summary.old_dir == project)
+        .cloned()
+        .collect();
+
+    // A task added to the project after its preview was shown.
+    let added = layout::child_dir(&project, "audit");
+    write(&layout::task_file(&added), &task_toml("l2", "Audit"));
+    let error = futures::executor::block_on(run_conversion(
+        &setup,
+        Some(&project),
+        &shown_project,
+        &git(),
+    ))
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("changed since the preview"),
+        "{error}"
+    );
+    assert!(!setup.projects_dir.exists(), "nothing was made");
+
+    // A project added since convert all's preview.
+    let other = layout::project_dir(&setup.root, "payroll");
+    write(&layout::project_file(&other), &project_toml("Payroll"));
+    write(&layout::task_file(&other), &task_toml("g9", "Payroll"));
+    let error =
+        futures::executor::block_on(run_conversion(&setup, None, &shown, &git())).unwrap_err();
+    assert!(
+        error.to_string().contains("changed since the preview"),
+        "{error}"
+    );
+    assert!(
+        RepositoryLocations::load(&setup.locations_path)
+            .unwrap()
+            .locations()
+            .is_empty()
+    );
+
+    // With the preview as it is now, convert all runs.
+    let shown = previews(&setup).unwrap();
+    let results =
+        futures::executor::block_on(run_conversion(&setup, None, &shown, &git())).unwrap();
+    assert_eq!(results.len(), 3);
+    assert!(
+        results.iter().all(|(_, result)| result.is_ok()),
+        "{results:?}"
+    );
+}
+
+#[test]
+fn a_new_one_off_is_refused_while_old_one_offs_are_not_converted() {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let setup = setup(&base);
+    seed(&setup.root);
+    let tree = load(&setup.root);
+    let locations = RepositoryLocations::load(&setup.locations_path).unwrap();
+
+    let block = old_oneoffs_block(&tree, Some(&locations)).expect("refused");
+    assert!(block.contains("project: convert"), "{block}");
+    assert!(old_oneoffs_block(&tree, None).is_some());
+
+    // Once the old one-offs are converted, new ones are filed again.
+    record_converted(
+        &setup.locations_path,
+        &layout::oneoffs_dir(&setup.root),
+        &setup.projects_dir.join("one-offs"),
+    );
+    let locations = RepositoryLocations::load(&setup.locations_path).unwrap();
+    assert_eq!(old_oneoffs_block(&tree, Some(&locations)), None);
+
+    // A tree with no old one-offs is never refused.
+    let empty = load(&base.join("empty"));
+    assert_eq!(old_oneoffs_block(&empty, None), None);
 }

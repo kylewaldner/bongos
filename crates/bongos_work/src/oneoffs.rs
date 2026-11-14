@@ -12,6 +12,7 @@ use bongos_project_repo::{
     RepositoryLocations, StateHandle, StateStore,
 };
 use bongos_work_model::commands::{self as model, NewTask};
+use bongos_work_model::layout;
 use bongos_work_model::store::{Project, WorkTree};
 use gpui::{App, AppContext as _, Context, Global, Task, Window};
 use settings::Settings as _;
@@ -36,6 +37,25 @@ pub(crate) fn oneoffs_project<'a>(tree: &'a WorkTree, title: &str) -> Option<&'a
                 .file
                 .as_ref()
                 .is_some_and(|file| file.title.trim() == title.trim())
+    })
+}
+
+/// Why a new one-off is refused while project repositories are on: old-format one-offs in
+/// `tree` are not converted yet. Converting them makes the one-offs project, so making it first
+/// would leave them unconvertible.
+pub(crate) fn old_oneoffs_block(
+    tree: &WorkTree,
+    locations: Option<&RepositoryLocations>,
+) -> Option<String> {
+    let has_old = !tree.activities.is_empty();
+    let dir = layout::oneoffs_dir(&tree.root);
+    let converted = locations.is_some_and(|locations| locations.converted_from(&dir).is_some());
+    (has_old && !converted).then(|| {
+        format!(
+            "the old one-offs in {} are not converted yet; convert them first with \
+             project: convert, then make new one-offs",
+            dir.display()
+        )
     })
 }
 
@@ -80,6 +100,11 @@ pub(crate) fn new_oneoff(
     let Some(tree) = ready(workspace, cx) else {
         return;
     };
+    let locations = RepositoryLocations::load(locations_path(cx)).log_err();
+    if let Some(block) = old_oneoffs_block(&tree, locations.as_ref()) {
+        show_toast(workspace, format!("New one-off: {block}"), cx);
+        return;
+    }
     let settings = ProjectRepositorySettings::get_global(cx).clone();
     let title = settings.oneoffs_project.clone();
     if oneoffs_project(&tree, &title).is_some() {
