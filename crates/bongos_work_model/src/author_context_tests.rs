@@ -59,7 +59,11 @@ fn flat_tree() -> WorkTree {
 fn parent_of_follows_the_nesting_not_the_directories() {
     let tree = flat_tree();
     let id = |slug| id_of(&tree, slug);
-    let parent = |slug| tree.parent_of(&id(slug)).and_then(Task::id).map(str::to_string);
+    let parent = |slug| {
+        tree.parent_of(&id(slug))
+            .and_then(Task::id)
+            .map(str::to_string)
+    };
 
     assert_eq!(parent("c"), Some(id("b")));
     assert_eq!(parent("b"), Some(id("a")));

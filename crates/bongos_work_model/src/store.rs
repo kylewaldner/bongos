@@ -224,34 +224,27 @@ impl WorkTree {
     /// The task whose `children` hold the task `id`; `None` for a top-level task or an unknown
     /// id. Read from the nesting, never from directories, so it holds for both formats.
     pub fn parent_of(&self, id: &str) -> Option<&Task> {
-        self.tasks().into_iter().find(|task| {
-            task.children
-                .iter()
-                .any(|child| child.id() == Some(id))
-        })
+        self.tasks()
+            .into_iter()
+            .find(|task| task.children.iter().any(|child| child.id() == Some(id)))
     }
 
     /// Whether `ancestor_id` is `id` or one of its ancestors. False when either is unknown.
     pub fn is_ancestor(&self, ancestor_id: &str, id: &str) -> bool {
         fn path_to<'a>(task: &'a Task, id: &str, path: &mut Vec<&'a Task>) -> bool {
             path.push(task);
-            if task.id() == Some(id)
-                || task
-                    .children
-                    .iter()
-                    .any(|child| path_to(child, id, path))
-            {
+            if task.id() == Some(id) || task.children.iter().any(|child| path_to(child, id, path)) {
                 return true;
             }
             path.pop();
             false
         }
 
-        let mut roots = self
-            .projects
-            .iter()
-            .map(|project| &project.task)
-            .chain(self.activities.iter().flat_map(|activity| &activity.oneoffs));
+        let mut roots = self.projects.iter().map(|project| &project.task).chain(
+            self.activities
+                .iter()
+                .flat_map(|activity| &activity.oneoffs),
+        );
         let mut path = Vec::new();
         roots.any(|root| path_to(root, id, &mut path))
             && path.iter().any(|task| task.id() == Some(ancestor_id))
