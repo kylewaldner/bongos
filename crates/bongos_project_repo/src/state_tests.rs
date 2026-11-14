@@ -104,7 +104,7 @@ fn a_second_writer_gets_held_by_with_the_pid() {
     let location = location(&root);
     let _first = writer(&location, &StateApplyHooks::new());
     match StateStore::open_writer_with_hooks(&location, &StateApplyHooks::new()) {
-        Err(OpenError::HeldBy { pid }) => assert_eq!(pid, std::process::id()),
+        Err(OpenError::HeldBy { pid }) => assert_eq!(pid, Some(std::process::id())),
         Err(error) => panic!("expected HeldBy, got {error}"),
         Ok(_) => panic!("a second writer opened"),
     }
@@ -170,7 +170,7 @@ fn a_killed_holder_releases_the_lock() {
     assert!(holding, "the holder exited before it held the writer");
 
     match StateStore::open_writer_with_hooks(&location, &StateApplyHooks::new()) {
-        Err(OpenError::HeldBy { pid }) => assert_eq!(pid, child.id()),
+        Err(OpenError::HeldBy { pid }) => assert_eq!(pid, Some(child.id())),
         Err(error) => panic!("expected HeldBy, got {error}"),
         Ok(_) => panic!("opened while the holder held the writer"),
     }
@@ -407,4 +407,105 @@ fn state_event_round_trips_through_json() {
     };
     let json = serde_json::to_string(&event).unwrap();
     assert_eq!(serde_json::from_str::<StateEvent>(&json).unwrap(), event);
+}
+
+struct PanicHook;
+
+impl crate::StateApplyHook for PanicHook {
+    fn name(&self) -> &str {
+        "panics"
+    }
+
+    fn apply(
+        &self,
+        _tx: &mut crate::StateTx,
+        _change: &crate::StateApplyChange,
+    ) -> anyhow::Result<()> {
+        panic!("the hook panicked")
+    }
+}
+
+#[test]
+fn a_panic_in_the_closure_or_a_hook_rolls_the_transaction_back() {
+    let root = TempDir::new().unwrap();
+    let location = location(&root);
+    let writer = writer(&location, &StateApplyHooks::new());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        writer.transact(|tx| -> anyhow::Result<()> {
+            tx.set_task("a", with_branch("work/a"))?;
+            panic!("the closure panicked")
+        })
+    }));
+    assert!(result.is_err());
+    assert_eq!(writer.read(|read| read.task("a")).unwrap(), None);
+    // The connection is not left inside a transaction.
+    writer
+        .transact(|tx| tx.set_task("b", with_branch("work/b")))
+        .unwrap();
+    assert_eq!(writer.generation().unwrap(), 1);
+    drop(writer);
+
+    let hooks = StateApplyHooks::new();
+    hooks.register(std::sync::Arc::new(PanicHook));
+    let writer = crate::test_support::writer(&location, &hooks);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        writer.transact(|tx| tx.set_task("c", with_branch("work/c")))
+    }));
+    assert!(result.is_err());
+    assert_eq!(writer.read(|read| read.task("c")).unwrap(), None);
+    assert_eq!(writer.generation().unwrap(), 1);
+}
+
+#[test]
+fn events_arrive_in_commit_order_from_many_threads() {
+    let root = TempDir::new().unwrap();
+    let writer = writer(&location(&root), &StateApplyHooks::new());
+    let mut events = writer.subscribe();
+    std::thread::scope(|scope| {
+        for thread in 0..4 {
+            let writer = &writer;
+            scope.spawn(move || {
+                for index in 0..25 {
+                    let id = format!("t{thread}-{index}");
+                    writer
+                        .transact(|tx| tx.set_task(&id, with_branch("b")))
+                        .unwrap();
+                }
+            });
+        }
+    });
+    let mut generations = Vec::new();
+    while let Ok(Some(StateEvent::Changed { generation, .. })) = events.try_next() {
+        generations.push(generation);
+    }
+    assert_eq!(generations, (1..=100).collect::<Vec<u64>>());
+}
+
+#[cfg(unix)]
+#[test]
+fn held_by_never_reports_pid_zero() {
+    use std::os::fd::AsRawFd as _;
+
+    for contents in ["", "0\n", "not a pid\n"] {
+        let root = TempDir::new().unwrap();
+        let location = location(&root);
+        let path = location
+            .state
+            .join(bongos_project_repo_model::layout::HOST_LOCK_FILE);
+        std::fs::write(&path, contents).unwrap();
+        let holder = std::fs::File::open(&path).unwrap();
+        // SAFETY: the descriptor is open for the duration of the call.
+        let locked = unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(locked, 0);
+        match StateStore::open_writer_with_hooks(&location, &StateApplyHooks::new()) {
+            Err(OpenError::HeldBy { pid }) => assert_eq!(pid, None, "{contents:?}"),
+            Err(error) => panic!("expected HeldBy, got {error}"),
+            Ok(_) => panic!("the lock is held"),
+        }
+        let error = OpenError::HeldBy { pid: None };
+        assert_eq!(
+            error.to_string(),
+            "this project is open in another bongos process (pid unknown)"
+        );
+    }
 }

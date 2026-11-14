@@ -15,7 +15,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use bongos_project_repo_model::{Author, TaskStateRecord, TodoStateRecord, layout};
+use bongos_project_repo_model::{
+    Author, DefinitionTree, StateLookup, TaskStateRecord, TodoStateRecord, layout,
+};
 use bongos_work_model::{HistoryEntry, TaskId, Timestamp, TodoState};
 use futures::channel::mpsc;
 use parking_lot::Mutex;
@@ -85,6 +87,13 @@ const SCHEMA: &[&str] = &[
 ];
 
 const GENERATION_KEY: &str = "generation";
+/// The `meta` key of the last commit that passed the deterministic checks.
+pub const VERIFIED_COMMIT_KEY: &str = "verified_commit";
+
+/// How long a second process waits for the writer's pid to appear in `host.lock`, which the
+/// writer empties and then fills right after it takes the lock.
+const PID_READ_ATTEMPTS: usize = 20;
+const PID_READ_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Sent after every committed transaction that wrote something.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,11 +109,19 @@ pub enum StateEvent {
 /// Why the writer could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
-    /// Another process holds the writer; open a reader instead.
-    #[error("this project is open in another bongos process (pid {pid})")]
-    HeldBy { pid: u32 },
+    /// Another process holds the writer; open a reader instead. `pid` is `None` when the
+    /// holder's pid could not be read.
+    #[error("this project is open in another bongos process ({})", held_by(.pid))]
+    HeldBy { pid: Option<u32> },
     #[error(transparent)]
     Store(#[from] anyhow::Error),
+}
+
+fn held_by(pid: &Option<u32>) -> String {
+    match pid {
+        Some(pid) => format!("pid {pid}"),
+        None => "pid unknown".to_string(),
+    }
 }
 
 /// Opens a project's state store.
@@ -130,6 +147,7 @@ impl StateStore {
         }
         Ok(StateWriter {
             connection: Mutex::new(connection),
+            definitions: Mutex::new(Arc::new(DefinitionTree::default())),
             hooks,
             subscribers: Mutex::new(Vec::new()),
             _lock: lock,
@@ -180,10 +198,9 @@ fn take_host_lock(path: &Path) -> Result<File, OpenError> {
     if result != 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            let mut text = String::new();
-            file.read_to_string(&mut text).ok();
-            let pid = text.trim().parse().unwrap_or(0);
-            return Err(OpenError::HeldBy { pid });
+            return Err(OpenError::HeldBy {
+                pid: read_holder_pid(&mut file),
+            });
         }
         return Err(anyhow!(error)
             .context(format!("locking {}", path.display()))
@@ -206,6 +223,26 @@ fn take_host_lock(path: &Path) -> Result<File, OpenError> {
     Ok(file)
 }
 
+/// The pid in a held `host.lock`. The holder empties the file and then writes its pid, so an
+/// empty or zero read is retried briefly; `None` if no pid appears.
+pub(crate) fn read_holder_pid(file: &mut File) -> Option<u32> {
+    for attempt in 0..PID_READ_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(PID_READ_PAUSE);
+        }
+        let mut text = String::new();
+        if file.seek(SeekFrom::Start(0)).is_err() || file.read_to_string(&mut text).is_err() {
+            continue;
+        }
+        if let Ok(pid) = text.trim().parse::<u32>()
+            && pid != 0
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
 fn write_pid(file: &mut File) -> std::io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
@@ -221,6 +258,8 @@ fn exec(connection: &Connection, sql: &str) -> Result<()> {
 pub struct StateWriter {
     // Declared before the lock so the database closes before the lock is released.
     connection: Mutex<Connection>,
+    /// The definitions at the verified commit, which the hooks see.
+    definitions: Mutex<Arc<DefinitionTree>>,
     hooks: Arc<[Arc<dyn StateApplyHook>]>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<StateEvent>>>,
     _lock: File,
@@ -250,27 +289,49 @@ impl StateWriter {
     ) -> Result<T> {
         let connection = self.connection.lock();
         exec(&connection, "BEGIN IMMEDIATE").context("starting a state transaction")?;
-        let outcome = run_transaction(&connection, &self.hooks, origin, ops, f);
-        let (value, event) = match outcome {
+        // Rolls back if `f` or a hook panics, so the connection is never left inside a
+        // transaction.
+        let mut guard = RollbackGuard {
+            connection: &connection,
+            open: true,
+        };
+        let definitions = self.definitions.lock().clone();
+        let outcome = run_transaction(&connection, &self.hooks, &definitions, origin, ops, f);
+        let (value, event, new_definitions) = match outcome {
             Ok(done) => {
+                guard.open = false;
                 if let Err(error) = exec(&connection, "COMMIT") {
                     exec(&connection, "ROLLBACK").ok();
                     return Err(error.context("committing a state transaction"));
                 }
                 done
             }
-            Err(error) => {
-                exec(&connection, "ROLLBACK").ok();
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        drop(connection);
+        drop(guard);
+        if let Some(definitions) = new_definitions {
+            *self.definitions.lock() = definitions;
+        }
+        // Sent while the connection is still held, so events reach subscribers in the order
+        // their transactions committed.
         if let Some(event) = event {
             self.subscribers
                 .lock()
                 .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
         }
+        drop(connection);
         Ok(value)
+    }
+
+    /// The definitions the hooks see as the verified commit's.
+    pub fn definitions(&self) -> Arc<DefinitionTree> {
+        self.definitions.lock().clone()
+    }
+
+    /// Sets the definitions the hooks see without a transaction: when a project opens, before
+    /// any write.
+    pub fn set_definitions(&self, definitions: Arc<DefinitionTree>) {
+        *self.definitions.lock() = definitions;
     }
 
     /// A consistent read on the writer's connection. Not callable from inside `transact`.
@@ -290,18 +351,36 @@ impl StateWriter {
     }
 }
 
+/// Rolls back the open transaction when dropped while `open`.
+struct RollbackGuard<'a> {
+    connection: &'a Connection,
+    open: bool,
+}
+
+impl Drop for RollbackGuard<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            exec(self.connection, "ROLLBACK").ok();
+        }
+    }
+}
+
+type TransactionDone<T> = (T, Option<StateEvent>, Option<Arc<DefinitionTree>>);
+
 fn run_transaction<T>(
     connection: &Connection,
     hooks: &[Arc<dyn StateApplyHook>],
+    definitions: &Arc<DefinitionTree>,
     origin: &Author,
     ops: &[StateOp],
     f: impl FnOnce(&mut StateTx) -> Result<T>,
-) -> Result<(T, Option<StateEvent>)> {
+) -> Result<TransactionDone<T>> {
     let mut tx = StateTx::new(connection);
     let value = f(&mut tx)?;
-    run_hooks(&mut tx, hooks, origin, ops)?;
+    run_hooks(&mut tx, hooks, definitions, origin, ops)?;
+    let new_definitions = tx.verified.take().map(|(_, tree)| tree);
     if !tx.dirty {
-        return Ok((value, None));
+        return Ok((value, None, new_definitions));
     }
     let generation = read_generation(connection)? + 1;
     connection.exec_bound::<(&str, String)>(
@@ -313,27 +392,48 @@ fn run_transaction<T>(
         task_ids: tx.task_ids.into_iter().collect(),
         namespaces: tx.namespaces.into_iter().collect(),
     };
-    Ok((value, Some(event)))
+    Ok((value, Some(event), new_definitions))
 }
 
 fn run_hooks(
     tx: &mut StateTx,
     hooks: &[Arc<dyn StateApplyHook>],
+    definitions: &Arc<DefinitionTree>,
     origin: &Author,
     ops: &[StateOp],
 ) -> Result<()> {
-    if tx.before.is_empty() || hooks.is_empty() {
+    let new_tree = tx.verified.as_ref().map(|(_, tree)| tree.clone());
+    if (tx.before.is_empty() && new_tree.is_none()) || hooks.is_empty() {
         return Ok(());
     }
-    let mut touched = Vec::with_capacity(tx.before.len());
-    for (id, before) in tx.before.clone() {
+    // When the verified commit changes, the hooks see the old and the new definitions, and
+    // every task whose definition differs counts as touched.
+    let (old_definitions, current) = match &new_tree {
+        Some(new_tree) => (Some(definitions.clone()), new_tree.clone()),
+        None => (None, definitions.clone()),
+    };
+    let mut ids: BTreeSet<TaskId> = tx.before.keys().cloned().collect();
+    if let Some(old) = &old_definitions {
+        ids.extend(old.differing_ids(&current));
+    }
+    let mut touched = Vec::with_capacity(ids.len());
+    for id in ids {
         let after = tx.task(&id)?;
+        let before = match tx.before.get(&id) {
+            Some(before) => before.clone(),
+            None => after.clone(),
+        };
+        let definition_before = old_definitions
+            .as_deref()
+            .unwrap_or(&current)
+            .task(&id);
+        let definition_after = current.task(&id);
         touched.push(TaskTouch {
             id,
             before,
             after,
-            definition_before: None,
-            definition_after: None,
+            definition_before,
+            definition_after,
         });
     }
     let namespaces: Vec<String> = tx.namespaces.iter().cloned().collect();
@@ -341,6 +441,8 @@ fn run_hooks(
         ops,
         touched: &touched,
         namespaces: &namespaces,
+        old_definitions: old_definitions.as_deref(),
+        definitions: &current,
         origin,
     };
     for hook in hooks {
@@ -428,6 +530,17 @@ impl<'a> StateRead<'a> {
     pub fn generation(&self) -> Result<u64> {
         read_generation(self.connection)
     }
+
+    /// The last commit that passed the deterministic checks; `None` before one is recorded.
+    pub fn verified_commit(&self) -> Result<Option<String>> {
+        read_meta(self.connection, VERIFIED_COMMIT_KEY)
+    }
+}
+
+impl StateLookup for StateRead<'_> {
+    fn task_state(&self, id: &str) -> std::result::Result<Option<TaskStateRecord>, String> {
+        self.task(id).map_err(|error| format!("{error:#}"))
+    }
 }
 
 /// One `kv` namespace in a read.
@@ -457,6 +570,8 @@ pub struct StateTx<'a> {
     dirty: bool,
     /// The hook running now; it may write only `kv`.
     hook: Option<String>,
+    /// The verified commit this transaction records, with its parsed definitions.
+    verified: Option<(String, Arc<DefinitionTree>)>,
 }
 
 impl<'a> StateTx<'a> {
@@ -468,6 +583,7 @@ impl<'a> StateTx<'a> {
             namespaces: BTreeSet::new(),
             dirty: false,
             hook: None,
+            verified: None,
         }
     }
 
@@ -481,6 +597,28 @@ impl<'a> StateTx<'a> {
 
     pub fn generation(&self) -> Result<u64> {
         read_generation(self.connection)
+    }
+
+    pub fn verified_commit(&self) -> Result<Option<String>> {
+        read_meta(self.connection, VERIFIED_COMMIT_KEY)
+    }
+
+    /// Records `commit` as the verified commit, whose parsed definitions are `definitions`. The
+    /// hooks of this transaction see the old and the new definitions, and once it commits the
+    /// writer's definitions are the new ones.
+    pub fn set_verified_commit(
+        &mut self,
+        commit: &str,
+        definitions: Arc<DefinitionTree>,
+    ) -> Result<()> {
+        self.only_kv_in_hook("the verified commit")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )?((VERIFIED_COMMIT_KEY, commit))?;
+        self.verified = Some((commit.to_string(), definitions));
+        self.dirty = true;
+        Ok(())
     }
 
     fn only_kv_in_hook(&self, what: &str) -> Result<()> {
@@ -734,6 +872,10 @@ fn read_task_ids(connection: &Connection) -> Result<Vec<TaskId>> {
         "SELECT id FROM tasks UNION SELECT task_id FROM todos UNION SELECT task_id FROM history
          ORDER BY 1",
     )?()
+}
+
+fn read_meta(connection: &Connection, key: &str) -> Result<Option<String>> {
+    connection.select_row_bound::<&str, String>("SELECT value FROM meta WHERE key = ?")?(key)
 }
 
 fn read_generation(connection: &Connection) -> Result<u64> {

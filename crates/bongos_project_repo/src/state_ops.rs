@@ -3,8 +3,8 @@
 //! when it is applied.
 
 use anyhow::{Context as _, Result, bail};
-use bongos_project_repo_model::TaskStateRecord;
-use bongos_work_model::{HistoryEntry, ProposalRecord, TaskId};
+use bongos_project_repo_model::{TaskStateRecord, TodoStateRecord};
+use bongos_work_model::{HistoryEntry, ProposalRecord, TaskId, TodoState};
 use serde::{Deserialize, Serialize};
 
 use crate::state::StateTx;
@@ -25,12 +25,20 @@ pub enum StateOp {
         to_task: TaskId,
     },
     /// Sets one field of a task's state record, only if it still holds `expected`; `None` is an
-    /// absent field.
+    /// absent field. Only the fields in [`SETTABLE_FIELDS`] can be set: todos and history have
+    /// their own ops.
     Set {
         task: TaskId,
         field: String,
         expected: Option<toml::Value>,
         value: Option<toml::Value>,
+    },
+    /// Sets one todo's state, matched by its id, only if it still holds `expected`. A todo with
+    /// no record, and an `expected` of `None`, read as open and never started.
+    SetTodo {
+        task: TaskId,
+        expected: Option<TodoStateRecord>,
+        value: TodoStateRecord,
     },
     AppendHistory {
         task: TaskId,
@@ -46,6 +54,23 @@ pub enum StateOp {
         record: ProposalRecord,
     },
 }
+
+/// The fields of a task's state record that [`StateOp::Set`] may set.
+pub const SETTABLE_FIELDS: [&str; 13] = [
+    "status",
+    "closed",
+    "linear",
+    "linear_state",
+    "branch",
+    "base",
+    "base_sha",
+    "rebase_ack_sha",
+    "worktree",
+    "ship_overridden",
+    "result",
+    "default_visibility",
+    "proposals",
+];
 
 /// Applies `ops` in order. Returns a note for each op that kept a newer value.
 pub(crate) fn apply(tx: &mut StateTx, ops: &[StateOp]) -> Result<Vec<String>> {
@@ -108,6 +133,9 @@ fn apply_one(tx: &mut StateTx, op: &StateOp, notes: &mut Vec<String>) -> Result<
             expected,
             value,
         } => {
+            if !SETTABLE_FIELDS.contains(&field.as_str()) {
+                bail!("{field} is not a state field that can be set (task {task})");
+            }
             let current = tx.task(task)?.unwrap_or_default();
             let toml::Value::Table(mut table) = toml::Value::try_from(&current)
                 .with_context(|| format!("reading the state of {task}"))?
@@ -130,6 +158,32 @@ fn apply_one(tx: &mut StateTx, op: &StateOp, notes: &mut Vec<String>) -> Result<
                 .try_into()
                 .with_context(|| format!("setting {field} of {task}"))?;
             tx.set_task(task, record)?;
+        }
+        StateOp::SetTodo {
+            task,
+            expected,
+            value,
+        } => {
+            let Some(todo_id) = value.id.as_deref() else {
+                bail!("a todo state set alone needs a todo id (task {task})");
+            };
+            let current = tx.task(task)?.unwrap_or_default();
+            // A todo with no record reads as open and never started.
+            let open = TodoStateRecord {
+                id: Some(todo_id.to_string()),
+                state: TodoState::Open,
+                started: None,
+            };
+            let existing = current
+                .todos
+                .iter()
+                .find(|todo| todo.id.as_deref() == Some(todo_id))
+                .unwrap_or(&open);
+            if existing != expected.as_ref().unwrap_or(&open) {
+                notes.push(format!("kept newer state of todo {todo_id} of {task}"));
+                return Ok(());
+            }
+            tx.set_todo(task, value.clone())?;
         }
         StateOp::AppendHistory { task, entry } => {
             tx.append_history(task, entry.clone())?;

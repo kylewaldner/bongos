@@ -289,3 +289,98 @@ fn hooks_run_in_registration_order() {
         .unwrap();
     assert_eq!(*order.lock(), ["first", "second", "third"]);
 }
+
+/// Records the goals and definitions a hook saw for each touched task.
+struct DefinitionHook {
+    seen: Mutex<Vec<(String, Option<String>, Option<String>, bool)>>,
+}
+
+impl StateApplyHook for DefinitionHook {
+    fn name(&self) -> &str {
+        "definitions"
+    }
+
+    fn apply(&self, _tx: &mut StateTx, change: &StateApplyChange) -> Result<()> {
+        let mut seen = self.seen.lock();
+        for touch in change.touched {
+            seen.push((
+                touch.id.clone(),
+                touch.definition_before.map(|definition| definition.goal.clone()),
+                touch.definition_after.map(|definition| definition.goal.clone()),
+                change.old_definitions.is_some(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn definitions_with(goals: &[(&str, &str)]) -> Arc<bongos_project_repo_model::DefinitionTree> {
+    use bongos_project_repo_model::{DefinitionTree, RelPath};
+    let mut files = vec![
+        (
+            RelPath::new("project.toml").unwrap(),
+            b"schema = 1\ntitle = \"P\"\n".to_vec(),
+        ),
+        (
+            RelPath::new("task.toml").unwrap(),
+            crate::test_support::definition_toml("g1", "Top", "other", &[]).into_bytes(),
+        ),
+    ];
+    for (id, goal) in goals {
+        files.push((
+            RelPath::new(format!("tasks/{id}/task.toml")).unwrap(),
+            crate::test_support::definition_toml(id, goal, "other", &[]).into_bytes(),
+        ));
+    }
+    Arc::new(DefinitionTree::parse_files(files).unwrap())
+}
+
+#[test]
+fn hooks_see_the_definitions_and_a_verified_commit_change() {
+    let root = TempDir::new().unwrap();
+    let hook = Arc::new(DefinitionHook {
+        seen: Mutex::new(Vec::new()),
+    });
+    let hooks = StateApplyHooks::new();
+    hooks.register(hook.clone());
+    let writer = writer(&location(&root), &hooks);
+    writer.set_definitions(definitions_with(&[("a", "Alpha"), ("b", "Beta")]));
+
+    // A state write sees the current definitions, unchanged.
+    writer
+        .transact(|tx| tx.set_task("a", TaskStateRecord::default()))
+        .unwrap();
+    assert_eq!(
+        std::mem::take(&mut *hook.seen.lock()),
+        [(
+            "a".to_string(),
+            Some("Alpha".to_string()),
+            Some("Alpha".to_string()),
+            false
+        )]
+    );
+
+    // A new verified commit: every task whose definition differs is touched, with no state
+    // write needed.
+    let next = definitions_with(&[("a", "Alpha"), ("b", "Beta renamed"), ("c", "Gamma")]);
+    writer
+        .transact(|tx| tx.set_verified_commit("abc123", next.clone()))
+        .unwrap();
+    assert_eq!(
+        std::mem::take(&mut *hook.seen.lock()),
+        [
+            (
+                "b".to_string(),
+                Some("Beta".to_string()),
+                Some("Beta renamed".to_string()),
+                true
+            ),
+            ("c".to_string(), None, Some("Gamma".to_string()), true),
+        ]
+    );
+    assert_eq!(writer.definitions(), next);
+    assert_eq!(
+        writer.read(|read| read.verified_commit()).unwrap(),
+        Some("abc123".to_string())
+    );
+}
