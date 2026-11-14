@@ -34,6 +34,10 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w d b", "todo::Start"),
     ("ctrl-c w p n", "project::New"),
     ("ctrl-c w P", "project::Focus"),
+    ("ctrl-c w G e", "project::Edit"),
+    ("ctrl-c w G w", "project::OpenWorkingCopy"),
+    ("ctrl-c w G k", "project::Abandon"),
+    ("ctrl-c w G o", "project::OpenRepository"),
     ("ctrl-c w h", "artifact::Hide"),
     ("ctrl-c w u", "artifact::Share"),
     ("ctrl-c w H", "artifact::HideAll"),
@@ -128,7 +132,7 @@ async fn emacs_binds_every_work_key(cx: &mut TestAppContext) {
             assert!(!pending, "{emacs}: {input}");
         }
         // Each prefix waits for the next key.
-        for prefix in ["ctrl-c", "ctrl-c w", "ctrl-c w d", "ctrl-c w p"] {
+        for prefix in ["ctrl-c", "ctrl-c w", "ctrl-c w d", "ctrl-c w p", "ctrl-c w G"] {
             assert!(
                 resolve(&keymap, prefix, &["Workspace", "Pane"]).1,
                 "{emacs}: {prefix}"
