@@ -1,7 +1,9 @@
 //! The query replace keys: in the prompt, `ctrl-q` (quoted insert) and `alt-c` (toggle case)
 //! resolve to their `query_replace::` actions on both platforms and win over the default quit and
-//! the Emacs capitalize-word binding; in an editor running a batch, `ctrl-g` stops it. Outside
-//! those contexts the keys keep their meaning.
+//! the Emacs capitalize-word binding; in an editor running a batch, `ctrl-g` stops it; in the
+//! decision view the answer keys resolve to the `query_replace::` actions, `ctrl-g` beats the
+//! strip's cancel and `ctrl-h` beats the Emacs help prefix. Outside those contexts the keys keep
+//! their meaning.
 
 use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
 use settings::{KeybindSource, KeymapFile};
@@ -35,6 +37,9 @@ const STRIP_PROMPT: [&str; 4] = [
     "QueryReplacePrompt",
     "Editor mode=full",
 ];
+
+const VIEW: [&str; 3] = ["Workspace", "Minibuffer", "QueryReplace"];
+const CENTERED_VIEW: [&str; 2] = ["Workspace", "QueryReplace"];
 
 /// The keymaps in load order, with the sources the app loads them with (`load_default_keymap`).
 fn load_all(platform: &Platform, emacs: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
@@ -158,5 +163,69 @@ async fn ctrl_g_in_a_running_batch_is_abort(cx: &mut TestAppContext) {
                 platform.overrides
             );
         }
+    }
+}
+
+#[gpui::test]
+async fn decision_view_keys_resolve_to_the_query_replace_actions(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        for emacs in [true, false] {
+            let keymap = Keymap::new(load_all(&platform, emacs, cx));
+            for contexts in [&VIEW[..], &CENTERED_VIEW[..]] {
+                for (input, action) in [
+                    ("y", "query_replace::Yes"),
+                    ("space", "query_replace::Yes"),
+                    ("n", "query_replace::No"),
+                    ("backspace", "query_replace::No"),
+                    (".", "query_replace::ThisAndExit"),
+                    ("q", "query_replace::Exit"),
+                    ("enter", "query_replace::Exit"),
+                    ("escape", "query_replace::Exit"),
+                    ("ctrl-g", "query_replace::Abort"),
+                    ("?", "query_replace::Help"),
+                    ("ctrl-h", "query_replace::Help"),
+                ] {
+                    let (names, pending) = resolve(&keymap, input, contexts);
+                    assert_eq!(
+                        names.first(),
+                        Some(&action),
+                        "{}: {input} in {contexts:?} (emacs {emacs})",
+                        platform.overrides
+                    );
+                    assert!(!pending, "{}: {input} in {contexts:?}", platform.overrides);
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+async fn ctrl_g_in_the_decision_view_beats_the_strip_cancel(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        let keymap = Keymap::new(load_all(&platform, true, cx));
+        let names = resolve(&keymap, "ctrl-g", &VIEW).0;
+        assert_eq!(names.first(), Some(&"query_replace::Abort"), "{names:?}");
+        assert!(names.contains(&"minibuffer::Cancel"), "{names:?}");
+        // The strip with another prompt still cancels.
+        assert_eq!(
+            first(&keymap, "ctrl-g", &["Workspace", "Minibuffer"]),
+            Some("minibuffer::Cancel")
+        );
+    }
+}
+
+#[gpui::test]
+async fn ctrl_h_in_the_decision_view_beats_the_pending_help_prefix(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        let keymap = Keymap::new(load_all(&platform, true, cx));
+        // In the workspace the key waits for the `e` of `ctrl-h e`.
+        let (_, pending) = resolve(&keymap, "ctrl-h", &["Workspace", "Minibuffer"]);
+        assert!(pending, "{}", platform.emacs);
+        let (names, pending) = resolve(&keymap, "ctrl-h", &VIEW);
+        assert_eq!(names.first(), Some(&"query_replace::Help"), "{names:?}");
+        assert!(!pending, "{}", platform.emacs);
     }
 }

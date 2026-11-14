@@ -135,6 +135,25 @@
       "ctrl-q": "query_replace::QuotedInsert",
     },
   },
+  // The query replace decision view (the `QueryReplace` context of the view the session opens).
+  // `ctrl-g` is deeper than the strip's `Minibuffer` cancel, and `ctrl-h` is deeper than the
+  // Emacs help prefix of the workspace.
+  {
+    "context": "QueryReplace",
+    "bindings": {
+      "y": "query_replace::Yes",
+      "space": "query_replace::Yes",
+      "n": "query_replace::No",
+      "backspace": "query_replace::No",
+      ".": "query_replace::ThisAndExit",
+      "q": "query_replace::Exit",
+      "enter": "query_replace::Exit",
+      "escape": "query_replace::Exit",
+      "ctrl-g": "query_replace::Abort",
+      "?": "query_replace::Help",
+      "ctrl-h": "query_replace::Help",
+    },
+  },
   // A running replace-string or replace-regexp (the `QueryReplaceBatch` context its editor has
   // while it runs). C-g stops it; the replacements already made stay.
   {

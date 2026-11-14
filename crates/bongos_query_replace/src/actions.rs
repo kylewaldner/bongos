@@ -1,5 +1,6 @@
 //! The `query_replace` actions: the four commands that start a replace, the ones that run in the
-//! prompts of a session, and the one that stops a running batch.
+//! prompts of a session, the keys of the decision view, and the one that stops a running batch or
+//! ends the decision view (`Abort`, in two key contexts).
 
 use gpui::actions;
 
@@ -23,5 +24,15 @@ actions!(
         QuotedInsert,
         /// Stops the replace that is running; the replacements already made stay.
         Abort,
+        /// Replaces this match and goes on to the next.
+        Yes,
+        /// Skips this match and goes on to the next.
+        No,
+        /// Replaces this match and ends the replace.
+        ThisAndExit,
+        /// Ends the replace; the cursor stays at the end of the current match.
+        Exit,
+        /// Shows the list of keys of the replace until the next key.
+        Help,
     ]
 );
