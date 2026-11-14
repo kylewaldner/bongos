@@ -21,7 +21,9 @@
 //!
 //! Projects of registered [`crate::ProjectSource`]s are merged into every tree read, beside the
 //! old-format projects and one-offs read from the root. When project repositories are enabled,
-//! every old-format project task refuses writes until it is converted.
+//! every old-format project and one-off refuses writes until it is converted, and the disk writer
+//! writes nothing at all. An old-format project (or the old one-offs) that the location record
+//! names as converted is left out of the tree; [`WorkStore::conversion_notice`] names it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -31,13 +33,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bongos_project_repo::ProjectRepositorySettings;
+use bongos_project_repo::{ProjectRepositorySettings, RepositoryLocations};
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{self, Change, Context, Outcome};
 use bongos_work_model::files::content_hash;
 use bongos_work_model::layout::{self, OP_FILE, TASKS_DIR, is_temp_file};
 use bongos_work_model::rules::Refusal;
-use bongos_work_model::store::{self as model_store, WorkTree};
+use bongos_work_model::store::{self as model_store, NEEDS_CONVERSION, WorkTree};
 use db::kvp::KeyValueStore;
 use fs::{Fs, PathEvent, PathEventKind, Watcher};
 use futures::channel::{mpsc, oneshot};
@@ -60,6 +62,17 @@ use crate::{WorkDirs, WorkSettings};
 /// The key value store key (in [`crate::KVP_NAMESPACE`]) set once the notice about worktrees
 /// left under the old `.bongos-worktrees` directories is dismissed.
 pub const OLD_WORKTREE_NOTICE_KEY: &str = "old_worktree_notice_dismissed";
+
+/// The key value store key (in [`crate::KVP_NAMESPACE`]) set once the notice explaining the
+/// conversion of old-format projects was shown.
+pub const CONVERSION_NOTICE_KEY: &str = "conversion_notice_shown";
+
+/// What the conversion notice says the first time it shows.
+pub const CONVERSION_EXPLANATION: &str = "Projects in the old plain-file layout cannot be changed \
+     while project repositories are on. project: convert (C-c w g C) copies one into a new \
+     project repository after showing what it will make and asking; project: convert all copies \
+     every one. The old folder is only read, never changed or removed, and nothing is ever \
+     converted without you asking.";
 
 pub const WATCH_LATENCY: Duration = Duration::from_millis(200);
 
@@ -172,14 +185,75 @@ pub struct WorkStore {
     /// Whether project repositories are enabled, which locks old-format projects; read by the
     /// session's tree reads.
     needs_conversion: Arc<AtomicBool>,
+    /// The old-format projects the last read left out because they were converted.
+    converted: Vec<ConvertedOld>,
+    /// Whether the conversion explanation was shown in an earlier run (or this one).
+    conversion_notice_seen: bool,
+    /// Whether the conversion explanation shows now: from its first showing until dismissed or
+    /// the end of the run.
+    explaining_conversion: bool,
     _settings: Subscription,
+}
+
+/// An old-format project left out of the tree because it was converted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConvertedOld {
+    /// The old folder: `projects/<slug>` or `oneoffs`.
+    pub old_dir: PathBuf,
+    /// Its name: the project's title, or `one-offs`.
+    pub name: String,
+    /// The project folder it was converted into.
+    pub folder: PathBuf,
+}
+
+/// What the Work view says about old-format projects while project repositories are enabled.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConversionNotice {
+    /// [`CONVERSION_EXPLANATION`] the first time the notice shows.
+    pub explanation: Option<&'static str>,
+    /// The old-format projects that need converting, by name.
+    pub needs_conversion: Vec<String>,
+    /// The converted ones, hidden from the view.
+    pub converted: Vec<ConvertedOld>,
+}
+
+impl ConversionNotice {
+    /// The notice as lines of text.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(explanation) = self.explanation {
+            lines.push(explanation.to_string());
+        }
+        if !self.needs_conversion.is_empty() {
+            lines.push(format!(
+                "Old format, needs conversion: {}",
+                self.needs_conversion.join(", ")
+            ));
+        }
+        if !self.converted.is_empty() {
+            let names: Vec<String> = self
+                .converted
+                .iter()
+                .map(|converted| format!("{} (now {})", converted.name, converted.folder.display()))
+                .collect();
+            lines.push(format!(
+                "Converted, so hidden here: {}; the old folders are kept as they were",
+                names.join(", ")
+            ));
+        }
+        lines
+    }
 }
 
 /// Whether the old worktree root notice was dismissed in an earlier run.
 fn read_notice_dismissed(cx: &gpui::App) -> bool {
+    read_kvp_flag(OLD_WORKTREE_NOTICE_KEY, cx)
+}
+
+fn read_kvp_flag(key: &str, cx: &gpui::App) -> bool {
     KeyValueStore::global(cx)
         .scoped(crate::KVP_NAMESPACE)
-        .read(OLD_WORKTREE_NOTICE_KEY)
+        .read(key)
         .log_err()
         .flatten()
         .is_some()
@@ -247,6 +321,9 @@ impl WorkStore {
             changed: HashMap::new(),
             status_runs: 0,
             needs_conversion: Arc::new(AtomicBool::new(project_repositories_enabled(cx))),
+            converted: Vec::new(),
+            conversion_notice_seen: read_kvp_flag(CONVERSION_NOTICE_KEY, cx),
+            explaining_conversion: false,
             _settings: settings,
         };
         this.sync_enabled(cx);
@@ -311,6 +388,75 @@ impl WorkStore {
                 .await
         });
         cx.notify();
+    }
+
+    /// The record of where this machine's project repositories are.
+    pub fn locations_path(&self) -> PathBuf {
+        self.dirs
+            .locations
+            .clone()
+            .unwrap_or_else(RepositoryLocations::default_path)
+    }
+
+    /// What the Work view says about old-format projects: `None` while project repositories are
+    /// off or there is no old-format project. Never converts anything.
+    pub fn conversion_notice(&self) -> Option<ConversionNotice> {
+        if !self.needs_conversion.load(Ordering::SeqCst) {
+            return None;
+        }
+        let tree = self.snapshot.as_ref()?;
+        let mut needs_conversion: Vec<String> = tree
+            .projects
+            .iter()
+            .filter(|project| project.task.needs_conversion)
+            .map(|project| {
+                project
+                    .file
+                    .as_ref()
+                    .map(|file| file.title.clone())
+                    .unwrap_or_else(|| project.slug.clone())
+            })
+            .collect();
+        if tree
+            .activities
+            .iter()
+            .flat_map(|activity| &activity.oneoffs)
+            .any(|oneoff| oneoff.needs_conversion)
+        {
+            needs_conversion.push("one-offs".to_string());
+        }
+        if needs_conversion.is_empty() && self.converted.is_empty() {
+            return None;
+        }
+        Some(ConversionNotice {
+            explanation: self.explaining_conversion.then_some(CONVERSION_EXPLANATION),
+            needs_conversion,
+            converted: self.converted.clone(),
+        })
+    }
+
+    /// Hides the conversion explanation; it was already remembered as shown.
+    pub fn dismiss_conversion_notice(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.explaining_conversion {
+            self.explaining_conversion = false;
+            cx.notify();
+        }
+    }
+
+    /// Shows the conversion explanation the first time there is an old-format project to
+    /// explain, and remembers that it was shown, so later runs do not show it again.
+    fn note_conversion_notice(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.conversion_notice_seen || self.conversion_notice().is_none() {
+            return;
+        }
+        self.conversion_notice_seen = true;
+        self.explaining_conversion = true;
+        let db = KeyValueStore::global(cx);
+        db::write_and_log(cx, move || async move {
+            db.scoped(crate::KVP_NAMESPACE)
+                .write(CONVERSION_NOTICE_KEY.to_string(), "true".to_string())
+                .await
+        });
     }
 
     /// Recomputes the overview when the repositories or the default root differ from what it was
@@ -481,6 +627,7 @@ impl WorkStore {
             sources: ProjectSources::global(cx),
             writers: DefinitionWriters::global(cx),
             needs_conversion: self.needs_conversion.clone(),
+            locations: self.dirs.locations.clone(),
         };
         let run = cx.spawn({
             let alive = alive.clone();
@@ -511,6 +658,12 @@ impl WorkStore {
                 }
             }
         }
+        if let Some(converted) = done.converted
+            && converted != self.converted
+        {
+            self.converted = converted;
+            cx.notify();
+        }
         if let Some(tree) = done.tree
             && !self
                 .snapshot
@@ -522,6 +675,7 @@ impl WorkStore {
             cx.notify();
             self.refresh_rebase(cx);
             self.refresh_overview(cx);
+            self.note_conversion_notice(cx);
         }
         // After the snapshot, so a caller that awaits the write sees its change.
         if let Some(reply) = done.reply {
@@ -536,11 +690,13 @@ fn project_repositories_enabled(cx: &gpui::App) -> bool {
     ProjectRepositorySettings::try_get(cx).is_some_and(|settings| settings.enabled)
 }
 
-/// What the session reads besides the disk: the registered seams and the conversion lock.
+/// What the session reads besides the disk: the registered seams, the conversion lock and the
+/// location record that says which old-format projects were converted.
 struct Seams {
     sources: ProjectSources,
     writers: DefinitionWriters,
     needs_conversion: Arc<AtomicBool>,
+    locations: Option<PathBuf>,
 }
 
 /// The session: watch the root, load, then run one job at a time until the store or the session
@@ -576,6 +732,7 @@ async fn run(
         alive,
         seams,
         tree: None,
+        converted: Vec::new(),
         echoes: Echoes::default(),
         watched: BTreeSet::new(),
     };
@@ -627,6 +784,8 @@ struct Done {
     kind: DoneKind,
     /// The tree after the job, when it read one.
     tree: Option<Arc<WorkTree>>,
+    /// The converted old-format projects the tree leaves out, when it read one.
+    converted: Option<Vec<ConvertedOld>>,
     reply: Option<Reply>,
 }
 
@@ -664,6 +823,7 @@ struct Disk {
     alive: Arc<AtomicBool>,
     seams: Seams,
     tree: Option<Arc<WorkTree>>,
+    converted: Vec<ConvertedOld>,
     echoes: Echoes,
     /// The directories added to the watcher, apart from the root.
     watched: BTreeSet<PathBuf>,
@@ -679,6 +839,7 @@ impl Disk {
                 Done {
                     kind: DoneKind::Loaded,
                     tree: self.tree.clone(),
+                    converted: Some(self.converted.clone()),
                     reply: None,
                 }
             }
@@ -691,12 +852,14 @@ impl Disk {
                     Done {
                         kind: DoneKind::Reloaded,
                         tree: self.tree.clone(),
+                        converted: Some(self.converted.clone()),
                         reply: None,
                     }
                 } else {
                     Done {
                         kind: DoneKind::Ignored,
                         tree: None,
+                        converted: None,
                         reply: None,
                     }
                 }
@@ -706,6 +869,7 @@ impl Disk {
                 Done {
                     kind: DoneKind::Refreshed,
                     tree: self.tree.clone(),
+                    converted: Some(self.converted.clone()),
                     reply: None,
                 }
             }
@@ -719,6 +883,7 @@ impl Disk {
                 Done {
                     kind: DoneKind::Wrote { retries },
                     tree: self.tree.clone(),
+                    converted: Some(self.converted.clone()),
                     reply: Some(Reply {
                         sender: Some(reply),
                         result: Some(result),
@@ -740,18 +905,31 @@ impl Disk {
         }
     }
 
-    /// Reads the old-format tree from the root, locks its projects when project repositories
-    /// are enabled, and adds the projects of the sources.
+    /// Reads the old-format tree from the root, and when project repositories are enabled
+    /// leaves out its converted projects and locks the rest; then adds the projects of the
+    /// sources.
     fn read_tree(&mut self) {
         let mut tree = match &self.tree {
             Some(previous) => model_store::reload(&self.root, previous),
             None => model_store::load(&self.root),
         };
+        self.converted.clear();
         if self.seams.needs_conversion.load(Ordering::SeqCst) {
+            let locations = self
+                .seams
+                .locations
+                .as_ref()
+                .and_then(|path| RepositoryLocations::load(path).log_err());
+            self.converted = hide_converted(&mut tree, locations.as_ref());
             for project in &mut tree.projects {
                 project
                     .task
                     .walk_mut(&mut |task| task.needs_conversion = task.definition.is_none());
+            }
+            for activity in &mut tree.activities {
+                for oneoff in &mut activity.oneoffs {
+                    oneoff.walk_mut(&mut |task| task.needs_conversion = task.definition.is_none());
+                }
             }
         }
         tree.projects.extend(self.seams.sources.projects());
@@ -836,6 +1014,14 @@ impl Disk {
                     attempt,
                 );
             }
+            // Whatever a command checked, nothing reaches the old-format files while project
+            // repositories are enabled: they are only ever read, by `project: convert`.
+            if self.seams.needs_conversion.load(Ordering::SeqCst) {
+                return (
+                    Err(WriteError::Refused(old_format_refusal(&change))),
+                    attempt,
+                );
+            }
             match unchanged_since_read(&tree, &change) {
                 Ok(true) => {
                     if !self.alive.load(Ordering::SeqCst) {
@@ -883,6 +1069,53 @@ impl Disk {
         self.reload();
         result
     }
+}
+
+/// The refusal of a change to the old-format files while project repositories are enabled.
+pub(crate) fn old_format_refusal(change: &Change) -> String {
+    format!("{}: {NEEDS_CONVERSION}", change.dir.display())
+}
+
+/// Leaves out of `tree` every old-format project, and the old one-offs, that `locations` names
+/// as converted. Returns what was left out.
+pub(crate) fn hide_converted(
+    tree: &mut WorkTree,
+    locations: Option<&RepositoryLocations>,
+) -> Vec<ConvertedOld> {
+    let Some(locations) = locations else {
+        return Vec::new();
+    };
+    let mut converted = Vec::new();
+    tree.projects.retain(|project| {
+        if project.task.definition.is_some() {
+            return true;
+        }
+        let Some(location) = locations.converted_from(&project.task.dir) else {
+            return true;
+        };
+        converted.push(ConvertedOld {
+            old_dir: project.task.dir.clone(),
+            name: project
+                .file
+                .as_ref()
+                .map(|file| file.title.clone())
+                .unwrap_or_else(|| project.slug.clone()),
+            folder: location.folder.clone(),
+        });
+        false
+    });
+    let oneoffs = layout::oneoffs_dir(&tree.root);
+    if !tree.activities.is_empty()
+        && let Some(location) = locations.converted_from(&oneoffs)
+    {
+        converted.push(ConvertedOld {
+            old_dir: oneoffs,
+            name: "one-offs".to_string(),
+            folder: location.folder.clone(),
+        });
+        tree.activities.clear();
+    }
+    converted
 }
 
 /// Whether `change` touches a new-format task of `tree` (one with a definition): writes its

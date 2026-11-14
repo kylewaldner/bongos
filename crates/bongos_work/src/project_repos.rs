@@ -237,6 +237,18 @@ fn seam_name(loaded: &LoadedProject) -> String {
     format!("project-repository:{}", loaded.repo().location().id)
 }
 
+/// Serves the definitions `loaded` has already loaded in the Work view at once, so a write queued
+/// next sees its project; [`register_project_repo`] later replaces the source with its own.
+pub(crate) fn serve_now(loaded: &Arc<LoadedProject>, cx: &mut App) {
+    ProjectSources::register(
+        Arc::new(RepoSource {
+            name: seam_name(loaded),
+            loaded: loaded.clone(),
+        }),
+        cx,
+    );
+}
+
 struct RepoSource {
     name: String,
     loaded: Arc<LoadedProject>,

@@ -1,13 +1,16 @@
-//! The handlers of the commands that change the shape of the tree: `task: new one off`, `split`,
+//! The handlers of the commands that change the shape of the tree: `task: new one off` (into the
+//! one-offs project while project repositories are on, see [`crate::oneoffs`]), `split`,
 //! `move`, `move to project` and `make one off`. The last four rename directories, so each runs
 //! the model command once on the current snapshot to learn whether it is refused and what it
 //! would do, shows that, and writes only after a confirmation (the default answer cancels).
 
+use bongos_project_repo::ProjectRepositorySettings;
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{self as model, Context as WorkContext, NewTask};
 use bongos_work_model::rules::{self, Place};
 use bongos_work_model::store::{Task, WorkTree};
 use gpui::{Context, Window};
+use settings::Settings as _;
 use workspace::Workspace;
 
 use crate::DEFAULT_ACTIVITY;
@@ -45,6 +48,10 @@ fn new_one_off(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
                         todos: new_task_todos(cx),
                         ..NewTask::default()
                     };
+                    if ProjectRepositorySettings::get_global(cx).enabled {
+                        crate::oneoffs::new_oneoff(activity, new, workspace, window, cx);
+                        return;
+                    }
                     submit(workspace, window, cx, move |tree, ctx| {
                         model::new_oneoff(tree, ctx, &activity, new.clone())
                     })
