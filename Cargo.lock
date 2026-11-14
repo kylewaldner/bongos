@@ -2315,11 +2315,13 @@ dependencies = [
  "bongos_emacs_model",
  "bongos_minibuffer",
  "collections",
+ "db",
  "editor",
  "futures 0.3.32",
  "git",
  "gpui",
  "language",
+ "log",
  "lsp",
  "multi_buffer",
  "project",
@@ -2330,6 +2332,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "tree-sitter-rust",
+ "util",
  "workspace",
 ]
 

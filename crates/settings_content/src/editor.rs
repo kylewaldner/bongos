@@ -798,6 +798,12 @@ pub struct EmacsSettingsContent {
     ///
     /// Default: false
     pub delete_selection: Option<bool>,
+    /// Whether the kill ring is saved to the app database and restored at launch. Text marked
+    /// secret and entries larger than 1 MiB are never saved. Turning it off deletes the saved
+    /// ring; the ring of the running session stays.
+    ///
+    /// Default: true
+    pub save_kill_ring: Option<bool>,
 }
 
 /// Which cursor shape the Emacs mode asks for.
