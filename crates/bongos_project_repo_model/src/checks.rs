@@ -5,6 +5,7 @@
 
 mod amendment;
 mod amendment_split;
+mod approval;
 mod declared;
 mod live;
 mod no_cycle;
@@ -16,6 +17,11 @@ mod size_and_kind;
 mod started;
 
 pub use amendment::{AmendmentInput, OUT_OF_BOUNDS, amendment_bounds, bound_amendment, split_goal};
+pub use approval::{
+    APPROVAL_TABLE, ApprovalBasis, ApprovalOpinion, ApprovalPolicy, ApprovalVerdict, AutomaticRule,
+    Judgment, PersonApproval, PersonRule, approval_policy_problems, judge, own_subtree,
+    rollback_opinion,
+};
 pub use declared::{
     APPROVAL_CHECK, CANNOT_DISABLE, NO_CYCLE_CHECK, NO_STATE_CHECK, REFERENCES_CHECK,
     SECRETS_CHECK, SIZE_AND_KIND_CHECK, STARTED_UNCHANGED_CHECK, landing_declaration_problems,
@@ -35,6 +41,8 @@ pub use started::{
 
 #[cfg(test)]
 mod amendment_tests;
+#[cfg(test)]
+mod approval_tests;
 #[cfg(test)]
 mod declared_tests;
 #[cfg(test)]

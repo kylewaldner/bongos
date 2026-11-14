@@ -3,7 +3,9 @@
 //! 1. Commit what is uncommitted in the working copy. 2. Drop earlier amend commits and rebase
 //! on the verified commit; a conflict stops here. 3. Run the amending checks (`amending.rs`),
 //! then the built-in checks and the before-queue checks on the final tree (`check_run.rs`); a
-//! failure refuses and a no verdict leaves the change waiting. 5. Enter the project's FIFO
+//! failure refuses and a no verdict leaves the change waiting. 4. Wait, outside the queue and
+//! its lock, until check 9 approves the change (`approval.rs`); it is judged again in the queue
+//! on the tree that lands. 5. Enter the project's FIFO
 //! landing queue; its head holds `flock` on `state/landing.lock`. 6. Re-verify master; when an
 //! earlier landing moved it, rebase (a change with amend commits goes back to step 2 first). A
 //! before-queue or amending check whose stamp differs on the tree now sends the change back to
@@ -36,6 +38,7 @@ use futures::future::Either;
 use serde::{Deserialize, Serialize};
 
 use crate::amending::Amended;
+use crate::approval::{NEEDS_A_WINDOW, PersonGrant, approved_line};
 use crate::builtin_checks::{schema_check, tree_facts};
 use crate::changes::{ChangeRow, ChangeState};
 use crate::check_run::{CheckResult, verdict};
@@ -45,6 +48,7 @@ use crate::landing_queue::{Holder, LandingLock, LockRefused, QueueSlot};
 use crate::loader::load_definition_tree;
 use crate::master::MasterStatus;
 use crate::state::StateWriter;
+use bongos_work_model::commands::Context as WorkContext;
 
 /// The ref master is.
 pub const MAIN_REF: &str = "refs/heads/main";
@@ -228,6 +232,9 @@ pub(crate) struct LandingRecord {
     /// Ops of the staged state that kept a newer value.
     #[serde(default)]
     pub(crate) notes: Vec<String>,
+    /// Who or what approved it ("approved: ...").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) approval: Option<String>,
     /// The store's generation when it landed, which orders the history.
     pub(crate) generation: u64,
 }
@@ -374,7 +381,49 @@ impl ProjectRepo {
         request: LandRequest,
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
-        let result = self.land_steps(change_id, &request, now).await;
+        self.land_granted(change_id, request, None, now).await
+    }
+
+    /// `project: land` by the person whose context `ctx` is: refused unless it still holds the
+    /// attestation of a person at a window. On the person's own change it records a `PersonLand`
+    /// approval of what the working copy holds once committed; then it lands like [`Self::land`].
+    pub fn land_by_person(
+        &self,
+        change_id: &str,
+        request: LandRequest,
+        ctx: WorkContext,
+        cx: &gpui::App,
+    ) -> gpui::Task<Result<LandingResult>> {
+        self.use_registered_checks(cx);
+        let repo = self.clone();
+        let change_id = change_id.to_string();
+        gpui::AppContext::background_spawn(cx, async move {
+            repo.land_as_person(&change_id, request, ctx, Utc::now())
+                .await
+        })
+    }
+
+    /// [`Self::land_by_person`] without an app, at `now`.
+    pub async fn land_as_person(
+        &self,
+        change_id: &str,
+        request: LandRequest,
+        mut ctx: WorkContext,
+        now: DateTime<Utc>,
+    ) -> Result<LandingResult> {
+        let grant = PersonGrant::from_context(&mut ctx).ok_or_else(|| anyhow!(NEEDS_A_WINDOW))?;
+        self.land_granted(change_id, request, Some(grant), now)
+            .await
+    }
+
+    pub(crate) async fn land_granted(
+        &self,
+        change_id: &str,
+        request: LandRequest,
+        grant: Option<PersonGrant>,
+        now: DateTime<Utc>,
+    ) -> Result<LandingResult> {
+        let result = self.land_steps(change_id, &request, grant, now).await;
         if let Ok(result) = &result
             && let Some(event) = event_for(result)
         {
@@ -422,10 +471,19 @@ impl ProjectRepo {
         &self,
         change_id: &str,
         request: &LandRequest,
+        mut grant: Option<PersonGrant>,
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
         let writer = self.writer_or_error()?;
         let Some(_landing) = self.engine.start_landing(change_id) else {
+            // A person's `project: land` of a change already landing (waiting for approval)
+            // approves what it holds committed; the running landing goes on.
+            if let Some(grant) = grant
+                && request.mode == LandMode::Land
+                && let Some(row) = self.change(change_id)?
+            {
+                self.record_land_approval(&writer, &row, grant, now).await?;
+            }
             return Ok(LandingResult::NoVerdict {
                 reason: ALREADY_LANDING.to_string(),
             });
@@ -483,8 +541,13 @@ impl ProjectRepo {
             subject
         };
         self.git.commit_if_dirty(&path, &subject, &identity).await?;
+        if request.mode == LandMode::Land
+            && let Some(grant) = grant.take()
+        {
+            self.record_land_approval(&writer, &row, grant, now).await?;
+        }
 
-        loop {
+        'steps: loop {
             // Edits typed while the change waited (for a split master, or to go round again
             // after an earlier landing) are never swept into an amend commit or a rebase.
             if !self.git.is_clean(&path).await? {
@@ -519,11 +582,16 @@ impl ProjectRepo {
             let started_seen = run.started_touched();
             let meta = landing_meta(&request.meta, &run.facts.summary);
             run.meta = meta.clone();
+            let checked_tip = self.git.rev_parse(&path, "HEAD").await?;
             let mut checks = self.run_builtins(&writer, &run)?;
             if request.mode == LandMode::CheckOnly {
                 for phase in [CheckPhase::BeforeQueue, CheckPhase::InQueue] {
                     checks.extend(self.run_registered(&writer, &mut run, phase).await?.0);
                 }
+                let (_, approval) = self
+                    .judge_approval(&writer, &row, &mut run, &checked_tip)
+                    .await?;
+                checks.push(approval);
                 return Ok(LandingResult::Checked {
                     tree: run.tree().to_string(),
                     checks,
@@ -540,6 +608,42 @@ impl ProjectRepo {
                 return Ok(ended);
             }
             seen.extend(amend_stamps);
+
+            // Step 4: approval, waited for here, outside the queue and its lock.
+            let mut told = false;
+            let approval_result = loop {
+                let wake = self.engine.signal.listen();
+                match self.change(change_id)?.map(|row| row.state) {
+                    Some(ChangeState::Requested) => {}
+                    Some(ChangeState::Abandoned) | None => return Ok(LandingResult::Abandoned),
+                    Some(_) => {
+                        if let Some(ended) = self.landing_result(change_id)? {
+                            return Ok(ended);
+                        }
+                    }
+                }
+                // A commit made while it waited is a new author part: the checks run again.
+                if self.git.rev_parse(&path, "HEAD").await? != checked_tip {
+                    drop(run);
+                    continue 'steps;
+                }
+                let (approval, result) = self
+                    .judge_approval(&writer, &row, &mut run, &checked_tip)
+                    .await?;
+                if approval.is_approved() {
+                    break result;
+                }
+                if !told {
+                    self.engine.emit(
+                        change_id,
+                        LandingEvent::Waiting {
+                            reason: approval.waiting_reason().unwrap_or_default(),
+                        },
+                    );
+                    told = true;
+                }
+                wake.await.ok();
+            };
             // The materialized trees go; the queue step reads the tree it lands.
             drop(run);
 
@@ -560,6 +664,12 @@ impl ProjectRepo {
             {
                 return Ok(ended);
             }
+            // A commit made while it waited for the lock is a new author part, approved by
+            // nothing yet: back to step 2, and in at the back of the queue.
+            if self.git.rev_parse(&path, "HEAD").await? != checked_tip {
+                drop(slot);
+                continue;
+            }
 
             // Step 6.
             match self.check_master_as(Some(change_id)).await? {
@@ -575,7 +685,8 @@ impl ProjectRepo {
                 }
             }
             let verified_now = self.shown_commit().await?.0;
-            if verified_now != based_on {
+            let rebased = verified_now != based_on;
+            if rebased {
                 if !self.git.is_clean(&path).await? {
                     return Ok(LandingResult::NoVerdict {
                         reason: UNSAVED_EDITS.to_string(),
@@ -595,6 +706,10 @@ impl ProjectRepo {
                 based_on = verified_now;
             }
             let tip = self.git.rev_parse(&path, "HEAD").await?;
+            if !rebased && tip != checked_tip {
+                drop(slot);
+                continue;
+            }
             let mut run = self
                 .prepare_checks(change_id, &based_on, &tip, &meta, &row.author)
                 .await?;
@@ -609,11 +724,19 @@ impl ProjectRepo {
             // bounded by the tasks started then, so it goes back to step 3, where they are
             // dropped and redone (or the checks judge the author's part again), and in at the
             // back of the queue.
-            if run.started_touched() != started_seen {
+            if !row.amend_commits.is_empty() && run.started_touched() != started_seen {
                 drop(run);
                 drop(slot);
                 continue;
             }
+            // Approval is judged again on the tree that lands: a person's row still counts when
+            // the rebase kept the author part, and anything else goes back to wait at step 4.
+            let (approval, _) = self.judge_approval(&writer, &row, &mut run, &tip).await?;
+            let Some(approval_line) = approved_line(&approval) else {
+                drop(run);
+                drop(slot);
+                continue;
+            };
             // The in-queue checks run under the lock, so they get what is left of the queue
             // limit: a check still running then is dropped, the change waits with no verdict,
             // and the lock goes to the next change as the slot is dropped.
@@ -655,6 +778,7 @@ impl ProjectRepo {
                 let words: Vec<(String, String)> = before
                     .iter()
                     .chain(&in_queue)
+                    .chain(std::iter::once(&approval_result))
                     .map(|result| (result.check.clone(), result.outcome.word().to_string()))
                     .collect();
                 let facts = LandingFacts {
@@ -679,8 +803,17 @@ impl ProjectRepo {
             }
 
             // Steps 8 and 9.
+            log::info!("{change_id}: {approval_line}");
             return self
-                .finish_landing(&writer, slot, &mut row, &meta, &based_on, &new, now)
+                .finish_landing(
+                    &writer,
+                    slot,
+                    &mut row,
+                    &meta,
+                    (&based_on, &new),
+                    approval_line,
+                    now,
+                )
                 .await;
         }
     }
@@ -854,8 +987,8 @@ impl ProjectRepo {
         slot: QueueSlot,
         row: &mut ChangeRow,
         meta: &ChangeMeta,
-        old: &str,
-        new: &str,
+        (old, new): (&str, &str),
+        approval: String,
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
         let change_id = row.change_id.clone();
@@ -917,6 +1050,7 @@ impl ProjectRepo {
                 subject: strip_trailers(&meta.subject),
                 author: meta.author.clone(),
                 notes,
+                approval: Some(approval.clone()),
                 generation: tx.generation()?,
             };
             tx.add_landing(

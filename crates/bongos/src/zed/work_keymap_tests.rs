@@ -40,6 +40,7 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w g o", "project::OpenRepository"),
     ("ctrl-c w g l", "project::Land"),
     ("ctrl-c w g c", "project::Check"),
+    ("ctrl-c w g A", "project::Approve"),
     ("ctrl-c w h", "artifact::Hide"),
     ("ctrl-c w u", "artifact::Share"),
     ("ctrl-c w H", "artifact::HideAll"),

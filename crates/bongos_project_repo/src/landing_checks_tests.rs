@@ -8,13 +8,14 @@ use tempfile::TempDir;
 
 use crate::check_fakes::FakeCheck;
 use crate::test_support::{
-    PROJECT_TOML, add_task, fixture_project, land, landed, main_commit, new_copy, person, request,
-    run_git, start, task_with_todos, write_definition,
+    PROJECT_TOML, add_task, fixture_project, land, land_as, landed, main_commit, new_copy, person,
+    request, run_git, start, task_with_todos, write_definition,
 };
 use crate::{CheckOutcome, CheckPhase, LandMode, LandRequest, LandingResult};
 
 fn check_only(repo: &crate::ProjectRepo, copy: &crate::WorkingCopy) -> LandingResult {
-    block_on(repo.land_now(
+    block_on(land_as(
+        &repo,
         &copy.change_id,
         LandRequest {
             meta: ChangeMeta::new("check", copy_author()),
@@ -83,13 +84,17 @@ fn a_slow_check_on_one_change_does_not_hold_up_another_landing() {
     add_task(&first, "alpha", "a1");
     add_task(&second, "beta", "b1");
 
-    let land_first = repo.land_now(&first.change_id, request("first", &author), start());
+    let land_first = land_as(&repo, &first.change_id, request("first", &author), start());
     let land_second = async {
         started_rx.await.unwrap();
         // The first change's slow check is running: the second lands meanwhile.
-        let result = repo
-            .land_now(&second.change_id, request("second", &author), start())
-            .await;
+        let result = land_as(
+            &repo,
+            &second.change_id,
+            request("second", &author),
+            start(),
+        )
+        .await;
         release_tx.send(()).unwrap();
         result
     };
@@ -262,8 +267,15 @@ fn a_landing_without_a_subject_takes_one_generated_from_the_change() {
     let author = person();
     let copy = new_copy(&repo, "amber-otter-0001", &author);
     add_task(&copy, "alpha", "a1");
-    let commit =
-        landed(block_on(repo.land_now(&copy.change_id, request("", &author), start())).unwrap());
+    let commit = landed(
+        block_on(land_as(
+            &repo,
+            &copy.change_id,
+            request("", &author),
+            start(),
+        ))
+        .unwrap(),
+    );
     assert_eq!(
         run_git(&repo, &["log", "-1", "--format=%s", &commit]),
         "Add 1 task"

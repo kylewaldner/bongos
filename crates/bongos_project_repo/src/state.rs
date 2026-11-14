@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use sqlez::connection::Connection;
 
 use crate::Location;
+use crate::approval::MOVE_ROLLBACK_NAMESPACE;
 use crate::changes::{self, ChangeRow};
 use crate::state_hooks::{StateApplyChange, StateApplyHook, StateApplyHooks, TaskTouch};
 use crate::state_ops::{self, StateOp};
@@ -596,6 +597,14 @@ impl<'a> StateRead<'a> {
         )?(change_id)
     }
 
+    /// The approval rows of `change_id` as records, oldest first. Only the approval check and
+    /// the views read them; nothing but a person's attestation writes them.
+    pub(crate) fn approvals(&self, change_id: &str) -> Result<Vec<String>> {
+        self.connection.select_bound::<&str, String>(
+            "SELECT record_toml FROM approvals WHERE change_id = ? ORDER BY seq",
+        )?(change_id)
+    }
+
     /// The stored result of `check` on `change_id` for exactly `tree` and `stamp`.
     pub(crate) fn check_result(
         &self,
@@ -900,10 +909,38 @@ impl<'a> StateTx<'a> {
         Ok(())
     }
 
+    /// Adds an approval row of `change_id`. Only `approval.rs` calls it, with a record built
+    /// from a person's attestation.
+    pub(crate) fn add_approval(&mut self, change_id: &str, record: &str) -> Result<()> {
+        self.only_kv_in_hook("an approval")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO approvals (change_id, seq, record_toml)
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM approvals WHERE change_id = ?1), ?2)",
+        )?((change_id, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// One `kv` namespace. A write to a namespace only the engine keeps (the move rollbacks
+    /// that check 9 trusts) is refused through it.
     pub fn kv(&mut self, namespace: &str) -> KvTx<'_, 'a> {
         KvTx {
             tx: self,
             namespace: namespace.to_string(),
+            engine: false,
+        }
+    }
+
+    /// The move rollbacks: written only by the move coordinator, never by a state hook.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "the move coordinator is its only writer")
+    )]
+    pub(crate) fn move_rollbacks(&mut self) -> KvTx<'_, 'a> {
+        KvTx {
+            tx: self,
+            namespace: MOVE_ROLLBACK_NAMESPACE.to_string(),
+            engine: true,
         }
     }
 
@@ -942,7 +979,12 @@ impl<'a> StateTx<'a> {
 pub struct KvTx<'t, 'a> {
     tx: &'t mut StateTx<'a>,
     namespace: String,
+    /// Opened by the engine for a namespace it alone keeps.
+    engine: bool,
 }
+
+/// The `kv` namespaces only the engine writes.
+const ENGINE_NAMESPACES: &[&str] = &[MOVE_ROLLBACK_NAMESPACE];
 
 impl KvTx<'_, '_> {
     pub fn get(&self, key: &str) -> Result<Option<toml::Value>> {
@@ -955,6 +997,7 @@ impl KvTx<'_, '_> {
     }
 
     pub fn put(&mut self, key: &str, value: toml::Value) -> Result<()> {
+        self.writable()?;
         let text = value_to_text(value)?;
         self.tx.connection.exec_bound::<(&str, &str, &str)>(
             "INSERT INTO kv (namespace, key, value_toml) VALUES (?1, ?2, ?3)
@@ -965,6 +1008,7 @@ impl KvTx<'_, '_> {
     }
 
     pub fn delete(&mut self, key: &str) -> Result<()> {
+        self.writable()?;
         self.tx
             .connection
             .exec_bound::<(&str, &str)>("DELETE FROM kv WHERE namespace = ?1 AND key = ?2")?(
@@ -974,6 +1018,25 @@ impl KvTx<'_, '_> {
         )
         )?;
         self.written();
+        Ok(())
+    }
+
+    fn writable(&self) -> Result<()> {
+        if !ENGINE_NAMESPACES.contains(&self.namespace.as_str()) {
+            return Ok(());
+        }
+        if let Some(hook) = &self.tx.hook {
+            bail!(
+                "the {} namespace is the engine's, and {hook} wrote it",
+                self.namespace
+            );
+        }
+        if !self.engine {
+            bail!(
+                "the {} namespace is written only by the engine",
+                self.namespace
+            );
+        }
         Ok(())
     }
 

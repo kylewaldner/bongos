@@ -9,7 +9,9 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 
-use crate::{AmendOutcome, AmendingCheck, CheckInput, CheckOutcome, CheckPhase, LandingCheck};
+use crate::{
+    AmendOutcome, AmendingCheck, CheckInput, CheckOutcome, CheckPhase, LandingCheck, Stamp,
+};
 
 /// What a fake check saw on one call: the tree id and the files of its root.
 #[derive(Clone, Debug)]
@@ -109,6 +111,8 @@ pub(crate) struct FakeAmender {
     pub(crate) edit: Edit,
     pub(crate) times: Mutex<usize>,
     pub(crate) stamp_paths: Vec<&'static str>,
+    /// A stamp that stays the same whatever the tree (the default is the tree id).
+    pub(crate) fixed_stamp: Option<&'static str>,
 }
 
 impl FakeAmender {
@@ -118,6 +122,7 @@ impl FakeAmender {
             edit,
             times: Mutex::new(times),
             stamp_paths: Vec::new(),
+            fixed_stamp: None,
         }
     }
 }
@@ -125,6 +130,13 @@ impl FakeAmender {
 impl AmendingCheck for FakeAmender {
     fn name(&self) -> &str {
         self.name
+    }
+
+    fn stamp(&self, input: &CheckInput) -> Stamp {
+        match self.fixed_stamp {
+            Some(stamp) => Stamp(stamp.to_string()),
+            None => Stamp::tree(input.tree.0.clone()),
+        }
     }
 
     fn stamp_paths(&self) -> Vec<RelPath> {

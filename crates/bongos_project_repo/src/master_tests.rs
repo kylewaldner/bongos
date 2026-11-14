@@ -9,8 +9,8 @@ use tempfile::TempDir;
 
 use crate::landing::ProbePoint;
 use crate::test_support::{
-    CountingHook, add_task, fixture_project_with_hooks, land, landed, main_commit, new_copy,
-    outside_commit, outside_document, person, reopen, request, run_git, start, verified,
+    CountingHook, add_task, fixture_project_with_hooks, land, land_as, landed, main_commit,
+    new_copy, outside_commit, outside_document, person, reopen, request, run_git, start, verified,
 };
 use crate::{
     HistoryKind, LandingEvent, LandingResult, MASTER_IS_SPLIT, MasterStatus, NOT_A_LANDING,
@@ -186,7 +186,15 @@ fn a_forged_change_trailer_is_outside_and_crash_recovery_ignores_it() {
     repo.set_probe(Arc::new(|point, _| {
         async move { point == ProbePoint::AfterStateTransaction }.boxed()
     }));
-    assert!(block_on(repo.land_now(&copy.change_id, request("crash", &author), start())).is_err());
+    assert!(
+        block_on(land_as(
+            &repo,
+            &copy.change_id,
+            request("crash", &author),
+            start()
+        ))
+        .is_err()
+    );
     let recorded = verified(&repo).unwrap();
     let forged = block_on(outside_commit(
         repo.git().clone(),
@@ -404,7 +412,7 @@ fn a_lane_landing_during_the_split_waits_and_resumes_after_the_resolve() {
 
     let mut events = repo.landing_events();
     let lane_id = lane.change_id.clone();
-    let landing = repo.land_now(&lane.change_id, request("lane", &agent), start());
+    let landing = land_as(&repo, &lane.change_id, request("lane", &agent), start());
     let resolve = async {
         while let Some((change, event)) = events.next().await {
             if change == lane_id

@@ -28,6 +28,8 @@ enum Behavior {
     WriteKv,
     Fail,
     WriteTask,
+    /// Writes a move rollback, as only the engine may.
+    WriteRollback,
 }
 
 struct FakeHook {
@@ -80,6 +82,9 @@ impl StateApplyHook for FakeHook {
             }
             Behavior::Fail => Err(anyhow!("no evidence")),
             Behavior::WriteTask => tx.set_task("other", TaskStateRecord::default()),
+            Behavior::WriteRollback => tx
+                .move_rollbacks()
+                .put("amber-otter-0001", toml::Value::Boolean(true)),
         }
     }
 }
@@ -249,6 +254,67 @@ fn a_hook_that_writes_a_task_row_fails() {
     assert!(error.contains("only kv"), "{error}");
     let ids = writer.read(|read| read.task_ids()).unwrap();
     assert!(ids.is_empty(), "{ids:?}");
+}
+
+#[test]
+fn only_the_engine_writes_the_move_rollbacks_and_never_from_a_hook() {
+    let root = TempDir::new().unwrap();
+    let hook = FakeHook::new("rogue", Behavior::WriteRollback);
+    let hooked = writer(&location(&root), &hooks_with(&[&hook]));
+
+    let through_kv = hooked
+        .transact(|tx| {
+            tx.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+                .put("amber-otter-0001", toml::Value::Boolean(true))
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(
+        through_kv.contains("written only by the engine"),
+        "{through_kv}"
+    );
+    let delete = hooked
+        .transact(|tx| {
+            tx.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+                .delete("amber-otter-0001")
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(delete.contains("written only by the engine"), "{delete}");
+
+    let from_hook = hooked
+        .transact(|tx| tx.set_task("a", TaskStateRecord::default()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        from_hook.starts_with("state hook rogue failed: "),
+        "{from_hook}"
+    );
+    assert!(from_hook.contains("the engine's"), "{from_hook}");
+
+    let stored = hooked
+        .read(|read| {
+            read.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+                .get("amber-otter-0001")
+        })
+        .unwrap();
+    assert_eq!(stored, None);
+
+    let other = TempDir::new().unwrap();
+    let plain = writer(&location(&other), &StateApplyHooks::new());
+    plain
+        .transact(|tx| {
+            tx.move_rollbacks()
+                .put("amber-otter-0001", toml::Value::Boolean(true))
+        })
+        .unwrap();
+    let stored = plain
+        .read(|read| {
+            read.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+                .get("amber-otter-0001")
+        })
+        .unwrap();
+    assert_eq!(stored, Some(toml::Value::Boolean(true)));
 }
 
 #[test]

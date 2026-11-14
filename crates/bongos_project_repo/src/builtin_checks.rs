@@ -10,8 +10,9 @@ use anyhow::Result;
 use bongos_project_repo_model::checks::{
     CheckOutcome, FileFacts, LiveFacts, NO_CYCLE_CHECK, NO_STATE_CHECK, REFERENCES_CHECK,
     SCHEMA_CHECK, SECRETS_CHECK, SIZE_AND_KIND_CHECK, STARTED_UNCHANGED_CHECK, SizeLimits,
-    StagedTodoMove, Stamp, StartedInput, compile_secret_patterns, landing_declaration_problems,
-    no_cycle, no_state, references, schema_problems, secrets, size_and_kind, started_unchanged,
+    StagedTodoMove, Stamp, StartedInput, approval_policy_problems, compile_secret_patterns,
+    landing_declaration_problems, no_cycle, no_state, references, schema_problems, secrets,
+    size_and_kind, started_unchanged,
 };
 use bongos_project_repo_model::layout::{
     DEFINITIONS_DIR, PROJECT_FILE, TASK_FILE, WORKFLOW_FILE, WORKFLOWS_DIR,
@@ -287,6 +288,7 @@ pub(crate) fn schema_check(tree: &TreeFacts, registry: &CheckRegistry) -> Vec<Pr
     {
         let amending: Vec<&str> = registry.amending.iter().map(|check| check.name()).collect();
         problems.extend(landing_declaration_problems(project, &amending));
+        problems.extend(approval_policy_problems(project));
         problems.extend(crate::declared_checks::entry_problems(
             Some(project),
             registry,

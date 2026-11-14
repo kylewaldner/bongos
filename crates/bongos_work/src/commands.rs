@@ -92,6 +92,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::OpenRepository>(),
         TypeId::of::<project::Land>(),
         TypeId::of::<project::Check>(),
+        TypeId::of::<project::Approve>(),
         TypeId::of::<work::AddRepository>(),
         TypeId::of::<work::EditWorktreeRoot>(),
         TypeId::of::<task::SetDefaultVisibility>(),
@@ -206,7 +207,13 @@ pub fn ready(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<A
 
 /// The author of what the person at the keyboard of this window does.
 pub(crate) fn keyboard_author(window: &Window, cx: &App) -> bongos_work_model::Author {
-    WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx)).author
+    keyboard_context(window, cx).author
+}
+
+/// The context of the person at the keyboard of `window`, holding the person's attestation for
+/// one approval (`project: land` on the person's own change, `project: approve`).
+pub(crate) fn keyboard_context(window: &Window, cx: &App) -> WorkContext {
+    WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx))
 }
 
 /// Queues `command` on the store's writer. `None`, after a toast, when there is no store.

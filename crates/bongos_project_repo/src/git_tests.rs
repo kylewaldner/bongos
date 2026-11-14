@@ -37,3 +37,61 @@ fn a_path_without_git_names_git() {
     );
     assert_eq!(GitError::missing_message(), error.to_string());
 }
+
+/// Commits `files` (path, text) on top of what `directory` has checked out.
+async fn commit_files(git: &Git, directory: &std::path::Path, files: &[(&str, &str)]) -> String {
+    for (path, text) in files {
+        std::fs::write(directory.join(path), text).unwrap();
+    }
+    git.commit_all(directory, "edit", &Identity::default())
+        .await
+        .unwrap()
+}
+
+#[test]
+fn the_patch_id_sees_whitespace_inside_a_line_and_survives_a_rebase() {
+    let dir = TempDir::new().unwrap();
+    let git = git();
+    let lines: Vec<String> = (1..=20).map(|n| format!("line {n}\n")).collect();
+    let file = lines.concat();
+    block_on(async {
+        git.init_repo(dir.path(), "main").await.unwrap();
+        let base = commit_files(&git, dir.path(), &[("a.txt", &file)]).await;
+        let edited = |line: &str| file.replacen("line 10\n", line, 1);
+        let spaced = commit_files(&git, dir.path(), &[("a.txt", &edited("rm -rf /tmp/x\n"))]).await;
+        let id = git.patch_id(dir.path(), &base, &spaced).await.unwrap();
+        git.run(dir.path(), &["reset", "-q", "--hard", &base])
+            .await
+            .unwrap();
+        let split = commit_files(&git, dir.path(), &[("a.txt", &edited("rm -rf / tmp/x\n"))]).await;
+        let split_id = git.patch_id(dir.path(), &base, &split).await.unwrap();
+        assert_ne!(id, split_id);
+
+        // Master gains lines before and after the edit (new blob ids, shifted hunk numbers);
+        // the edit rebased onto it keeps its id.
+        git.run(dir.path(), &["reset", "-q", "--hard", &base])
+            .await
+            .unwrap();
+        let moved_file = file
+            .replacen("line 1\n", "line 1\nline one and a half\n", 1)
+            .replacen("line 18\n", "line eighteen\n", 1);
+        let moved = commit_files(&git, dir.path(), &[("a.txt", &moved_file)]).await;
+        let rebased = commit_files(
+            &git,
+            dir.path(),
+            &[(
+                "a.txt",
+                &moved_file.replacen("line 10\n", "rm -rf /tmp/x\n", 1),
+            )],
+        )
+        .await;
+        assert_eq!(
+            git.patch_id(dir.path(), &moved, &rebased).await.unwrap(),
+            id
+        );
+        assert_eq!(
+            git.patch_id(dir.path(), &base, &base).await.unwrap(),
+            "empty"
+        );
+    });
+}

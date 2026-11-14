@@ -13,8 +13,8 @@ use tempfile::TempDir;
 use crate::check_fakes::{FakeAmender, FakeCheck, replace_in, write_in};
 use crate::landing::ProbePoint;
 use crate::test_support::{
-    add_task, fixture_project, land, landed, main_commit, new_copy, request, run_git, start,
-    task_with_todos, write_definition,
+    add_task, fixture_project, land, land_as, landed, main_commit, new_copy, request, run_git,
+    start, task_with_todos, write_definition,
 };
 use crate::{CheckPhase, LandMode, LandRequest, LandingEvent, LandingResult, UNSAVED_EDITS};
 
@@ -236,11 +236,16 @@ fn dropping_amendments_while_the_working_copy_has_unsaved_edits_waits_and_loses_
     }));
     let mut events = repo.landing_events();
     let second_id = second.change_id.clone();
-    let land_first = repo.land_now(&first.change_id, request("first", &author), start());
+    let land_first = land_as(&repo, &first.change_id, request("first", &author), start());
     let land_second = async {
         paused_rx.await.unwrap();
-        repo.land_now(&second.change_id, request("second", &author), start())
-            .await
+        land_as(
+            &repo,
+            &second.change_id,
+            request("second", &author),
+            start(),
+        )
+        .await
     };
     let typed_in = typed.clone();
     let watch = async {
@@ -279,7 +284,8 @@ fn a_branch_without_a_worktree_drops_its_amendments_by_compare_and_swap() {
     let author = Author::agent("chat 1");
     let copy = new_copy(&repo, "amber-otter-0001", &author);
     add_task(&copy, "alpha", "a1");
-    let checked = block_on(repo.land_now(
+    let checked = block_on(land_as(
+        &repo,
         &copy.change_id,
         LandRequest {
             meta: bongos_project_repo_model::ChangeMeta::new("check", author),
@@ -402,7 +408,8 @@ fn a_listed_amend_commit_the_branch_never_got_is_skipped_when_the_amendments_are
     let author = Author::agent("chat 1");
     let copy = new_copy(&repo, "amber-otter-0001", &author);
     add_task(&copy, "alpha", "a1");
-    let checked = block_on(repo.land_now(
+    let checked = block_on(land_as(
+        &repo,
         &copy.change_id,
         LandRequest {
             meta: bongos_project_repo_model::ChangeMeta::new("check", author),
