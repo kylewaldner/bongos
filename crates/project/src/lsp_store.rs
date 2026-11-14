@@ -35,6 +35,7 @@ use crate::{
     PulledDiagnostics, ResolveState, Symbol,
     buffer_store::{BufferStore, BufferStoreEvent},
     environment::ProjectEnvironment,
+    language_server_policy::{policy_allows, policy_formatter_for_buffer, with_policy_worktree},
     lsp_command::{self, *},
     lsp_store::{
         self,
@@ -341,6 +342,9 @@ pub struct LocalLspStore {
     restricted_worktrees_tasks: HashMap<WorktreeId, (Subscription, watch::Receiver<bool>)>,
     all_language_servers_stopped: bool,
     stopped_language_servers: HashSet<LanguageServerName>,
+    /// Number of `reapply_server_policy` calls still waiting for refused servers to stop.
+    /// While nonzero, no server is started, so a policy switch never runs two servers at once.
+    policy_switches_in_flight: usize,
 
     buffers_to_refresh_hash_set: HashSet<BufferId>,
     buffers_to_refresh_queue: VecDeque<BufferId>,
@@ -1673,8 +1677,8 @@ impl LocalLspStore {
         logger: zlog::Logger,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        let (adapters_and_servers, settings, request_timeout) =
-            lsp_store.update(cx, |lsp_store, cx| {
+        let (adapters_and_servers, settings, request_timeout, policy_formatter) = lsp_store
+            .update(cx, |lsp_store, cx| {
                 buffer.handle.update(cx, |buffer, cx| {
                     let adapters_and_servers = lsp_store
                         .as_local()
@@ -1686,7 +1690,27 @@ impl LocalLspStore {
                     let request_timeout = ProjectSettings::get_global(cx)
                         .global_lsp_settings
                         .get_request_timeout();
-                    (adapters_and_servers, settings, request_timeout)
+                    // A policy formatter that is not running for this buffer falls back to the
+                    // usual "auto" choice, matching `has_formatter`.
+                    let policy_formatter = policy_formatter_for_buffer(buffer, cx)
+                        .filter(|name| {
+                            adapters_and_servers
+                                .iter()
+                                .any(|(_, server)| server.name() == *name)
+                        })
+                        .map(|name| {
+                            Formatter::LanguageServer(
+                                settings::LanguageServerFormatterSpecifier::Specific {
+                                    name: name.0.to_string(),
+                                },
+                            )
+                        });
+                    (
+                        adapters_and_servers,
+                        settings,
+                        request_timeout,
+                        policy_formatter,
+                    )
                 })
             })?;
         let had_existing_line_endings = buffer
@@ -1776,7 +1800,10 @@ impl LocalLspStore {
 
         for formatter in formatters {
             let formatter = if formatter == &Formatter::Auto {
-                if settings.prettier.allowed {
+                if let Some(policy_formatter) = &policy_formatter {
+                    zlog::trace!(logger => "Formatter set to auto: using the language server policy's formatter");
+                    policy_formatter
+                } else if settings.prettier.allowed {
                     zlog::trace!(logger => "Formatter set to auto: defaulting to prettier");
                     &Formatter::Prettier
                 } else {
@@ -2866,6 +2893,10 @@ impl LocalLspStore {
         if self.all_language_servers_stopped {
             return;
         }
+        // During a policy switch the buffer is still opened in servers that are already running,
+        // but no server starts: the `refresh_server_tree` that ends the switch starts them, and a
+        // starting server opens every registered buffer it serves.
+        let policy_switch_in_flight = self.policy_switches_in_flight > 0;
         let buffer = buffer_handle.read(cx);
         let buffer_id = buffer.remote_id();
 
@@ -2922,7 +2953,7 @@ impl LocalLspStore {
         let servers_and_adapters = servers
             .into_iter()
             .filter_map(|server_node| {
-                if reused && server_node.server_id().is_none() {
+                if (reused || policy_switch_in_flight) && server_node.server_id().is_none() {
                     return None;
                 }
                 if let Some(name) = server_node.name()
@@ -3083,6 +3114,17 @@ impl LocalLspStore {
             })
             .into_values()
             .max_by_key(|servers| servers.len())?;
+        // A reused server still has to pass the language server policy for this worktree.
+        let servers = with_policy_worktree(worktree.read(cx), |policy_worktree| {
+            servers
+                .into_iter()
+                .filter(|server_node| {
+                    server_node.name().is_some_and(|name| {
+                        policy_allows(policy_worktree, language_name, &name, cx)
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
 
         let worktree_id = worktree.read(cx).id();
         let apply = move |tree: &mut LanguageServerTree| {
@@ -4434,6 +4476,7 @@ impl LspStore {
                 restricted_worktrees_tasks: HashMap::default(),
                 all_language_servers_stopped: false,
                 stopped_language_servers: HashSet::default(),
+                policy_switches_in_flight: 0,
                 watched_manifest_filenames: ManifestProvidersStore::global(cx)
                     .manifest_file_names(),
             }),
@@ -5252,14 +5295,27 @@ impl LspStore {
         settings.formatter.as_ref().iter().any(|formatter| {
             match formatter {
                 Formatter::None => false,
-                Formatter::Auto => {
-                    settings.prettier.allowed
-                        || self.check_if_capable_for_proto_request(
-                            buffer,
-                            server_capabilities_support_range_formatting,
-                            cx,
-                        )
-                }
+                Formatter::Auto => match self
+                    .as_local()
+                    .and_then(|_| policy_formatter_for_buffer(buffer.read(cx), cx))
+                {
+                    Some(name) => self.check_if_any_relevant_server_matches(
+                        buffer,
+                        |server_status, capabilities| {
+                            server_status.name == name
+                                && server_capabilities_support_range_formatting(capabilities)
+                        },
+                        cx,
+                    ),
+                    None => {
+                        settings.prettier.allowed
+                            || self.check_if_capable_for_proto_request(
+                                buffer,
+                                server_capabilities_support_range_formatting,
+                                cx,
+                            )
+                    }
+                },
                 Formatter::Prettier => true,
                 Formatter::External { .. } => false,
                 Formatter::LanguageServer(settings::LanguageServerFormatterSpecifier::Current) => {
@@ -5511,7 +5567,7 @@ impl LspStore {
         let Some(local) = self.as_local_mut() else {
             return;
         };
-        if local.all_language_servers_stopped {
+        if local.all_language_servers_stopped || local.policy_switches_in_flight > 0 {
             return;
         }
         let stopped_language_servers = local.stopped_language_servers.clone();
@@ -5667,6 +5723,69 @@ impl LspStore {
         for (id, _) in to_stop {
             self.stop_local_language_server(id, cx).detach();
         }
+    }
+
+    /// Applies the registered [`crate::LanguageServerPolicy`] list to running servers.
+    ///
+    /// Stops every running server that a policy now refuses for one of its languages, waits for
+    /// those stops, then refreshes the server tree, which starts the servers the policy now
+    /// allows. No server starts while the stops are in flight, so switching servers never runs
+    /// the old and the new one at once. Call this in the same main-thread turn as the change
+    /// that makes a policy answer differently.
+    pub fn reapply_server_policy(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        let Some(local) = self.as_local_mut() else {
+            return Task::ready(());
+        };
+        let mut refused = BTreeSet::new();
+        for (worktree_id, servers) in &local.lsp_tree.instances {
+            let Some(worktree) = local
+                .worktree_store
+                .read(cx)
+                .worktree_for_id(*worktree_id, cx)
+            else {
+                continue;
+            };
+            with_policy_worktree(worktree.read(cx), |policy_worktree| {
+                for (name, (node, languages)) in servers.roots.values().flatten() {
+                    if let Some(id) = node.id()
+                        && languages
+                            .iter()
+                            .any(|language| !policy_allows(policy_worktree, language, name, cx))
+                    {
+                        refused.insert(id);
+                    }
+                }
+            });
+        }
+        if refused.is_empty() {
+            self.refresh_server_tree(cx);
+            return Task::ready(());
+        }
+
+        local.lsp_tree.remove_nodes(&refused);
+        local.policy_switches_in_flight += 1;
+        let stops = refused
+            .into_iter()
+            .map(|id| self.stop_local_language_server(id, cx))
+            .collect::<Vec<_>>();
+        // The switch runs detached so that dropping the returned task cannot leave
+        // `policy_switches_in_flight` raised.
+        let (done_tx, done_rx) = oneshot::channel();
+        cx.spawn(async move |this, cx| {
+            join_all(stops).await;
+            this.update(cx, |this, cx| {
+                if let Some(local) = this.as_local_mut() {
+                    local.policy_switches_in_flight -= 1;
+                }
+                this.refresh_server_tree(cx);
+            })
+            .ok();
+            done_tx.send(()).ok();
+        })
+        .detach();
+        cx.background_spawn(async move {
+            done_rx.await.ok();
+        })
     }
 
     pub fn apply_code_action(

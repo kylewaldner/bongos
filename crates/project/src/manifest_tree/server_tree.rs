@@ -23,7 +23,9 @@ use std::sync::OnceLock;
 use util::rel_path::RelPath;
 
 use crate::{
-    LanguageServerId, ProjectPath, project_settings::LspSettings,
+    LanguageServerId, ProjectPath,
+    language_server_policy::{PolicyWorktree, policy_allows},
+    project_settings::LspSettings,
     toolchain_store::LocalToolchainStore,
 };
 
@@ -144,7 +146,7 @@ impl LanguageServerTree {
         cx: &mut App,
     ) -> impl Iterator<Item = LanguageServerId> + 'a {
         let manifest_location = self.manifest_location_for_path(&path, manifest_name, delegate, cx);
-        let adapters = self.adapters_for_language(&manifest_location, &language_name, cx);
+        let adapters = self.adapters_for_language(&manifest_location, &language_name, delegate, cx);
         self.get_with_adapters(manifest_location, adapters)
     }
 
@@ -158,7 +160,7 @@ impl LanguageServerTree {
         cx: &'a mut App,
     ) -> impl Iterator<Item = LanguageServerTreeNode> + 'a {
         let manifest_location = self.manifest_location_for_path(&path, manifest_name, delegate, cx);
-        let adapters = self.adapters_for_language(&manifest_location, &language_name, cx);
+        let adapters = self.adapters_for_language(&manifest_location, &language_name, delegate, cx);
         self.init_with_adapters(manifest_location, language_name, adapters, cx)
     }
 
@@ -236,6 +238,7 @@ impl LanguageServerTree {
         &self,
         manifest_location: &ProjectPath,
         language_name: &LanguageName,
+        delegate: &Arc<dyn ManifestDelegate>,
         cx: &App,
     ) -> IndexMap<LanguageServerName, (LspSettings, Arc<CachedLspAdapter>)> {
         let settings_location = SettingsLocation {
@@ -256,10 +259,29 @@ impl LanguageServerTree {
             .map(|lsp_adapter| lsp_adapter.name.clone())
             .collect::<Vec<_>>();
 
+        let worktree_abs_path = self
+            .manifest_tree
+            .read(cx)
+            .worktree_store
+            .read(cx)
+            .worktree_for_id(manifest_location.worktree_id, cx)
+            .map(|worktree| worktree.read(cx).abs_path());
+        let has_entry = |path: &RelPath| delegate.exists(path, None);
+        let policy_worktree = worktree_abs_path.as_deref().map(|abs_path| PolicyWorktree {
+            id: manifest_location.worktree_id,
+            abs_path,
+            has_entry: &has_entry,
+        });
+
         let desired_language_servers =
             settings.customized_language_servers(&available_language_servers);
         let adapters_with_settings = desired_language_servers
             .into_iter()
+            .filter(|desired_adapter| {
+                policy_worktree.as_ref().is_none_or(|worktree| {
+                    policy_allows(worktree, language_name, desired_adapter, cx)
+                })
+            })
             .filter_map(|desired_adapter| {
                 let adapter = if let Some(adapter) = available_lsp_adapters
                     .iter()
@@ -399,9 +421,9 @@ impl ServerTreeRebase {
         let manifest =
             self.new_tree
                 .manifest_location_for_path(&path, manifest_name, &delegate, cx);
-        let adapters = self
-            .new_tree
-            .adapters_for_language(&manifest, &language_name, cx);
+        let adapters =
+            self.new_tree
+                .adapters_for_language(&manifest, &language_name, &delegate, cx);
 
         self.new_tree
             .init_with_adapters(manifest, language_name, adapters, cx)
