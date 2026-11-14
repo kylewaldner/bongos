@@ -232,6 +232,105 @@ pub fn new_oneoff(tree: &WorkTree, ctx: &Context, activity: &str, new: NewTask) 
     })
 }
 
+/// `task: new one off` while project repositories are on: a new task in the one-offs project
+/// whose top group is `top`, a child of the top-level group of `activity` (the group whose
+/// `activity` is that activity's slug), which is made with it when there is none yet.
+pub fn new_oneoff_in_project(
+    tree: &WorkTree,
+    ctx: &Context,
+    top: &str,
+    activity: &str,
+    new: NewTask,
+) -> Outcome {
+    let activity = activity.trim();
+    if activity.is_empty() {
+        return Err("a one-off needs an activity".to_string());
+    }
+    let goal = check_goal(&new.goal)?.to_string();
+    let activity_slug = slugify(activity);
+    if activity_slug.is_empty() {
+        return Err(format!("{activity} cannot name an activity"));
+    }
+    let (place, mut top_file) = writable(tree, top)?;
+    let kind = new.kind.unwrap_or(Kind::Spike);
+    let existing = place.task.children.iter().find(|child| {
+        child
+            .file
+            .as_ref()
+            .and_then(|file| file.activity.as_deref())
+            .is_some_and(|known| slugify(known) == activity_slug)
+    });
+    if let Some(group) = existing {
+        let group_id = group
+            .id()
+            .ok_or_else(|| format!("{} has no task.toml", group.slug))?
+            .to_string();
+        let mut change = new_child(
+            tree,
+            ctx,
+            &group_id,
+            NewTask {
+                goal,
+                kind: Some(kind),
+                ..new
+            },
+        )?;
+        for write in &mut change.writes {
+            if let Write::Task { dir, file } = write
+                && *dir == change.dir
+            {
+                file.activity = Some(activity.to_string());
+            }
+        }
+        return Ok(change);
+    }
+
+    rules::check_add_child(&place, tree)?;
+    let siblings: Vec<&str> = place
+        .task
+        .children
+        .iter()
+        .map(|child| child.slug.as_str())
+        .collect();
+    let group_slug = free_slug(&activity_slug, &siblings);
+    let group_dir = layout::child_dir(&place.task.dir, &group_slug);
+    let mut group = TaskFile::new(activity_slug.clone(), Kind::Other);
+    group.created = ctx.at;
+    group.todos = Vec::new();
+    group.activity = Some(activity_slug.clone());
+    group
+        .history
+        .push(ctx.entry("created", Some(activity_slug)));
+
+    let dir = layout::child_dir(&group_dir, &free_slug(&slugify(&goal), &[]));
+    let mut file = new_file(ctx, &goal, kind, new.repository, new.todos);
+    file.activity = Some(activity.to_string());
+    let entry = ctx.entry("created", Some(goal));
+    file.history.push(entry.clone());
+    let mut writes = vec![
+        Write::Task {
+            dir: group_dir,
+            file: group,
+        },
+        Write::Task {
+            dir: dir.clone(),
+            file,
+        },
+    ];
+    if give_up_todos(ctx, &place, tree, &mut top_file, &group_slug) {
+        writes.push(Write::Task {
+            dir: place.task.dir.clone(),
+            file: top_file,
+        });
+    }
+    Ok(Change {
+        dir,
+        writes,
+        entry,
+        moves: Vec::new(),
+    })
+}
+
 /// `task: edit`: goal, kind and repository. A goal that comes from Linear
 /// ([`rules::goal_locked`]) is refused; kind and repository stay editable. The directory keeps its slug, so artifacts, chats and
 /// the worktree stay where they are.
