@@ -584,9 +584,8 @@ fn detail_drawn(cx: &mut VisualTestContext) -> bool {
 }
 
 fn detailed(log: &Shared) -> Session {
-    session(log, fixed(&["alpha", "beta"])).detail(|value, _| {
-        Some(format!("about {}\n\nsecond line", text_of(value)).into())
-    })
+    session(log, fixed(&["alpha", "beta"]))
+        .detail(|value, _| Some(format!("about {}\n\nsecond line", text_of(value)).into()))
 }
 
 #[gpui::test]
