@@ -1182,7 +1182,7 @@ impl ProjectRepo {
             (None, None) => None,
         };
         let mut snapshots: Vec<RestoreCandidate> = local.into_iter().chain(remote).collect();
-        snapshots.sort_by(|a, b| b.taken_at.cmp(&a.taken_at));
+        snapshots.sort_by_key(|candidate| std::cmp::Reverse(candidate.taken_at));
         candidates.candidates = snapshots;
         for (name, time) in self.replaced_states()? {
             candidates.candidates.push(RestoreCandidate {

@@ -347,7 +347,7 @@ fn restore_refuses_while_work_runs_and_can_stop_it_at_a_job_boundary() {
     let lanes = Arc::new(FakeActivity {
         running: Mutex::new(vec!["lane 1 runs build of l1".to_string()]),
     });
-    repo.use_activity_sources(vec![lanes.clone()]);
+    repo.use_activity_sources(vec![lanes]);
     let before = everything(&repo);
 
     let preview = block_on(repo.restore_preview(&RestoreSource::Newest)).unwrap();
@@ -607,26 +607,18 @@ fn hostile_paths_in_a_snapshot_are_refused_whole() {
     let before = everything(&repo);
     let git = repo.git();
     let repository = &repo.location().repository;
+    let index = root.path().join("mktree.index");
     let tree_of = |entries: &str| -> String {
-        let input = std::process::Command::new("git")
-            .args(["mktree"])
-            .current_dir(repository)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        use std::io::Write as _;
-        let mut input = input;
-        input
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(entries.as_bytes())
-            .unwrap();
-        let output = input.wait_with_output().unwrap();
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
+        // Git's own tool, which a person editing the branch by hand could use.
+        match block_on(git.run_on_index(
+            repository,
+            &index,
+            &["mktree"],
+            Some(entries.as_bytes().to_vec()),
+        )) {
+            Ok(output) => String::from_utf8(output).unwrap().trim().to_string(),
+            Err(_) => String::new(),
+        }
     };
     let blob = |text: &str| -> String {
         let path = root.path().join("blob");
