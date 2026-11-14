@@ -129,4 +129,12 @@
       "ctrl-q": "query_replace::QuotedInsert",
     },
   },
+  // A running replace-string or replace-regexp (the `QueryReplaceBatch` context its editor has
+  // while it runs). C-g stops it; the replacements already made stay.
+  {
+    "context": "Editor && QueryReplaceBatch",
+    "bindings": {
+      "ctrl-g": "query_replace::Abort",
+    },
+  },
 ]

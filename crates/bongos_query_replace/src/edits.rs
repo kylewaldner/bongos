@@ -78,6 +78,8 @@ pub struct Applied {
     pub replaced: usize,
     /// Matches left alone: their text changed since the scan, or they had no replacement.
     pub skipped: usize,
+    /// The end of the last replacement made, where the cursor goes when the batch ends.
+    pub end: Option<Anchor>,
 }
 
 /// The anchors of a match found on `snapshot`, as the scan makes them: they keep to the matched
@@ -234,15 +236,24 @@ impl Edits {
             ranges.push((start..end, Arc::<str>::from(replacement)));
         }
         let replaced = ranges.len();
+        // Before the last replacement, so it stays put when text is inserted at its start.
+        let last = ranges
+            .last()
+            .map(|(range, with)| (snapshot.anchor_before(range.start), with.len()));
         let id = if ranges.is_empty() {
             None
         } else {
             self.transact(editor, window, cx, |editor, cx| editor.edit(ranges, cx))
         };
+        let end = last.map(|(start, len)| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            snapshot.anchor_before(start.to_offset(&snapshot) + len)
+        });
         Ok(Applied {
             id,
             replaced,
             skipped,
+            end,
         })
     }
 

@@ -455,12 +455,29 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `query_replace` commands, with the palette text of each.
-const QUERY_REPLACE_ACTIONS: [(&str, &str); 2] = [
+const QUERY_REPLACE_ACTIONS: [(&str, &str); 7] = [
+    (
+        "query_replace::QueryReplace",
+        "query replace: query replace",
+    ),
+    (
+        "query_replace::QueryReplaceRegexp",
+        "query replace: query replace regexp",
+    ),
+    (
+        "query_replace::ReplaceString",
+        "query replace: replace string",
+    ),
+    (
+        "query_replace::ReplaceRegexp",
+        "query replace: replace regexp",
+    ),
     ("query_replace::ToggleCase", "query replace: toggle case"),
     (
         "query_replace::QuotedInsert",
         "query replace: quoted insert",
     ),
+    ("query_replace::Abort", "query replace: abort"),
 ];
 
 #[gpui::test]
