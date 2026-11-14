@@ -9062,6 +9062,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "collections",
+ "dap",
+ "dap_adapters",
  "fs",
  "futures 0.3.32",
  "globset",
@@ -9075,6 +9077,7 @@ dependencies = [
  "lsp",
  "node_runtime",
  "parking_lot",
+ "paths",
  "pet",
  "pet-conda",
  "pet-core",
@@ -9112,6 +9115,7 @@ dependencies = [
  "unindent",
  "url",
  "util",
+ "watch",
 ]
 
 [[package]]

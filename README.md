@@ -592,6 +592,35 @@ kotlin-lsp builds are early access and expire about 29 days after build, so bong
 build per release and releases roughly monthly. A new Kotlin build needs a new bongos release. If
 the pinned build has expired, update bongos.
 
+### Language server and debugger downloads
+
+bongos downloads a language server or debug adapter when it first installs it and when it checks
+for an update, never while you edit. It sends no telemetry to these hosts, and a server already on
+your `PATH` is used without a download. Each one comes from:
+
+- GitHub (`api.github.com` for the latest release, `github.com` for the download, which redirects
+  to GitHub's release CDN, `objects.githubusercontent.com` or `release-assets.githubusercontent.com`):
+  rust-analyzer, ruff, ty, clangd, package-version-server, the ESLint server's source (pinned
+  version), CodeLLDB, js-debug and delve-shim-dap (Delve's adapter shim).
+- The npm registry that npm's own configuration names (`registry.npmjs.org` unless you set
+  another): vtsls, typescript-language-server, basedpyright, pyright, the Tailwind servers, and
+  the YAML, Bash, CSS and JSON servers, the ESLint server's dependencies, and Prettier. Every npm
+  command runs with `npm_config_update_notifier=false` and `npm_config_audit=false`, so npm does
+  not check for a newer npm or send an audit report.
+- `nodejs.org`: Node.js itself, only when no suitable system Node.js (22 or later) is found.
+- `pypi.org`: the latest debugpy version. The debugpy wheel is then fetched by your Python's pip,
+  from the index pip's configuration names, as is pylsp.
+- Go's module proxy, as Go's configuration names it (`proxy.golang.org` by default): gopls and
+  Delve, built with your `go install`. The latest gopls version is read from `api.github.com`.
+
+The YAML server is started with `redhat.telemetry.enabled` set to `false`. Java and Terraform
+servers list their hosts when they are added.
+
+A running server may still fetch what your files ask for: the YAML server reads its schema
+catalog from `www.schemastore.org` (turn it off with `yaml.schemaStore.enable: false` in the
+server's settings), the JSON and YAML servers fetch the schemas a file names, and the TypeScript
+servers may fetch type packages from the npm registry.
+
 ### Kotlin server manifest file
 
 To run a Kotlin server build other than the one pinned in your bongos release (a newer kotlin-lsp
