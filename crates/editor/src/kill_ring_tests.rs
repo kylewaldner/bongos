@@ -327,3 +327,68 @@ async fn test_kill_ring_cut_with_nothing_to_cut_pushes_nothing(cx: &mut TestAppC
         Some("outside".to_string())
     );
 }
+
+#[gpui::test]
+async fn test_yank_text_reads_the_clipboard_without_capturing(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    let yank_text = |cx: &mut EditorTestContext| cx.update(|_, cx| kill_ring::yank_text(cx));
+    let generation = |cx: &mut EditorTestContext| cx.update(|_, cx| kill_ring::generation(cx));
+
+    // Nothing in the ring and nothing on the clipboard.
+    assert_eq!(yank_text(&mut cx), None);
+    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+    assert_eq!(yank_text(&mut cx), None);
+
+    // Text from another app is what a yank would insert, though nothing was captured.
+    cx.write_to_clipboard(ClipboardItem::new_string("outside".to_string()));
+    assert_eq!(yank_text(&mut cx), Some("outside".to_string()));
+    assert!(ring_texts(&mut cx).is_empty());
+    assert_eq!(generation(&mut cx), 0);
+
+    // Clipboard text equal to the newest entry gives that entry.
+    assert!(cx.update(|_, cx| capture_clipboard(cx)));
+    let before = generation(&mut cx);
+    assert_eq!(yank_text(&mut cx), Some("outside".to_string()));
+
+    // A different clipboard text wins over the newest entry, and the ring stays as it was.
+    cx.write_to_clipboard(ClipboardItem::new_string("newer".to_string()));
+    assert_eq!(yank_text(&mut cx), Some("newer".to_string()));
+    assert_eq!(ring_texts(&mut cx), ["outside"]);
+    assert_eq!(generation(&mut cx), before);
+
+    // Ignored text is skipped, and so is empty text.
+    cx.update(|_, cx| ignore_clipboard_text("private", cx));
+    cx.write_to_clipboard(ClipboardItem::new_string("private".to_string()));
+    assert_eq!(yank_text(&mut cx), Some("outside".to_string()));
+    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+    assert_eq!(yank_text(&mut cx), Some("outside".to_string()));
+    assert_eq!(ring_texts(&mut cx), ["outside"]);
+    assert_eq!(generation(&mut cx), before);
+}
+
+#[gpui::test]
+async fn test_capture_keeps_the_pieces_of_an_editor_copy(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+
+    // A copy from an editor writes the clipboard with per-caret metadata; once the ring
+    // forgot it, capturing that clipboard item restores the pieces.
+    cx.set_state("«one ˇ»two «three ˇ»four");
+    cx.update_editor(|e, window, cx| e.copy(&Copy, window, cx));
+    let copied = newest(&mut cx).unwrap();
+    assert_eq!(shape(&copied), [(4, false), (6, false)]);
+    cx.update(|_, cx| kill_ring::update(cx, |ring| *ring = Default::default()));
+    assert!(ring_texts(&mut cx).is_empty());
+
+    assert!(cx.update(|_, cx| capture_clipboard(cx)));
+    let captured = newest(&mut cx).unwrap();
+    assert_eq!(captured.text, "one \nthree ");
+    assert_eq!(shape(&captured), [(4, false), (6, false)]);
+    assert!(!captured.secret);
+    assert_eq!(ring_texts(&mut cx).len(), 1);
+
+    // The same item is not captured twice.
+    assert!(!cx.update(|_, cx| capture_clipboard(cx)));
+    assert_eq!(ring_texts(&mut cx).len(), 1);
+}
