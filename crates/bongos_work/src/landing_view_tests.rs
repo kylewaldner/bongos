@@ -350,7 +350,11 @@ fn an_approval_passes_over_only_approval_waits_of_its_change_announced_before_it
     assert!(!is_passed_wait(&wait("c1", approval, 1), "c1", 1));
     // A second approval passes over the wait that saw only the first.
     assert!(is_passed_wait(&wait("c1", approval, 1), "c1", 2));
-    assert!(!is_passed_wait(&wait("c1", WAITING_MASTER_SPLIT, 0), "c1", 1));
+    assert!(!is_passed_wait(
+        &wait("c1", WAITING_MASTER_SPLIT, 0),
+        "c1",
+        1
+    ));
     assert!(!is_passed_wait(&wait("c2", approval, 0), "c1", 1));
     assert!(!is_passed_wait(
         &("c1".to_string(), LandingEvent::Checking),

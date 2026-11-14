@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use bongos_project_repo::router::{self, Routed};
 use bongos_project_repo::{
-    ApprovalRow, LandingEvent, LoadedProject, ProjectRepo, QuickEdit, Recovery, StateEvent, check_fresh,
-    written_tasks,
+    ApprovalRow, LandingEvent, LoadedProject, ProjectRepo, QuickEdit, Recovery, StateEvent,
+    check_fresh, written_tasks,
 };
 use bongos_project_repo_model::ChangeMeta;
 use bongos_work_model::PersonAtKeyboard;

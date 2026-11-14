@@ -160,7 +160,12 @@ fn a_land_asked_while_a_check_of_the_change_runs_waits_for_it_and_lands() {
     assert_eq!(main_commit(&repo), commit);
     let ended = std::iter::from_fn(|| events.try_next().ok().flatten())
         .filter(|(change, _)| *change == copy.change_id)
-        .any(|(_, event)| event == crate::LandingEvent::Landed { commit: commit.clone() });
+        .any(|(_, event)| {
+            event
+                == crate::LandingEvent::Landed {
+                    commit: commit.clone(),
+                }
+        });
     assert!(ended, "the land reports its end");
 }
 

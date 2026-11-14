@@ -1095,7 +1095,9 @@ fn an_agent_chat_sent_by_a_peer_is_never_trusted_by_own_subtree() {
     assert_eq!(row.author.chat, None);
     let mut reason = String::new();
     until_landing_event(&mut events, &change_id, |event| match event {
-        LandingEvent::Waiting { reason: waiting, .. } => {
+        LandingEvent::Waiting {
+            reason: waiting, ..
+        } => {
             reason = waiting.clone();
             true
         }
