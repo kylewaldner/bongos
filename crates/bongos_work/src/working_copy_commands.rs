@@ -1,5 +1,5 @@
 //! The handlers of `project: edit`, `project: open working copy`, `project: abandon`,
-//! `project: open repository`, `project: land` and `project: check`.
+//! `project: open repository`, `project: land`, `project: check` and `project: approve`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -20,7 +20,7 @@ use util::ResultExt as _;
 use workspace::{MultiWorkspace, OpenMode, OpenOptions, Workspace};
 
 use crate::actions::project;
-use crate::commands::{keyboard_author, show_toast};
+use crate::commands::{keyboard_author, keyboard_context, show_toast};
 use crate::modals;
 use crate::project_repos::open_repos;
 
@@ -42,7 +42,8 @@ pub fn register(workspace: &mut Workspace) {
         .register_action(|w, _: &project::Land, window, cx| land(w, LandMode::Land, window, cx))
         .register_action(|w, _: &project::Check, window, cx| {
             land(w, LandMode::CheckOnly, window, cx)
-        });
+        })
+        .register_action(|w, _: &project::Approve, window, cx| approve(w, window, cx));
 }
 
 /// A row of a list of working copies: its name, who made it, how long it has been idle, and
@@ -402,7 +403,13 @@ fn start_landing(
         mode,
     };
     let copy = repo.working_copy_path(&row.name);
-    let landing = repo.land(&row.change_id, request, cx);
+    // A person's `project: land` of the person's own change approves it.
+    let landing = match mode {
+        LandMode::Land => {
+            repo.land_by_person(&row.change_id, request, keyboard_context(window, cx), cx)
+        }
+        LandMode::CheckOnly => repo.land(&row.change_id, request, cx),
+    };
     cx.spawn_in(window, async move |workspace, cx| {
         let message = match landing.await {
             Ok(result) => {
@@ -420,6 +427,75 @@ fn start_landing(
                 landing_message(&row.name, &result)
             }
             Err(error) => format!("Landing {} failed: {error:#}", row.name),
+        };
+        workspace
+            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+            .log_err();
+    })
+    .detach();
+}
+
+/// `project: approve`: the outside commit on master once its checks passed, else the working
+/// copy of the current buffer, or one picked. The approval is the person's at this window; a
+/// landing waiting for it goes on.
+fn approve(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    for loaded in open_repos(cx) {
+        let repo = loaded.repo().clone();
+        if let Ok(Some(outside)) = repo.outside_change()
+            && outside.passed
+        {
+            let Some(marker) = keyboard_context(window, cx).take_attestation() else {
+                return;
+            };
+            cx.spawn_in(window, async move |workspace, cx| {
+                let message = match repo.approve_outside(marker).await {
+                    Ok(commit) => format!(
+                        "Approved the outside commit {}",
+                        &commit[..commit.len().min(8)]
+                    ),
+                    Err(error) => format!("{error:#}"),
+                };
+                workspace
+                    .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+                    .log_err();
+            })
+            .detach();
+            return;
+        }
+    }
+    if let Some(path) = active_path(workspace, cx) {
+        for loaded in open_repos(cx) {
+            let repo = loaded.repo().clone();
+            let rows = repo
+                .changes(&ChangeFilter::default())
+                .log_err()
+                .unwrap_or_default();
+            if let Some(row) = change_at(&repo, &rows, &path) {
+                approve_change(repo, row, window, cx);
+                return;
+            }
+        }
+    }
+    pick_working_copy(
+        workspace,
+        window,
+        cx,
+        "Approve which change?",
+        |repo, row, _, window, cx| approve_change(repo, row, window, cx),
+    );
+}
+
+fn approve_change(
+    repo: ProjectRepo,
+    row: ChangeRow,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let ctx = keyboard_context(window, cx);
+    cx.spawn_in(window, async move |workspace, cx| {
+        let message = match repo.approve(&row.change_id, ctx, now()).await {
+            Ok(approval) => format!("Approved {} ({})", row.name, approval.name),
+            Err(error) => format!("Approving {} failed: {error:#}", row.name),
         };
         workspace
             .update(cx, |workspace, cx| show_toast(workspace, message, cx))

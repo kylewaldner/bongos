@@ -152,6 +152,9 @@ pub mod project {
             /// Runs the landing checks on the working copy of the current buffer, or one
             /// picked, without landing it.
             Check,
+            /// Approves a change waiting for a person (the working copy of the current buffer,
+            /// or one picked), or the outside commit on master once its checks passed.
+            Approve,
         ]
     );
 }

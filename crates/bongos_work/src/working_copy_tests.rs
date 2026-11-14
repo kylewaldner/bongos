@@ -389,9 +389,14 @@ fn the_settings_for_working_copies_have_their_defaults(cx: &mut TestAppContext) 
 async fn project_land_lands_the_working_copy_of_the_current_buffer(cx: &mut TestAppContext) {
     let (fixture, cx) = fixture(cx).await;
     let before = fixture.master_bytes();
+    // The person's own change: `project: land` by the same person approves it.
+    let person = bongos_work_model::commands::Context::at_keyboard(
+        bongos_work_model::PersonAtKeyboard::for_test(),
+    )
+    .author;
     let copy = fixture
         .repo
-        .create_working_copy("plan-edit", "work/", &Author::agent("tester"), start())
+        .create_working_copy("plan-edit", "work/", &person, start())
         .await
         .unwrap();
     let plan = copy.path.join("definitions/plan.md");
@@ -430,6 +435,51 @@ async fn project_land_lands_the_working_copy_of_the_current_buffer(cx: &mut Test
             .readonly()
     );
     assert_eq!(fixture.master_bytes(), before);
+}
+
+#[gpui::test]
+async fn project_approve_approves_a_change_waiting_for_a_person(cx: &mut TestAppContext) {
+    let (fixture, cx) = fixture(cx).await;
+    let agent = Author::agent("chat 1");
+    let copy = fixture
+        .repo
+        .create_working_copy("agent-plan", "work/", &agent, start())
+        .await
+        .unwrap();
+    let plan = copy.path.join("definitions/plan.md");
+    std::fs::write(&plan, "the agent's plan\n").unwrap();
+    // The landing engine is asked to land an agent's change; no rule approves it.
+    let repo = fixture.repo.clone();
+    let events = std::cell::RefCell::new(repo.landing_events());
+    let request = bongos_project_repo::LandRequest {
+        meta: bongos_project_repo_model::ChangeMeta::new("the agent's plan", agent),
+        mode: bongos_project_repo::LandMode::Land,
+    };
+    let landing = cx.update(|_, cx| repo.land(&copy.change_id, request, cx));
+    let waiting = std::cell::Cell::new(false);
+    wait_until(cx, "the change to wait for approval", |_| {
+        while let Ok((_, event)) = events.borrow_mut().try_recv() {
+            if matches!(&event, bongos_project_repo::LandingEvent::Waiting { reason }
+                if reason.starts_with("waiting for approval"))
+            {
+                waiting.set(true);
+            }
+        }
+        waiting.get()
+    })
+    .await;
+    assert!(fixture.repo.approvals(&copy.change_id).unwrap().is_empty());
+
+    fixture.open(cx, &plan).await;
+    dispatch(cx, "project::Approve");
+    let result = landing.await.unwrap();
+    assert!(matches!(result, LandingResult::Landed { .. }), "{result:?}");
+    let approvals = fixture.repo.approvals(&copy.change_id).unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(
+        approvals[0].basis,
+        bongos_project_repo::ApprovalBasis::PersonApprove
+    );
 }
 
 #[gpui::test]
