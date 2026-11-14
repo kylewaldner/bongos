@@ -389,7 +389,10 @@ fn an_invalid_secret_pattern_stops_the_snapshot_without_a_panic_or_a_leak() {
     );
     let status = block_on(repo.backup_status(start())).unwrap();
     let error = status.snapshot_error.unwrap();
-    assert!(error.contains("no snapshot is taken"), "{error}");
+    assert!(
+        error.contains("could not be checked for secrets"),
+        "an error that cannot be cleaned is replaced whole: {error}"
+    );
     assert!(!error.contains("SECRET-123123"));
 }
 
