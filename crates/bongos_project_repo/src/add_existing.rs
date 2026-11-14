@@ -18,6 +18,7 @@ use crate::landing_checks::CheckRegistry;
 use crate::loader::{StateHandle, load_definition_tree};
 use crate::locations::{Location, RepositoryLocations};
 use crate::restore::REMOTE_STATE_REF;
+use crate::snapshot::Secrets;
 use crate::state::StateStore;
 use crate::state_branch;
 use crate::state_hooks::StateApplyHooks;
@@ -46,6 +47,8 @@ pub struct AddExistingRequest {
     pub checks: Option<CheckRegistry>,
     /// Gives up a clone or fetch when it resolves; the push timeout when `None`.
     pub timeout: Option<PushTimeout>,
+    /// The patterns withheld from the text of a failed clone or fetch.
+    pub secret_patterns: Vec<String>,
 }
 
 /// A project added.
@@ -62,8 +65,14 @@ pub struct AddedProject {
     pub notes: Vec<String>,
 }
 
-/// The directories made so far, removed when adding fails.
-struct Made(Vec<PathBuf>);
+/// What adding changed so far, undone when adding fails: the directories and files it made,
+/// and the files it made read-only, with the permissions they had.
+#[derive(Default)]
+struct Made {
+    dirs: Vec<PathBuf>,
+    files: Vec<PathBuf>,
+    protected: Vec<(PathBuf, std::fs::Permissions)>,
+}
 
 impl Made {
     fn dir(&mut self, path: &Path) -> Result<()> {
@@ -77,15 +86,26 @@ impl Made {
             .unwrap_or(path)
             .to_path_buf();
         std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
-        self.0.push(top);
+        self.dirs.push(top);
         Ok(())
     }
 
     fn undo(&self) {
-        for path in self.0.iter().rev() {
+        for (path, permissions) in &self.protected {
+            std::fs::set_permissions(path, permissions.clone()).ok();
+        }
+        for path in &self.files {
+            std::fs::remove_file(path).ok();
+        }
+        for path in self.dirs.iter().rev() {
             std::fs::remove_dir_all(path).ok();
         }
     }
+}
+
+/// `path` with its links and `..` resolved, or as given when it cannot be.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn resolve(template: &str, folder: &Path) -> PathBuf {
@@ -99,9 +119,13 @@ fn is_repository(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
-/// `message` with the credentials of `remote` withheld.
-fn cleaned(message: &str, remote: &str) -> String {
-    message.replace(remote, &shown_remote(remote))
+/// `message` with the credentials of `remote` and every match of `secret_patterns` withheld.
+fn cleaned(message: &str, remote: &str, secret_patterns: &[String]) -> String {
+    let message = message.replace(remote, &shown_remote(remote));
+    match Secrets::new(secret_patterns, &[]) {
+        Ok(secrets) => secrets.clean(&message),
+        Err(_) => "git failed".to_string(),
+    }
 }
 
 impl ProjectRepo {
@@ -113,7 +137,7 @@ impl ProjectRepo {
         find_git: impl FnOnce() -> Result<Git, GitError>,
     ) -> Result<AddedProject> {
         let git = find_git()?;
-        let mut made = Made(Vec::new());
+        let mut made = Made::default();
         match Self::add(&git, request, locations, &mut made).await {
             Ok(added) => Ok(added),
             Err(error) => {
@@ -155,9 +179,12 @@ impl ProjectRepo {
                     .await
                     .map_err(|error| {
                         anyhow!(
-                            "cloning {}: {}",
-                            shown_remote(address),
-                            cleaned(&error.to_string(), address)
+                            "{}",
+                            cleaned(
+                                &format!("cloning {address}: {error}"),
+                                address,
+                                &request.secret_patterns
+                            )
                         )
                     })?;
                 // The clone brought every branch of the remote; the state branch becomes this
@@ -198,7 +225,7 @@ impl ProjectRepo {
                     {
                         notes.push(format!(
                             "the remote's state branch could not be fetched: {}",
-                            cleaned(&error.to_string(), remote)
+                            cleaned(&error.to_string(), remote, &request.secret_patterns)
                         ));
                     }
                 }
@@ -253,7 +280,7 @@ impl ProjectRepo {
                 )
             })?;
         if let Some(known) = locations.location(&id)
-            && known.repository != repository
+            && canonical(&known.repository) != canonical(&repository)
         {
             bail!(
                 "this project is already on this machine, at {}",
@@ -273,6 +300,19 @@ impl ProjectRepo {
         };
         for path in [&location.working_copies, &location.state, &location.files] {
             made.dir(path)?;
+        }
+        let database = location.state.join(layout::STATE_DB_FILE);
+        if std::fs::symlink_metadata(&database).is_err() {
+            // The store and its WAL files are this call's: a failure removes them.
+            for suffix in ["", "-wal", "-shm"] {
+                let mut name = database.clone().into_os_string();
+                name.push(suffix);
+                made.files.push(PathBuf::from(name));
+            }
+        }
+        let host_lock = location.state.join(layout::HOST_LOCK_FILE);
+        if std::fs::symlink_metadata(&host_lock).is_err() {
+            made.files.push(host_lock);
         }
         // The hooks of the app are not run: nothing of this project is loaded yet.
         let writer = Arc::new(
@@ -304,7 +344,7 @@ impl ProjectRepo {
         } else {
             None
         };
-        crate::working_copies::protect_files(&location.repository)
+        crate::working_copies::protect_files_noting(&location.repository, &mut made.protected)
             .context("making master read-only")?;
         let has_snapshot = state_branch::tip(git, &location.repository, &reference)
             .await

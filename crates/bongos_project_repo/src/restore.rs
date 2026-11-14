@@ -1,8 +1,8 @@
 //! `project: restore`: rebuilds a project's live state from one snapshot (the newer of this
 //! machine's state branch and the remote's, a snapshot picked by the person, or a state an
 //! earlier restore replaced). A snapshot is read whole and checked before anything changes: its
-//! `FORMAT` version, its paths, every file it holds. Then, under the landing lock and while no
-//! activity runs, the store is copied to `state/replaced/<time>.db` and every file of the
+//! `FORMAT` version, its paths, every file it holds. Then, under the landing lock, with new work
+//! held back and while no activity runs, the store is copied to `state/replaced/<time>.db` and every file of the
 //! snapshot is imported in one transaction that runs no state apply hook, replacing the task
 //! state, the runs and every exporter's state. A value the snapshot withheld is never imported:
 //! the local value is kept, or the place is left empty. Worktrees and run records the restored
@@ -22,12 +22,12 @@ use util::rel_path::{RelPath, RelPathBuf};
 
 use crate::backup::{remote_problem, shown_remote};
 use crate::create::ProjectRepo;
-use crate::registries::StateExporter;
+use crate::registries::{ActivitySource, StateExporter};
 use crate::snapshot::{
     self, FORMAT_FILE, MAX_EXPORTED_FILE_BYTES, RUNS_FILE, RUNS_NAMESPACE, Secrets, TASKS_DIR,
     WITHHELD_FILE, WITHHELD_SECRET, Withheld, is_safe_component, namespace_problem,
 };
-use crate::state::{ImportReason, StateStore, StateTx};
+use crate::state::{ImportReason, StateRead, StateStore, StateTx};
 use crate::state_branch;
 
 /// The folder of `state/` where a restore keeps the state it replaced.
@@ -998,6 +998,68 @@ fn apply_plan(
     Ok(())
 }
 
+/// The landing lock held by a restore; dropping it, on any return or a panic, releases it.
+struct RestoreLock<'a> {
+    repo: &'a ProjectRepo,
+}
+
+impl<'a> RestoreLock<'a> {
+    fn take(repo: &'a ProjectRepo) -> Result<Self> {
+        repo.take_lock_for(RESTORE_HOLDER)?;
+        Ok(Self { repo })
+    }
+}
+
+impl Drop for RestoreLock<'_> {
+    fn drop(&mut self) {
+        self.repo.release_lock(RESTORE_HOLDER);
+    }
+}
+
+/// New work held back in every activity source of a project; dropping it, on any return or a
+/// panic, releases the sources it holds.
+struct NewWorkHold {
+    project: String,
+    held: Vec<Arc<dyn ActivitySource>>,
+    /// The sources that could not be held, which the restore takes for running work.
+    problems: Vec<String>,
+}
+
+impl NewWorkHold {
+    fn take(repo: &ProjectRepo) -> Self {
+        let project = repo.location.id.clone();
+        let mut held = Vec::new();
+        let mut problems = Vec::new();
+        for source in repo.activity_sources() {
+            match std::panic::catch_unwind(AssertUnwindSafe(|| source.hold_new_work(&project))) {
+                Ok(()) => held.push(source),
+                Err(_) => problems.push(
+                    "an activity source panicked when asked to hold new work; assuming work runs"
+                        .to_string(),
+                ),
+            }
+        }
+        Self {
+            project,
+            held,
+            problems,
+        }
+    }
+}
+
+impl Drop for NewWorkHold {
+    fn drop(&mut self) {
+        for source in self.held.drain(..) {
+            let released = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                source.release_new_work(&self.project)
+            }));
+            if released.is_err() {
+                log::error!("an activity source panicked when its hold on new work was released");
+            }
+        }
+    }
+}
+
 impl ProjectRepo {
     /// The work running in the project, as the activity sources report it.
     pub fn activity(&self) -> Vec<String> {
@@ -1338,54 +1400,78 @@ impl ProjectRepo {
             .collect()
     }
 
-    async fn plan_restore(&self, source: &RestoreSource) -> Result<Plan> {
-        let writer = self.writer_or_error()?;
+    /// The secrets a restore from `kind` resolves withheld values with: only a snapshot
+    /// withholds; a replaced state holds every task under its own name.
+    fn restore_secrets(&self, kind: SourceKind) -> Result<Option<Secrets>> {
+        let options = self.backup_options();
+        Ok(match kind {
+            SourceKind::Replaced => None,
+            SourceKind::Local | SourceKind::Remote => Some(
+                Secrets::new(&options.secret_patterns, &options.secret_keys)
+                    .context("restoring needs valid secret patterns")?,
+            ),
+        })
+    }
+
+    /// The plan of restoring `resolved` over the state `read` sees: which local tasks are
+    /// kept, and the local values standing in for the withheld ones, come from this read.
+    fn plan_over(
+        &self,
+        resolved: Resolved,
+        read: &StateRead,
+        exporters: &[(String, Arc<dyn StateExporter>)],
+    ) -> Result<Plan> {
+        let secrets = self.restore_secrets(resolved.kind)?;
+        let plain_exporters: Vec<Arc<dyn StateExporter>> = exporters
+            .iter()
+            .map(|(_, exporter)| exporter.clone())
+            .collect();
+        let plain = Secrets::new(&[], &[])?;
+        let local = snapshot::export(read, &plain_exporters, &plain)?.files;
+        let mut local_tasks = BTreeMap::new();
+        for id in read.task_ids()? {
+            if let Some(record) = read.task(&id)? {
+                local_tasks.insert(id, record);
+            }
+        }
+        let mut plan = read_plan(
+            resolved,
+            &local,
+            &local_tasks,
+            exporters,
+            secrets.as_ref(),
+            self.backup_options().replaced_keep_days.max(1),
+        )?;
+        let (worktrees, records) =
+            missing_on_this_machine(&plan.tasks, &plan.runs, &self.location.files);
+        plan.preview.missing_worktrees = worktrees;
+        plan.preview.missing_run_records = records;
+        Ok(plan)
+    }
+
+    async fn resolve_for_restore(
+        &self,
+        source: &RestoreSource,
+    ) -> Result<(Resolved, Vec<(String, Arc<dyn StateExporter>)>)> {
         let exporters = self.named_exporters();
         let plain_exporters: Vec<Arc<dyn StateExporter>> = exporters
             .iter()
             .map(|(_, exporter)| exporter.clone())
             .collect();
         let resolved = self.resolve_source(source, &plain_exporters).await?;
-        let options = self.backup_options();
-        // Only a snapshot withholds; a replaced state holds every task under its own name.
-        let secrets = match resolved.kind {
-            SourceKind::Replaced => None,
-            SourceKind::Local | SourceKind::Remote => Some(
-                Secrets::new(&options.secret_patterns, &options.secret_keys)
-                    .context("restoring needs valid secret patterns")?,
-            ),
-        };
-        let plain = Secrets::new(&[], &[])?;
-        let (local, local_tasks) = writer.read(|read| {
-            let local = snapshot::export(read, &plain_exporters, &plain)?;
-            let mut tasks = BTreeMap::new();
-            for id in read.task_ids()? {
-                if let Some(record) = read.task(&id)? {
-                    tasks.insert(id, record);
-                }
-            }
-            Ok((local.files, tasks))
-        })?;
-        let mut plan = read_plan(
-            resolved,
-            &local,
-            &local_tasks,
-            &exporters,
-            secrets.as_ref(),
-            options.replaced_keep_days.max(1),
-        )?;
-        let (worktrees, records) =
-            missing_on_this_machine(&plan.tasks, &plan.runs, &self.location.files);
-        plan.preview.missing_worktrees = worktrees;
-        plan.preview.missing_run_records = records;
-        plan.preview.activity = self.activity();
-        Ok(plan)
+        // A bad secret pattern fails before anything is locked.
+        self.restore_secrets(resolved.kind)?;
+        Ok((resolved, exporters))
     }
 
     /// What restoring from `source` would do, read without changing anything (but fetching
     /// the remote's state branch when `source` is the newest).
     pub async fn restore_preview(&self, source: &RestoreSource) -> Result<RestorePreview> {
-        Ok(self.plan_restore(source).await?.preview)
+        let writer = self.writer_or_error()?;
+        let (resolved, exporters) = self.resolve_for_restore(source).await?;
+        let mut plan = writer.read(|read| self.plan_over(resolved, read, &exporters))?;
+        plan.preview.activity = self.activity();
+        Ok(plan.preview)
     }
 
     /// Restores the state from `source` at `now`. Refuses while work runs; fails, changing
@@ -1400,31 +1486,50 @@ impl ProjectRepo {
         if !activity.is_empty() {
             return Ok(RestoreOutcome::Refused { activity });
         }
-        let plan = self.plan_restore(source).await?;
-        self.take_lock_for(RESTORE_HOLDER)?;
-        let restored = self.restore_locked(plan, now);
-        self.release_lock(RESTORE_HOLDER);
-        restored
+        self.writer_or_error()?;
+        let (resolved, exporters) = self.resolve_for_restore(source).await?;
+        let _lock = RestoreLock::take(self)?;
+        self.restore_locked(resolved, &exporters, now)
     }
 
-    fn restore_locked(&self, plan: Plan, now: DateTime<Utc>) -> Result<RestoreOutcome> {
+    fn restore_locked(
+        &self,
+        resolved: Resolved,
+        exporters: &[(String, Arc<dyn StateExporter>)],
+        now: DateTime<Utc>,
+    ) -> Result<RestoreOutcome> {
         if self.in_flight()?.is_some() {
             bail!("a landing is in flight; it completes first, then restore again");
+        }
+        // New work is held back from before the activity check until the import ended, so no
+        // job starts in between and writes over the restored state.
+        let hold = NewWorkHold::take(self);
+        if !hold.problems.is_empty() {
+            return Ok(RestoreOutcome::Refused {
+                activity: hold.problems.clone(),
+            });
         }
         let activity = self.activity();
         if !activity.is_empty() {
             return Ok(RestoreOutcome::Refused { activity });
         }
         let writer = self.writer_or_error()?;
-        let exporters = self.named_exporters();
         let (name, path) = self.fresh_replaced_path(now)?;
+        // The plan is made inside the import's transaction, so the local tasks kept and the
+        // local values standing in for withheld ones are those the import replaces.
         let imported = writer.import_without_hooks(ImportReason::Restore, Some(&path), |tx| {
-            apply_plan(tx, &plan, &exporters)
+            let plan = self.plan_over(resolved, &tx.as_read(), exporters)?;
+            apply_plan(tx, &plan, exporters)?;
+            Ok(plan)
         });
-        if let Err(error) = imported {
-            std::fs::remove_file(&path).ok();
-            return Err(error);
-        }
+        drop(hold);
+        let plan = match imported {
+            Ok(plan) => plan,
+            Err(error) => {
+                std::fs::remove_file(&path).ok();
+                return Err(error);
+            }
+        };
         if let Err(error) = self.prune_replaced(now) {
             log::error!("removing old replaced states: {error:#}");
         }

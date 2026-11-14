@@ -23,7 +23,7 @@ fn bare(root: &TempDir, name: &str) -> PathBuf {
 
 /// The fixture project with its master and a snapshot (task `l1`'s first todo done) pushed to
 /// a bare remote. Returns the project and the remote.
-fn pushed(root: &TempDir) -> (ProjectRepo, PathBuf) {
+pub(crate) fn pushed(root: &TempDir) -> (ProjectRepo, PathBuf) {
     let remote = bare(root, "remote.git");
     let repo = project(root);
     let mut location = repo.location().clone();
@@ -48,6 +48,7 @@ fn request(source: AddExistingSource, remote: Option<String>) -> AddExistingRequ
         remote,
         checks: None,
         timeout: None,
+        secret_patterns: crate::snapshot_tests::PATTERNS.map(str::to_string).to_vec(),
     }
 }
 
@@ -341,4 +342,164 @@ fn a_project_already_on_this_machine_elsewhere_is_refused() {
     assert!(!second.exists());
     assert_eq!(known.locations().len(), 1);
     assert!(Path::new(&known.locations()[0].folder).ends_with("one"));
+}
+
+#[test]
+fn a_failed_clone_or_fetch_withholds_secrets_from_its_message() {
+    let root = TempDir::new().unwrap();
+    let mut known = locations(&root);
+    let missing = root.path().join("no-such-SECRET-123456.git");
+    let error = add(
+        request(
+            AddExistingSource::Remote {
+                address: missing.to_string_lossy().into_owned(),
+                folder: root.path().join("new"),
+            },
+            None,
+        ),
+        &mut known,
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("cloning"), "{message}");
+    assert!(!message.contains("SECRET-123456"), "{message}");
+
+    let (_original, remote) = pushed(&root);
+    let folder = root.path().join("copy");
+    std::fs::create_dir_all(&folder).unwrap();
+    block_on(git().run(
+        &folder,
+        &[
+            "clone",
+            "-q",
+            "--branch",
+            "main",
+            remote.to_str().unwrap(),
+            folder.join("repository").to_str().unwrap(),
+        ],
+    ))
+    .unwrap();
+    let added = add(
+        request(
+            AddExistingSource::Path { path: folder },
+            Some(missing.to_string_lossy().into_owned()),
+        ),
+        &mut known,
+    )
+    .unwrap();
+    assert_eq!(added.notes.len(), 1, "{:?}", added.notes);
+    assert!(
+        added.notes[0].contains("could not be fetched"),
+        "{:?}",
+        added.notes
+    );
+    assert!(
+        !added.notes[0].contains("SECRET-123456"),
+        "{:?}",
+        added.notes
+    );
+}
+
+#[test]
+fn a_failed_add_of_a_folder_undoes_the_store_and_the_read_only_master() {
+    let root = TempDir::new().unwrap();
+    let (_original, remote) = pushed(&root);
+    let folder = root.path().join("copy");
+    let repository = folder.join("repository");
+    std::fs::create_dir_all(&folder).unwrap();
+    block_on(git().run(
+        &folder,
+        &[
+            "clone",
+            "-q",
+            "--branch",
+            "main",
+            remote.to_str().unwrap(),
+            repository.to_str().unwrap(),
+        ],
+    ))
+    .unwrap();
+    // The project folder already has its state folder, without a store.
+    let layout = LayoutTemplates::default();
+    let resolve = |template: &str| {
+        PathBuf::from(bongos_project_repo_model::layout::resolve_template(
+            template,
+            &folder.to_string_lossy(),
+        ))
+    };
+    let state = resolve(&layout.state);
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("notes.txt"), "kept").unwrap();
+    // The location record cannot be written: adding fails at its last step.
+    let mut known = locations(&root);
+    let record = root.path().join("machine").join("locations.toml");
+    std::fs::create_dir_all(&record).unwrap();
+    std::fs::write(record.join("in-the-way"), "").unwrap();
+
+    let error = add(
+        request(
+            AddExistingSource::Path {
+                path: folder.clone(),
+            },
+            None,
+        ),
+        &mut known,
+    )
+    .unwrap_err();
+    assert!(known.locations().is_empty(), "{error:#}");
+    let names: Vec<String> = std::fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["notes.txt"]);
+    assert!(!resolve(&layout.working_copies).exists());
+    assert!(!resolve(&layout.files).exists());
+    let project_file = repository.join("definitions").join("project.toml");
+    assert!(
+        !std::fs::metadata(project_file)
+            .unwrap()
+            .permissions()
+            .readonly()
+    );
+}
+
+#[test]
+fn the_same_repository_by_another_path_is_not_another_project() {
+    let root = TempDir::new().unwrap();
+    let (_original, remote) = pushed(&root);
+    let folder = root.path().join("copy");
+    let repository = folder.join("repository");
+    std::fs::create_dir_all(&folder).unwrap();
+    block_on(git().run(
+        &folder,
+        &[
+            "clone",
+            "-q",
+            "--branch",
+            "main",
+            remote.to_str().unwrap(),
+            repository.to_str().unwrap(),
+        ],
+    ))
+    .unwrap();
+    let mut known = locations(&root);
+    add(
+        request(
+            AddExistingSource::Path {
+                path: folder.clone(),
+            },
+            None,
+        ),
+        &mut known,
+    )
+    .unwrap();
+    // The same folder through a link: the project is the one already known.
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&folder, &link).unwrap();
+    add(
+        request(AddExistingSource::Path { path: link }, None),
+        &mut known,
+    )
+    .unwrap();
+    assert_eq!(known.locations().len(), 1);
 }

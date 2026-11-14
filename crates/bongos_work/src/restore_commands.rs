@@ -119,6 +119,7 @@ fn add_existing(workspace: &mut Workspace, window: &mut Window, cx: &mut Context
                 remote: None,
                 checks: Some(registered_checks(cx)),
                 timeout: None,
+                secret_patterns: settings.secret_patterns.clone(),
             };
             let added = cx.background_spawn(async move {
                 let mut locations = RepositoryLocations::load(RepositoryLocations::default_path())?;

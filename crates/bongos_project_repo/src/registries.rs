@@ -38,6 +38,20 @@ pub trait ActivitySource: Send + Sync + 'static {
             self.name()
         )
     }
+
+    /// Holds back new work in the project (a run or lane job that would start) until
+    /// [`Self::release_new_work`]: a restore takes the hold before it checks the activity and
+    /// releases it once its import ended, so no job starts between the check and the import
+    /// and writes the state the restore replaces. Work held back starts after the release. A
+    /// source that never starts work leaves the default, which holds nothing.
+    fn hold_new_work(&self, project_id: &str) {
+        let _ = project_id;
+    }
+
+    /// Ends a hold of [`Self::hold_new_work`]; held work may start again.
+    fn release_new_work(&self, project_id: &str) {
+        let _ = project_id;
+    }
 }
 
 pub struct StateExporters {

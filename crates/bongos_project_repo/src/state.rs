@@ -772,6 +772,13 @@ impl<'a> StateTx<'a> {
         read_meta(self.connection, VERIFIED_COMMIT_KEY)
     }
 
+    /// A read of the state as this transaction sees it, for code that takes a [`StateRead`].
+    pub(crate) fn as_read(&self) -> StateRead<'a> {
+        StateRead {
+            connection: self.connection,
+        }
+    }
+
     /// Records `commit` as the verified commit, whose parsed definitions are `definitions`. The
     /// hooks of this transaction see the old and the new definitions, and once it commits the
     /// writer's definitions are the new ones.

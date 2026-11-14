@@ -266,19 +266,30 @@ impl ProjectRepo {
 
 /// Clears the write bits of every file under `directory`, leaving `.git` alone.
 pub fn protect_files(directory: &Path) -> std::io::Result<()> {
+    protect_files_noting(directory, &mut Vec::new())
+}
+
+/// [`protect_files`], noting in `changed` each file it made read-only with the permissions it
+/// had, even when it then fails.
+pub(crate) fn protect_files_noting(
+    directory: &Path,
+    changed: &mut Vec<(std::path::PathBuf, std::fs::Permissions)>,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
         let kind = entry.file_type()?;
         if kind.is_dir() {
             if entry.file_name() != ".git" {
-                protect_files(&path)?;
+                protect_files_noting(&path, changed)?;
             }
         } else if kind.is_file() {
             let mut permissions = std::fs::metadata(&path)?.permissions();
             if !permissions.readonly() {
+                let original = permissions.clone();
                 permissions.set_readonly(true);
                 std::fs::set_permissions(&path, permissions)?;
+                changed.push((path, original));
             }
         }
     }

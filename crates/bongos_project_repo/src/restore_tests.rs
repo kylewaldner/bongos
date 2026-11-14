@@ -708,6 +708,237 @@ fn restore_never_interleaves_with_a_landing() {
     repo.release_lock("change-2");
 }
 
+/// A run starter that refuses to start work while a restore holds it, and logs what it saw.
+#[derive(Default)]
+struct GatedRuns {
+    holds: AtomicUsize,
+    log: Mutex<Vec<String>>,
+    /// Writes to the state when the hold is taken, as a job that just ended would.
+    on_hold: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl GatedRuns {
+    fn held(&self) -> bool {
+        self.holds.load(Ordering::SeqCst) > 0
+    }
+
+    /// Starts a run unless new work is held.
+    fn try_start(&self, run: &str) -> bool {
+        let started = !self.held();
+        self.log.lock().push(format!("start {run}: {started}"));
+        started
+    }
+}
+
+impl ActivitySource for GatedRuns {
+    fn name(&self) -> &str {
+        "runs"
+    }
+
+    fn activity(&self, _project_id: &str) -> Vec<String> {
+        self.log
+            .lock()
+            .push(format!("activity checked, held {}", self.held()));
+        Vec::new()
+    }
+
+    fn hold_new_work(&self, _project_id: &str) {
+        self.holds.fetch_add(1, Ordering::SeqCst);
+        self.log.lock().push("hold".to_string());
+        if let Some(write) = self.on_hold.lock().as_ref() {
+            write();
+        }
+    }
+
+    fn release_new_work(&self, _project_id: &str) {
+        self.holds.fetch_sub(1, Ordering::SeqCst);
+        self.log.lock().push("release".to_string());
+    }
+}
+
+/// The ledger's exporter, whose import tries to start a run first, then imports, fails or
+/// panics.
+struct StartsARun {
+    runs: Arc<GatedRuns>,
+    ending: &'static str,
+}
+
+impl StateExporter for StartsARun {
+    fn namespace(&self) -> &str {
+        LEDGER
+    }
+
+    fn export(&self, read: &StateRead) -> Result<Vec<(RelPathBuf, String)>> {
+        Ledger.export(read)
+    }
+
+    fn import(&self, tx: &mut StateTx, files: &[(RelPathBuf, String)]) -> Result<()> {
+        self.runs.try_start("run 9");
+        match self.ending {
+            "fail" => bail!("the ledger cannot import"),
+            "panic" => panic!("the ledger importer panicked"),
+            _ => Ledger.import(tx, files),
+        }
+    }
+}
+
+#[test]
+fn new_work_is_held_from_the_activity_check_until_the_import_ended() {
+    for ending in ["import", "fail", "panic"] {
+        let root = TempDir::new().unwrap();
+        let (repo, _) = snapshotted(&root);
+        let runs = Arc::new(GatedRuns::default());
+        repo.use_activity_sources(vec![runs.clone()]);
+        repo.use_exporters(vec![Arc::new(StartsARun {
+            runs: runs.clone(),
+            ending,
+        })]);
+
+        let restored = restore(&repo, &RestoreSource::Newest, start() + Duration::hours(1));
+        assert_eq!(
+            restored.is_ok(),
+            ending == "import",
+            "{ending}: {restored:?}"
+        );
+        assert_eq!(
+            *runs.log.lock(),
+            [
+                "activity checked, held false",
+                "hold",
+                "activity checked, held true",
+                "start run 9: false",
+                "release",
+            ],
+            "{ending}"
+        );
+        // Held work starts once the restore ended, however it ended, and a landing is not
+        // blocked by the restore.
+        assert!(runs.try_start("run 10"), "{ending}");
+        assert!(repo.take_lock_for("change-1").is_ok(), "{ending}");
+        repo.release_lock("change-1");
+    }
+}
+
+#[test]
+fn the_kept_tasks_and_withheld_stand_ins_are_read_when_the_import_runs() {
+    let root = TempDir::new().unwrap();
+    let repo = project(&root);
+    let mut l1 = task_with_todos(&[("t1", TodoState::Done)]);
+    l1.branch = Some("work/SECRET-123456".to_string());
+    set_task(&repo, "l1", l1);
+    snapshot_at(&repo, start());
+    let mut l1 = task_with_todos(&[("t1", TodoState::Done)]);
+    l1.branch = Some("work/SECRET-222222".to_string());
+    set_task(&repo, "l1", l1);
+    let preview = block_on(repo.restore_preview(&RestoreSource::Newest)).unwrap();
+    assert!(preview.withheld.iter().any(|note| note.kept_local));
+
+    // After the preview, and after the restore read the snapshot, a task no snapshot can hold
+    // and a plain task are created, and the local value of the withheld branch changes.
+    let runs = Arc::new(GatedRuns::default());
+    let store = writer(&repo);
+    *runs.on_hold.lock() = Some(Box::new(move || {
+        store
+            .transact(|tx| {
+                tx.set_task("SECRET-999999", task_with_todos(&[]))?;
+                tx.set_task("l9", task_with_todos(&[]))?;
+                let mut l1 = tx.task("l1")?.unwrap();
+                l1.branch = Some("work/SECRET-333333".to_string());
+                tx.set_task("l1", l1)
+            })
+            .unwrap();
+    }));
+    repo.use_activity_sources(vec![runs]);
+
+    let outcome = block_on(repo.restore(&RestoreSource::Newest, start())).unwrap();
+    let RestoreOutcome::Restored { preview, .. } = outcome else {
+        panic!("expected a restore, got {outcome:?}");
+    };
+    assert_eq!(
+        task(&repo, "l1").unwrap().branch.as_deref(),
+        Some("work/SECRET-333333")
+    );
+    assert!(task(&repo, "SECRET-999999").is_some());
+    assert_eq!(task(&repo, "l9"), None);
+    assert!(
+        preview
+            .notes
+            .iter()
+            .any(|note| note.contains("1 tasks of this machine have ids no snapshot can hold")),
+        "{:?}",
+        preview.notes
+    );
+}
+
+#[test]
+fn a_remote_state_branch_rewritten_by_thinning_still_restores() {
+    let root = TempDir::new().unwrap();
+    let (repo, remote) = crate::add_existing_tests::pushed(&root);
+    repo.use_activity_sources(Vec::new());
+    let local = block_on(state_branch::tip(
+        repo.git(),
+        &repo.location().repository,
+        STATE_REF,
+    ))
+    .unwrap();
+    // The remote's state branch has been fetched once.
+    let candidates = block_on(repo.restore_candidates()).unwrap();
+    assert!(candidates.notes.is_empty(), "{:?}", candidates.notes);
+
+    // Thinning rewrote it on the remote: a newer snapshot without the old one as parent.
+    let files = crate::snapshot_tests::files_at(&repo, &local);
+    let thinned = match block_on(state_branch::commit_snapshot(
+        repo.git(),
+        &repo.location().repository,
+        &repo.location().state,
+        "refs/heads/thinned",
+        &files,
+        None,
+        &state_branch::snapshot_message("thinning", start() + Duration::hours(2), 1),
+    ))
+    .unwrap()
+    {
+        state_branch::Committed::Moved { commit } => commit,
+        other => panic!("expected a commit, got {other:?}"),
+    };
+    crate::test_support::run_git(
+        &repo,
+        &[
+            "push",
+            "-q",
+            "-f",
+            remote.to_str().unwrap(),
+            &format!("{thinned}:{STATE_REF}"),
+        ],
+    );
+    assert!(!block_on(repo.git().is_ancestor(
+        &repo.location().repository,
+        &local,
+        &thinned
+    )));
+    change_state(&repo, TodoState::Open);
+
+    let candidates = block_on(repo.restore_candidates()).unwrap();
+    assert!(candidates.notes.is_empty(), "{:?}", candidates.notes);
+    assert_eq!(
+        candidates.newest,
+        Some(RestoreSource::Snapshot {
+            commit: thinned.clone()
+        })
+    );
+    let outcome =
+        block_on(repo.restore(&RestoreSource::Newest, start() + Duration::hours(3))).unwrap();
+    let RestoreOutcome::Restored { preview, .. } = outcome else {
+        panic!("expected a restore, got {outcome:?}");
+    };
+    assert_eq!(preview.kind, SourceKind::Remote);
+    assert_eq!(preview.source, RestoreSource::Snapshot { commit: thinned });
+    assert_eq!(
+        task(&repo, "l1").unwrap().todos,
+        vec![todo("t1", TodoState::Done)]
+    );
+}
+
 #[test]
 fn old_replaced_states_are_removed_after_the_keep_days() {
     let root = TempDir::new().unwrap();
