@@ -152,7 +152,10 @@ async fn yank_keys_shadow_the_git_and_agent_keys_only_inside_editors(cx: &mut Te
         first(&keymap, "ctrl-alt-y", &AGENT_DIFF_EDITOR),
         Some("agent::Keep")
     );
-    assert_eq!(first(&keymap, "ctrl-alt-y", &AGENT_DIFF), Some("agent::Keep"));
+    assert_eq!(
+        first(&keymap, "ctrl-alt-y", &AGENT_DIFF),
+        Some("agent::Keep")
+    );
 }
 
 #[gpui::test]
