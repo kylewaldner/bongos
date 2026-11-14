@@ -26,6 +26,7 @@ use task::{TaskTemplate, TaskTemplates, VariableName};
 use util::rel_path::RelPath;
 use util::{ResultExt, maybe};
 
+use crate::package_json::LOCKFILES;
 use crate::{PackageJson, PackageJsonData};
 
 pub(crate) struct TypeScriptContextProvider {
@@ -67,36 +68,48 @@ const TYPESCRIPT_NODE_PACKAGE_PATH_VARIABLE: VariableName =
 struct PackageJsonContents(Arc<RwLock<HashMap<PathBuf, PackageJson>>>);
 
 impl PackageJsonData {
+    /// Arguments that run a locally installed `runner` through the project's package manager.
+    fn exec_args(&self, runner: &str, rest: Vec<String>) -> Vec<String> {
+        let mut args = if self.is_bun() {
+            vec!["x".to_owned(), runner.to_owned()]
+        } else {
+            vec!["exec".to_owned(), "--".to_owned(), runner.to_owned()]
+        };
+        args.extend(rest);
+        args
+    }
+
     fn fill_task_templates(&self, task_templates: &mut TaskTemplates) {
+        let package_manager = self.resolved_package_manager();
         if self.jest_package_path.is_some() {
             task_templates.0.push(TaskTemplate {
                 label: "jest file test".to_owned(),
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
-                args: vec![
-                    "exec".to_owned(),
-                    "--".to_owned(),
-                    "jest".to_owned(),
-                    "--runInBand".to_owned(),
-                    VariableName::File.template_value(),
-                ],
+                command: package_manager.to_owned(),
+                args: self.exec_args(
+                    "jest",
+                    vec![
+                        "--runInBand".to_owned(),
+                        VariableName::File.template_value(),
+                    ],
+                ),
                 cwd: Some(TYPESCRIPT_JEST_PACKAGE_PATH_VARIABLE.template_value()),
                 ..TaskTemplate::default()
             });
             task_templates.0.push(TaskTemplate {
                 label: format!("jest test {}", VariableName::Symbol.template_value()),
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
-                args: vec![
-                    "exec".to_owned(),
-                    "--".to_owned(),
-                    "jest".to_owned(),
-                    "--runInBand".to_owned(),
-                    "--testNamePattern".to_owned(),
-                    format!(
-                        "\"{}\"",
-                        TYPESCRIPT_JEST_TEST_NAME_VARIABLE.template_value()
-                    ),
-                    VariableName::File.template_value(),
-                ],
+                command: package_manager.to_owned(),
+                args: self.exec_args(
+                    "jest",
+                    vec![
+                        "--runInBand".to_owned(),
+                        "--testNamePattern".to_owned(),
+                        format!(
+                            "\"{}\"",
+                            TYPESCRIPT_JEST_TEST_NAME_VARIABLE.template_value()
+                        ),
+                        VariableName::File.template_value(),
+                    ],
+                ),
                 tags: vec![
                     "ts-test".to_owned(),
                     "js-test".to_owned(),
@@ -110,15 +123,15 @@ impl PackageJsonData {
         if self.vitest_package_path.is_some() {
             task_templates.0.push(TaskTemplate {
                 label: format!("{} file test", "vitest".to_owned()),
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
-                args: vec![
-                    "exec".to_owned(),
-                    "--".to_owned(),
-                    "vitest".to_owned(),
-                    "run".to_owned(),
-                    "--no-file-parallelism".to_owned(),
-                    VariableName::File.template_value(),
-                ],
+                command: package_manager.to_owned(),
+                args: self.exec_args(
+                    "vitest",
+                    vec![
+                        "run".to_owned(),
+                        "--no-file-parallelism".to_owned(),
+                        VariableName::File.template_value(),
+                    ],
+                ),
                 cwd: Some(TYPESCRIPT_VITEST_PACKAGE_PATH_VARIABLE.template_value()),
                 ..TaskTemplate::default()
             });
@@ -128,20 +141,20 @@ impl PackageJsonData {
                     "vitest".to_owned(),
                     VariableName::Symbol.template_value(),
                 ),
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
-                args: vec![
-                    "exec".to_owned(),
-                    "--".to_owned(),
-                    "vitest".to_owned(),
-                    "run".to_owned(),
-                    "--no-file-parallelism".to_owned(),
-                    "--testNamePattern".to_owned(),
-                    format!(
-                        "\"{}\"",
-                        TYPESCRIPT_VITEST_TEST_NAME_VARIABLE.template_value()
-                    ),
-                    VariableName::File.template_value(),
-                ],
+                command: package_manager.to_owned(),
+                args: self.exec_args(
+                    "vitest",
+                    vec![
+                        "run".to_owned(),
+                        "--no-file-parallelism".to_owned(),
+                        "--testNamePattern".to_owned(),
+                        format!(
+                            "\"{}\"",
+                            TYPESCRIPT_VITEST_TEST_NAME_VARIABLE.template_value()
+                        ),
+                        VariableName::File.template_value(),
+                    ],
+                ),
                 tags: vec![
                     "ts-test".to_owned(),
                     "js-test".to_owned(),
@@ -155,13 +168,8 @@ impl PackageJsonData {
         if self.mocha_package_path.is_some() {
             task_templates.0.push(TaskTemplate {
                 label: format!("{} file test", "mocha".to_owned()),
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
-                args: vec![
-                    "exec".to_owned(),
-                    "--".to_owned(),
-                    "mocha".to_owned(),
-                    VariableName::File.template_value(),
-                ],
+                command: package_manager.to_owned(),
+                args: self.exec_args("mocha", vec![VariableName::File.template_value()]),
                 cwd: Some(TYPESCRIPT_MOCHA_PACKAGE_PATH_VARIABLE.template_value()),
                 ..TaskTemplate::default()
             });
@@ -171,15 +179,15 @@ impl PackageJsonData {
                     "mocha".to_owned(),
                     VariableName::Symbol.template_value(),
                 ),
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
-                args: vec![
-                    "exec".to_owned(),
-                    "--".to_owned(),
-                    "mocha".to_owned(),
-                    "--grep".to_owned(),
-                    format!("\"{}\"", VariableName::Symbol.template_value()),
-                    VariableName::File.template_value(),
-                ],
+                command: package_manager.to_owned(),
+                args: self.exec_args(
+                    "mocha",
+                    vec![
+                        "--grep".to_owned(),
+                        format!("\"{}\"", VariableName::Symbol.template_value()),
+                        VariableName::File.template_value(),
+                    ],
+                ),
                 tags: vec![
                     "ts-test".to_owned(),
                     "js-test".to_owned(),
@@ -193,13 +201,8 @@ impl PackageJsonData {
         if self.jasmine_package_path.is_some() {
             task_templates.0.push(TaskTemplate {
                 label: format!("{} file test", "jasmine".to_owned()),
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
-                args: vec![
-                    "exec".to_owned(),
-                    "--".to_owned(),
-                    "jasmine".to_owned(),
-                    VariableName::File.template_value(),
-                ],
+                command: package_manager.to_owned(),
+                args: self.exec_args("jasmine", vec![VariableName::File.template_value()]),
                 cwd: Some(TYPESCRIPT_JASMINE_PACKAGE_PATH_VARIABLE.template_value()),
                 ..TaskTemplate::default()
             });
@@ -209,14 +212,14 @@ impl PackageJsonData {
                     "jasmine".to_owned(),
                     VariableName::Symbol.template_value(),
                 ),
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
-                args: vec![
-                    "exec".to_owned(),
-                    "--".to_owned(),
-                    "jasmine".to_owned(),
-                    format!("--filter={}", VariableName::Symbol.template_value()),
-                    VariableName::File.template_value(),
-                ],
+                command: package_manager.to_owned(),
+                args: self.exec_args(
+                    "jasmine",
+                    vec![
+                        format!("--filter={}", VariableName::Symbol.template_value()),
+                        VariableName::File.template_value(),
+                    ],
+                ),
                 tags: vec![
                     "ts-test".to_owned(),
                     "js-test".to_owned(),
@@ -227,12 +230,15 @@ impl PackageJsonData {
             });
         }
 
-        if self.bun_package_path.is_some() {
+        if self.bun_package_path.is_some() || self.is_bun() {
             task_templates.0.push(TaskTemplate {
                 label: format!("{} file test", "bun test".to_owned()),
                 command: "bun".to_owned(),
                 args: vec!["test".to_owned(), VariableName::File.template_value()],
-                cwd: Some(TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE.template_value()),
+                cwd: self
+                    .bun_package_path
+                    .is_some()
+                    .then(|| TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE.template_value()),
                 ..TaskTemplate::default()
             });
             task_templates.0.push(TaskTemplate {
@@ -249,12 +255,15 @@ impl PackageJsonData {
                     "js-test".to_owned(),
                     "tsx-test".to_owned(),
                 ],
-                cwd: Some(TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE.template_value()),
+                cwd: self
+                    .bun_package_path
+                    .is_some()
+                    .then(|| TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE.template_value()),
                 ..TaskTemplate::default()
             });
         }
 
-        if self.node_package_path.is_some() {
+        if self.node_package_path.is_some() && !self.is_bun() {
             task_templates.0.push(TaskTemplate {
                 label: format!("{} file test", "node test".to_owned()),
                 command: "node".to_owned(),
@@ -304,7 +313,7 @@ impl PackageJsonData {
             };
             task_templates.0.push(TaskTemplate {
                 label,
-                command: TYPESCRIPT_RUNNER_VARIABLE.template_value(),
+                command: package_manager.to_owned(),
                 args: vec!["run".to_owned(), script.to_owned()],
                 tags: vec!["package-script".into()],
                 cwd: Some(
@@ -334,11 +343,14 @@ impl TypeScriptContextProvider {
         file_relative_path: &RelPath,
         cx: &App,
     ) -> Task<anyhow::Result<PackageJsonData>> {
-        let new_json_data = file_relative_path
+        let directories = file_relative_path
             .ancestors()
             .map(|path| worktree_root.join(path.as_std_path()))
+            .collect::<Vec<_>>();
+        let new_json_data = directories
+            .iter()
             .map(|parent_path| {
-                self.package_json_data(&parent_path, self.last_package_json.clone(), fs.clone(), cx)
+                self.package_json_data(parent_path, self.last_package_json.clone(), fs.clone(), cx)
             })
             .collect::<Vec<_>>();
 
@@ -346,6 +358,13 @@ impl TypeScriptContextProvider {
             let mut package_json_data = PackageJsonData::default();
             for new_data in join_all(new_json_data).await.into_iter().flatten() {
                 package_json_data.merge(new_data);
+            }
+            for directory in &directories {
+                for (file_name, manager) in LOCKFILES {
+                    if fs.is_file(&directory.join(file_name)).await {
+                        package_json_data.lockfiles.push(manager);
+                    }
+                }
             }
             Ok(package_json_data)
         })
@@ -404,25 +423,6 @@ impl TypeScriptContextProvider {
     }
 }
 
-async fn detect_package_manager(
-    worktree_root: PathBuf,
-    fs: Arc<dyn Fs>,
-    package_json_data: Option<PackageJsonData>,
-) -> &'static str {
-    if let Some(package_json_data) = package_json_data
-        && let Some(package_manager) = package_json_data.package_manager
-    {
-        return package_manager;
-    }
-    if fs.is_file(&worktree_root.join("pnpm-lock.yaml")).await {
-        return "pnpm";
-    }
-    if fs.is_file(&worktree_root.join("yarn.lock")).await {
-        return "yarn";
-    }
-    "npm"
-}
-
 impl ContextProvider for TypeScriptContextProvider {
     fn associated_tasks(
         &self,
@@ -445,13 +445,17 @@ impl ContextProvider for TypeScriptContextProvider {
         );
 
         cx.background_spawn(async move {
+            let package_json_data = package_json_data.await;
+            let is_bun = package_json_data
+                .as_ref()
+                .is_ok_and(PackageJsonData::is_bun);
             let mut task_templates = TaskTemplates(Vec::new());
             task_templates.0.push(TaskTemplate {
                 label: format!(
                     "execute selection {}",
                     VariableName::SelectedText.template_value()
                 ),
-                command: "node".to_owned(),
+                command: if is_bun { "bun" } else { "node" }.to_owned(),
                 args: vec![
                     "-e".to_owned(),
                     format!("\"{}\"", VariableName::SelectedText.template_value()),
@@ -459,7 +463,7 @@ impl ContextProvider for TypeScriptContextProvider {
                 ..TaskTemplate::default()
             });
 
-            match package_json_data.await {
+            match package_json_data {
                 Ok(package_json) => {
                     package_json.fill_task_templates(&mut task_templates);
                 }
@@ -507,20 +511,17 @@ impl ContextProvider for TypeScriptContextProvider {
 
         let args = location.worktree_root.zip(location.fs).zip(file_path).map(
             |((worktree_root, fs), file_path)| {
-                (
-                    self.combined_package_json_data(fs.clone(), &worktree_root, file_path, cx),
-                    worktree_root,
-                    fs,
-                )
+                self.combined_package_json_data(fs, &worktree_root, file_path, cx)
             },
         );
         cx.background_spawn(async move {
-            if let Some((task, worktree_root, fs)) = args {
+            if let Some(task) = args {
                 let package_json_data = task.await.log_err();
                 vars.insert(
                     TYPESCRIPT_RUNNER_VARIABLE,
-                    detect_package_manager(worktree_root, fs, package_json_data.clone())
-                        .await
+                    package_json_data
+                        .as_ref()
+                        .map_or("npm", PackageJsonData::resolved_package_manager)
                         .to_owned(),
                 );
 
@@ -1507,6 +1508,7 @@ mod tests {
                 .into_iter()
                 .collect(),
                 package_manager: None,
+                lockfiles: Vec::new(),
             }
         );
 
@@ -1684,5 +1686,175 @@ mod tests {
             bun_test_index.unwrap() < node_test_index.unwrap(),
             "Bun should come before Node"
         );
+    }
+
+    async fn templates_for(
+        cx: &mut TestAppContext,
+        executor: BackgroundExecutor,
+        tree: serde_json::Value,
+        file: &str,
+    ) -> (PackageJsonData, Vec<task::TaskTemplate>) {
+        cx.update(|cx| {
+            settings::init(cx);
+        });
+        let fs = FakeFs::new(executor);
+        fs.insert_tree(path!("/root"), tree).await;
+        let provider = TypeScriptContextProvider::new(fs.clone());
+        let data = cx
+            .update(|cx| {
+                provider.combined_package_json_data(
+                    fs.clone(),
+                    path!("/root").as_ref(),
+                    rel_path(file),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let mut templates = TaskTemplates::default();
+        data.fill_task_templates(&mut templates);
+        (data, templates.0)
+    }
+
+    fn manifest(extra: serde_json::Value) -> String {
+        let mut value = json!({
+            "name": "fixture",
+            "scripts": { "build": "tsc" },
+            "devDependencies": { "jest": "29.0.0", "vitest": "1.0.0", "@types/node": "20.0.0" },
+        });
+        for (key, extra_value) in extra.as_object().unwrap() {
+            value[key] = extra_value.clone();
+        }
+        value.to_string()
+    }
+
+    #[gpui::test]
+    async fn test_package_manager_from_lockfile(
+        executor: BackgroundExecutor,
+        cx: &mut TestAppContext,
+    ) {
+        let cases = [
+            ("bun.lock", "bun"),
+            ("bun.lockb", "bun"),
+            ("pnpm-lock.yaml", "pnpm"),
+            ("yarn.lock", "yarn"),
+            ("package-lock.json", "npm"),
+        ];
+        for (lockfile, expected) in cases {
+            let tree = json!({ "package.json": manifest(json!({})), lockfile: "", "a.js": "" });
+            let (data, _) = templates_for(cx, executor.clone(), tree, "a.js").await;
+            assert_eq!(data.resolved_package_manager(), expected, "{lockfile}");
+        }
+        let tree = json!({ "package.json": manifest(json!({})), "a.js": "" });
+        let (data, _) = templates_for(cx, executor, tree, "a.js").await;
+        assert_eq!(data.resolved_package_manager(), "npm");
+    }
+
+    #[gpui::test]
+    async fn test_package_manager_field_beats_lockfile(
+        executor: BackgroundExecutor,
+        cx: &mut TestAppContext,
+    ) {
+        let tree = json!({
+            "package.json": manifest(json!({ "packageManager": "pnpm@9.0.0" })),
+            "yarn.lock": "",
+            "a.js": "",
+        });
+        let (data, templates) = templates_for(cx, executor, tree, "a.js").await;
+        assert_eq!(data.resolved_package_manager(), "pnpm");
+        assert!(templates.iter().all(|t| t.command != "yarn"));
+    }
+
+    #[gpui::test]
+    async fn test_root_lockfile_applies_to_nested_package(
+        executor: BackgroundExecutor,
+        cx: &mut TestAppContext,
+    ) {
+        let tree = json!({
+            "pnpm-lock.yaml": "",
+            "packages": { "app": { "package.json": manifest(json!({})), "a.js": "" } },
+        });
+        let (data, templates) = templates_for(cx, executor, tree, "packages/app/a.js").await;
+        assert_eq!(data.resolved_package_manager(), "pnpm");
+        let script = templates
+            .iter()
+            .find(|t| t.tags.contains(&"package-script".into()))
+            .unwrap();
+        assert_eq!(
+            (script.command.as_str(), script.args.clone()),
+            ("pnpm", vec!["run".to_owned(), "build".to_owned()])
+        );
+    }
+
+    #[gpui::test]
+    async fn test_templates_use_the_project_package_manager(
+        executor: BackgroundExecutor,
+        cx: &mut TestAppContext,
+    ) {
+        for (lockfile, manager) in [
+            ("package-lock.json", "npm"),
+            ("pnpm-lock.yaml", "pnpm"),
+            ("yarn.lock", "yarn"),
+        ] {
+            let tree = json!({ "package.json": manifest(json!({})), lockfile: "", "a.js": "" });
+            let (_, templates) = templates_for(cx, executor.clone(), tree, "a.js").await;
+            for runner in ["jest", "vitest"] {
+                let template = templates
+                    .iter()
+                    .find(|t| t.label == format!("{runner} file test"))
+                    .unwrap();
+                assert_eq!(template.command, manager);
+                assert_eq!(template.args[..3], ["exec", "--", runner]);
+            }
+            let script = templates
+                .iter()
+                .find(|t| t.label == "package.json > build")
+                .unwrap();
+            assert_eq!(script.command, manager);
+            assert_eq!(script.args, ["run", "build"]);
+        }
+    }
+
+    #[gpui::test]
+    async fn test_bun_project_never_uses_npm_or_node(
+        executor: BackgroundExecutor,
+        cx: &mut TestAppContext,
+    ) {
+        for lockfile in ["bun.lock", "bun.lockb"] {
+            let tree = json!({ "package.json": manifest(json!({})), lockfile: "", "a.js": "" });
+            let (data, templates) = templates_for(cx, executor.clone(), tree, "a.js").await;
+            assert!(data.bun_package_path.is_none());
+            assert!(data.is_bun());
+            for runner in ["jest", "vitest"] {
+                let template = templates
+                    .iter()
+                    .find(|t| t.label == format!("{runner} file test"))
+                    .unwrap();
+                assert_eq!(template.command, "bun");
+                assert_eq!(template.args[..2], ["x", runner]);
+            }
+            let script = templates
+                .iter()
+                .find(|t| t.label == "package.json > build")
+                .unwrap();
+            assert_eq!(
+                (script.command.as_str(), script.args.clone()),
+                ("bun", vec!["run".to_owned(), "build".to_owned()])
+            );
+            assert!(
+                templates.iter().any(|t| t.label == "bun test file test"
+                    && t.command == "bun"
+                    && t.args[0] == "test"),
+                "bun test is offered without @types/bun"
+            );
+            for template in &templates {
+                assert!(
+                    !["npm", "npx", "node"].contains(&template.command.as_str()),
+                    "{} starts with {}",
+                    template.label,
+                    template.command
+                );
+            }
+        }
     }
 }
