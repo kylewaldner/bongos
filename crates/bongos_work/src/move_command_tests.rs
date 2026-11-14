@@ -385,7 +385,7 @@ fn a_move_left_in_flight_is_resumed_once_both_projects_are_open() {
         std::slice::from_ref(&move_id)
     );
     // With only the source open the move waits.
-    assert!(block_on(resume_moves(&[source.repo.clone()], now())).is_empty());
+    assert!(block_on(resume_moves(std::slice::from_ref(&source.repo), now())).is_empty());
     let outcomes = block_on(resume_moves(&[source.repo.clone(), target.repo], now()));
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].0, move_id);
