@@ -2479,7 +2479,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let destination = dir.path().join("rust-analyzer-2026-01-01");
             let archive = gzip(b"binary");
-            let client = client(archive.clone(), None);
+            let client = client(archive, None);
             for wrong in [Some(digest(b"other")), None] {
                 let result = smol::block_on(download_gz_server(
                     &*client,
