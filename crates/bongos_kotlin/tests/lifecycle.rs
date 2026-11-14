@@ -1,6 +1,7 @@
 //! The Kotlin lifecycle with a real project and the fake server as a real process. The project is
 //! on the real file system, the server binary comes from `lsp.kotlin.binary.path`, and the manager
 //! restarts it through the project's `LspStore`.
+//! The fake server is a stand-in for the real language server and never talks to the network.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)]
 
