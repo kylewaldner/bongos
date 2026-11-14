@@ -3,6 +3,8 @@
 //! `definitions/` (or is `.gitattributes`), in a known file or folder, and the definitions parse;
 //! [`landing_declaration_problems`] adds the project's `[[landing.checks]]` entries.
 
+mod amendment;
+mod amendment_split;
 mod declared;
 mod live;
 mod no_cycle;
@@ -13,6 +15,7 @@ mod secrets;
 mod size_and_kind;
 mod started;
 
+pub use amendment::{AmendmentInput, OUT_OF_BOUNDS, amendment_bounds, bound_amendment, split_goal};
 pub use declared::{
     APPROVAL_CHECK, CANNOT_DISABLE, NO_CYCLE_CHECK, NO_STATE_CHECK, REFERENCES_CHECK,
     SECRETS_CHECK, SIZE_AND_KIND_CHECK, STARTED_UNCHANGED_CHECK, landing_declaration_problems,
@@ -30,6 +33,8 @@ pub use started::{
     MOVE_MARKER, StagedTodoMove, StartedInput, started_unchanged, strip_move_meta, strip_move_text,
 };
 
+#[cfg(test)]
+mod amendment_tests;
 #[cfg(test)]
 mod declared_tests;
 #[cfg(test)]
