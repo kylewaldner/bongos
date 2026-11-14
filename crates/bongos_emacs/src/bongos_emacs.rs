@@ -10,6 +10,7 @@ mod global_mark;
 mod goto_line;
 mod jumps;
 mod kill;
+pub mod kill_ring_store;
 pub mod kill_ring_sink;
 pub mod kill_sink;
 pub mod last_command;
@@ -41,6 +42,8 @@ mod goto_line_tests;
 mod jumps_tests;
 #[cfg(test)]
 mod kill_ring_sink_tests;
+#[cfg(test)]
+mod kill_ring_store_tests;
 #[cfg(test)]
 mod kill_sink_tests;
 #[cfg(test)]
@@ -80,6 +83,7 @@ pub use last_command::last_command;
 /// tracker. Actions without a handler stay undispatchable, so only working commands reach M-x.
 pub fn init(cx: &mut App) {
     last_command::init(cx);
+    kill_ring_store::init(cx);
     kill_ring_sink::init(cx);
     quit::init(cx);
     cursor::init(cx);

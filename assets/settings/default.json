@@ -32,7 +32,10 @@
     "cursor_style": "auto",
     // Whether typing over an active region replaces the selected text. While false and
     // `base_keymap` is "Emacs", typing inserts at point and keeps the selected text.
-    "delete_selection": false
+    "delete_selection": false,
+    // Whether the kill ring is saved and restored at launch. Text marked secret and entries
+    // larger than 1 MiB are never saved. Turning it off deletes the saved ring.
+    "save_kill_ring": true
   },
   // The name of a font to use for rendering text in the editor
   // ".ZedMono" currently aliases to Lilex

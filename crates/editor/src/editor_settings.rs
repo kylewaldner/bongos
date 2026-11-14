@@ -22,6 +22,9 @@ pub struct EditorSettings {
     /// Whether typing over a non-empty selection replaces it; false under the Emacs base keymap
     /// unless `emacs.delete_selection` is set.
     pub typing_replaces_selection: bool,
+    /// Whether the kill ring is saved to the app database and restored at launch
+    /// (`emacs.save_kill_ring`).
+    pub save_kill_ring: bool,
     pub current_line_highlight: CurrentLineHighlight,
     pub selection_highlight: bool,
     pub rounded_selection: bool,
@@ -265,6 +268,11 @@ impl Settings for EditorSettings {
                     .as_ref()
                     .and_then(|emacs| emacs.delete_selection)
                     .unwrap_or(false),
+            save_kill_ring: content
+                .emacs
+                .as_ref()
+                .and_then(|emacs| emacs.save_kill_ring)
+                .unwrap_or(true),
             current_line_highlight: editor.current_line_highlight.unwrap(),
             selection_highlight: editor.selection_highlight.unwrap(),
             rounded_selection: editor.rounded_selection.unwrap(),
