@@ -20,6 +20,29 @@ use crate::{WorkStore, WriteError, WriteOutcome};
 /// The refusal of a change to definitions until landings exist.
 pub const LANDING_UNAVAILABLE: &str = "landing is not available yet";
 
+/// The project repositories open in this process, which the commands on working copies and the
+/// handling of master files serve.
+#[derive(Default)]
+struct OpenRepos(Vec<Arc<LoadedProject>>);
+
+impl gpui::Global for OpenRepos {}
+
+/// Every project repository registered with [`register_project_repo`].
+pub(crate) fn open_repos(cx: &App) -> Vec<Arc<LoadedProject>> {
+    cx.try_global::<OpenRepos>()
+        .map(|repos| repos.0.clone())
+        .unwrap_or_default()
+}
+
+/// Makes `loaded` known to the commands on working copies and to the handling of master files.
+pub(crate) fn note_open_repo(loaded: &Arc<LoadedProject>, cx: &mut App) {
+    let repos = cx.default_global::<OpenRepos>();
+    repos
+        .0
+        .retain(|known| known.repo().location().id != loaded.repo().location().id);
+    repos.0.push(loaded.clone());
+}
+
 fn seam_name(loaded: &LoadedProject) -> String {
     format!("project-repository:{}", loaded.repo().location().id)
 }
@@ -89,6 +112,7 @@ impl DefinitionWriter for RepoWriter {
 /// definitions again when the verified commit moved. The returned task does that until dropped.
 pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<()> {
     let name = seam_name(&loaded);
+    note_open_repo(&loaded, cx);
     let events = loaded
         .repo()
         .state()

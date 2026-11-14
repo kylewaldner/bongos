@@ -350,7 +350,7 @@ async fn old_format_projects_refuse_writes_once_project_repositories_are_enabled
 }
 
 /// A project repository with the top group `g1` and the leaf `l1`, its state store open.
-fn project_repo(folder: &Path) -> ProjectRepo {
+pub(crate) fn project_repo(folder: &Path) -> ProjectRepo {
     let location = Location {
         id: "project-1".to_string(),
         folder: folder.to_path_buf(),

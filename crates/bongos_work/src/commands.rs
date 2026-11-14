@@ -25,13 +25,14 @@ use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
 
 use crate::actions::{artifact, project, task, todo, work};
+use crate::master_files;
 use crate::modals::{self, Then};
 use crate::registry::LiveModesRegistry;
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
 use crate::{
     artifacts, filters, focus, links, modes, open, panel, projects, rebase, repositories,
-    structure, worktrees,
+    structure, working_copy_commands, worktrees,
 };
 
 /// The activity a task made with `task: new` goes under: it names no parent, and the Work view
@@ -85,6 +86,10 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::Unarchive>(),
         TypeId::of::<project::OpenFolder>(),
         TypeId::of::<project::Focus>(),
+        TypeId::of::<project::Edit>(),
+        TypeId::of::<project::OpenWorkingCopy>(),
+        TypeId::of::<project::Abandon>(),
+        TypeId::of::<project::OpenRepository>(),
         TypeId::of::<work::AddRepository>(),
         TypeId::of::<work::EditWorktreeRoot>(),
         TypeId::of::<task::SetDefaultVisibility>(),
@@ -158,6 +163,8 @@ pub fn register(workspace: &mut Workspace) {
     worktrees::register(workspace);
     rebase::register(workspace);
     focus::register(workspace);
+    working_copy_commands::register(workspace);
+    master_files::register(workspace);
     open::register(workspace);
     artifacts::register(workspace);
     modes::register(workspace);
@@ -193,6 +200,11 @@ pub fn ready(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<A
             None
         }
     }
+}
+
+/// The author of what the person at the keyboard of this window does.
+pub(crate) fn keyboard_author(window: &Window, cx: &App) -> bongos_work_model::Author {
+    WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx)).author
 }
 
 /// Queues `command` on the store's writer. `None`, after a toast, when there is no store.

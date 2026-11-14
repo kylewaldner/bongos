@@ -10,6 +10,7 @@ mod commands;
 mod filters;
 mod focus;
 mod links;
+mod master_files;
 mod modals;
 mod modes;
 mod open;
@@ -27,6 +28,7 @@ mod status;
 mod store;
 mod structure;
 mod view;
+mod working_copy_commands;
 mod worktrees;
 
 use std::path::{Path, PathBuf};
@@ -43,6 +45,7 @@ pub use changes::CHANGES_INTERVAL;
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
 pub use commands::{ready, set_new_task_todos, show_toast, with_task};
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, focus_task, is_project_top, target};
+pub use master_files::{MASTER_SUFFIX, MasterFile, master_file, master_file_at};
 pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
 pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root_tasks};
 pub use panel::{WorkPanel, init_panel, task_at_point};
@@ -105,6 +108,7 @@ impl Global for GlobalWorkStore {}
 pub fn init(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut App) {
     WorkSettings::register(cx);
     bongos_project_repo::init(cx);
+    master_files::init(cx);
     let store = cx.new(|cx| WorkStore::new(fs, dirs, cx));
     cx.set_global(GlobalWorkStore(store));
     focus::init(cx);
@@ -155,6 +159,8 @@ mod store_tests;
 mod structure_tests;
 #[cfg(test)]
 mod top_level_tests;
+#[cfg(test)]
+mod working_copy_tests;
 #[cfg(test)]
 mod worktree_root_tests;
 #[cfg(test)]

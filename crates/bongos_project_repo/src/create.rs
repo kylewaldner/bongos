@@ -201,6 +201,10 @@ impl ProjectRepo {
         git.init_repo(&repository, MAIN_BRANCH).await?;
         git.commit_all(&repository, FIRST_COMMIT_MESSAGE, &Identity::default())
             .await?;
+        crate::working_copies::protect_files(&repository).map_err(|source| CreateError::Io {
+            context: "making master read-only".to_string(),
+            source,
+        })?;
 
         let location = Location {
             id: project_id,

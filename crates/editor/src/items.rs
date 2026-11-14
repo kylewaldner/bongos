@@ -709,7 +709,10 @@ impl Item for Editor {
 
     fn tab_content_text(&self, detail: usize, cx: &App) -> SharedString {
         if let Some(path) = path_for_buffer(&self.buffer, detail, true, cx) {
-            path.to_string().into()
+            match &self.title_suffix {
+                Some(suffix) => format!("{path} {suffix}").into(),
+                None => path.to_string().into(),
+            }
         } else {
             // Use the same logic as the displayed title for consistency
             self.buffer.read(cx).title(cx).to_string().into()

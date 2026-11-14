@@ -13,6 +13,12 @@ pub struct ProjectRepositorySettings {
     /// Where new project folders go; `None` is `<data dir>/projects`.
     pub projects_dir: Option<PathBuf>,
     pub layout: LayoutTemplates,
+    /// The start of every working copy's branch name.
+    pub branch_prefix: String,
+    /// Whether a landed working copy stays instead of being removed.
+    pub keep_landed: bool,
+    /// Days of idleness after which a change is shown as stale.
+    pub stale_after_days: u32,
 }
 
 impl ProjectRepositorySettings {
@@ -42,6 +48,15 @@ impl Settings for ProjectRepositorySettings {
                 .projects_dir
                 .filter(|dir| !dir.trim().is_empty())
                 .map(PathBuf::from),
+            branch_prefix: settings
+                .branch_prefix
+                .expect("default.json defines `project_repository.branch_prefix`"),
+            keep_landed: settings
+                .keep_landed
+                .expect("default.json defines `project_repository.keep_landed`"),
+            stale_after_days: settings
+                .stale_after_days
+                .expect("default.json defines `project_repository.stale_after_days`"),
             layout: LayoutTemplates {
                 repository: templates
                     .repository
