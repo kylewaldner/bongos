@@ -312,4 +312,55 @@ impl Git {
         self.run(directory, &["rev-parse", "--verify", revision])
             .await
     }
+    /// Adds a worktree at `path` on the new branch `branch`, made from `commit`.
+    pub async fn worktree_add(
+        &self,
+        repository: &Path,
+        path: &Path,
+        branch: &str,
+        commit: &str,
+    ) -> Result<(), GitError> {
+        let args = vec![
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("-q"),
+            OsString::from("-b"),
+            OsString::from(branch),
+            path.as_os_str().to_owned(),
+            OsString::from(commit),
+        ];
+        self.run_os(repository, args).await?;
+        Ok(())
+    }
+
+    /// Removes the worktree at `path`, with whatever is uncommitted in it, and forgets worktrees
+    /// whose folder is gone.
+    pub async fn worktree_remove(&self, repository: &Path, path: &Path) -> Result<(), GitError> {
+        let args = vec![
+            OsString::from("worktree"),
+            OsString::from("remove"),
+            OsString::from("--force"),
+            path.as_os_str().to_owned(),
+        ];
+        let removed = self.run_os(repository, args).await;
+        self.run(repository, &["worktree", "prune"]).await?;
+        match removed {
+            Err(_) if !path.exists() => Ok(()),
+            other => other.map(|_| ()),
+        }
+    }
+
+    /// Whether the local branch `branch` exists.
+    pub async fn branch_exists(&self, repository: &Path, branch: &str) -> bool {
+        let reference = format!("refs/heads/{branch}");
+        self.run(repository, &["show-ref", "--verify", "--quiet", &reference])
+            .await
+            .is_ok()
+    }
+
+    /// Deletes the local branch `branch`, merged or not.
+    pub async fn branch_delete(&self, repository: &Path, branch: &str) -> Result<(), GitError> {
+        self.run(repository, &["branch", "-D", branch]).await?;
+        Ok(())
+    }
 }

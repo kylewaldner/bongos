@@ -1,6 +1,7 @@
 //! Project repositories: a project's definitions kept in a git repository, the per-machine
 //! record of where each one lives, the creation of a new one, and its live state store.
 
+mod changes;
 mod create;
 mod git;
 mod loader;
@@ -12,7 +13,9 @@ mod sink;
 mod state;
 mod state_hooks;
 mod state_ops;
+mod working_copies;
 
+pub use changes::{ChangeFilter, ChangeRow, ChangeState};
 pub use create::MAIN_BRANCH;
 pub use create::{CreateError, CreateRequest, LayoutTemplates, ProjectRepo};
 pub use git::{
@@ -30,6 +33,10 @@ pub use state::{
 };
 pub use state_hooks::{StateApplyChange, StateApplyHook, StateApplyHooks, TaskTouch};
 pub use state_ops::{SETTABLE_FIELDS, StateOp};
+pub use working_copies::{
+    AbandonRefused, LandingResult, WorkingCopy, clean_name, fresh_name, generated_name,
+    protect_files,
+};
 
 /// Registers the settings of project repositories.
 pub fn init(cx: &mut gpui::App) {
@@ -57,3 +64,5 @@ mod state_ops_tests;
 mod state_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod working_copies_tests;

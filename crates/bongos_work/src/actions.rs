@@ -137,6 +137,15 @@ pub mod project {
             OpenFolder,
             /// Picks a project and focuses its top group, like `task: focus`.
             Focus,
+            /// Asks for a name, makes a working copy of the project repository from the
+            /// verified commit and opens it in a new window.
+            Edit,
+            /// Picks an open working copy and opens it in a new window.
+            OpenWorkingCopy,
+            /// Picks an open working copy and, after asking, deletes it and its branch.
+            Abandon,
+            /// Opens the project repository's definitions, master, in a new window.
+            OpenRepository,
         ]
     );
 }

@@ -19,6 +19,7 @@ test-support = []
 anyhow.workspace = true
 bongos_minibuffer.workspace = true
 bongos_project_repo.workspace = true
+bongos_project_repo_model.workspace = true
 bongos_work_model = { workspace = true, features = ["gpui"] }
 chrono.workspace = true
 command_palette_hooks.workspace = true
@@ -28,6 +29,7 @@ fs.workspace = true
 futures.workspace = true
 git.workspace = true
 gpui.workspace = true
+language.workspace = true
 log.workspace = true
 menu.workspace = true
 parking_lot.workspace = true
@@ -50,7 +52,6 @@ db = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
-language.workspace = true
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

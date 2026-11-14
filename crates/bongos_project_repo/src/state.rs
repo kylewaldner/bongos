@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use sqlez::connection::Connection;
 
 use crate::Location;
+use crate::changes::{self, ChangeRow};
 use crate::state_hooks::{StateApplyChange, StateApplyHook, StateApplyHooks, TaskTouch};
 use crate::state_ops::{self, StateOp};
 
@@ -513,6 +514,16 @@ impl<'a> StateRead<'a> {
             .collect())
     }
 
+    /// The change with `change_id`.
+    pub fn change(&self, change_id: &str) -> Result<Option<ChangeRow>> {
+        changes::read_change(self.connection, change_id)
+    }
+
+    /// Every change, oldest first, whatever its state.
+    pub fn changes(&self) -> Result<Vec<ChangeRow>> {
+        changes::read_changes(self.connection)
+    }
+
     pub fn kv(&self, namespace: &str) -> KvRead<'_> {
         KvRead {
             connection: self.connection,
@@ -711,6 +722,18 @@ impl<'a> StateTx<'a> {
         ] {
             self.connection.exec_bound::<&str>(statement)?(id)?;
         }
+        Ok(())
+    }
+
+    pub fn change(&self, change_id: &str) -> Result<Option<ChangeRow>> {
+        changes::read_change(self.connection, change_id)
+    }
+
+    /// Inserts `row`, or replaces the row with its id.
+    pub fn set_change(&mut self, row: &ChangeRow) -> Result<()> {
+        self.only_kv_in_hook("a change")?;
+        changes::write_change(self.connection, row)?;
+        self.dirty = true;
         Ok(())
     }
 
