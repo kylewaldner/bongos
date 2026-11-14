@@ -880,9 +880,8 @@ impl LspInstaller for RustLspAdapter {
                 }
             }
 
-            let report = |done, total| {
-                delegate.report_download_progress(server_name.clone(), done, total)
-            };
+            let report =
+                |done, total| delegate.report_download_progress(server_name.clone(), done, total);
             match Self::GITHUB_ASSET_KIND {
                 AssetKind::Gz => {
                     // Nothing here sets the flag: a cancelled install drops this future, and
@@ -962,8 +961,9 @@ async fn download_gz_server(
     download_verified_file(http, url, expected_digest, &archive_path, progress, cancel).await?;
     let result = async {
         let archive = fs::File::open(&archive_path).await?;
-        let mut decoder =
-            async_compression::futures::bufread::GzipDecoder::new(futures::io::BufReader::new(archive));
+        let mut decoder = async_compression::futures::bufread::GzipDecoder::new(
+            futures::io::BufReader::new(archive),
+        );
         let mut file = fs::File::create(destination_path).await?;
         futures::io::copy(&mut decoder, &mut file).await?;
         anyhow::Ok(())
@@ -2371,7 +2371,10 @@ mod tests {
         let test = find("Test '");
         assert_eq!(test.tags, ["rust-test"]);
         assert_eq!(test.args[0], "test");
-        assert!(test.args.contains(&RUST_TEST_NAME_TASK_VARIABLE.template_value()));
+        assert!(
+            test.args
+                .contains(&RUST_TEST_NAME_TASK_VARIABLE.template_value())
+        );
         let labels = templates
             .iter()
             .map(|template| template.label.split(" (").next().unwrap().to_owned())
@@ -2386,7 +2389,9 @@ mod tests {
         let registry = Arc::new(language::LanguageRegistry::test(cx.executor()));
         bongos_languages::init(&registry);
         let available = registry
-            .language_for_file_path(Path::new("script/bongos/fixtures/languages/rust/Cargo.toml"))
+            .language_for_file_path(Path::new(
+                "script/bongos/fixtures/languages/rust/Cargo.toml",
+            ))
             .expect("a language for Cargo.toml");
         assert_eq!(available.name().as_ref(), "TOML");
     }
