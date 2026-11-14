@@ -1402,10 +1402,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("announce");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap();
+        let status =
+            smol::block_on(util::command::new_command("mkfifo").arg(&fifo).status()).unwrap();
         assert!(status.success());
         let npm = dir.path().join("npm");
         std::fs::write(
@@ -1420,17 +1418,14 @@ mod tests {
 
         let (started_tx, started_rx) = futures::channel::oneshot::channel();
         let (closed_tx, closed_rx) = mpsc::channel();
-        let reader = std::thread::spawn({
-            let fifo = fifo.clone();
-            move || {
-                let mut announce = std::io::BufReader::new(std::fs::File::open(fifo).unwrap());
-                let mut pid = String::new();
-                announce.read_line(&mut pid).unwrap();
-                started_tx.send(pid).ok();
-                let mut rest = Vec::new();
-                announce.read_to_end(&mut rest).ok();
-                closed_tx.send(()).ok();
-            }
+        let reader = std::thread::spawn(move || {
+            let mut announce = std::io::BufReader::new(std::fs::File::open(fifo).unwrap());
+            let mut pid = String::new();
+            announce.read_line(&mut pid).unwrap();
+            started_tx.send(pid).ok();
+            let mut rest = Vec::new();
+            announce.read_to_end(&mut rest).ok();
+            closed_tx.send(()).ok();
         });
 
         let runtime = SystemNodeRuntime {
