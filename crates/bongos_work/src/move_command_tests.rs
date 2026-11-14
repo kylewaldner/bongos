@@ -2,7 +2,6 @@
 //! a refusal that changes nothing, a confirmed move, a move into the one-offs project and the
 //! resume of an interrupted move. Real git and real SQLite, each project in its own `TempDir`.
 
-use std::process::Command;
 use std::sync::Arc;
 
 use bongos_project_repo::{
@@ -127,27 +126,18 @@ fn invoicing() -> Repo {
 impl Repo {
     /// The files committed on main, relative to `definitions/`.
     fn on_main(&self) -> Vec<String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo.location().repository)
-            .args(["ls-tree", "-r", "--name-only", MAIN_BRANCH])
-            .output()
-            .unwrap();
-        String::from_utf8(output.stdout)
-            .unwrap()
+        self.git(&["ls-tree", "-r", "--name-only", MAIN_BRANCH])
             .lines()
             .filter_map(|line| line.strip_prefix("definitions/").map(str::to_string))
             .collect()
     }
 
     fn main_commit(&self) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo.location().repository)
-            .args(["rev-parse", MAIN_BRANCH])
-            .output()
-            .unwrap();
-        String::from_utf8(output.stdout).unwrap()
+        self.git(&["rev-parse", MAIN_BRANCH])
+    }
+
+    fn git(&self, args: &[&str]) -> String {
+        block_on(self.repo.git().run(&self.repo.location().repository, args)).unwrap()
     }
 }
 
@@ -390,13 +380,13 @@ fn a_move_left_in_flight_is_resumed_once_both_projects_are_open() {
     .unwrap();
     let move_id = coordinator.move_id().to_string();
     drop(coordinator);
-    assert_eq!(source.repo.moves_in_flight().unwrap(), [move_id.clone()]);
+    assert_eq!(
+        source.repo.moves_in_flight().unwrap(),
+        std::slice::from_ref(&move_id)
+    );
     // With only the source open the move waits.
     assert!(block_on(resume_moves(&[source.repo.clone()], now())).is_empty());
-    let outcomes = block_on(resume_moves(
-        &[source.repo.clone(), target.repo.clone()],
-        now(),
-    ));
+    let outcomes = block_on(resume_moves(&[source.repo.clone(), target.repo], now()));
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].0, move_id);
     assert_eq!(outcomes[0].1.as_ref().unwrap(), &MoveOutcome::Moved);
