@@ -563,6 +563,7 @@ fn the_first_transaction_of_a_fresh_multibuffer_undoes_tests(cx: &mut TestAppCon
     let cx = &mut cx;
     let query = text_query("foo");
     let scope = whole(&editor, cx);
+    let original = text(&editor, cx);
     let mut edits = start(&editor, cx);
     let replacement = replace_next(&mut edits, &editor, &query, &scope, 0, "a", cx);
     assert_eq!(replacement.model_id(), 0);
@@ -570,7 +571,7 @@ fn the_first_transaction_of_a_fresh_multibuffer_undoes_tests(cx: &mut TestAppCon
         edits.undo(replacement.model_id(), editor, cx)
     });
     assert_eq!(undone, Ok(true));
-    assert!(!text(&editor, cx).contains('a'));
+    assert_eq!(text(&editor, cx), original);
 }
 
 #[gpui::test]
