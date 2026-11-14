@@ -263,7 +263,7 @@ fn last_message(repo: &ProjectRepo) -> String {
 fn seed_state(source: &ProjectRepo) {
     let mut record = task_with_todos(&[("t1", TodoState::Open)]);
     record.history = Vec::new();
-    set_state(source, "l1", record.clone());
+    set_state(source, "l1", record);
     let files = &source.location().files;
     std::fs::create_dir_all(files.join("l1")).unwrap();
     std::fs::write(files.join("l1/prompts.txt"), "prompt\n").unwrap();
@@ -860,7 +860,7 @@ fn a_crash_between_the_two_landings_resumes_to_completion() {
     let hooks = StateApplyHooks::new();
     let source = reopen(source, &hooks);
     let target = reopen(target, &hooks);
-    assert_eq!(source.moves_in_flight().unwrap(), [move_id.clone()]);
+    assert_eq!(source.moves_in_flight().unwrap(), std::slice::from_ref(&move_id));
     let coordinator = MoveCoordinator::resume(&source, &target, &move_id).unwrap();
     assert_eq!(coordinator.record().unwrap().phase, MovePhase::TargetLanded);
     assert_eq!(run(&coordinator), MoveOutcome::Moved);
