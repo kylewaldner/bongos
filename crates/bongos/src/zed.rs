@@ -186,7 +186,10 @@ actions!(
 /// ring entry, or the clipboard's text when another app wrote it. Secret text is skipped,
 /// because a search saves its string to a history on disk.
 pub fn install_isearch_kill_source(cx: &mut App) {
-    bongos_isearch::seams::set_kill_source(std::rc::Rc::new(editor::kill_ring::yank_text_unless_secret), cx);
+    bongos_isearch::seams::set_kill_source(
+        std::rc::Rc::new(editor::kill_ring::yank_text_unless_secret),
+        cx,
+    );
 }
 
 pub fn init(cx: &mut App) {
