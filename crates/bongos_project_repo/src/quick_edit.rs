@@ -472,7 +472,7 @@ impl ProjectRepo {
             let record = self.quick_edit_record(change_id)?;
             let subject = record.map(|record| record.subject).unwrap_or_default();
             anyhow::Ok(LandRequest {
-                meta: ChangeMeta::new(subject, row.author.clone()),
+                meta: ChangeMeta::new(subject, row.author),
                 mode: LandMode::Land,
             })
         })();

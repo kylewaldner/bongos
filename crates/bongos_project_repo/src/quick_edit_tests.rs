@@ -1112,7 +1112,7 @@ fn an_agent_chat_sent_by_a_peer_is_never_trusted_by_own_subtree() {
     let command = RepoCommand::Land {
         change_id: started.change_id.clone(),
         request: crate::LandRequest {
-            meta: ChangeMeta::new(String::new(), agent.clone()),
+            meta: ChangeMeta::new(String::new(), agent),
             mode: crate::LandMode::Land,
         },
         person: None,
@@ -1249,7 +1249,7 @@ fn a_revert_from_a_peer_that_fails_leaves_no_working_copy() {
     let rows_before = repo.read_state(|read| read.changes()).unwrap().len();
     let refs_before = crate::test_support::refs(&repo);
     let command = RepoCommand::Revert {
-        change_id: other.change_id.clone(),
+        change_id: other.change_id,
         author: keyboard().author,
         person: None,
     };
