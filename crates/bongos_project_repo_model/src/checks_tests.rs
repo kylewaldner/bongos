@@ -24,6 +24,14 @@ fn only_known_paths_pass_the_layout() {
 }
 
 #[test]
+fn a_registered_folder_passes_the_layout() {
+    let paths = ["definitions/checks/plan-format", "definitions/lanes/a.toml"];
+    let problems = layout_problems(paths, &["checks/".to_string()]);
+    let named: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
+    assert_eq!(named, ["lanes/a.toml"]);
+}
+
+#[test]
 fn the_schema_check_reports_unparsable_definitions() {
     let files = vec![
         (

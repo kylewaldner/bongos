@@ -52,7 +52,8 @@ pub const SCHEMA_CHECK: &str = "schema";
 
 /// The problems of the layout of a tree whose files are `paths` (relative to the repository
 /// root). `extra` lists more paths under `definitions/` that are allowed, such as the files an
-/// amending check writes.
+/// amending check writes; an entry ending in `/` allows a whole folder (a registered definition
+/// folder).
 pub fn layout_problems<'a>(
     paths: impl IntoIterator<Item = &'a str>,
     extra: &[String],
@@ -78,7 +79,10 @@ pub fn layout_problems<'a>(
                     || extra.iter().any(|allowed| allowed == relative)
             }
             Some((folder, _)) => {
-                is_known_folder(folder) || extra.iter().any(|allowed| allowed == relative)
+                is_known_folder(folder)
+                    || extra.iter().any(|allowed| {
+                        allowed == relative || allowed.strip_suffix('/') == Some(folder)
+                    })
             }
         };
         if !known {
