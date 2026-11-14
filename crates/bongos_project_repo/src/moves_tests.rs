@@ -860,7 +860,10 @@ fn a_crash_between_the_two_landings_resumes_to_completion() {
     let hooks = StateApplyHooks::new();
     let source = reopen(source, &hooks);
     let target = reopen(target, &hooks);
-    assert_eq!(source.moves_in_flight().unwrap(), std::slice::from_ref(&move_id));
+    assert_eq!(
+        source.moves_in_flight().unwrap(),
+        std::slice::from_ref(&move_id)
+    );
     let coordinator = MoveCoordinator::resume(&source, &target, &move_id).unwrap();
     assert_eq!(coordinator.record().unwrap().phase, MovePhase::TargetLanded);
     assert_eq!(run(&coordinator), MoveOutcome::Moved);
