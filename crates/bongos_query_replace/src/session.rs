@@ -422,26 +422,23 @@ fn start_count(state: &Shared, from: usize, window: &mut Window, cx: &mut App) {
         )
     };
     let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
-    let task = cx.background_spawn({
-        let cancel = cancel.clone();
-        async move {
-            let mut matches = 0;
-            engine::scan(
-                &snapshot,
-                &query,
-                MultiBufferOffset(from),
-                &scope,
-                &cancel,
-                None,
-                |chunk| {
-                    matches += chunk.len();
-                    if matches >= COUNT_CAP {
-                        cancel.cancel();
-                    }
-                },
-            );
-            matches
-        }
+    let task = cx.background_spawn(async move {
+        let mut matches = 0;
+        engine::scan(
+            &snapshot,
+            &query,
+            MultiBufferOffset(from),
+            &scope,
+            &cancel,
+            None,
+            |chunk| {
+                matches += chunk.len();
+                if matches >= COUNT_CAP {
+                    cancel.cancel();
+                }
+            },
+        );
+        matches
     });
     let state = state.clone();
     window
