@@ -488,6 +488,28 @@ async fn download_unless_cancelled<T>(
     }
 }
 
+/// Whether `binary`'s program and every absolute path among its arguments (an npm server's
+/// script, run by node) are on disk.
+fn binary_files_exist(binary: &LanguageServerBinary) -> bool {
+    binary.path.exists()
+        && binary.arguments.iter().all(|argument| {
+            let path = Path::new(argument);
+            !path.is_absolute() || path.exists()
+        })
+}
+
+/// The lock a download into `container_dir` holds while it runs.
+fn download_lock(container_dir: &Path) -> Arc<futures::lock::Mutex<()>> {
+    static LOCKS: LazyLock<std::sync::Mutex<HashMap<PathBuf, Arc<futures::lock::Mutex<()>>>>> =
+        LazyLock::new(Default::default);
+    LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(container_dir.to_path_buf())
+        .or_default()
+        .clone()
+}
+
 /// The names of the entries in `dir`.
 fn dir_entry_names(dir: &Path) -> HashSet<std::ffi::OsString> {
     std::fs::read_dir(dir)
@@ -802,6 +824,11 @@ where
     ) -> Result<LanguageServerBinary> {
         let name = self.name();
 
+        // Held until the download and its cleanup are done, so downloads into one directory
+        // run one at a time and none removes what another is writing. Taken before the cancel
+        // flag, so a cancel while this one waits stops the download that is running.
+        let download_lock = download_lock(&container_dir).lock_owned().await;
+
         // Asked for before the version check, so a cancel during the check stops the download.
         let cancel = delegate.download_cancel_flag(name.clone());
 
@@ -832,6 +859,8 @@ where
             let binary = cx
                 .background_executor()
                 .spawn(async move {
+                    // Declared first, so it is released after the cleanup below has run.
+                    let _download_lock = download_lock;
                     // Armed until the download succeeds, so a failure, a cancel, or dropping
                     // the start (a restart or stop while it downloads) all remove what it wrote,
                     // and the next start downloads again instead of finding a partial install.
@@ -888,10 +917,11 @@ where
             }
 
             // A cached binary an update has since removed (a GitHub download replaces the old
-            // version's directory) is looked up on disk again below.
+            // version's directory, a cancelled npm update removes its package) is looked up on
+            // disk again below.
             if let Some((pre_release, cached_binary)) = cached_binary_deref
                 && *pre_release == binary_options.pre_release
-                && cached_binary.path.exists()
+                && binary_files_exist(cached_binary)
             {
                 return (Ok(cached_binary.clone()), None);
             }

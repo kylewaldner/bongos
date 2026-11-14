@@ -392,36 +392,34 @@ impl NodeRuntime {
     }
 }
 
-/// The files `npm install` writes into the directory it installs into.
-const NPM_INSTALL_ENTRIES: [&str; 3] = ["node_modules", "package.json", "package-lock.json"];
-
 /// Runs `install`, an `npm install` of `packages` into `directory`, so that it never leaves a
-/// half-updated install behind.
+/// half-updated package behind.
 ///
 /// npm updates packages in place, so an install that stops partway over an existing one can
 /// leave a mix of old and new files that still looks installed. Copying the old install aside
 /// first would cost a full copy on every update, so instead an install that does not succeed
-/// is checked when it ends: dropped (npm is killed with it, by a cancel or a stopped start),
-/// it is removed, since a killed npm leaves no record of what it changed. Failed on its own, npm
-/// has rolled its changes back, so the old install is kept when every package was installed
-/// before and still has its old version, and removed otherwise. Either way the result is the
-/// intact old install or nothing, and the next start installs again.
+/// (failed, or dropped by a cancel or a stopped start, which kills npm) is checked when it ends:
+/// each of `packages` that is new, or whose installed version changed or can no longer be read,
+/// is removed, and the next start installs it again. A package npm had not touched yet, the
+/// other packages of `directory` (an extension's servers share it) and its `package.json` are
+/// left as they are, so a running server keeps its install.
 async fn install_removing_partial_updates<T>(
     directory: &Path,
     packages: &[&str],
     install: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    let mut guard = RemovePartialInstallOnDrop {
+    let mut guard = RemoveChangedPackagesOnDrop {
         directory,
-        versions_before: packages
+        packages_before: packages
             .iter()
-            .map(|name| (*name, installed_version_now(directory, name)))
+            .map(|name| {
+                let path = directory.join("node_modules").join(name);
+                (*name, path.exists(), installed_version_now(directory, name))
+            })
             .collect(),
-        npm_exited: false,
         armed: true,
     };
     let result = install.await;
-    guard.npm_exited = true;
     guard.armed = result.is_err();
     result
 }
@@ -440,41 +438,96 @@ fn installed_version_now(directory: &Path, name: &str) -> Option<Version> {
     Some(serde_json::from_str::<PackageJson>(&contents).ok()?.version)
 }
 
-struct RemovePartialInstallOnDrop<'a> {
+struct RemoveChangedPackagesOnDrop<'a> {
     directory: &'a Path,
-    versions_before: Vec<(&'a str, Option<Version>)>,
-    npm_exited: bool,
+    /// Each package's name, whether its directory existed and its version, before the install.
+    packages_before: Vec<(&'a str, bool, Option<Version>)>,
     armed: bool,
 }
 
-impl Drop for RemovePartialInstallOnDrop<'_> {
+impl Drop for RemoveChangedPackagesOnDrop<'_> {
     fn drop(&mut self) {
         if !self.armed {
             return;
         }
-        let old_install_intact = self.npm_exited
-            && self.versions_before.iter().all(|(name, before)| {
-                before.is_some() && *before == installed_version_now(self.directory, name)
-            });
-        if old_install_intact {
-            return;
-        }
-        log::info!(
-            "removing the unfinished npm install in {}",
-            self.directory.display()
-        );
-        for entry in NPM_INSTALL_ENTRIES {
-            let path = self.directory.join(entry);
-            let result = if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            if let Err(error) = result
+        for (name, existed, version_before) in &self.packages_before {
+            let path = self.directory.join("node_modules").join(name);
+            let untouched = *existed
+                && version_before.is_some()
+                && *version_before == installed_version_now(self.directory, name);
+            if untouched || !path.exists() {
+                continue;
+            }
+            log::info!("removing the unfinished npm install of {}", path.display());
+            if let Err(error) = std::fs::remove_dir_all(&path)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 log::warn!("removing the unfinished npm install {path:?}: {error}");
             }
+        }
+    }
+}
+
+/// Runs `npm_command` in `directory` to its end and returns its output. npm runs in a process
+/// group of its own, and dropping the run (a cancelled download) kills the whole group: npm and
+/// whatever it started, such as a package's install script.
+async fn run_npm_command(npm_command: NpmCommand, directory: Option<&Path>) -> Result<Output> {
+    let mut command = util::command::new_std_command(npm_command.path);
+    command.args(npm_command.args);
+    command.envs(npm_command.env);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    let child = util::process::Child::spawn(
+        command,
+        std::process::Stdio::null(),
+        std::process::Stdio::piped(),
+        std::process::Stdio::piped(),
+    )?;
+    let mut running = KillProcessGroupOnDrop {
+        child,
+        exited: false,
+    };
+    let mut stdout_pipe = running.child.stdout.take();
+    let mut stderr_pipe = running.child.stderr.take();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let (stdout_read, stderr_read, status) = futures::join!(
+        async {
+            match stdout_pipe.as_mut() {
+                Some(pipe) => pipe.read_to_end(&mut stdout).await.map(drop),
+                None => Ok(()),
+            }
+        },
+        async {
+            match stderr_pipe.as_mut() {
+                Some(pipe) => pipe.read_to_end(&mut stderr).await.map(drop),
+                None => Ok(()),
+            }
+        },
+        running.child.status(),
+    );
+    let status = status?;
+    running.exited = true;
+    stdout_read?;
+    stderr_read?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Kills the process group of `child` when dropped before it exited.
+struct KillProcessGroupOnDrop {
+    child: util::process::Child,
+    exited: bool,
+}
+
+impl Drop for KillProcessGroupOnDrop {
+    fn drop(&mut self) {
+        if !self.exited {
+            self.child.kill().log_err();
         }
     }
 }
@@ -816,15 +869,7 @@ impl NodeRuntimeTrait for ManagedNodeRuntime {
     ) -> Result<Output> {
         let attempt = || async {
             let npm_command = self.npm_command(directory, proxy, subcommand, args).await?;
-            let mut command = util::command::new_command(npm_command.path);
-            command.args(npm_command.args);
-            command.envs(npm_command.env);
-            // Dropping the install (a cancelled download) kills npm.
-            command.kill_on_drop(true);
-            if let Some(directory) = directory {
-                command.current_dir(directory);
-            }
-            command.output().await.map_err(|e| anyhow!("{e}"))
+            run_npm_command(npm_command, directory).await
         };
 
         let mut output = attempt().await;
@@ -983,15 +1028,7 @@ impl NodeRuntimeTrait for SystemNodeRuntime {
         args: &[&str],
     ) -> anyhow::Result<Output> {
         let npm_command = self.npm_command(directory, proxy, subcommand, args).await?;
-        let mut command = util::command::new_command(npm_command.path);
-        command.args(npm_command.args);
-        command.envs(npm_command.env);
-        // Dropping the install (a cancelled download) kills npm.
-        command.kill_on_drop(true);
-        if let Some(directory) = directory {
-            command.current_dir(directory);
-        }
-        let output = command.output().await?;
+        let output = run_npm_command(npm_command, directory).await?;
         anyhow::ensure!(
             output.status.success(),
             "failed to execute npm {subcommand} subcommand:\nstdout: {:?}\nstderr: {:?}",
@@ -1481,11 +1518,12 @@ mod tests {
         Ok(())
     }
 
-    /// A fake npm that announces its pid on a FIFO and then sleeps with the FIFO still open, so
-    /// the FIFO reaches end-of-file exactly when the sleeping process dies.
+    /// A fake npm that announces its pid on a FIFO, starts a child (as a package's install
+    /// script would) and then sleeps, both with the FIFO still open, so the FIFO reaches
+    /// end-of-file exactly when npm and its child have both died.
     #[cfg(unix)]
     #[test]
-    fn test_dropping_an_npm_install_kills_npm() {
+    fn test_dropping_an_npm_install_kills_npm_and_its_children() {
         use super::{NodeRuntimeTrait, SystemNodeRuntime};
         use std::io::{BufRead, Read};
         use std::os::unix::fs::PermissionsExt;
@@ -1501,7 +1539,7 @@ mod tests {
         std::fs::write(
             &npm,
             format!(
-                "#!/bin/sh\nexec 3>'{}'\necho $$ >&3\nexec sleep 60\n",
+                "#!/bin/sh\nexec 3>'{}'\nsleep 60 &\necho $$ >&3\nexec sleep 60\n",
                 fifo.display()
             ),
         )
@@ -1538,53 +1576,95 @@ mod tests {
 
         closed_rx
             .recv_timeout(Duration::from_secs(30))
-            .expect("npm kept running after its install was dropped");
+            .expect("npm or its child kept running after the install was dropped");
         reader.join().unwrap();
     }
 
-    /// An installed `pkg` 1.0.0 in a temporary directory, the way an npm install leaves it.
+    /// An installed `pkg` 1.0.0 beside a sibling package `other`, in a temporary directory,
+    /// the way an npm install leaves them.
     fn existing_install() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        write_package_version(dir.path(), "1.0.0");
+        write_package_version(dir.path(), "pkg", "1.0.0");
+        write_package_version(dir.path(), "other", "3.0.0");
         std::fs::write(dir.path().join("package.json"), "{}").unwrap();
         std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
         dir
     }
 
-    fn write_package_version(directory: &Path, version: &str) {
-        let package = directory.join("node_modules").join("pkg");
+    fn write_package_version(directory: &Path, name: &str, version: &str) {
+        let package = directory.join("node_modules").join(name);
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join("package.json"),
-            format!(r#"{{"name": "pkg", "version": "{version}"}}"#),
+            format!(r#"{{"name": "{name}", "version": "{version}"}}"#),
         )
         .unwrap();
+        std::fs::write(package.join("index.js"), "").unwrap();
     }
 
-    fn installed(directory: &Path) -> Option<Version> {
-        super::installed_version_now(directory, "pkg")
+    fn installed(directory: &Path, name: &str) -> Option<Version> {
+        super::installed_version_now(directory, name)
     }
 
-    fn assert_removed(directory: &Path) {
-        for entry in super::NPM_INSTALL_ENTRIES {
-            assert!(
-                !directory.join(entry).exists(),
-                "{entry} is left from the half-updated install"
-            );
-        }
+    /// The old `pkg` is gone, and everything else is as it was.
+    fn assert_only_pkg_removed(directory: &Path) {
+        assert!(!directory.join("node_modules").join("pkg").exists());
+        assert_rest_intact(directory);
+    }
+
+    fn assert_rest_intact(directory: &Path) {
+        assert_eq!(installed(directory, "other"), Some(Version::new(3, 0, 0)));
+        assert!(directory.join("package.json").exists());
+        assert!(directory.join("package-lock.json").exists());
+    }
+
+    /// Runs `install` over `directory` until it first waits, then drops it, the way a cancel
+    /// drops a running update.
+    fn drop_mid_install(directory: &Path, packages: &[&str], install: impl Fn()) {
+        let update = super::install_removing_partial_updates(directory, packages, async {
+            install();
+            futures::future::pending::<Result<()>>().await
+        });
+        assert!(futures::FutureExt::now_or_never(update).is_none());
     }
 
     #[test]
-    fn test_a_dropped_update_removes_the_half_updated_install() {
+    fn test_an_update_dropped_before_npm_wrote_anything_keeps_the_old_install() {
         let dir = existing_install();
-        let update = super::install_removing_partial_updates(dir.path(), &["pkg"], async {
-            write_package_version(dir.path(), "2.0.0");
-            std::fs::write(dir.path().join("node_modules").join("half-written.js"), "").unwrap();
-            futures::future::pending::<Result<()>>().await
+        drop_mid_install(dir.path(), &["pkg"], || {});
+        assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(1, 0, 0)));
+        assert!(dir.path().join("node_modules/pkg/index.js").exists());
+        assert_rest_intact(dir.path());
+    }
+
+    #[test]
+    fn test_a_dropped_update_removes_only_the_half_updated_package() {
+        let dir = existing_install();
+        drop_mid_install(dir.path(), &["pkg"], || {
+            write_package_version(dir.path(), "pkg", "2.0.0");
         });
-        // Polled once, then dropped mid-install the way a cancel drops it.
-        assert!(futures::FutureExt::now_or_never(update).is_none());
-        assert_removed(dir.path());
+        assert_only_pkg_removed(dir.path());
+    }
+
+    #[test]
+    fn test_a_dropped_update_removes_a_package_whose_version_became_unreadable() {
+        let dir = existing_install();
+        drop_mid_install(dir.path(), &["pkg"], || {
+            std::fs::remove_file(dir.path().join("node_modules/pkg/package.json")).unwrap();
+        });
+        assert_only_pkg_removed(dir.path());
+    }
+
+    #[test]
+    fn test_a_dropped_first_install_removes_the_new_package_only() {
+        let dir = existing_install();
+        drop_mid_install(dir.path(), &["new-pkg"], || {
+            std::fs::create_dir_all(dir.path().join("node_modules/new-pkg")).unwrap();
+            std::fs::write(dir.path().join("node_modules/new-pkg/half.js"), "").unwrap();
+        });
+        assert!(!dir.path().join("node_modules/new-pkg").exists());
+        assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(1, 0, 0)));
+        assert_rest_intact(dir.path());
     }
 
     #[test]
@@ -1596,23 +1676,23 @@ mod tests {
             async { Err::<(), _>(anyhow::anyhow!("network is unreachable")) },
         ));
         assert!(result.is_err());
-        assert_eq!(installed(dir.path()), Some(Version::new(1, 0, 0)));
-        assert!(dir.path().join("package-lock.json").exists());
+        assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(1, 0, 0)));
+        assert_rest_intact(dir.path());
     }
 
     #[test]
-    fn test_a_failed_update_that_changed_the_install_removes_it() {
+    fn test_a_failed_update_that_changed_the_package_removes_only_it() {
         let dir = existing_install();
         let result = smol::block_on(super::install_removing_partial_updates(
             dir.path(),
             &["pkg"],
             async {
-                write_package_version(dir.path(), "2.0.0");
+                write_package_version(dir.path(), "pkg", "2.0.0");
                 Err::<(), _>(anyhow::anyhow!("npm failed"))
             },
         ));
         assert!(result.is_err());
-        assert_removed(dir.path());
+        assert_only_pkg_removed(dir.path());
     }
 
     #[test]
@@ -1622,11 +1702,12 @@ mod tests {
             dir.path(),
             &["pkg"],
             async {
-                write_package_version(dir.path(), "2.0.0");
+                write_package_version(dir.path(), "pkg", "2.0.0");
                 Ok(())
             },
         ))
         .unwrap();
-        assert_eq!(installed(dir.path()), Some(Version::new(2, 0, 0)));
+        assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(2, 0, 0)));
+        assert_rest_intact(dir.path());
     }
 }

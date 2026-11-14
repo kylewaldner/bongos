@@ -409,3 +409,116 @@ async fn test_a_second_start_does_not_wait_for_the_first_ones_update_check(
     assert_eq!(binary.path, cached.join("server"));
     assert_eq!(installer.downloads(), 0);
 }
+
+/// A cached npm-style binary: the program exists, and its script is the argument `script`.
+fn cache_holding_script(program: &Path, script: &Path) -> BinaryCache {
+    Arc::new(futures::lock::Mutex::new(Some((
+        false,
+        LanguageServerBinary {
+            path: program.to_path_buf(),
+            arguments: vec![script.into(), "--stdio".into()],
+            env: None,
+        },
+    ))))
+}
+
+#[gpui::test]
+async fn test_a_cached_binary_whose_script_was_removed_is_looked_up_on_disk_again(
+    cx: &mut TestAppContext,
+) {
+    let container = tempfile::tempdir().unwrap();
+    let on_disk = container.path().join("1.0");
+    std::fs::create_dir(&on_disk).unwrap();
+    std::fs::write(on_disk.join("server"), "").unwrap();
+    let program = container.path().join("node");
+    std::fs::write(&program, "").unwrap();
+    let removed_script = container.path().join("removed").join("server.js");
+    let http = FakeHttpClient::create(|_| futures::future::pending());
+    let delegate = TestDelegate::new(container.path(), http);
+    let installer = Arc::new(TestInstaller::default());
+
+    let cache = cache_holding_script(&program, &removed_script);
+    let binary = start_with_cache(&installer, &delegate, &cache, cx)
+        .await
+        .unwrap();
+    assert_eq!(binary.path, on_disk.join("server"));
+    assert_eq!(
+        cache.lock().await.as_ref().unwrap().1.path,
+        on_disk.join("server")
+    );
+}
+
+#[gpui::test]
+async fn test_a_cached_binary_whose_script_exists_is_used(cx: &mut TestAppContext) {
+    let container = tempfile::tempdir().unwrap();
+    let program = container.path().join("node");
+    std::fs::write(&program, "").unwrap();
+    let script = container.path().join("server.js");
+    std::fs::write(&script, "").unwrap();
+    let http = FakeHttpClient::create(|_| futures::future::pending());
+    let delegate = TestDelegate::new(container.path(), http);
+    let installer = Arc::new(TestInstaller::default());
+
+    let cache = cache_holding_script(&program, &script);
+    let binary = start_with_cache(&installer, &delegate, &cache, cx)
+        .await
+        .unwrap();
+    assert_eq!(binary.path, program);
+    assert_eq!(
+        binary.arguments.first(),
+        Some(&script.clone().into_os_string())
+    );
+    // A cache hit asks nothing of the network.
+    assert_eq!(delegate.last_status(), None);
+}
+
+#[gpui::test]
+async fn test_downloads_into_one_directory_run_one_at_a_time(cx: &mut TestAppContext) {
+    let container = tempfile::tempdir().unwrap();
+    let cached = container.path().join("0.9");
+    std::fs::create_dir(&cached).unwrap();
+    std::fs::write(cached.join("server"), "").unwrap();
+    let delegate = TestDelegate::new(container.path(), answers("1.0"));
+    let installer = Arc::new(TestInstaller::default());
+    installer.hang.store(true, Ordering::SeqCst);
+
+    // Two starts that do not share a cache (an extension's sibling servers share a directory):
+    // both run the cached server at once and update it beside it.
+    let first = start(&installer, &delegate, cx);
+    cx.run_until_parked();
+    assert_eq!(first.await.unwrap().path, cached.join("server"));
+    assert_eq!(installer.downloads(), 1);
+    let second = start(&installer, &delegate, cx);
+    cx.run_until_parked();
+    let binary = futures::FutureExt::now_or_never(second)
+        .expect("a cached start waited for another download into its directory")
+        .unwrap();
+    assert_eq!(binary.path, cached.join("server"));
+    assert_eq!(
+        installer.downloads(),
+        1,
+        "the second update ran beside the first"
+    );
+
+    // The cancel stops the running download, which removes what it wrote; only then does the
+    // waiting one start, and it finishes its download.
+    installer.hang.store(false, Ordering::SeqCst);
+    delegate.cancel();
+    cx.executor().advance_clock(DOWNLOAD_CANCEL_POLL_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(installer.downloads(), 2);
+    assert!(container.path().join("1.0").join("server").exists());
+    assert!(cached.join("server").exists());
+}
+
+#[test]
+fn test_binary_files_exist_ignores_arguments_that_are_not_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("node");
+    std::fs::write(&program, "").unwrap();
+    let mut binary = binary(program);
+    binary.arguments = vec!["--stdio".into(), "relative/script.js".into()];
+    assert!(binary_files_exist(&binary));
+    binary.arguments.push(dir.path().join("missing.js").into());
+    assert!(!binary_files_exist(&binary));
+}
