@@ -425,11 +425,7 @@ async fn write(
     let task = cx.update(|cx| {
         WorkStore::global(cx).map(|store| {
             store.update(cx, |store, cx| {
-                store.write(
-                    WorkContext::new("linear", bongos_work_model::now()),
-                    command,
-                    cx,
-                )
+                store.write(crate::subtickets::sync_context(), command, cx)
             })
         })
     });

@@ -10,6 +10,9 @@
 //! Either answer records the records as offered; "Not now" and the unchecked leaves are added to
 //! `declined`, which only the command lists again.
 //!
+//! The action handlers (the command, the offer's preview, checklist and confirm) are in
+//! `subtickets_actions`; this file holds what the background sync also reaches.
+//!
 //! The promise: nothing is sent to Linear before Kyle confirms. Detection, the preview, the
 //! checklist and the question send nothing at all. The only function here that sends a request
 //! is [`create`], and it takes a [`confirm::Confirmed`], which only the "yes" of the confirm
@@ -28,29 +31,32 @@ use bongos_linear_model::subtickets::{
 use bongos_linear_model::sync::{linked_identifier, nearest_linked_ancestor};
 use bongos_linear_model::{ApiError, IssueRef, IssueSummary};
 use bongos_work::{WorkStore, WorkStoreEvent, WriteError};
-use bongos_work_model::TaskId;
 use bongos_work_model::commands::{Change, Context as WorkContext, Outcome};
 use bongos_work_model::derive::{self, Shape};
 use bongos_work_model::rules::Place;
 use bongos_work_model::store::WorkTree;
-use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EntityId, Global, Subscription, Window,
-};
+use bongos_work_model::{Author, TaskId};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Global, Subscription};
 use settings::Settings as _;
 use uuid::Uuid;
 use workspace::{MultiWorkspace, Workspace};
 
+use crate::subtickets_actions::open_offer;
+
 use crate::LinearSettings;
 use crate::actions::show_toast;
-use crate::checklist::{self, Row};
+use crate::checklist::Row;
 use crate::needs_you;
-use crate::preview;
 use crate::refresh;
 use crate::sync::{self, Scope};
-use crate::token;
 
-/// Who applied a proposal when Kyle did; any other `by` is an agent or a workflow.
-const KYLE: &str = "kyle";
+/// Who the Linear sync's own writes are by.
+pub(crate) const SYNC: &str = "linear sync";
+
+/// The context of a write the background sync makes: a workflow named [`SYNC`], with no run.
+pub(crate) fn sync_context() -> WorkContext {
+    WorkContext::new(SYNC, bongos_work_model::now()).with_author(Author::workflow(SYNC))
+}
 
 /// The toast of the command on a task with no linked group at or above it.
 pub(crate) const NO_GROUP: &str =
@@ -195,7 +201,7 @@ pub(crate) fn identifier_of(tree: &WorkTree, group_id: &str) -> Option<String> {
     linked_identifier(file).map(str::to_string)
 }
 
-fn enabled(cx: &App) -> bool {
+pub(crate) fn enabled(cx: &App) -> bool {
     LinearSettings::get_global(cx).enabled
 }
 
@@ -216,11 +222,11 @@ fn key(offer: &Unoffered) -> OfferKey {
 }
 
 /// One offer: the tasks of a linked group that need a ticket, and the applied records it answers.
-struct Offer {
-    group_id: TaskId,
-    identifier: String,
-    items: Vec<Missing>,
-    offers: Vec<Unoffered>,
+pub(crate) struct Offer {
+    pub(crate) group_id: TaskId,
+    pub(crate) identifier: String,
+    pub(crate) items: Vec<Missing>,
+    pub(crate) offers: Vec<Unoffered>,
 }
 
 /// Watches the store for applied records that need an offer, and keeps the groups that need
@@ -282,7 +288,7 @@ pub(crate) fn need_chip(task_id: &str, cx: &App) -> Option<String> {
     Some(needs_you::need_tickets(count))
 }
 
-fn release(group_id: &str, cx: &mut App) {
+pub(crate) fn release(group_id: &str, cx: &mut App) {
     if let Some(watcher) = global(cx) {
         watcher.update(cx, |watcher, _| {
             watcher.busy.remove(group_id);
@@ -291,7 +297,7 @@ fn release(group_id: &str, cx: &mut App) {
 }
 
 /// Marks `group_id` as having an offer open; false when one already is.
-fn claim(group_id: &str, cx: &mut App) -> bool {
+pub(crate) fn claim(group_id: &str, cx: &mut App) -> bool {
     global(cx).is_some_and(|watcher| {
         watcher.update(cx, |watcher, _| watcher.busy.insert(group_id.to_string()))
     })
@@ -350,10 +356,10 @@ impl Watcher {
                     }
                     continue;
                 }
-                let kyle_fresh = offers
+                let person_fresh = offers
                     .iter()
-                    .any(|offer| offer.by == KYLE && fresh.contains(&key(offer)));
-                if kyle_fresh {
+                    .any(|offer| offer.by_person && fresh.contains(&key(offer)));
+                if person_fresh {
                     self.handled.extend(fresh);
                     self.busy.insert(group_id.clone());
                     opens.push(Offer {
@@ -362,7 +368,7 @@ impl Watcher {
                         items,
                         offers,
                     });
-                } else if offers.iter().any(|offer| offer.by != KYLE) {
+                } else if offers.iter().any(|offer| !offer.by_person) {
                     need.insert(group_id, items.len());
                 }
             }
@@ -389,10 +395,9 @@ fn note_offered(group_id: TaskId, offers: Vec<Unoffered>, cx: &mut App) {
     let Some(store) = WorkStore::global(cx) else {
         return;
     };
-    let ctx = WorkContext::new("linear", bongos_work_model::now());
     let write = store.update(cx, |store, cx| {
         store.write(
-            ctx,
+            sync_context(),
             move |tree, ctx| record_offered(tree, ctx, &group_id, &offers, &[]),
             cx,
         )
@@ -447,116 +452,12 @@ fn forget(offer: Offer, cx: &mut App) {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// The offer: preview, checklist, confirm. Nothing here sends a request.
-
-/// Opens the preview of `offer`, then the checklist over it.
-fn open_offer(
-    workspace: &mut Workspace,
-    offer: Offer,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let text = preview_text(&offer.items, &offer.identifier);
-    preview::open(
-        preview_title(&offer.identifier),
-        text,
-        workspace,
-        window,
-        cx,
-        Box::new(move |workspace, item, window, cx| {
-            open_checklist(workspace, offer, item, window, cx)
-        }),
-    );
-}
-
-fn open_checklist(
-    workspace: &mut Workspace,
-    offer: Offer,
-    item: EntityId,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let title = offer_question(&offer.items, &offer.identifier);
-    let rows = rows(&offer.items);
-    checklist::open(
-        workspace,
-        title,
-        rows,
-        Box::new(move |answer, workspace, window, cx| match answer {
-            Some(checked) => {
-                let (chosen, declined) = select(&offer.items, &checked);
-                if chosen.is_empty() {
-                    not_now(workspace, offer, item, window, cx);
-                } else {
-                    ask_confirm(workspace, offer, chosen, declined, item, window, cx);
-                }
-            }
-            None => not_now(workspace, offer, item, window, cx),
-        }),
-        window,
-        cx,
-    );
-}
-
-fn ask_confirm(
-    workspace: &mut Workspace,
-    offer: Offer,
-    chosen: Vec<Missing>,
-    declined: Vec<TaskId>,
-    item: EntityId,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let weak = cx.entity().downgrade();
-    let question = confirm_question(chosen.len(), &offer.identifier);
-    bongos_minibuffer::yes_or_no(
-        workspace,
-        bongos_work::MINIBUFFER_NAME,
-        question,
-        false,
-        move |yes, window, cx| {
-            weak.update(cx, |workspace, cx| {
-                match confirm::answer(yes, &offer, chosen) {
-                    Some(confirmed) => {
-                        preview::close(workspace, item, window, cx);
-                        record(workspace, &offer, declined, cx);
-                        create_after_token(confirmed, cx);
-                    }
-                    None => not_now(workspace, offer, item, window, cx),
-                }
-            })
-            .ok();
-        },
-        window,
-        cx,
-    );
-}
-
-/// "Not now": the records are offered and every leaf of the offer is declined. Nothing is sent.
-fn not_now(
-    workspace: &mut Workspace,
-    offer: Offer,
-    item: EntityId,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    preview::close(workspace, item, window, cx);
-    let declined = offer
-        .items
-        .iter()
-        .filter(|item| !item.is_group)
-        .map(|item| item.task_id.clone())
-        .collect();
-    record(workspace, &offer, declined, cx);
-    release(&offer.group_id, cx);
-}
-
 /// Writes the answer on the group: its records as offered, `declined` added to its list.
-fn record(
+pub(crate) fn record(
     workspace: &mut Workspace,
     offer: &Offer,
     declined: Vec<TaskId>,
+    ctx: WorkContext,
     cx: &mut Context<Workspace>,
 ) {
     if offer.offers.is_empty() && declined.is_empty() {
@@ -569,7 +470,7 @@ fn record(
     };
     let write = store.update(cx, |store, cx| {
         store.write(
-            WorkContext::kyle(),
+            ctx,
             move |tree, ctx| record_offered(tree, ctx, &group_id, &offers, &declined),
             cx,
         )
@@ -578,21 +479,21 @@ fn record(
 }
 
 /// The confirmed selection, which only the "yes" of the confirm question makes.
-mod confirm {
+pub(crate) mod confirm {
     use bongos_linear_model::subtickets::Missing;
     use bongos_work_model::TaskId;
 
     /// Kyle confirmed creating tickets for `items` under the linked group `group_id`. The only
     /// way to make one is [`answer`] with a yes, so a create request needs Kyle's confirm.
-    pub(super) struct Confirmed {
-        pub(super) group_id: TaskId,
-        pub(super) identifier: String,
-        pub(super) items: Vec<Missing>,
+    pub(crate) struct Confirmed {
+        pub(crate) group_id: TaskId,
+        pub(crate) identifier: String,
+        pub(crate) items: Vec<Missing>,
         _confirmed: (),
     }
 
     /// The answer of the confirm question: `Some` only for a yes.
-    pub(super) fn answer(
+    pub(crate) fn answer(
         yes: bool,
         offer: &super::Offer,
         items: Vec<Missing>,
@@ -606,34 +507,7 @@ mod confirm {
     }
 }
 
-use confirm::Confirmed;
-
-/// Reads the token (a toast and nothing more without one), then creates.
-fn create_after_token(confirmed: Confirmed, cx: &mut Context<Workspace>) {
-    token::with_token_state(cx, move |workspace, present, cx| {
-        if !present {
-            show_toast(workspace, token::NO_TOKEN_MESSAGE.to_string(), cx);
-            release(&confirmed.group_id, cx);
-            return;
-        }
-        if !enabled(cx) {
-            release(&confirmed.group_id, cx);
-            return;
-        }
-        cx.spawn(async move |workspace, cx| {
-            let group_id = confirmed.group_id.clone();
-            let message = create(confirmed, cx).await;
-            cx.update(|cx| {
-                release(&group_id, cx);
-                refresh::sync_linked(cx);
-            });
-            workspace
-                .update(cx, |workspace, cx| show_toast(workspace, message, cx))
-                .ok();
-        })
-        .detach();
-    });
-}
+pub(crate) use confirm::Confirmed;
 
 // ---------------------------------------------------------------------------------------------
 // Creation: the only code here that sends a create request.
@@ -650,14 +524,12 @@ fn stopped(created: &[String], title: &str, reason: &str) -> String {
 
 async fn write(
     cx: &mut AsyncApp,
+    ctx: WorkContext,
     command: impl Fn(&WorkTree, &WorkContext) -> Outcome + Send + 'static,
 ) -> Result<Change, String> {
     let task = cx.update(|cx| {
-        WorkStore::global(cx).map(|store| {
-            store.update(cx, |store, cx| {
-                store.write(WorkContext::kyle(), command, cx)
-            })
-        })
+        WorkStore::global(cx)
+            .map(|store| store.update(cx, |store, cx| store.write(ctx, command, cx)))
     });
     match task {
         Some(task) => task.await.map_err(|error| error.to_string()),
@@ -699,7 +571,9 @@ async fn read_by_id(group_id: &str, id: Uuid, cx: &mut AsyncApp) -> Result<Issue
 /// Creates the confirmed tickets, parents first, and returns the toast. Each leaf: its
 /// `pending_create` (a new UUID, or the one a crash left), the create with that UUID, then the
 /// link. Stops at the first failure.
-async fn create(confirmed: Confirmed, cx: &mut AsyncApp) -> String {
+/// Each write is made as `ctx`, a person's context without its attestation: the writes are
+/// state-only, so they need none.
+pub(crate) async fn create(confirmed: Confirmed, ctx: WorkContext, cx: &mut AsyncApp) -> String {
     let Confirmed {
         group_id,
         identifier,
@@ -735,7 +609,7 @@ async fn create(confirmed: Confirmed, cx: &mut AsyncApp) -> String {
             None => {
                 let id = Uuid::new_v4();
                 let task_id = item.task_id.clone();
-                if let Err(reason) = write(cx, move |tree, ctx| {
+                if let Err(reason) = write(cx, ctx.clone(), move |tree, ctx| {
                     begin_create(tree, ctx, &task_id, id, true)
                 })
                 .await
@@ -767,7 +641,7 @@ async fn create(confirmed: Confirmed, cx: &mut AsyncApp) -> String {
         };
         let task_id = item.task_id.clone();
         let linked = issue.clone();
-        if let Err(reason) = write(cx, move |tree, ctx| {
+        if let Err(reason) = write(cx, ctx.clone(), move |tree, ctx| {
             finish_create(tree, ctx, &task_id, &linked, &description)
         })
         .await
@@ -781,72 +655,4 @@ async fn create(confirmed: Confirmed, cx: &mut AsyncApp) -> String {
     } else {
         format!("Created {} under {identifier}", created.join(", "))
     }
-}
-
-// ---------------------------------------------------------------------------------------------
-// The command
-
-/// `task: create missing subtickets`: every task under the linked group at or above the task at
-/// point that has no ticket, declined ones included, then the same preview, checklist and
-/// confirm. The token is read first; no token means a toast and nothing else.
-pub(crate) fn create_missing_subtickets(
-    workspace: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let Some(tree) = bongos_work::ready(workspace, cx) else {
-        return;
-    };
-    let group_id =
-        bongos_work::task_at_point(workspace, window, cx).and_then(|id| group_for(&tree, &id));
-    let Some(group_id) = group_id else {
-        show_toast(workspace, NO_GROUP.to_string(), cx);
-        return;
-    };
-    let Some(identifier) = identifier_of(&tree, &group_id) else {
-        show_toast(workspace, NO_GROUP.to_string(), cx);
-        return;
-    };
-    let items = match missing(&tree, &group_id, Listed::Command) {
-        Ok(items) => items,
-        Err(reason) => {
-            show_toast(workspace, reason, cx);
-            return;
-        }
-    };
-    if items.is_empty() {
-        show_toast(
-            workspace,
-            format!("Every task under {identifier} has a ticket"),
-            cx,
-        );
-        return;
-    }
-    let offers: Vec<Unoffered> = unoffered(&tree)
-        .into_iter()
-        .filter(|offer| offer.group_id == group_id)
-        .collect();
-    let handle = window.window_handle();
-    token::with_token(cx, move |_, _, cx| {
-        if !enabled(cx) || !claim(&group_id, cx) {
-            return;
-        }
-        let offer = Offer {
-            group_id,
-            identifier,
-            items,
-            offers,
-        };
-        let workspace = cx.entity().downgrade();
-        // The token read has no window; the preview needs one.
-        cx.defer(move |cx| {
-            let group_id = offer.group_id.clone();
-            let opened = handle.update(cx, |_, window, cx| {
-                workspace.update(cx, |workspace, cx| open_offer(workspace, offer, window, cx))
-            });
-            if !matches!(opened, Ok(Ok(()))) {
-                release(&group_id, cx);
-            }
-        });
-    });
 }

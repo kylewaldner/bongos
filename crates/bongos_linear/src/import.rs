@@ -523,7 +523,7 @@ pub(crate) fn answered(
 ) {
     preview::close(workspace, item, window, cx);
     if import {
-        finish_import(workspace, plan, cx);
+        finish_import(workspace, plan, window, cx);
     }
 }
 
@@ -533,6 +533,7 @@ pub(crate) fn answered(
 pub(crate) fn finish_import(
     workspace: &mut Workspace,
     plan: ImportPlan,
+    window: &Window,
     cx: &mut Context<Workspace>,
 ) {
     let Some(tree) = bongos_work::ready(workspace, cx) else {
@@ -540,7 +541,7 @@ pub(crate) fn finish_import(
     };
     let kind = leaf_kind(&tree, &plan.placement, cx);
     let identifier = plan.root.identifier.clone();
-    let Some(write) = link::queue(workspace, cx, move |tree, ctx| {
+    let Some(write) = link::queue(workspace, window, cx, move |tree, ctx| {
         model::change(tree, ctx, &plan, kind)
     }) else {
         return;

@@ -10,6 +10,7 @@ use bongos_linear_model::api::{ApiError, Issue, LinearApi, StateKind, WorkflowSt
 use bongos_linear_model::fake::{Call, FakeLinear};
 use bongos_linear_model::sync::{self as model, refresh_diff};
 use bongos_work::{Focus, RowChipsRegistry, WorkDirs, WorkStore};
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{Context as WorkContext, default_todos};
 use bongos_work_model::store::WorkTree;
 use bongos_work_model::{
@@ -377,7 +378,7 @@ async fn refresh_updates_a_changed_title_and_writes_nothing_when_unchanged(
         .iter()
         .find(|entry| entry.event == "title from Linear")
         .unwrap();
-    assert_eq!(entry.by, "linear");
+    assert_eq!(entry.by, "linear sync");
     assert_eq!(
         entry.detail.as_deref(),
         Some("\"Old beta\" -> \"New beta\"")
@@ -389,7 +390,7 @@ async fn refresh_updates_a_changed_title_and_writes_nothing_when_unchanged(
     assert!(
         beta.history
             .iter()
-            .any(|e| e.event == "description from Linear" && e.by == "linear")
+            .any(|e| e.event == "description from Linear" && e.by == "linear sync")
     );
     assert_eq!(env.writes(cx), 1, "title and description in one write");
 
@@ -622,7 +623,7 @@ async fn a_link_changed_between_read_and_write_is_skipped(cx: &mut TestAppContex
     let other = issue(8, "Other");
     let unlink = env.store.update(cx, |store, cx| {
         store.write(
-            WorkContext::kyle(),
+            WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
             |tree, ctx| model::unlink(tree, ctx, "l2"),
             cx,
         )
@@ -631,7 +632,7 @@ async fn a_link_changed_between_read_and_write_is_skipped(cx: &mut TestAppContex
     let relink = env.store.update(cx, |store, cx| {
         let other = other.clone();
         store.write(
-            WorkContext::kyle(),
+            WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
             move |tree, ctx| model::link(tree, ctx, "l2", &other),
             cx,
         )
@@ -823,7 +824,7 @@ async fn the_linked_set_follows_the_store(cx: &mut TestAppContext) {
     let ticket = issue(9, "Nine");
     let write = env.store.update(cx, |store, cx| {
         store.write(
-            WorkContext::kyle(),
+            WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
             move |tree, ctx| model::link(tree, ctx, "l1", &ticket),
             cx,
         )
@@ -835,7 +836,7 @@ async fn the_linked_set_follows_the_store(cx: &mut TestAppContext) {
     .await;
     let write = env.store.update(cx, |store, cx| {
         store.write(
-            WorkContext::kyle(),
+            WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
             |tree, ctx| model::unlink(tree, ctx, "l3"),
             cx,
         )
