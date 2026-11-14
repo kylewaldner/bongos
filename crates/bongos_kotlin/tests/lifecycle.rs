@@ -1,6 +1,7 @@
 //! The Kotlin lifecycle with a real project and the fake server as a real process. The project is
 //! on the real file system, the server binary comes from `lsp.kotlin.binary.path`, and the manager
 //! restarts it through the project's `LspStore`.
+//! The fake server is a stand-in for the real language server and never talks to the network.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)]
 
@@ -135,6 +136,7 @@ async fn start_worktrees(
         state_dir: temp.path().join("state"),
         logs_dir: temp.path().join("logs"),
         install_root: temp.path().join("languages"),
+        config_dir: temp.path().join("config"),
     };
 
     cx.executor().allow_parking();

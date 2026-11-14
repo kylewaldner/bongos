@@ -120,9 +120,17 @@ actions!(
 struct KotlinSetup {
     dirs: KotlinDirs,
     manifest: Arc<Manifest>,
+    /// The first error of a malformed or unreadable user manifest, naming the file.
+    manifest_error: Option<String>,
 }
 
 impl Global for KotlinSetup {}
+
+/// The user manifest error waiting for its one toast; the first workspace takes it.
+#[derive(Clone)]
+struct ManifestNoticePending(String);
+
+impl Global for ManifestNoticePending {}
 
 /// Everything `kotlin: show jdk` reads on the main thread. `text` does the file reads and can run
 /// on any thread.
@@ -232,18 +240,26 @@ pub struct KotlinDirs {
     pub logs_dir: PathBuf,
     /// Holds `<server>/<version>` for each installed server.
     pub install_root: PathBuf,
+    /// Holds the optional `kotlin-server-manifest.toml`.
+    pub config_dir: PathBuf,
 }
 
 pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
     KotlinSettings::register(cx);
-    let manifest = Manifest::load(cfg!(debug_assertions)).unwrap_or_else(|error| {
-        ::log::error!("{error:#}; using the built-in Kotlin server manifest");
-        Manifest::embedded()
-    });
-    let manifest = Arc::new(manifest);
+    let loaded = Manifest::load_for_app(cfg!(debug_assertions), &dirs.config_dir);
+    if let Some(error) = &loaded.error {
+        let line = format!("manifest: ignoring the user manifest, using the built-in one: {error}");
+        ::log::error!("{line}");
+        KotlinLog::new(&dirs.logs_dir).line(&line);
+        cx.set_global(ManifestNoticePending(format!(
+            "Kotlin server manifest ignored: {error}"
+        )));
+    }
+    let manifest = Arc::new(loaded.manifest);
     cx.set_global(KotlinSetup {
         dirs: dirs.clone(),
         manifest: manifest.clone(),
+        manifest_error: loaded.error,
     });
     languages.register_lsp_adapter(
         LanguageName::new_static("Kotlin"),

@@ -980,6 +980,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_a_user_file_pin_for_other_bytes_is_rejected_and_nothing_is_installed() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = server_dir(root.path());
+        let archive = tar_gz(&files(0, true));
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(
+            config.path().join(crate::manifest::USER_FILE_NAME),
+            format!(
+                r#"
+[kotlin-lsp]
+version = "1.2.3"
+
+[kotlin-lsp.platform.linux-x64]
+url = "http://127.0.0.1:1/server"
+sha256 = "{}"
+archive = "tar.gz"
+strip_components = 1
+launcher = "bin/launcher"
+"#,
+                sha256(b"something else")
+            ),
+        )
+        .unwrap();
+        let loaded = crate::manifest::Manifest::load_user_file(config.path());
+        assert_eq!(loaded.error, None);
+        let entry = loaded.manifest.entry(SERVER, "linux-x64").unwrap();
+        let run = run_install(
+            &serving(archive, None),
+            &entry,
+            &dir,
+            &AtomicBool::new(false),
+        );
+        assert!(run.result.is_err());
+        assert!(names(&dir).is_empty(), "left behind: {:?}", names(&dir));
+        assert!(check_installed(root.path(), SERVER, &entry).is_none());
+    }
+
+    #[test]
     fn test_a_pin_for_other_bytes_rejects_a_zip_too() {
         let root = tempfile::tempdir().unwrap();
         let dir = server_dir(root.path());

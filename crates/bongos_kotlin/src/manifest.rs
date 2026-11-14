@@ -23,6 +23,20 @@ pub const EMBEDDED: &str = include_str!("../servers.toml");
 /// Names a manifest file that replaces the embedded one, in debug builds only.
 pub const OVERRIDE_VAR: &str = "BONGOS_KOTLIN_SERVERS";
 
+/// The optional user-maintained manifest in the config directory.
+pub const USER_FILE_NAME: &str = "kotlin-server-manifest.toml";
+
+/// The host bongos never downloads from, and so refuses in a user manifest (with subdomains).
+const REFUSED_HOST: &str = "bongos.rocks";
+
+/// The manifest to use after looking for the user file, and the problem with the file if any.
+#[derive(Clone, Debug)]
+pub struct UserManifest {
+    pub manifest: Manifest,
+    /// Names the file and its first error. `None` when the file was missing or merged.
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub enum ArchiveKind {
     #[serde(rename = "tar.gz")]
@@ -58,10 +72,11 @@ struct ServerPin {
     /// The last day the build runs.
     #[serde(default)]
     expires: Option<NaiveDate>,
+    /// `None` when the table omits it; a user file's omission takes the built-in value.
     #[serde(default)]
-    args: Vec<String>,
+    args: Option<Vec<String>>,
     #[serde(default)]
-    env: BTreeMap<String, String>,
+    env: Option<BTreeMap<String, String>>,
     platform: BTreeMap<String, PlatformPin>,
 }
 
@@ -152,13 +167,106 @@ impl Manifest {
         }
     }
 
+    /// What the app runs with: in a debug build `BONGOS_KOTLIN_SERVERS` when set (it wins over the
+    /// user file), else the embedded manifest merged with the user file in `config_dir`.
+    pub fn load_for_app(allow_override: bool, config_dir: &Path) -> UserManifest {
+        if allow_override && std::env::var_os(OVERRIDE_VAR).is_some() {
+            return match Self::load(allow_override) {
+                Ok(manifest) => UserManifest {
+                    manifest,
+                    error: None,
+                },
+                Err(error) => UserManifest {
+                    manifest: Self::embedded(),
+                    error: Some(format!("{error:#}")),
+                },
+            };
+        }
+        Self::load_user_file(config_dir)
+    }
+
+    /// The embedded manifest with the servers of `<config_dir>/kotlin-server-manifest.toml`
+    /// merged over it. A server table in the file replaces the built-in one whole, except that an
+    /// omitted `args` or `env` keeps the built-in value. A missing file is exactly
+    /// `Manifest::embedded()` without an error; an unreadable or malformed one falls back to it
+    /// and says why.
+    pub fn load_user_file(config_dir: &Path) -> UserManifest {
+        let path = config_dir.join(USER_FILE_NAME);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                log::debug!("no user Kotlin server manifest at {}", path.display());
+                return UserManifest {
+                    manifest: Self::embedded(),
+                    error: None,
+                };
+            }
+            Err(error) => return Self::user_file_failed(&path, anyhow!(error)),
+        };
+        match Self::merge_user_text(&text) {
+            Ok(manifest) => {
+                log::info!("using the Kotlin server manifest {}", path.display());
+                UserManifest {
+                    manifest,
+                    error: None,
+                }
+            }
+            Err(error) => Self::user_file_failed(&path, error),
+        }
+    }
+
+    fn user_file_failed(path: &Path, error: anyhow::Error) -> UserManifest {
+        let message = format!(
+            "{}: {}",
+            path.display(),
+            format!("{error:#}")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        UserManifest {
+            manifest: Self::embedded(),
+            error: Some(message),
+        }
+    }
+
+    fn merge_user_text(text: &str) -> Result<Self> {
+        let user = Self::parse(text)?;
+        let mut merged = Self::embedded();
+        for (name, mut pin) in user.servers {
+            ensure!(
+                [KotlinServerKind::KotlinLsp, KotlinServerKind::Intellij]
+                    .into_iter()
+                    .any(|server| server_name(server) == name),
+                "{name} is not a Kotlin server bongos knows"
+            );
+            for (platform, platform_pin) in &pin.platform {
+                if let Some(problem) = user_url_problem(&platform_pin.url) {
+                    bail!(
+                        "{name} on {platform}: url {:?}: {problem}",
+                        platform_pin.url
+                    );
+                }
+            }
+            if let Some(builtin) = merged.servers.get(&name) {
+                pin.args = pin.args.or_else(|| builtin.args.clone());
+                pin.env = pin.env.or_else(|| builtin.env.clone());
+            }
+            merged.servers.insert(name, pin);
+        }
+        Ok(merged)
+    }
+
     /// The arguments and environment `server` starts with, whatever build runs.
     pub(crate) fn args_and_env(
         &self,
         server: KotlinServerKind,
     ) -> Option<(Vec<String>, BTreeMap<String, String>)> {
         let pin = self.servers.get(server_name(server))?;
-        Some((pin.args.clone(), pin.env.clone()))
+        Some((
+            pin.args.clone().unwrap_or_default(),
+            pin.env.clone().unwrap_or_default(),
+        ))
     }
 
     /// The pin of `server` for `platform` (`current_platform()` in the app).
@@ -179,12 +287,30 @@ impl Manifest {
             strip_components: platform_pin.strip_components,
             launcher: platform_pin.launcher.clone(),
             runtime: platform_pin.runtime.clone(),
-            args: pin.args.clone(),
-            env: pin.env.clone(),
+            args: pin.args.clone().unwrap_or_default(),
+            env: pin.env.clone().unwrap_or_default(),
             built: pin.built,
             expires: pin.expires,
         })
     }
+}
+
+/// Why `url` from the user manifest may not be downloaded, or `None`: only `https` (loopback
+/// `http` in a debug build), no user name or password, and never `bongos.rocks` or a subdomain.
+pub(crate) fn user_url_problem(url: &str) -> Option<String> {
+    let url = match http_client::Url::parse(url) {
+        Ok(url) => url,
+        Err(error) => return Some(format!("it is not a URL ({error})")),
+    };
+    if let Some(problem) = crate::remote_manifest::manifest_url_problem(&url) {
+        return Some(problem.to_string());
+    }
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let host = host.trim_end_matches('.');
+    if host == REFUSED_HOST || host.ends_with(&format!(".{REFUSED_HOST}")) {
+        return Some(format!("{REFUSED_HOST} is never a download host"));
+    }
+    None
 }
 
 /// True when `name` is one plain path component, so joining it cannot leave its parent.
@@ -328,5 +454,213 @@ mod tests {
         // Allowed and unreadable: an error, not a silent fallback.
         let missing = temp.path().join("missing.toml").into_os_string();
         assert!(Manifest::load_with(true, Some(missing)).is_err());
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn user_table(server: &str, url: &str, extra: &str) -> String {
+        format!(
+            r#"
+[{server}]
+version = "9.9.9"
+{extra}
+
+[{server}.platform.linux-x64]
+url = "{url}"
+sha256 = "{SHA}"
+archive = "tar.gz"
+launcher = "bin/launcher"
+"#
+        )
+    }
+
+    fn load(text: Option<&str>) -> (UserManifest, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        if let Some(text) = text {
+            fs::write(temp.path().join(USER_FILE_NAME), text).unwrap();
+        }
+        (Manifest::load_user_file(temp.path()), temp)
+    }
+
+    fn entry(manifest: &Manifest, server: KotlinServerKind) -> ManifestEntry {
+        manifest.entry(server, "linux-x64").unwrap()
+    }
+
+    #[test]
+    fn test_missing_user_file_is_exactly_the_embedded_manifest() {
+        let (loaded, _temp) = load(None);
+        assert_eq!(loaded.error, None);
+        let embedded = Manifest::embedded();
+        for server in [KotlinServerKind::KotlinLsp, KotlinServerKind::Intellij] {
+            for platform in PLATFORMS {
+                assert_eq!(
+                    loaded.manifest.entry(server, platform).unwrap(),
+                    embedded.entry(server, platform).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_valid_user_file_parses_and_keeps_other_builtin_servers() {
+        let text = user_table(
+            "kotlin-lsp",
+            "https://example.com/server.tar.gz",
+            "args = [\"--stdio\", \"--x\"]\n[kotlin-lsp.env]\nA = \"b\"\n",
+        );
+        // The env table must come after the platform keys of its own table; build it apart.
+        let text = text.replace("[kotlin-lsp.env]\nA = \"b\"\n", "");
+        let text = format!("{text}\n[kotlin-lsp.env]\nA = \"b\"\n");
+        let (loaded, _temp) = load(Some(&text));
+        assert_eq!(loaded.error, None, "{:?}", loaded.error);
+        let lsp = entry(&loaded.manifest, KotlinServerKind::KotlinLsp);
+        assert_eq!(lsp.version, "9.9.9");
+        assert_eq!(lsp.url, "https://example.com/server.tar.gz");
+        assert_eq!(lsp.sha256, SHA);
+        assert_eq!(lsp.args, ["--stdio", "--x"]);
+        assert_eq!(lsp.env.get("A").map(String::as_str), Some("b"));
+        // A file with only kotlin-lsp leaves the built-in intellij.
+        assert_eq!(
+            entry(&loaded.manifest, KotlinServerKind::Intellij),
+            entry(&Manifest::embedded(), KotlinServerKind::Intellij)
+        );
+    }
+
+    #[test]
+    fn test_a_user_table_replaces_the_builtin_table_whole() {
+        let (loaded, _temp) = load(Some(&user_table(
+            "kotlin-lsp",
+            "https://example.com/server.tar.gz",
+            "",
+        )));
+        assert_eq!(loaded.error, None);
+        // The file pins linux-x64 only, with no expiry: nothing of the built-in table is left.
+        assert!(
+            loaded
+                .manifest
+                .entry(KotlinServerKind::KotlinLsp, "macos-arm64")
+                .is_err()
+        );
+        let lsp = entry(&loaded.manifest, KotlinServerKind::KotlinLsp);
+        assert_eq!((lsp.built, lsp.expires), (None, None));
+        assert_eq!(lsp.strip_components, 0);
+    }
+
+    #[test]
+    fn test_omitted_args_and_env_come_from_the_builtin_table() {
+        let (loaded, _temp) = load(Some(&user_table(
+            "kotlin-lsp",
+            "https://example.com/server.tar.gz",
+            "",
+        )));
+        let builtin = entry(&Manifest::embedded(), KotlinServerKind::KotlinLsp);
+        let lsp = entry(&loaded.manifest, KotlinServerKind::KotlinLsp);
+        assert!(lsp.args.contains(&"--stdio".to_string()));
+        assert_eq!(lsp.args, builtin.args);
+        assert_eq!(lsp.env, builtin.env);
+        // An explicit empty list is not an omission.
+        let (loaded, _temp) = load(Some(&user_table(
+            "kotlin-lsp",
+            "https://example.com/server.tar.gz",
+            "args = []",
+        )));
+        assert!(
+            entry(&loaded.manifest, KotlinServerKind::KotlinLsp)
+                .args
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_a_bad_user_file_falls_back_and_names_the_file_and_error() {
+        let good = user_table("kotlin-lsp", "https://example.com/s.tar.gz", "");
+        let cases = [
+            (
+                "missing sha256",
+                good.replace(&format!("sha256 = \"{SHA}\"\n"), ""),
+            ),
+            ("bad sha256", good.replace(SHA, "abc")),
+            (
+                "unknown field",
+                good.replace("version", "colour = 1\nversion"),
+            ),
+            (
+                "unknown server",
+                good.replace("[kotlin-lsp", "[other")
+                    .replace("kotlin-lsp.", "other."),
+            ),
+            ("not toml", "[[[".to_string()),
+        ];
+        for (label, text) in cases {
+            let (loaded, temp) = load(Some(&text));
+            let error = loaded.error.unwrap_or_else(|| panic!("{label}: no error"));
+            assert!(error.contains(USER_FILE_NAME), "{label}: {error}");
+            assert!(
+                error.contains(&temp.path().display().to_string()),
+                "{label}: {error}"
+            );
+            assert_eq!(
+                entry(&loaded.manifest, KotlinServerKind::KotlinLsp),
+                entry(&Manifest::embedded(), KotlinServerKind::KotlinLsp),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unreadable_user_file_falls_back_with_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        // A directory where the file should be cannot be read as text.
+        fs::create_dir(temp.path().join(USER_FILE_NAME)).unwrap();
+        let loaded = Manifest::load_user_file(temp.path());
+        assert!(loaded.error.unwrap().contains(USER_FILE_NAME));
+    }
+
+    #[test]
+    fn test_user_file_urls_are_restricted() {
+        let refused = [
+            "https://bongos.rocks/s.tar.gz",
+            "https://www.bongos.rocks/s.tar.gz",
+            "https://BONGOS.ROCKS/s.tar.gz",
+            "https://cdn.Bongos.Rocks/s.tar.gz",
+            "http://example.com/s.tar.gz",
+            "ftp://example.com/s.tar.gz",
+            "https://user:pass@example.com/s.tar.gz",
+            "https://user@example.com/s.tar.gz",
+            "not a url",
+        ];
+        for url in refused {
+            let (loaded, _temp) = load(Some(&user_table("kotlin-lsp", url, "")));
+            assert!(loaded.error.is_some(), "{url} was accepted");
+        }
+        for url in [
+            "https://example.com/s.tar.gz",
+            "https://notbongos.rocks/s.tar.gz",
+            "http://127.0.0.1:8123/s.tar.gz",
+        ] {
+            let (loaded, _temp) = load(Some(&user_table("kotlin-lsp", url, "")));
+            assert_eq!(loaded.error, None, "{url}");
+        }
+    }
+
+    #[test]
+    fn test_the_environment_override_wins_over_the_user_file() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(USER_FILE_NAME),
+            user_table("kotlin-lsp", "https://example.com/s.tar.gz", ""),
+        )
+        .unwrap();
+        // Without the variable the user file applies; `load_with` is the override path.
+        let loaded = Manifest::load_for_app(true, temp.path());
+        let version = |manifest: &Manifest| entry(manifest, KotlinServerKind::KotlinLsp).version;
+        if std::env::var_os(OVERRIDE_VAR).is_none() {
+            assert_eq!(version(&loaded.manifest), "9.9.9");
+        }
+        // A release build never reads the variable, but still reads the user file.
+        assert_eq!(
+            version(&Manifest::load_for_app(false, temp.path()).manifest),
+            "9.9.9"
+        );
     }
 }
