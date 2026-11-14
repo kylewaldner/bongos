@@ -10,7 +10,6 @@ use bongos_project_repo_model::layout::PINS_DIR;
 
 use crate::create::ProjectRepo;
 
-
 /// A materialized tree, removed on drop.
 #[derive(Debug)]
 pub struct PinGuard {
@@ -37,7 +36,10 @@ impl ProjectRepo {
     /// `state/pins/`, scripts with their executable bit.
     pub async fn materialize(&self, treeish: &str) -> Result<PinGuard> {
         let repository = &self.location.repository;
-        let tree = self.git.rev_parse(repository, &format!("{treeish}^{{tree}}")).await?;
+        let tree = self
+            .git
+            .rev_parse(repository, &format!("{treeish}^{{tree}}"))
+            .await?;
         let entries: Vec<_> = self
             .git
             .ls_tree_r(repository, &tree)

@@ -268,7 +268,10 @@ fn event_for(result: &LandingResult) -> Option<LandingEvent> {
 
 /// The meta a landing commits with: any `Bongos-Move` text stripped, and a subject generated
 /// from the change summary when the author wrote none.
-fn landing_meta(meta: &ChangeMeta, summary: &bongos_project_repo_model::ChangeSummary) -> ChangeMeta {
+fn landing_meta(
+    meta: &ChangeMeta,
+    summary: &bongos_project_repo_model::ChangeSummary,
+) -> ChangeMeta {
     let mut meta = strip_move_meta(meta);
     if strip_trailers(&meta.subject).trim().is_empty() {
         meta.subject = summary.generated_subject();

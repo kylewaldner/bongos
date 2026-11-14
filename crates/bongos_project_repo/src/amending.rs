@@ -233,7 +233,15 @@ impl ProjectRepo {
                     return Ok(Amended::NoVerdict(format!("{name}: {KEEPS_AMENDING}")));
                 }
                 let bounded = self
-                    .bound(scratch, &author_tip, &author_tree, &author_part, &started, check, message)
+                    .bound(
+                        scratch,
+                        &author_tip,
+                        &author_tree,
+                        &author_part,
+                        &started,
+                        check,
+                        message,
+                    )
                     .await?;
                 let message = match bounded {
                     AmendOutcome::Amended { message } => message,
@@ -291,7 +299,9 @@ impl ProjectRepo {
     /// Puts the scratch copy back to `head`, dropping what a check wrote and did not report.
     async fn reset_scratch(&self, scratch: &Path, head: &str) -> Result<()> {
         if !self.git.is_clean(scratch).await? {
-            self.git.run(scratch, &["reset", "-q", "--hard", head]).await?;
+            self.git
+                .run(scratch, &["reset", "-q", "--hard", head])
+                .await?;
             self.git.run(scratch, &["clean", "-fdq"]).await?;
         }
         Ok(())
@@ -315,7 +325,13 @@ impl ProjectRepo {
             .git
             .run(
                 scratch,
-                &["diff", "--cached", "--name-only", "--no-renames", author_tip],
+                &[
+                    "diff",
+                    "--cached",
+                    "--name-only",
+                    "--no-renames",
+                    author_tip,
+                ],
             )
             .await?
             .lines()

@@ -9,9 +9,9 @@ use std::path::Path;
 use anyhow::Result;
 use bongos_project_repo_model::checks::{
     CheckOutcome, FileFacts, LiveFacts, NO_CYCLE_CHECK, NO_STATE_CHECK, REFERENCES_CHECK,
-    SCHEMA_CHECK, SECRETS_CHECK, SIZE_AND_KIND_CHECK, STARTED_UNCHANGED_CHECK, SizeLimits, Stamp,
-    StagedTodoMove, StartedInput, compile_secret_patterns, landing_declaration_problems, no_cycle,
-    no_state, references, schema_problems, secrets, size_and_kind, started_unchanged,
+    SCHEMA_CHECK, SECRETS_CHECK, SIZE_AND_KIND_CHECK, STARTED_UNCHANGED_CHECK, SizeLimits,
+    StagedTodoMove, Stamp, StartedInput, compile_secret_patterns, landing_declaration_problems,
+    no_cycle, no_state, references, schema_problems, secrets, size_and_kind, started_unchanged,
 };
 use bongos_project_repo_model::layout::{
     DEFINITIONS_DIR, PROJECT_FILE, TASK_FILE, WORKFLOW_FILE, WORKFLOWS_DIR,
@@ -154,8 +154,11 @@ impl ChangeFacts {
         for (file, blob) in changed.iter_mut().zip(blobs) {
             file.bytes = blob;
         }
-        let now: std::collections::BTreeSet<&str> =
-            new.entries.iter().map(|entry| entry.path.as_str()).collect();
+        let now: std::collections::BTreeSet<&str> = new
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
         for entry in &master.entries {
             if !now.contains(entry.path.as_str()) {
                 changed.push(ChangedFile {
@@ -191,7 +194,11 @@ impl ChangeFacts {
         let mut ids: Vec<String> = [&self.master, &self.new]
             .into_iter()
             .filter_map(|tree| tree.definitions.as_ref().ok())
-            .flat_map(|tree| tree.nodes().into_iter().map(|node| node.definition.id.clone()))
+            .flat_map(|tree| {
+                tree.nodes()
+                    .into_iter()
+                    .map(|node| node.definition.id.clone())
+            })
             .collect();
         ids.sort();
         ids.dedup();
@@ -250,7 +257,10 @@ pub(crate) fn schema_check(tree: &TreeFacts, registry: &CheckRegistry) -> Vec<Pr
     {
         let amending: Vec<&str> = registry.amending.iter().map(|check| check.name()).collect();
         problems.extend(landing_declaration_problems(project, &amending));
-        problems.extend(crate::declared_checks::entry_problems(Some(project), registry));
+        problems.extend(crate::declared_checks::entry_problems(
+            Some(project),
+            registry,
+        ));
     }
     for (path, bytes) in &tree.folder_files {
         let Some((folder, _)) = path.split_once('/') else {
@@ -297,7 +307,9 @@ pub(crate) fn run_builtin(name: &str, input: &BuiltinInput) -> CheckOutcome {
                 .collect();
             no_state(
                 facts.new.paths(),
-                texts.iter().map(|(path, text)| (path.as_str(), text.as_str())),
+                texts
+                    .iter()
+                    .map(|(path, text)| (path.as_str(), text.as_str())),
             )
         }
         NO_CYCLE_CHECK => match parsed {
@@ -370,5 +382,9 @@ pub(crate) fn builtin_stamp(name: &str, input: &BuiltinInput) -> Stamp {
     let ids = input.facts.task_ids();
     let started = input.live.started_set(ids.iter().map(String::as_str));
     let started: Vec<&str> = started.iter().map(String::as_str).collect();
-    Stamp(format!("{} started: {}", input.facts.new.id, started.join(",")))
+    Stamp(format!(
+        "{} started: {}",
+        input.facts.new.id,
+        started.join(",")
+    ))
 }

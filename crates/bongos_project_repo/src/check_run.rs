@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use bongos_project_repo_model::checks::{CheckOutcome, CheckPhase, LiveFacts, StagedTodoMove, Stamp};
+use bongos_project_repo_model::checks::{
+    CheckOutcome, CheckPhase, LiveFacts, StagedTodoMove, Stamp,
+};
 use bongos_project_repo_model::{Author, ChangeMeta, TaskStateRecord};
 use bongos_work_model::ProjectFile;
 use serde::{Deserialize, Serialize};
@@ -166,7 +168,11 @@ impl ProjectRepo {
         author: &Author,
     ) -> Result<CheckRun> {
         let registry = self.check_registry();
-        let folders: Vec<String> = registry.folders.iter().map(|(name, _)| name.clone()).collect();
+        let folders: Vec<String> = registry
+            .folders
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
         let facts = ChangeFacts::read(
             &self.git,
             &self.location.repository,
@@ -236,15 +242,30 @@ impl ProjectRepo {
         Ok(())
     }
 
-    fn store_result(&self, writer: &StateWriter, change_id: &str, result: &CheckResult) -> Result<()> {
+    fn store_result(
+        &self,
+        writer: &StateWriter,
+        change_id: &str,
+        result: &CheckResult,
+    ) -> Result<()> {
         let record = result.to_record()?;
         writer.transact(|tx| {
-            tx.set_check_result(change_id, &result.check, &result.tree, &result.stamp, &record)
+            tx.set_check_result(
+                change_id,
+                &result.check,
+                &result.tree,
+                &result.stamp,
+                &record,
+            )
         })
     }
 
     /// The built-ins on the run's tree, each result stored.
-    pub(crate) fn run_builtins(&self, writer: &StateWriter, run: &CheckRun) -> Result<Vec<CheckResult>> {
+    pub(crate) fn run_builtins(
+        &self,
+        writer: &StateWriter,
+        run: &CheckRun,
+    ) -> Result<Vec<CheckResult>> {
         let options = self.land_options();
         let input = run.builtin_input(&options);
         let mut results = Vec::new();
@@ -287,7 +308,9 @@ impl ProjectRepo {
             let stamp = check.stamp(&run.input());
             stamps.insert(check.name().to_string(), stamp.clone());
             let stored = self
-                .read_state(|read| read.check_result(&run.change_id, check.name(), &tree, stamp.as_str()))?
+                .read_state(|read| {
+                    read.check_result(&run.change_id, check.name(), &tree, stamp.as_str())
+                })?
                 .map(|record| CheckResult::from_record(&record))
                 .transpose()?
                 .filter(|result| !matches!(result.outcome, CheckOutcome::NoVerdict { .. }));

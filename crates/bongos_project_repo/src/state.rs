@@ -889,12 +889,13 @@ impl<'a> StateTx<'a> {
         record: &str,
     ) -> Result<()> {
         self.only_kv_in_hook("a check result")?;
-        self.connection.exec_bound::<(&str, &str, &str, &str, &str)>(
-            "INSERT INTO check_results (change_id, check_name, tree, stamp, result_toml)
+        self.connection
+            .exec_bound::<(&str, &str, &str, &str, &str)>(
+                "INSERT INTO check_results (change_id, check_name, tree, stamp, result_toml)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (change_id, check_name, tree, stamp)
              DO UPDATE SET result_toml = excluded.result_toml",
-        )?((change_id, check, tree, stamp, record))?;
+            )?((change_id, check, tree, stamp, record))?;
         self.dirty = true;
         Ok(())
     }

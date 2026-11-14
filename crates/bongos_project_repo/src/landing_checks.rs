@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use bongos_project_repo_model::checks::{AmendOutcome, CheckOutcome, CheckPhase, LiveSource, Stamp};
+use bongos_project_repo_model::checks::{
+    AmendOutcome, CheckOutcome, CheckPhase, LiveSource, Stamp,
+};
 use bongos_project_repo_model::{ChangeMeta, ChangeSummary, Problem, RelPath};
 use bongos_work_model::ProjectFile;
 use futures::future::BoxFuture;
@@ -100,8 +102,11 @@ impl CheckRegistry {
     pub(crate) fn merged(mut self, more: &CheckRegistry) -> Self {
         self.checks.extend(more.checks.iter().cloned());
         self.amending.extend(more.amending.iter().cloned());
-        self.kinds
-            .extend(more.kinds.iter().map(|(name, parse)| (name.clone(), *parse)));
+        self.kinds.extend(
+            more.kinds
+                .iter()
+                .map(|(name, parse)| (name.clone(), *parse)),
+        );
         self.folders.extend(more.folders.iter().cloned());
         self.live.extend(more.live.iter().cloned());
         if more.workflows.is_some() {

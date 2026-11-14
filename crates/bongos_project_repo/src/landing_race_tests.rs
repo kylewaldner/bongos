@@ -171,9 +171,7 @@ fn a_change_only_waiting_in_the_queue_can_be_abandoned() {
     landed(first_result.unwrap());
     assert_eq!(second_result.unwrap(), LandingResult::Abandoned);
     assert!(!second.path.exists());
-    assert!(
-        !run_git(&repo, &["ls-tree", "-r", "--name-only", "main"]).contains("tasks/beta")
-    );
+    assert!(!run_git(&repo, &["ls-tree", "-r", "--name-only", "main"]).contains("tasks/beta"));
 }
 
 #[test]
@@ -189,9 +187,7 @@ fn edits_typed_while_the_checks_run_do_not_land_and_are_kept() {
     *typing.typed.lock() = Some(typed.clone());
 
     let commit = landed(land(&repo, &copy, &author));
-    assert!(
-        !run_git(&repo, &["ls-tree", "-r", "--name-only", &commit]).contains("typed.md")
-    );
+    assert!(!run_git(&repo, &["ls-tree", "-r", "--name-only", &commit]).contains("typed.md"));
     // The working copy stays with what was typed, uncommitted.
     assert_eq!(
         std::fs::read_to_string(&typed).unwrap(),

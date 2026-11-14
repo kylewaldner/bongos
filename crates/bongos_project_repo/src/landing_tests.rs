@@ -21,8 +21,8 @@ use crate::test_support::{
     new_copy, person, reopen, request, run_git, start, verified, write_definition,
 };
 use crate::{
-    AbandonRefused, AmendOutcome, AmendingCheck, ChangeFilter, CheckInput, ChangeState, LandMode, LandRequest,
-    LandingEvent, LandingResult, Recovery, StateApplyHooks, StateOp,
+    AbandonRefused, AmendOutcome, AmendingCheck, ChangeFilter, ChangeState, CheckInput, LandMode,
+    LandRequest, LandingEvent, LandingResult, Recovery, StateApplyHooks, StateOp,
 };
 
 /// An amending check that writes the sorted task folder names into `definitions/stamp.txt`.
@@ -369,7 +369,9 @@ fn two_simultaneous_landings_serialize_and_the_second_lands_rebased() {
     assert!(files.contains("definitions/tasks/beta/task.toml"));
     // The second change's checks ran again on the rebased tree.
     let landed_tree = run_git(&repo, &["rev-parse", "main^{tree}"]);
-    let results = repo.check_results_on(&second.change_id, &landed_tree).unwrap();
+    let results = repo
+        .check_results_on(&second.change_id, &landed_tree)
+        .unwrap();
     assert_eq!(results.len(), 7, "{results:?}");
     assert!(
         results

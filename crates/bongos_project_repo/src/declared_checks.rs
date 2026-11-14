@@ -199,7 +199,9 @@ fn declared(entry: &Entry, registry: &CheckRegistry) -> Result<Arc<dyn LandingCh
             let table = run
                 .as_table()
                 .filter(|table| table.len() == 1)
-                .ok_or_else(|| format!("{at}: run must name one kind, such as {{ script = ... }}"))?;
+                .ok_or_else(|| {
+                    format!("{at}: run must name one kind, such as {{ script = ... }}")
+                })?;
             let (kind, value) = table.iter().next().expect("one key");
             match registry.kind(kind) {
                 Some(parse) => parse(value).map_err(|error| format!("{at}: {error}"))?,
@@ -224,7 +226,10 @@ fn declared(entry: &Entry, registry: &CheckRegistry) -> Result<Arc<dyn LandingCh
 
 /// What `project`'s entries cannot become, for check 1: a `run` no kind parses, an unknown
 /// kind, a bad phase or applies.
-pub(crate) fn entry_problems(project: Option<&ProjectFile>, registry: &CheckRegistry) -> Vec<Problem> {
+pub(crate) fn entry_problems(
+    project: Option<&ProjectFile>,
+    registry: &CheckRegistry,
+) -> Vec<Problem> {
     let builtins: BTreeSet<&str> = BUILTIN_CHECKS.into_iter().collect();
     let amending: BTreeSet<&str> = registry.amending.iter().map(|check| check.name()).collect();
     entries(project)

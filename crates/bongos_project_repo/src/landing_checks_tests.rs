@@ -8,8 +8,8 @@ use tempfile::TempDir;
 
 use crate::check_fakes::FakeCheck;
 use crate::test_support::{
-    PROJECT_TOML, add_task, fixture_project, land, landed, main_commit, new_copy, person,
-    request, run_git, start, task_with_todos, write_definition,
+    PROJECT_TOML, add_task, fixture_project, land, landed, main_commit, new_copy, person, request,
+    run_git, start, task_with_todos, write_definition,
 };
 use crate::{CheckOutcome, CheckPhase, LandMode, LandRequest, LandingResult};
 
@@ -93,8 +93,7 @@ fn a_slow_check_on_one_change_does_not_hold_up_another_landing() {
         release_tx.send(()).unwrap();
         result
     };
-    let (first_result, second_result) =
-        block_on(async { futures::join!(land_first, land_second) });
+    let (first_result, second_result) = block_on(async { futures::join!(land_first, land_second) });
     let second_commit = landed(second_result.unwrap());
     let first_commit = landed(first_result.unwrap());
     assert_eq!(main_commit(&repo), first_commit);
@@ -126,7 +125,11 @@ fn a_result_for_another_tree_is_never_counted_and_no_verdict_is_retried() {
     let copy = new_copy(&repo, "amber-otter-0001", &author);
     add_task(&copy, "alpha", "a1");
 
-    let LandingResult::Checked { tree: first_tree, checks } = check_only(&repo, &copy) else {
+    let LandingResult::Checked {
+        tree: first_tree,
+        checks,
+    } = check_only(&repo, &copy)
+    else {
         panic!("expected check results");
     };
     assert!(checks.iter().any(|result| result.check == "unsure"
@@ -142,13 +145,18 @@ fn a_result_for_another_tree_is_never_counted_and_no_verdict_is_retried() {
     // Another tree: the result stored for the first tree is not counted for it.
     // Committed by the check's first step.
     add_task(&copy, "gamma", "c1");
-    let LandingResult::Checked { tree: second_tree, .. } = check_only(&repo, &copy) else {
+    let LandingResult::Checked {
+        tree: second_tree, ..
+    } = check_only(&repo, &copy)
+    else {
         panic!("expected check results");
     };
     assert_ne!(second_tree, first_tree);
     assert_eq!(counting.calls(), 2);
     let on_first = repo.check_results_on(&copy.change_id, &first_tree).unwrap();
-    let on_second = repo.check_results_on(&copy.change_id, &second_tree).unwrap();
+    let on_second = repo
+        .check_results_on(&copy.change_id, &second_tree)
+        .unwrap();
     assert!(on_first.iter().any(|result| result.check == "counting"));
     assert!(on_second.iter().any(|result| result.check == "counting"));
     assert!(on_second.iter().all(|result| result.tree == second_tree));
@@ -175,14 +183,18 @@ fn a_task_started_while_the_change_waits_is_refused() {
             "other",
             &[("t1", "implement"), ("t2", "review"), ("t3", "check")],
         )
-        .replace("kind = \"other\"\n", "kind = \"other\"\nareas = [\"billing\"]\n"),
+        .replace(
+            "kind = \"other\"\n",
+            "kind = \"other\"\nareas = [\"billing\"]\n",
+        ),
     );
     assert_eq!(waiting(land(&repo, &copy, &author)), "unsure: not sure yet");
     let passed = repo.check_results(&copy.change_id).unwrap();
     assert!(
         passed
             .iter()
-            .any(|result| result.check == "started-unchanged" && result.outcome == CheckOutcome::Pass)
+            .any(|result| result.check == "started-unchanged"
+                && result.outcome == CheckOutcome::Pass)
     );
 
     // While it waits, the task is started.
@@ -237,9 +249,7 @@ fn a_disabled_built_in_does_not_run_and_the_always_on_ones_cannot_be_disabled() 
     write_definition(
         &refused,
         "project.toml",
-        &format!(
-            "{PROJECT_TOML}\n[[landing.checks]]\nname = \"schema\"\nenabled = false\n"
-        ),
+        &format!("{PROJECT_TOML}\n[[landing.checks]]\nname = \"schema\"\nenabled = false\n"),
     );
     let reasons = refusals(land(&repo, &refused, &author));
     assert!(reasons[0].contains("cannot be disabled"), "{reasons:?}");
@@ -252,9 +262,8 @@ fn a_landing_without_a_subject_takes_one_generated_from_the_change() {
     let author = person();
     let copy = new_copy(&repo, "amber-otter-0001", &author);
     add_task(&copy, "alpha", "a1");
-    let commit = landed(
-        block_on(repo.land_now(&copy.change_id, request("", &author), start())).unwrap(),
-    );
+    let commit =
+        landed(block_on(repo.land_now(&copy.change_id, request("", &author), start())).unwrap());
     assert_eq!(
         run_git(&repo, &["log", "-1", "--format=%s", &commit]),
         "Add 1 task"
@@ -288,7 +297,11 @@ fn a_script_check_passes_on_exit_0_fails_on_1_and_gives_no_verdict_otherwise() {
          case \"$2\" in *tasks_added*) ;; *) echo \"no summary\"; exit 4;; esac\n\
          echo \"verdict $code\"\nexit \"$code\"\n",
     );
-    write_script(&setup, "checks/broken.sh", "#!/nonexistent/interpreter\nexit 0\n");
+    write_script(
+        &setup,
+        "checks/broken.sh",
+        "#!/nonexistent/interpreter\nexit 0\n",
+    );
     write_definition(
         &setup,
         "project.toml",

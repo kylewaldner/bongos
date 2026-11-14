@@ -47,19 +47,34 @@ fn an_amending_check_adding_an_edge_is_committed_and_the_other_checks_run_on_the
     assert_eq!(row.amend_commits[0].check, "edges");
     // The amend commit is on the change's branch with its label as the subject.
     assert_eq!(
-        run_git(&repo, &["log", "-1", "--format=%s", &row.amend_commits[0].commit]),
+        run_git(
+            &repo,
+            &["log", "-1", "--format=%s", &row.amend_commits[0].commit]
+        ),
         "amend: edges edit"
     );
     let landed_tree = run_git(&repo, &["rev-parse", &format!("{commit}^{{tree}}")]);
     assert_eq!(
-        run_git(&repo, &["rev-parse", &format!("{}^{{tree}}", row.amend_commits[0].commit)]),
+        run_git(
+            &repo,
+            &[
+                "rev-parse",
+                &format!("{}^{{tree}}", row.amend_commits[0].commit)
+            ]
+        ),
         landed_tree
     );
     // The before-queue check ran once, on the amended tree, which is the tree that landed.
     let seen = recorder.seen.lock().clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].tree, landed_tree);
-    assert!(seen[0].alpha.as_deref().unwrap().contains("task = \"backfill\""));
+    assert!(
+        seen[0]
+            .alpha
+            .as_deref()
+            .unwrap()
+            .contains("task = \"backfill\"")
+    );
     // Its materialized tree is gone once the checks completed.
     assert!(!seen[0].root.exists());
     assert!(
@@ -114,7 +129,11 @@ fn amendments_outside_their_bounds_give_no_verdict_and_commit_nothing() {
     let cases = [
         (
             "goal",
-            replace_in("tasks/alpha/task.toml", "goal = \"alpha\"", "goal = \"other\""),
+            replace_in(
+                "tasks/alpha/task.toml",
+                "goal = \"alpha\"",
+                "goal = \"other\"",
+            ),
             "goal",
         ),
         (
@@ -269,21 +288,23 @@ fn a_branch_without_a_worktree_drops_its_amendments_by_compare_and_swap() {
         start(),
     ))
     .unwrap();
-    assert!(matches!(checked, LandingResult::Checked { .. }), "{checked:?}");
+    assert!(
+        matches!(checked, LandingResult::Checked { .. }),
+        "{checked:?}"
+    );
     let mut row = repo.change(&copy.change_id).unwrap().unwrap();
     assert_eq!(row.amend_commits.len(), 1);
     let author_commit = run_git(&repo, &["rev-parse", &format!("{}^", row.branch)]);
     // As a quick edit: the branch has no worktree.
-    run_git(&repo, &["worktree", "remove", "--force", copy.path.to_str().unwrap()]);
+    run_git(
+        &repo,
+        &["worktree", "remove", "--force", copy.path.to_str().unwrap()],
+    );
 
     let writer = repo.writer_or_error().unwrap();
-    let ended = block_on(repo.drop_amendments(
-        &writer,
-        &mut row,
-        &copy.path,
-        &crate::Identity::default(),
-    ))
-    .unwrap();
+    let ended =
+        block_on(repo.drop_amendments(&writer, &mut row, &copy.path, &crate::Identity::default()))
+            .unwrap();
     assert_eq!(ended, None);
     assert_eq!(run_git(&repo, &["rev-parse", &row.branch]), author_commit);
     assert!(
@@ -305,7 +326,14 @@ fn scratch_copies_left_by_a_former_process_are_removed_at_open() {
     std::fs::create_dir_all(&amending).unwrap();
     run_git(
         &repo,
-        &["worktree", "add", "-q", "--detach", registered.to_str().unwrap(), "main"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            registered.to_str().unwrap(),
+            "main",
+        ],
     );
     std::fs::create_dir_all(&plain).unwrap();
     std::fs::write(plain.join("left.txt"), "left\n").unwrap();

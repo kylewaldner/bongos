@@ -64,10 +64,7 @@ impl LandingCheck for ScriptCheck {
     }
 
     fn run(&self, input: CheckInput) -> BoxFuture<'static, CheckOutcome> {
-        let script: PathBuf = input
-            .master_root
-            .join(DEFINITIONS_DIR)
-            .join(&self.script);
+        let script: PathBuf = input.master_root.join(DEFINITIONS_DIR).join(&self.script);
         let root = input.root.to_path_buf();
         let summary = serde_json::to_string(input.summary);
         let meta = serde_json::to_string(input.meta);
