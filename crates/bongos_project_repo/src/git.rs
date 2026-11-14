@@ -157,19 +157,7 @@ impl Git {
             args: shown.clone(),
             message: error.to_string(),
         };
-        let mut command = util::command::new_command(&self.binary);
-        command
-            .current_dir(directory)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args(args);
-        if let Some(index) = index {
-            command.env("GIT_INDEX_FILE", index);
-        }
-        if self.isolated {
-            command
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1");
-        }
+        let mut command = self.command(directory, index, args);
         let output = match stdin {
             None => command.output().await.map_err(spawn_error)?,
             Some(input) => {
@@ -199,6 +187,75 @@ impl Git {
         };
         if output.status.success() {
             Ok(output.stdout)
+        } else {
+            Err(GitError::Failed {
+                args: shown,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
+    }
+
+    /// A git command with `args` in `directory`, with `GIT_INDEX_FILE` set to `index` when
+    /// given.
+    fn command(
+        &self,
+        directory: &Path,
+        index: Option<&Path>,
+        args: Vec<OsString>,
+    ) -> util::command::Command {
+        let mut command = util::command::new_command(&self.binary);
+        command
+            .current_dir(directory)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(args);
+        if let Some(index) = index {
+            command.env("GIT_INDEX_FILE", index);
+        }
+        if self.isolated {
+            command
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1");
+        }
+        command
+    }
+
+    /// Runs git with `args` in `directory` until it ends or `timeout` resolves, whichever is
+    /// first; then the child is killed. Nothing is read from stdin.
+    async fn run_bounded(
+        &self,
+        directory: &Path,
+        args: Vec<OsString>,
+        timeout: impl std::future::Future<Output = ()>,
+    ) -> Result<String, GitError> {
+        use futures::FutureExt as _;
+
+        let shown = args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut command = self.command(directory, None, args);
+        command
+            .stdin(util::command::Stdio::null())
+            .kill_on_drop(true);
+        // Dropping the output future drops the child, which kills it.
+        let output = command.output().fuse();
+        let timeout = timeout.fuse();
+        futures::pin_mut!(output, timeout);
+        let output = futures::select_biased! {
+            output = output => output.map_err(|error| GitError::Spawn {
+                args: shown.clone(),
+                message: error.to_string(),
+            })?,
+            () = timeout => {
+                return Err(GitError::Failed {
+                    args: shown,
+                    stderr: "timed out; the git process was stopped".to_string(),
+                });
+            }
+        };
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
             Err(GitError::Failed {
                 args: shown,
@@ -868,6 +925,35 @@ impl Git {
     ) -> Result<(), GitError> {
         self.run(directory, &["push", "-q", remote, refspec])
             .await?;
+        Ok(())
+    }
+
+    /// Pushes the branch `branch` to the same branch of `remote` (a validated remote name or
+    /// URL), never forcing but through `lease` (`<branch>:<expected commit>`), and gives up when
+    /// `timeout` resolves. Options end before the remote, and the `ext` transport is refused.
+    pub async fn push_branch(
+        &self,
+        directory: &Path,
+        remote: &str,
+        branch: &str,
+        lease: Option<&str>,
+        timeout: impl std::future::Future<Output = ()>,
+    ) -> Result<(), GitError> {
+        let mut args = vec![
+            OsString::from("-c"),
+            OsString::from("protocol.ext.allow=never"),
+            OsString::from("push"),
+            OsString::from("-q"),
+        ];
+        if let Some(lease) = lease {
+            args.push(OsString::from(format!("--force-with-lease={lease}")));
+        }
+        args.push(OsString::from("--"));
+        args.push(OsString::from(remote));
+        args.push(OsString::from(format!(
+            "refs/heads/{branch}:refs/heads/{branch}"
+        )));
+        self.run_bounded(directory, args, timeout).await?;
         Ok(())
     }
 }

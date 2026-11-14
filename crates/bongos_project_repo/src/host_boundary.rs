@@ -10,6 +10,7 @@ use bongos_project_repo_model::{Author, AuthorKind};
 use chrono::{DateTime, Utc};
 
 use crate::approval::{NEEDS_A_WINDOW, PersonGrant};
+use crate::backup::SnapshotReason;
 use crate::create::ProjectRepo;
 use crate::landing::{LandMode, LandRequest};
 use crate::peer::PeerIdentity;
@@ -164,6 +165,32 @@ impl HostBoundary {
             }
             RepoCommand::ShowHistory { filter } => Ok(RepoReply::History {
                 entries: self.repo.change_history(&filter, now).await?,
+            }),
+            RepoCommand::SnapshotNow { reason } => {
+                // Skipping the gap is a person's call: from any other peer a manual snapshot
+                // waits for the gap like a job end's, so no peer can flood the state branch.
+                let reason = if reason == SnapshotReason::Manual && !peer.may_attest_person() {
+                    SnapshotReason::JobEnd
+                } else {
+                    reason
+                };
+                Ok(RepoReply::Snapshot {
+                    outcome: self.repo.snapshot_now(reason, now).await?,
+                })
+            }
+            RepoCommand::BackupNow => {
+                let outcome = if peer.may_attest_person() {
+                    self.repo.backup_now(now).await?
+                } else {
+                    // As above: the gap and the push's retry pause hold for other peers.
+                    let outcome = self.repo.snapshot_now(SnapshotReason::JobEnd, now).await?;
+                    self.repo.spawn_push(now, false);
+                    outcome
+                };
+                Ok(RepoReply::Snapshot { outcome })
+            }
+            RepoCommand::BackupStatus => Ok(RepoReply::BackupStatus {
+                status: Box::new(self.repo.backup_status(now).await?),
             }),
         }
     }

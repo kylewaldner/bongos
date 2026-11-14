@@ -2537,6 +2537,7 @@ dependencies = [
  "log",
  "parking_lot",
  "paths",
+ "regex",
  "serde",
  "serde_json",
  "settings",

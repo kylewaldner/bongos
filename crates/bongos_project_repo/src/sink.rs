@@ -8,6 +8,7 @@ use bongos_project_repo_model::Author;
 use gpui::{BackgroundExecutor, Task};
 use serde::{Deserialize, Serialize};
 
+use crate::backup::{BackupStatus, SnapshotOutcome, SnapshotReason};
 use crate::history::{HistoryEntry, HistoryFilter};
 use crate::landing::LandRequest;
 use crate::quick_edit::QuickEdit;
@@ -46,6 +47,13 @@ pub enum RepoCommand {
     },
     /// `project: show history` through a filter.
     ShowHistory { filter: HistoryFilter },
+    /// A snapshot of the state for `reason`. Only a verified window's `manual` skips the
+    /// minimum gap; any other peer's waits for it like a job end.
+    SnapshotNow { reason: SnapshotReason },
+    /// `project: backup now`: a snapshot at once, and a push on its own task.
+    BackupNow,
+    /// `project: backup status`.
+    BackupStatus,
 }
 
 /// A window's claim that a person at its keyboard asked for a command, by the person's name.
@@ -67,6 +75,14 @@ pub enum RepoReply {
     /// The entries of a history, newest first.
     History {
         entries: Vec<HistoryEntry>,
+    },
+    /// What a snapshot request did.
+    Snapshot {
+        outcome: SnapshotOutcome,
+    },
+    /// The backup status, computed by the host.
+    BackupStatus {
+        status: Box<BackupStatus>,
     },
 }
 

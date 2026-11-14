@@ -144,6 +144,8 @@ pub(crate) struct Engine {
     pub(crate) landing: Mutex<std::collections::HashMap<String, crate::landing::LandMode>>,
     /// The timer of the deadlines; the real one unless a test set its own.
     pub(crate) timer: Mutex<Option<Timer>>,
+    /// Snapshots, pushes, thinning and the run record copy.
+    pub(crate) backup: crate::backup::BackupEngine,
     #[cfg(test)]
     pub(crate) probe: Mutex<Option<crate::landing::Probe>>,
 }

@@ -3,6 +3,7 @@
 
 mod amending;
 mod approval;
+mod backup;
 mod builtin_checks;
 mod changes;
 mod check_run;
@@ -21,13 +22,16 @@ mod locations;
 mod master;
 mod peer;
 mod pins;
+mod project_values;
 mod quick_edit;
 mod registries;
 pub mod router;
 mod script_check;
 mod settings;
 mod sink;
+mod snapshot;
 mod state;
+mod state_branch;
 mod state_hooks;
 mod state_ops;
 mod working_copies;
@@ -36,6 +40,12 @@ pub use amending::KEEPS_AMENDING;
 pub use approval::{
     ApprovalHook, ApprovalHooks, ApprovalInput, ApprovalRow, ChatTaskLookup,
     MOVE_ROLLBACK_NAMESPACE, NEEDS_A_WINDOW, OwnSubtreeHook,
+};
+pub use backup::{
+    BACKUP_TICK, BackupOptions, BackupStatus, CopyResult, DEFAULT_STATE_BRANCH,
+    DRIVE_FAILURE_SENTENCE, LAST_SNAPSHOT_KEY, NOT_BACKED_UP_NO_REMOTE, PUSH_TIMEOUT, PushResult,
+    PushTimeout, RUN_RECORDS_LOCAL_SENTENCE, RunRecordCopyStatus, SnapshotOutcome, SnapshotReason,
+    SnapshotRecord, retry_delay,
 };
 pub use bongos_project_repo_model::checks::{
     AmendOutcome, CheckOutcome, CheckPhase, HoldReason, LiveFacts, LiveSource, Stamp,
@@ -73,6 +83,10 @@ pub use master::{
 };
 pub use peer::{ClientKind, PeerIdentity, peer_identity};
 pub use pins::PinGuard;
+pub use project_values::{
+    OVERRIDABLE_PROJECT_KEYS, ProjectValue, ProjectValueOverride, ProjectValueOverrides,
+    SNAPSHOT_INTERVAL_KEY, ValueSource,
+};
 pub use quick_edit::{
     LANDING_MARK, NOT_LANDED_MARK, QUICK_EDITS_NAMESPACE, QuickEdit, QuickEditStarted,
     STALE_SNAPSHOT, check_fresh, written_tasks,
@@ -81,10 +95,15 @@ pub use registries::{ActivitySource, ActivitySources, StateExporter, StateExport
 pub use script_check::ScriptCheck;
 pub use settings::ProjectRepositorySettings;
 pub use sink::{LocalSink, PersonClaim, RefusingSink, RepoCommand, RepoReply, StateSink};
+pub use snapshot::{
+    FORMAT_FILE, FORMAT_LINE, RESERVED_NAMES, RUNS_FILE, RUNS_NAMESPACE, Snapshot, TASKS_DIR,
+    WITHHELD_FILE, WITHHELD_SECRET, Withheld, WithheldReason,
+};
 pub use state::{
     KvRead, KvTx, OpenError, StateEvent, StateRead, StateReader, StateStore, StateTx, StateWriter,
     VERIFIED_COMMIT_KEY,
 };
+pub use state_branch::{SNAPSHOT_INDEX_FILE, state_ref};
 pub use state_hooks::{StateApplyChange, StateApplyHook, StateApplyHooks, TaskTouch};
 pub use state_ops::{SETTABLE_FIELDS, StateOp};
 pub use working_copies::{
@@ -101,6 +120,8 @@ pub fn init(cx: &mut gpui::App) {
 mod amending_tests;
 #[cfg(test)]
 mod approval_tests;
+#[cfg(test)]
+mod backup_tests;
 #[cfg(test)]
 mod check_fakes;
 #[cfg(test)]
@@ -124,11 +145,15 @@ mod master_tests;
 #[cfg(test)]
 mod peer_tests;
 #[cfg(test)]
+mod project_values_tests;
+#[cfg(test)]
 mod quick_edit_tests;
 #[cfg(test)]
 mod router_tests;
 #[cfg(test)]
 mod sink_tests;
+#[cfg(test)]
+mod snapshot_tests;
 #[cfg(test)]
 mod split_tests;
 #[cfg(test)]
