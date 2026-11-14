@@ -56,9 +56,11 @@ pub mod task {
             /// Picks a task and a task to move it under. Asks first.
             Move,
             /// Picks a task and a project and moves it to the top level of that project. Asks
-            /// first.
+            /// first. A task of a project repository moves with every task under it to another
+            /// project repository, under a task picked there, after a preview of the move.
             MoveToProject,
-            /// Picks a task and an activity and files it as a one-off. Asks first.
+            /// Picks a task and an activity and files it as a one-off. Asks first. A task of a
+            /// project repository moves like `task: move to project`, to the one-offs project.
             MakeOneOff,
             /// Picks an open leaf (pr-ship, pr-merge, spike or babysit) and creates its branch and
             /// worktree in its repository, then runs the repository's setup command there. A

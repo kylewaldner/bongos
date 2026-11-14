@@ -17,6 +17,7 @@ mod links;
 mod master_files;
 mod modals;
 mod modes;
+mod move_commands;
 mod oneoffs;
 mod open;
 mod overview;
@@ -177,6 +178,8 @@ mod landing_view_tests;
 mod modal_route_tests;
 #[cfg(test)]
 mod mode_tests;
+#[cfg(test)]
+mod move_command_tests;
 #[cfg(test)]
 mod overview_tests;
 #[cfg(test)]
