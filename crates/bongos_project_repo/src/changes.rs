@@ -92,7 +92,7 @@ impl ChangeFilter {
 }
 
 /// A person and a claimed person are the same kind in storage.
-fn same_kind(wanted: AuthorKind, found: AuthorKind) -> bool {
+pub(crate) fn same_kind(wanted: AuthorKind, found: AuthorKind) -> bool {
     let normal = |kind| match kind {
         AuthorKind::PersonClaimed => AuthorKind::Person,
         other => other,

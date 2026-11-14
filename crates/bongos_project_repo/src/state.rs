@@ -571,7 +571,7 @@ impl<'a> StateRead<'a> {
     }
 
     /// Every landing as `(change id, record)`, newest first.
-    pub(crate) fn landings(&self) -> Result<Vec<(String, String)>> {
+    pub fn landings(&self) -> Result<Vec<(String, String)>> {
         self.connection.select::<(String, String)>(
             "SELECT change_id, record_toml FROM landings ORDER BY rowid DESC",
         )?()

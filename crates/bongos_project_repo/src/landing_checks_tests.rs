@@ -116,6 +116,60 @@ fn a_slow_check_on_one_change_does_not_hold_up_another_landing() {
 }
 
 #[test]
+fn a_land_asked_while_a_check_of_the_change_runs_waits_for_it_and_lands() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let slow = Arc::new(FakeCheck::new("slow", CheckPhase::BeforeQueue));
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    *slow.gate.lock() = Some((started_tx, release_rx));
+    repo.add_landing_check(slow);
+    let author = copy_author();
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let mut events = repo.landing_events();
+
+    let checking = land_as(
+        &repo,
+        &copy.change_id,
+        LandRequest {
+            meta: ChangeMeta::new("check", author.clone()),
+            mode: LandMode::CheckOnly,
+        },
+        start(),
+    );
+    let landing = async {
+        started_rx.await.unwrap();
+        let mut land = std::pin::pin!(land_as(
+            &repo,
+            &copy.change_id,
+            request("land", &author),
+            start()
+        ));
+        // The check holds the change: the land waits instead of answering "already landing".
+        assert!(futures::poll!(land.as_mut()).is_pending());
+        release_tx.send(()).unwrap();
+        land.await
+    };
+    let (checked, landed_result) = block_on(async { futures::join!(checking, landing) });
+    assert!(
+        matches!(checked.unwrap(), LandingResult::Checked { .. }),
+        "the check ends with its own result"
+    );
+    let commit = landed(landed_result.unwrap());
+    assert_eq!(main_commit(&repo), commit);
+    let ended = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|(change, _)| *change == copy.change_id)
+        .any(|(_, event)| {
+            event
+                == crate::LandingEvent::Landed {
+                    commit: commit.clone(),
+                }
+        });
+    assert!(ended, "the land reports its end");
+}
+
+#[test]
 fn a_result_for_another_tree_is_never_counted_and_no_verdict_is_retried() {
     let root = TempDir::new().unwrap();
     let repo = fixture_project(&root);

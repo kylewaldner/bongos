@@ -17,6 +17,7 @@ use bongos_project_repo_model::{
 };
 use bongos_work_model::TaskId;
 use bongos_work_model::commands::{Change, Write};
+use bongos_work_model::slug::MAX_SLUG_LEN;
 use bongos_work_model::store::{PendingMark, WorkTree};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,7 +31,7 @@ use crate::router::{
 };
 use crate::state::StateRead;
 use crate::state_ops::StateOp;
-use crate::working_copies::fresh_name;
+use crate::working_copies::{clean_name, fresh_name};
 
 /// The `kv` namespace of the quick edits' records, by change id.
 pub const QUICK_EDITS_NAMESPACE: &str = "quick-edits";
@@ -53,6 +54,10 @@ pub struct QuickEdit {
     pub meta: ChangeMeta,
     /// The tasks whose rows show the change as pending.
     pub tasks: Vec<TaskId>,
+    /// The name asked for the change's branch and row (cleaned, and numbered when taken); a
+    /// generated one when `None`.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// A quick edit whose branch and row exist.
@@ -125,7 +130,7 @@ pub fn check_fresh(
 
 /// Refuses `base` unless it is a full commit id (40 or 64 hex digits): a quick edit from
 /// another process names it, and git must never read it as an option or a revision expression.
-fn check_commit_id(base: &str) -> Result<()> {
+pub(crate) fn check_commit_id(base: &str) -> Result<()> {
     if !matches!(base.len(), 40 | 64) || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("{base:?} is not a commit id");
     }
@@ -227,14 +232,29 @@ impl ProjectRepo {
         }
         let repository = self.location.repository.clone();
         let prefix = self.land_options().branch_prefix;
-        let mut name = fresh_name();
+        let wanted = edit.name.as_deref().and_then(|name| clean_name(name).ok());
+        let mut name = wanted.clone().unwrap_or_else(fresh_name);
+        let mut attempt = 1;
         while self
             .git
             .branch_exists(&repository, &format!("{prefix}{name}"))
             .await
             || self.working_copy_path(&name).exists()
         {
-            name = fresh_name();
+            attempt += 1;
+            name = match &wanted {
+                // Cleaned again, the stem shortened first so the suffix survives the length
+                // limit: a name that cleaned to the same text every time would never be free.
+                Some(wanted) => {
+                    let suffix = format!("-{attempt}");
+                    let stem: String = wanted
+                        .chars()
+                        .take(MAX_SLUG_LEN.saturating_sub(suffix.len()))
+                        .collect();
+                    clean_name(&format!("{stem}{suffix}"))?
+                }
+                None => fresh_name(),
+            };
         }
         let branch = format!("{prefix}{name}");
         let scratch = self.location.state.join("quick-edits").join(&name);
@@ -445,14 +465,32 @@ impl ProjectRepo {
         change_id: &str,
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
-        let row = self
-            .change(change_id)?
-            .ok_or_else(|| anyhow!("there is no change {change_id}"))?;
-        let record = self.quick_edit_record(change_id)?;
-        let subject = record.map(|record| record.subject).unwrap_or_default();
-        let request = LandRequest {
-            meta: ChangeMeta::new(subject, row.author.clone()),
-            mode: LandMode::Land,
+        let request = (|| {
+            let row = self
+                .change(change_id)?
+                .ok_or_else(|| anyhow!("there is no change {change_id}"))?;
+            let record = self.quick_edit_record(change_id)?;
+            let subject = record.map(|record| record.subject).unwrap_or_default();
+            anyhow::Ok(LandRequest {
+                meta: ChangeMeta::new(subject, row.author),
+                mode: LandMode::Land,
+            })
+        })();
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                // The landing never started, so no landing reports its end, unless a landing
+                // of the change already runs: that one reports its own.
+                if !self.engine.is_landing(change_id) {
+                    self.engine.emit(
+                        change_id,
+                        crate::LandingEvent::Ended {
+                            reason: format!("the landing failed: {error:#}"),
+                        },
+                    );
+                }
+                return Err(error);
+            }
         };
         let result = self.land_now(change_id, request, now).await?;
         let not_landed = match &result {
@@ -482,6 +520,13 @@ impl ProjectRepo {
         value
             .map(|value| value.try_into().context("reading a quick edit"))
             .transpose()
+    }
+
+    /// The subject and the mark (`landing` or `not landed`) of the quick edit `change_id`, when
+    /// it is one.
+    pub(crate) fn quick_edit_label(&self, change_id: &str) -> Option<(String, String)> {
+        let record = self.quick_edit_record(change_id).ok().flatten()?;
+        Some((record.subject, record.label))
     }
 
     fn relabel_quick_edit(&self, change_id: &str, label: &str) -> Result<()> {

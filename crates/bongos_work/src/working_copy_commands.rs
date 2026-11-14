@@ -63,7 +63,7 @@ pub(crate) fn working_copy_label(
 }
 
 /// Runs `then` with the project repository to act on: the only open one, or the one picked.
-fn with_repo(
+pub(crate) fn with_repo(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -108,7 +108,11 @@ fn with_repo(
 }
 
 /// Opens `path` as a workspace of this window and activates it.
-fn open_in_new_workspace(path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
+pub(crate) fn open_in_new_workspace(
+    path: PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
         return;
     };
@@ -362,7 +366,7 @@ fn land(
 }
 
 /// Asks for the subject of a landing (a check needs none), then lands or checks `row`.
-fn ask_and_land(
+pub(crate) fn ask_and_land(
     repo: ProjectRepo,
     row: ChangeRow,
     mode: LandMode,
@@ -389,7 +393,7 @@ fn ask_and_land(
     }
 }
 
-fn start_landing(
+pub(crate) fn start_landing(
     repo: ProjectRepo,
     row: ChangeRow,
     mode: LandMode,
@@ -491,11 +495,11 @@ fn approve(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Work
 }
 
 /// The first eight hex digits of `commit`.
-fn short_commit(commit: &str) -> &str {
+pub(crate) fn short_commit(commit: &str) -> &str {
     &commit[..commit.len().min(8)]
 }
 
-fn approve_change(
+pub(crate) fn approve_change(
     repo: ProjectRepo,
     row: ChangeRow,
     window: &mut Window,

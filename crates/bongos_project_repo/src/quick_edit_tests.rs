@@ -81,6 +81,7 @@ pub(crate) fn quick_edit_of(
         files,
         meta: ChangeMeta::new(String::new(), author.clone()),
         tasks: written_tasks(change),
+        name: None,
     }
 }
 
@@ -119,7 +120,7 @@ pub(crate) async fn until_waiting(
             next = events.next() => {
                 let (id, event) = next.expect("the landing events");
                 if id == change_id
-                    && matches!(&event, LandingEvent::Waiting { reason } if reason.starts_with("waiting for approval"))
+                    && matches!(&event, LandingEvent::Waiting { reason, .. } if reason.starts_with("waiting for approval"))
                 {
                     return;
                 }
@@ -471,6 +472,7 @@ fn paths_that_leave_definitions_or_files_are_refused() {
             files: Vec::new(),
             meta: ChangeMeta::new(String::new(), keyboard().author),
             tasks: Vec::new(),
+            name: None,
         };
         assert!(block_on(repo.quick_edit(edit, None, start())).is_err());
     }
@@ -1028,7 +1030,7 @@ fn a_person_claim_approves_no_quick_edit_by_another_author_or_from_an_unverified
         // approves it: never as a person's edit.
         let mut ended = None;
         until_landing_event(&mut events, &change_id, |event| match event {
-            LandingEvent::Waiting { reason } => reason.starts_with("waiting for approval"),
+            LandingEvent::Waiting { reason, .. } => reason.starts_with("waiting for approval"),
             LandingEvent::Landed { .. } => {
                 ended = Some(event.clone());
                 true
@@ -1056,4 +1058,216 @@ fn a_person_claim_approves_no_quick_edit_by_another_author_or_from_an_unverified
         }
         assert!(repo.approvals(&change_id).unwrap().is_empty());
     }
+}
+
+/// The fixture project with only the real `own-subtree` hook, which reads chat `c1` as working on
+/// the leaf `l1`.
+fn own_subtree_project(root: &TempDir) -> ProjectRepo {
+    let repo = crate::test_support::bare_fixture_project(root);
+    repo.add_approval_hook(Arc::new(crate::OwnSubtreeHook::new(Arc::new(
+        |chat: &str| (chat == "c1").then(|| "l1".to_string()),
+    ))));
+    repo
+}
+
+#[test]
+fn an_agent_chat_sent_by_a_peer_is_never_trusted_by_own_subtree() {
+    let window = PeerIdentity::for_test(4242, ClientKind::Window, true);
+    let agent = Author::agent("agent").with_chat("c1");
+
+    // In this process the chat is the author's: the change inside its task lands on its own.
+    let root = TempDir::new().unwrap();
+    let repo = own_subtree_project(&root);
+    let here = loaded(&repo);
+    let started = block_on(repo.quick_edit(rename_edit(&here, &agent), None, start())).unwrap();
+    let result = block_on(repo.land_quick_edit(&started.change_id, start())).unwrap();
+    assert!(matches!(result, LandingResult::Landed { .. }), "{result:?}");
+
+    // The same author sent by a peer, even a verified window, claims a chat it is not bound to:
+    // the host drops it, and the change waits for a person.
+    let root = TempDir::new().unwrap();
+    let repo = own_subtree_project(&root);
+    let loaded = loaded(&repo);
+    let before = main_commit(&repo);
+    let mut events = repo.landing_events();
+    let change_id = sent_quick_edit(&repo, &loaded, &agent, &window);
+    let row = repo.change(&change_id).unwrap().unwrap();
+    assert_eq!(row.author.chat, None);
+    let mut reason = String::new();
+    until_landing_event(&mut events, &change_id, |event| match event {
+        LandingEvent::Waiting {
+            reason: waiting, ..
+        } => {
+            reason = waiting.clone();
+            true
+        }
+        _ => false,
+    });
+    assert!(reason.starts_with("waiting for approval"), "{reason}");
+    assert!(reason.contains("unknown chat"), "{reason}");
+    assert_eq!(main_commit(&repo), before);
+    block_on(repo.abandon_now(&change_id, start())).unwrap();
+
+    // A peer's `land` of an agent's change, claiming the chat in its request, waits too.
+    let edit = rename_edit(&loaded, &Author::agent("agent"));
+    let started = block_on(repo.quick_edit(edit, None, start())).unwrap();
+    let command = RepoCommand::Land {
+        change_id: started.change_id.clone(),
+        request: crate::LandRequest {
+            meta: ChangeMeta::new(String::new(), agent),
+            mode: crate::LandMode::Land,
+        },
+        person: None,
+    };
+    let command: RepoCommand =
+        serde_json::from_value(serde_json::to_value(command).unwrap()).unwrap();
+    let boundary = HostBoundary::new(repo.clone());
+    block_on(async {
+        let mut landing = boundary
+            .accept_now(command, &window, start())
+            .boxed()
+            .fuse();
+        loop {
+            futures::select! {
+                result = landing => panic!("the peer's land ended before it waited: {result:?}"),
+                next = events.next() => {
+                    let (id, event) = next.expect("the landing events");
+                    if id == started.change_id
+                        && matches!(&event, LandingEvent::Waiting { reason, .. } if reason.contains("unknown chat"))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        repo.abandon_now(&started.change_id, start()).await.unwrap();
+        landing.await.unwrap();
+    });
+    assert_eq!(main_commit(&repo), before);
+}
+
+#[test]
+fn a_received_author_keeps_everything_but_its_chat_and_proposal() {
+    let mut author = Author::agent("agent").with_chat("c1");
+    author.proposal = Some(("g1".to_string(), 1));
+    let received = crate::host_boundary::as_received(&author).unwrap();
+    assert_eq!(received.kind(), author.kind());
+    assert_eq!(received.name, "agent");
+    assert_eq!(received.chat, None);
+    assert_eq!(received.proposal, None);
+    // In this process the author keeps both: only the boundary drops them.
+    assert_eq!(author.chat.as_deref(), Some("c1"));
+    assert_eq!(author.proposal, Some(("g1".to_string(), 1)));
+    // A person stays only a claim.
+    let received = crate::host_boundary::as_received(&keyboard().author).unwrap();
+    assert_eq!(
+        received.kind(),
+        bongos_project_repo_model::AuthorKind::PersonClaimed
+    );
+}
+
+#[test]
+fn a_landing_that_cannot_start_ends_for_its_watchers() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let mut events = repo.landing_events();
+    assert!(block_on(repo.land_quick_edit("no-such-change", start())).is_err());
+    let (id, event) = block_on(events.next()).unwrap();
+    assert_eq!(id, "no-such-change");
+    assert!(
+        matches!(&event, LandingEvent::Ended { reason } if reason.contains("there is no change")),
+        "{event:?}"
+    );
+}
+
+#[test]
+fn an_abandoned_change_ends_its_waiting_landing_for_its_watchers() {
+    let root = TempDir::new().unwrap();
+    let repo = crate::test_support::bare_fixture_project(&root);
+    let loaded = loaded(&repo);
+    let started =
+        block_on(repo.quick_edit(rename_edit(&loaded, &Author::agent("agent")), None, start()))
+            .unwrap();
+    let mut events = repo.landing_events();
+    let mut landing = landing(&repo, &started.change_id);
+    block_on(async {
+        until_waiting(&mut landing, &mut events, &started.change_id).await;
+        repo.abandon_now(&started.change_id, start()).await.unwrap();
+        assert_eq!(landing.await.unwrap(), LandingResult::Abandoned);
+    });
+    let mut ended = 0;
+    while let Ok((id, event)) = events.try_recv() {
+        if id == started.change_id {
+            assert_eq!(
+                event,
+                LandingEvent::Ended {
+                    reason: crate::LANDING_ABANDONED.to_string()
+                }
+            );
+            ended += 1;
+        }
+    }
+    assert!(ended >= 1);
+}
+
+#[test]
+fn a_taken_long_name_is_numbered_within_the_length_limit() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    let long = "a".repeat(bongos_work_model::slug::MAX_SLUG_LEN);
+    let mut names = Vec::new();
+    for _ in 0..2 {
+        let mut edit = rename_edit(&loaded, &keyboard().author);
+        edit.name = Some(long.clone());
+        names.push(block_on(repo.quick_edit(edit, None, start())).unwrap().name);
+    }
+    assert_eq!(names[0], long);
+    assert_ne!(names[1], long);
+    assert!(names[1].ends_with("-2"), "{}", names[1]);
+    assert_eq!(names[1].len(), bongos_work_model::slug::MAX_SLUG_LEN);
+    assert_eq!(crate::clean_name(&names[1]).unwrap(), names[1]);
+}
+
+#[test]
+fn a_revert_from_a_peer_that_fails_leaves_no_working_copy() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    let started = start_edit(&repo, &loaded, keyboard(), rename("l1", "Backfill events"));
+    let result = block_on(repo.land_quick_edit(&started.change_id, start())).unwrap();
+    assert!(matches!(result, LandingResult::Landed { .. }), "{result:?}");
+    // A landed row whose commit is a landing, but not its own: the revert of the commit is
+    // possible, its meta (the subject of the change's own landing) is not.
+    let mut other = repo.change(&started.change_id).unwrap().unwrap();
+    other.change_id = new_id();
+    other.name = "other".to_string();
+    other.branch = "work/other".to_string();
+    repo.writer_or_error()
+        .unwrap()
+        .transact(|tx| tx.set_change(&other))
+        .unwrap();
+    let copies = || {
+        std::fs::read_dir(&repo.location().working_copies)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    let copies_before = copies();
+    let rows_before = repo.read_state(|read| read.changes()).unwrap().len();
+    let refs_before = crate::test_support::refs(&repo);
+    let command = RepoCommand::Revert {
+        change_id: other.change_id,
+        author: keyboard().author,
+        person: None,
+    };
+    let window = PeerIdentity::for_test(4242, ClientKind::Window, true);
+    let error = block_on(HostBoundary::new(repo.clone()).accept_now(command, &window, start()))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("no landing"), "{error:#}");
+    assert_eq!(
+        repo.read_state(|read| read.changes()).unwrap().len(),
+        rows_before
+    );
+    assert_eq!(crate::test_support::refs(&repo), refs_before);
+    assert_eq!(copies(), copies_before);
 }

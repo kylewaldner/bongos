@@ -330,6 +330,53 @@ fn own_subtree_approves_inside_the_chats_task_only() {
 }
 
 #[test]
+fn own_subtree_is_not_fooled_by_a_shared_prefix_or_a_climbing_path() {
+    // `tasks/a/tasks/b` and its sibling `tasks/a/tasks/bc` share a prefix.
+    let master = tree(&[
+        ("tasks/a", ""),
+        ("tasks/a/tasks/b", ""),
+        ("tasks/a/tasks/bc", ""),
+    ]);
+    let added = tree(&[
+        ("tasks/a", ""),
+        ("tasks/a/tasks/b", ""),
+        ("tasks/a/tasks/bc", ""),
+        ("tasks/a/tasks/bc/tasks/x", ""),
+    ]);
+    let summary = summarize(&master, &added);
+    assert!(matches!(
+        own_subtree(Some("b"), &summary, &master, &added),
+        ApprovalOpinion::NeedsPerson(_)
+    ));
+    let files = |path: &str| {
+        summarize(&master, &master)
+            .with_files(vec![(path.to_string(), crate::FileChange::Modified)])
+    };
+    for path in [
+        "tasks/a/tasks/bc/task.toml",
+        "tasks/a/tasks/b/../bc/task.toml",
+        "tasks/a/tasks/b/../../../../project.toml",
+    ] {
+        assert!(
+            matches!(
+                own_subtree(Some("b"), &files(path), &master, &master),
+                ApprovalOpinion::NeedsPerson(_)
+            ),
+            "{path}"
+        );
+    }
+    assert!(matches!(
+        own_subtree(
+            Some("b"),
+            &files("tasks/a/tasks/b/task.toml"),
+            &master,
+            &master
+        ),
+        ApprovalOpinion::Approve(_)
+    ));
+}
+
+#[test]
 fn own_subtree_never_covers_project_level_files() {
     let (master, _) = subtree_trees();
     let summary = summarize(&master, &master).with_files(vec![(

@@ -41,6 +41,9 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w g l", "project::Land"),
     ("ctrl-c w g c", "project::Check"),
     ("ctrl-c w g A", "project::Approve"),
+    ("ctrl-c w g h", "project::ShowHistory"),
+    ("ctrl-c w g r", "project::Revert"),
+    ("ctrl-c w g v", "project::ShowChanges"),
     ("ctrl-c w h", "artifact::Hide"),
     ("ctrl-c w u", "artifact::Share"),
     ("ctrl-c w H", "artifact::HideAll"),
@@ -79,6 +82,7 @@ const UNBOUND: &[&str] = &[
     "project::Archive",
     "project::Unarchive",
     "project::OpenFolder",
+    "project::ResolveSplit",
 ];
 
 fn load(paths: &[&str], cx: &TestAppContext) -> (Keymap, Vec<KeyBinding>) {

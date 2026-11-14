@@ -38,7 +38,7 @@ use futures::future::Either;
 use serde::{Deserialize, Serialize};
 
 use crate::amending::Amended;
-use crate::approval::{NEEDS_A_WINDOW, PersonGrant, approved_line};
+use crate::approval::{ApprovalRow, NEEDS_A_WINDOW, PersonGrant, approved_line};
 use crate::builtin_checks::{schema_check, tree_facts};
 use crate::changes::{ChangeRow, ChangeState};
 use crate::check_run::{CheckResult, verdict};
@@ -164,6 +164,9 @@ pub enum LandingEvent {
     Checking,
     Waiting {
         reason: String,
+        /// How many approval rows of the change the landing had read when it announced the
+        /// wait (rows are only ever added); 0 for a wait that is not for approval.
+        approvals: usize,
     },
     Refused {
         reasons: Vec<String>,
@@ -174,7 +177,15 @@ pub enum LandingEvent {
     Landed {
         commit: String,
     },
+    /// The landing stopped with no verdict and waits for nothing: the change was abandoned, it
+    /// cannot land as it is, or the landing failed.
+    Ended {
+        reason: String,
+    },
 }
+
+/// Why a landing ended for an abandoned change.
+pub const LANDING_ABANDONED: &str = "the change was abandoned";
 
 /// What other surfaces hear about the repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,7 +277,18 @@ pub(crate) type Probe = Arc<dyn Fn(ProbePoint, String) -> BoxFuture<'static, boo
 /// The error of a simulated crash.
 pub(crate) const SIMULATED_CRASH: &str = "simulated crash";
 
-fn event_for(result: &LandingResult) -> Option<LandingEvent> {
+/// The event a landing that returned `result` ends with. Every way a landing of the change can
+/// end has one, so a watcher never waits on a landing that is over; a call that found the change
+/// already landing has none, since that landing reports its own end.
+fn event_for(result: &Result<LandingResult>) -> Option<LandingEvent> {
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            return Some(LandingEvent::Ended {
+                reason: format!("the landing failed: {error:#}"),
+            });
+        }
+    };
     match result {
         LandingResult::Landed { commit } => Some(LandingEvent::Landed {
             commit: commit.clone(),
@@ -277,10 +299,17 @@ fn event_for(result: &LandingResult) -> Option<LandingEvent> {
         LandingResult::Conflict { files } => Some(LandingEvent::Conflict {
             files: files.clone(),
         }),
-        LandingResult::NoVerdict { reason } => Some(LandingEvent::Waiting {
+        LandingResult::NoVerdict { reason } if reason == ALREADY_LANDING => None,
+        LandingResult::NoVerdict { reason } => Some(LandingEvent::Ended {
             reason: reason.clone(),
         }),
-        _ => None,
+        LandingResult::Abandoned => Some(LandingEvent::Ended {
+            reason: LANDING_ABANDONED.to_string(),
+        }),
+        LandingResult::NotRequested => Some(LandingEvent::Ended {
+            reason: "the change was not asked to land".to_string(),
+        }),
+        LandingResult::Checked { .. } => None,
     }
 }
 
@@ -433,10 +462,13 @@ impl ProjectRepo {
         grant: Option<PersonGrant>,
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
-        let result = self.land_steps(change_id, &request, grant, now).await;
-        if let Ok(result) = &result
-            && let Some(event) = event_for(result)
-        {
+        let mut running_elsewhere = false;
+        let result = self
+            .land_steps(change_id, &request, grant, now, &mut running_elsewhere)
+            .await;
+        // A call that found the change already landing reports nothing, not even its own error:
+        // the running landing reports its end.
+        if !running_elsewhere && let Some(event) = event_for(&result) {
             self.engine.emit(change_id, event);
         }
         self.engine.signal.notify();
@@ -483,9 +515,23 @@ impl ProjectRepo {
         request: &LandRequest,
         mut grant: Option<PersonGrant>,
         now: DateTime<Utc>,
+        running_elsewhere: &mut bool,
     ) -> Result<LandingResult> {
         let writer = self.writer_or_error()?;
-        let Some(_landing) = self.engine.start_landing(change_id) else {
+        let _landing = loop {
+            let wake = self.engine.signal.listen();
+            let running = match self.engine.start_landing(change_id, request.mode) {
+                Ok(guard) => break guard,
+                Err(running) => running,
+            };
+            // A land of a change being checked waits for the check to end, then lands: the
+            // check never reports a landing's end, so answering "already landing" would leave
+            // the land unreported.
+            if request.mode == LandMode::Land && running == LandMode::CheckOnly {
+                wake.await.ok();
+                continue;
+            }
+            *running_elsewhere = true;
             // A person's `project: land` of a change already landing (waiting for approval)
             // approves what it holds committed; the running landing goes on.
             if let Some(grant) = grant
@@ -626,8 +672,10 @@ impl ProjectRepo {
             }
             seen.extend(amend_stamps);
 
-            // Step 4: approval, waited for here, outside the queue and its lock.
-            let mut told = false;
+            // Step 4: approval, waited for here, outside the queue and its lock. The wait is
+            // announced again whenever the approval rows changed and still are not enough, so a
+            // person who approved hears that the landing waits on.
+            let mut told: Option<Vec<ApprovalRow>> = None;
             let approval_result = loop {
                 let wake = self.engine.signal.listen();
                 match self.change(change_id)?.map(|row| row.state) {
@@ -644,20 +692,24 @@ impl ProjectRepo {
                     drop(run);
                     continue 'steps;
                 }
+                // The rows are read before the judgment, so a wait never claims a row the
+                // judgment did not see.
+                let rows = self.approvals(change_id)?;
                 let (approval, result) = self
                     .judge_approval(&writer, &row, &mut run, &checked_tip)
                     .await?;
                 if approval.is_approved() {
                     break result;
                 }
-                if !told {
+                if told.as_ref() != Some(&rows) {
                     self.engine.emit(
                         change_id,
                         LandingEvent::Waiting {
                             reason: approval.waiting_reason().unwrap_or_default(),
+                            approvals: rows.len(),
                         },
                     );
-                    told = true;
+                    told = Some(rows);
                 }
                 wake.await.ok();
             };
@@ -864,6 +916,7 @@ impl ProjectRepo {
                             change_id,
                             LandingEvent::Waiting {
                                 reason: WAITING_MASTER_SPLIT.to_string(),
+                                approvals: 0,
                             },
                         );
                         told = true;
@@ -903,6 +956,7 @@ impl ProjectRepo {
                             change_id,
                             LandingEvent::Waiting {
                                 reason: WAITING_MASTER_SPLIT.to_string(),
+                                approvals: 0,
                             },
                         );
                         shown = Some(None);

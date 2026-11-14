@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 
 use crate::approval::{NEEDS_A_WINDOW, PersonGrant};
 use crate::create::ProjectRepo;
+use crate::landing::{LandMode, LandRequest};
 use crate::peer::PeerIdentity;
 use crate::sink::{PersonClaim, RepoCommand, RepoReply};
 use crate::state_ops::StateOp;
@@ -20,9 +21,18 @@ pub struct HostBoundary {
     repo: ProjectRepo,
 }
 
-/// `author` as it is after crossing a process boundary: a person becomes a claimed person.
-fn as_received(author: &Author) -> Result<Author> {
-    Ok(serde_json::from_value(serde_json::to_value(author)?)?)
+/// `author` as it is after crossing a process boundary: a person becomes a claimed person, and
+/// the chat it claims to act in and the proposal it claims to write are dropped. An automatic
+/// approval rule (`own-subtree`) trusts the chat of an author, and a proposal's working copy is
+/// named for it and approved by `project: approve` of that proposal, so only this process binds
+/// either: an author built here, by the store's writer for a chat or proposal of this process. No
+/// peer is bound to a chat or a proposal by anything the host can verify, so a peer's agent change
+/// has neither and waits for a person.
+pub(crate) fn as_received(author: &Author) -> Result<Author> {
+    let mut received: Author = serde_json::from_value(serde_json::to_value(author)?)?;
+    received.chat = None;
+    received.proposal = None;
+    Ok(received)
 }
 
 /// The person's grant for `claim`, only from a peer that may attest a person.
@@ -114,6 +124,47 @@ impl HostBoundary {
                     change_id: started.change_id,
                 })
             }
+            RepoCommand::Revert {
+                change_id,
+                author,
+                person,
+            } => {
+                let author = as_received(&author)?;
+                // As for a quick edit: only a person's own revert is a person's landing. A claim
+                // sent with an agent's, a workflow's or an unattributed revert approves nothing.
+                let person = person.filter(|_| {
+                    matches!(
+                        author.kind(),
+                        AuthorKind::Person | AuthorKind::PersonClaimed
+                    )
+                });
+                let grant = grant(person, peer);
+                // Everything that can fail runs before the revert makes its working copy, so a
+                // failure leaves none behind.
+                let request = LandRequest {
+                    meta: self.repo.revert_meta(&change_id, &author)?,
+                    mode: LandMode::Land,
+                };
+                let copy = self.repo.revert(&change_id, &author, now).await?;
+                let repo = self.repo.clone();
+                let revert_id = copy.change_id.clone();
+                // The landing runs on, as a quick edit's does.
+                smol::spawn(async move {
+                    if let Err(error) = repo
+                        .land_granted(&revert_id, request, grant, Utc::now())
+                        .await
+                    {
+                        log::error!("landing the revert {revert_id}: {error:#}");
+                    }
+                })
+                .detach();
+                Ok(RepoReply::Started {
+                    change_id: copy.change_id,
+                })
+            }
+            RepoCommand::ShowHistory { filter } => Ok(RepoReply::History {
+                entries: self.repo.change_history(&filter, now).await?,
+            }),
         }
     }
 
