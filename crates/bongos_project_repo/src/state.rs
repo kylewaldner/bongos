@@ -596,6 +596,14 @@ impl<'a> StateRead<'a> {
         )?(change_id)
     }
 
+    /// The approval rows of `change_id` as records, oldest first. Only the approval check and
+    /// the views read them; nothing but a person's attestation writes them.
+    pub(crate) fn approvals(&self, change_id: &str) -> Result<Vec<String>> {
+        self.connection.select_bound::<&str, String>(
+            "SELECT record_toml FROM approvals WHERE change_id = ? ORDER BY seq",
+        )?(change_id)
+    }
+
     /// The stored result of `check` on `change_id` for exactly `tree` and `stamp`.
     pub(crate) fn check_result(
         &self,
@@ -896,6 +904,18 @@ impl<'a> StateTx<'a> {
              ON CONFLICT (change_id, check_name, tree, stamp)
              DO UPDATE SET result_toml = excluded.result_toml",
             )?((change_id, check, tree, stamp, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Adds an approval row of `change_id`. Only `approval.rs` calls it, with a record built
+    /// from a person's attestation.
+    pub(crate) fn add_approval(&mut self, change_id: &str, record: &str) -> Result<()> {
+        self.only_kv_in_hook("an approval")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO approvals (change_id, seq, record_toml)
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM approvals WHERE change_id = ?1), ?2)",
+        )?((change_id, record))?;
         self.dirty = true;
         Ok(())
     }

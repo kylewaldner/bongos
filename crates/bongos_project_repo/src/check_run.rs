@@ -251,7 +251,7 @@ impl ProjectRepo {
         Ok(())
     }
 
-    fn store_result(
+    pub(crate) fn store_result(
         &self,
         writer: &StateWriter,
         change_id: &str,

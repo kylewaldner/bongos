@@ -120,17 +120,67 @@ pub(crate) fn fixture_project_with_hooks(
             .unwrap();
     });
     let writer = writer(&location, hooks);
-    crate::ProjectRepo::new(location, git).with_state(crate::StateHandle::Writer(writer))
+    with_test_rules(
+        crate::ProjectRepo::new(location, git).with_state(crate::StateHandle::Writer(writer)),
+    )
+}
+
+/// The fixture project without the test approval rules: an agent's, workflow's or healer's
+/// change waits for a person as with no feature's hook registered.
+pub(crate) fn bare_fixture_project(root: &TempDir) -> crate::ProjectRepo {
+    without_test_rules(fixture_project(root))
 }
 
 /// The project of `repo` opened again, as after a restart of the process: `repo` must be the
 /// last handle on its writer.
 pub(crate) fn reopen(repo: crate::ProjectRepo, hooks: &StateApplyHooks) -> crate::ProjectRepo {
+    with_test_rules(reopen_bare(repo, hooks))
+}
+
+/// [`reopen`] without the test approval rules.
+pub(crate) fn reopen_bare(repo: crate::ProjectRepo, hooks: &StateApplyHooks) -> crate::ProjectRepo {
     let location = repo.location().clone();
     let git = repo.git().clone();
     drop(repo);
     let writer = writer(&location, hooks);
     crate::ProjectRepo::new(location, git).with_state(crate::StateHandle::Writer(writer))
+}
+
+/// An approval hook implementing `rule` that approves every change it is asked about: what the
+/// features that implement the automatic rules (the task builder, lanes, the healer) answer for
+/// the changes of the landing tests, which are not about approval.
+pub(crate) struct ApproveRule(pub(crate) crate::AutomaticRule);
+
+impl crate::ApprovalHook for ApproveRule {
+    fn name(&self) -> &str {
+        "test rule"
+    }
+
+    fn rule(&self) -> Option<crate::AutomaticRule> {
+        Some(self.0)
+    }
+
+    fn judge(&self, _input: &crate::ApprovalInput) -> crate::ApprovalOpinion {
+        crate::ApprovalOpinion::Approve(format!("test {} rule", self.0.word()))
+    }
+}
+
+/// `repo` with an [`ApproveRule`] for each automatic rule.
+pub(crate) fn with_test_rules(repo: crate::ProjectRepo) -> crate::ProjectRepo {
+    for rule in [
+        crate::AutomaticRule::OwnSubtree,
+        crate::AutomaticRule::DeclaredScope,
+        crate::AutomaticRule::IndependentReview,
+    ] {
+        repo.add_approval_hook(Arc::new(ApproveRule(rule)));
+    }
+    repo
+}
+
+/// `repo` with the approval hooks added to it removed.
+pub(crate) fn without_test_rules(repo: crate::ProjectRepo) -> crate::ProjectRepo {
+    repo.engine.local.lock().approval_hooks.clear();
+    repo
 }
 
 /// Runs git with `args` in the repository of `repo`.
@@ -156,10 +206,7 @@ pub(crate) fn start() -> chrono::DateTime<chrono::Utc> {
 
 /// A person at the keyboard, as a UI action makes one.
 pub(crate) fn person() -> bongos_project_repo_model::Author {
-    bongos_work_model::commands::Context::at_keyboard(
-        bongos_project_repo_model::PersonAtKeyboard::for_test(),
-    )
-    .author
+    keyboard().author
 }
 
 pub(crate) fn new_copy(
@@ -196,13 +243,41 @@ pub(crate) fn request(
     }
 }
 
+/// A person at the keyboard, with the marker a UI action holds.
+pub(crate) fn keyboard() -> bongos_work_model::commands::Context {
+    bongos_work_model::commands::Context::at_keyboard(
+        bongos_project_repo_model::PersonAtKeyboard::for_test(),
+    )
+}
+
+/// Lands as `project: land` would: a person author lands as the person at the keyboard (which
+/// approves the person's own change), any other author through [`crate::ProjectRepo::land_now`].
+pub(crate) async fn land_as(
+    repo: &crate::ProjectRepo,
+    change_id: &str,
+    request: crate::LandRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<crate::LandingResult> {
+    if request.meta.author.kind() == bongos_project_repo_model::AuthorKind::Person {
+        repo.land_as_person(change_id, request, keyboard(), now)
+            .await
+    } else {
+        repo.land_now(change_id, request, now).await
+    }
+}
+
 pub(crate) fn land(
     repo: &crate::ProjectRepo,
     copy: &crate::WorkingCopy,
     author: &bongos_project_repo_model::Author,
 ) -> crate::LandingResult {
-    futures::executor::block_on(repo.land_now(&copy.change_id, request("land it", author), start()))
-        .unwrap()
+    futures::executor::block_on(land_as(
+        repo,
+        &copy.change_id,
+        request("land it", author),
+        start(),
+    ))
+    .unwrap()
 }
 
 /// The commit a landing result landed, or a panic naming the result.

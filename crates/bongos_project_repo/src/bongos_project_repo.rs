@@ -2,18 +2,21 @@
 //! record of where each one lives, the creation of a new one, and its live state store.
 
 mod amending;
+mod approval;
 mod builtin_checks;
 mod changes;
 mod check_run;
 mod create;
 mod declared_checks;
 mod git;
+mod host_boundary;
 mod landing;
 mod landing_checks;
 mod landing_queue;
 mod loader;
 mod locations;
 mod master;
+mod peer;
 mod pins;
 mod registries;
 pub mod router;
@@ -26,8 +29,15 @@ mod state_ops;
 mod working_copies;
 
 pub use amending::KEEPS_AMENDING;
+pub use approval::{
+    ApprovalHook, ApprovalHooks, ApprovalInput, ApprovalRow, ChatTaskLookup,
+    MOVE_ROLLBACK_NAMESPACE, NEEDS_A_WINDOW, OwnSubtreeHook,
+};
 pub use bongos_project_repo_model::checks::{
     AmendOutcome, CheckOutcome, CheckPhase, HoldReason, LiveFacts, LiveSource, Stamp,
+};
+pub use bongos_project_repo_model::checks::{
+    ApprovalBasis, ApprovalOpinion, ApprovalPolicy, ApprovalVerdict, AutomaticRule,
 };
 pub use changes::{AmendCommit, ChangeFilter, ChangeRow, ChangeState};
 pub use check_run::CheckResult;
@@ -38,6 +48,7 @@ pub use git::{
     CommitId, DEFAULT_IDENTITY_EMAIL, DEFAULT_IDENTITY_NAME, Git, GitError, Identity,
     RebaseOutcome, TreeEntry, TreeId, TreeRef,
 };
+pub use host_boundary::HostBoundary;
 pub use landing::{
     ALREADY_LANDING, DEFAULT_SECRET_PATTERNS, LandMode, LandOptions, LandRequest, LandingEvent,
     LandingResult, MAIN_REF, MASTER_IS_SPLIT, RepoEvent, UNSAVED_EDITS, WAITING_MASTER_SPLIT,
@@ -52,11 +63,12 @@ pub use master::{
     HistoryKind, HistoryRow, MasterStatus, NOT_A_LANDING, OutsideChange, Recovery, Resolved,
     SplitMaster, SplitResolution, UNAPPROVED_OUTSIDE_CHANGE, landed_ref, outside_ref,
 };
+pub use peer::{ClientKind, PeerIdentity, peer_identity};
 pub use pins::PinGuard;
 pub use registries::{ActivitySource, ActivitySources, StateExporter, StateExporters};
 pub use script_check::ScriptCheck;
 pub use settings::ProjectRepositorySettings;
-pub use sink::{LocalSink, RefusingSink, RepoCommand, RepoReply, StateSink};
+pub use sink::{LocalSink, PersonClaim, RefusingSink, RepoCommand, RepoReply, StateSink};
 pub use state::{
     KvRead, KvTx, OpenError, StateEvent, StateRead, StateReader, StateStore, StateTx, StateWriter,
     VERIFIED_COMMIT_KEY,
@@ -76,6 +88,8 @@ pub fn init(cx: &mut gpui::App) {
 #[cfg(test)]
 mod amending_tests;
 #[cfg(test)]
+mod approval_tests;
+#[cfg(test)]
 mod check_fakes;
 #[cfg(test)]
 mod create_tests;
@@ -93,6 +107,8 @@ mod loader_tests;
 mod locations_tests;
 #[cfg(test)]
 mod master_tests;
+#[cfg(test)]
+mod peer_tests;
 #[cfg(test)]
 mod router_tests;
 #[cfg(test)]

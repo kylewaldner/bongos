@@ -4,8 +4,8 @@
 //! [`landing_declaration_problems`] adds the project's `[[landing.checks]]` entries.
 
 mod amendment;
-mod approval;
 mod amendment_split;
+mod approval;
 mod declared;
 mod live;
 mod no_cycle;

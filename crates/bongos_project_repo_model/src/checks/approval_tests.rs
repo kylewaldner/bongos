@@ -82,10 +82,13 @@ fn the_policy_reads_each_key_and_person_turns_a_rule_off() {
         "[approval]\nperson = \"approve\"\nagent = \"person\"\nworkflow = \"person\"\nhealer = \"person\"\n",
     )))
     .unwrap();
-    assert_eq!(policy, ApprovalPolicy {
-        person: PersonRule::Approve,
-        ..ApprovalPolicy::strict()
-    });
+    assert_eq!(
+        policy,
+        ApprovalPolicy {
+            person: PersonRule::Approve,
+            ..ApprovalPolicy::strict()
+        }
+    );
     // The project switch of the task builder turns the agent rule off too.
     let off = ApprovalPolicy::parse(Some(&project("auto_apply_proposals = false\n"))).unwrap();
     assert_eq!(off.agent, None);
@@ -304,8 +307,10 @@ fn subtree_trees() -> (crate::DefinitionTree, crate::DefinitionTree) {
 #[test]
 fn own_subtree_approves_inside_the_chats_task_only() {
     let (master, change) = subtree_trees();
-    let summary = summarize(&master, &change)
-        .with_files(vec![("tasks/a/tasks/a2/task.toml".to_string(), crate::FileChange::Added)]);
+    let summary = summarize(&master, &change).with_files(vec![(
+        "tasks/a/tasks/a2/task.toml".to_string(),
+        crate::FileChange::Added,
+    )]);
     assert_eq!(
         own_subtree(Some("a"), &summary, &master, &change),
         ApprovalOpinion::Approve("agent change inside its own subtree".to_string())

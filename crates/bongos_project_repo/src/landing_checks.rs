@@ -97,6 +97,7 @@ pub struct CheckRegistry {
     pub(crate) folders: Vec<(String, FolderValidator)>,
     pub(crate) live: Vec<Arc<dyn LiveSource>>,
     pub(crate) workflows: Option<WorkflowResolver>,
+    pub(crate) approval_hooks: Vec<Arc<dyn crate::approval::ApprovalHook>>,
 }
 
 impl CheckRegistry {
@@ -111,6 +112,8 @@ impl CheckRegistry {
         );
         self.folders.extend(more.folders.iter().cloned());
         self.live.extend(more.live.iter().cloned());
+        self.approval_hooks
+            .extend(more.approval_hooks.iter().cloned());
         if more.workflows.is_some() {
             self.workflows = more.workflows.clone();
         }
@@ -140,6 +143,10 @@ pub fn registered_checks(cx: &App) -> CheckRegistry {
     cx.try_global::<GlobalCheckRegistry>()
         .map(|global| global.0.clone())
         .unwrap_or_default()
+}
+
+pub(crate) fn register_approval_hook(hook: Arc<dyn crate::approval::ApprovalHook>, cx: &mut App) {
+    global_mut(cx).approval_hooks.push(hook);
 }
 
 /// The registry of landing checks and amending checks.
@@ -227,6 +234,11 @@ impl ProjectRepo {
             .lock()
             .folders
             .push((name.to_string(), validator));
+    }
+
+    /// Adds an approval hook to this project's landings only.
+    pub fn add_approval_hook(&self, hook: Arc<dyn crate::approval::ApprovalHook>) {
+        self.engine.local.lock().approval_hooks.push(hook);
     }
 
     /// Adds a live source to this project's landings only.

@@ -14,7 +14,8 @@ use tempfile::TempDir;
 use crate::check_fakes::{FakeCheck, ManualTimer};
 use crate::landing::{InFlight, LANDING_IN_FLIGHT_KEY, ProbePoint};
 use crate::test_support::{
-    add_task, fixture_project, land, landed, main_commit, new_copy, person, request, run_git, start,
+    add_task, fixture_project, land, land_as, landed, main_commit, new_copy, person, request,
+    run_git, start,
 };
 use crate::{CheckPhase, LandingEvent, LandingResult, MasterStatus};
 
@@ -142,11 +143,16 @@ fn a_change_only_waiting_in_the_queue_can_be_abandoned() {
     }));
     let mut events = repo.landing_events();
     let second_id = second.change_id.clone();
-    let land_first = repo.land_now(&first.change_id, request("first", &author), start());
+    let land_first = land_as(&repo, &first.change_id, request("first", &author), start());
     let land_second = async {
         paused_rx.await.unwrap();
-        repo.land_now(&second.change_id, request("second", &author), start())
-            .await
+        land_as(
+            &repo,
+            &second.change_id,
+            request("second", &author),
+            start(),
+        )
+        .await
     };
     let watch = async {
         let mut refused = None;
@@ -220,11 +226,16 @@ fn a_hung_in_queue_check_gives_no_verdict_at_the_queue_limit_and_the_next_change
     add_task(&second, "beta", "b1");
     let mut events = repo.landing_events();
     let second_id = second.change_id.clone();
-    let land_first = repo.land_now(&first.change_id, request("first", &author), start());
+    let land_first = land_as(&repo, &first.change_id, request("first", &author), start());
     let land_second = async {
         started.await.unwrap();
-        repo.land_now(&second.change_id, request("second", &author), start())
-            .await
+        land_as(
+            &repo,
+            &second.change_id,
+            request("second", &author),
+            start(),
+        )
+        .await
     };
     let watch = async {
         while let Some((change, event)) = events.next().await {
@@ -264,7 +275,7 @@ fn a_change_whose_in_queue_check_hangs_can_be_abandoned_once_the_queue_limit_end
     let copy = new_copy(&repo, "amber-otter-0001", &author);
     add_task(&copy, "alpha", "a1");
     let old = main_commit(&repo);
-    let land_it = repo.land_now(&copy.change_id, request("first", &author), start());
+    let land_it = land_as(&repo, &copy.change_id, request("first", &author), start());
     let control = async {
         started.await.unwrap();
         // It holds the lock while the check hangs, so abandoning it is refused.

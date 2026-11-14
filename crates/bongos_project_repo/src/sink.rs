@@ -8,14 +8,35 @@ use bongos_project_repo_model::Author;
 use gpui::{BackgroundExecutor, Task};
 use serde::{Deserialize, Serialize};
 
+use crate::landing::LandRequest;
 use crate::state::StateWriter;
 use crate::state_ops::StateOp;
 
 /// A repository call that writes state. Each variant arrives with the step that adds its
-/// operation.
+/// operation. A command carries no person's attestation (it cannot be serialized), only a
+/// [`PersonClaim`], which the host trusts only from a peer it verified (`HostBoundary`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "kebab-case")]
 #[non_exhaustive]
-pub enum RepoCommand {}
+pub enum RepoCommand {
+    /// `project: land` of a change.
+    Land {
+        change_id: String,
+        request: LandRequest,
+        person: Option<PersonClaim>,
+    },
+    /// `project: approve` of a change.
+    Approve {
+        change_id: String,
+        person: PersonClaim,
+    },
+}
+
+/// A window's claim that a person at its keyboard asked for a command, by the person's name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonClaim {
+    pub name: String,
+}
 
 /// The answer to a [`RepoCommand`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +80,11 @@ impl StateSink for LocalSink {
     }
 
     fn repo(&self, command: RepoCommand) -> Task<Result<RepoReply>> {
-        match command {}
+        // A window of this process calls the repository itself, with the person's marker; a
+        // command, which carries only a claim, is for the host boundary of another process.
+        Task::ready(Err(anyhow!(
+            "{command:?} carries no attestation here; call the repository directly"
+        )))
     }
 }
 

@@ -17,8 +17,8 @@ use tempfile::TempDir;
 use crate::landing::ProbePoint;
 use crate::landing_queue::LandingLock;
 use crate::test_support::{
-    CountingHook, add_task, fixture_project, fixture_project_with_hooks, land, landed, main_commit,
-    new_copy, person, reopen, request, run_git, start, verified, write_definition,
+    CountingHook, add_task, fixture_project, fixture_project_with_hooks, land, land_as, landed,
+    main_commit, new_copy, person, reopen, request, run_git, start, verified, write_definition,
 };
 use crate::{
     AbandonRefused, AmendOutcome, AmendingCheck, ChangeFilter, ChangeState, CheckInput, LandMode,
@@ -98,7 +98,7 @@ fn a_landing_is_one_squashed_commit_with_subject_body_and_trailers() {
         meta,
         mode: LandMode::Land,
     };
-    let commit = landed(block_on(repo.land_now(&copy.change_id, request, start())).unwrap());
+    let commit = landed(block_on(land_as(&repo, &copy.change_id, request, start())).unwrap());
 
     assert_eq!(main_commit(&repo), commit);
     assert_eq!(verified(&repo).as_deref(), Some(commit.as_str()));
@@ -138,7 +138,7 @@ fn a_landing_is_one_squashed_commit_with_subject_body_and_trailers() {
         trailer(&message, "Bongos-Checks").as_deref(),
         Some(
             "schema=pass, no-state=pass, no-cycle=pass, references=pass, \
-             started-unchanged=pass, size-and-kind=pass, secrets=pass"
+             started-unchanged=pass, size-and-kind=pass, secrets=pass, approval=pass"
         )
     );
     assert_eq!(
@@ -313,11 +313,10 @@ fn race(
     }));
     let mut events = repo.landing_events();
     let second_id = second.change_id.clone();
-    let land_first = repo.land_now(&first.change_id, request("first", author), start());
+    let land_first = land_as(&repo, &first.change_id, request("first", author), start());
     let land_second = async {
         paused_rx.await.unwrap();
-        repo.land_now(&second.change_id, request("second", author), start())
-            .await
+        land_as(&repo, &second.change_id, request("second", author), start()).await
     };
     let watch = async {
         let mut amends = Vec::new();
@@ -372,7 +371,7 @@ fn two_simultaneous_landings_serialize_and_the_second_lands_rebased() {
     let results = repo
         .check_results_on(&second.change_id, &landed_tree)
         .unwrap();
-    assert_eq!(results.len(), 7, "{results:?}");
+    assert_eq!(results.len(), 8, "{results:?}");
     assert!(
         results
             .iter()
@@ -514,8 +513,13 @@ fn land_until_crash(
     repo.set_probe(Arc::new(move |point, _| {
         async move { point == crash }.boxed()
     }));
-    let error =
-        block_on(repo.land_now(&copy.change_id, request("crash", author), start())).unwrap_err();
+    let error = block_on(land_as(
+        &repo,
+        &copy.change_id,
+        request("crash", author),
+        start(),
+    ))
+    .unwrap_err();
     assert!(format!("{error}").contains(crate::landing::SIMULATED_CRASH));
 }
 
@@ -697,7 +701,8 @@ fn check_only_runs_the_checks_without_queueing_or_landing() {
     let copy = new_copy(&repo, "amber-otter-0001", &author);
     write_definition(&copy, "junk.txt", "not a definition\n");
     let before = main_commit(&repo);
-    let result = block_on(repo.land_now(
+    let result = block_on(land_as(
+        &repo,
         &copy.change_id,
         LandRequest {
             meta: ChangeMeta::new("check", author.clone()),
@@ -709,8 +714,9 @@ fn check_only_runs_the_checks_without_queueing_or_landing() {
     let LandingResult::Checked { checks, .. } = result else {
         panic!("expected check results, got {result:?}");
     };
-    assert_eq!(checks.len(), 7);
+    assert_eq!(checks.len(), 8);
     assert_eq!(checks[0].check, "schema");
+    assert_eq!(checks[7].check, "approval");
     assert!(
         matches!(&checks[0].outcome, crate::CheckOutcome::Fail { message, .. } if message.contains("junk.txt"))
     );
@@ -856,7 +862,7 @@ fn a_second_land_of_a_change_being_landed_waits_and_the_first_lands() {
             async move {
                 if point == ProbePoint::InQueue {
                     let author = Author::agent("chat 1");
-                    let second = repo.land_now(&change, request("again", &author), start());
+                    let second = land_as(&repo, &change, request("again", &author), start());
                     *seen.lock() = Some(second.await.unwrap());
                 }
                 false

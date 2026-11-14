@@ -360,7 +360,9 @@ pub fn own_subtree(
         return ApprovalOpinion::NeedsPerson("unknown chat".to_string());
     };
     let Some(root) = master.node(chat_task) else {
-        return ApprovalOpinion::NeedsPerson(format!("the chat's task {chat_task} is not in master"));
+        return ApprovalOpinion::NeedsPerson(format!(
+            "the chat's task {chat_task} is not in master"
+        ));
     };
     let folder = root.folder.as_str();
     let touched = summary

@@ -666,6 +666,70 @@ impl Git {
         self.run_bytes(directory, args, None).await
     }
 
+    /// The stable `git patch-id` of the diff from `from` to `to` (full blob ids and binary
+    /// contents included, renames off, no external diff or text conversion), or `"empty"` when
+    /// they hold the same files. It stays the same when both are rebased together onto another
+    /// base without touching the lines around the changed ones.
+    pub async fn patch_id(
+        &self,
+        directory: &Path,
+        from: &str,
+        to: &str,
+    ) -> Result<String, GitError> {
+        let args = [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--full-index",
+            "--binary",
+            from,
+            to,
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let diff = self.run_bytes(directory, args, None).await?;
+        if diff.is_empty() {
+            return Ok("empty".to_string());
+        }
+        let args = ["patch-id", "--stable"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let output = self.run_bytes(directory, args, Some(diff)).await?;
+        let text = String::from_utf8_lossy(&output);
+        Ok(text
+            .split_whitespace()
+            .next()
+            .unwrap_or("empty")
+            .to_string())
+    }
+
+    /// The tree of `git revert` of `commit` applied to `onto`, by a merge that touches no
+    /// checkout; `None` when it conflicts.
+    pub async fn revert_tree(
+        &self,
+        directory: &Path,
+        commit: &str,
+        onto: &str,
+    ) -> Result<Option<String>, GitError> {
+        let base = format!("--merge-base={commit}");
+        let parent = format!("{commit}^");
+        match self
+            .run(
+                directory,
+                &["merge-tree", "--write-tree", &base, onto, &parent],
+            )
+            .await
+        {
+            Ok(output) => Ok(output.lines().next().map(str::to_string)),
+            Err(GitError::Failed { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Applies `patch` to the files and index of the checkout at `directory`.
     pub async fn apply_index(&self, directory: &Path, patch: Vec<u8>) -> Result<(), GitError> {
         if patch.is_empty() {
