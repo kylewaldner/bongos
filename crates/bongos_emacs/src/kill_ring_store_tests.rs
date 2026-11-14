@@ -3,7 +3,7 @@ use db::AppDatabase;
 use db::kvp::KeyValueStore;
 use editor::test::editor_test_context::EditorTestContext;
 use editor::{EditorSettings, kill_ring};
-use gpui::{App, KeyBinding, TestAppContext};
+use gpui::{App, BorrowAppContext as _, KeyBinding, TestAppContext};
 use settings::{Settings as _, SettingsStore};
 
 use crate::actions::KillLine;

@@ -13,7 +13,7 @@ use editor::EditorSettings;
 use editor::kill_ring::{self, KillRing};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
-use gpui::{App, Global};
+use gpui::{App, AppContext as _, Global};
 use settings::{Settings as _, SettingsStore};
 use util::ResultExt as _;
 
