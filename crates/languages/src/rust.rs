@@ -6,7 +6,9 @@ use futures::lock::OwnedMutexGuard;
 use gpui::{App, AppContext, AsyncApp, Entity, SharedString, Task};
 use http_client::github::AssetKind;
 use http_client::github::{GitHubLspBinaryVersion, latest_github_release};
-use http_client::github_download::{GithubBinaryMetadata, download_server_binary_with_progress};
+use http_client::github_download::{
+    GithubBinaryMetadata, download_server_binary_with_progress, download_verified_file,
+};
 pub use language::*;
 use lsp::{InitializeParams, LanguageServerBinary, LanguageServerBinaryOptions};
 use project::lsp_store::lsp_ext_command;
@@ -24,7 +26,10 @@ use std::ops::Range;
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use task::{TaskTemplate, TaskTemplates, TaskVariables, VariableName};
 use util::command::{Stdio, new_command};
@@ -566,6 +571,14 @@ impl LspAdapter for RustLspAdapter {
         Some(label)
     }
 
+    async fn initialization_options(
+        self: Arc<Self>,
+        _: &Arc<dyn LspAdapterDelegate>,
+        _cx: &mut AsyncApp,
+    ) -> Result<Option<serde_json::Value>> {
+        Ok(Some(default_initialization_options()))
+    }
+
     async fn initialization_options_schema(
         self: Arc<Self>,
         delegate: &Arc<dyn LspAdapterDelegate>,
@@ -867,15 +880,36 @@ impl LspInstaller for RustLspAdapter {
                 }
             }
 
-            download_server_binary_with_progress(
-                &*delegate.http_client(),
-                &url,
-                expected_digest.as_deref(),
-                &destination_path,
-                Self::GITHUB_ASSET_KIND,
-                &|done, total| delegate.report_download_progress(server_name.clone(), done, total),
-            )
-            .await?;
+            let report = |done, total| {
+                delegate.report_download_progress(server_name.clone(), done, total)
+            };
+            match Self::GITHUB_ASSET_KIND {
+                AssetKind::Gz => {
+                    // Nothing here sets the flag: a cancelled install drops this future, and
+                    // `download_verified_file` deletes its partial file when that happens.
+                    let cancel = AtomicBool::new(false);
+                    download_gz_server(
+                        &*delegate.http_client(),
+                        &url,
+                        expected_digest.as_deref(),
+                        &destination_path,
+                        &report,
+                        &cancel,
+                    )
+                    .await?;
+                }
+                kind => {
+                    download_server_binary_with_progress(
+                        &*delegate.http_client(),
+                        &url,
+                        expected_digest.as_deref(),
+                        &destination_path,
+                        kind,
+                        &report,
+                    )
+                    .await?;
+                }
+            }
             make_file_executable(&server_path).await?;
             remove_matching(&container_dir, |path| path != destination_path).await;
             GithubBinaryMetadata::write_to_file(
@@ -902,6 +936,42 @@ impl LspInstaller for RustLspAdapter {
     ) -> Option<LanguageServerBinary> {
         get_cached_server_binary(container_dir).await
     }
+}
+
+/// The initialization options rust-analyzer gets before the user's own are merged over them:
+/// it builds into `<target>/rust-analyzer`, so its builds never lock the target directory
+/// `cargo` uses. A user's `cargo.targetDir` replaces this value when the options are merged.
+fn default_initialization_options() -> serde_json::Value {
+    json!({ "cargo": { "targetDir": true } })
+}
+
+/// Downloads the gzip-compressed rust-analyzer binary at `url` into `destination_path`.
+/// The download goes through `download_verified_file`, so it reports progress, honors `cancel`
+/// and is kept only when its SHA-256 equals the digest the GitHub API gave for the asset.
+async fn download_gz_server(
+    http: &dyn http_client::HttpClient,
+    url: &str,
+    expected_digest: Option<&str>,
+    destination_path: &Path,
+    progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let expected_digest = expected_digest
+        .with_context(|| format!("the GitHub API gave no SHA-256 digest for {url}"))?;
+    let archive_path = destination_path.with_extension("download");
+    download_verified_file(http, url, expected_digest, &archive_path, progress, cancel).await?;
+    let result = async {
+        let archive = fs::File::open(&archive_path).await?;
+        let mut decoder =
+            async_compression::futures::bufread::GzipDecoder::new(futures::io::BufReader::new(archive));
+        let mut file = fs::File::create(destination_path).await?;
+        futures::io::copy(&mut decoder, &mut file).await?;
+        anyhow::Ok(())
+    }
+    .await
+    .with_context(|| format!("extracting {url} to {destination_path:?}"));
+    fs::remove_file(&archive_path).await.log_err();
+    result
 }
 
 pub(crate) struct RustContextProvider;
@@ -2225,6 +2295,224 @@ mod tests {
             "--bin=x",
         );
         check([], "/project/src/main.rs", "--");
+    }
+
+    #[test]
+    fn test_default_initialization_options_target_dir() {
+        let defaults = default_initialization_options();
+        assert_eq!(defaults, json!({ "cargo": { "targetDir": true } }));
+
+        // The language server store merges the user's options over the adapter's.
+        let mut merged = defaults.clone();
+        merge_json_value_into(
+            json!({ "cargo": { "targetDir": "/tmp/mine" }, "check": { "command": "clippy" } }),
+            &mut merged,
+        );
+        assert_eq!(
+            merged,
+            json!({ "cargo": { "targetDir": "/tmp/mine" }, "check": { "command": "clippy" } })
+        );
+
+        let mut merged = defaults;
+        merge_json_value_into(json!({ "cargo": { "features": "all" } }), &mut merged);
+        assert_eq!(
+            merged,
+            json!({ "cargo": { "targetDir": true, "features": "all" } })
+        );
+    }
+
+    fn fixture_lib_rs() -> String {
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../script/bongos/fixtures/languages/rust/src/lib.rs"),
+        )
+        .unwrap()
+    }
+
+    #[gpui::test]
+    async fn test_fixture_test_function_is_runnable(cx: &mut TestAppContext) {
+        let language = crate::language("rust", tree_sitter_rust::LANGUAGE.into());
+        let text = fixture_lib_rs();
+        let buffer = cx.new(|cx| Buffer::local(text.clone(), cx).with_language(language, cx));
+        cx.executor().run_until_parked();
+        let snapshot = buffer.read_with(cx, |buffer, _| buffer.snapshot());
+        let tagged = snapshot
+            .runnable_ranges(0..text.len())
+            .filter(|runnable| {
+                runnable
+                    .runnable
+                    .tags
+                    .iter()
+                    .any(|tag| tag.0.as_ref() == "rust-test")
+            })
+            .map(|runnable| text[runnable.run_range].to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(tagged, ["adds"]);
+    }
+
+    #[gpui::test]
+    async fn test_rust_tasks_list_has_the_cargo_tasks(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+        });
+        let templates = cx
+            .update(|cx| RustContextProvider.associated_tasks(None, cx))
+            .await
+            .unwrap()
+            .0;
+        assert!(templates.iter().all(|template| template.command == "cargo"));
+        let find = |label_start: &str| {
+            templates
+                .iter()
+                .find(|template| template.label.starts_with(label_start))
+                .unwrap_or_else(|| panic!("no task labeled {label_start}"))
+        };
+        let test = find("Test '");
+        assert_eq!(test.tags, ["rust-test"]);
+        assert_eq!(test.args[0], "test");
+        assert!(test.args.contains(&RUST_TEST_NAME_TASK_VARIABLE.template_value()));
+        let labels = templates
+            .iter()
+            .map(|template| template.label.split(" (").next().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        for expected in ["Check", "Check all targets", "Test", "Run", "Clean"] {
+            assert!(labels.iter().any(|label| label == expected), "{expected}");
+        }
+    }
+
+    #[gpui::test]
+    async fn test_cargo_toml_selects_toml(cx: &mut TestAppContext) {
+        let registry = Arc::new(language::LanguageRegistry::test(cx.executor()));
+        bongos_languages::init(&registry);
+        let available = registry
+            .language_for_file_path(Path::new("script/bongos/fixtures/languages/rust/Cargo.toml"))
+            .expect("a language for Cargo.toml");
+        assert_eq!(available.name().as_ref(), "TOML");
+    }
+
+    mod download {
+        use super::*;
+        use futures::AsyncReadExt as _;
+        use http_client::{AsyncBody, FakeHttpClient, Response};
+        use sha2::{Digest as _, Sha256};
+        use std::sync::Mutex;
+
+        fn gzip(data: &[u8]) -> Vec<u8> {
+            let mut encoder = async_compression::futures::bufread::GzipEncoder::new(
+                futures::io::Cursor::new(data.to_vec()),
+            );
+            let mut out = Vec::new();
+            smol::block_on(encoder.read_to_end(&mut out)).unwrap();
+            out
+        }
+
+        fn digest(data: &[u8]) -> String {
+            format!("{:x}", Sha256::digest(data))
+        }
+
+        fn client(
+            body: Vec<u8>,
+            raise_on_request: Option<Arc<AtomicBool>>,
+        ) -> Arc<http_client::HttpClientWithUrl> {
+            FakeHttpClient::create(move |_| {
+                let body = body.clone();
+                let flag = raise_on_request.clone();
+                async move {
+                    if let Some(flag) = flag {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    Ok(Response::builder()
+                        .status(200)
+                        .header("Content-Length", body.len())
+                        .body(AsyncBody::from(body))
+                        .unwrap())
+                }
+            })
+        }
+
+        const URL: &str = "https://example.com/rust-analyzer-x86_64-unknown-linux-gnu.gz";
+
+        #[test]
+        fn reports_progress_and_installs_the_binary() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("rust-analyzer-2026-01-01");
+            // Noise from a xorshift generator, so it hardly compresses.
+            let mut state = 0x9e3779b97f4a7c15u64;
+            let binary = (0..3 * 1024 * 1024)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    (state >> 24) as u8
+                })
+                .collect::<Vec<_>>();
+            let archive = gzip(&binary);
+            let client = client(archive.clone(), None);
+            let events = Mutex::new(Vec::new());
+            let record = |done, total| events.lock().unwrap().push((done, total));
+            smol::block_on(download_gz_server(
+                &*client,
+                URL,
+                Some(&digest(&archive)),
+                &destination,
+                &record,
+                &AtomicBool::new(false),
+            ))
+            .unwrap();
+            assert_eq!(std::fs::read(&destination).unwrap(), binary);
+            assert!(!destination.with_extension("download").exists());
+            let events = events.into_inner().unwrap();
+            let total = Some(archive.len() as u64);
+            assert_eq!(events.first(), Some(&(0, total)));
+            assert_eq!(events.last(), Some(&(archive.len() as u64, total)));
+            assert!(events.len() > 2, "progress arrives in steps: {events:?}");
+        }
+
+        #[test]
+        fn a_digest_mismatch_or_missing_digest_installs_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("rust-analyzer-2026-01-01");
+            let archive = gzip(b"binary");
+            let client = client(archive.clone(), None);
+            for wrong in [Some(digest(b"other")), None] {
+                let result = smol::block_on(download_gz_server(
+                    &*client,
+                    URL,
+                    wrong.as_deref(),
+                    &destination,
+                    &|_, _| {},
+                    &AtomicBool::new(false),
+                ));
+                assert!(result.is_err());
+                assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+            }
+        }
+
+        #[test]
+        fn cancel_stops_the_download_and_leaves_no_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("rust-analyzer-2026-01-01");
+            let archive = gzip(&vec![7u8; 4 * 1024 * 1024]);
+            let cancel = Arc::new(AtomicBool::new(false));
+            // The flag goes up while the request is answered, before the body is read.
+            let client = client(archive.clone(), Some(cancel.clone()));
+            let error = smol::block_on(download_gz_server(
+                &*client,
+                URL,
+                Some(&digest(&archive)),
+                &destination,
+                &|_, _| {},
+                &cancel,
+            ))
+            .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<http_client::DownloadCancelled>()
+                    .is_some()
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
     }
 
     #[test]
