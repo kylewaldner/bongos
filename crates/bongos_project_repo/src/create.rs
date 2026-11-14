@@ -8,10 +8,11 @@ use bongos_work_model::ProjectFile;
 use bongos_work_model::{Kind, TaskFile, new_id, serialize_project};
 
 use crate::git::{Git, GitError, Identity};
+use crate::loader::StateHandle;
 use crate::locations::{Location, LocationError, RepositoryLocations};
 
 /// The branch master is.
-const MAIN_BRANCH: &str = "main";
+pub const MAIN_BRANCH: &str = "main";
 const FIRST_COMMIT_MESSAGE: &str = "create the project";
 
 /// The template of each part of a project folder; `{folder}` is the only token.
@@ -71,15 +72,52 @@ pub enum CreateError {
     },
 }
 
-/// A project repository on this machine.
-#[derive(Clone, Debug)]
+/// A project repository on this machine: where its parts are, the git that reads it, and its
+/// state store once opened.
+#[derive(Clone)]
 pub struct ProjectRepo {
-    location: Location,
+    pub(crate) location: Location,
+    pub(crate) git: Git,
+    pub(crate) state: Option<StateHandle>,
+}
+
+impl std::fmt::Debug for ProjectRepo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectRepo")
+            .field("location", &self.location)
+            .field("git", &self.git)
+            .field("state_open", &self.state.is_some())
+            .finish()
+    }
 }
 
 impl ProjectRepo {
+    /// The project at `location`, read with `git`, its state store not opened.
+    pub fn new(location: Location, git: Git) -> Self {
+        Self {
+            location,
+            git,
+            state: None,
+        }
+    }
+
+    /// The same project reading and writing its state through `state`.
+    pub fn with_state(mut self, state: StateHandle) -> Self {
+        self.state = Some(state);
+        self
+    }
+
     pub fn location(&self) -> &Location {
         &self.location
+    }
+
+    pub fn git(&self) -> &Git {
+        &self.git
+    }
+
+    /// The opened state store, if any.
+    pub fn state(&self) -> Option<&StateHandle> {
+        self.state.as_ref()
     }
 
     /// Creates the project folder, runs `git init`, commits the definitions on `main`, makes the
@@ -175,7 +213,7 @@ impl ProjectRepo {
             converted_from: None,
         };
         locations.record(location.clone())?;
-        Ok(Self { location })
+        Ok(Self::new(location, git.clone()))
     }
 }
 
