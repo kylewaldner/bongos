@@ -163,6 +163,16 @@ async fn the_agent_editor_keeps_its_thinking_mode_key(cx: &mut TestAppContext) {
         first(&keymap, "ctrl-alt-k", &AGENT_EDITOR),
         Some("agent::ToggleThinkingMode")
     );
+    // macOS puts thinking mode on cmd-alt-k, so ctrl-alt-k kills the whole line there.
+    let keymap = Keymap::new(load_all(&MACOS, true, cx));
+    assert_eq!(
+        first(&keymap, "cmd-alt-k", &AGENT_EDITOR),
+        Some("agent::ToggleThinkingMode")
+    );
+    assert_eq!(
+        first(&keymap, "ctrl-alt-k", &AGENT_EDITOR),
+        Some("emacs::KillWholeLine")
+    );
 }
 
 #[gpui::test]
