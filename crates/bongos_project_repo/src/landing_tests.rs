@@ -1009,7 +1009,6 @@ fn a_ref_move_held_up_by_a_git_lock_lands_once_the_lock_is_gone() {
     add_task(&copy, "alpha", "a1");
     let lock = repo.location().repository.join(".git/refs/heads/main.lock");
     {
-        let lock = lock.clone();
         repo.set_probe(Arc::new(move |point, _| {
             if point == ProbePoint::BeforeRefMove {
                 std::fs::write(&lock, "").unwrap();
@@ -1091,7 +1090,7 @@ fn a_marker_left_after_the_ref_moved_is_cleared_by_the_next_master_check() {
     let commit = landed(land(&repo, &copy, &author));
     // As when the transaction that clears the marker failed.
     let in_flight = toml::to_string(&crate::landing::InFlight {
-        change_id: copy.change_id.clone(),
+        change_id: copy.change_id,
         commit: commit.clone(),
         old,
     })
