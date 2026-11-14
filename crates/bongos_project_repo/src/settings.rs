@@ -46,15 +46,22 @@ pub struct ProjectRepositorySettings {
     /// Where run records are copied; `None` keeps them on this machine only.
     pub run_record_copy_dir: Option<PathBuf>,
     pub run_record_copy_interval_minutes: u32,
+    /// The title of the project one-offs go in: made by the first `task: new one-off`, or by
+    /// converting the old one-offs.
+    pub oneoffs_project: String,
 }
 
 impl ProjectRepositorySettings {
     /// The folder of a new project named `slug`.
     pub fn project_folder(&self, slug: &str) -> PathBuf {
+        self.projects_folder().join(slug)
+    }
+
+    /// The folder project folders go in.
+    pub fn projects_folder(&self) -> PathBuf {
         self.projects_dir
             .clone()
             .unwrap_or_else(|| paths::data_dir().join("projects"))
-            .join(slug)
     }
 }
 
@@ -125,6 +132,13 @@ impl Settings for ProjectRepositorySettings {
             run_record_copy_interval_minutes: settings
                 .run_record_copy_interval_minutes
                 .unwrap_or(crate::backup::DEFAULT_RUN_RECORD_COPY_INTERVAL_MINUTES),
+            oneoffs_project: settings
+                .oneoffs_project
+                .map(|title| title.trim().to_string())
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| {
+                    bongos_project_repo_model::convert::DEFAULT_ONEOFFS_TITLE.to_string()
+                }),
             layout: LayoutTemplates {
                 repository: templates
                     .repository
