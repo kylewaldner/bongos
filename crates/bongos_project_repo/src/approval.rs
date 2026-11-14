@@ -298,6 +298,21 @@ impl ProjectRepo {
         grant: PersonGrant,
         now: DateTime<Utc>,
     ) -> Result<ApprovalRow> {
+        let (text, approval) = self.person_approval(row, basis, grant, now).await?;
+        writer.transact(|tx| tx.add_approval(&row.change_id, &text))?;
+        self.approval_recorded(&approval, row);
+        Ok(approval)
+    }
+
+    /// The approval row of `grant` on `row`'s branch tip, and its stored text, without writing
+    /// it: a caller adds it in its own transaction, then calls [`Self::approval_recorded`].
+    pub(crate) async fn person_approval(
+        &self,
+        row: &ChangeRow,
+        basis: ApprovalBasis,
+        grant: PersonGrant,
+        now: DateTime<Utc>,
+    ) -> Result<(String, ApprovalRow)> {
         if !matches!(row.state, ChangeState::Open | ChangeState::Requested) {
             bail!("change {} is no longer open", row.change_id);
         }
@@ -313,25 +328,31 @@ impl ProjectRepo {
             at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
         };
         let text = toml::to_string(&record).context("serializing an approval")?;
-        writer.transact(|tx| tx.add_approval(&row.change_id, &text))?;
+        Ok((
+            text,
+            ApprovalRow {
+                change_id: row.change_id.clone(),
+                author_patch_id: part.patch_id,
+                amend_patch_id: part.amend_patch_id,
+                commit: tip,
+                basis,
+                name: grant.name,
+                at: now,
+            },
+        ))
+    }
+
+    /// Logs an approval written and wakes the landings waiting for one.
+    pub(crate) fn approval_recorded(&self, approval: &ApprovalRow, row: &ChangeRow) {
         log::info!(
             "approved: {} {} (change {} on {} at {})",
-            basis.words(),
-            grant.name,
+            approval.basis.words(),
+            approval.name,
             row.change_id,
             row.branch,
-            short_commit(&tip)
+            short_commit(&approval.commit)
         );
         self.engine.signal.notify();
-        Ok(ApprovalRow {
-            change_id: row.change_id.clone(),
-            author_patch_id: part.patch_id,
-            amend_patch_id: part.amend_patch_id,
-            commit: tip,
-            basis,
-            name: grant.name,
-            at: now,
-        })
     }
 
     /// `project: approve` of `change_id` by the person whose context `ctx` is: refused unless the

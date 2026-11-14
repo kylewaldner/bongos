@@ -36,6 +36,12 @@ pub enum StateOp {
     CreatePrompts {
         task: TaskId,
     },
+    /// Writes a file (relative to the files root: a task's artifacts or a link) when the change
+    /// lands, as [`StateOp::MoveFiles`] moves one.
+    WriteFile {
+        path: std::path::PathBuf,
+        bytes: Vec<u8>,
+    },
     /// Sets one field of a task's state record, only if it still holds `expected`; `None` is an
     /// absent field. Only the fields in [`SETTABLE_FIELDS`] can be set: todos and history have
     /// their own ops.
@@ -153,7 +159,7 @@ fn apply_one(tx: &mut StateTx, op: &StateOp, notes: &mut Vec<String>) -> Result<
             tx.set_task(from_task, from)?;
             tx.set_task(to_task, to)?;
         }
-        StateOp::MoveFiles { .. } | StateOp::CreatePrompts { .. } => {}
+        StateOp::MoveFiles { .. } | StateOp::CreatePrompts { .. } | StateOp::WriteFile { .. } => {}
         StateOp::Set {
             task,
             field,

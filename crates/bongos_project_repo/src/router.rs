@@ -321,7 +321,7 @@ pub fn route(tree: &WorkTree, change: &Change) -> Result<Routed, String> {
     })
 }
 
-fn project_of<'a>(tree: &'a WorkTree, dir: &Path) -> Option<&'a ProjectFile> {
+pub(crate) fn project_of<'a>(tree: &'a WorkTree, dir: &Path) -> Option<&'a ProjectFile> {
     tree.projects
         .iter()
         .find(|project| project.task.dir == dir)
@@ -497,20 +497,27 @@ pub(crate) fn staged_file_ops(ops: &[StateOp]) -> Vec<FileOp> {
                 to: to.clone(),
             }),
             StateOp::CreatePrompts { task } => Some(FileOp::CreatePrompts { task: task.clone() }),
+            StateOp::WriteFile { path, bytes } => Some(FileOp::Write {
+                path: path.clone(),
+                bytes: bytes.clone(),
+            }),
             _ => None,
         })
         .collect()
 }
 
-/// The staged op that waits for the landing to make `op`, if it is one of those that do.
-pub(crate) fn staged_file_op(op: &FileOp) -> Option<StateOp> {
+/// The staged op that waits for the landing to make `op`.
+pub(crate) fn staged_file_op(op: &FileOp) -> StateOp {
     match op {
-        FileOp::Move { from, to } => Some(StateOp::MoveFiles {
+        FileOp::Move { from, to } => StateOp::MoveFiles {
             from: from.clone(),
             to: to.clone(),
-        }),
-        FileOp::CreatePrompts { task } => Some(StateOp::CreatePrompts { task: task.clone() }),
-        FileOp::Write { .. } => None,
+        },
+        FileOp::CreatePrompts { task } => StateOp::CreatePrompts { task: task.clone() },
+        FileOp::Write { path, bytes } => StateOp::WriteFile {
+            path: path.clone(),
+            bytes: bytes.clone(),
+        },
     }
 }
 
@@ -546,7 +553,7 @@ pub(crate) fn check_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
             Ok(())
         }
         FileOp::Write { path, .. } => {
-            if !is_plain(path) {
+            if !is_plain(path) || path.as_os_str().is_empty() {
                 anyhow::bail!("{} is not a files path", path.display());
             }
             Ok(())
@@ -554,16 +561,17 @@ pub(crate) fn check_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
     }
 }
 
-/// Makes every op of `ops`, after checking all of them first, so a refused one makes none.
-/// Running it again changes nothing.
-pub(crate) fn run_file_ops(files_root: &Path, ops: &[FileOp]) -> Result<()> {
-    for op in ops {
-        check_file_op(files_root, op)?;
-    }
-    for op in ops {
-        apply_file_op(files_root, op)?;
-    }
-    Ok(())
+/// Makes each op of `ops` that passes [`check_file_op`], one at a time: one that fails does not
+/// stop the others. Returns the ops that failed, each with why. Running it again changes nothing.
+pub(crate) fn run_file_ops(files_root: &Path, ops: &[FileOp]) -> Vec<(FileOp, String)> {
+    ops.iter()
+        .filter_map(|op| {
+            check_file_op(files_root, op)
+                .and_then(|()| apply_file_op(files_root, op))
+                .err()
+                .map(|error| (op.clone(), format!("{error:#}")))
+        })
+        .collect()
 }
 
 pub(crate) fn apply_file_op(files_root: &Path, op: &FileOp) -> Result<()> {

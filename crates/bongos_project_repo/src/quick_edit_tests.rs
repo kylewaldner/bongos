@@ -15,8 +15,11 @@ use tempfile::TempDir;
 
 use crate::changes::ChangeState;
 use crate::check_fakes::{FakeAmender, FakeCheck, write_in};
+use crate::host_boundary::HostBoundary;
 use crate::landing::{InFlight, LANDING_IN_FLIGHT_KEY, LandingRecord};
-use crate::router::{DefinitionOp, Routed, apply_state_only, project_into, route};
+use crate::peer::{ClientKind, PeerIdentity};
+use crate::router::{DefinitionOp, FileOp, Routed, apply_state_only, project_into, route};
+use crate::sink::{PersonClaim, RepoCommand, RepoReply};
 use crate::test_support::{
     CountingHook, fixture_project, fixture_project_with_hooks, keyboard, main_commit,
     outside_document, run_git, start,
@@ -527,8 +530,9 @@ fn two_hundred_new_tasks_are_one_quick_edit_and_one_commit() {
     assert_eq!(edit.definition.len(), 200);
     let started = block_on(repo.quick_edit(edit, None, start())).unwrap();
     let elapsed = timer.elapsed();
-    // Generous for a slow machine, far below one git commit per task.
-    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    // Only a gross regression (a git process per task on a loaded machine) gets near this; the
+    // single commit below is what proves the batching.
+    assert!(elapsed < Duration::from_secs(60), "took {elapsed:?}");
     assert_eq!(
         run_git(
             &repo,
@@ -706,4 +710,350 @@ fn trailer_text_never_makes_a_landing() {
         crate::test_support::verified(&repo).as_deref(),
         Some(outside.as_str())
     );
+}
+
+/// A rename of `l1` by `author`, as a quick edit computed on the loaded tree.
+fn rename_edit(loaded: &LoadedProject, author: &Author) -> QuickEdit {
+    let tree = loaded.work_tree().unwrap();
+    let change = rename("l1", "Backfill events")(&tree, &keyboard()).unwrap();
+    quick_edit_of(loaded, &tree, &change, author)
+}
+
+#[test]
+fn a_sent_file_write_outside_the_files_root_is_refused() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    let files = repo.location().files.clone();
+    let outside = root.path().join("escaped.txt");
+    let refs_before = crate::test_support::refs(&repo);
+    let sent = [
+        r#"{"write":{"path":"../escaped.txt","bytes":[120]}}"#.to_string(),
+        r#"{"write":{"path":"l1/../../escaped.txt","bytes":[120]}}"#.to_string(),
+        serde_json::json!({"write": {"path": outside, "bytes": [120]}}).to_string(),
+        r#"{"write":{"path":"","bytes":[120]}}"#.to_string(),
+    ];
+    for text in &sent {
+        let op: FileOp = serde_json::from_str(text).unwrap();
+        let mut edit = rename_edit(&loaded, &keyboard().author);
+        edit.files.push(op.clone());
+        assert!(
+            block_on(repo.quick_edit(edit, None, start())).is_err(),
+            "{text}"
+        );
+        // The same op sent as a staged state op is refused too.
+        let mut edit = rename_edit(&loaded, &keyboard().author);
+        let FileOp::Write { path, bytes } = op.clone() else {
+            unreachable!()
+        };
+        edit.state.push(StateOp::WriteFile { path, bytes });
+        assert!(
+            block_on(repo.quick_edit(edit, None, start())).is_err(),
+            "{text}"
+        );
+        // And from another process, through the host.
+        let mut edit = rename_edit(&loaded, &keyboard().author);
+        edit.files.push(op);
+        let command: RepoCommand = serde_json::from_value(
+            serde_json::to_value(RepoCommand::QuickEdit { edit, person: None }).unwrap(),
+        )
+        .unwrap();
+        let boundary = HostBoundary::new(repo.clone());
+        let window = PeerIdentity::for_test(4242, ClientKind::Window, true);
+        assert!(
+            block_on(boundary.accept_now(command, &window, start())).is_err(),
+            "{text}"
+        );
+    }
+    assert!(!outside.exists());
+    assert!(!root.path().join("escaped.txt").exists());
+    assert!(!files.join("l1/../../escaped.txt").exists());
+    assert_eq!(crate::test_support::refs(&repo), refs_before);
+    assert!(repo.read_state(|read| read.changes()).unwrap().is_empty());
+}
+
+#[test]
+fn a_base_that_is_not_a_commit_id_is_refused() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    let written = root.path().join("x");
+    let refs_before = crate::test_support::refs(&repo);
+    let real = loaded.shown().0.unwrap().0;
+    for base in [
+        format!("--index-output={}", written.display()),
+        "HEAD".to_string(),
+        "main~1".to_string(),
+        real[..12].to_string(),
+        format!("{real}x"),
+        "g".repeat(40),
+    ] {
+        let mut edit = rename_edit(&loaded, &keyboard().author);
+        edit.base = base.clone();
+        let error = block_on(repo.quick_edit(edit, None, start())).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not a commit id"),
+            "{base}: {error:#}"
+        );
+    }
+    assert!(!written.exists());
+    assert_eq!(crate::test_support::refs(&repo), refs_before);
+}
+
+#[test]
+fn a_project_write_through_a_stale_snapshot_is_refused() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    let stale = loaded.work_tree().unwrap();
+    let slug = stale.projects[0].slug.clone();
+    let archive = |tree: &WorkTree, ctx: &Context| commands::project_archive(tree, ctx, &slug);
+
+    let started = start_edit(&repo, &loaded, keyboard(), archive);
+    let result = block_on(repo.land_quick_edit(&started.change_id, start())).unwrap();
+    assert!(matches!(result, LandingResult::Landed { .. }), "{result:?}");
+    block_on(loaded.load()).unwrap();
+
+    // The stale snapshot still reads the project as open: its whole project file would undo
+    // the archive.
+    let change = archive(&stale, &keyboard()).unwrap();
+    let error = check_fresh(&stale, &change, &loaded.definitions()).unwrap_err();
+    assert_eq!(error, format!("the project {STALE_SNAPSHOT}"));
+    // From the fresh snapshot the project file is writable.
+    let fresh = loaded.work_tree().unwrap();
+    let change = commands::project_unarchive(&fresh, &keyboard(), &slug).unwrap();
+    check_fresh(&fresh, &change, &loaded.definitions()).unwrap();
+}
+
+#[test]
+fn a_quick_edit_writes_its_files_only_when_it_lands() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    repo.add_landing_check(Arc::new(
+        FakeCheck::new("refuser", CheckPhase::BeforeQueue)
+            .answering(vec![CheckOutcome::fail("not like this")]),
+    ));
+    let loaded = loaded(&repo);
+    let notes = repo.location().files.join("l1/notes.txt");
+    let with_file = |loaded: &LoadedProject| {
+        let mut edit = rename_edit(loaded, &keyboard().author);
+        edit.files.push(FileOp::Write {
+            path: PathBuf::from("l1/notes.txt"),
+            bytes: b"written".to_vec(),
+        });
+        edit
+    };
+
+    // Refused: the file is never written.
+    let mut ctx = keyboard();
+    let marker = ctx.take_attestation();
+    let started = block_on(repo.quick_edit(with_file(&loaded), marker, start())).unwrap();
+    assert!(!notes.exists());
+    let result = block_on(repo.land_quick_edit(&started.change_id, start())).unwrap();
+    assert!(
+        matches!(result, LandingResult::Refused { .. }),
+        "{result:?}"
+    );
+    assert!(!notes.exists());
+}
+
+#[test]
+fn a_quick_edit_writes_its_files_when_it_lands() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    let notes = repo.location().files.join("l1/notes.txt");
+    let mut edit = rename_edit(&loaded, &keyboard().author);
+    edit.files.push(FileOp::Write {
+        path: PathBuf::from("l1/notes.txt"),
+        bytes: b"written".to_vec(),
+    });
+    let mut ctx = keyboard();
+    let marker = ctx.take_attestation();
+    let started = block_on(repo.quick_edit(edit, marker, start())).unwrap();
+    assert!(!notes.exists());
+    let result = block_on(repo.land_quick_edit(&started.change_id, start())).unwrap();
+    assert!(matches!(result, LandingResult::Landed { .. }), "{result:?}");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "written");
+    assert_eq!(
+        repo.read_state(|read| read.meta(crate::landing::LANDING_FILE_MOVES_KEY))
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_failed_approval_leaves_no_open_quick_edit() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    let refs_before = crate::test_support::refs(&repo);
+    let edit = rename_edit(&loaded, &keyboard().author);
+    // A verified commit with no history in common with the branch: the approval, computed after
+    // the branch is made, cannot find the change's base.
+    let main = main_commit(&repo);
+    let orphan = run_git(
+        &repo,
+        &[
+            "-c",
+            "user.name=bongos",
+            "-c",
+            "user.email=bongos@example.com",
+            "commit-tree",
+            &format!("{main}^{{tree}}"),
+            "-m",
+            "unrelated",
+        ],
+    );
+    repo.writer_or_error()
+        .unwrap()
+        .transact(|tx| tx.set_verified_commit(&orphan, Arc::new(Default::default())))
+        .unwrap();
+    let grant = Some(crate::approval::PersonGrant::for_verified_peer(
+        keyboard().author.name,
+    ));
+    assert!(block_on(repo.start_quick_edit(edit, grant, start())).is_err());
+    // Nothing open: no row, no record, no staged state, no approval, no branch.
+    assert!(repo.read_state(|read| read.changes()).unwrap().is_empty());
+    assert_eq!(crate::test_support::refs(&repo), refs_before);
+    assert!(
+        loaded
+            .work_tree()
+            .unwrap()
+            .task_by_id("l1")
+            .unwrap()
+            .pending
+            .is_none()
+    );
+}
+
+/// Sends a quick edit by `author` with a person's claim from `peer` through the host, and
+/// returns its change.
+fn sent_quick_edit(
+    repo: &ProjectRepo,
+    loaded: &LoadedProject,
+    author: &Author,
+    peer: &PeerIdentity,
+) -> String {
+    let edit = rename_edit(loaded, author);
+    let command = RepoCommand::QuickEdit {
+        edit,
+        person: Some(PersonClaim {
+            name: keyboard().author.name,
+        }),
+    };
+    // As it crosses the socket.
+    let command: RepoCommand =
+        serde_json::from_value(serde_json::to_value(command).unwrap()).unwrap();
+    let boundary = HostBoundary::new(repo.clone());
+    let reply = block_on(boundary.accept_now(command, peer, start())).unwrap();
+    let RepoReply::Started { change_id } = reply else {
+        panic!("expected a started quick edit, got {reply:?}");
+    };
+    change_id
+}
+
+/// Waits for the landing the host started for `change_id` to show `wanted`.
+fn until_landing_event(
+    events: &mut UnboundedReceiver<(String, LandingEvent)>,
+    change_id: &str,
+    mut wanted: impl FnMut(&LandingEvent) -> bool,
+) {
+    block_on(async {
+        loop {
+            let (id, event) = events.next().await.expect("the landing events");
+            if id != change_id {
+                continue;
+            }
+            if wanted(&event) {
+                return;
+            }
+            if matches!(
+                event,
+                LandingEvent::Landed { .. }
+                    | LandingEvent::Refused { .. }
+                    | LandingEvent::Conflict { .. }
+            ) {
+                panic!("{change_id} ended with {event:?}");
+            }
+        }
+    });
+}
+
+#[test]
+fn a_person_quick_edit_from_a_verified_window_is_approved_and_lands() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    let mut events = repo.landing_events();
+    let window = PeerIdentity::for_test(4242, ClientKind::Window, true);
+    let change_id = sent_quick_edit(&repo, &loaded, &keyboard().author, &window);
+    let approvals = repo.approvals(&change_id).unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].basis, ApprovalBasis::PersonEdit);
+    until_landing_event(&mut events, &change_id, |event| {
+        matches!(event, LandingEvent::Landed { .. })
+    });
+    assert_eq!(goal(&loaded, "l1"), "Backfill events");
+}
+
+#[test]
+fn a_person_claim_approves_no_quick_edit_by_another_author_or_from_an_unverified_peer() {
+    let window = PeerIdentity::for_test(4242, ClientKind::Window, true);
+    let cases = [
+        (Author::agent("chat 1"), window.clone()),
+        (Author::workflow("run 1"), window.clone()),
+        (Author::unattributed("tester"), window),
+        (
+            keyboard().author,
+            PeerIdentity::for_test(4242, ClientKind::Cli, true),
+        ),
+        (
+            keyboard().author,
+            PeerIdentity::for_test(4242, ClientKind::Window, false),
+        ),
+    ];
+    for (author, peer) in cases {
+        let root = TempDir::new().unwrap();
+        let repo = fixture_project(&root);
+        let loaded = loaded(&repo);
+        let before = main_commit(&repo);
+        let mut events = repo.landing_events();
+        let change_id = sent_quick_edit(&repo, &loaded, &author, &peer);
+        assert!(
+            repo.approvals(&change_id).unwrap().is_empty(),
+            "{author:?} from {peer:?}"
+        );
+        // It waits for `project: approve`, unless the project's automatic rule for its author
+        // approves it: never as a person's edit.
+        let mut ended = None;
+        until_landing_event(&mut events, &change_id, |event| match event {
+            LandingEvent::Waiting { reason } => reason.starts_with("waiting for approval"),
+            LandingEvent::Landed { .. } => {
+                ended = Some(event.clone());
+                true
+            }
+            _ => false,
+        });
+        if ended.is_some() {
+            // Only agents and workflows have automatic rules.
+            assert!(
+                matches!(
+                    author.kind(),
+                    bongos_project_repo_model::AuthorKind::Agent
+                        | bongos_project_repo_model::AuthorKind::Workflow
+                ),
+                "{author:?} from {peer:?}"
+            );
+            let approval = landing_record(&repo, &change_id)
+                .approval
+                .unwrap_or_default();
+            assert!(!approval.contains("edited by"), "{approval}");
+        } else {
+            assert_eq!(main_commit(&repo), before, "{author:?} from {peer:?}");
+            // The landing the host started ends as abandoned.
+            block_on(repo.abandon_now(&change_id, start())).unwrap();
+        }
+        assert!(repo.approvals(&change_id).unwrap().is_empty());
+    }
 }

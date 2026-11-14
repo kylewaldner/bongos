@@ -439,3 +439,54 @@ fn a_file_move_from_outside_the_files_folders_is_refused() {
     assert!(!repo.location().files.join("l1/secret.txt").exists());
     assert_eq!(files_of(&repo, "l1"), ["chats/a.txt", "runs/r.txt"]);
 }
+
+#[test]
+fn file_moves_that_fail_after_the_landing_stay_recorded_for_the_recovery() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let loaded = loaded(&repo);
+    start_leaf(&repo, &loaded);
+    let started = start_edit(&repo, &loaded, keyboard(), split_l1);
+    let keeper = staged(&repo, &started.change_id)
+        .unwrap()
+        .into_iter()
+        .find_map(|op| match op {
+            StateOp::CreatePrompts { task } => Some(task),
+            _ => None,
+        })
+        .expect("the keeper's files folder waits for the landing");
+    // A file where the keeper's files folder goes: the moves pass their checks (nothing is at
+    // their destinations) but cannot be made.
+    let files = repo.location().files.clone();
+    std::fs::write(files.join(&keeper), "in the way").unwrap();
+
+    let result = block_on(repo.land_quick_edit(&started.change_id, start())).unwrap();
+    assert!(matches!(result, LandingResult::Landed { .. }), "{result:?}");
+    assert_eq!(files_of(&repo, "l1"), ["chats/a.txt", "runs/r.txt"]);
+    let recorded = || {
+        repo.read_state(|read| read.meta(crate::landing::LANDING_FILE_MOVES_KEY))
+            .unwrap()
+    };
+    assert!(recorded().is_some());
+    // The recovery tries again, fails, says so and keeps the record.
+    let error = block_on(repo.recover_landing()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("could not be moved"),
+        "{error:#}"
+    );
+    assert!(recorded().is_some());
+    assert_eq!(files_of(&repo, "l1"), ["chats/a.txt", "runs/r.txt"]);
+
+    // Once the way is clear, the next recovery moves them and clears the record.
+    std::fs::remove_file(files.join(&keeper)).unwrap();
+    assert_eq!(
+        block_on(repo.recover_landing()).unwrap(),
+        crate::Recovery::Nothing
+    );
+    assert_eq!(recorded(), None);
+    assert_eq!(files_of(&repo, "l1"), Vec::<String>::new());
+    assert_eq!(
+        files_of(&repo, &keeper),
+        ["chats/a.txt", "prompts.txt", "runs/r.txt"]
+    );
+}

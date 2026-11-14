@@ -25,7 +25,9 @@ use crate::approval::PersonGrant;
 use crate::changes::{ChangeRow, ChangeState};
 use crate::create::ProjectRepo;
 use crate::landing::{ALREADY_LANDING, LandMode, LandRequest, LandingResult, author_identity};
-use crate::router::{DefinitionOp, FileOp, apply_file_op, check_file_op, staged_file_op};
+use crate::router::{
+    DefinitionOp, FileOp, check_file_op, project_of, staged_file_op, staged_file_ops,
+};
 use crate::state::StateRead;
 use crate::state_ops::StateOp;
 use crate::working_copies::fresh_name;
@@ -92,8 +94,18 @@ pub fn check_fresh(
     definitions: &DefinitionTree,
 ) -> Result<(), String> {
     for write in &change.writes {
-        let Write::Task { file, .. } = write else {
-            continue;
+        let file = match write {
+            Write::Task { file, .. } => file,
+            // The router writes the whole project file when the change alters it: refused when
+            // the one read is not the one at the commit the quick edit starts from.
+            Write::Project { dir, file } => {
+                let read = project_of(tree, dir);
+                if read != Some(file) && read != definitions.project.as_ref() {
+                    return Err(format!("the project {STALE_SNAPSHOT}"));
+                }
+                continue;
+            }
+            _ => continue,
         };
         let Some(task) = tree.task_by_id(&file.id) else {
             continue;
@@ -107,6 +119,15 @@ pub fn check_fresh(
         if !fresh {
             return Err(format!("{} {STALE_SNAPSHOT}", task.named_goal()));
         }
+    }
+    Ok(())
+}
+
+/// Refuses `base` unless it is a full commit id (40 or 64 hex digits): a quick edit from
+/// another process names it, and git must never read it as an option or a revision expression.
+fn check_commit_id(base: &str) -> Result<()> {
+    if !matches!(base.len(), 40 | 64) || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{base:?} is not a commit id");
     }
     Ok(())
 }
@@ -195,18 +216,14 @@ impl ProjectRepo {
         if edit.definition.is_empty() {
             bail!("a quick edit needs a change to definitions");
         }
-        // Moves and new task folders wait for the landing, with the state: a change that does not
-        // land makes none.
+        check_commit_id(&edit.base)?;
+        // Every file op (a move, a new task folder, a written file) waits for the landing, with
+        // the state: a change that does not land makes none. Each is checked here, and again at
+        // the landing, so none leaves the files root, whoever sent it.
         let mut state = edit.state.clone();
-        let mut files = Vec::new();
-        for op in &edit.files {
-            match staged_file_op(op) {
-                Some(staged) => {
-                    check_file_op(&self.location.files, op)?;
-                    state.push(staged);
-                }
-                None => files.push(op.clone()),
-            }
+        state.extend(edit.files.iter().map(staged_file_op));
+        for op in staged_file_ops(&state) {
+            check_file_op(&self.location.files, &op)?;
         }
         let repository = self.location.repository.clone();
         let prefix = self.land_options().branch_prefix;
@@ -265,23 +282,37 @@ impl ProjectRepo {
             label: LANDING_MARK.to_string(),
         };
         let record = toml::Value::try_from(&record).context("serializing a quick edit")?;
-        let written = writer.transact(|tx| {
-            tx.set_change(&row)?;
-            if !state.is_empty() {
-                tx.stage(&change_id, &state)?;
-            }
-            tx.kv(QUICK_EDITS_NAMESPACE).put(&change_id, record.clone())
+        // Everything that can fail runs before the one transaction that writes the row, the
+        // staged state, the record and the approval: a failure leaves nothing open.
+        let prepared = match grant {
+            Some(grant) => self
+                .person_approval(&row, ApprovalBasis::PersonEdit, grant, now)
+                .await
+                .map(Some),
+            None => Ok(None),
+        };
+        let written = prepared.and_then(|approval| {
+            writer.transact(|tx| {
+                tx.set_change(&row)?;
+                if !state.is_empty() {
+                    tx.stage(&change_id, &state)?;
+                }
+                tx.kv(QUICK_EDITS_NAMESPACE)
+                    .put(&change_id, record.clone())?;
+                if let Some((text, _)) = &approval {
+                    tx.add_approval(&change_id, text)?;
+                }
+                Ok(())
+            })?;
+            Ok(approval)
         });
-        if let Err(error) = written {
-            self.git.branch_delete(&repository, &branch).await.ok();
-            return Err(error);
-        }
-        for op in &files {
-            apply_file_op(&self.location.files, op)?;
-        }
-        if let Some(grant) = grant {
-            self.record_person_approval(&writer, &row, ApprovalBasis::PersonEdit, grant, now)
-                .await?;
+        match written {
+            Ok(Some((_, approval))) => self.approval_recorded(&approval, &row),
+            Ok(None) => {}
+            Err(error) => {
+                self.git.branch_delete(&repository, &branch).await.ok();
+                return Err(error);
+            }
         }
         Ok(QuickEditStarted {
             change_id,
@@ -301,6 +332,7 @@ impl ProjectRepo {
     ) -> Result<String> {
         let repository = &self.location.repository;
         let index = scratch.join("index");
+        // `base` is a checked commit id, so the null id of its hash has its length.
         let zero = "0".repeat(base.len());
         self.git
             .run_on_index(repository, &index, &["read-tree", base], None)
