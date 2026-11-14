@@ -8,6 +8,7 @@ pub mod checks;
 mod definitions;
 pub mod layout;
 mod split;
+mod summary;
 
 pub use bongos_work_model::{Author, AuthorKind, PersonAtKeyboard};
 pub use change_record::{
@@ -21,6 +22,7 @@ pub use split::{
     RESERVED_STATE_KEYS, TaskDefinition, TaskStateRecord, TodoDefinition, TodoStateRecord, join,
     reserved_keys_in, split,
 };
+pub use summary::{ChangeSummary, EdgeChange, EdgeKind, FileChange, summarize};
 
 #[cfg(test)]
 mod change_record_tests;
@@ -32,3 +34,7 @@ mod definitions_tests;
 mod layout_tests;
 #[cfg(test)]
 mod split_tests;
+#[cfg(test)]
+mod summary_tests;
+#[cfg(test)]
+mod test_trees;
