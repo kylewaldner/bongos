@@ -195,6 +195,8 @@ actions!(
     [
         /// Makes the next kill append to the newest kill ring entry.
         AppendNextKill,
+        /// Lists the kill ring in the minibuffer and inserts the chosen entry.
+        BrowseKillRing,
     ]
 );
 count_action!(
