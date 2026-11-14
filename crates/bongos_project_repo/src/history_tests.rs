@@ -549,7 +549,7 @@ fn a_revert_from_a_peer_names_a_landed_change_and_a_person_claim_approves_only_a
     until_landing_event(
         &mut events,
         &waiting,
-        |event| matches!(event, LandingEvent::Waiting { reason } if reason.starts_with("waiting for approval")),
+        |event| matches!(event, LandingEvent::Waiting { reason, .. } if reason.starts_with("waiting for approval")),
     );
     assert!(repo.approvals(&waiting).unwrap().is_empty());
     assert!(

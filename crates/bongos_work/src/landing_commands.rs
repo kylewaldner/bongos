@@ -263,8 +263,9 @@ fn revert_change(
             let making = {
                 let repo = repo.clone();
                 cx.background_spawn(async move {
-                    let copy = repo.revert(&change_id, &author, now()).await?;
+                    // The meta first: a failure there leaves no working copy behind.
                     let meta = repo.revert_meta(&change_id, &author)?;
+                    let copy = repo.revert(&change_id, &author, now()).await?;
                     anyhow::Ok((copy, meta.subject))
                 })
             };

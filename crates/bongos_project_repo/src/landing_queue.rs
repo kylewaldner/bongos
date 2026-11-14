@@ -175,20 +175,21 @@ impl Engine {
             .map(|holder| holder.change_id.clone())
     }
 
-    /// Marks `change_id` as being landed or checked by this process; `None` while another
-    /// `land` or `check` of it runs. Dropping the guard unmarks it.
+    /// Marks `change_id` as being landed or checked by this process; while another `land` or
+    /// `check` of it runs, the mode of that one instead. Dropping the guard unmarks it and wakes
+    /// the [`Signal`]'s waiters.
     pub(crate) fn start_landing(
         self: &Arc<Self>,
         change_id: &str,
         mode: crate::landing::LandMode,
-    ) -> Option<LandingGuard> {
+    ) -> Result<LandingGuard, crate::landing::LandMode> {
         match self.landing.lock().entry(change_id.to_string()) {
-            std::collections::hash_map::Entry::Occupied(_) => return None,
+            std::collections::hash_map::Entry::Occupied(running) => return Err(*running.get()),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(mode);
             }
         }
-        Some(LandingGuard {
+        Ok(LandingGuard {
             engine: self.clone(),
             change_id: change_id.to_string(),
         })
@@ -221,6 +222,7 @@ pub(crate) struct LandingGuard {
 impl Drop for LandingGuard {
     fn drop(&mut self) {
         self.engine.landing.lock().remove(&self.change_id);
+        self.engine.signal.notify();
     }
 }
 

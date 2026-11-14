@@ -460,7 +460,7 @@ async fn project_approve_approves_a_change_waiting_for_a_person(cx: &mut TestApp
     let waiting = std::cell::Cell::new(false);
     wait_until(cx, "the change to wait for approval", |_| {
         while let Ok((_, event)) = events.borrow_mut().try_recv() {
-            if matches!(&event, bongos_project_repo::LandingEvent::Waiting { reason }
+            if matches!(&event, bongos_project_repo::LandingEvent::Waiting { reason, .. }
                 if reason.starts_with("waiting for approval"))
             {
                 waiting.set(true);

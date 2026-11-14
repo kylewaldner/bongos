@@ -74,7 +74,7 @@ async fn until_event(
 }
 
 fn waits_for_approval(event: &LandingEvent) -> bool {
-    matches!(event, LandingEvent::Waiting { reason } if reason.starts_with("waiting for approval"))
+    matches!(event, LandingEvent::Waiting { reason, .. } if reason.starts_with("waiting for approval"))
 }
 
 /// Lands `change_id` with no person's grant until it waits for approval and returns the reason
@@ -100,7 +100,7 @@ fn waits_in(repo: &ProjectRepo, change_id: &str, mut landing: Landing) -> String
         "an unapproved change moved master"
     );
     match reason {
-        LandingEvent::Waiting { reason } => reason,
+        LandingEvent::Waiting { reason, .. } => reason,
         _ => unreachable!(),
     }
 }
@@ -393,7 +393,7 @@ fn an_amendment_that_trips_a_protected_section_hook_waits_for_a_person() {
         )
         .await;
         assert!(
-            matches!(&event, LandingEvent::Waiting { reason } if reason.contains("protected-section: the change touches the protected section")),
+            matches!(&event, LandingEvent::Waiting { reason, .. } if reason.contains("protected-section: the change touches the protected section")),
             "{event:?}"
         );
         assert_eq!(
@@ -669,7 +669,8 @@ fn a_forged_person_author_in_the_changes_table_waits_for_project_approve() {
         assert_eq!(
             event,
             LandingEvent::Waiting {
-                reason: "waiting for approval: no person approved this version of the change; run project: approve".to_string()
+                reason: "waiting for approval: no person approved this version of the change; run project: approve".to_string(),
+                approvals: 0,
             }
         );
         assert_eq!(

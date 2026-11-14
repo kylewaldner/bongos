@@ -164,6 +164,9 @@ pub enum LandingEvent {
     Checking,
     Waiting {
         reason: String,
+        /// How many approval rows of the change the landing had read when it announced the
+        /// wait (rows are only ever added); 0 for a wait that is not for approval.
+        approvals: usize,
     },
     Refused {
         reasons: Vec<String>,
@@ -515,7 +518,19 @@ impl ProjectRepo {
         running_elsewhere: &mut bool,
     ) -> Result<LandingResult> {
         let writer = self.writer_or_error()?;
-        let Some(_landing) = self.engine.start_landing(change_id, request.mode) else {
+        let _landing = loop {
+            let wake = self.engine.signal.listen();
+            let running = match self.engine.start_landing(change_id, request.mode) {
+                Ok(guard) => break guard,
+                Err(running) => running,
+            };
+            // A land of a change being checked waits for the check to end, then lands: the
+            // check never reports a landing's end, so answering "already landing" would leave
+            // the land unreported.
+            if request.mode == LandMode::Land && running == LandMode::CheckOnly {
+                wake.await.ok();
+                continue;
+            }
             *running_elsewhere = true;
             // A person's `project: land` of a change already landing (waiting for approval)
             // approves what it holds committed; the running landing goes on.
@@ -677,18 +692,21 @@ impl ProjectRepo {
                     drop(run);
                     continue 'steps;
                 }
+                // The rows are read before the judgment, so a wait never claims a row the
+                // judgment did not see.
+                let rows = self.approvals(change_id)?;
                 let (approval, result) = self
                     .judge_approval(&writer, &row, &mut run, &checked_tip)
                     .await?;
                 if approval.is_approved() {
                     break result;
                 }
-                let rows = self.approvals(change_id)?;
                 if told.as_ref() != Some(&rows) {
                     self.engine.emit(
                         change_id,
                         LandingEvent::Waiting {
                             reason: approval.waiting_reason().unwrap_or_default(),
+                            approvals: rows.len(),
                         },
                     );
                     told = Some(rows);
@@ -898,6 +916,7 @@ impl ProjectRepo {
                             change_id,
                             LandingEvent::Waiting {
                                 reason: WAITING_MASTER_SPLIT.to_string(),
+                                approvals: 0,
                             },
                         );
                         told = true;
@@ -937,6 +956,7 @@ impl ProjectRepo {
                             change_id,
                             LandingEvent::Waiting {
                                 reason: WAITING_MASTER_SPLIT.to_string(),
+                                approvals: 0,
                             },
                         );
                         shown = Some(None);

@@ -329,32 +329,32 @@ async fn show_changes_lists_a_real_repository_by_section_and_d_opens_the_task_di
 }
 
 #[test]
-fn an_approval_passes_over_only_approval_waits_of_its_change() {
+fn an_approval_passes_over_only_approval_waits_of_its_change_announced_before_it() {
+    use crate::project_repos::is_passed_wait;
     use bongos_project_repo::{LandingEvent, WAITING_MASTER_SPLIT};
 
-    let wait = |id: &str, reason: &str| {
+    let wait = |id: &str, reason: &str, approvals: usize| {
         (
             id.to_string(),
             LandingEvent::Waiting {
                 reason: reason.to_string(),
+                approvals,
             },
         )
     };
     let approval = "waiting for approval: the project's approval policy asks a person";
-    assert!(crate::project_repos::is_passed_wait(
-        &wait("c1", approval),
-        "c1"
-    ));
-    assert!(!crate::project_repos::is_passed_wait(
-        &wait("c1", WAITING_MASTER_SPLIT),
-        "c1"
-    ));
-    assert!(!crate::project_repos::is_passed_wait(
-        &wait("c2", approval),
-        "c1"
-    ));
-    assert!(!crate::project_repos::is_passed_wait(
+    // The approval written made the change's rows number 1: a wait that saw none is over.
+    assert!(is_passed_wait(&wait("c1", approval, 0), "c1", 1));
+    // A wait announced again after the approval (it saw the row, which was not enough: a
+    // second approver, a stale tip) still holds.
+    assert!(!is_passed_wait(&wait("c1", approval, 1), "c1", 1));
+    // A second approval passes over the wait that saw only the first.
+    assert!(is_passed_wait(&wait("c1", approval, 1), "c1", 2));
+    assert!(!is_passed_wait(&wait("c1", WAITING_MASTER_SPLIT, 0), "c1", 1));
+    assert!(!is_passed_wait(&wait("c2", approval, 0), "c1", 1));
+    assert!(!is_passed_wait(
         &("c1".to_string(), LandingEvent::Checking),
-        "c1"
+        "c1",
+        1
     ));
 }

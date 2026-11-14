@@ -419,6 +419,7 @@ fn a_lane_landing_during_the_split_waits_and_resumes_after_the_resolve() {
                 && event
                     == (LandingEvent::Waiting {
                         reason: WAITING_MASTER_SPLIT.to_string(),
+                        approvals: 0,
                     })
             {
                 break;

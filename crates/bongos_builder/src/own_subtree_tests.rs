@@ -665,7 +665,7 @@ async fn a_reject_ends_the_watch_on_the_proposals_landing(cx: &mut TestAppContex
     assert_eq!(message, crate::apply::rejected_message(1));
     // Even a watcher that passed over the waits hears that the landing is over.
     let mut watch = watch;
-    watch.pass_waits(&change_id);
+    watch.pass_waits(&change_id, usize::MAX);
     assert_eq!(
         within(cx, watch.verdict(&change_id)).await,
         LandingVerdict::Ended(bongos_project_repo::LANDING_ABANDONED.to_string())

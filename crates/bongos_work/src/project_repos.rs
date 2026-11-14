@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use bongos_project_repo::router::{self, Routed};
 use bongos_project_repo::{
-    LandingEvent, LoadedProject, ProjectRepo, QuickEdit, Recovery, StateEvent, check_fresh,
+    ApprovalRow, LandingEvent, LoadedProject, ProjectRepo, QuickEdit, Recovery, StateEvent, check_fresh,
     written_tasks,
 };
 use bongos_project_repo_model::ChangeMeta;
@@ -53,12 +53,13 @@ pub(crate) fn note_open_repo(loaded: &Arc<LoadedProject>, cx: &mut App) {
 /// a window). Resolves with the approved branch tip.
 pub fn approve_proposal(change_id: &str, ctx: Context, cx: &App) -> Task<Result<String, String>> {
     let approving = approving(change_id, ctx, cx);
-    cx.background_spawn(approving)
+    cx.background_spawn(async move { approving.await.map(|approved| approved.commit) })
 }
 
-/// [`approve_proposal`] for a caller that follows the landing with `watch`: the moment the
-/// approval is written, the approval waits the landing announced before it are passed over (see
-/// [`LandingWatch::pass_waits`]); a wait announced after it, and a master-split wait, still hold. Resolves with the watch.
+/// [`approve_proposal`] for a caller that follows the landing with `watch`: the approval waits
+/// the landing announced before the approval was written are passed over (see
+/// [`LandingWatch::pass_waits`]); a wait announced after it, and a master-split wait, still hold.
+/// Resolves with the watch.
 pub fn approve_and_watch(
     change_id: &str,
     ctx: Context,
@@ -68,17 +69,24 @@ pub fn approve_and_watch(
     let approving = approving(change_id, ctx, cx);
     let change_id = change_id.to_string();
     cx.background_spawn(async move {
-        approving.await?;
-        watch.pass_waits(&change_id);
+        let approved = approving.await?;
+        watch.pass_waits(&change_id, approved.rows);
         Ok(watch)
     })
+}
+
+/// An approval written: the branch tip it approved, and how many approval rows the change had
+/// once it was written (its own included).
+struct Approved {
+    commit: String,
+    rows: usize,
 }
 
 fn approving(
     change_id: &str,
     ctx: Context,
     cx: &App,
-) -> impl std::future::Future<Output = Result<String, String>> + Send + 'static {
+) -> impl std::future::Future<Output = Result<Approved, String>> + Send + 'static {
     let found = open_repos(cx)
         .into_iter()
         .map(|loaded| loaded.repo().clone())
@@ -86,11 +94,34 @@ fn approving(
     let change_id = change_id.to_string();
     async move {
         let repo = found.ok_or_else(|| format!("there is no change {change_id}"))?;
-        repo.approve(&change_id, ctx, Utc::now())
+        let approval = repo
+            .approve(&change_id, ctx, Utc::now())
             .await
-            .map(|approval| approval.commit)
-            .map_err(|error| format!("{error:#}"))
+            .map_err(|error| format!("{error:#}"))?;
+        // Rows are only ever added, so the position of this one is how many there were once it
+        // was written; a later row of another approval does not count.
+        let rows = repo
+            .approvals(&change_id)
+            .map_err(|error| format!("{error:#}"))?;
+        let rows = rows
+            .iter()
+            .rposition(|row| same_approval(row, &approval))
+            .map_or(rows.len(), |index| index + 1);
+        Ok(Approved {
+            commit: approval.commit,
+            rows,
+        })
     }
+}
+
+/// Whether `stored` is the row `written` was stored as (its time keeps only whole seconds).
+fn same_approval(stored: &ApprovalRow, written: &ApprovalRow) -> bool {
+    stored.commit == written.commit
+        && stored.name == written.name
+        && stored.basis == written.basis
+        && stored.author_patch_id == written.author_patch_id
+        && stored.amend_patch_id == written.amend_patch_id
+        && stored.at.timestamp() == written.at.timestamp()
 }
 
 /// Abandons every open working copy of proposal `number` of the task `root` (its branch and
@@ -151,21 +182,24 @@ pub fn watch_landings(cx: &App) -> LandingWatch {
     }
 }
 
-/// Whether `event` is an approval wait of `change_id`, which an approval just written resolves.
-pub(crate) fn is_passed_wait(event: &(String, LandingEvent), change_id: &str) -> bool {
+/// Whether `event` is an approval wait of `change_id` announced before the approval that made
+/// the change's approval rows number `rows` was written: one that saw fewer rows.
+pub(crate) fn is_passed_wait(event: &(String, LandingEvent), change_id: &str, rows: usize) -> bool {
     event.0 == change_id
-        && matches!(&event.1, LandingEvent::Waiting { reason } if reason.starts_with("waiting for approval"))
+        && matches!(&event.1, LandingEvent::Waiting { reason, approvals }
+            if reason.starts_with("waiting for approval") && *approvals < rows)
 }
 
 impl LandingWatch {
-    /// Passes over every approval wait of `change_id` announced so far: for a caller that has just
-    /// approved the change, a wait for approval the landing announced before the approval is over.
-    /// Every other event (the master-split wait too, which an approval does not resolve), and
-    /// every wait announced from now on, still counts.
-    pub fn pass_waits(&mut self, change_id: &str) {
+    /// Passes over the approval waits of `change_id` announced before the approval that made its
+    /// approval rows number `rows` was written (each wait carries the rows the landing had read):
+    /// for a caller that has just approved the change, those waits are over. Every other event
+    /// counts: the master-split wait, which an approval does not resolve, and a wait announced
+    /// after the approval (rows changed but not enough: a second approver, a stale tip).
+    pub fn pass_waits(&mut self, change_id: &str, rows: usize) {
         for receiver in &mut self.receivers {
             while let Ok(event) = receiver.try_recv() {
-                if !is_passed_wait(&event, change_id) {
+                if !is_passed_wait(&event, change_id, rows) {
                     self.early.push(event);
                 }
             }
@@ -189,7 +223,7 @@ impl LandingWatch {
                 LandingEvent::Conflict { files } => {
                     return LandingVerdict::Held(format!("conflict in {}", files.join(", ")));
                 }
-                LandingEvent::Waiting { reason } => return LandingVerdict::Held(reason),
+                LandingEvent::Waiting { reason, .. } => return LandingVerdict::Held(reason),
                 LandingEvent::Ended { reason } => return LandingVerdict::Ended(reason),
                 LandingEvent::Queued { .. } | LandingEvent::Checking => {}
             }

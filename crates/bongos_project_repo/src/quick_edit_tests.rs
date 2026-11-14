@@ -120,7 +120,7 @@ pub(crate) async fn until_waiting(
             next = events.next() => {
                 let (id, event) = next.expect("the landing events");
                 if id == change_id
-                    && matches!(&event, LandingEvent::Waiting { reason } if reason.starts_with("waiting for approval"))
+                    && matches!(&event, LandingEvent::Waiting { reason, .. } if reason.starts_with("waiting for approval"))
                 {
                     return;
                 }
@@ -1030,7 +1030,7 @@ fn a_person_claim_approves_no_quick_edit_by_another_author_or_from_an_unverified
         // approves it: never as a person's edit.
         let mut ended = None;
         until_landing_event(&mut events, &change_id, |event| match event {
-            LandingEvent::Waiting { reason } => reason.starts_with("waiting for approval"),
+            LandingEvent::Waiting { reason, .. } => reason.starts_with("waiting for approval"),
             LandingEvent::Landed { .. } => {
                 ended = Some(event.clone());
                 true
@@ -1095,7 +1095,7 @@ fn an_agent_chat_sent_by_a_peer_is_never_trusted_by_own_subtree() {
     assert_eq!(row.author.chat, None);
     let mut reason = String::new();
     until_landing_event(&mut events, &change_id, |event| match event {
-        LandingEvent::Waiting { reason: waiting } => {
+        LandingEvent::Waiting { reason: waiting, .. } => {
             reason = waiting.clone();
             true
         }
@@ -1131,7 +1131,7 @@ fn an_agent_chat_sent_by_a_peer_is_never_trusted_by_own_subtree() {
                 next = events.next() => {
                     let (id, event) = next.expect("the landing events");
                     if id == started.change_id
-                        && matches!(&event, LandingEvent::Waiting { reason } if reason.contains("unknown chat"))
+                        && matches!(&event, LandingEvent::Waiting { reason, .. } if reason.contains("unknown chat"))
                     {
                         break;
                     }
