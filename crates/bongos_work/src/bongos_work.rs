@@ -5,6 +5,7 @@
 
 pub mod actions;
 mod artifacts;
+mod backup_commands;
 mod changes;
 mod commands;
 mod filters;
