@@ -159,11 +159,15 @@ fn github_releases(repo: &str) -> String {
     let assets: Vec<_> = names
         .iter()
         .map(|name| {
+            // rust-analyzer refuses to download an asset that has no digest to check it against.
+            let digest = name
+                .starts_with("rust-analyzer-")
+                .then(|| format!("sha256:{}", "0".repeat(64)));
             json!({
                 "name": name,
                 "browser_download_url":
                     format!("https://github.com/{repo}/releases/download/{tag}/{name}"),
-                "digest": null,
+                "digest": digest,
             })
         })
         .collect();
