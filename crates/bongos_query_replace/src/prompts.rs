@@ -52,6 +52,7 @@ pub struct Answer {
 }
 
 type Done = Box<dyn FnOnce(Answer, &mut Window, &mut App)>;
+type Cancelled = Box<dyn FnOnce(&mut Window, &mut App)>;
 
 /// The history ring that holds the FROM strings of `regexp` mode.
 pub fn from_history(regexp: bool) -> &'static str {
@@ -166,12 +167,21 @@ pub fn prompt(
         handle: None,
         _intercept: None,
     };
-    open_stage(workspace, state, initial, Box::new(on_done), window, cx);
+    open_stage(
+        workspace,
+        state,
+        initial,
+        Box::new(on_done),
+        None,
+        window,
+        cx,
+    );
 }
 
 /// Asks for a new replacement, starting from `current`, for the `from` string (as typed in the
-/// prompt) of a session that is running, and calls `on_done` with it. The `e` key of the
-/// decision view opens this.
+/// prompt) of a session that is running, and calls `on_done` with it, or `on_cancel` when the
+/// prompt is cancelled. The `e` key of the decision view opens this.
+#[allow(clippy::too_many_arguments)]
 pub fn edit_replacement(
     workspace: &mut Workspace,
     mode: Mode,
@@ -179,6 +189,7 @@ pub fn edit_replacement(
     from: &str,
     current: &str,
     on_done: impl FnOnce(String, &mut Window, &mut App) + 'static,
+    on_cancel: impl FnOnce(&mut Window, &mut App) + 'static,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -196,7 +207,15 @@ pub fn edit_replacement(
         _intercept: None,
     };
     let done: Done = Box::new(move |answer, window, cx| on_done(answer.to, window, cx));
-    open_stage(workspace, state, to_input(current), done, window, cx);
+    open_stage(
+        workspace,
+        state,
+        to_input(current),
+        done,
+        Some(Box::new(on_cancel)),
+        window,
+        cx,
+    );
 }
 
 /// The text that starts the FROM: the region when it is within one line, else the word at the
@@ -323,6 +342,7 @@ fn open_stage(
     state: Prompt,
     initial: String,
     done: Done,
+    cancelled: Option<Cancelled>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -368,9 +388,12 @@ fn open_stage(
         })
         .on_cancel({
             let prompt = Rc::downgrade(&shared);
-            move |_, cx| {
+            move |window, cx| {
                 if let Some(prompt) = prompt.upgrade() {
                     forget(id, &prompt, cx);
+                }
+                if let Some(cancelled) = cancelled {
+                    cancelled(window, cx);
                 }
             }
         });
@@ -434,7 +457,7 @@ fn confirmed(
             };
             if let Some(workspace) = workspace.upgrade() {
                 workspace.update(cx, |workspace, cx| {
-                    open_stage(workspace, state, initial, done, window, cx)
+                    open_stage(workspace, state, initial, done, None, window, cx)
                 });
             }
         }

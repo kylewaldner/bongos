@@ -58,6 +58,12 @@ pub fn decision_prompt(from: &str, replacement: &str, regexp: bool) -> String {
     )
 }
 
+/// The prompt after `,`: the replacement is made and shown.
+pub const SHOWN_PROMPT: &str = "(replaced; y/n/q to continue)";
+
+/// The prompt while `^` shows an older replacement.
+pub const WALKING_PROMPT: &str = "(previous replacement; y/n to resume)";
+
 /// `4/23` for the 1-based `index` of the current match; `4/10000+` when the
 /// count stopped at the cap `total`; empty while the total is unknown.
 pub fn counter(index: usize, total: Option<usize>, capped: bool) -> String {

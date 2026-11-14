@@ -12,27 +12,27 @@ use crate::commands_tests::{Scene, scene};
 use crate::view::QueryReplaceView;
 
 impl Scene {
-    fn view(&self) -> Option<Entity<QueryReplaceView>> {
+    pub(crate) fn view(&self) -> Option<Entity<QueryReplaceView>> {
         self.workspace.read_with(&self.cx, |workspace, cx| {
             workspace.active_modal::<QueryReplaceView>(cx)
         })
     }
 
-    fn view_open(&self) -> bool {
+    pub(crate) fn view_open(&self) -> bool {
         self.view().is_some()
     }
 
-    fn prompt(&self) -> String {
+    pub(crate) fn prompt(&self) -> String {
         let view = self.view().expect("the view is open");
         view.read_with(&self.cx, |view, _| view.prompt().to_string())
     }
 
-    fn status(&self) -> String {
+    pub(crate) fn status(&self) -> String {
         let view = self.view().expect("the view is open");
         view.read_with(&self.cx, |view, _| view.status().to_string())
     }
 
-    fn help_lines(&self) -> Vec<String> {
+    pub(crate) fn help_lines(&self) -> Vec<String> {
         let view = self.view().expect("the view is open");
         view.read_with(&self.cx, |view, _| view.help_lines().to_vec())
     }

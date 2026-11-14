@@ -14,18 +14,18 @@ use zed_actions::minibuffer;
 use crate::actions::QueryReplace;
 use crate::commands_tests::{Scene, scene};
 
-const ACTIVE: &str = "#ff0000ff";
-const OTHER: &str = "#00ff00ff";
-const REPLACED: &str = "#0000ffff";
-const REGION: &str = "#ffff00ff";
+pub(crate) const ACTIVE: &str = "#ff0000ff";
+pub(crate) const OTHER: &str = "#00ff00ff";
+pub(crate) const REPLACED: &str = "#0000ffff";
+pub(crate) const REGION: &str = "#ffff00ff";
 
-fn color(hex: &str) -> Hsla {
+pub(crate) fn color(hex: &str) -> Hsla {
     gpui::Rgba::try_from(hex).expect("a color").into()
 }
 
 impl Scene {
     /// Gives the three highlights and the region their own colors, so they can be told apart.
-    fn color_the_highlights(&mut self) {
+    pub(crate) fn color_the_highlights(&mut self) {
         self.cx.update(|_, cx| {
             SettingsStore::update_global(cx, |settings, cx| {
                 settings.update_user_settings(cx, |settings| {
@@ -46,7 +46,7 @@ impl Scene {
     }
 
     /// The highlights as (row, column, color), in order.
-    fn highlights(&mut self) -> Vec<(u32, u32, Hsla)> {
+    pub(crate) fn highlights(&mut self) -> Vec<(u32, u32, Hsla)> {
         self.editor.update_in(&mut self.cx, |editor, window, cx| {
             editor
                 .all_text_background_highlights(window, cx)

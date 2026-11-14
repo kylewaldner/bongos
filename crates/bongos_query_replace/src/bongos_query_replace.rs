@@ -23,6 +23,8 @@ mod edits_tests;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
+mod history_tests;
+#[cfg(test)]
 mod prompts_tests;
 #[cfg(test)]
 mod view_tests;

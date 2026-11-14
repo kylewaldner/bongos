@@ -455,7 +455,7 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `query_replace` commands, with the palette text of each.
-const QUERY_REPLACE_ACTIONS: [(&str, &str); 12] = [
+const QUERY_REPLACE_ACTIONS: [(&str, &str); 17] = [
     (
         "query_replace::QueryReplace",
         "query replace: query replace",
@@ -481,7 +481,15 @@ const QUERY_REPLACE_ACTIONS: [(&str, &str); 12] = [
     ("query_replace::Yes", "query replace: yes"),
     ("query_replace::No", "query replace: no"),
     ("query_replace::ThisAndExit", "query replace: this and exit"),
+    ("query_replace::ThisAndWait", "query replace: this and wait"),
+    ("query_replace::Previous", "query replace: previous"),
+    ("query_replace::Undo", "query replace: undo"),
+    (
+        "query_replace::EditReplacement",
+        "query replace: edit replacement",
+    ),
     ("query_replace::Exit", "query replace: exit"),
+    ("query_replace::Recenter", "query replace: recenter"),
     ("query_replace::Help", "query replace: help"),
 ];
 
