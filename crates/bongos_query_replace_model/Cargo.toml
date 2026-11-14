@@ -13,3 +13,6 @@ path = "src/bongos_query_replace_model.rs"
 doctest = false
 
 [dependencies]
+
+[dev-dependencies]
+regex.workspace = true
