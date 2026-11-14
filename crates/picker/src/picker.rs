@@ -347,6 +347,16 @@ pub trait PickerDelegate: Sized + 'static {
         None
     }
 
+    /// Drawn directly under the candidate list, in the centered presentation and in the minibuffer
+    /// strip alike. `None` draws nothing.
+    fn render_detail(
+        &self,
+        _window: &mut Window,
+        _: &mut Context<Picker<Self>>,
+    ) -> Option<AnyElement> {
+        None
+    }
+
     /// Overrides the picker's footer.
     ///
     /// Note there normally isn't a footer unless this is set or the picker has

@@ -102,6 +102,8 @@ pub enum Outcome {
 }
 
 pub(crate) type PreviewHandler = Rc<dyn Fn(Preview, &mut Window, &mut App)>;
+/// Describes a candidate in a panel under the list, from its value: `None` draws no panel.
+pub(crate) type DetailHandler = Rc<dyn Fn(&Value, &App) -> Option<SharedString>>;
 pub(crate) type InputHandler = Rc<dyn Fn(&str, &SessionHandle, &mut Window, &mut App)>;
 pub(crate) type ConfirmHandler = Box<dyn FnOnce(Outcome, &mut Window, &mut App)>;
 pub(crate) type CancelHandler = Box<dyn FnOnce(&mut Window, &mut App)>;
@@ -131,6 +133,7 @@ pub struct Session {
     key_context: Option<KeyContext>,
     actions: Vec<SessionAction>,
     on_preview: Option<PreviewHandler>,
+    detail: Option<DetailHandler>,
     on_input: Option<InputHandler>,
     on_confirm: Option<ConfirmHandler>,
     on_cancel: Option<CancelHandler>,
@@ -153,6 +156,7 @@ impl Session {
             key_context: None,
             actions: Vec::new(),
             on_preview: None,
+            detail: None,
             on_input: None,
             on_confirm: None,
             on_cancel: None,
@@ -246,6 +250,17 @@ impl Session {
         self
     }
 
+    /// Draws the text `handler` returns for the selected candidate's value in a panel directly
+    /// under the list, one line per line of text, in the buffer font. Nothing is drawn when the
+    /// handler returns `None` or no candidate is selected. The text is drawn as given.
+    pub fn detail(
+        mut self,
+        handler: impl Fn(&Value, &App) -> Option<SharedString> + 'static,
+    ) -> Self {
+        self.detail = Some(Rc::new(handler));
+        self
+    }
+
     /// Runs after each change of the input, with the new text.
     pub fn on_input(
         mut self,
@@ -297,6 +312,7 @@ pub(crate) struct Core {
     pub(crate) history: HistoryStore,
     pub(crate) actions: Vec<SessionAction>,
     pub(crate) on_preview: Option<PreviewHandler>,
+    pub(crate) detail: Option<DetailHandler>,
     pub(crate) on_input: Option<InputHandler>,
     on_confirm: RefCell<Option<ConfirmHandler>>,
     on_cancel: RefCell<Option<CancelHandler>>,
@@ -449,6 +465,7 @@ pub fn open(
         key_context,
         actions,
         on_preview,
+        detail,
         on_input,
         on_confirm,
         on_cancel,
@@ -468,6 +485,7 @@ pub fn open(
         history_name: history,
         actions,
         on_preview,
+        detail,
         on_input,
         on_confirm: RefCell::new(on_confirm),
         on_cancel: RefCell::new(on_cancel),
