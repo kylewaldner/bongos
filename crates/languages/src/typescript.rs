@@ -884,8 +884,8 @@ async fn get_cached_ts_server_binary(
 mod tests {
     use std::path::Path;
 
-    use gpui::{AppContext as _, BackgroundExecutor, TestAppContext};
     use super::execute_selection_template;
+    use gpui::{AppContext as _, BackgroundExecutor, TestAppContext};
     use project::FakeFs;
     use serde_json::json;
     use task::TaskTemplates;

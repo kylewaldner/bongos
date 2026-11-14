@@ -119,7 +119,9 @@ impl ContextProvider for JsonTaskProvider {
                 .await
                 .ok()?;
             let path = cx.update(|cx| file.abs_path(cx)).as_path().into();
-            let worktree_root = file.worktree.read_with(cx, |worktree, _| worktree.abs_path());
+            let worktree_root = file
+                .worktree
+                .read_with(cx, |worktree, _| worktree.abs_path());
 
             let task_templates = if is_package_json {
                 let package_json = serde_json_lenient::from_str::<
