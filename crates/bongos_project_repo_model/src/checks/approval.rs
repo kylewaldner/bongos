@@ -333,6 +333,10 @@ pub fn judge(input: &Judgment) -> ApprovalVerdict {
 /// project-level files (`project.toml`, which holds the policy, workflows, checks and the
 /// registered folders).
 fn in_subtree(folder: &str, path: &str) -> bool {
+    // A path that climbs out of where it starts is never inside anything.
+    if path.split('/').any(|part| part == "..") {
+        return false;
+    }
     if folder.is_empty() {
         return path == TASK_FILE
             || path == PLAN_FILE

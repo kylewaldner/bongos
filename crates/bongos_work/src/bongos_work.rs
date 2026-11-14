@@ -51,7 +51,10 @@ pub use master_files::{MASTER_SUFFIX, MasterFile, master_file, master_file_at};
 pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
 pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root_tasks};
 pub use panel::{WorkPanel, init_panel, task_at_point};
-pub use project_repos::register_project_repo;
+pub use project_repos::{
+    LandingVerdict, LandingWatch, abandon_proposal, approve_proposal, register_project_repo,
+    watch_landings,
+};
 pub use rebase::RebaseState;
 pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};
 pub use registry::{

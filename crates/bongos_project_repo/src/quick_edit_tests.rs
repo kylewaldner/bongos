@@ -81,6 +81,7 @@ pub(crate) fn quick_edit_of(
         files,
         meta: ChangeMeta::new(String::new(), author.clone()),
         tasks: written_tasks(change),
+        name: None,
     }
 }
 
@@ -471,6 +472,7 @@ fn paths_that_leave_definitions_or_files_are_refused() {
             files: Vec::new(),
             meta: ChangeMeta::new(String::new(), keyboard().author),
             tasks: Vec::new(),
+            name: None,
         };
         assert!(block_on(repo.quick_edit(edit, None, start())).is_err());
     }

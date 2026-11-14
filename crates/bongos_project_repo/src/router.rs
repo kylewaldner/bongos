@@ -422,7 +422,29 @@ fn diff_state(
     let mut ops = Vec::new();
     let old_table = state_table(id, old)?;
     let new_table = state_table(id, new)?;
+    // Proposal records only added to (the usual apply and reject) are recorded as such: a
+    // typed record keeps its timestamp where a generic `Set` of the list does not. A record
+    // that changed keeps the generic `Set`.
+    let appended = old
+        .proposals
+        .iter()
+        .all(|record| new.proposals.contains(record));
+    if appended {
+        for record in new
+            .proposals
+            .iter()
+            .filter(|record| !old.proposals.contains(record))
+        {
+            ops.push(StateOp::RecordProposal {
+                root: id.to_string(),
+                record: record.clone(),
+            });
+        }
+    }
     for field in SETTABLE_FIELDS {
+        if appended && field == "proposals" {
+            continue;
+        }
         let before = old_table.get(field);
         let after = new_table.get(field);
         if before != after {

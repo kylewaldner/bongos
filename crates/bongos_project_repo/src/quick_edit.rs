@@ -30,7 +30,7 @@ use crate::router::{
 };
 use crate::state::StateRead;
 use crate::state_ops::StateOp;
-use crate::working_copies::fresh_name;
+use crate::working_copies::{clean_name, fresh_name};
 
 /// The `kv` namespace of the quick edits' records, by change id.
 pub const QUICK_EDITS_NAMESPACE: &str = "quick-edits";
@@ -53,6 +53,10 @@ pub struct QuickEdit {
     pub meta: ChangeMeta,
     /// The tasks whose rows show the change as pending.
     pub tasks: Vec<TaskId>,
+    /// The name asked for the change's branch and row (cleaned, and numbered when taken); a
+    /// generated one when `None`.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// A quick edit whose branch and row exist.
@@ -227,14 +231,20 @@ impl ProjectRepo {
         }
         let repository = self.location.repository.clone();
         let prefix = self.land_options().branch_prefix;
-        let mut name = fresh_name();
+        let wanted = edit.name.as_deref().and_then(|name| clean_name(name).ok());
+        let mut name = wanted.clone().unwrap_or_else(fresh_name);
+        let mut attempt = 1;
         while self
             .git
             .branch_exists(&repository, &format!("{prefix}{name}"))
             .await
             || self.working_copy_path(&name).exists()
         {
-            name = fresh_name();
+            attempt += 1;
+            name = match &wanted {
+                Some(wanted) => format!("{wanted}-{attempt}"),
+                None => fresh_name(),
+            };
         }
         let branch = format!("{prefix}{name}");
         let scratch = self.location.state.join("quick-edits").join(&name);

@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use bongos_project_repo::router::{self, Routed};
 use bongos_project_repo::{
-    LoadedProject, ProjectRepo, QuickEdit, Recovery, StateEvent, check_fresh, written_tasks,
+    LandingEvent, LoadedProject, ProjectRepo, QuickEdit, Recovery, StateEvent, check_fresh,
+    written_tasks,
 };
 use bongos_project_repo_model::ChangeMeta;
 use bongos_work_model::PersonAtKeyboard;
@@ -45,6 +46,103 @@ pub(crate) fn note_open_repo(loaded: &Arc<LoadedProject>, cx: &mut App) {
         .0
         .retain(|known| known.repo().location().id != loaded.repo().location().id);
     repos.0.push(loaded.clone());
+}
+
+/// `project: approve` of the change `change_id` in whichever open repository holds it, by the
+/// person whose context `ctx` is (refused unless it still holds the attestation of a person at
+/// a window). Resolves with the approved branch tip.
+pub fn approve_proposal(change_id: &str, ctx: Context, cx: &App) -> Task<Result<String, String>> {
+    let found = open_repos(cx)
+        .into_iter()
+        .map(|loaded| loaded.repo().clone())
+        .find(|repo| repo.change(change_id).ok().flatten().is_some());
+    let change_id = change_id.to_string();
+    cx.background_spawn(async move {
+        let repo = found.ok_or_else(|| format!("there is no change {change_id}"))?;
+        repo.approve(&change_id, ctx, Utc::now())
+            .await
+            .map(|approval| approval.commit)
+            .map_err(|error| format!("{error:#}"))
+    })
+}
+
+/// Abandons every open working copy of proposal `number` of the task `root` (its branch and
+/// files go, master is untouched). Resolves with how many it abandoned.
+pub fn abandon_proposal(root: &str, number: u32, cx: &App) -> Task<Result<usize, String>> {
+    let repos: Vec<ProjectRepo> = open_repos(cx)
+        .into_iter()
+        .map(|loaded| loaded.repo().clone())
+        .collect();
+    let proposal = (root.to_string(), number);
+    cx.background_spawn(async move {
+        let mut abandoned = 0;
+        for repo in repos {
+            let rows = repo
+                .changes(&Default::default())
+                .map_err(|error| format!("{error:#}"))?;
+            for row in rows
+                .into_iter()
+                .filter(|row| row.author.proposal.as_ref() == Some(&proposal))
+            {
+                repo.abandon_now(&row.change_id, Utc::now())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                abandoned += 1;
+            }
+        }
+        Ok(abandoned)
+    })
+}
+
+/// How a landing ended, or where it waits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LandingVerdict {
+    Landed,
+    /// Refused, in conflict, or waiting for a person; the reason.
+    Held(String),
+}
+
+/// The landing events of every open repository from the moment it was made, so a landing that
+/// starts with the next write is never missed.
+pub struct LandingWatch(Vec<futures::channel::mpsc::UnboundedReceiver<(String, LandingEvent)>>);
+
+/// Starts watching; call before the write whose landing is to be followed.
+pub fn watch_landings(cx: &App) -> LandingWatch {
+    LandingWatch(
+        open_repos(cx)
+            .iter()
+            .map(|loaded| loaded.repo().landing_events())
+            .collect(),
+    )
+}
+
+impl LandingWatch {
+    /// Resolves when `change_id` landed or is held (refused, conflicting, and, when
+    /// `through_waiting` is false, waiting for approval).
+    pub async fn verdict(self, change_id: &str, through_waiting: bool) -> LandingVerdict {
+        let mut events = futures::stream::select_all(self.0);
+        while let Some((id, event)) = events.next().await {
+            if id != change_id {
+                continue;
+            }
+            match event {
+                LandingEvent::Landed { .. } => return LandingVerdict::Landed,
+                LandingEvent::Refused { reasons } => {
+                    return LandingVerdict::Held(reasons.join("; "));
+                }
+                LandingEvent::Conflict { files } => {
+                    return LandingVerdict::Held(format!("conflict in {}", files.join(", ")));
+                }
+                LandingEvent::Waiting { reason } if !through_waiting => {
+                    return LandingVerdict::Held(reason);
+                }
+                LandingEvent::Waiting { .. }
+                | LandingEvent::Queued { .. }
+                | LandingEvent::Checking => {}
+            }
+        }
+        LandingVerdict::Held("the repository was closed".to_string())
+    }
 }
 
 fn seam_name(loaded: &LoadedProject) -> String {
@@ -119,6 +217,14 @@ impl DefinitionWriter for RepoWriter {
                     ));
                 };
                 check_fresh(tree, &change, &definitions).map_err(WriteError::Refused)?;
+                // A proposal's working copy is named for it, and nobody's marker approves it:
+                // the person approves it afterwards with `project: approve`, an agent's waits
+                // for the approval hooks.
+                let proposal = ctx.author.proposal.as_ref();
+                let name = proposal.and_then(|(root, number)| {
+                    Some(format!("proposal-{}-{number}", tree.task_by_id(root)?.slug))
+                });
+                let attestation = attestation.filter(|_| proposal.is_none());
                 let edit = QuickEdit {
                     base: base.0,
                     definition,
@@ -126,6 +232,7 @@ impl DefinitionWriter for RepoWriter {
                     files,
                     meta: ChangeMeta::new(String::new(), ctx.author.clone()),
                     tasks: written_tasks(&change),
+                    name,
                 };
                 let repo = self.loaded.repo().clone();
                 // The store's serial writer runs on a background thread and waits for the

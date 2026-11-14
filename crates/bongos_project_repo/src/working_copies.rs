@@ -227,10 +227,19 @@ impl ProjectRepo {
         let row = marked?;
         let repository = &self.location.repository;
         let path = self.working_copy_path(&row.name);
-        self.git
-            .worktree_remove(repository, &path)
-            .await
-            .map_err(|error| failed(error.into()))?;
+        // A landing that was checking the working copy out when it was abandoned holds git's
+        // lock on it until it notices; wait that out.
+        let mut waited = 0;
+        loop {
+            match self.git.worktree_remove(repository, &path).await {
+                Ok(()) => break,
+                Err(error) if waited < 100 && error.to_string().contains("locked") => {
+                    waited += 1;
+                    crate::landing::backoff(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(failed(error.into())),
+            }
+        }
         if self.git.branch_exists(repository, &row.branch).await {
             self.git
                 .branch_delete(repository, &row.branch)
