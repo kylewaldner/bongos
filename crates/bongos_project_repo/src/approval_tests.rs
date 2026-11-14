@@ -650,7 +650,7 @@ fn a_forged_person_author_in_the_changes_table_waits_for_project_approve() {
         bongos_project_repo_model::AuthorKind::PersonClaimed
     );
     let mut row = repo.change(&copy.change_id).unwrap().unwrap();
-    row.author = forged.clone();
+    row.author = forged;
     let writer = repo.writer_or_error().unwrap();
     writer.transact(|tx| tx.set_change(&row)).unwrap();
     let json: Author = serde_json::from_str(r#"{"kind":"person","name":"someone"}"#).unwrap();
@@ -1000,7 +1000,7 @@ fn no_call_path_lands_an_unapproved_change() {
     let checked = block_on(repo.land_now(
         &copy.change_id,
         LandRequest {
-            meta: ChangeMeta::new("check", unattributed.clone()),
+            meta: ChangeMeta::new("check", unattributed),
             mode: LandMode::CheckOnly,
         },
         start(),
