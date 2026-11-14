@@ -305,8 +305,12 @@ impl StateApplyHook for DefinitionHook {
         for touch in change.touched {
             seen.push((
                 touch.id.clone(),
-                touch.definition_before.map(|definition| definition.goal.clone()),
-                touch.definition_after.map(|definition| definition.goal.clone()),
+                touch
+                    .definition_before
+                    .map(|definition| definition.goal.clone()),
+                touch
+                    .definition_after
+                    .map(|definition| definition.goal.clone()),
                 change.old_definitions.is_some(),
             ));
         }

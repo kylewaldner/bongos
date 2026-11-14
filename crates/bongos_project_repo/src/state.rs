@@ -423,10 +423,7 @@ fn run_hooks(
             Some(before) => before.clone(),
             None => after.clone(),
         };
-        let definition_before = old_definitions
-            .as_deref()
-            .unwrap_or(&current)
-            .task(&id);
+        let definition_before = old_definitions.as_deref().unwrap_or(&current).task(&id);
         let definition_after = current.task(&id);
         touched.push(TaskTouch {
             id,

@@ -50,8 +50,8 @@ use util::ResultExt as _;
 use crate::changes::ChangedCount;
 use crate::overview::{self, Inputs, RepositoryRow};
 use crate::rebase::{RebaseChecks, RebaseState};
-use crate::seams::{DefinitionWriter, DefinitionWriters, ProjectSources, WriteOutcome};
 use crate::ref_watch::{GitDirInfo, RefWatches};
+use crate::seams::{DefinitionWriter, DefinitionWriters, ProjectSources, WriteOutcome};
 use crate::settings::Repository;
 use crate::worktrees::Layout;
 use crate::{WorkDirs, WorkSettings};
@@ -821,7 +821,10 @@ impl Disk {
                 Err(refusal) => return (Err(WriteError::Refused(refusal)), attempt),
             };
             if let Some(writer) = self.seams.writers.owner(&tree, &change) {
-                return (self.write_owned(&*writer, &tree, ctx, attestation, change), attempt);
+                return (
+                    self.write_owned(&*writer, &tree, ctx, attestation, change),
+                    attempt,
+                );
             }
             match unchanged_since_read(&tree, &change) {
                 Ok(true) => {

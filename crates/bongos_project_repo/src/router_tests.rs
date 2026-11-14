@@ -128,7 +128,9 @@ fn state_only_commands_write_one_transaction_and_no_commit_or_branch() {
 
     let tree = run_state_only(&repo, &loaded, |tree, ctx| commands::close(tree, ctx, "l1"));
     assert_eq!(status(&tree, "l1"), Status::Done);
-    let tree = run_state_only(&repo, &loaded, |tree, ctx| commands::reopen(tree, ctx, "l1"));
+    let tree = run_state_only(&repo, &loaded, |tree, ctx| {
+        commands::reopen(tree, ctx, "l1")
+    });
     assert_eq!(status(&tree, "l1"), Status::Open);
     let tree = run_state_only(&repo, &loaded, |tree, ctx| {
         commands::drop_task(tree, ctx, "l2", false)
@@ -136,7 +138,13 @@ fn state_only_commands_write_one_transaction_and_no_commit_or_branch() {
     assert_eq!(status(&tree, "l2"), Status::Cancelled);
 
     // Every command left its history entry in the state store, by its author.
-    let history = &tree.task_by_id("l1").unwrap().file.as_ref().unwrap().history;
+    let history = &tree
+        .task_by_id("l1")
+        .unwrap()
+        .file
+        .as_ref()
+        .unwrap()
+        .history;
     let events: Vec<&str> = history.iter().map(|entry| entry.event.as_str()).collect();
     assert_eq!(
         events,
@@ -200,7 +208,8 @@ fn renaming_a_goal_is_a_definition_change_that_keeps_the_state() {
     );
 
     // Joined with the state as it is, the new definition keeps status, todos and result.
-    let new_definition: TaskDefinition = toml::from_str(std::str::from_utf8(bytes).unwrap()).unwrap();
+    let new_definition: TaskDefinition =
+        toml::from_str(std::str::from_utf8(bytes).unwrap()).unwrap();
     let joined = join(new_definition, state_before.unwrap());
     assert_eq!(joined.goal, "Backfill usage events");
     assert_eq!(joined.todos[0].state, TodoState::Done);

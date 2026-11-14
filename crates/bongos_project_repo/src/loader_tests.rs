@@ -42,13 +42,26 @@ fn seed_state(repo: &ProjectRepo) {
 
 /// Commits `files` (relative to `definitions/`) on a new branch in a separate worktree, the way a
 /// working copy does, and returns the commit. `main` and its checkout stay as they were.
-fn commit_on_branch(repo: &ProjectRepo, root: &Path, branch: &str, files: &[(&str, String)]) -> CommitId {
+fn commit_on_branch(
+    repo: &ProjectRepo,
+    root: &Path,
+    branch: &str,
+    files: &[(&str, String)],
+) -> CommitId {
     let git = repo.git();
     let copy = root.join("working-copies").join(branch);
     let copy_arg = copy.to_str().unwrap().to_string();
     block_on(git.run(
         &repo.location().repository,
-        &["worktree", "add", "-q", "-b", branch, &copy_arg, MAIN_BRANCH],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            &copy_arg,
+            MAIN_BRANCH,
+        ],
     ))
     .unwrap();
     for (path, text) in files {
@@ -162,9 +175,12 @@ fn a_tree_ref_by_tree_id_reads_the_same_definitions() {
         &["rev-parse", &format!("{}^{{tree}}", commit.0)],
     ))
     .unwrap();
-    let by_commit =
-        block_on(crate::load_definition_tree(repo.git(), &repo.location().repository, &TreeRef::Commit(commit)))
-            .unwrap();
+    let by_commit = block_on(crate::load_definition_tree(
+        repo.git(),
+        &repo.location().repository,
+        &TreeRef::Commit(commit),
+    ))
+    .unwrap();
     let by_tree = block_on(crate::load_definition_tree(
         repo.git(),
         &repo.location().repository,

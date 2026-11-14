@@ -145,11 +145,13 @@ impl DefinitionWriters {
     }
 
     /// The first writer that owns `change`.
-    pub(crate) fn owner(&self, tree: &WorkTree, change: &Change) -> Option<Arc<dyn DefinitionWriter>> {
+    pub(crate) fn owner(
+        &self,
+        tree: &WorkTree,
+        change: &Change,
+    ) -> Option<Arc<dyn DefinitionWriter>> {
         let writers: Vec<_> = self.0.lock().clone();
-        writers
-            .into_iter()
-            .find(|writer| writer.owns(tree, change))
+        writers.into_iter().find(|writer| writer.owns(tree, change))
     }
 }
 

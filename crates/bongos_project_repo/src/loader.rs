@@ -129,8 +129,7 @@ impl ProjectRepo {
 
     /// [`Self::work_tree_at`] without an app.
     pub async fn load_work_tree_at(&self, at: &TreeRef) -> Result<WorkTree> {
-        let definitions =
-            load_definition_tree(&self.git, &self.location.repository, at).await?;
+        let definitions = load_definition_tree(&self.git, &self.location.repository, at).await?;
         self.join_with_state(&definitions)
     }
 

@@ -50,7 +50,9 @@ async fn wait_until(
     check: impl Fn(&WorkTree) -> bool,
 ) {
     for _ in 0..200 {
-        if store.read_with(cx, |store, _| store.snapshot().is_some_and(|tree| check(&tree))) {
+        if store.read_with(cx, |store, _| {
+            store.snapshot().is_some_and(|tree| check(&tree))
+        }) {
             return;
         }
         cx.executor().timer(Duration::from_millis(50)).await;
@@ -97,7 +99,8 @@ fn memory_project(files: &Path) -> Project {
         children: Vec::new(),
     };
     let mut top = task("memory", file, "");
-    top.children.push(task("remembered", leaf, "tasks/remembered"));
+    top.children
+        .push(task("remembered", leaf, "tasks/remembered"));
     Project {
         slug: "memory".to_string(),
         file: None,
@@ -270,7 +273,8 @@ async fn old_format_projects_refuse_writes_once_project_repositories_are_enabled
     });
     assert!(cx.update(|cx| ProjectRepositorySettings::get_global(cx).enabled));
     wait_until(cx, &store, "the conversion lock", |tree| {
-        tree.task_by_id("l1").is_some_and(|task| task.needs_conversion)
+        tree.task_by_id("l1")
+            .is_some_and(|task| task.needs_conversion)
     })
     .await;
     let error = store
@@ -308,7 +312,10 @@ fn project_repo(folder: &Path) -> ProjectRepo {
         &definitions.join("project.toml"),
         "schema = 1\nid = \"project-1\"\ntitle = \"Repo project\"\n",
     );
-    write(&definitions.join("task.toml"), &definition("g1", "Repo project"));
+    write(
+        &definitions.join("task.toml"),
+        &definition("g1", "Repo project"),
+    );
     write(
         &definitions.join("tasks/leaf/task.toml"),
         &definition("r1", "Repo leaf"),
@@ -317,7 +324,9 @@ fn project_repo(folder: &Path) -> ProjectRepo {
     std::fs::create_dir_all(&location.files).unwrap();
     let git = Git::locate().expect("git is installed").isolated();
     futures::executor::block_on(async {
-        git.init_repo(&location.repository, MAIN_BRANCH).await.unwrap();
+        git.init_repo(&location.repository, MAIN_BRANCH)
+            .await
+            .unwrap();
         git.commit_all(&location.repository, "create", &Identity::default())
             .await
             .unwrap();
@@ -352,7 +361,11 @@ async fn a_project_repository_serves_its_tasks_and_applies_state_only_writes(
 
     store
         .update(cx, |store, cx| {
-            store.write(ctx(), |tree, ctx| commands::advance(tree, ctx, "r1", false), cx)
+            store.write(
+                ctx(),
+                |tree, ctx| commands::advance(tree, ctx, "r1", false),
+                cx,
+            )
         })
         .await
         .unwrap();

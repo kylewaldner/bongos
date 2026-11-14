@@ -90,7 +90,10 @@ fn problems_name_the_file() {
         task("c1", "Child").into_bytes(),
     ));
     let problems = DefinitionTree::parse_files(files).unwrap_err();
-    let paths: Vec<&str> = problems.iter().map(|problem| problem.path.as_str()).collect();
+    let paths: Vec<&str> = problems
+        .iter()
+        .map(|problem| problem.path.as_str())
+        .collect();
     assert!(paths.contains(&"tasks/broken/task.toml"), "{problems:?}");
     assert!(paths.contains(&"tasks/stateful/task.toml"), "{problems:?}");
     assert!(paths.contains(&"tasks/orphan/task.toml"), "{problems:?}");
@@ -153,10 +156,7 @@ fn work_tree_from_joins_definitions_with_state_and_scans_files_folders() {
     assert_eq!(file.status, Status::Done);
     assert_eq!(file.todos[0].state, TodoState::Done);
     let names: Vec<&Path> = task.files.keys().map(PathBuf::as_path).collect();
-    assert_eq!(
-        names,
-        [Path::new("chats/one.md"), Path::new("prompts.txt")]
-    );
+    assert_eq!(names, [Path::new("chats/one.md"), Path::new("prompts.txt")]);
 
     // A task with no state row reads as open with open todos, and no files folder is fine.
     let inner = tree.task_by_id("l2").unwrap();

@@ -28,19 +28,35 @@ use crate::state_ops::{SETTABLE_FIELDS, StateOp};
 /// A change to the files of `definitions/`, relative to it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DefinitionOp {
-    Write { path: RelPath, bytes: Vec<u8> },
+    Write {
+        path: RelPath,
+        bytes: Vec<u8>,
+    },
     /// A task folder (relative to `definitions/`) and everything in it.
-    Move { from: String, to: String },
-    Delete { path: RelPath },
+    Move {
+        from: String,
+        to: String,
+    },
+    Delete {
+        path: RelPath,
+    },
 }
 
 /// A change in the files folders, relative to the files root (`<task id>/...`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileOp {
-    Write { path: PathBuf, bytes: Vec<u8> },
-    Move { from: PathBuf, to: PathBuf },
+    Write {
+        path: PathBuf,
+        bytes: Vec<u8>,
+    },
+    Move {
+        from: PathBuf,
+        to: PathBuf,
+    },
     /// An empty `prompts.txt` in a new task's files folder.
-    CreatePrompts { task: TaskId },
+    CreatePrompts {
+        task: TaskId,
+    },
 }
 
 /// Where a change goes.
@@ -317,7 +333,9 @@ fn diff_state(
     }
     let kept = old.history.len().min(new.history.len());
     if new.history[..kept] != old.history[..kept] {
-        return Err(format!("the history of {id} was rewritten, not appended to"));
+        return Err(format!(
+            "the history of {id} was rewritten, not appended to"
+        ));
     }
     for entry in &new.history[kept..] {
         ops.push(StateOp::AppendHistory {
@@ -374,8 +392,7 @@ fn apply_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
         }
         FileOp::CreatePrompts { task } => {
             let dir = files_root.join(task);
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             create_prompts(&dir).map_err(|error| anyhow::anyhow!("{error}"))?;
         }
     }
@@ -400,9 +417,9 @@ pub fn owns(tree: &WorkTree, project_id: &str, change: &Change) -> bool {
     let mut paths = vec![change.dir.clone()];
     for write in &change.writes {
         paths.push(match write {
-            Write::Task { dir, .. }
-            | Write::Project { dir, .. }
-            | Write::Artifacts { dir, .. } => dir.clone(),
+            Write::Task { dir, .. } | Write::Project { dir, .. } | Write::Artifacts { dir, .. } => {
+                dir.clone()
+            }
             Write::Link { path, .. } => path.clone(),
         });
     }

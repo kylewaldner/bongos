@@ -13,8 +13,8 @@ mod state;
 mod state_hooks;
 mod state_ops;
 
-pub use create::{CreateError, CreateRequest, LayoutTemplates, ProjectRepo};
 pub use create::MAIN_BRANCH;
+pub use create::{CreateError, CreateRequest, LayoutTemplates, ProjectRepo};
 pub use git::{
     CommitId, DEFAULT_IDENTITY_EMAIL, DEFAULT_IDENTITY_NAME, Git, GitError, Identity, TreeEntry,
     TreeId, TreeRef,

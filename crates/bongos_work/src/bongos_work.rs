@@ -15,8 +15,8 @@ mod modes;
 mod open;
 mod overview;
 mod panel;
-mod projects;
 mod project_repos;
+mod projects;
 mod rebase;
 mod ref_watch;
 mod registry;
@@ -46,17 +46,17 @@ pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, focus_task, is_project_
 pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
 pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root_tasks};
 pub use panel::{WorkPanel, init_panel, task_at_point};
+pub use project_repos::register_project_repo;
 pub use rebase::RebaseState;
 pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};
 pub use registry::{
     ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
     NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart, observe_view_opened,
 };
-pub use project_repos::register_project_repo;
+pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
 pub use seams::{
     ChangeId, DefinitionWriter, DefinitionWriters, ProjectSource, ProjectSources, WriteOutcome,
 };
-pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
 pub use status::{FocusStatus, breadcrumb};
 pub use store::{

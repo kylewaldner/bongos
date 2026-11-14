@@ -285,7 +285,10 @@ fn join_path(folder: &str, name: &str) -> String {
     }
 }
 
-fn build_node(folder: &str, tasks: &mut BTreeMap<String, TaskDefinition>) -> Option<DefinitionNode> {
+fn build_node(
+    folder: &str,
+    tasks: &mut BTreeMap<String, TaskDefinition>,
+) -> Option<DefinitionNode> {
     let definition = tasks.remove(folder)?;
     let prefix = join_path(folder, TASKS_DIR);
     let child_folders: Vec<String> = tasks

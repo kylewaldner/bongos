@@ -6,7 +6,6 @@ use tempfile::TempDir;
 
 use crate::{Location, StateApplyHooks, StateStore, StateWriter};
 
-
 /// A project location whose parts are all inside `root`, with an empty state directory.
 pub(crate) fn location(root: &TempDir) -> Location {
     let folder = root.path().join("project");
@@ -58,7 +57,9 @@ pub(crate) fn definition_toml(id: &str, goal: &str, kind: &str, todos: &[(&str, 
          created = 2026-01-01T10:00:00Z\n"
     );
     for (todo_id, name) in todos {
-        text.push_str(&format!("\n[[todos]]\nid = \"{todo_id}\"\nname = \"{name}\"\n"));
+        text.push_str(&format!(
+            "\n[[todos]]\nid = \"{todo_id}\"\nname = \"{name}\"\n"
+        ));
     }
     text
 }
@@ -68,7 +69,10 @@ pub(crate) fn definition_toml(id: &str, goal: &str, kind: &str, todos: &[(&str, 
 pub(crate) fn fixture_definitions() -> Vec<(&'static str, String)> {
     vec![
         ("project.toml", PROJECT_TOML.to_string()),
-        ("task.toml", definition_toml("g1", "Invoicing", "other", &[])),
+        (
+            "task.toml",
+            definition_toml("g1", "Invoicing", "other", &[]),
+        ),
         ("plan.md", String::new()),
         (
             "tasks/backfill/task.toml",

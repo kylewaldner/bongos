@@ -7,10 +7,10 @@ mod definitions;
 pub mod layout;
 mod split;
 
+pub use bongos_work_model::{Author, AuthorKind, PersonAtKeyboard};
 pub use definitions::{
     DefinitionNode, DefinitionTree, Problem, RelPath, StateLookup, work_tree_from,
 };
-pub use bongos_work_model::{Author, AuthorKind, PersonAtKeyboard};
 pub use split::{
     RESERVED_STATE_KEYS, TaskDefinition, TaskStateRecord, TodoDefinition, TodoStateRecord, join,
     reserved_keys_in, split,
