@@ -123,7 +123,7 @@ fn a_land_asked_while_a_check_of_the_change_runs_waits_for_it_and_lands() {
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     *slow.gate.lock() = Some((started_tx, release_rx));
-    repo.add_landing_check(slow.clone());
+    repo.add_landing_check(slow);
     let author = copy_author();
     let copy = new_copy(&repo, "amber-otter-0001", &author);
     add_task(&copy, "alpha", "a1");
@@ -158,7 +158,7 @@ fn a_land_asked_while_a_check_of_the_change_runs_waits_for_it_and_lands() {
     );
     let commit = landed(landed_result.unwrap());
     assert_eq!(main_commit(&repo), commit);
-    let ended = std::iter::from_fn(|| events.try_next().ok().flatten())
+    let ended = std::iter::from_fn(|| events.try_recv().ok())
         .filter(|(change, _)| *change == copy.change_id)
         .any(|(_, event)| {
             event
