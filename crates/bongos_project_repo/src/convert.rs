@@ -380,7 +380,12 @@ fn destination(
             return Ok(candidate);
         }
     }
-    Err(anyhow!("no free folder name for {} in {}", plan.slug, projects_dir.display()).into())
+    Err(anyhow!(
+        "no free folder name for {} in {}",
+        plan.slug,
+        projects_dir.display()
+    )
+    .into())
 }
 
 // The check on disk -------------------------------------------------------------------------
@@ -456,7 +461,12 @@ fn scan(plan: &mut ConversionPlan) -> Histories {
     let mut blockers = Vec::new();
     for task in &mut plan.tasks {
         if task.synthetic {
-            scan_listing(&task.old_dir, &task.child_slugs, &mut rejected, &mut blockers);
+            scan_listing(
+                &task.old_dir,
+                &task.child_slugs,
+                &mut rejected,
+                &mut blockers,
+            );
             continue;
         }
         let inside = task
@@ -550,10 +560,10 @@ fn kind_reason(kind: &Kind) -> &'static str {
 
 fn read_history(path: &Path) -> anyhow::Result<Vec<HistoryEntry>> {
     let bytes = read_no_follow(path)?;
-    let text = String::from_utf8(bytes)
-        .map_err(|_| anyhow!("{} is not UTF-8 text", path.display()))?;
-    let file =
-        parse_history(&text).map_err(|error| anyhow!("{} does not parse: {error}", path.display()))?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| anyhow!("{} is not UTF-8 text", path.display()))?;
+    let file = parse_history(&text)
+        .map_err(|error| anyhow!("{} does not parse: {error}", path.display()))?;
     Ok(file.history)
 }
 
@@ -726,8 +736,12 @@ fn copy_old_file(dir: &Path, relative: &str, to: &Path) -> anyhow::Result<()> {
             from.display()
         );
     }
-    let mut source = open_no_follow(&from).with_context(|| format!("reading {}", from.display()))?;
-    let modified = source.metadata().and_then(|metadata| metadata.modified()).ok();
+    let mut source =
+        open_no_follow(&from).with_context(|| format!("reading {}", from.display()))?;
+    let modified = source
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok();
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -780,7 +794,10 @@ fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        if !matches!(error.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS)) {
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINVAL) | Some(libc::ENOSYS)
+        ) {
             return Err(error);
         }
     }
@@ -1107,7 +1124,10 @@ async fn execute(
     }
     let parsed = DefinitionTree::parse_dir(&definitions).map_err(|problems| {
         let list: Vec<String> = problems.iter().map(ToString::to_string).collect();
-        anyhow!("the converted definitions do not read back: {}", list.join("; "))
+        anyhow!(
+            "the converted definitions do not read back: {}",
+            list.join("; ")
+        )
     })?;
     let mut parsed_ids: Vec<&str> = parsed
         .nodes()

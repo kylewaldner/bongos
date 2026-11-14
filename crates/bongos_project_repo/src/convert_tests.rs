@@ -18,10 +18,10 @@ use tempfile::TempDir;
 use crate::convert::{Phase, Seams, TempLock, claim_conversion, convert_with};
 use crate::test_support::git;
 use crate::{
-    CONVERSION_COMMIT_MESSAGE, ConversionPreview, ConvertError, ConvertOptions,
-    LayoutTemplates, OldFormatState, OldSource, ProjectRepo, RepositoryLocations, StateApplyChange,
-    StateApplyHook, StateApplyHooks, StateHandle, StateStore, StateTx, TreeRef,
-    claim_old_project_start, clean_stale_conversions, convert, convert_all, preview, preview_all,
+    CONVERSION_COMMIT_MESSAGE, ConversionPreview, ConvertError, ConvertOptions, LayoutTemplates,
+    OldFormatState, OldSource, ProjectRepo, RepositoryLocations, StateApplyChange, StateApplyHook,
+    StateApplyHooks, StateHandle, StateStore, StateTx, TreeRef, claim_old_project_start,
+    clean_stale_conversions, convert, convert_all, preview, preview_all,
 };
 
 const TITLE: &str = "One-offs";
@@ -256,12 +256,13 @@ fn the_project(tree: &WorkTree) -> OldSource<'_> {
 
 fn converted_tree(location: &crate::Location) -> WorkTree {
     let reader = StateStore::open_reader(location).unwrap();
-    let repo = ProjectRepo::new(location.clone(), git()).with_state(StateHandle::Reader(Arc::new(
-        reader,
-    )));
+    let repo =
+        ProjectRepo::new(location.clone(), git()).with_state(StateHandle::Reader(Arc::new(reader)));
     block_on(async {
         let commit = repo.shown_commit().await.unwrap();
-        repo.load_work_tree_at(&TreeRef::Commit(commit)).await.unwrap()
+        repo.load_work_tree_at(&TreeRef::Commit(commit))
+            .await
+            .unwrap()
     })
 }
 
@@ -296,7 +297,10 @@ fn a_conversion_keeps_every_task_and_runs_no_state_hook() {
     let location = &converted.location;
     assert_eq!(location.folder, world.projects_dir().join("invoicing"));
     assert_eq!(location.id, "p-invoicing");
-    assert_eq!(location.converted_from.as_deref(), Some(world.old_project().as_path()));
+    assert_eq!(
+        location.converted_from.as_deref(),
+        Some(world.old_project().as_path())
+    );
     let reloaded = world.locations();
     assert_eq!(reloaded.locations(), std::slice::from_ref(location));
     assert_eq!(
@@ -321,7 +325,14 @@ fn a_conversion_keeps_every_task_and_runs_no_state_hook() {
             expected.history.insert(0, history("created"));
         }
         assert_eq!(without_todo_ids(task), expected, "task {id}");
-        assert!(task.file.as_ref().unwrap().todos.iter().all(|todo| todo.id.is_some()));
+        assert!(
+            task.file
+                .as_ref()
+                .unwrap()
+                .todos
+                .iter()
+                .all(|todo| todo.id.is_some())
+        );
     }
     let backfill = new.task_by_id("l1").unwrap();
     assert_eq!(backfill.slug, "backfill");
@@ -366,9 +377,12 @@ fn a_conversion_keeps_every_task_and_runs_no_state_hook() {
 fn no_temporary_folders(world: &World) -> bool {
     std::fs::read_dir(world.projects_dir())
         .map(|entries| {
-            entries
-                .flatten()
-                .all(|entry| !entry.file_name().to_string_lossy().starts_with(".converting-"))
+            entries.flatten().all(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".converting-")
+            })
         })
         .unwrap_or(true)
 }
@@ -399,10 +413,16 @@ fn a_failure_at_any_phase_leaves_nothing_and_the_old_folder_untouched() {
         ));
         assert!(result.is_err(), "{phase:?}");
         assert_eq!(hash_tree(&world.root()), before, "{phase:?}");
-        assert!(!world.projects_dir().exists(), "{phase:?} left the projects folder");
+        assert!(
+            !world.projects_dir().exists(),
+            "{phase:?} left the projects folder"
+        );
         assert!(locations.locations().is_empty(), "{phase:?}");
         assert!(world.locations().locations().is_empty(), "{phase:?}");
-        assert!(!world.dir.path().join("locations.toml").exists(), "{phase:?}");
+        assert!(
+            !world.dir.path().join("locations.toml").exists(),
+            "{phase:?}"
+        );
         assert_eq!(world.hook_calls(), 0, "{phase:?}");
 
         // Nothing stands in the way of converting again.
@@ -461,11 +481,7 @@ fn hostile_entries_are_named_in_the_preview_and_never_copied() {
     std::fs::create_dir_all(task.join("notes/.git")).unwrap();
     std::fs::write(task.join("notes/.git/HEAD"), "ref\n").unwrap();
     std::fs::write(task.join("line\nbreak.txt"), "x").unwrap();
-    std::fs::write(
-        task.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt")),
-        "x",
-    )
-    .unwrap();
+    std::fs::write(task.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt")), "x").unwrap();
     std::fs::write(task.join(".x.tmp-1"), "half").unwrap();
     let tree = world.load();
     let before = hash_tree(&world.root());
@@ -497,7 +513,10 @@ fn hostile_entries_are_named_in_the_preview_and_never_copied() {
         "tasks/backfill/bad\u{fffd}.txt",
         "tasks/backfill/.x.tmp-1",
     ] {
-        assert!(rejected.iter().any(|path| path == expected), "{expected:?} in {rejected:?}");
+        assert!(
+            rejected.iter().any(|path| path == expected),
+            "{expected:?} in {rejected:?}"
+        );
     }
     // The preview crosses to the window as data.
     let wired: ConversionPreview =
@@ -552,7 +571,10 @@ fn a_hostile_task_id_blocks_the_conversion_and_makes_nothing() {
         &git(),
         ids(),
     ));
-    assert!(matches!(result, Err(ConvertError::Blocked(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(ConvertError::Blocked(_))),
+        "{result:?}"
+    );
     assert_eq!(hash_tree(&world.root()), before);
     assert!(!world.projects_dir().exists());
     assert!(!world.dir.path().join("escape").exists());
@@ -571,7 +593,10 @@ fn a_task_file_that_does_not_parse_blocks_the_conversion() {
         &git(),
         ids(),
     ));
-    assert!(matches!(result, Err(ConvertError::Blocked(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(ConvertError::Blocked(_))),
+        "{result:?}"
+    );
     assert!(!world.projects_dir().exists());
 }
 
@@ -583,7 +608,11 @@ fn an_unfinished_journal_blocks_the_conversion() {
     world.write("projects/invoicing/tasks/backfill/.op.toml", "half");
     let preview = preview(&the_project(&tree), world.options(), &world.locations());
     assert!(preview.is_blocked());
-    assert!(preview.summary.blockers[0].contains("journal"), "{:?}", preview.summary.blockers);
+    assert!(
+        preview.summary.blockers[0].contains("journal"),
+        "{:?}",
+        preview.summary.blockers
+    );
 }
 
 #[test]
@@ -605,7 +634,7 @@ fn a_stale_temporary_folder_is_removed_and_a_running_one_kept() {
 
     let mut removed = clean_stale_conversions(&projects);
     removed.sort();
-    let mut expected = vec![stale.clone()];
+    let mut expected = vec![stale];
     #[cfg(unix)]
     expected.push(projects.join(".converting-link"));
     expected.sort();
@@ -615,7 +644,10 @@ fn a_stale_temporary_folder_is_removed_and_a_running_one_kept() {
     assert!(projects.join("real-project").is_dir());
 
     drop(held);
-    assert_eq!(clean_stale_conversions(&projects), [running.clone()]);
+    assert_eq!(
+        clean_stale_conversions(&projects),
+        std::slice::from_ref(&running)
+    );
     assert!(!running.exists());
 }
 
@@ -633,7 +665,10 @@ fn a_temporary_folder_is_never_taken_for_a_project_or_a_destination() {
         ids(),
     ))
     .unwrap();
-    assert_eq!(converted.location.folder, world.projects_dir().join("invoicing"));
+    assert_eq!(
+        converted.location.folder,
+        world.projects_dir().join("invoicing")
+    );
     // The old layout's loader never lists a hidden folder as a project either.
     let old_view = store::load(&world.projects_dir());
     assert!(old_view.projects.is_empty());
@@ -724,7 +759,9 @@ fn a_taken_folder_name_gives_the_next_free_one() {
     .unwrap();
     assert_eq!(converted.location.folder, expected);
     assert_eq!(
-        std::fs::read_dir(world.projects_dir().join("invoicing")).unwrap().count(),
+        std::fs::read_dir(world.projects_dir().join("invoicing"))
+            .unwrap()
+            .count(),
         0
     );
 }
@@ -745,7 +782,10 @@ fn a_project_id_already_on_this_machine_is_refused() {
         &git(),
         ids(),
     ));
-    assert!(matches!(result, Err(ConvertError::IdTaken { .. })), "{result:?}");
+    assert!(
+        matches!(result, Err(ConvertError::IdTaken { .. })),
+        "{result:?}"
+    );
     assert!(!world.projects_dir().exists());
 }
 
@@ -753,7 +793,12 @@ fn a_project_id_already_on_this_machine_is_refused() {
 fn a_layout_with_a_part_outside_the_folder_is_refused_and_leaves_nothing() {
     let mut world = World::new();
     write_fixture(&world);
-    world.layout.state = world.dir.path().join("elsewhere/{folder}").to_string_lossy().into();
+    world.layout.state = world
+        .dir
+        .path()
+        .join("elsewhere/{folder}")
+        .to_string_lossy()
+        .into();
     let tree = world.load();
     let result = block_on(convert(
         &the_project(&tree),
@@ -772,7 +817,10 @@ fn an_empty_project_converts() {
     let world = World::new();
     let mut project = ProjectFile::new("Empty");
     project.id = Some("p-empty".to_string());
-    world.write("projects/empty/project.toml", &serialize_project(&project).unwrap());
+    world.write(
+        "projects/empty/project.toml",
+        &serialize_project(&project).unwrap(),
+    );
     world.write(
         "projects/empty/task.toml",
         &serialize_task(&task_file("g", "Empty", Status::Open)).unwrap(),
@@ -847,7 +895,10 @@ fn convert_all_converts_the_projects_and_the_oneoffs_into_one_project() {
             )
         })
         .collect();
-    assert_eq!(groups, [("reading", Some("reading")), ("writing", Some("writing"))]);
+    assert_eq!(
+        groups,
+        [("reading", Some("reading")), ("writing", Some("writing"))]
+    );
     let fix = new.task_by_id("o1").unwrap();
     assert_eq!(fix.file.as_ref().unwrap().status, Status::Done);
     assert_eq!(new.parent_of("o1").unwrap().slug, "writing");

@@ -17,7 +17,8 @@ fn ids() -> impl FnMut() -> String {
 
 fn with_files(mut task: Task, files: &[&str]) -> Task {
     for file in files {
-        task.files.insert(PathBuf::from(file), SystemTime::UNIX_EPOCH);
+        task.files
+            .insert(PathBuf::from(file), SystemTime::UNIX_EPOCH);
     }
     task
 }
@@ -96,10 +97,20 @@ fn a_project_plans_every_task_with_its_definition_state_and_files() {
 
     let summary = plan.summary();
     assert_eq!(
-        (summary.tasks, summary.todos, summary.workflows, summary.chats),
+        (
+            summary.tasks,
+            summary.todos,
+            summary.workflows,
+            summary.chats
+        ),
         (3, 2, 1, 1)
     );
-    assert!(summary.creates.iter().any(|line| line.contains(CONVERSION_COMMIT_MESSAGE)));
+    assert!(
+        summary
+            .creates
+            .iter()
+            .any(|line| line.contains(CONVERSION_COMMIT_MESSAGE))
+    );
 }
 
 #[test]
@@ -165,7 +176,11 @@ fn colliding_ids_block_and_repeated_todo_ids_are_renewed() {
     let plan = plan(&old, &mut ids());
     assert_eq!(plan.blockers.len(), 1, "{:?}", plan.blockers);
     assert!(plan.blockers[0].contains("duplicate id"));
-    let report = plan.tasks.iter().find(|task| task.folder == "tasks/report").unwrap();
+    let report = plan
+        .tasks
+        .iter()
+        .find(|task| task.folder == "tasks/report")
+        .unwrap();
     let todo_ids: Vec<_> = report
         .definition
         .todos
@@ -198,7 +213,12 @@ fn an_empty_project_plans_only_its_top_group() {
     assert_eq!(plan.tasks.len(), 1);
     let summary = plan.summary();
     assert_eq!((summary.tasks, summary.files), (1, 0));
-    assert!(summary.creates.iter().any(|line| line.contains("an empty plan.md")));
+    assert!(
+        summary
+            .creates
+            .iter()
+            .any(|line| line.contains("an empty plan.md"))
+    );
 }
 
 #[test]

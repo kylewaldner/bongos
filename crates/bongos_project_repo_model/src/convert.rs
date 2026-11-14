@@ -152,7 +152,8 @@ impl ConversionPlan {
                     }
                     Target::Files(path) => {
                         files += 1;
-                        if let Some(rest) = path.strip_prefix(&format!("{}/", old_layout::CHATS_DIR))
+                        if let Some(rest) =
+                            path.strip_prefix(&format!("{}/", old_layout::CHATS_DIR))
                             && !rest.contains('/')
                             && rest.ends_with(".toml")
                         {
@@ -289,8 +290,9 @@ pub fn plan(old: &Project, new_id: &mut impl FnMut() -> String) -> ConversionPla
         blockers: Vec::new(),
     };
     if let Some(problem) = name_problem(&old.slug) {
-        plan.blockers
-            .push(format!("the project folder's name cannot be used: {problem}"));
+        plan.blockers.push(format!(
+            "the project folder's name cannot be used: {problem}"
+        ));
     }
     if old.file.is_none() {
         plan.blockers.push(format!(
@@ -361,8 +363,9 @@ pub fn plan_oneoffs(
         blockers: Vec::new(),
     };
     if let Some(problem) = name_problem(&slug) {
-        plan.blockers
-            .push(format!("the one-offs project's title cannot be used: {problem}"));
+        plan.blockers.push(format!(
+            "the one-offs project's title cannot be used: {problem}"
+        ));
     }
     let mut ids = BTreeMap::new();
     plan_task(&top, String::new(), true, &mut plan, &mut ids, new_id);
