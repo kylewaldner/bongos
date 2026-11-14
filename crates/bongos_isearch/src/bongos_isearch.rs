@@ -38,7 +38,8 @@ mod session_tests;
 use gpui::App;
 
 pub use engine::{
-    Cancel, Count, Engine, FindOutcome, InvalidPattern, count, find, find_outcome, in_range,
+    Cancel, Count, Engine, FindOutcome, InvalidPattern, count, count_in, find, find_outcome,
+    in_range,
 };
 
 /// The action namespace of the isearch commands.

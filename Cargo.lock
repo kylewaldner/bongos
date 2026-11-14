@@ -2056,6 +2056,7 @@ dependencies = [
  "bongos_minibuffer",
  "bongos_net",
  "bongos_prompts",
+ "bongos_query_replace",
  "bongos_version",
  "bongos_work",
  "bongos_workflow",
@@ -2594,6 +2595,24 @@ name = "bongos_prompts_model"
 version = "0.1.0"
 dependencies = [
  "chrono",
+]
+
+[[package]]
+name = "bongos_query_replace"
+version = "0.1.0"
+dependencies = [
+ "bongos_isearch",
+ "bongos_isearch_model",
+ "bongos_query_replace_model",
+ "buffer_diff",
+ "command_palette_hooks",
+ "fancy-regex 0.17.0",
+ "gpui",
+ "language",
+ "multi_buffer",
+ "project",
+ "regex",
+ "settings",
 ]
 
 [[package]]
