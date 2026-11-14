@@ -2599,6 +2599,9 @@ dependencies = [
 [[package]]
 name = "bongos_query_replace_model"
 version = "0.1.0"
+dependencies = [
+ "regex",
+]
 
 [[package]]
 name = "bongos_version"
