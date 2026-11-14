@@ -625,7 +625,7 @@ fn replace(state: &Shared, with: &str, window: &mut Window, cx: &mut App) -> Res
                 .model
                 .on_replaced(replacement.model_id(), replacement.range.clone());
             state.rest = Some(replacement.anchors.end);
-            state.replacement = Some(replacement.anchors.clone());
+            state.replacement = Some(replacement.anchors);
         }
         Ok(Replace::Changed(_)) => state.rest = Some(anchors.end),
         Err(_) => return Err(READ_ONLY.to_string()),
