@@ -1690,13 +1690,21 @@ impl LocalLspStore {
                     let request_timeout = ProjectSettings::get_global(cx)
                         .global_lsp_settings
                         .get_request_timeout();
-                    let policy_formatter = policy_formatter_for_buffer(buffer, cx).map(|name| {
-                        Formatter::LanguageServer(
-                            settings::LanguageServerFormatterSpecifier::Specific {
-                                name: name.0.to_string(),
-                            },
-                        )
-                    });
+                    // A policy formatter that is not running for this buffer falls back to the
+                    // usual "auto" choice, matching `has_formatter`.
+                    let policy_formatter = policy_formatter_for_buffer(buffer, cx)
+                        .filter(|name| {
+                            adapters_and_servers
+                                .iter()
+                                .any(|(_, server)| server.name() == *name)
+                        })
+                        .map(|name| {
+                            Formatter::LanguageServer(
+                                settings::LanguageServerFormatterSpecifier::Specific {
+                                    name: name.0.to_string(),
+                                },
+                            )
+                        });
                     (
                         adapters_and_servers,
                         settings,
@@ -2882,11 +2890,13 @@ impl LocalLspStore {
         only_register_servers: HashSet<LanguageServerSelector>,
         cx: &mut Context<LspStore>,
     ) {
-        // During a policy switch the buffer stays in `registered_buffers`, and the
-        // `refresh_server_tree` that ends the switch registers it.
-        if self.all_language_servers_stopped || self.policy_switches_in_flight > 0 {
+        if self.all_language_servers_stopped {
             return;
         }
+        // During a policy switch the buffer is still opened in servers that are already running,
+        // but no server starts: the `refresh_server_tree` that ends the switch starts them, and a
+        // starting server opens every registered buffer it serves.
+        let policy_switch_in_flight = self.policy_switches_in_flight > 0;
         let buffer = buffer_handle.read(cx);
         let buffer_id = buffer.remote_id();
 
@@ -2943,7 +2953,7 @@ impl LocalLspStore {
         let servers_and_adapters = servers
             .into_iter()
             .filter_map(|server_node| {
-                if reused && server_node.server_id().is_none() {
+                if (reused || policy_switch_in_flight) && server_node.server_id().is_none() {
                     return None;
                 }
                 if let Some(name) = server_node.name()

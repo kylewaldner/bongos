@@ -14,6 +14,8 @@ use util::rel_path::RelPath;
 use worktree::{File, Worktree};
 
 /// Decides, per worktree, which language servers may run and which server formats a file.
+///
+/// Policies are consulted only by a local language server store, never on a remote or guest client.
 pub trait LanguageServerPolicy: 'static + Send + Sync {
     /// Called on the main thread for every (worktree, language, server) the server tree considers.
     /// Must answer from cached state, never from disk or the network.

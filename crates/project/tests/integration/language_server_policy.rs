@@ -10,7 +10,9 @@ use collections::HashSet;
 use fs::FakeFs;
 use futures::StreamExt;
 use gpui::{App, Entity, TestAppContext, UpdateGlobal};
-use language::{FakeLspAdapter, LanguageName, rust_lang};
+use language::{
+    FakeLspAdapter, Language, LanguageConfig, LanguageMatcher, LanguageName, rust_lang,
+};
 use lsp::LanguageServerName;
 use parking_lot::Mutex;
 use project::{
@@ -67,7 +69,8 @@ impl LanguageServerPolicy for SwitchPolicy {
     }
 }
 
-struct FormatterPolicy;
+/// Names `self.0` as the formatting server everywhere.
+struct FormatterPolicy(&'static str);
 
 impl LanguageServerPolicy for FormatterPolicy {
     fn allows(
@@ -86,7 +89,7 @@ impl LanguageServerPolicy for FormatterPolicy {
         _: &LanguageName,
         _: &App,
     ) -> Option<LanguageServerName> {
-        Some(LanguageServerName::new_static("policy-formatter"))
+        Some(LanguageServerName::new_static(self.0))
     }
 }
 
@@ -118,6 +121,37 @@ fn running_servers(
         servers.sort();
         servers
     })
+}
+
+/// A fake server that records in `events` when it starts and when it is asked to shut down.
+fn recording_adapter(name: &'static str, events: &Arc<Mutex<Vec<String>>>) -> FakeLspAdapter {
+    let events = events.clone();
+    FakeLspAdapter {
+        name,
+        initializer: Some(Box::new(move |server: &mut lsp::FakeLanguageServer| {
+            events.lock().push(format!("{name} started"));
+            let events = events.clone();
+            server.set_request_handler::<lsp::request::Shutdown, _, _>(move |_, _| {
+                events.lock().push(format!("{name} stopped"));
+                async move { Ok(()) }
+            });
+        })),
+        ..Default::default()
+    }
+}
+
+fn toml_lang() -> Arc<Language> {
+    Arc::new(Language::new(
+        LanguageConfig {
+            name: "TOML".into(),
+            matcher: LanguageMatcher {
+                path_suffixes: vec!["toml".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
 }
 
 #[gpui::test]
@@ -210,23 +244,10 @@ async fn test_policy_switch_stops_old_server_before_starting_new(cx: &mut TestAp
     language_registry.add(rust_lang());
 
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
-    let fake_adapter = |name: &'static str| {
-        let events = events.clone();
-        FakeLspAdapter {
-            name,
-            initializer: Some(Box::new(move |server: &mut lsp::FakeLanguageServer| {
-                events.lock().push(format!("{name} started"));
-                let events = events.clone();
-                server.set_request_handler::<lsp::request::Shutdown, _, _>(move |_, _| {
-                    events.lock().push(format!("{name} stopped"));
-                    async move { Ok(()) }
-                });
-            })),
-            ..Default::default()
-        }
-    };
-    let _old_servers = language_registry.register_fake_lsp("Rust", fake_adapter("old-server"));
-    let mut new_servers = language_registry.register_fake_lsp("Rust", fake_adapter("new-server"));
+    let _old_servers =
+        language_registry.register_fake_lsp("Rust", recording_adapter("old-server", &events));
+    let mut new_servers =
+        language_registry.register_fake_lsp("Rust", recording_adapter("new-server", &events));
 
     let (_buffer_a, _handle_a) = project
         .update(cx, |project, cx| {
@@ -309,7 +330,7 @@ async fn test_policy_formatter_replaces_prettier_for_auto(cx: &mut TestAppContex
                     });
             });
         });
-        register_language_server_policy(Arc::new(FormatterPolicy), cx);
+        register_language_server_policy(Arc::new(FormatterPolicy("policy-formatter")), cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -367,5 +388,157 @@ async fn test_policy_formatter_replaces_prettier_for_auto(cx: &mut TestAppContex
     assert_eq!(
         buffer.read_with(cx, |buffer, _| buffer.text()),
         "one policy\n"
+    );
+}
+
+#[gpui::test]
+async fn test_policy_switch_still_opens_buffers_in_running_servers(cx: &mut TestAppContext) {
+    init_test(cx);
+    let policy = Arc::new(SwitchPolicy {
+        switched: AtomicBool::new(false),
+    });
+    cx.update(|cx| register_language_server_policy(policy.clone(), cx));
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/a"),
+        json!({
+            "switch-marker": "",
+            "main.rs": "fn main() {}",
+            "one.toml": "",
+            "two.toml": "",
+        }),
+    )
+    .await;
+    fs.insert_tree(path!("/b"), json!({})).await;
+    let project = Project::test(fs, [path!("/a").as_ref(), path!("/b").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    language_registry.add(toml_lang());
+
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let _old_servers =
+        language_registry.register_fake_lsp("Rust", recording_adapter("old-server", &events));
+    let mut new_servers =
+        language_registry.register_fake_lsp("Rust", recording_adapter("new-server", &events));
+    let mut toml_servers =
+        language_registry.register_fake_lsp("TOML", recording_adapter("toml-server", &events));
+
+    let (_rust_buffer, _rust_handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/a/main.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let (_one_buffer, _one_handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/a/one.toml"), cx)
+        })
+        .await
+        .unwrap();
+    let mut toml_server = toml_servers.next().await.unwrap();
+    cx.run_until_parked();
+    let opened = toml_server
+        .receive_notification::<lsp::notification::DidOpenTextDocument>()
+        .await;
+    assert_eq!(
+        opened.text_document.uri,
+        lsp::Uri::from_file_path(path!("/a/one.toml")).unwrap()
+    );
+    events.lock().clear();
+
+    let two_buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/a/two.toml"), cx)
+        })
+        .await
+        .unwrap();
+    policy.switched.store(true, Ordering::SeqCst);
+    let (reapply, _two_handle) = project.update(cx, |project, cx| {
+        let reapply = project
+            .lsp_store()
+            .update(cx, |lsp_store, cx| lsp_store.reapply_server_policy(cx));
+        // The TOML server survives the switch, so a buffer registered while the old Rust server
+        // is still stopping must still be opened in it.
+        let handle = project.register_buffer_with_language_servers(&two_buffer, cx);
+        (reapply, handle)
+    });
+    let opened = toml_server
+        .receive_notification::<lsp::notification::DidOpenTextDocument>()
+        .await;
+    assert_eq!(
+        opened.text_document.uri,
+        lsp::Uri::from_file_path(path!("/a/two.toml")).unwrap()
+    );
+    reapply.await;
+    let _new_server = new_servers.next().await.unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        *events.lock(),
+        vec![
+            "old-server stopped".to_string(),
+            "new-server started".to_string()
+        ],
+        "the old server must be stopped before the new one starts, and the TOML server keeps running"
+    );
+}
+
+#[gpui::test]
+async fn test_policy_formatter_not_running_falls_back(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        register_language_server_policy(Arc::new(FormatterPolicy("missing-formatter")), cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/a"), json!({ "main.rs": "one" }))
+        .await;
+    fs.insert_tree(path!("/b"), json!({})).await;
+    let project = Project::test(fs, [path!("/a").as_ref(), path!("/b").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut primary_servers = language_registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            name: "primary-formatter",
+            capabilities: lsp::ServerCapabilities {
+                document_formatting_provider: Some(lsp::OneOf::Left(true)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/a/main.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let primary_server = primary_servers.next().await.unwrap();
+    cx.run_until_parked();
+    primary_server.set_request_handler::<lsp::request::Formatting, _, _>(|_, _| async move {
+        Ok(Some(vec![lsp::TextEdit::new(
+            lsp::Range::new(lsp::Position::new(0, 3), lsp::Position::new(0, 3)),
+            " primary".to_string(),
+        )]))
+    });
+
+    project
+        .update(cx, |project, cx| {
+            project.format(
+                HashSet::from_iter([buffer.clone()]),
+                LspFormatTarget::Buffers,
+                true,
+                FormatTrigger::Manual,
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        buffer.read_with(cx, |buffer, _| buffer.text()),
+        "one primary\n"
     );
 }
