@@ -455,7 +455,7 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 48] = [
+const EMACS_ACTIONS: [(&str, &str); 49] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
