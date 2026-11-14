@@ -45,11 +45,27 @@ use crate::{
 pub struct KotlinAdapter {
     dirs: KotlinDirs,
     manifest: Arc<Manifest>,
+    /// Tests pin the date the expiry check sees; production reads the clock.
+    #[cfg(test)]
+    pinned_today: Option<NaiveDate>,
 }
 
 impl KotlinAdapter {
     pub fn new(dirs: KotlinDirs, manifest: Arc<Manifest>) -> Self {
-        Self { dirs, manifest }
+        Self {
+            dirs,
+            manifest,
+            #[cfg(test)]
+            pinned_today: None,
+        }
+    }
+
+    fn today(&self) -> NaiveDate {
+        #[cfg(test)]
+        if let Some(today) = self.pinned_today {
+            return today;
+        }
+        chrono::Utc::now().date_naive()
     }
 }
 
@@ -88,7 +104,7 @@ impl DynLspInstaller for KotlinAdapter {
                 delegate.http_client(),
                 &root,
                 delegate.worktree_id(),
-                chrono::Utc::now().date_naive(),
+                self.today(),
                 &mut cx,
             )
             .await;
@@ -732,9 +748,39 @@ mod tests {
         WorktreeId::from_usize(1)
     }
 
+    /// The embedded manifest with every expiry moved far ahead, so the pinned build's expiry
+    /// date can never decide these tests, whatever date the fixed test clock has.
+    fn unexpired_embedded() -> Manifest {
+        let text = crate::manifest::EMBEDDED
+            .lines()
+            .map(|line| {
+                if line.starts_with("expires = ") {
+                    "expires = \"2999-01-01\"".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Manifest::parse(&text).unwrap()
+    }
+
+    /// The date every test start sees. Tests never read the wall clock: `today()` is passed to
+    /// `server_command` (or pinned on the adapter), and every fixture date is built from it with
+    /// `days_from_today`, because a calendar date written out here would pass in real time.
     fn today() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 11, 7).unwrap()
     }
+
+    /// The date `days` after `today()` (before it when negative) as `YYYY-MM-DD`.
+    fn days_from_today(days: i64) -> String {
+        (today() + chrono::Duration::days(days)).to_string()
+    }
+
+    /// A build that is still good at `today()`, for a few days.
+    const SOON: i64 = 5;
+    /// A build that is still good at `today()`, for weeks.
+    const FAR: i64 = 55;
 
     /// A client that counts its requests and answers each with `respond`.
     struct Net {
@@ -947,7 +993,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_a_missing_server_is_installed_before_it_starts(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let net = net_serving(fixture.archive.clone());
 
         let binary = fixture.command(cx, &net, today()).await.unwrap();
@@ -989,7 +1035,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_the_import_jdk_becomes_java_home(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let net = net_serving(fixture.archive.clone());
         fs::create_dir_all(fixture.root.join("tools/jdk")).unwrap();
         fs::write(
@@ -1024,7 +1070,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_an_unmet_toolchain_fails_before_any_download(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let net = net_serving(fixture.archive.clone());
         // No machine has a JDK 99.
         fs::write(
@@ -1080,7 +1126,7 @@ launcher = "bin/launcher"
     async fn test_the_host_starts_the_installed_server(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let host = Rc::new(StartingHost::default());
-        let fixture = fixture(cx, host.clone(), "2026-11-12");
+        let fixture = fixture(cx, host.clone(), &days_from_today(SOON));
         let net = net_serving(fixture.archive.clone());
         *host.fixture.borrow_mut() = Some((
             fixture.dirs.clone(),
@@ -1105,7 +1151,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_an_installed_server_starts_when_the_network_fails(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         fixture
             .command(cx, &net_serving(fixture.archive.clone()), today())
             .await
@@ -1134,7 +1180,7 @@ launcher = "bin/launcher"
         cx: &mut TestAppContext,
     ) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let endless = net_endless();
         let task = fixture.command(cx, &endless, today());
 
@@ -1174,7 +1220,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_two_projects_starting_at_once_install_once(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let second_root = fixture.root.parent().unwrap().join("project2");
         fs::create_dir_all(&second_root).unwrap();
         fixture.manager.update(cx, |manager, cx| {
@@ -1223,14 +1269,14 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_an_expired_pin_is_not_installed_or_started(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let net = net_serving(fixture.archive.clone());
         let expired_status = Some(ServerStatus::Failed {
             reason: "server expired, update bongos".into(),
         });
 
         // The day after `expires`: failed, with no download and nothing on disk.
-        let day_after = NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+        let day_after = today() + chrono::Duration::days(SOON + 1);
         let error = fixture.command(cx, &net, day_after).await.unwrap_err();
         assert_eq!(error.to_string(), "server expired, update bongos");
         assert_eq!(fixture.status(cx), expired_status);
@@ -1243,7 +1289,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_without_a_manifest_url_the_pin_starts(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2027-01-01");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(FAR));
         let downloaded = ManifestEntry {
             version: "9.9.9".into(),
             ..fixture.entry.clone()
@@ -1275,10 +1321,10 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_expires_is_the_last_day_the_build_runs(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let net = net_serving(fixture.archive.clone());
-        let last_day = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
-        let day_after = NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+        let last_day = today() + chrono::Duration::days(SOON);
+        let day_after = last_day + chrono::Duration::days(1);
 
         fixture.command(cx, &net, last_day).await.unwrap();
         assert_eq!(fixture.status(cx), Some(ServerStatus::Starting));
@@ -1300,7 +1346,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_a_server_that_reported_expiry_is_not_started_again(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let net = net_serving(fixture.archive.clone());
         fixture.command(cx, &net, today()).await.unwrap();
 
@@ -1335,7 +1381,7 @@ launcher = "bin/launcher"
     /// An IntelliJ pin for a small archive: a `EULA.txt` and a launcher that records that it ran
     /// and exits with the code in the `license-exit` file next to the state directory.
     fn intellij_fixture(cx: &mut TestAppContext) -> Fixture {
-        let mut fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let mut fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let scratch = fixture.dirs.state_dir.parent().unwrap().to_path_buf();
         let launcher = format!(
             "#!/bin/sh\necho ran >> '{ran}'\nexit $(cat '{exit}')\n",
@@ -1358,7 +1404,7 @@ launcher = "bin/launcher"
             r#"
 [kotlin-lsp]
 version = "1.2.3"
-expires = "2026-11-12"
+expires = "{expires}"
 args = {args:?}
 
 [kotlin-lsp.platform.{platform}]
@@ -1383,6 +1429,7 @@ strip_components = 1
 launcher = "bin/launcher"
 "#,
             args = PINNED_ARGS,
+            expires = days_from_today(SOON),
             platform = current_platform().unwrap(),
             sha = crate::install::tests::sha256(&fixture.archive),
             lsp_sha = "0".repeat(64),
@@ -1654,7 +1701,7 @@ launcher = "bin/launcher"
         cx: &mut TestAppContext,
     ) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let status = status_after_dropping_a_start_mid_install(cx, &fixture).await;
         assert_eq!(
             status,
@@ -1685,7 +1732,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_a_dropped_start_does_not_end_a_newer_install(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2026-11-12");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(SOON));
         let endless = net_endless();
         let first = fixture.command(cx, &endless, today());
         wait_until(cx, "the first download", |cx| {
@@ -1720,7 +1767,7 @@ launcher = "bin/launcher"
             config_dir: temp.path().join("config"),
         };
         let root = temp.path().to_path_buf();
-        let manifest = Manifest::embedded();
+        let manifest = unexpired_embedded();
         let net = net_with(|| {
             Ok(http_client::Response::builder()
                 .status(404)
@@ -1828,16 +1875,7 @@ launcher = "bin/launcher"
             install_root: temp.path().join("languages"),
             config_dir: temp.path().join("config"),
         };
-        // The embedded builds expire about a month after `built`; this test is about switching, not expiry.
-        let far_future: String = crate::manifest::EMBEDDED
-            .lines()
-            .map(|line| match line.starts_with("expires = ") {
-                true => "expires = \"2999-01-01\"",
-                false => line,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let manifest = Manifest::parse(&far_future).unwrap();
+        let manifest = unexpired_embedded();
         let kotlin_lsp = install(&dirs, &manifest, KotlinServerKind::KotlinLsp);
         let intellij = install(&dirs, &manifest, KotlinServerKind::Intellij);
         // The user accepted the bundle's agreement; the launcher exits 0 for `license status`.
@@ -1847,7 +1885,9 @@ launcher = "bin/launcher"
             manager.add_worktree(worktree(), root.clone(), cx)
         });
 
-        let adapter = Arc::new(KotlinAdapter::new(dirs, Arc::new(manifest)));
+        let mut adapter = KotlinAdapter::new(dirs, Arc::new(manifest));
+        adapter.pinned_today = Some(today());
+        let adapter = Arc::new(adapter);
         let cached = Arc::new(futures::lock::Mutex::new(None));
         let start = |cx: &mut TestAppContext| {
             let (adapter, cached, root) = (adapter.clone(), cached.clone(), root.clone());
@@ -1910,7 +1950,7 @@ launcher = "bin/launcher"
             .iter()
             .map(|(version, digit)| {
                 serde_json::json!({
-                    "version": version, "built": "2026-11-01", "expires": "2027-01-01",
+                    "version": version, "built": "2026-11-01", "expires": days_from_today(FAR),
                     "requires": 1,
                     "platform": { platform: {
                         "url": format!("https://download.jetbrains.com/kotlin-server-{version}.tar.gz"),
@@ -2008,7 +2048,7 @@ launcher = "bin/launcher"
     #[gpui::test]
     async fn test_a_jdk_failure_before_launch_leaves_the_trial_pending(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let fixture = fixture(cx, Rc::new(NoHost), "2027-01-01");
+        let fixture = fixture(cx, Rc::new(NoHost), &days_from_today(FAR));
         let (_, trial) = seed_trial(cx, &fixture);
         let notices = fixture.trial_notices(cx);
         let gradle = fixture.root.join("build.gradle.kts");
@@ -2050,7 +2090,7 @@ launcher = "bin/launcher"
         use std::os::unix::process::ExitStatusExt as _;
         cx.executor().allow_parking();
         let host = Rc::new(StartingHost::default());
-        let fixture = fixture(cx, host.clone(), "2027-01-01");
+        let fixture = fixture(cx, host.clone(), &days_from_today(FAR));
         let (active, trial) = seed_trial(cx, &fixture);
         let down = net_down();
         *host.fixture.borrow_mut() = Some((
@@ -2129,7 +2169,7 @@ launcher = "bin/launcher"
         cx.executor().allow_parking();
         let host = Rc::new(StartingHost::default());
         // The pin expired the day before `today()`.
-        let fixture = fixture(cx, host.clone(), "2026-11-06");
+        let fixture = fixture(cx, host.clone(), &days_from_today(-1));
         let down = net_down();
         *host.fixture.borrow_mut() = Some((
             fixture.dirs.clone(),

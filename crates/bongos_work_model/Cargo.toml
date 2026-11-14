@@ -14,9 +14,12 @@ doctest = false
 
 [features]
 test-support = []
+# The constructor of `PersonAtKeyboard`, which takes a window; only UI crates need it.
+gpui = ["dep:gpui"]
 
 [dependencies]
 chrono.workspace = true
+gpui = { workspace = true, optional = true }
 serde.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

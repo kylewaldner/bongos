@@ -7,7 +7,8 @@ Bongos is an Emacs-shaped Kotlin IDE and a hard fork of Zed, licensed GPL-3.0-or
 - Use it when many differently shaped cargo commands (different `-p` sets, the app build, the whole-workspace test build) share one target directory; otherwise each shape compiles much of the workspace again under new artifact hashes. With it on, test builds of any subset reuse one whole-workspace test build, the app build forms one more family, and clippy stays separate. The first build after flipping the switch in either direction recompiles everything.
 - Side effects of unified features: `RUSTC_BOOTSTRAP=1` is also read by rustc and some build scripts, so a few dependencies (anyhow, thiserror, proc-macro2, cap-primitives, cap-std, io-extras, system-interface) enable code paths meant for nightly compilers. The app's own dependency features change slightly (gpui gains `font-kit` and `windows-manifest`, nix gains a few modules, prettyplease gains `verbatim`). `cargo build -p <a dependency that is not a workspace member>` silently builds nothing.
 - `build`, `test`, `test-all` and `check` print one line saying unified features are on. Release bundles (`bundle-linux`, `bundle-mac`) and `stock-build` never use it. Dependency-graph checks (the `no_webrtc` rule, `cargo_meta_file`) and `generate-licenses` run without it (`cargo_plain` in `lib.sh`).
-- `.config/nextest.toml` has no retries by default, except for a block of tests known to be flaky on a loaded machine (each with its reason in a comment). A test in that block that fails and then passes on a retry is shown as `FLAKY` in nextest's output and counted in `passed` and in the final `flaky=N` of the `test` and `test-all` summary line; the run stays green. Fix the test and remove it from the block when you can. A new entry needs a reason.
+- `.config/nextest.toml` has no retries by default, except for a block of tests known to be flaky on a loaded machine (each with its reason in a comment). A test in that block that fails and then passes on a retry is shown as `FLAKY` in nextest's output and counted in `passed` and in the final `flaky=N` of the `test` and `test-all` summary line; the run stays green. Fix the test and remove it from the block when you can. A new entry needs a reason. The timing tests are not run by `test` and `test-all` (see Timing tests).
+- Faster dev builds on Linux: `env.sh` links x86_64 Linux builds with mold when `mold` is installed (`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER` names a wrapper `env.sh` writes once to `$BONGOS_WORKSPACE/bin/bongos-mold-linker`, the same path for every checkout; the linker setting leaves `.cargo/config.toml`'s rustflags in place) and sets the dev profile's `split-debuginfo` to `off` (no `.dwo` files; backtraces keep file and line). Opt out with `BONGOS_NO_MOLD=1` and `BONGOS_KEEP_SPLIT_DEBUGINFO=1`; like `BONGOS_UNIFIED_FEATURES`, these count only when set to exactly `1`. Release bundles and `stock-build` export `BONGOS_RELEASE_BUILD=1` and are unchanged. Switching either one in a target directory recompiles it once.
 - Never run a Zed or bongos binary with the real `HOME`.
 - Every `gh` command names `--repo kylewaldner/bongos`.
 - Commit messages are lowercase plain English with no prefix, no trailing period, and no `Co-Authored-By` or AI trailer.
@@ -48,6 +49,15 @@ Bongos is an Emacs-shaped Kotlin IDE and a hard fork of Zed, licensed GPL-3.0-or
 * In GPUI tests, prefer GPUI executor timers over `smol::Timer::after(...)` when you need timeouts, delays, or to drive `run_until_parked()`:
   - Use `cx.background_executor().timer(duration).await` (or `cx.background_executor.timer(duration).await` in `TestAppContext`) so the work is scheduled on GPUI's dispatcher.
   - Avoid `smol::Timer::after(...)` for test timeouts when you rely on `run_until_parked()`, because it may not be tracked by GPUI's scheduler and can lead to "nothing left to run" when pumping.
+
+# Timing tests
+
+* A test that asserts wall-clock time under about 30 s belongs in the perf set. Add it to all three copies of the filter in `.config/nextest.toml` (the `perf-timing` override of the default profile, `default-filter` of `[profile.gate]` negated, and `default-filter` of `[profile.perf]`), with a reason in the comment above them. `script/bongos/test` and `test-all` run the `gate` profile, which skips the perf set, so a timing test never fails a merge gate on a busy machine.
+* `cargo nextest run --profile perf` runs only the perf set, one test at a time, best of 3 (a failing test is retried twice), and writes `target/nextest/perf/junit.xml` under the repository root, even when `CARGO_TARGET_DIR` points elsewhere. `BONGOS_NEXTEST_PROFILE=perf script/bongos/test-all` does the same through the script.
+* Any other test does not depend on real time: inject a clock, or use the GPUI executor's timers and fake clock (see Timers in tests).
+* Wait on events (a pid file, a log line, a channel), never on sleeps used as barriers.
+* Keep real budgets only in `perf_` tests, measured as the best of several runs.
+* Never delete, `#[ignore]` or loosen a budget without measured numbers.
 
 # GPUI
 

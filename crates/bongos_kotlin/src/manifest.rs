@@ -402,18 +402,26 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.to_string(), "kotlin-lsp has no build for plan9-mips");
 
-        let bad = EMBEDDED.replacen(
-            "ae0c4b01e17ab73a4a5227a78ea99e6dcbe3e499600315b22759a4e4cddd11df",
-            "",
-            1,
-        );
+        let pinned_digest = manifest
+            .entry(KotlinServerKind::KotlinLsp, "linux-x64")
+            .unwrap()
+            .sha256;
+        let bad = EMBEDDED.replacen(&pinned_digest, "", 1);
         let error = Manifest::parse(&bad).unwrap_err();
         assert!(format!("{error:#}").contains("sha256 must be 64 hexadecimal"));
     }
 
+    /// The kotlin-lsp version in `servers.toml`, so a refreshed pin does not break these tests.
+    fn pinned_version() -> String {
+        Manifest::embedded()
+            .entry(KotlinServerKind::KotlinLsp, "linux-x64")
+            .unwrap()
+            .version
+    }
+
     fn fake_manifest_file(dir: &std::path::Path) -> OsString {
         let path = dir.join("servers.toml");
-        let text = EMBEDDED.replace("263.7084.0", "0.0.1");
+        let text = EMBEDDED.replace(&pinned_version(), "0.0.1");
         fs::write(&path, text).unwrap();
         path.into_os_string()
     }
@@ -436,12 +444,12 @@ mod tests {
         // Not allowed (a release build): the variable is ignored, even though the file exists.
         assert_eq!(
             version(Manifest::load_with(false, Some(path)).unwrap()),
-            "263.7084.0"
+            pinned_version()
         );
         // Allowed but unset: embedded.
         assert_eq!(
             version(Manifest::load_with(true, None).unwrap()),
-            "263.7084.0"
+            pinned_version()
         );
         // Allowed and unreadable: an error, not a silent fallback.
         let missing = temp.path().join("missing.toml").into_os_string();

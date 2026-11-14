@@ -231,6 +231,13 @@ pub trait Platform: 'static {
     fn read_from_clipboard(&self) -> Option<ClipboardItem>;
     fn write_to_clipboard(&self, item: ClipboardItem);
 
+    /// Whether the item returned by the latest `read_from_clipboard` was marked
+    /// concealed by its owner (for example a password manager). The answer comes
+    /// from that same read, never from a second look at the clipboard.
+    fn clipboard_is_concealed(&self) -> bool {
+        false
+    }
+
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn read_from_primary(&self) -> Option<ClipboardItem>;
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -2308,6 +2315,47 @@ impl From<String> for ClipboardString {
             text: value,
             metadata: None,
         }
+    }
+}
+
+/// The clipboard target (an X11 atom name or a Wayland mime type) that password
+/// managers such as KeePassXC and KDE's Klipper add to entries that should be
+/// kept out of clipboard histories.
+pub const CONCEALED_CLIPBOARD_HINT: &str = "x-kde-passwordManagerHint";
+
+/// Whether a clipboard's list of target names carries the concealed hint.
+/// Only the presence of the hint counts, not its value.
+pub fn is_concealed_hint<S: AsRef<str>>(target_names: impl IntoIterator<Item = S>) -> bool {
+    target_names
+        .into_iter()
+        .any(|name| name.as_ref() == CONCEALED_CLIPBOARD_HINT)
+}
+
+#[cfg(test)]
+mod concealed_hint_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_concealed_hint_with_hint() {
+        assert!(is_concealed_hint([
+            "text/plain;charset=utf-8",
+            "x-kde-passwordManagerHint",
+            "UTF8_STRING",
+        ]));
+        assert!(is_concealed_hint(vec![
+            "x-kde-passwordManagerHint".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_is_concealed_hint_without_hint() {
+        assert!(!is_concealed_hint(Vec::<String>::new()));
+        assert!(!is_concealed_hint([
+            "text/plain;charset=utf-8",
+            "UTF8_STRING",
+            "TARGETS",
+        ]));
+        assert!(!is_concealed_hint(["x-kde-passwordmanagerhint"]));
     }
 }
 

@@ -89,6 +89,11 @@ pub(crate) trait LinuxClient {
     fn write_to_clipboard(&self, item: ClipboardItem);
     fn read_from_primary(&self) -> Option<ClipboardItem>;
     fn read_from_clipboard(&self) -> Option<ClipboardItem>;
+    /// Whether the item returned by the latest `read_from_clipboard` carried the
+    /// concealed hint, decided by that same read.
+    fn clipboard_is_concealed(&self) -> bool {
+        false
+    }
     fn active_window(&self) -> Option<AnyWindowHandle>;
     fn window_stack(&self) -> Option<Vec<AnyWindowHandle>>;
     fn run(&self);
@@ -637,6 +642,10 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         self.inner.read_from_clipboard()
+    }
+
+    fn clipboard_is_concealed(&self) -> bool {
+        self.inner.clipboard_is_concealed()
     }
 
     fn add_recent_document(&self, _path: &Path) {}

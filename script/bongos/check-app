@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Fast compile check of the app without linking: type-checks the app, cli and bongos_kotlin with the same packages,
+# flags and environment as script/bongos/build (one invocation, so the feature set is unified the same way), with no
+# code generation and no link. It catches code that compiles only under test (cfg(test), test-support features) or
+# breaks outside the crates a change touched. Full cargo output goes to the log; the terminal gets one summary line,
+# or on failure the compiler errors (script/bongos/tail-log check-app shows them again).
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+log_init check-app
+say_unified_features
+
+out="$TMPDIR/check-app.$$.out"
+summary_hook() {
+  local warnings errors
+  warnings=$(grep -c '^warning' "$out" 2>/dev/null || true)
+  errors=$(grep -cE '^error(\[|:)' "$out" 2>/dev/null || true)
+  if [ "$1" = 0 ]; then SUMMARY="warnings=${warnings:-0}"; else SUMMARY="errors=${errors:-0}"; fi
+  rm -f "$out"
+}
+
+require_space
+
+# Cargo's output is kept in $out so the memory-kill check reads only this attempt.
+run_check_app() {
+  local rc=0
+  cargo_limited check -p bongos -p cli -p bongos_kotlin --locked --color never >"$out" 2>&1 || rc=$?
+  cat "$out"
+  return "$rc"
+}
+
+if ! run_check_app; then
+  if grep -qE 'SIGKILL|signal: 9|Killed|out of memory' "$out"; then
+    echo "bongos: check-app killed, probably by memory; retrying once at 3 jobs"
+    export CARGO_BUILD_JOBS=3
+    run_check_app
+  else
+    exit 1
+  fi
+fi

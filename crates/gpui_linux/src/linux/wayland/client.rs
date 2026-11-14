@@ -989,6 +989,10 @@ impl LinuxClient for WaylandClient {
         self.0.borrow_mut().clipboard.read()
     }
 
+    fn clipboard_is_concealed(&self) -> bool {
+        self.0.borrow().clipboard.read_concealed()
+    }
+
     fn active_window(&self) -> Option<AnyWindowHandle> {
         self.0
             .borrow_mut()
