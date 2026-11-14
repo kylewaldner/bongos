@@ -211,6 +211,30 @@ pub(crate) fn register_pending_chips(cx: &mut App) {
     RowChipsRegistry::add_source(PENDING_SOURCE, Rc::new(PendingChips), cx);
 }
 
+/// The name of the source of the marks of worktrees and run records missing on this machine.
+pub(crate) const MISSING_SOURCE: &str = "missing on this machine";
+
+/// Shows "worktree missing" and "interrupted, record not on this machine" on the rows of the
+/// tasks of open project repositories whose state names a worktree or run record this machine
+/// lacks (after a restore from another machine, say). Nothing is recreated.
+struct MissingChips;
+
+impl RowChipsSource for MissingChips {
+    fn chips(&self, task_id: &str, cx: &App) -> Vec<SharedString> {
+        crate::project_repos::open_repos(cx)
+            .iter()
+            .flat_map(|loaded| loaded.marks_of(task_id))
+            .map(SharedString::from)
+            .collect()
+    }
+}
+
+/// Registers the chips of missing worktrees and run records; the refreshes of the store
+/// redraw them.
+pub(crate) fn register_missing_chips(cx: &mut App) {
+    RowChipsRegistry::add_source(MISSING_SOURCE, Rc::new(MissingChips), cx);
+}
+
 #[derive(Default)]
 struct ViewOpenedObservers(Vec<Rc<dyn Fn(&mut App)>>);
 

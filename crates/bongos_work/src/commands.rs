@@ -32,7 +32,7 @@ use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
 use crate::{
     artifacts, backup_commands, filters, focus, landing_commands, links, modes, open, panel,
-    projects, rebase, repositories, structure, working_copy_commands, worktrees,
+    projects, rebase, repositories, restore_commands, structure, working_copy_commands, worktrees,
 };
 
 /// The activity a task made with `task: new` goes under: it names no parent, and the Work view
@@ -99,6 +99,9 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::ResolveSplit>(),
         TypeId::of::<project::BackupStatus>(),
         TypeId::of::<project::BackupNow>(),
+        TypeId::of::<project::AddExisting>(),
+        TypeId::of::<project::Restore>(),
+        TypeId::of::<project::RestoreFrom>(),
         TypeId::of::<work::AddRepository>(),
         TypeId::of::<work::EditWorktreeRoot>(),
         TypeId::of::<task::SetDefaultVisibility>(),
@@ -175,6 +178,7 @@ pub fn register(workspace: &mut Workspace) {
     working_copy_commands::register(workspace);
     landing_commands::register(workspace);
     backup_commands::register(workspace);
+    restore_commands::register(workspace);
     master_files::register(workspace);
     open::register(workspace);
     artifacts::register(workspace);

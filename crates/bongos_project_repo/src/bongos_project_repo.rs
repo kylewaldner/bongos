@@ -1,6 +1,7 @@
 //! Project repositories: a project's definitions kept in a git repository, the per-machine
 //! record of where each one lives, the creation of a new one, and its live state store.
 
+mod add_existing;
 mod amending;
 mod approval;
 mod backup;
@@ -25,6 +26,7 @@ mod pins;
 mod project_values;
 mod quick_edit;
 mod registries;
+mod restore;
 pub mod router;
 mod script_check;
 mod settings;
@@ -36,6 +38,7 @@ mod state_hooks;
 mod state_ops;
 mod working_copies;
 
+pub use add_existing::{AddExistingRequest, AddExistingSource, AddedProject};
 pub use amending::KEEPS_AMENDING;
 pub use approval::{
     ApprovalHook, ApprovalHooks, ApprovalInput, ApprovalRow, ChatTaskLookup,
@@ -92,6 +95,11 @@ pub use quick_edit::{
     STALE_SNAPSHOT, check_fresh, written_tasks,
 };
 pub use registries::{ActivitySource, ActivitySources, StateExporter, StateExporters};
+pub use restore::{
+    FORMAT_KIND, FORMAT_VERSION, MissingRunRecord, MissingWorktree, NamespaceChange,
+    REMOTE_STATE_REF, REPLACED_DIR, RUN_RECORD_MISSING, RestoreCandidate, RestoreCandidates,
+    RestoreOutcome, RestorePreview, RestoreSource, SourceKind, WORKTREE_MISSING, WithheldNote,
+};
 pub use script_check::ScriptCheck;
 pub use settings::ProjectRepositorySettings;
 pub use sink::{LocalSink, PersonClaim, RefusingSink, RepoCommand, RepoReply, StateSink};
@@ -100,8 +108,8 @@ pub use snapshot::{
     WITHHELD_FILE, WITHHELD_SECRET, Withheld, WithheldReason,
 };
 pub use state::{
-    KvRead, KvTx, OpenError, StateEvent, StateRead, StateReader, StateStore, StateTx, StateWriter,
-    VERIFIED_COMMIT_KEY,
+    ImportReason, KvRead, KvTx, OpenError, StateEvent, StateRead, StateReader, StateStore, StateTx,
+    StateWriter, VERIFIED_COMMIT_KEY,
 };
 pub use state_branch::{SNAPSHOT_INDEX_FILE, state_ref};
 pub use state_hooks::{StateApplyChange, StateApplyHook, StateApplyHooks, TaskTouch};
@@ -116,6 +124,8 @@ pub fn init(cx: &mut gpui::App) {
     ProjectRepositorySettings::register(cx);
 }
 
+#[cfg(test)]
+mod add_existing_tests;
 #[cfg(test)]
 mod amending_tests;
 #[cfg(test)]
@@ -148,6 +158,8 @@ mod peer_tests;
 mod project_values_tests;
 #[cfg(test)]
 mod quick_edit_tests;
+#[cfg(test)]
+mod restore_tests;
 #[cfg(test)]
 mod router_tests;
 #[cfg(test)]

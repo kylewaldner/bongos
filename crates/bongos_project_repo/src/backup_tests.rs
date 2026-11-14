@@ -341,6 +341,50 @@ fn credentials_in_a_remote_url_are_not_shown() {
     );
     assert_eq!(shown_remote("/backups/state.git"), "/backups/state.git");
     assert_eq!(shown_remote("origin"), "origin");
+    // A password holding an unescaped `@` or `/` is withheld whole.
+    for remote in [
+        "https://kyle:p@ss@example.com/state.git",
+        "https://kyle:pa/ss@example.com/state.git",
+        "https://kyle:p@s/s@example.com/state.git",
+    ] {
+        assert_eq!(
+            shown_remote(remote),
+            "https://<withheld: secret>@example.com/state.git",
+            "{remote}"
+        );
+    }
+}
+
+#[test]
+fn a_stopped_backup_neither_snapshots_nor_pushes_on_request() {
+    let root = TempDir::new().unwrap();
+    let remote = bare(&root, "remote.git", None);
+    let repo = with_remote(&project(&root), remote.to_str().unwrap());
+    change_state(&repo, TodoState::Done);
+    block_on(repo.snapshot_now(SnapshotReason::Manual, start())).unwrap();
+    repo.stop_backups();
+    assert!(!block_on(repo.push_now(start())).unwrap());
+    assert_eq!(
+        block_on(repo.backup_now(start())).unwrap(),
+        SnapshotOutcome::Stopped
+    );
+    assert_eq!(remote_tip(&repo, &remote), None);
+}
+
+#[test]
+fn a_failed_snapshot_records_its_error_without_secrets() {
+    let root = TempDir::new().unwrap();
+    let repo = project(&root);
+    change_state(&repo, TodoState::Done);
+    // A state branch name git refuses, quoting a secret in the error.
+    let mut options = repo.backup_options();
+    options.state_branch = "state-SECRET-123456..x".to_string();
+    repo.set_backup_options(options);
+    assert!(block_on(repo.snapshot_now(SnapshotReason::Manual, start())).is_err());
+    let status = block_on(repo.backup_status(start())).unwrap();
+    let error = status.snapshot_error.unwrap();
+    assert!(!error.contains("SECRET-123456"), "{error}");
+    assert!(error.contains("<withheld: secret>"), "{error}");
 }
 
 /// Snapshots of the state taken at each of `times`, one change before each.
@@ -769,8 +813,17 @@ fn the_status_lists_orphan_state_and_unpushed_snapshots() {
     change_state(&repo, TodoState::Open);
     block_on(repo.snapshot_now(SnapshotReason::Manual, start() + minutes(1))).unwrap();
 
+    writer(&repo)
+        .transact(|tx| {
+            tx.set_task(
+                "gone-SECRET-123456",
+                crate::test_support::task_with_todos(&[]),
+            )
+        })
+        .unwrap();
     let status = block_on(repo.backup_status(start())).unwrap();
-    assert_eq!(status.orphans, ["gone-task"]);
+    // An orphan's id is shown with its secrets withheld.
+    assert_eq!(status.orphans, ["gone-<withheld: secret>", "gone-task"]);
     assert_eq!(status.unpushed_snapshots, 2);
     assert!(status.render().contains("gone-task"));
     assert!(state_files(&repo).contains_key("tasks/gone-task.toml"));

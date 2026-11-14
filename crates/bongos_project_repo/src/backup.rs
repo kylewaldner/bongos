@@ -22,7 +22,7 @@ use crate::project_values::{
     PUSH_RETRY_MAX_KEY, PUSH_RETRY_MIN_KEY, ProjectValueOverrides, RUN_RECORD_COPY_INTERVAL_KEY,
     SNAPSHOT_INTERVAL_KEY,
 };
-use crate::registries::{StateExporter, StateExporters};
+use crate::registries::{ActivitySource, ActivitySources, StateExporter, StateExporters};
 use crate::settings::ProjectRepositorySettings;
 use crate::snapshot::{self, Secrets, Withheld};
 use crate::state::StateWriter;
@@ -34,6 +34,7 @@ pub const DEFAULT_MIN_SNAPSHOT_GAP_SECONDS: u32 = 60;
 pub const DEFAULT_PUSH_RETRY_MIN_MINUTES: u32 = 5;
 pub const DEFAULT_PUSH_RETRY_MAX_MINUTES: u32 = 60;
 pub const DEFAULT_THINNING_AFTER_DAYS: u32 = 30;
+pub const DEFAULT_REPLACED_KEEP_DAYS: u32 = 30;
 pub const DEFAULT_RUN_RECORD_COPY_INTERVAL_MINUTES: u32 = 60;
 /// How long a push may take before its git is stopped.
 pub const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -65,6 +66,8 @@ pub struct BackupOptions {
     pub push_retry_min_minutes: u32,
     pub push_retry_max_minutes: u32,
     pub thinning_after_days: u32,
+    /// How long a restore keeps the state it replaced.
+    pub replaced_keep_days: u32,
     pub run_record_copy_dir: Option<PathBuf>,
     pub run_record_copy_interval_minutes: u32,
     pub secret_patterns: Vec<String>,
@@ -81,6 +84,7 @@ impl Default for BackupOptions {
             push_retry_min_minutes: DEFAULT_PUSH_RETRY_MIN_MINUTES,
             push_retry_max_minutes: DEFAULT_PUSH_RETRY_MAX_MINUTES,
             thinning_after_days: DEFAULT_THINNING_AFTER_DAYS,
+            replaced_keep_days: DEFAULT_REPLACED_KEEP_DAYS,
             run_record_copy_dir: None,
             run_record_copy_interval_minutes: DEFAULT_RUN_RECORD_COPY_INTERVAL_MINUTES,
             secret_patterns: crate::DEFAULT_SECRET_PATTERNS.map(str::to_string).to_vec(),
@@ -98,6 +102,7 @@ impl ProjectRepositorySettings {
             push_retry_min_minutes: self.push_retry_min_minutes,
             push_retry_max_minutes: self.push_retry_max_minutes,
             thinning_after_days: self.thinning_after_days,
+            replaced_keep_days: self.replaced_keep_days,
             run_record_copy_dir: self.run_record_copy_dir.clone(),
             run_record_copy_interval_minutes: self.run_record_copy_interval_minutes,
             secret_patterns: self.secret_patterns.clone(),
@@ -335,6 +340,8 @@ pub(crate) struct BackupEngine {
     push_lock: futures::lock::Mutex<()>,
     stopped: AtomicBool,
     push_timeout: Mutex<Option<PushTimeout>>,
+    /// `None` reads the activity sources registered in the app.
+    activity: Mutex<Option<Vec<Arc<dyn ActivitySource>>>>,
 }
 
 impl Default for BackupEngine {
@@ -347,21 +354,23 @@ impl Default for BackupEngine {
             push_lock: futures::lock::Mutex::new(()),
             stopped: AtomicBool::new(false),
             push_timeout: Mutex::new(None),
+            activity: Mutex::new(None),
         }
     }
 }
 
 /// The real push timeout: [`PUSH_TIMEOUT`] on smol's timer, which the landing's backoff uses
 /// too (see `landing::backoff`).
-fn real_push_timeout() -> BoxFuture<'static, ()> {
+pub(crate) fn real_push_timeout() -> BoxFuture<'static, ()> {
     Box::pin(crate::landing::backoff(PUSH_TIMEOUT))
 }
 
-/// `remote` as shown: the credentials of a URL withheld.
+/// `remote` as shown: the credentials of a URL withheld. A password may hold an unescaped `@`
+/// or `/`, so everything up to the last `@` is withheld; an `@` in the path withholds more than
+/// it needs to, never less.
 pub(crate) fn shown_remote(remote: &str) -> String {
     if let Some((scheme, rest)) = remote.split_once("://")
-        && let Some((userinfo, host)) = rest.split_once('@')
-        && !userinfo.contains('/')
+        && let Some((_, host)) = rest.rsplit_once('@')
     {
         return format!("{scheme}://{}@{host}", snapshot::WITHHELD_SECRET);
     }
@@ -434,7 +443,31 @@ impl ProjectRepo {
         self.engine.backup.stopped.load(Ordering::SeqCst)
     }
 
-    fn exporters(&self) -> Vec<Arc<dyn StateExporter>> {
+    /// Asks `sources` about running work instead of those registered in the app.
+    pub fn use_activity_sources(&self, sources: Vec<Arc<dyn ActivitySource>>) {
+        *self.engine.backup.activity.lock() = Some(sources);
+    }
+
+    pub(crate) fn activity_sources(&self) -> Vec<Arc<dyn ActivitySource>> {
+        self.engine
+            .backup
+            .activity
+            .lock()
+            .clone()
+            .unwrap_or_else(|| ActivitySources::global().all())
+    }
+
+    /// The push timeout of this project: the one a test set, or [`PUSH_TIMEOUT`].
+    pub(crate) fn network_timeout(&self) -> BoxFuture<'static, ()> {
+        self.engine
+            .backup
+            .push_timeout
+            .lock()
+            .clone()
+            .map_or_else(real_push_timeout, |timeout| timeout())
+    }
+
+    pub(crate) fn exporters(&self) -> Vec<Arc<dyn StateExporter>> {
         self.engine
             .backup
             .exporters
@@ -526,7 +559,17 @@ impl ProjectRepo {
         match &result {
             Ok(_) => {}
             Err(error) => {
+                // The error may quote a value of the state or the remote's URL.
                 let message = format!("{error:#}");
+                let message = match &self.location.remote {
+                    Some(remote) => message.replace(remote.as_str(), &shown_remote(remote)),
+                    None => message,
+                };
+                let message = match Secrets::new(&options.secret_patterns, &options.secret_keys) {
+                    Ok(secrets) => secrets.clean(&message),
+                    Err(_) => "the snapshot failed, and its error could not be checked for secrets"
+                        .to_string(),
+                };
                 self.update_backup_record(&writer, |record| {
                     record.snapshot_error = Some(message);
                 })
@@ -614,6 +657,9 @@ impl ProjectRepo {
         let Some(remote) = self.location.remote.clone() else {
             return Ok(false);
         };
+        if self.backups_stopped() {
+            return Ok(false);
+        }
         let _push = self.engine.backup.push_lock.lock().await;
         let writer = self.writer_or_error()?;
         let options = self.backup_options();
@@ -730,6 +776,9 @@ impl ProjectRepo {
     /// `project: backup now`: a snapshot at once, and the push started on its own task so
     /// nothing waits for the remote.
     pub async fn backup_now(&self, now: DateTime<Utc>) -> Result<SnapshotOutcome> {
+        if self.backups_stopped() {
+            return Ok(SnapshotOutcome::Stopped);
+        }
         let outcome = self.snapshot_now(SnapshotReason::Manual, now).await?;
         self.spawn_push(now, true);
         Ok(outcome)
@@ -781,6 +830,9 @@ impl ProjectRepo {
         }
         if let Err(error) = self.copy_run_records_if_due(now) {
             log::error!("copying run records: {error:#}");
+        }
+        if let Err(error) = self.prune_replaced(now) {
+            log::error!("removing old replaced states: {error:#}");
         }
     }
 
@@ -843,7 +895,16 @@ impl ProjectRepo {
                         .iter()
                         .map(|node| node.definition.id.clone())
                         .collect();
-                    writer.read(|read| read.orphans(&known))?
+                    let orphans = writer.read(|read| read.orphans(&known))?;
+                    // A task id may be anything a definition held, a secret among them.
+                    match Secrets::new(&options.secret_patterns, &options.secret_keys) {
+                        Ok(secrets) => orphans.iter().map(|id| secrets.clean(id)).collect(),
+                        Err(_) if orphans.is_empty() => Vec::new(),
+                        Err(_) => vec![format!(
+                            "{} (not shown: the secret patterns are invalid)",
+                            orphans.len()
+                        )],
+                    }
                 } else {
                     Vec::new()
                 }

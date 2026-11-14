@@ -118,6 +118,25 @@ pub enum StateEvent {
     },
 }
 
+/// Why state is written without the state apply hooks: the two exceptions to them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportReason {
+    /// `project: restore` replaces the run state with one snapshot, read consistently.
+    Restore,
+    /// `project: convert` fills a new store from a project of the old format.
+    Conversion,
+}
+
+impl ImportReason {
+    fn label(self) -> &'static str {
+        match self {
+            ImportReason::Restore => "restore",
+            ImportReason::Conversion => "conversion",
+        }
+    }
+}
+
 /// Why the writer could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
@@ -169,11 +188,16 @@ impl StateStore {
     /// Opens the store for reading only. It never takes the host lock, so it works beside the
     /// writer of another process.
     pub fn open_reader(location: &Location) -> Result<StateReader> {
-        let path = location.state.join(layout::STATE_DB_FILE);
-        if !path.exists() {
+        Self::open_reader_at(&location.state.join(layout::STATE_DB_FILE))
+    }
+
+    /// Opens the store file at `path` for reading only: a project's, or a replaced state kept
+    /// by a restore.
+    pub(crate) fn open_reader_at(path: &Path) -> Result<StateReader> {
+        if !path.is_file() {
             bail!("no state store at {}", path.display());
         }
-        let connection = open_connection(&path)?;
+        let connection = open_connection(path)?;
         exec(&connection, "PRAGMA query_only=ON")?;
         Ok(StateReader {
             connection: Mutex::new(connection),
@@ -331,6 +355,67 @@ impl StateWriter {
                 .lock()
                 .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
         }
+        drop(connection);
+        Ok(value)
+    }
+
+    /// Writes in one transaction without running any state apply hook: the rows `f` writes,
+    /// the hook-owned `kv` rows among them, are authoritative as written. Only a restore
+    /// (`restore.rs`) and a conversion (`convert.rs`) call it; a test scanning the crate's
+    /// sources holds that. When `keep_copy` is given, the store as it is before the transaction
+    /// is first copied there, under the same hold of the connection, so no other write falls
+    /// between the copy and the import. An error from `f` changes nothing (the copy stays).
+    pub(crate) fn import_without_hooks<T>(
+        &self,
+        reason: ImportReason,
+        keep_copy: Option<&Path>,
+        f: impl FnOnce(&mut StateTx) -> Result<T>,
+    ) -> Result<T> {
+        let connection = self.connection.lock();
+        if let Some(copy) = keep_copy {
+            let target = copy
+                .to_str()
+                .with_context(|| format!("the path {} is not UTF-8", copy.display()))?;
+            connection.exec_bound::<&str>("VACUUM INTO ?")?(target)
+                .with_context(|| format!("keeping the state in {}", copy.display()))?;
+        }
+        exec(&connection, "BEGIN IMMEDIATE").context("starting an import")?;
+        let mut guard = RollbackGuard {
+            connection: &connection,
+            open: true,
+        };
+        let mut tx = StateTx::new(&connection);
+        let value = f(&mut tx)?;
+        let event = if tx.dirty {
+            let generation = read_generation(&connection)? + 1;
+            connection.exec_bound::<(&str, String)>(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            )?((GENERATION_KEY, generation.to_string()))?;
+            Some(StateEvent::Changed {
+                generation,
+                task_ids: tx.task_ids.iter().cloned().collect(),
+                namespaces: tx.namespaces.iter().cloned().collect(),
+            })
+        } else {
+            None
+        };
+        let verified = tx.verified.take();
+        guard.open = false;
+        if let Err(error) = exec(&connection, "COMMIT") {
+            exec(&connection, "ROLLBACK").ok();
+            return Err(error.context(format!("committing the {}", reason.label())));
+        }
+        drop(guard);
+        if let Some((commit, definitions)) = verified {
+            *self.definitions.lock() = (Some(commit), definitions);
+        }
+        if let Some(event) = event {
+            self.subscribers
+                .lock()
+                .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
+        }
+        log::info!("state replaced by a {}", reason.label());
         drop(connection);
         Ok(value)
     }
@@ -801,6 +886,17 @@ impl<'a> StateTx<'a> {
         Ok(())
     }
 
+    /// Removes the rows of every task but those `keep` holds: what a restore does before it
+    /// writes the snapshot's.
+    pub(crate) fn clear_task_state(&mut self, keep: impl Fn(&str) -> bool) -> Result<()> {
+        for id in self.task_ids()? {
+            if !keep(&id) {
+                self.delete_task(&id)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn change(&self, change_id: &str) -> Result<Option<ChangeRow>> {
         changes::read_change(self.connection, change_id)
     }
@@ -1029,6 +1125,18 @@ impl KvTx<'_, '_> {
             &self.namespace,
             key,
         )
+        )?;
+        self.written();
+        Ok(())
+    }
+
+    /// Removes every entry of the namespace.
+    pub fn clear(&mut self) -> Result<()> {
+        self.writable()?;
+        self.tx
+            .connection
+            .exec_bound::<&str>("DELETE FROM kv WHERE namespace = ?")?(
+            self.namespace.as_str()
         )?;
         self.written();
         Ok(())

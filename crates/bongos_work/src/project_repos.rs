@@ -366,6 +366,7 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
         cx,
     );
     crate::registry::register_pending_chips(cx);
+    crate::registry::register_missing_chips(cx);
     let source = Arc::new(RepoSource {
         name,
         loaded: loaded.clone(),
@@ -382,7 +383,9 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
                     Err(error) => log::error!("recovering a landing: {error:#}"),
                 }
             }
-            first.load().await
+            let loaded = first.load().await;
+            first.refresh_marks().log_err();
+            loaded
         })
         .await
         .log_err();
@@ -393,9 +396,13 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
         let refresh = async {
             while let Some(StateEvent::Changed { .. }) = events.next().await {
                 let reload = loaded.clone();
-                cx.background_spawn(async move { reload.load().await })
-                    .await
-                    .log_err();
+                cx.background_spawn(async move {
+                    let loaded = reload.load().await;
+                    reload.refresh_marks().log_err();
+                    loaded
+                })
+                .await
+                .log_err();
                 cx.update(|cx| {
                     if let Some(store) = WorkStore::global(cx) {
                         store.update(cx, |store, cx| store.refresh_sources(cx));

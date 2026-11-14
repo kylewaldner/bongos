@@ -17,6 +17,11 @@ use crate::peer::PeerIdentity;
 use crate::sink::{PersonClaim, RepoCommand, RepoReply};
 use crate::state_ops::StateOp;
 
+/// Why a restore, or stopping work for one, from a peer that is not a verified window is
+/// refused.
+pub const RESTORE_NEEDS_A_WINDOW: &str =
+    "restoring needs a person at a bongos window; the request did not come from a verified window";
+
 /// The host side of one project's commands from other processes.
 pub struct HostBoundary {
     repo: ProjectRepo,
@@ -192,6 +197,25 @@ impl HostBoundary {
             RepoCommand::BackupStatus => Ok(RepoReply::BackupStatus {
                 status: Box::new(self.repo.backup_status(now).await?),
             }),
+            RepoCommand::RestoreCandidates => Ok(RepoReply::RestoreCandidates {
+                candidates: self.repo.restore_candidates().await?,
+            }),
+            RepoCommand::RestorePreview { source } => Ok(RepoReply::RestorePreview {
+                preview: Box::new(self.repo.restore_preview(&source).await?),
+            }),
+            RepoCommand::Restore { source, person } => {
+                // Replacing every task's state is a person's call, as an approval is.
+                grant(Some(person), peer).ok_or_else(|| anyhow!(RESTORE_NEEDS_A_WINDOW))?;
+                Ok(RepoReply::Restore {
+                    outcome: self.repo.restore(&source, now).await?,
+                })
+            }
+            RepoCommand::StopAtJobBoundary { person } => {
+                grant(Some(person), peer).ok_or_else(|| anyhow!(RESTORE_NEEDS_A_WINDOW))?;
+                Ok(RepoReply::Stopping {
+                    problems: self.repo.stop_at_job_boundary(),
+                })
+            }
         }
     }
 

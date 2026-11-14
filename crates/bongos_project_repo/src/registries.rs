@@ -27,6 +27,17 @@ pub trait ActivitySource: Send + Sync + 'static {
 
     /// A line for each activity running in the project, empty when idle.
     fn activity(&self, project_id: &str) -> Vec<String>;
+
+    /// Asks the activity of the project to stop at its next job boundary (a run between two
+    /// steps, a lane between two jobs), so a restore can follow. Returns at once; the
+    /// activity ends later. A source that cannot be stopped from here says so.
+    fn stop_at_job_boundary(&self, project_id: &str) -> Result<()> {
+        let _ = project_id;
+        anyhow::bail!(
+            "{} cannot be stopped from here; stop it where it runs",
+            self.name()
+        )
+    }
 }
 
 pub struct StateExporters {

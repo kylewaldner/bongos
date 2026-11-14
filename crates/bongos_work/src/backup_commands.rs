@@ -20,7 +20,7 @@ pub fn register(workspace: &mut Workspace) {
 }
 
 /// The repository with the backup settings of this moment.
-fn configured(repo: ProjectRepo, cx: &mut Context<Workspace>) -> ProjectRepo {
+pub(crate) fn configured(repo: ProjectRepo, cx: &mut Context<Workspace>) -> ProjectRepo {
     repo.set_backup_options(ProjectRepositorySettings::get_global(cx).backup_options());
     repo
 }
@@ -33,7 +33,7 @@ fn backup_status(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
             Ok(status) => {
                 workspace
                     .update_in(cx, |workspace, window, cx| {
-                        open_read_only(workspace, status.render(), window, cx)
+                        open_read_only(workspace, "Backup status", status.render(), window, cx)
                     })
                     .log_err();
             }
@@ -49,9 +49,10 @@ fn backup_status(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
     });
 }
 
-/// Opens `text` in a new read-only buffer titled "Backup status".
-fn open_read_only(
+/// Opens `text` in a new read-only buffer titled `title`.
+pub(crate) fn open_read_only(
     workspace: &mut Workspace,
+    title: &'static str,
     text: String,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -62,11 +63,7 @@ fn open_read_only(
         let Ok(buffer) = buffer.await else {
             workspace
                 .update(cx, |workspace, cx| {
-                    show_toast(
-                        workspace,
-                        "Could not open the backup status".to_string(),
-                        cx,
-                    )
+                    show_toast(workspace, format!("Could not open the {title}"), cx)
                 })
                 .log_err();
             return;
@@ -77,9 +74,8 @@ fn open_read_only(
         });
         workspace
             .update_in(cx, |workspace, window, cx| {
-                let multi_buffer = cx.new(|cx| {
-                    MultiBuffer::singleton(buffer, cx).with_title("Backup status".to_string())
-                });
+                let multi_buffer =
+                    cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title.to_string()));
                 let editor = cx.new(|cx| {
                     let mut editor =
                         Editor::for_multibuffer(multi_buffer, Some(project), window, cx);
