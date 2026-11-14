@@ -421,3 +421,143 @@ fn a_set_of_an_unknown_or_reserved_field_is_refused() {
     }
     assert_eq!(writer(&repo).read(|read| read.task("l1")).unwrap(), None);
 }
+
+/// The state of a todo in a state row; a todo with no record there is open.
+fn todo_state(record: &bongos_project_repo_model::TaskStateRecord, todo_id: &str) -> TodoState {
+    record
+        .todos
+        .iter()
+        .find(|todo| todo.id.as_deref() == Some(todo_id))
+        .map_or(TodoState::Open, |todo| todo.state)
+}
+
+#[test]
+fn a_todo_moved_to_another_task_keeps_its_state() {
+    let root = TempDir::new().unwrap();
+    let (repo, loaded) = loaded(&root);
+    run_state_only(&repo, &loaded, |tree, ctx| {
+        commands::todo_skip(tree, ctx, "l1", Some(1))
+    });
+    let tree = loaded.work_tree().unwrap();
+    let mut from = tree.task_by_id("l1").unwrap().file.clone().unwrap();
+    let mut to = tree.task_by_id("l2").unwrap().file.clone().unwrap();
+    let moved = from.todos.remove(1);
+    assert_eq!(moved.id.as_deref(), Some("t2"));
+    to.todos.push(moved);
+    let change = Change {
+        dir: tree.task_by_id("l1").unwrap().dir.clone(),
+        writes: vec![
+            commands::Write::Task {
+                dir: tree.task_by_id("l1").unwrap().dir.clone(),
+                file: from,
+            },
+            commands::Write::Task {
+                dir: tree.task_by_id("l2").unwrap().dir.clone(),
+                file: to,
+            },
+        ],
+        entry: bongos_work_model::HistoryEntry {
+            at: "2026-11-13T10:00:00Z".parse().unwrap(),
+            by: "tester".to_string(),
+            event: "todo moved".to_string(),
+            detail: None,
+            extra: Default::default(),
+        },
+        moves: Vec::new(),
+    };
+    let Routed::Definition { state, .. } = route(&tree, &change).unwrap() else {
+        panic!("a todo's task is a definition");
+    };
+    assert_eq!(
+        state,
+        [StateOp::MoveTodo {
+            from_task: "l1".to_string(),
+            to_task: "l2".to_string(),
+            todo_id: "t2".to_string(),
+        }]
+    );
+    writer(&repo)
+        .transact(|tx| tx.apply_ops(&state))
+        .unwrap();
+    let l2 = writer(&repo).read(|read| read.task("l2")).unwrap().unwrap();
+    assert_eq!(todo_state(&l2, "t2"), TodoState::Skipped);
+    let l1 = writer(&repo).read(|read| read.task("l1")).unwrap().unwrap();
+    assert!(l1.todos.iter().all(|todo| todo.id.as_deref() != Some("t2")));
+}
+
+#[test]
+fn a_split_moves_todos_and_work_as_the_rows_hold_them_when_applied() {
+    let root = TempDir::new().unwrap();
+    let (repo, loaded) = loaded(&root);
+    run_state_only(&repo, &loaded, |tree, ctx| {
+        commands::advance(tree, ctx, "l1", false)
+    });
+    run_state_only(&repo, &loaded, |tree, ctx| {
+        commands::set_result(tree, ctx, "l1", link_result())
+    });
+    let tree = loaded.work_tree().unwrap();
+    let change = commands::split(&tree, &ctx(), "l1", Some("Keeper")).unwrap();
+    let keeper = change
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            commands::Write::Task { file, .. } if file.goal == "Keeper" => Some(file.id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let Routed::Definition { state, .. } = route(&tree, &change).unwrap() else {
+        panic!("a split is a definition");
+    };
+    for todo_id in ["t1", "t2", "t3"] {
+        assert!(
+            state.contains(&StateOp::MoveTodo {
+                from_task: "l1".to_string(),
+                to_task: keeper.clone(),
+                todo_id: todo_id.to_string(),
+            }),
+            "{state:?}"
+        );
+    }
+    assert!(state.contains(&StateOp::MoveWork {
+        from_task: "l1".to_string(),
+        to_task: keeper.clone(),
+    }));
+    // Nothing moved is also set.
+    assert!(
+        !state.iter().any(|op| match op {
+            StateOp::SetTodo { .. } => true,
+            StateOp::Set { field, .. } => field == "result",
+            _ => false,
+        }),
+        "{state:?}"
+    );
+
+    // While the split waits to land, a todo is skipped and the result changes.
+    run_state_only(&repo, &loaded, |tree, ctx| {
+        commands::todo_skip(tree, ctx, "l1", None)
+    });
+    let mut newer = link_result();
+    newer.url = Some("https://example.com/newer".to_string());
+    let newer_result = newer.clone();
+    run_state_only(&repo, &loaded, |tree, ctx| {
+        commands::clear_result(tree, ctx, "l1")
+    });
+    run_state_only(&repo, &loaded, move |tree, ctx| {
+        commands::set_result(tree, ctx, "l1", newer.clone())
+    });
+
+    writer(&repo)
+        .transact(|tx| tx.apply_ops(&state))
+        .unwrap();
+    let kept = writer(&repo)
+        .read(|read| read.task(&keeper))
+        .unwrap()
+        .unwrap();
+    assert_eq!(todo_state(&kept, "t1"), TodoState::Done);
+    assert_eq!(todo_state(&kept, "t2"), TodoState::Skipped);
+    assert_eq!(todo_state(&kept, "t3"), TodoState::Open);
+    assert_eq!(kept.result, Some(newer_result));
+    let parent = writer(&repo).read(|read| read.task("l1")).unwrap().unwrap();
+    assert!(parent.todos.is_empty());
+    assert_eq!(parent.result, None);
+}

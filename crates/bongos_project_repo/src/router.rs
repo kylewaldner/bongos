@@ -23,7 +23,7 @@ use bongos_work_model::{
 };
 
 use crate::state::StateWriter;
-use crate::state_ops::{SETTABLE_FIELDS, StateOp};
+use crate::state_ops::{SETTABLE_FIELDS, StateOp, move_work, work_of};
 
 /// A change to the files of `definitions/`, relative to it.
 #[derive(Clone, Debug, PartialEq)]
@@ -157,6 +157,7 @@ pub fn route(tree: &WorkTree, change: &Change) -> Result<Routed, String> {
     let mut definition = Vec::new();
     let mut state = Vec::new();
     let mut files = Vec::new();
+    let mut task_states = Vec::new();
 
     // New tasks first, parents before children, so a child's directory maps through its
     // parent's.
@@ -218,7 +219,7 @@ pub fn route(tree: &WorkTree, change: &Change) -> Result<Routed, String> {
                         bytes: bytes.into_bytes(),
                     });
                 }
-                state.extend(diff_state(&file.id, &old_state, &new_state)?);
+                task_states.push((file.id.clone(), old_state, new_state));
             }
             Write::Project { dir, file } => {
                 if project_of(tree, dir) != Some(file) {
@@ -245,6 +246,8 @@ pub fn route(tree: &WorkTree, change: &Change) -> Result<Routed, String> {
             }
         }
     }
+
+    state.extend(state_ops(task_states)?);
 
     for moved in &change.moves {
         let task_folder = tree
@@ -289,6 +292,82 @@ fn state_table(id: &str, record: &TaskStateRecord) -> Result<toml::Table, String
         Ok(_) => Err(format!("the state of {id} is not a table")),
         Err(error) => Err(format!("reading the state of {id}: {error}")),
     }
+}
+
+fn has_todo(record: &TaskStateRecord, todo_id: &str) -> bool {
+    record
+        .todos
+        .iter()
+        .any(|todo| todo.id.as_deref() == Some(todo_id))
+}
+
+/// The state ops of the written tasks, each given as (id, state as the command read it, new
+/// state): first the moves between them, a `MoveTodo` for a todo that left one written task for
+/// another and a `MoveWork` for the work a split hands to its keeper, so they move whatever the
+/// rows hold when applied; then each task's own diff against its state with those moves made, so
+/// a moved value is never also set (and a value changed in the move is set only if it is still
+/// the one moved).
+fn state_ops(
+    mut states: Vec<(TaskId, TaskStateRecord, TaskStateRecord)>,
+) -> Result<Vec<StateOp>, String> {
+    let mut ops = Vec::new();
+    for to in 0..states.len() {
+        let arrived: Vec<String> = states[to]
+            .2
+            .todos
+            .iter()
+            .filter_map(|todo| todo.id.clone())
+            .filter(|todo_id| !has_todo(&states[to].1, todo_id))
+            .collect();
+        for todo_id in arrived {
+            let from = (0..states.len()).find(|&from| {
+                from != to
+                    && has_todo(&states[from].1, &todo_id)
+                    && !has_todo(&states[from].2, &todo_id)
+            });
+            let Some(from) = from else {
+                continue;
+            };
+            let old = &mut states[from].1.todos;
+            let Some(position) = old
+                .iter()
+                .position(|todo| todo.id.as_deref() == Some(todo_id.as_str()))
+            else {
+                continue;
+            };
+            let record = old.remove(position);
+            states[to].1.todos.push(record);
+            ops.push(StateOp::MoveTodo {
+                from_task: states[from].0.clone(),
+                to_task: states[to].0.clone(),
+                todo_id,
+            });
+        }
+    }
+    let none = TaskStateRecord::default();
+    for from in 0..states.len() {
+        let work = work_of(&states[from].1);
+        if work == none || work_of(&states[from].2) != none {
+            continue;
+        }
+        let to = (0..states.len()).find(|&to| {
+            to != from && work_of(&states[to].1) == none && work_of(&states[to].2) == work
+        });
+        let Some(to) = to else {
+            continue;
+        };
+        let mut from_old = states[from].1.clone();
+        move_work(&mut from_old, &mut states[to].1);
+        states[from].1 = from_old;
+        ops.push(StateOp::MoveWork {
+            from_task: states[from].0.clone(),
+            to_task: states[to].0.clone(),
+        });
+    }
+    for (id, old, new) in &states {
+        ops.extend(diff_state(id, old, new)?);
+    }
+    Ok(ops)
 }
 
 /// The ops that turn the state `old` (as the command read it) into `new`: a `Set` per changed

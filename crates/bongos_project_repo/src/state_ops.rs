@@ -72,6 +72,26 @@ pub const SETTABLE_FIELDS: [&str; 13] = [
     "proposals",
 ];
 
+/// Moves the work (branch, base, base SHA, rebase acknowledgement, worktree, result and ship
+/// override) of `from` to `to`, leaving `from` with none.
+pub(crate) fn move_work(from: &mut TaskStateRecord, to: &mut TaskStateRecord) {
+    to.branch = from.branch.take();
+    to.base = from.base.take();
+    to.base_sha = from.base_sha.take();
+    to.rebase_ack_sha = from.rebase_ack_sha.take();
+    to.worktree = from.worktree.take();
+    to.result = from.result.take();
+    to.ship_overridden = from.ship_overridden.take();
+}
+
+/// The work of `record` alone, on an otherwise empty record.
+pub(crate) fn work_of(record: &TaskStateRecord) -> TaskStateRecord {
+    let mut from = record.clone();
+    let mut work = TaskStateRecord::default();
+    move_work(&mut from, &mut work);
+    work
+}
+
 /// Applies `ops` in order. Returns a note for each op that kept a newer value.
 pub(crate) fn apply(tx: &mut StateTx, ops: &[StateOp]) -> Result<Vec<String>> {
     let mut notes = Vec::new();
@@ -117,13 +137,7 @@ fn apply_one(tx: &mut StateTx, op: &StateOp, notes: &mut Vec<String>) -> Result<
                 return Ok(());
             };
             let mut to = tx.task(to_task)?.unwrap_or_default();
-            to.branch = from.branch.take();
-            to.base = from.base.take();
-            to.base_sha = from.base_sha.take();
-            to.rebase_ack_sha = from.rebase_ack_sha.take();
-            to.worktree = from.worktree.take();
-            to.result = from.result.take();
-            to.ship_overridden = from.ship_overridden.take();
+            move_work(&mut from, &mut to);
             tx.set_task(from_task, from)?;
             tx.set_task(to_task, to)?;
         }
