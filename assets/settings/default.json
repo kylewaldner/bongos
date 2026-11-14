@@ -1558,6 +1558,21 @@
       "download": false
     }
   },
+  // Settings for the Java language server.
+  "java": {
+    // The JDK the Java language server (jdtls) itself runs on. Null detects one. A
+    // relative path resolves against the worktree root.
+    "server_jdk": null,
+    // The JDK used for project import and builds. Null detects one. A relative path
+    // resolves against the worktree root.
+    "jdk_home": null,
+  },
+  // Settings for the Terraform language server.
+  "terraform": {
+    // The path or name of the terraform (or OpenTofu) binary passed to terraform-ls.
+    // Null uses the `terraform` on the worktree's PATH, else `tofu`.
+    "binary": null,
+  },
   // Inert in bongos, which never checks for updates.
   "auto_update": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.
@@ -2260,6 +2275,7 @@
       "language_servers": ["herb", "!ruby-lsp", "..."],
     },
     "Java": {
+      "language_servers": ["jdtls", "kotlin", "..."],
       "prettier": {
         "allowed": true,
         "plugins": ["prettier-plugin-java"],
@@ -2398,6 +2414,14 @@
         "allowed": true,
         "plugins": ["prettier-plugin-svelte"],
       },
+    },
+    "Terraform": {
+      "formatter": "language_server",
+      "language_servers": ["terraform-ls", "..."],
+    },
+    "Terraform Vars": {
+      "formatter": "language_server",
+      "language_servers": ["terraform-ls", "..."],
     },
     "TSX": {
       "language_servers": ["!typescript-language-server", "vtsls", "..."],
