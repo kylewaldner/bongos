@@ -126,6 +126,7 @@ pub struct Session {
     prompt: SharedString,
     source: Source,
     initial_input: String,
+    select_initial: bool,
     default: Option<String>,
     free_input: bool,
     accept: Option<InputCheck>,
@@ -150,6 +151,7 @@ impl Session {
             prompt: prompt.into(),
             source: Source::Fixed(Vec::new()),
             initial_input: String::new(),
+            select_initial: false,
             default: None,
             free_input: false,
             accept: None,
@@ -172,6 +174,12 @@ impl Session {
 
     pub fn initial_input(mut self, input: impl Into<String>) -> Self {
         self.initial_input = input.into();
+        self
+    }
+
+    /// Selects the initial input, so that typing replaces it and RET accepts it.
+    pub fn select_initial_input(mut self) -> Self {
+        self.select_initial = true;
         self
     }
 
@@ -469,6 +477,7 @@ pub fn open(
         prompt,
         source,
         initial_input,
+        select_initial,
         default,
         free_input,
         accept,
@@ -506,10 +515,19 @@ pub fn open(
 
     // `toggle_modal` alone would close a modal of the same type instead of replacing it.
     workspace.hide_modal(window, cx);
-    let mut parts = Some((source, initial_input, key_context));
+    let mut parts = Some((source, initial_input, select_initial, key_context));
     workspace.toggle_modal(window, cx, |window, cx| {
-        let (source, initial_input, key_context) = parts.take().expect("built once");
-        SessionView::new(core.clone(), source, initial_input, key_context, window, cx)
+        let (source, initial_input, select_initial, key_context) =
+            parts.take().expect("built once");
+        SessionView::new(
+            core.clone(),
+            source,
+            initial_input,
+            select_initial,
+            key_context,
+            window,
+            cx,
+        )
     });
     if parts.is_some() {
         // Another modal refused to close, so this session never opened: it ends as cancelled.

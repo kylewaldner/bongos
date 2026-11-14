@@ -27,6 +27,8 @@ mod open_listener;
 mod open_url_modal;
 #[cfg(test)]
 mod prompts_keymap_tests;
+#[cfg(test)]
+mod query_replace_keymap_tests;
 mod quick_action_bar;
 pub mod remote_debug;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -5542,6 +5544,7 @@ mod tests {
                 "projects",
                 "prompts",
                 "proposal",
+                "query_replace",
                 "recent_projects",
                 "remote_debug",
                 "repl",

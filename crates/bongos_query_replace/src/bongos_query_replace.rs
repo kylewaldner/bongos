@@ -4,13 +4,17 @@
 //! every buffer change of a session and turn them into one undo step. The session state machine,
 //! the replacement templates and the case transfer live in `bongos_query_replace_model`.
 
+pub mod actions;
 pub mod edits;
 pub mod engine;
+pub mod prompts;
 
 #[cfg(test)]
 mod edits_tests;
 #[cfg(test)]
 mod engine_tests;
+#[cfg(test)]
+mod prompts_tests;
 
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::App;
@@ -21,4 +25,5 @@ pub const NAMESPACE: &str = "query_replace";
 /// Hides the query replace actions from the command palette.
 pub fn init(cx: &mut App) {
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_namespace(NAMESPACE));
+    prompts::init(cx);
 }
