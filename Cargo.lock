@@ -2549,6 +2549,7 @@ version = "0.1.0"
 dependencies = [
  "bongos_work_model",
  "serde",
+ "tempfile",
  "toml 0.8.23",
 ]
 

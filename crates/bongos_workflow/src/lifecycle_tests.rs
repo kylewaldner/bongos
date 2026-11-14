@@ -266,6 +266,8 @@ fn task(dir: PathBuf, file: TaskFile, children: Vec<Task>) -> Task {
         artifacts: None,
         errors: Vec::new(),
         definition: None,
+        pending: None,
+        needs_conversion: false,
         broken_edges: Vec::new(),
         files: BTreeMap::<PathBuf, SystemTime>::new(),
         hashes: BTreeMap::new(),

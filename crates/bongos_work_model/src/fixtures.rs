@@ -49,6 +49,8 @@ pub fn task(slug: &str, file: TaskFile) -> Task {
         artifacts: None,
         errors: Vec::new(),
         definition: None,
+        pending: None,
+        needs_conversion: false,
         broken_edges: Vec::new(),
         files: BTreeMap::new(),
         hashes: BTreeMap::new(),

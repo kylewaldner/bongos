@@ -51,7 +51,20 @@ impl fmt::Display for FileError {
     }
 }
 
-/// A write refused because the task has an error badge.
+/// The reason every write to an old-format task is refused once project repositories are
+/// enabled.
+pub const NEEDS_CONVERSION: &str = "old format, needs conversion: run project: convert";
+
+/// A change to a task that waits to land: the change's id and the mark its row shows (such as
+/// "landing" or "not landed").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingMark {
+    pub change_id: String,
+    pub label: String,
+}
+
+/// A write refused because the task has an error badge, or because it is in the old format and
+/// needs conversion (then `errors` is empty).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteRefused {
     pub task_dir: PathBuf,
@@ -60,6 +73,9 @@ pub struct WriteRefused {
 
 impl fmt::Display for WriteRefused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.errors.is_empty() {
+            return write!(f, "{}: {NEEDS_CONVERSION}", self.task_dir.display());
+        }
         write!(
             f,
             "{} cannot be changed until its files are fixed: ",
@@ -88,6 +104,11 @@ pub struct Task {
     /// For a task of a new-format project, its definition folder relative to `definitions/`;
     /// `None` for an old-format task.
     pub definition: Option<PathBuf>,
+    /// A change to this task waiting to land, shown as a mark on its row.
+    pub pending: Option<PendingMark>,
+    /// Set on an old-format task once project repositories are enabled: every write is refused
+    /// until the project is converted.
+    pub needs_conversion: bool,
     /// The last good parse of `task.toml`; `None` when it has never parsed.
     pub file: Option<TaskFile>,
     /// The last good parse of `artifacts.toml`; `None` when it is absent or has never parsed.
@@ -131,6 +152,12 @@ impl Task {
 
     /// The write guard every command calls before changing this task's files.
     pub fn check_writable(&self) -> Result<(), WriteRefused> {
+        if self.needs_conversion && self.definition.is_none() {
+            return Err(WriteRefused {
+                task_dir: self.dir.clone(),
+                errors: Vec::new(),
+            });
+        }
         if self.errors.is_empty() {
             Ok(())
         } else {
@@ -161,7 +188,7 @@ impl Task {
         tasks
     }
 
-    fn walk_mut(&mut self, visit: &mut impl FnMut(&mut Task)) {
+    pub fn walk_mut(&mut self, visit: &mut impl FnMut(&mut Task)) {
         visit(self);
         for child in &mut self.children {
             child.walk_mut(visit);
@@ -570,6 +597,8 @@ fn load_task(slug: String, dir: PathBuf, previous: &Previous, errors: &mut Vec<F
         artifacts,
         errors: badges,
         definition: None,
+        pending: None,
+        needs_conversion: false,
         broken_edges: Vec::new(),
         files,
         hashes,
@@ -578,7 +607,7 @@ fn load_task(slug: String, dir: PathBuf, previous: &Previous, errors: &mut Vec<F
 }
 
 /// Records the mtime of every file under `dir` that the task owns.
-pub(crate) fn collect_files(
+pub fn collect_files(
     dir: &Path,
     relative: &Path,
     files: &mut BTreeMap<PathBuf, SystemTime>,

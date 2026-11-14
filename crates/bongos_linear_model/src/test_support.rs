@@ -44,6 +44,8 @@ fn make(slug: &str, goal: &str, kind: Kind, with_todos: bool) -> Task {
         artifacts: None,
         errors: Vec::new(),
         definition: None,
+        pending: None,
+        needs_conversion: false,
         broken_edges: Vec::new(),
         files: Default::default(),
         hashes: Default::default(),
