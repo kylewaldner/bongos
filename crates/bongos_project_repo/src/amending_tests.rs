@@ -282,7 +282,7 @@ fn a_branch_without_a_worktree_drops_its_amendments_by_compare_and_swap() {
     let checked = block_on(repo.land_now(
         &copy.change_id,
         LandRequest {
-            meta: bongos_project_repo_model::ChangeMeta::new("check", author.clone()),
+            meta: bongos_project_repo_model::ChangeMeta::new("check", author),
             mode: LandMode::CheckOnly,
         },
         start(),

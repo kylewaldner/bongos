@@ -40,7 +40,6 @@ fn a_landing_left_in_flight_is_completed_only_by_the_holder_of_the_lock() {
     let second_id = second.change_id.clone();
     let seen: Arc<Mutex<Option<(MasterStatus, String)>>> = Arc::new(Mutex::new(None));
     {
-        let lock = lock.clone();
         let repo_in_probe = repo.clone();
         let seen = seen.clone();
         repo.set_probe(Arc::new(move |point, change| {
@@ -94,7 +93,7 @@ fn finishing_a_checkout_clears_only_its_own_marker() {
     let later = InFlight {
         change_id: "b".to_string(),
         commit: main.clone(),
-        old: main.clone(),
+        old: main,
     };
     let earlier = InFlight {
         change_id: "a".to_string(),
