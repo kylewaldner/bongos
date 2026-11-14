@@ -57,8 +57,8 @@ pub fn approve_proposal(change_id: &str, ctx: Context, cx: &App) -> Task<Result<
 }
 
 /// [`approve_proposal`] for a caller that follows the landing with `watch`: the moment the
-/// approval is written, the waits the landing announced before it are passed over (see
-/// [`LandingWatch::pass_waits`]); a wait announced after it still holds. Resolves with the watch.
+/// approval is written, the approval waits the landing announced before it are passed over (see
+/// [`LandingWatch::pass_waits`]); a wait announced after it, and a master-split wait, still hold. Resolves with the watch.
 pub fn approve_and_watch(
     change_id: &str,
     ctx: Context,
@@ -151,16 +151,21 @@ pub fn watch_landings(cx: &App) -> LandingWatch {
     }
 }
 
+/// Whether `event` is an approval wait of `change_id`, which an approval just written resolves.
+pub(crate) fn is_passed_wait(event: &(String, LandingEvent), change_id: &str) -> bool {
+    event.0 == change_id
+        && matches!(&event.1, LandingEvent::Waiting { reason } if reason.starts_with("waiting for approval"))
+}
+
 impl LandingWatch {
-    /// Passes over every wait of `change_id` announced so far: for a caller that has just
-    /// approved the change, a wait the landing announced before the approval is over. Every other
-    /// event, and every wait announced from now on, still counts.
+    /// Passes over every approval wait of `change_id` announced so far: for a caller that has just
+    /// approved the change, a wait for approval the landing announced before the approval is over.
+    /// Every other event (the master-split wait too, which an approval does not resolve), and
+    /// every wait announced from now on, still counts.
     pub fn pass_waits(&mut self, change_id: &str) {
         for receiver in &mut self.receivers {
             while let Ok(event) = receiver.try_recv() {
-                let passed =
-                    event.0 == change_id && matches!(event.1, LandingEvent::Waiting { .. });
-                if !passed {
+                if !is_passed_wait(&event, change_id) {
                     self.early.push(event);
                 }
             }

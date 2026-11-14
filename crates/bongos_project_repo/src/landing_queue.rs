@@ -141,7 +141,7 @@ pub(crate) struct Engine {
     pub(crate) local: Mutex<crate::landing_checks::CheckRegistry>,
     pub(crate) options: Mutex<crate::LandOptions>,
     /// The changes a `land` or `check` of this process is working on.
-    pub(crate) landing: Mutex<std::collections::HashSet<String>>,
+    pub(crate) landing: Mutex<std::collections::HashMap<String, crate::landing::LandMode>>,
     /// The timer of the deadlines; the real one unless a test set its own.
     pub(crate) timer: Mutex<Option<Timer>>,
     #[cfg(test)]
@@ -177,9 +177,16 @@ impl Engine {
 
     /// Marks `change_id` as being landed or checked by this process; `None` while another
     /// `land` or `check` of it runs. Dropping the guard unmarks it.
-    pub(crate) fn start_landing(self: &Arc<Self>, change_id: &str) -> Option<LandingGuard> {
-        if !self.landing.lock().insert(change_id.to_string()) {
-            return None;
+    pub(crate) fn start_landing(
+        self: &Arc<Self>,
+        change_id: &str,
+        mode: crate::landing::LandMode,
+    ) -> Option<LandingGuard> {
+        match self.landing.lock().entry(change_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(_) => return None,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(mode);
+            }
         }
         Some(LandingGuard {
             engine: self.clone(),
@@ -187,9 +194,10 @@ impl Engine {
         })
     }
 
-    /// Whether a `land` or `check` of `change_id` runs in this process.
+    /// Whether a `land` of `change_id` runs in this process; a running `check` is not one, since
+    /// it never reports the end of a landing.
     pub(crate) fn is_landing(&self, change_id: &str) -> bool {
-        self.landing.lock().contains(change_id)
+        self.landing.lock().get(change_id) == Some(&crate::landing::LandMode::Land)
     }
 
     /// Releases the lock if `change_id` holds it.

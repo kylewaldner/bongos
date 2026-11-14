@@ -327,3 +327,34 @@ async fn show_changes_lists_a_real_repository_by_section_and_d_opens_the_task_di
         "{text}"
     );
 }
+
+#[test]
+fn an_approval_passes_over_only_approval_waits_of_its_change() {
+    use bongos_project_repo::{LandingEvent, WAITING_MASTER_SPLIT};
+
+    let wait = |id: &str, reason: &str| {
+        (
+            id.to_string(),
+            LandingEvent::Waiting {
+                reason: reason.to_string(),
+            },
+        )
+    };
+    let approval = "waiting for approval: the project's approval policy asks a person";
+    assert!(crate::project_repos::is_passed_wait(
+        &wait("c1", approval),
+        "c1"
+    ));
+    assert!(!crate::project_repos::is_passed_wait(
+        &wait("c1", WAITING_MASTER_SPLIT),
+        "c1"
+    ));
+    assert!(!crate::project_repos::is_passed_wait(
+        &wait("c2", approval),
+        "c1"
+    ));
+    assert!(!crate::project_repos::is_passed_wait(
+        &("c1".to_string(), LandingEvent::Checking),
+        "c1"
+    ));
+}

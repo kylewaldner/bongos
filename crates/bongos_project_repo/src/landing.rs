@@ -515,7 +515,7 @@ impl ProjectRepo {
         running_elsewhere: &mut bool,
     ) -> Result<LandingResult> {
         let writer = self.writer_or_error()?;
-        let Some(_landing) = self.engine.start_landing(change_id) else {
+        let Some(_landing) = self.engine.start_landing(change_id, request.mode) else {
             *running_elsewhere = true;
             // A person's `project: land` of a change already landing (waiting for approval)
             // approves what it holds committed; the running landing goes on.
