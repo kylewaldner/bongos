@@ -168,6 +168,15 @@ pub fn capture_clipboard(cx: &mut App) -> bool {
     true
 }
 
+/// Pushes `text` as a new plain entry, unless it is empty. The text is
+/// already on the clipboard, so nothing is written there.
+pub fn push_plain_text(text: String, cx: &mut App) {
+    if text.is_empty() {
+        return;
+    }
+    update(cx, |ring| ring.push(Entry::plain(text)));
+}
+
 /// Remembers `text` so that [`capture_clipboard`] never pushes it. Only the
 /// latest ignored text is kept.
 pub fn ignore_clipboard_text(text: &str, cx: &mut App) {
