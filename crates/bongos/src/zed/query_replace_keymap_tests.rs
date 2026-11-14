@@ -1,6 +1,7 @@
-//! The query replace prompt keys: `ctrl-q` (quoted insert) and `alt-c` (toggle case) resolve to
-//! their `query_replace::` actions in the prompt, on both platforms, and win over Zed's quit and
-//! the Emacs capitalize-word binding. Outside the prompt those keys keep their meaning.
+//! The query replace keys: in the prompt, `ctrl-q` (quoted insert) and `alt-c` (toggle case)
+//! resolve to their `query_replace::` actions on both platforms and win over the default quit and
+//! the Emacs capitalize-word binding; in an editor running a batch, `ctrl-g` stops it. Outside
+//! those contexts the keys keep their meaning.
 
 use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
 use settings::{KeybindSource, KeymapFile};
@@ -27,6 +28,7 @@ const MACOS: Platform = Platform {
 
 const EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full"];
 const PROMPT: [&str; 3] = ["Workspace", "QueryReplacePrompt", "Editor mode=full"];
+const BATCH: [&str; 3] = ["Workspace", "Pane", "Editor mode=full QueryReplaceBatch"];
 const STRIP_PROMPT: [&str; 4] = [
     "Workspace",
     "Minibuffer",
@@ -131,5 +133,30 @@ async fn alt_c_in_the_prompt_is_not_capitalize_word(cx: &mut TestAppContext) {
             "{}",
             platform.emacs
         );
+    }
+}
+
+#[gpui::test]
+async fn ctrl_g_in_a_running_batch_is_abort(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        for emacs in [true, false] {
+            let keymap = Keymap::new(load_all(&platform, emacs, cx));
+            let (names, pending) = resolve(&keymap, "ctrl-g", &BATCH);
+            assert_eq!(
+                names.first(),
+                Some(&"query_replace::Abort"),
+                "{} (emacs {emacs})",
+                platform.overrides
+            );
+            assert!(!pending, "{}", platform.overrides);
+            // Without a batch the key keeps its meaning.
+            assert_ne!(
+                first(&keymap, "ctrl-g", &EDITOR),
+                Some("query_replace::Abort"),
+                "{} (emacs {emacs})",
+                platform.overrides
+            );
+        }
     }
 }

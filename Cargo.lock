@@ -2601,6 +2601,7 @@ dependencies = [
 name = "bongos_query_replace"
 version = "0.1.0"
 dependencies = [
+ "bongos_emacs",
  "bongos_isearch",
  "bongos_isearch_model",
  "bongos_minibuffer",
@@ -2609,6 +2610,7 @@ dependencies = [
  "command_palette_hooks",
  "editor",
  "fancy-regex 0.17.0",
+ "futures 0.3.32",
  "gpui",
  "language",
  "multi_buffer",
