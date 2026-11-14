@@ -5536,6 +5536,7 @@ mod tests {
                 "keystroke_input",
                 "kotlin",
                 "language_selector",
+                "languages",
                 "line_ending_selector",
                 "linear",
                 "lsp_tool",
