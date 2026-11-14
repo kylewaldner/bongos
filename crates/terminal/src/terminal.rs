@@ -3348,14 +3348,23 @@ mod tests {
         cx.executor().allow_parking();
 
         let (terminal, completion_rx) =
-            build_test_terminal_with_arguments(cx, "sleep".to_string(), vec!["1".to_string()])
+            build_test_terminal_with_arguments(cx, "sleep".to_string(), vec!["600".to_string()])
                 .await;
 
         assert_foreground_process_command_eventually(&terminal, "sleep", cx).await;
 
+        // End the long-lived child deliberately now that it has been observed.
+        terminal.update(cx, |terminal, _| {
+            // kill_active_task is a no-op without a task, so kill the pty child directly.
+            if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
+                info.kill_current_process();
+                info.kill_child_process();
+            }
+        });
+
         assert!(
             completion_rx.recv().await.is_ok(),
-            "expected terminal completion after sleep exits"
+            "expected terminal completion after sleep is killed"
         );
     }
 
@@ -4091,7 +4100,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let mut command_name = None;
-        for _ in 0..100 {
+        for _ in 0..1000 {
             terminal.update(cx, |terminal, _| {
                 if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
                     info.load_for_test();
