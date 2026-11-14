@@ -128,35 +128,42 @@ pub fn write_newest_to_clipboard(cx: &mut App) {
     cx.write_to_clipboard(item);
 }
 
-/// Pushes the system clipboard's text as a new entry when it is not empty,
-/// differs from the newest entry's text and is not the ignored text. The entry
-/// is secret when the clipboard owner (such as a password manager) marked the
-/// text concealed. Returns whether it pushed.
-pub fn capture_clipboard(cx: &mut App) -> bool {
-    let Some(item) = cx.read_from_clipboard() else {
-        return false;
-    };
+/// The entry the system clipboard would add to the ring: its text is not
+/// empty, differs from the newest entry's text and is not the ignored text.
+/// The entry is secret when the clipboard owner (such as a password manager)
+/// marked the text concealed. Reads the clipboard and nothing else.
+fn clipboard_candidate(cx: &App) -> Option<Entry> {
+    let item = cx.read_from_clipboard()?;
     // Asked right after the read, so the platform answers for this same item.
     let concealed = cx.clipboard_is_concealed();
-    let Some(mut entry) = entry_from_clipboard(&item) else {
-        return false;
-    };
+    let mut entry = entry_from_clipboard(&item)?;
     entry.secret = concealed;
     if entry.text.is_empty() {
-        return false;
+        return None;
     }
     if read(cx)
         .and_then(Ring::newest)
         .is_some_and(|newest| newest.text == entry.text)
     {
-        return false;
+        return None;
     }
     let ignored = cx
         .try_global::<KillRing>()
         .and_then(|kill_ring| kill_ring.ignored_clipboard);
     if ignored == Some(ClipboardString::text_hash(&entry.text)) {
-        return false;
+        return None;
     }
+    Some(entry)
+}
+
+/// Pushes the system clipboard's text as a new entry when it is not empty,
+/// differs from the newest entry's text and is not the ignored text. The entry
+/// is secret when the clipboard owner (such as a password manager) marked the
+/// text concealed. Returns whether it pushed.
+pub fn capture_clipboard(cx: &mut App) -> bool {
+    let Some(entry) = clipboard_candidate(cx) else {
+        return false;
+    };
     update(cx, |ring| ring.push(entry));
     true
 }
@@ -167,9 +174,15 @@ pub fn ignore_clipboard_text(text: &str, cx: &mut App) {
     cx.default_global::<KillRing>().ignored_clipboard = Some(ClipboardString::text_hash(text));
 }
 
-/// The newest entry's text.
+/// The text a yank inserts: the clipboard's text when [`capture_clipboard`]
+/// would push it (written by another app since the last kill or yank), else
+/// the newest entry's text. `None` when both are missing. It changes neither
+/// the ring nor its generation; the yank command captures first.
 pub fn yank_text(cx: &App) -> Option<String> {
-    read(cx)?.newest().map(|entry| entry.text.clone())
+    match clipboard_candidate(cx) {
+        Some(entry) => Some(entry.text),
+        None => read(cx)?.newest().map(|entry| entry.text.clone()),
+    }
 }
 
 /// Splits `text` into its pieces by `do_paste`'s rule: each piece is `len`
