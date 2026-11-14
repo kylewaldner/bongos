@@ -30,6 +30,7 @@ use bongos_project_repo_model::{
 };
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc;
+use futures::future::Either;
 #[cfg(test)]
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -412,6 +413,11 @@ impl ProjectRepo {
         *self.engine.probe.lock() = Some(probe);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_timer(&self, timer: crate::landing_queue::Timer) {
+        *self.engine.timer.lock() = Some(timer);
+    }
+
     async fn land_steps(
         &self,
         change_id: &str,
@@ -598,26 +604,40 @@ impl ProjectRepo {
                 drop(slot);
                 continue;
             }
-            let mut in_queue = self.run_builtins(&writer, &run)?;
-            in_queue.extend(
-                self.run_registered(&writer, &mut run, CheckPhase::InQueue)
-                    .await?
-                    .0,
-            );
-            if let Some(ended) = verdict(&in_queue) {
-                return Ok(ended);
-            }
-            let tree = run.tree().to_string();
-            drop(run);
+            // The in-queue checks run under the lock, so they get what is left of the queue
+            // limit: a check still running then is dropped, the change waits with no verdict,
+            // and the lock goes to the next change as the slot is dropped.
             let options = self.land_options();
-            if entered.elapsed() > options.queue_limit {
+            let remaining = options.queue_limit.saturating_sub(entered.elapsed());
+            let in_queue = {
+                let checks = std::pin::pin!(async {
+                    let mut results = self.run_builtins(&writer, &run)?;
+                    results.extend(
+                        self.run_registered(&writer, &mut run, CheckPhase::InQueue)
+                            .await?
+                            .0,
+                    );
+                    anyhow::Ok(results)
+                });
+                let deadline = (self.engine.timer())(remaining);
+                match futures::future::select(checks, deadline).await {
+                    Either::Left((results, _)) => Some(results?),
+                    Either::Right(_) => None,
+                }
+            };
+            let Some(in_queue) = in_queue else {
                 return Ok(LandingResult::NoVerdict {
                     reason: format!(
                         "the landing took longer than the queue limit of {} seconds; land again",
                         options.queue_limit.as_secs()
                     ),
                 });
+            };
+            if let Some(ended) = verdict(&in_queue) {
+                return Ok(ended);
             }
+            let tree = run.tree().to_string();
+            drop(run);
 
             // Step 7.
             let repository = &self.location.repository;

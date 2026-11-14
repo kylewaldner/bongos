@@ -175,3 +175,40 @@ pub(crate) fn write_in(relative: &'static str, text: &'static str) -> Edit {
         true
     })
 }
+
+/// A timer the test fires: every call waits until [`ManualTimer::fire`], or forever.
+#[derive(Clone, Default)]
+pub(crate) struct ManualTimer {
+    waiting: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
+}
+
+impl ManualTimer {
+    pub(crate) fn timer(&self) -> crate::landing_queue::Timer {
+        let waiting = self.waiting.clone();
+        Arc::new(move |_| {
+            let (fire, fired) = oneshot::channel();
+            waiting.lock().push(fire);
+            async move {
+                if fired.await.is_err() {
+                    futures::future::pending::<()>().await;
+                }
+            }
+            .boxed()
+        })
+    }
+
+    /// Ends every wait started so far; how many there were.
+    pub(crate) fn fire(&self) -> usize {
+        let waiting = std::mem::take(&mut *self.waiting.lock());
+        let count = waiting.len();
+        for fire in waiting {
+            fire.send(()).ok();
+        }
+        count
+    }
+}
+
+/// A timer whose every wait has already ended.
+pub(crate) fn elapsed_timer() -> crate::landing_queue::Timer {
+    Arc::new(|_| async {}.boxed())
+}

@@ -116,6 +116,7 @@ pub(crate) struct CheckRun {
     pub(crate) project: ProjectFile,
     pub(crate) meta: ChangeMeta,
     pub(crate) staged_moves: Vec<StagedTodoMove>,
+    pub(crate) timer: crate::landing_queue::Timer,
     /// The materialized change tree and master, while a registered check may read them.
     pins: Option<(PinGuard, PinGuard)>,
 }
@@ -140,6 +141,7 @@ impl CheckRun {
             summary: &self.facts.summary,
             meta: &self.meta,
             live: &self.live,
+            timer: self.timer.clone(),
         }
     }
 
@@ -210,6 +212,7 @@ impl ProjectRepo {
             project,
             meta: meta.clone(),
             staged_moves: staged_moves(&staged),
+            timer: self.engine.timer(),
             pins: None,
         })
     }

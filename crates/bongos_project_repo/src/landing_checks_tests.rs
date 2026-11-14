@@ -341,3 +341,45 @@ fn a_script_check_passes_on_exit_0_fails_on_1_and_gives_no_verdict_otherwise() {
         "{reason}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_hung_script_check_is_stopped_with_no_verdict_and_runs_again_on_the_next_try() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    repo.add_definition_folder("checks", accept_any);
+    let author = person();
+    let ready = root.path().join("ready");
+    let setup = new_copy(&repo, "amber-otter-0001", &author);
+    write_script(
+        &setup,
+        "checks/slow.sh",
+        &format!(
+            "#!/bin/sh\n[ -f '{}' ] && exit 0\nexec sleep 600\n",
+            ready.display()
+        ),
+    );
+    write_definition(
+        &setup,
+        "project.toml",
+        &format!(
+            "{PROJECT_TOML}\n[[landing.checks]]\nname = \"slow\"\n\
+             run = {{ script = \"checks/slow.sh\" }}\n"
+        ),
+    );
+    landed(land(&repo, &setup, &author));
+
+    let copy = new_copy(&repo, "bold-crane-0002", &author);
+    add_task(&copy, "alpha", "a1");
+    // The script hangs until its time is up.
+    repo.set_timer(crate::check_fakes::elapsed_timer());
+    let reason = waiting(land(&repo, &copy, &author));
+    assert!(
+        reason.starts_with("slow: checks/slow.sh ran longer than 600 seconds and was stopped"),
+        "{reason}"
+    );
+    // The no verdict is not kept: the same tree runs the script again, which now ends.
+    repo.set_timer(crate::check_fakes::ManualTimer::default().timer());
+    std::fs::write(&ready, "").unwrap();
+    landed(land(&repo, &copy, &author));
+}

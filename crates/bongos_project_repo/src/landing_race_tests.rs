@@ -11,7 +11,7 @@ use futures::executor::block_on;
 use parking_lot::Mutex;
 use tempfile::TempDir;
 
-use crate::check_fakes::FakeCheck;
+use crate::check_fakes::{FakeCheck, ManualTimer};
 use crate::landing::{InFlight, LANDING_IN_FLIGHT_KEY, ProbePoint};
 use crate::test_support::{
     add_task, fixture_project, land, landed, main_commit, new_copy, person, request, run_git, start,
@@ -192,4 +192,99 @@ fn edits_typed_while_the_checks_run_do_not_land_and_are_kept() {
         std::fs::read_to_string(&typed).unwrap(),
         "typed while checking\n"
     );
+}
+
+/// A change whose in-queue check never ends, holding the lock, with a timer the test fires.
+fn hung_in_queue(repo: &crate::ProjectRepo) -> (ManualTimer, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let hung = Arc::new(FakeCheck::new("hung", CheckPhase::InQueue));
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    *hung.gate.lock() = Some((started_tx, release_rx));
+    repo.add_landing_check(hung);
+    let timer = ManualTimer::default();
+    repo.set_timer(timer.timer());
+    (timer, started_rx, release_tx)
+}
+
+#[test]
+fn a_hung_in_queue_check_gives_no_verdict_at_the_queue_limit_and_the_next_change_lands() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let (timer, started, _release) = hung_in_queue(&repo);
+    let author = Author::agent("chat 1");
+    let first = new_copy(&repo, "amber-otter-0001", &author);
+    let second = new_copy(&repo, "calm-heron-0002", &author);
+    add_task(&first, "alpha", "a1");
+    add_task(&second, "beta", "b1");
+    let mut events = repo.landing_events();
+    let second_id = second.change_id.clone();
+    let land_first = repo.land_now(&first.change_id, request("first", &author), start());
+    let land_second = async {
+        started.await.unwrap();
+        repo.land_now(&second.change_id, request("second", &author), start())
+            .await
+    };
+    let watch = async {
+        while let Some((change, event)) = events.next().await {
+            if change == second_id && event == (LandingEvent::Queued { position: 1 }) {
+                // The second waits for the lock the first holds while its check hangs; then
+                // the queue limit is reached.
+                assert_eq!(repo.landing_holder(), Some(first.change_id.clone()));
+                assert_eq!(timer.fire(), 1);
+                break;
+            }
+        }
+    };
+    let (first_result, second_result, ()) =
+        block_on(async { futures::join!(land_first, land_second, watch) });
+    let LandingResult::NoVerdict { reason } = first_result.unwrap() else {
+        panic!("expected no verdict");
+    };
+    assert!(reason.contains("queue limit"), "{reason}");
+    let commit = landed(second_result.unwrap());
+    assert_eq!(main_commit(&repo), commit);
+    let files = run_git(&repo, &["ls-tree", "-r", "--name-only", "main"]);
+    assert!(files.contains("tasks/beta") && !files.contains("tasks/alpha"));
+    assert_eq!(repo.landing_holder(), None);
+    // The first still waits to be landed again.
+    assert_eq!(
+        repo.change(&first.change_id).unwrap().unwrap().state,
+        crate::changes::ChangeState::Requested
+    );
+}
+
+#[test]
+fn a_change_whose_in_queue_check_hangs_can_be_abandoned_once_the_queue_limit_ends_it() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let (timer, started, _release) = hung_in_queue(&repo);
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let old = main_commit(&repo);
+    let land_it = repo.land_now(&copy.change_id, request("first", &author), start());
+    let control = async {
+        started.await.unwrap();
+        // It holds the lock while the check hangs, so abandoning it is refused.
+        let refused = repo.abandon_now(&copy.change_id, start()).await;
+        timer.fire();
+        refused
+    };
+    let (result, refused) = block_on(async { futures::join!(land_it, control) });
+    assert!(
+        matches!(refused, Err(crate::AbandonRefused::Landing)),
+        "{refused:?}"
+    );
+    assert!(
+        matches!(result.unwrap(), LandingResult::NoVerdict { .. }),
+        "expected no verdict"
+    );
+    assert_eq!(repo.landing_holder(), None);
+    block_on(repo.abandon_now(&copy.change_id, start())).unwrap();
+    assert_eq!(
+        block_on(repo.wait_for_landing(&copy.change_id)).unwrap(),
+        LandingResult::Abandoned
+    );
+    assert!(!copy.path.exists());
+    assert_eq!(main_commit(&repo), old);
 }

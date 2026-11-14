@@ -31,6 +31,8 @@ pub struct CheckInput<'a> {
     pub summary: &'a ChangeSummary,
     pub meta: &'a ChangeMeta,
     pub live: &'a bongos_project_repo_model::checks::LiveFacts,
+    /// What a check that bounds its own run (a `script` check) waits on.
+    pub(crate) timer: crate::landing_queue::Timer,
 }
 
 /// A check a landing runs on the change's tree.

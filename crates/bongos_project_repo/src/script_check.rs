@@ -2,19 +2,24 @@
 //! script (from the materialized tree of master, so a change cannot rewrite the check that
 //! judges it) with the change's materialized tree, the change summary as JSON and the change
 //! meta as JSON as its arguments. Exit 0 passes, exit 1 fails, any other exit or a script that
-//! cannot be started (a missing interpreter) gives no verdict.
+//! cannot be started (a missing interpreter) gives no verdict. A script still running after
+//! [`SCRIPT_TIMEOUT`] is killed and gives no verdict.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bongos_project_repo_model::checks::{CheckOutcome, CheckPhase};
 use bongos_project_repo_model::layout::DEFINITIONS_DIR;
 use futures::FutureExt as _;
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, Either};
 
 use crate::landing_checks::{CheckInput, LandingCheck};
 
 pub(crate) const SCRIPT_KIND: &str = "script";
+
+/// How long a script check may run before it is killed.
+pub(crate) const SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// How much of a script's output a failure or no verdict quotes.
 const QUOTED_OUTPUT_BYTES: usize = 2000;
@@ -69,6 +74,7 @@ impl LandingCheck for ScriptCheck {
         let summary = serde_json::to_string(input.summary);
         let meta = serde_json::to_string(input.meta);
         let shown = self.script.clone();
+        let timer = input.timer.clone();
         async move {
             if !script.is_file() {
                 return CheckOutcome::no_verdict(format!("master has no script {shown}"));
@@ -80,11 +86,25 @@ impl LandingCheck for ScriptCheck {
                 }
             };
             let mut command = util::command::new_command(&script);
-            command.current_dir(&root).arg(&root).arg(summary).arg(meta);
-            let output = match command.output().await {
-                Ok(output) => output,
-                Err(error) => {
+            // Dropping the run on the timeout drops the child, which kills it.
+            command
+                .current_dir(&root)
+                .arg(&root)
+                .arg(summary)
+                .arg(meta)
+                .kill_on_drop(true);
+            let output = match futures::future::select(command.output().boxed(), timer(SCRIPT_TIMEOUT))
+                .await
+            {
+                Either::Left((Ok(output), _)) => output,
+                Either::Left((Err(error), _)) => {
                     return CheckOutcome::no_verdict(format!("{shown} could not run: {error}"));
+                }
+                Either::Right(_) => {
+                    return CheckOutcome::no_verdict(format!(
+                        "{shown} ran longer than {} seconds and was stopped",
+                        SCRIPT_TIMEOUT.as_secs()
+                    ));
                 }
             };
             let mut said = output.stdout.clone();
