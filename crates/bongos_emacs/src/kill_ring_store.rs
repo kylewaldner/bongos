@@ -74,7 +74,8 @@ pub fn init(cx: &mut App) {
         ..saver
     });
     cx.observe_global::<KillRing>(ring_changed).detach();
-    cx.observe_global::<SettingsStore>(settings_changed).detach();
+    cx.observe_global::<SettingsStore>(settings_changed)
+        .detach();
 }
 
 fn current_json(cx: &App) -> String {

@@ -85,7 +85,11 @@ async fn kill_ring_survives_a_new_app_over_the_same_db(
     start(cx_a, &db, None);
     let mut editor_cx = EditorTestContext::new(cx_a).await;
     editor_cx.update(|_, cx| {
-        cx.bind_keys([KeyBinding::new("ctrl-k", KillLine::default(), Some("Editor"))])
+        cx.bind_keys([KeyBinding::new(
+            "ctrl-k",
+            KillLine::default(),
+            Some("Editor"),
+        )])
     });
     editor_cx.set_state("ˇone\nˇtwo\nthree");
     editor_cx.simulate_keystrokes("ctrl-k");
@@ -93,7 +97,11 @@ async fn kill_ring_survives_a_new_app_over_the_same_db(
     editor_cx.run_until_parked();
     let before = editor_cx.update(|_, cx| saved_form(kill_ring::read(cx).unwrap()));
     assert_eq!(before.len(), 2);
-    assert_eq!(before[1].pieces.len(), 2, "the kill has one piece per caret");
+    assert_eq!(
+        before[1].pieces.len(),
+        2,
+        "the kill has one piece per caret"
+    );
 
     start(cx_b, &db, None);
     let after = cx_b.update(|cx| saved_form(kill_ring::read(cx).unwrap()));
