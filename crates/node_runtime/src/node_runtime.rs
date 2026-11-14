@@ -727,6 +727,8 @@ impl NodeRuntimeTrait for ManagedNodeRuntime {
             let mut command = util::command::new_command(npm_command.path);
             command.args(npm_command.args);
             command.envs(npm_command.env);
+            // Dropping the install (a cancelled download) kills npm.
+            command.kill_on_drop(true);
             if let Some(directory) = directory {
                 command.current_dir(directory);
             }
@@ -892,6 +894,8 @@ impl NodeRuntimeTrait for SystemNodeRuntime {
         let mut command = util::command::new_command(npm_command.path);
         command.args(npm_command.args);
         command.envs(npm_command.env);
+        // Dropping the install (a cancelled download) kills npm.
+        command.kill_on_drop(true);
         if let Some(directory) = directory {
             command.current_dir(directory);
         }
@@ -1097,7 +1101,7 @@ fn npm_command_env(node_binary: Option<&Path>) -> HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use anyhow::{Result, bail};
     use http_client::Url;
@@ -1383,5 +1387,71 @@ mod tests {
             "no version found for npm package test-package before 2023-12-01T00:00:00.000Z"
         );
         Ok(())
+    }
+
+    /// A fake npm that announces its pid on a FIFO and then sleeps with the FIFO still open, so
+    /// the FIFO reaches end-of-file exactly when the sleeping process dies.
+    #[cfg(unix)]
+    #[test]
+    fn test_dropping_an_npm_install_kills_npm() {
+        use super::{NodeRuntimeTrait, SystemNodeRuntime};
+        use std::io::{BufRead, Read};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("announce");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let npm = dir.path().join("npm");
+        std::fs::write(
+            &npm,
+            format!(
+                "#!/bin/sh\nexec 3>'{}'\necho $$ >&3\nexec sleep 60\n",
+                fifo.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (started_tx, started_rx) = futures::channel::oneshot::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let reader = std::thread::spawn({
+            let fifo = fifo.clone();
+            move || {
+                let mut announce = std::io::BufReader::new(std::fs::File::open(fifo).unwrap());
+                let mut pid = String::new();
+                announce.read_line(&mut pid).unwrap();
+                started_tx.send(pid).ok();
+                let mut rest = Vec::new();
+                announce.read_to_end(&mut rest).ok();
+                closed_tx.send(()).ok();
+            }
+        });
+
+        let runtime = SystemNodeRuntime {
+            node: PathBuf::from("node"),
+            npm,
+            scratch_dir: dir.path().to_path_buf(),
+        };
+        smol::block_on(async {
+            let install =
+                runtime.run_npm_subcommand(Some(dir.path()), None, "install", &["some-package"]);
+            futures::select! {
+                _ = futures::FutureExt::fuse(install) => panic!("the fake npm finished"),
+                pid = futures::FutureExt::fuse(started_rx) => {
+                    assert!(!pid.unwrap().trim().is_empty());
+                }
+            }
+        });
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("npm kept running after its install was dropped");
+        reader.join().unwrap();
     }
 }

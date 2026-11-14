@@ -39,7 +39,7 @@ use util::fs::{make_file_executable, remove_matching};
 use util::paths::PathStyle;
 use util::rel_path::RelPath;
 
-use http_client::github_download::{GithubBinaryMetadata, download_server_binary};
+use http_client::github_download::{GithubBinaryMetadata, download_server_binary_with_progress};
 use parking_lot::Mutex;
 use std::str::FromStr;
 use std::{
@@ -456,6 +456,7 @@ impl LspInstaller for TyLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
+        let server_name = self.name();
 
         async move {
             let GitHubLspBinaryVersion {
@@ -516,12 +517,13 @@ impl LspInstaller for TyLspAdapter {
                 }
             }
 
-            download_server_binary(
+            download_server_binary_with_progress(
                 &*delegate.http_client(),
                 &url,
                 expected_digest.as_deref(),
                 &destination_path,
                 Self::GITHUB_ASSET_KIND,
+                &|done, total| delegate.report_download_progress(server_name.clone(), done, total),
             )
             .await?;
             make_file_executable(&server_path).await?;
@@ -2594,6 +2596,7 @@ impl LspInstaller for RuffLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
+        let server_name = self.name();
 
         async move {
             let GitHubLspBinaryVersion {
@@ -2651,12 +2654,13 @@ impl LspInstaller for RuffLspAdapter {
                 }
             }
 
-            download_server_binary(
+            download_server_binary_with_progress(
                 &*delegate.http_client(),
                 &url,
                 expected_digest.as_deref(),
                 &destination_path,
                 Self::GITHUB_ASSET_KIND,
+                &|done, total| delegate.report_download_progress(server_name.clone(), done, total),
             )
             .await?;
             make_file_executable(&server_path).await?;

@@ -3233,7 +3233,8 @@ impl Project {
                 Event::LanguageServerLog(*server_id, log_type.clone(), string.clone()),
             ),
             LspStoreEvent::LanguageServerStartupStderr { .. }
-            | LspStoreEvent::LanguageServerStartFailed { .. } => {}
+            | LspStoreEvent::LanguageServerStartFailed { .. }
+            | LspStoreEvent::LanguageServerDownloadProgress { .. } => {}
             LspStoreEvent::LanguageDetected {
                 buffer,
                 new_language,

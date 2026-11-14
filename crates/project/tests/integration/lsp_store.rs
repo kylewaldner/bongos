@@ -11,6 +11,82 @@ use util::path;
 
 use crate::init_test;
 
+/// Download progress a delegate reports reaches `LspStore` subscribers, and
+/// `cancel_server_download` sets the flag of the download that started last.
+#[gpui::test]
+async fn test_server_download_progress_and_cancel(cx: &mut TestAppContext) {
+    use language::LspAdapterDelegate;
+    use lsp::LanguageServerName;
+    use std::sync::atomic::Ordering;
+
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/the-root"), json!({ "main.rs": "fn main() {}" }))
+        .await;
+    let project = Project::test(fs, [path!("/the-root").as_ref()], cx).await;
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscription = cx.update(|cx| {
+        let events = events.clone();
+        cx.subscribe(&lsp_store, move |_, event, _| {
+            if let LspStoreEvent::LanguageServerDownloadProgress {
+                name,
+                worktree_id,
+                done,
+                total,
+            } = event
+            {
+                events
+                    .borrow_mut()
+                    .push((name.clone(), *worktree_id, *done, *total));
+            }
+        })
+    });
+    let (delegate, worktree_id) = lsp_store.update(cx, |lsp_store, cx| {
+        let local = lsp_store.as_local().unwrap();
+        let worktree = local.worktree_store.read(cx).worktrees().next().unwrap();
+        let worktree_id = worktree.read(cx).id();
+        (
+            LocalLspAdapterDelegate::from_local_lsp(local, &worktree, cx),
+            worktree_id,
+        )
+    });
+    let server = LanguageServerName::new_static("downloaded-server");
+
+    delegate.report_download_progress(server.clone(), 0, Some(300));
+    delegate.report_download_progress(server.clone(), 300, Some(300));
+    delegate.report_download_progress(server.clone(), 7, None);
+    cx.run_until_parked();
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            (server.clone(), worktree_id, 0, Some(300)),
+            (server.clone(), worktree_id, 300, Some(300)),
+            (server.clone(), worktree_id, 7, None),
+        ]
+    );
+
+    assert!(
+        !lsp_store.read_with(cx, |lsp_store, _| lsp_store.cancel_server_download(&server)),
+        "no download of the server started yet"
+    );
+    let first = delegate.download_cancel_flag(server.clone());
+    assert!(lsp_store.read_with(cx, |lsp_store, _| lsp_store.cancel_server_download(&server)));
+    assert!(first.load(Ordering::SeqCst));
+    let second = delegate.download_cancel_flag(server.clone());
+    assert!(
+        !second.load(Ordering::SeqCst),
+        "a new download starts uncancelled"
+    );
+    let other = delegate.download_cancel_flag(LanguageServerName::new_static("other-server"));
+    lsp_store.read_with(cx, |lsp_store, _| lsp_store.cancel_server_download(&server));
+    assert!(second.load(Ordering::SeqCst));
+    assert!(
+        !other.load(Ordering::SeqCst),
+        "a cancel stops only its own server"
+    );
+}
+
 #[gpui::test]
 async fn test_removing_invisible_worktree_cleans_reused_lsp_bookkeeping(cx: &mut TestAppContext) {
     init_test(cx);

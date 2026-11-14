@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use gpui::AsyncApp;
 use http_client::{
     github::{AssetKind, GitHubLspBinaryVersion, build_asset_url},
-    github_download::download_server_binary,
+    github_download::download_server_binary_with_progress,
 };
 use language::{LspAdapter, LspAdapterDelegate, LspInstaller, Toolchain};
 use lsp::{CodeActionKind, LanguageServerBinary, LanguageServerName, Uri};
@@ -107,6 +107,7 @@ impl LspInstaller for EsLintLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
+        let server_name = self.name();
         let node = self.node.clone();
 
         async move {
@@ -116,12 +117,15 @@ impl LspInstaller for EsLintLspAdapter {
             if fs::metadata(&server_path).await.is_err() {
                 remove_matching(&container_dir, |_| true).await;
 
-                download_server_binary(
+                download_server_binary_with_progress(
                     &*delegate.http_client(),
                     &version.url,
                     None,
                     &destination_path,
                     Self::GITHUB_ASSET_KIND,
+                    &|done, total| {
+                        delegate.report_download_progress(server_name.clone(), done, total)
+                    },
                 )
                 .await?;
 
