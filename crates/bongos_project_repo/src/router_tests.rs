@@ -476,9 +476,7 @@ fn a_todo_moved_to_another_task_keeps_its_state() {
             todo_id: "t2".to_string(),
         }]
     );
-    writer(&repo)
-        .transact(|tx| tx.apply_ops(&state))
-        .unwrap();
+    writer(&repo).transact(|tx| tx.apply_ops(&state)).unwrap();
     let l2 = writer(&repo).read(|read| read.task("l2")).unwrap().unwrap();
     assert_eq!(todo_state(&l2, "t2"), TodoState::Skipped);
     let l1 = writer(&repo).read(|read| read.task("l1")).unwrap().unwrap();
@@ -546,9 +544,7 @@ fn a_split_moves_todos_and_work_as_the_rows_hold_them_when_applied() {
         commands::set_result(tree, ctx, "l1", newer.clone())
     });
 
-    writer(&repo)
-        .transact(|tx| tx.apply_ops(&state))
-        .unwrap();
+    writer(&repo).transact(|tx| tx.apply_ops(&state)).unwrap();
     let kept = writer(&repo)
         .read(|read| read.task(&keeper))
         .unwrap()
