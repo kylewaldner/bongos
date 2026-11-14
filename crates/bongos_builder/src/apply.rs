@@ -6,7 +6,9 @@
 //! the keeper of every split whose keeper the proposal does not mark, opens the preview and asks
 //! "Apply proposal N?". Nothing is written before that answer, except the save of the buffer.
 //!
-//! On Apply one command goes to the work store's serial writer. It runs on the tree the writer
+//! On Apply one command goes to the work store's serial writer; in a project repository it makes
+//! the working copy `proposal-<root slug>-<n>`, and the Apply is the person's `project: approve`
+//! of it (see [`apply_and_approve`]). It runs on the tree the writer
 //! holds, with the running work collected and the file read when Apply was chosen (never the
 //! previewed ones), and refuses unless the diff it computes has the previewed fingerprint; so a
 //! tree, file or running chat that changed since the preview writes nothing. A proposal applied
@@ -14,7 +16,8 @@
 //! creates twice. The apply never stops a process: a task with a running chat is kept, not
 //! cancelled.
 //!
-//! A reject writes only the root's `[[proposals]]` record, through the same writer.
+//! A reject records the rejection in the root's `[[proposals]]` record, through the same writer,
+//! and abandons the proposal's working copy, if one waits to land.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -28,14 +31,14 @@ use bongos_work::model::PersonAtKeyboard;
 use bongos_work::model::commands::{Context as WorkContext, Outcome};
 use bongos_work::model::store::WorkTree;
 use bongos_work::model::{ProposalState, TaskId};
-use bongos_work::{WorkStore, WriteError, pick, ready};
-use gpui::{AppContext as _, Context, Window};
+use bongos_work::{LandingVerdict, WorkStore, WriteError, WriteOutcome, pick, ready};
+use gpui::{App, AppContext as _, Context, Entity, Window};
 use settings::Settings as _;
 use workspace::Workspace;
 
 use crate::actions::show_toast;
 use crate::choose::{self, Chosen};
-use crate::{TaskBuilderSettings, live, preview_view, view};
+use crate::{TaskBuilderSettings, later, live, preview_view, view};
 
 /// The question before anything is written.
 pub(crate) fn confirm_prompt(number: u32) -> String {
@@ -487,34 +490,79 @@ fn queue(
                 return;
             }
         };
-        let Ok(write) = workspace.update_in(cx, |_, window, cx| {
+        let Ok(applying) = workspace.update_in(cx, |_, window, cx| {
             // The running work now, right before the write is queued, never the previewed set:
             // a chat started since the preview (or during the read above) changes the diff, and
             // the writer refuses.
             let now = store.read(cx).snapshot();
             let live = now.map(|now| live::collect(&now, cx)).unwrap_or_default();
-            let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
-            store.update(cx, |store, cx| {
-                store.write(
-                    ctx,
-                    move |tree, ctx| {
-                        apply_command(&request, &root, number, tree, ctx, &live, &bytes)
-                    },
-                    cx,
-                )
-            })
+            let person = |window: &Window, cx: &App| {
+                WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx))
+            };
+            apply_and_approve(
+                &store,
+                (person(window, cx), person(window, cx)),
+                (request, root, number),
+                (live, bytes),
+                summary,
+                cx,
+            )
         }) else {
             return;
         };
-        let message = match write.await {
-            Ok(_) => summary,
-            Err(error) => error.to_string(),
-        };
+        let message = applying.await;
         workspace
             .update(cx, |workspace, cx| show_toast(workspace, message, cx))
             .ok();
     })
     .detach();
+}
+
+/// Writes the apply as the person `contexts.0`, and approves it as the person `contexts.1` (two
+/// attestations: one is spent by the write, one by the approval). In a project repository the
+/// write makes the working copy `proposal-<root slug>-<number>` (the author's `proposal` is set
+/// here) that waits to land, and `project: approve` of it is the Apply; master is not touched
+/// before. Resolves with the toast: `summary` once it applied, or why it did not. A held landing
+/// (a failed check) leaves the proposal pending with the reason, which the needs-you source
+/// reports.
+pub(crate) fn apply_and_approve(
+    store: &Entity<WorkStore>,
+    contexts: (WorkContext, WorkContext),
+    (request, root, number): (Request, TaskId, u32),
+    (live, bytes): (bongos_builder_model::LiveSet, Vec<u8>),
+    summary: String,
+    cx: &mut App,
+) -> gpui::Task<String> {
+    let (mut ctx, approver) = contexts;
+    ctx.author.proposal = Some((root.clone(), number));
+    let watch = bongos_work::watch_landings(cx);
+    let write = store.update(cx, |store, cx| {
+        let task = root.clone();
+        store.write_outcome(
+            ctx,
+            move |tree, ctx| apply_command(&request, &task, number, tree, ctx, &live, &bytes),
+            cx,
+        )
+    });
+    cx.spawn(async move |cx| match write.await {
+        // Written at once: not a project repository, or the change is state only.
+        Ok(WriteOutcome::Applied(_)) => summary,
+        Ok(WriteOutcome::Landing { change_id, .. }) => {
+            let approved = cx.update(|cx| bongos_work::approve_proposal(&change_id, approver, cx));
+            if let Err(error) = approved.await {
+                return format!("Proposal {number} was not approved: {error}");
+            }
+            match watch.verdict(&change_id, false).await {
+                LandingVerdict::Landed => summary,
+                LandingVerdict::Held(reason) => {
+                    let held = format!("Proposal {number} pending: {reason}");
+                    cx.update(|cx| later::hold(&root, number, reason, cx));
+                    held
+                }
+            }
+        }
+        Err(error) => error.to_string(),
+    })
 }
 
 /// `task: reject proposal`.
@@ -559,20 +607,30 @@ fn reject_chosen(
                 return;
             }
         };
-        let Ok(write) = workspace.update_in(cx, |_, window, cx| {
+        let abandon_root = task_id.clone();
+        let Ok((write, abandon)) = workspace.update_in(cx, |_, window, cx| {
             let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
-            store.update(cx, |store, cx| {
+            let write = store.update(cx, |store, cx| {
                 store.write(
                     ctx,
                     move |tree, ctx| reject_command(&task_id, number, tree, ctx, &bytes),
                     cx,
                 )
-            })
+            });
+            (
+                write,
+                bongos_work::abandon_proposal(&abandon_root, number, cx),
+            )
         }) else {
             return;
         };
+        // The record of the rejection goes to state; then the working copy of the proposal, if
+        // one waits to land, is abandoned with its branch and files. Master is never touched.
         let message = match write.await {
-            Ok(_) => rejected_message(number),
+            Ok(_) => match abandon.await {
+                Ok(_) => rejected_message(number),
+                Err(error) => format!("Proposal {number} rejected, but its working copy: {error}"),
+            },
             Err(error) => error.to_string(),
         };
         workspace

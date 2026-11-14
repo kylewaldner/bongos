@@ -16,6 +16,7 @@ doctest = false
 anyhow.workspace = true
 bongos_builder_model.workspace = true
 bongos_chat.workspace = true
+bongos_project_repo.workspace = true
 bongos_prompts.workspace = true
 bongos_work.workspace = true
 command_palette_hooks.workspace = true
@@ -36,6 +37,7 @@ bongos_work_model = { workspace = true, features = ["test-support"] }
 db = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
+futures.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
 # Like bongos_prompts: `project` and `workspace` are only lint-clean together under test-support.
