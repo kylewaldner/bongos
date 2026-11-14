@@ -1823,6 +1823,81 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_java_and_terraform_settings(cx: &mut App) {
+        use settings_content::MergeFromTrait as _;
+
+        let store = SettingsStore::new(cx, &default_settings());
+        let defaults = store.raw_default_settings();
+        let java = defaults
+            .project
+            .java
+            .as_ref()
+            .expect("default.json defines `java`");
+        assert_eq!(java.server_jdk, None);
+        assert_eq!(java.jdk_home, None);
+        let terraform = defaults
+            .project
+            .terraform
+            .as_ref()
+            .expect("default.json defines `terraform`");
+        assert_eq!(terraform.binary, None);
+
+        // User values resolve, and a project's values override them. Relative paths stay verbatim.
+        let mut merged = defaults.clone();
+        let user = SettingsContent::parse_json_with_comments(
+            r#"{ "java": { "server_jdk": "jdk/17", "jdk_home": "/opt/jdk21" },
+                 "terraform": { "binary": "tofu" } }"#,
+        )
+        .unwrap();
+        merged.merge_from(&user);
+        let java = merged.project.java.clone().unwrap();
+        assert_eq!(java.server_jdk.as_deref(), Some("jdk/17"));
+        assert_eq!(java.jdk_home.as_deref(), Some("/opt/jdk21"));
+        assert_eq!(
+            merged.project.terraform.clone().unwrap().binary.as_deref(),
+            Some("tofu")
+        );
+
+        let project = SettingsContent::parse_json_with_comments(
+            r#"{ "java": { "jdk_home": "jdk/21" }, "terraform": { "binary": "./bin/terraform" } }"#,
+        )
+        .unwrap();
+        merged.merge_from(&project);
+        let java = merged.project.java.unwrap();
+        assert_eq!(java.server_jdk.as_deref(), Some("jdk/17"));
+        assert_eq!(java.jdk_home.as_deref(), Some("jdk/21"));
+        assert_eq!(
+            merged.project.terraform.unwrap().binary.as_deref(),
+            Some("./bin/terraform")
+        );
+    }
+
+    #[gpui::test]
+    fn test_java_and_terraform_language_defaults(cx: &mut App) {
+        let store = SettingsStore::new(cx, &default_settings());
+        let languages = &store
+            .raw_default_settings()
+            .project
+            .all_languages
+            .languages
+            .0;
+        let servers = |name: &str| languages[name].language_servers.clone().unwrap();
+        assert_eq!(servers("Java"), ["jdtls", "kotlin", "..."]);
+        assert_eq!(servers("Terraform"), ["terraform-ls", "..."]);
+        assert_eq!(servers("Terraform Vars"), ["terraform-ls", "..."]);
+        for name in ["Terraform", "Terraform Vars"] {
+            assert_eq!(
+                languages[name].formatter,
+                Some(settings_content::FormatterList::Single(
+                    settings_content::Formatter::LanguageServer(
+                        settings_content::LanguageServerFormatterSpecifier::Current
+                    )
+                ))
+            );
+        }
+    }
+
+    #[gpui::test]
     fn test_settings_store_basic(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &default_settings());
         store.register_setting::<AutoUpdateSetting>();
