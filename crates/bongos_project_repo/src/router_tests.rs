@@ -561,3 +561,54 @@ fn a_split_moves_todos_and_work_as_the_rows_hold_them_when_applied() {
     assert!(parent.todos.is_empty());
     assert_eq!(parent.result, None);
 }
+
+#[test]
+fn a_link_at_a_moved_tasks_new_place_goes_into_that_tasks_files_folder() {
+    let root = TempDir::new().unwrap();
+    let (_repo, loaded) = loaded(&root);
+    let tree = loaded.work_tree().unwrap();
+    let mut change = commands::move_task(&tree, &ctx(), "l2", "l1").unwrap();
+    let old_dir = tree.task_by_id("l2").unwrap().dir.clone();
+    let new_dir = change
+        .moves
+        .iter()
+        .find(|moved| moved.from == old_dir)
+        .unwrap()
+        .to
+        .clone();
+    let link = commands::artifact_link(&tree, &ctx(), "l2", "https://example.com/doc", "Doc")
+        .unwrap()
+        .writes
+        .into_iter()
+        .find_map(|write| match write {
+            commands::Write::Link { path, file } => Some((path, file)),
+            _ => None,
+        })
+        .unwrap();
+    let name = link.0.strip_prefix(&old_dir).unwrap().to_path_buf();
+    change.writes.push(commands::Write::Link {
+        path: new_dir.join(&name),
+        file: link.1,
+    });
+    let Routed::Definition {
+        definition, files, ..
+    } = route(&tree, &change).unwrap()
+    else {
+        panic!("a move is a definition");
+    };
+    assert!(
+        definition.contains(&DefinitionOp::Move {
+            from: "tasks/report".to_string(),
+            to: "tasks/backfill/tasks/report".to_string(),
+        }),
+        "{definition:?}"
+    );
+    let written: Vec<&PathBuf> = files
+        .iter()
+        .filter_map(|op| match op {
+            FileOp::Write { path, .. } => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(written, [&Path::new("l2").join(&name)]);
+}

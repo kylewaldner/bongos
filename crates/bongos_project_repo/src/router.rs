@@ -179,6 +179,27 @@ pub fn route(tree: &WorkTree, change: &Change) -> Result<Routed, String> {
         });
     }
 
+    // Moved tasks, outer before inner, so a path at a task's new place maps to the task's own
+    // files folder, never through its new parent's.
+    let mut moved_tasks: Vec<(&PathBuf, &str)> = change
+        .moves
+        .iter()
+        .filter_map(|moved| {
+            let task = tree.task_by_dir(&moved.from)?;
+            task.definition.as_ref()?;
+            Some((&moved.to, task.id()?))
+        })
+        .collect();
+    moved_tasks.sort_by_key(|(to, _)| to.components().count());
+    for (to, id) in moved_tasks {
+        let folder = places.folder_of(to)?;
+        places.0.push(Place {
+            dir: to.clone(),
+            id: id.to_string(),
+            folder,
+        });
+    }
+
     for write in &change.writes {
         match write {
             Write::Task { dir, file } => {
