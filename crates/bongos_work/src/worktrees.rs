@@ -718,8 +718,8 @@ fn create(request: Request, window: &mut Window, cx: &mut Context<Workspace>) {
         };
         let id = request.id.clone();
         let write = workspace
-            .update(cx, |workspace, cx| {
-                queue(workspace, cx, {
+            .update_in(cx, |workspace, window, cx| {
+                queue(workspace, window, cx, {
                     let started = started.clone();
                     move |tree, ctx| model::record_worktree(tree, ctx, &id, started.clone())
                 })

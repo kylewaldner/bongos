@@ -24,6 +24,7 @@ use bongos_builder_model::diff::{Keeper, KeeperSource, fingerprint};
 use bongos_builder_model::{
     Choices, Diff, Node, Op, Parsed, Severity, applied_summary, diff, preview,
 };
+use bongos_work::model::PersonAtKeyboard;
 use bongos_work::model::commands::{Context as WorkContext, Outcome};
 use bongos_work::model::store::WorkTree;
 use bongos_work::model::{ProposalState, TaskId};
@@ -486,15 +487,16 @@ fn queue(
                 return;
             }
         };
-        let Ok(write) = workspace.update(cx, |_, cx| {
+        let Ok(write) = workspace.update_in(cx, |_, window, cx| {
             // The running work now, right before the write is queued, never the previewed set:
             // a chat started since the preview (or during the read above) changes the diff, and
             // the writer refuses.
             let now = store.read(cx).snapshot();
             let live = now.map(|now| live::collect(&now, cx)).unwrap_or_default();
+            let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
             store.update(cx, |store, cx| {
                 store.write(
-                    WorkContext::kyle(),
+                    ctx,
                     move |tree, ctx| {
                         apply_command(&request, &root, number, tree, ctx, &live, &bytes)
                     },
@@ -557,10 +559,11 @@ fn reject_chosen(
                 return;
             }
         };
-        let Ok(write) = workspace.update(cx, |_, cx| {
+        let Ok(write) = workspace.update_in(cx, |_, window, cx| {
+            let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
             store.update(cx, |store, cx| {
                 store.write(
-                    WorkContext::kyle(),
+                    ctx,
                     move |tree, ctx| reject_command(&task_id, number, tree, ctx, &bytes),
                     cx,
                 )

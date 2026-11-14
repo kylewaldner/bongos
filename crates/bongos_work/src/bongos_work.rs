@@ -15,11 +15,13 @@ mod modes;
 mod open;
 mod overview;
 mod panel;
+mod project_repos;
 mod projects;
 mod rebase;
 mod ref_watch;
 mod registry;
 mod repositories;
+mod seams;
 mod settings;
 mod status;
 mod store;
@@ -44,6 +46,7 @@ pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, focus_task, is_project_
 pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
 pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root_tasks};
 pub use panel::{WorkPanel, init_panel, task_at_point};
+pub use project_repos::register_project_repo;
 pub use rebase::RebaseState;
 pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};
 pub use registry::{
@@ -51,6 +54,9 @@ pub use registry::{
     NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart, observe_view_opened,
 };
 pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
+pub use seams::{
+    ChangeId, DefinitionWriter, DefinitionWriters, ProjectSource, ProjectSources, WriteOutcome,
+};
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
 pub use status::{FocusStatus, breadcrumb};
 pub use store::{
@@ -130,6 +136,8 @@ mod overview_tests;
 #[cfg(test)]
 mod panel_tests;
 #[cfg(test)]
+mod person_marker_tests;
+#[cfg(test)]
 mod privacy_tests;
 #[cfg(test)]
 mod rebase_tests;
@@ -140,7 +148,11 @@ mod registry_tests;
 #[cfg(test)]
 mod repository_tests;
 #[cfg(test)]
+mod seam_tests;
+#[cfg(test)]
 mod store_tests;
+#[cfg(test)]
+mod structure_tests;
 #[cfg(test)]
 mod top_level_tests;
 #[cfg(test)]

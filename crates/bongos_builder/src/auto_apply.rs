@@ -4,6 +4,7 @@
 //! takes the setting.
 
 use bongos_work::WorkStore;
+use bongos_work::model::PersonAtKeyboard;
 use bongos_work::model::commands::{Change, Context as WorkContext, Outcome, Write};
 use bongos_work::model::rules::Place;
 use bongos_work::model::store::WorkTree;
@@ -135,7 +136,7 @@ pub(crate) fn toggle_auto_apply(
 fn toggle_on(
     task_id: String,
     workspace: &mut Workspace,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
     let Some(store) = WorkStore::global(cx) else {
@@ -143,9 +144,10 @@ fn toggle_on(
         return;
     };
     let global = TaskBuilderSettings::get_global(cx).auto_apply;
+    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
     let write = store.update(cx, |store, cx| {
         store.write(
-            WorkContext::kyle(),
+            ctx,
             move |tree, ctx| toggle_command(tree, ctx, &task_id, global),
             cx,
         )

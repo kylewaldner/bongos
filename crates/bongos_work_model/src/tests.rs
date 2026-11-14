@@ -795,6 +795,7 @@ fn linear_state_round_trips_and_sits_between_proposals_and_history() {
         state: ProposalState::Applied,
         at: "2026-11-09T12:00:00Z".parse().unwrap(),
         by: "agent".to_string(),
+        by_kind: None,
         hash: "00".to_string(),
         extra: Extra::new(),
     });
@@ -854,4 +855,44 @@ fn linear_state_omits_empty_fields_and_keeps_unknown_keys() {
             .unwrap()
             .contains("future = \"kept\"")
     );
+}
+
+#[test]
+fn a_proposal_record_stores_the_kind_of_its_author_and_old_records_have_none() {
+    let old: ProposalRecord = toml::from_str(
+        "number = 1\nstate = \"applied\"\nat = 2026-11-09T12:00:00Z\nby = \"kyle\"\nhash = \"00\"\n",
+    )
+    .unwrap();
+    assert_eq!(old.by_kind, None);
+    // An old record by `kyle` counts as a person; nothing else does.
+    assert!(old.by_person());
+    assert!(
+        !ProposalRecord {
+            by: "agent".to_string(),
+            ..old.clone()
+        }
+        .by_person()
+    );
+    // A record with no kind writes none.
+    assert!(!toml::to_string(&old).unwrap().contains("by_kind"));
+
+    let new = ProposalRecord {
+        by: "alice".to_string(),
+        by_kind: Some(ByKind::from(AuthorKind::Person)),
+        ..old.clone()
+    };
+    let text = toml::to_string(&new).unwrap();
+    assert!(text.contains("by_kind = \"person\""), "{text}");
+    let back: ProposalRecord = toml::from_str(&text).unwrap();
+    assert_eq!(back, new);
+    assert!(back.by_person());
+    // The kind decides, not the name.
+    let agent = ProposalRecord {
+        by: "kyle".to_string(),
+        by_kind: Some(ByKind::Agent),
+        ..old
+    };
+    assert!(!agent.by_person());
+    // A person read back from storage is still a person on a record.
+    assert_eq!(ByKind::from(AuthorKind::PersonClaimed), ByKind::Person);
 }

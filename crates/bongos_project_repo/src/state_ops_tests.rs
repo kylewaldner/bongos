@@ -36,6 +36,7 @@ fn proposal(number: u32, state: ProposalState) -> ProposalRecord {
         state,
         at: "2026-11-12T10:00:00Z".parse().unwrap(),
         by: "agent".to_string(),
+        by_kind: None,
         hash: "ab".repeat(32),
         extra: Default::default(),
     }

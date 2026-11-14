@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use bongos_builder_model::apply::{Request, STALE, applied, file_hash};
 use bongos_builder_model::{Choices, LiveSet, diff, fingerprint, parse, preview};
+use bongos_work::model::PersonAtKeyboard;
 use bongos_work::model::commands::Context as WorkContext;
 use bongos_work::model::store::WorkTree;
 use bongos_work::model::{ProposalState, Status};
@@ -218,7 +219,7 @@ async fn apply_writes_exactly_the_previewed_operations_and_a_second_apply_writes
         &parsed,
         &tree,
         &expected,
-        &WorkContext::kyle(),
+        &WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
         &file_hash(LAYERS.as_bytes()),
     )
     .unwrap();
@@ -283,7 +284,7 @@ async fn two_queued_applies_of_one_preview_write_once(cx: &mut gpui::TestAppCont
         let request = request.clone();
         store.update(cx, |store, cx| {
             store.write(
-                WorkContext::kyle(),
+                WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
                 move |tree, ctx| {
                     apply_command(
                         &request,
@@ -558,7 +559,13 @@ async fn a_reject_of_an_applied_proposal_is_refused_even_after_its_file_was_edit
 
     // The writer's command refuses on the tree as it is, whatever the file's bytes.
     let tree = snapshot(cx);
-    let refused = reject_command("b", 1, &tree, &WorkContext::kyle(), edited.as_bytes());
+    let refused = reject_command(
+        "b",
+        1,
+        &tree,
+        &WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
+        edited.as_bytes(),
+    );
     assert_eq!(refused.unwrap_err(), reject_applied_message(1));
 
     // And so does the command, which leaves the applied record in place.

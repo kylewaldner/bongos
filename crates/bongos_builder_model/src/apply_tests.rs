@@ -10,8 +10,8 @@ use bongos_work_model::journal::{run_steps, write_journal};
 use bongos_work_model::layout::{self, OP_FILE};
 use bongos_work_model::store::{Task, WorkTree, load};
 use bongos_work_model::{
-    Kind, ProposalState, Status, TaskFile, TodoRole, TodoState, UnblockPoint, serialize_project,
-    serialize_task,
+    Author, ByKind, Kind, PersonAtKeyboard, ProposalState, Status, TaskFile, TodoRole, TodoState,
+    UnblockPoint, serialize_project, serialize_task,
 };
 use tempfile::TempDir;
 
@@ -184,6 +184,15 @@ impl Fixture {
 
 /// Parses, diffs and builds the apply of `text` on the fixture, without writing it.
 fn build(fixture: &Fixture, text: &str, live: &LiveSet) -> (Parsed, Diff, Applied) {
+    build_by(fixture, text, live, &ctx())
+}
+
+fn build_by(
+    fixture: &Fixture,
+    text: &str,
+    live: &LiveSet,
+    ctx: &Context,
+) -> (Parsed, Diff, Applied) {
     let parsed = checked_parse(&fixture.tree, text);
     let diff = diff(&parsed, &fixture.tree, live, &Choices::default());
     assert_eq!(diff.refusal, None);
@@ -191,7 +200,7 @@ fn build(fixture: &Fixture, text: &str, live: &LiveSet) -> (Parsed, Diff, Applie
         &parsed,
         &fixture.tree,
         &diff,
-        &ctx(),
+        ctx,
         &file_hash(text.as_bytes()),
     )
     .expect("the apply is built");
@@ -1119,4 +1128,35 @@ fn a_locked_goal_is_never_written() {
         )
     );
     assert_eq!(snapshot(locked_root.path()), before);
+}
+
+/// The kind of the author of an apply, as the root's proposal record stores it.
+fn recorded_kind(ctx: &Context) -> (String, Option<ByKind>) {
+    let fixture = billing_fixture();
+    let (_, _, applied) = build_by(&fixture, &billing_text(), &LiveSet::default(), ctx);
+    write_change(fixture.root(), &applied.change).expect("the change is written");
+    let after = fixture.reload();
+    let record = file(&after, &id_of("billing")).proposals[0].clone();
+    (record.by, record.by_kind)
+}
+
+#[test]
+fn the_proposal_record_stores_the_kind_of_the_author_that_applied_it() {
+    let at = timestamp("2026-11-09T12:00:00Z");
+    assert_eq!(
+        recorded_kind(&Context::new("kyle", at)),
+        ("kyle".to_string(), Some(ByKind::Unattributed))
+    );
+    let person = Context::at_keyboard(PersonAtKeyboard::for_test());
+    assert_eq!(recorded_kind(&person).1, Some(ByKind::Person));
+    let agent = Context::new("agent", at).with_author(Author::agent("agent").with_chat("c1"));
+    assert_eq!(
+        recorded_kind(&agent),
+        ("agent".to_string(), Some(ByKind::Agent))
+    );
+    let workflow = Context::new("w", at).with_author(Author::workflow("linear sync"));
+    assert_eq!(
+        recorded_kind(&workflow),
+        ("linear sync".to_string(), Some(ByKind::Workflow))
+    );
 }

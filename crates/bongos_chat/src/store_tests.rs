@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bongos_chat_model::{Agent, ChatRecord, read_record, record_path, write_record};
 use bongos_work::{WorkDirs, WorkSettings, WorkStore};
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{self, Context};
 use bongos_work_model::layout;
 use command_palette_hooks::CommandPaletteFilter;
@@ -193,7 +194,7 @@ async fn a_record_in_a_moved_task_is_still_indexed(cx: &mut TestAppContext) {
         .work
         .update(cx, |store, cx| {
             store.write(
-                Context::kyle(),
+                Context::at_keyboard(PersonAtKeyboard::for_test()),
                 |tree, ctx| commands::move_task(tree, ctx, "l1", "l2"),
                 cx,
             )

@@ -211,6 +211,7 @@ fn record(file: &mut TaskFile, ctx: &Context, number: u32, state: ProposalState,
         state,
         at: ctx.at,
         by: ctx.by.clone(),
+        by_kind: Some(ctx.author.kind().into()),
         hash: hash.to_string(),
         extra: Extra::new(),
     };

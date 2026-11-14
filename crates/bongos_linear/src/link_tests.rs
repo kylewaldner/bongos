@@ -71,6 +71,7 @@ fn applied(file: &mut TaskFile, number: u32) {
         state: ProposalState::Applied,
         at: "2026-11-09T10:00:00Z".parse().unwrap(),
         by: "kyle".to_string(),
+        by_kind: None,
         hash: format!("hash-{number}"),
         extra: Extra::new(),
     });
@@ -316,8 +317,8 @@ impl Env {
         let before = self.writes(cx);
         self.clear_toast(cx);
         let (id, issue) = (id.to_string(), issue.clone());
-        self.workspace.update(cx, |workspace, cx| {
-            link::finish_link(workspace, id, issue, cx)
+        self.workspace.update_in(cx, |workspace, window, cx| {
+            link::finish_link(workspace, id, issue, window, cx)
         });
         cx.run_until_parked();
         wait_until(cx, "the link", |cx| {
@@ -384,11 +385,17 @@ async fn a_group_link_seeds_offered_with_the_applied_records(cx: &mut TestAppCon
     );
 }
 
+fn ctx() -> bongos_work_model::commands::Context {
+    bongos_work_model::commands::Context::at_keyboard(
+        bongos_work_model::PersonAtKeyboard::for_test(),
+    )
+}
+
 #[gpui::test]
 async fn a_ticket_linked_elsewhere_is_refused_with_no_write(cx: &mut TestAppContext) {
     let (env, cx) = env(cx, true, true).await;
     let tree = env.tree(cx);
-    let reason = link::check(&tree, "l1", &issue(5)).unwrap_err();
+    let reason = link::check(&tree, "l1", &issue(5), &ctx()).unwrap_err();
     assert!(reason.starts_with("SEQ-5 is linked to "), "{reason}");
     assert!(reason.contains("beta"), "{reason}");
 
@@ -399,12 +406,12 @@ async fn a_ticket_linked_elsewhere_is_refused_with_no_write(cx: &mut TestAppCont
     assert_eq!(env.file("alpha", cx), before);
     assert!(env.last_toast(cx).starts_with("SEQ-5 is linked to "));
     // A hand-set link counts too.
-    assert!(link::check(&tree, "l1", &issue(9)).is_err());
+    assert!(link::check(&tree, "l1", &issue(9), &ctx()).is_err());
     // An unlinked ticket is fine, also for a group whose ticket is a subticket of a linked group's.
-    assert!(link::check(&tree, "l1", &issue(121)).is_ok());
+    assert!(link::check(&tree, "l1", &issue(121), &ctx()).is_ok());
     let mut child = issue(101);
     child.parent = Some(issue(100).summary());
-    assert!(link::check(&tree, "g1", &child).is_ok());
+    assert!(link::check(&tree, "g1", &child, &ctx()).is_ok());
 }
 
 #[gpui::test]

@@ -44,6 +44,41 @@ impl Default for Identity {
     }
 }
 
+/// A commit id.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CommitId(pub String);
+
+/// A tree id.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TreeId(pub String);
+
+/// The tree to read: a commit's, or a tree object directly.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TreeRef {
+    Commit(CommitId),
+    Tree(TreeId),
+}
+
+impl TreeRef {
+    /// The object name git resolves to the tree.
+    pub fn treeish(&self) -> &str {
+        match self {
+            TreeRef::Commit(CommitId(id)) | TreeRef::Tree(TreeId(id)) => id,
+        }
+    }
+}
+
+/// One file of a tree, as `git ls-tree -r` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeEntry {
+    pub mode: String,
+    /// `blob`, or `commit` for a submodule.
+    pub kind: String,
+    pub object: String,
+    /// Relative to the tree's root, `/`-separated.
+    pub path: String,
+}
+
 /// A located git binary.
 #[derive(Clone, Debug)]
 pub struct Git {
@@ -88,11 +123,28 @@ impl Git {
     }
 
     async fn run_os(&self, directory: &Path, args: Vec<OsString>) -> Result<String, GitError> {
+        let output = self.run_bytes(directory, args, None).await?;
+        Ok(String::from_utf8_lossy(&output).trim().to_string())
+    }
+
+    /// Runs git with `args` in `directory`, feeding it `stdin`, and returns its raw output.
+    async fn run_bytes(
+        &self,
+        directory: &Path,
+        args: Vec<OsString>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, GitError> {
+        use futures::AsyncWriteExt as _;
+
         let shown = args
             .iter()
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
+        let spawn_error = |error: std::io::Error| GitError::Spawn {
+            args: shown.clone(),
+            message: error.to_string(),
+        };
         let mut command = util::command::new_command(&self.binary);
         command
             .current_dir(directory)
@@ -103,12 +155,35 @@ impl Git {
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_NOSYSTEM", "1");
         }
-        let output = command.output().await.map_err(|error| GitError::Spawn {
-            args: shown.clone(),
-            message: error.to_string(),
-        })?;
+        let output = match stdin {
+            None => command.output().await.map_err(spawn_error)?,
+            Some(input) => {
+                command
+                    .stdin(util::command::Stdio::piped())
+                    .stdout(util::command::Stdio::piped())
+                    .stderr(util::command::Stdio::piped());
+                let mut child = command.spawn().map_err(spawn_error)?;
+                let mut pipe = child.stdin.take();
+                // Written while the output is read, so a large answer never fills its pipe and
+                // stalls the writer.
+                let feed = async move {
+                    if let Some(pipe) = pipe.as_mut() {
+                        pipe.write_all(&input).await?;
+                        pipe.close().await?;
+                    }
+                    drop(pipe);
+                    Ok::<(), std::io::Error>(())
+                };
+                let (fed, output) = futures::join!(feed, child.output());
+                let output = output.map_err(spawn_error)?;
+                if output.status.success() {
+                    fed.map_err(spawn_error)?;
+                }
+                output
+            }
+        };
         if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            Ok(output.stdout)
         } else {
             Err(GitError::Failed {
                 args: shown,
@@ -147,6 +222,89 @@ impl Git {
         self.run_os(directory, args.into_iter().map(OsString::from).collect())
             .await?;
         self.rev_parse(directory, "HEAD").await
+    }
+
+    /// Every file of the tree `treeish` names, recursively, in one `git ls-tree -r`.
+    pub async fn ls_tree_r(
+        &self,
+        directory: &Path,
+        treeish: &str,
+    ) -> Result<Vec<TreeEntry>, GitError> {
+        let args = ["ls-tree", "-r", "-z", "--full-tree", treeish]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let output = self.run_bytes(directory, args, None).await?;
+        let mut entries = Vec::new();
+        for record in output.split(|byte| *byte == 0) {
+            if record.is_empty() {
+                continue;
+            }
+            let record = String::from_utf8_lossy(record);
+            let Some((meta, path)) = record.split_once('\t') else {
+                continue;
+            };
+            let mut parts = meta.split(' ');
+            let (Some(mode), Some(kind), Some(object)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            entries.push(TreeEntry {
+                mode: mode.to_string(),
+                kind: kind.to_string(),
+                object: object.to_string(),
+                path: path.to_string(),
+            });
+        }
+        Ok(entries)
+    }
+
+    /// The contents of each object in `objects` (object ids, or `<commit>:<path>`), in order,
+    /// from one `git cat-file --batch`. A missing object is `None`.
+    pub async fn cat_file_batch(
+        &self,
+        directory: &Path,
+        objects: &[String],
+    ) -> Result<Vec<Option<Vec<u8>>>, GitError> {
+        if objects.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut input = Vec::new();
+        for object in objects {
+            input.extend_from_slice(object.as_bytes());
+            input.push(b'\n');
+        }
+        let args = vec![OsString::from("cat-file"), OsString::from("--batch")];
+        let output = self.run_bytes(directory, args, Some(input)).await?;
+        let malformed = |what: &str| GitError::Failed {
+            args: "cat-file --batch".to_string(),
+            stderr: format!("unexpected output: {what}"),
+        };
+        let mut contents = Vec::with_capacity(objects.len());
+        let mut rest = output.as_slice();
+        for _ in objects {
+            let newline = rest
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .ok_or_else(|| malformed("a header without a newline"))?;
+            let header = String::from_utf8_lossy(&rest[..newline]).to_string();
+            rest = &rest[newline + 1..];
+            if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+                contents.push(None);
+                continue;
+            }
+            let size: usize = header
+                .rsplit(' ')
+                .next()
+                .and_then(|size| size.parse().ok())
+                .ok_or_else(|| malformed(&header))?;
+            if rest.len() < size + 1 {
+                return Err(malformed("a short object"));
+            }
+            contents.push(Some(rest[..size].to_vec()));
+            rest = &rest[size + 1..];
+        }
+        Ok(contents)
     }
 
     /// The commit id `revision` names.

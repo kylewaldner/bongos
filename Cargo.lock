@@ -2226,6 +2226,7 @@ dependencies = [
  "bongos_chat",
  "bongos_prompts",
  "bongos_work",
+ "bongos_work_model",
  "command_palette_hooks",
  "db",
  "editor",
@@ -2549,6 +2550,7 @@ version = "0.1.0"
 dependencies = [
  "bongos_work_model",
  "serde",
+ "tempfile",
  "toml 0.8.23",
 ]
 

@@ -50,7 +50,6 @@ impl Author {
     }
 
     /// A person author. Only this crate builds one, from a [`PersonAtKeyboard`].
-    #[allow(dead_code)]
     pub(crate) fn person(name: impl Into<String>) -> Self {
         Self::new(AuthorKind::Person, name)
     }
@@ -70,6 +69,12 @@ impl Author {
     /// A write nobody named the author of; `by` says what made it.
     pub fn unattributed(by: impl Into<String>) -> Self {
         Self::new(AuthorKind::Unattributed, by)
+    }
+
+    /// The same author acting in the chat `chat`.
+    pub fn with_chat(mut self, chat: impl Into<String>) -> Self {
+        self.chat = Some(chat.into());
+        self
     }
 
     pub fn kind(&self) -> AuthorKind {
@@ -157,6 +162,12 @@ impl PersonAtKeyboard {
     /// Called by UI action handlers, which have a window to pass.
     #[cfg(feature = "gpui")]
     pub fn from_action(_window: &gpui::Window, _cx: &gpui::App) -> Self {
+        Self { _private: () }
+    }
+
+    /// A marker for tests, which have no window.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test() -> Self {
         Self { _private: () }
     }
 }

@@ -66,20 +66,21 @@ impl StateSink for LocalSink {
 /// The sink of a process that found the project's writer held by another process, until writes
 /// can be sent there: it refuses every write.
 pub struct RefusingSink {
-    pid: u32,
+    pid: Option<u32>,
 }
 
 impl RefusingSink {
-    /// `pid` is the process that holds the writer.
-    pub fn new(pid: u32) -> Self {
-        Self { pid }
+    /// `pid` is the process that holds the writer, `None` when it could not be read.
+    pub fn new(pid: impl Into<Option<u32>>) -> Self {
+        Self { pid: pid.into() }
     }
 
     fn refusal(&self) -> anyhow::Error {
-        anyhow!(
-            "this project is open in another bongos process (pid {}); work there or close it",
-            self.pid
-        )
+        let pid = match self.pid {
+            Some(pid) => format!("pid {pid}"),
+            None => "pid unknown".to_string(),
+        };
+        anyhow!("this project is open in another bongos process ({pid}); work there or close it")
     }
 }
 

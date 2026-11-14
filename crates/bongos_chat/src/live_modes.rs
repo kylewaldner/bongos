@@ -13,10 +13,13 @@ use std::rc::Rc;
 use bongos_work::{LiveModes, LiveModesRegistry, LiveModesSource, WorkStore, WriteError};
 use bongos_work_model::commands::{Context, todo_start};
 use bongos_work_model::derive::{self, Shape, current_todo};
-use bongos_work_model::now;
+use bongos_work_model::{Author, now};
 use gpui::{App, Entity, Task};
 
 use crate::{ChatRuntime, ChatRuntimeEvent, ChatState, ChatStore, ChatStoreEvent};
+
+/// Who a chat's own writes are by, in the history.
+const CHAT: &str = "chat";
 
 /// The name of the source in the registry.
 pub const SOURCE_NAME: &str = "chats";
@@ -86,12 +89,18 @@ fn watch_runtime(runtime: &Entity<ChatRuntime>, cx: &mut App) {
     .detach();
 }
 
+/// The context of a write a chat makes by itself: an agent working in the chat `chat_id`.
+pub(crate) fn chat_context(chat_id: &str) -> Context {
+    Context::new(CHAT, now()).with_author(Author::agent(CHAT).with_chat(chat_id))
+}
+
 /// A chat started on the leaf `task_id`: when the leaf's current todo (the first open one) has no
-/// `started` time, writes it, through the store's writer as `chat` (03 D8: "a chat opened while it
-/// is current"). Resolves to whether this call started it. A group, a task without an open todo,
+/// `started` time, writes it, through the store's writer as an agent working in the chat `chat_id`
+/// (03 D8: "a chat opened while it is current"). Resolves to whether this call started it. A group, a task without an open todo,
 /// and a todo that already started are left alone: the command's own refusal is not an error here.
 pub fn start_current_todo(
     work: &Entity<WorkStore>,
+    chat_id: &str,
     task_id: &str,
     cx: &mut App,
 ) -> Task<Result<bool, WriteError>> {
@@ -107,12 +116,9 @@ pub fn start_current_todo(
         return Task::ready(Ok(false));
     }
     let id = task_id.to_string();
+    let ctx = chat_context(chat_id);
     let write = work.update(cx, |work, cx| {
-        work.write(
-            Context::new("chat", now()),
-            move |tree, ctx| todo_start(tree, ctx, &id, None),
-            cx,
-        )
+        work.write(ctx, move |tree, ctx| todo_start(tree, ctx, &id, None), cx)
     });
     cx.spawn(async move |_| match write.await {
         Ok(_) => Ok(true),

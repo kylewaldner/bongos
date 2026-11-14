@@ -9,14 +9,19 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use bongos_builder_model::LiveSet;
+use bongos_builder_model::{Choices, LiveSet, diff, parse};
+use bongos_work::model::store::{Project, Task, WorkTree};
+use bongos_work::model::{AuthorKind, Kind, ProjectFile, TaskFile};
 use bongos_work::{LiveModes, LiveModesRegistry, LiveModesSource, WorkStore};
 use gpui::{App, TestAppContext, UpdateGlobal as _, VisualTestContext};
 use settings::SettingsStore;
 
 use crate::actions::LastToast;
 use crate::auto_apply::toggled_message;
-use crate::later::{ChatOwner, FailAutoApply, Later, Status, TestChats, agent_line, finish_apply};
+use crate::later::{
+    AGENT, ChatOwner, Chats, FailAutoApply, Later, Status, Switch, TestChats, agent_context,
+    agent_line, finish_apply, wait_reason as decide,
+};
 use crate::propose::{is_untouched, prefilled};
 use crate::view_tests::{
     Harness, dispatch, harness, set_settings_in, snapshot, task_toml, wait_for_in, write,
@@ -462,4 +467,93 @@ async fn an_untouched_pre_filled_file_raises_nothing(cx: &mut TestAppContext) {
     assert_eq!(status(cx, &h.file(1)), Some(Status::Untouched));
     assert_eq!(needs_you(cx, "top"), 0);
     assert_eq!(attempts(cx), 0);
+}
+
+/// A task with a flat folder, as a project repository's `files/<id>/`: nothing in its path says
+/// where it sits in the tree.
+fn flat_task(id: &str, goal: &str, children: Vec<Task>) -> Task {
+    let mut file = TaskFile::new(goal, Kind::Other);
+    file.id = id.to_string();
+    Task {
+        slug: id.to_string(),
+        dir: PathBuf::from("/root/files").join(id),
+        file: Some(file),
+        artifacts: None,
+        errors: Vec::new(),
+        definition: None,
+        pending: None,
+        needs_conversion: false,
+        broken_edges: Vec::new(),
+        files: Default::default(),
+        hashes: Default::default(),
+        children,
+    }
+}
+
+/// `top` holds `billing` (which the proposal changes) and `other`.
+fn flat_tree() -> WorkTree {
+    WorkTree {
+        root: PathBuf::from("/root"),
+        projects: vec![Project {
+            slug: "p".to_string(),
+            file: Some(ProjectFile::new("P")),
+            task: flat_task(
+                "top",
+                "Top",
+                vec![
+                    flat_task("b", "Billing", Vec::new()),
+                    flat_task("other", "Other", Vec::new()),
+                ],
+            ),
+        }],
+        ..WorkTree::default()
+    }
+}
+
+/// Why the proposal by the chat `c`, which sits on the task `owner`, waits on `flat_tree()`.
+fn flat_wait(owner: &str) -> Option<String> {
+    let tree = flat_tree();
+    let text = helper(1, "by chat c", "more");
+    let parsed = parse(&text);
+    let diff = diff(&parsed, &tree, &LiveSet::default(), &Choices::default());
+    let chats: Chats = [(
+        "c".to_string(),
+        ChatOwner {
+            task_id: owner.to_string(),
+            name: "helper chat".to_string(),
+        },
+    )]
+    .into();
+    let switch = Switch {
+        enabled: true,
+        global: true,
+        todo_warning: 0,
+    };
+    decide(&parsed, &diff, 1, &tree, &chats, switch)
+}
+
+#[test]
+fn a_proposal_in_the_chats_subtree_applies_and_one_outside_waits_with_flat_folders() {
+    // The chat is on the project's top task, above `billing`.
+    assert_eq!(flat_wait("top"), None);
+    // On `billing` itself.
+    assert_eq!(flat_wait("b"), None);
+    // On a sibling: `billing` is outside its subtree.
+    let reason = flat_wait("other").expect("waits");
+    assert!(reason.contains("outside the subtree"), "{reason}");
+}
+
+#[test]
+fn an_auto_apply_is_the_agent_in_the_chat_the_proposal_names() {
+    let context = agent_context(helper(1, "by chat c1", "more").as_bytes());
+    assert_eq!(context.author.kind(), AuthorKind::Agent);
+    assert_eq!(context.author.name, AGENT);
+    assert_eq!(context.author.chat.as_deref(), Some("c1"));
+    assert_eq!(context.by, AGENT);
+    assert!(!context.has_attestation());
+
+    // A proposal with no chat names none.
+    let context = agent_context(helper(1, "by workflow w", "more").as_bytes());
+    assert_eq!(context.author.kind(), AuthorKind::Agent);
+    assert_eq!(context.author.chat, None);
 }

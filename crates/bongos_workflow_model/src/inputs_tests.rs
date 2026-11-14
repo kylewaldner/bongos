@@ -28,6 +28,9 @@ fn task(dir: &str, file: Option<TaskFile>, files: &[&str], manifest: Option<&str
         file,
         artifacts: manifest.map(|text| toml::from_str::<ArtifactsFile>(text).unwrap()),
         errors: Vec::new(),
+        definition: None,
+        pending: None,
+        needs_conversion: false,
         broken_edges: Vec::new(),
         files: files
             .iter()
@@ -270,4 +273,34 @@ pr = { type = "text", from = "task.pr", required = false }"#,
         "https://e/1\nhttps://e/2"
     );
     assert_eq!(value(&inputs, "pr"), None);
+}
+
+/// A tree whose folders are flat, not nested under their parents: the plan is found through the
+/// tree, not the folder names.
+#[test]
+fn a_plan_is_found_on_a_grandparent_whose_folder_is_not_above_the_leaf() {
+    let leaf = task(
+        "/root/files/leaf-id",
+        Some(leaf_file()),
+        &["plan.md"],
+        Some(MANIFEST),
+    );
+    let mut middle = task(
+        "/root/files/middle-id",
+        Some(TaskFile::new("The middle", Kind::Other)),
+        &[],
+        None,
+    );
+    middle.children.push(leaf.clone());
+    let mut top = task(
+        "/root/files/top-id",
+        Some(TaskFile::new("The project", Kind::Other)),
+        &["plan.md"],
+        None,
+    );
+    top.children.push(middle);
+    let tree = tree(top);
+    let definition = definition(r#"plan = { type = "path", from = "task.plan" }"#);
+    let inputs = resolve(&definition, &leaf, &tree, None, &BTreeMap::new());
+    assert_eq!(value(&inputs, "plan"), text("/root/files/top-id/plan.md"));
 }

@@ -1047,9 +1047,19 @@ async fn test_a_chat_start_starts_the_current_todo_once(cx: &mut TestAppContext)
     assert_eq!(history(cx).len(), 1);
 
     // Asked directly, it says it did nothing.
-    let again = cx.update(|cx| crate::start_current_todo(&h.work, "t1", cx));
+    let again = cx.update(|cx| crate::start_current_todo(&h.work, "chat", "t1", cx));
     assert_eq!(again.await, Ok(false));
     assert_eq!(todo_starts(&h, cx), started);
+}
+
+#[test]
+fn a_chats_own_write_is_an_agent_in_that_chat() {
+    let ctx = crate::live_modes::chat_context("c1");
+    assert_eq!(ctx.author.kind(), bongos_work_model::AuthorKind::Agent);
+    assert_eq!(ctx.author.name, "chat");
+    assert_eq!(ctx.author.chat.as_deref(), Some("c1"));
+    assert_eq!(ctx.by, "chat");
+    assert!(!ctx.has_attestation());
 }
 
 #[gpui::test]
@@ -1058,16 +1068,16 @@ async fn test_start_current_todo_writes_once_and_ignores_other_tasks(cx: &mut Te
     wait_for_task(&h, cx).await;
     // A group and an unknown task have no todo to start.
     for id in ["top", "nope"] {
-        let task = cx.update(|cx| crate::start_current_todo(&h.work, id, cx));
+        let task = cx.update(|cx| crate::start_current_todo(&h.work, "chat", id, cx));
         assert_eq!(task.await, Ok(false), "{id}");
     }
     assert_eq!(todo_starts(&h, cx), vec![None, None]);
 
-    let first = cx.update(|cx| crate::start_current_todo(&h.work, "t1", cx));
+    let first = cx.update(|cx| crate::start_current_todo(&h.work, "chat", "t1", cx));
     assert_eq!(first.await, Ok(true));
     let started = todo_starts(&h, cx);
     assert!(started[0].is_some() && started[1].is_none());
-    let second = cx.update(|cx| crate::start_current_todo(&h.work, "t1", cx));
+    let second = cx.update(|cx| crate::start_current_todo(&h.work, "chat", "t1", cx));
     assert_eq!(second.await, Ok(false));
     assert_eq!(todo_starts(&h, cx), started);
 }

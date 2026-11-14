@@ -282,6 +282,7 @@ fn a_command_changes_only_its_own_task_file() {
         number: 1,
         hash: "h".to_string(),
         by: "kyle".to_string(),
+        by_person: true,
     }];
     let uuid = Uuid::new_v4();
     let commands = [

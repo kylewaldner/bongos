@@ -471,6 +471,7 @@ impl ChatRuntime {
         let store = self.store.clone();
         let record_path = request.record_path;
         let task_id = request.task_id;
+        let started_chat = prepared.record.id.clone();
         Ok(cx.spawn(async move |this, cx| {
             let result = async {
                 if let Some(previous) = previous_capture {
@@ -528,7 +529,7 @@ impl ChatRuntime {
                         cx,
                     );
                     if let Some(task_id) = &task_id {
-                        this.start_todo(task_id, cx);
+                        this.start_todo(&started_chat, task_id, cx);
                     }
                 })
                 .map_err(|error| LaunchError::Spawn(format!("{error:#}")))?;
@@ -556,10 +557,11 @@ impl ChatRuntime {
         self.launching_set().contains(chat_id)
     }
 
-    /// A chat started on the leaf `task_id`: its current todo starts if it had not (design D23).
-    fn start_todo(&mut self, task_id: &str, cx: &mut Context<Self>) {
+    /// The chat `chat_id` started on the leaf `task_id`: its current todo starts if it had not
+    /// (design D23).
+    fn start_todo(&mut self, chat_id: &str, task_id: &str, cx: &mut Context<Self>) {
         let work = self.store.read(cx).work().clone();
-        let start = crate::live_modes::start_current_todo(&work, task_id, cx);
+        let start = crate::live_modes::start_current_todo(&work, chat_id, task_id, cx);
         cx.spawn(async move |_, _| {
             if let Err(error) = start.await {
                 log::warn!("chats: could not start the task's current todo: {error}");

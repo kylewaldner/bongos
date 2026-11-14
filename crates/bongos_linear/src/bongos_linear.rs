@@ -28,6 +28,7 @@ mod settings;
 mod stacks;
 mod status;
 mod subtickets;
+mod subtickets_actions;
 mod suggestions;
 pub mod sync;
 pub mod token;

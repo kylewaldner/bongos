@@ -32,12 +32,12 @@ use std::time::SystemTime;
 use bongos_builder_model::apply::{APPLIED_EVENT, Request, file_hash};
 use bongos_builder_model::{
     By, Choices, Diff, KeeperSource, LiveSet, Op, Parsed, Severity, applied_summary, diff,
-    fingerprint,
+    fingerprint, parse,
 };
 use bongos_chat::ChatStore;
 use bongos_work::model::commands::{Change, Context as WorkContext, Outcome, Write};
 use bongos_work::model::store::{Task, WorkTree};
-use bongos_work::model::{TodoRole, TodoState, now};
+use bongos_work::model::{Author, TodoRole, TodoState, now};
 use bongos_work::{NeedsYouRegistry, WorkStore, WorkStoreEvent};
 use gpui::{App, AppContext as _, Global};
 use settings::{Settings as _, SettingsStore};
@@ -397,7 +397,8 @@ pub(crate) fn wait_reason(
     };
     let inside = tree
         .task_by_id(&owner.task_id)
-        .is_some_and(|owner| root.dir.starts_with(&owner.dir));
+        .and_then(|owner| owner.id())
+        .is_some_and(|owner_id| tree.is_ancestor(owner_id, &diff.root));
     if !inside {
         return Some(format!(
             "{} is outside the subtree of chat {}",
@@ -442,6 +443,18 @@ pub(crate) fn wait_reason(
         }
         _ => None,
     })
+}
+
+/// The context of an auto-apply of the proposal `bytes`: the agent, in the chat the proposal says
+/// it is by.
+pub(crate) fn agent_context(bytes: &[u8]) -> WorkContext {
+    let mut author = Author::agent(AGENT);
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && let Some(By::Chat(id)) = parse(text).header.by.as_ref().map(|by| &by.value)
+    {
+        author = author.with_chat(id.clone());
+    }
+    WorkContext::new(AGENT, now()).with_author(author)
 }
 
 /// The history line and toast of an auto-apply: `agent applied proposal 2: added 1 task (chat
@@ -621,9 +634,10 @@ fn run_queue(cx: &mut App) {
                     let chats = chats(cx);
                     let switch = Switch::read(cx);
                     let holder = entry.task_id.clone();
+                    let ctx = agent_context(&bytes);
                     store.update(cx, |store, cx| {
                         store.write(
-                            WorkContext::new(AGENT, now()),
+                            ctx,
                             move |tree, ctx| {
                                 #[cfg(test)]
                                 if let Some(reason) = &injected {

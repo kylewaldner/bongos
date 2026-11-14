@@ -9,6 +9,7 @@
 use std::any::TypeId;
 use std::sync::Arc;
 
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{
     self as model, Context as WorkContext, NewTask, NewTodo, Placement, TaskEdit,
 };
@@ -197,6 +198,7 @@ pub fn ready(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<A
 /// Queues `command` on the store's writer. `None`, after a toast, when there is no store.
 pub(crate) fn queue(
     workspace: &mut Workspace,
+    window: &Window,
     cx: &mut Context<Workspace>,
     command: impl Fn(&WorkTree, &WorkContext) -> model::Outcome + Send + 'static,
 ) -> Option<gpui::Task<Result<model::Change, WriteError>>> {
@@ -204,18 +206,18 @@ pub(crate) fn queue(
         show_toast(workspace, WriteError::Off.to_string(), cx);
         return None;
     };
-    Some(store.update(cx, |store, cx| {
-        store.write(WorkContext::kyle(), command, cx)
-    }))
+    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    Some(store.update(cx, |store, cx| store.write(ctx, command, cx)))
 }
 
 /// Queues `command` on the store's writer and shows why it did not happen, if it did not.
 pub(crate) fn submit(
     workspace: &mut Workspace,
+    window: &Window,
     cx: &mut Context<Workspace>,
     command: impl Fn(&WorkTree, &WorkContext) -> model::Outcome + Send + 'static,
 ) {
-    let Some(write) = queue(workspace, cx, command) else {
+    let Some(write) = queue(workspace, window, cx, command) else {
         return;
     };
     cx.spawn(async move |workspace, cx| {
@@ -486,12 +488,12 @@ fn new_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         "Goal of the new task, in one sentence",
         "",
         false,
-        Box::new(|goal, workspace, _, cx| {
+        Box::new(|goal, workspace, window, cx| {
             let placement = Placement::OneOff {
                 activity: DEFAULT_ACTIVITY.to_string(),
             };
             let new = new_task_with_default_kind(&placement, goal, cx);
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::new_task(tree, ctx, placement.clone(), new.clone())
             })
         }),
@@ -514,10 +516,10 @@ fn new_child(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 "Goal of the new task, in one sentence",
                 "",
                 false,
-                Box::new(move |goal, workspace, _, cx| {
+                Box::new(move |goal, workspace, window, cx| {
                     let new =
                         new_task_with_default_kind(&Placement::Under(parent.clone()), goal, cx);
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::new_child(tree, ctx, &parent, new.clone())
                     })
                 }),
@@ -557,11 +559,11 @@ fn advance(
             }
             !override_ship || ship_waits(task, tree)
         },
-        Box::new(move |id, workspace, _, cx| {
+        Box::new(move |id, workspace, window, cx| {
             if refuse_active_run(&id, workspace, cx) {
                 return;
             }
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::advance(tree, ctx, &id, override_ship)
             })
         }),
@@ -592,8 +594,10 @@ fn close(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Worksp
         "Close which task?",
         "There is no open task to close",
         |task, _| has_status(task, |status| status == Status::Open),
-        Box::new(|id, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| model::close(tree, ctx, &id))
+        Box::new(|id, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
+                model::close(tree, ctx, &id)
+            })
         }),
     );
 }
@@ -620,7 +624,7 @@ fn drop_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 })
                 .unwrap_or_default();
             if open.is_empty() {
-                submit(workspace, cx, move |tree, ctx| {
+                submit(workspace, window, cx, move |tree, ctx| {
                     model::drop_task(tree, ctx, &id, false)
                 });
                 return;
@@ -636,9 +640,9 @@ fn drop_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                     "Keep them".to_string(),
                 ],
                 1,
-                Box::new(move |choice, workspace, _, cx| {
+                Box::new(move |choice, workspace, window, cx| {
                     if choice == 0 {
-                        submit(workspace, cx, move |tree, ctx| {
+                        submit(workspace, window, cx, move |tree, ctx| {
                             model::drop_task(tree, ctx, &id, true)
                         });
                     }
@@ -658,8 +662,8 @@ fn reopen(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Works
         "Reopen which task?",
         "There is no closed or cancelled task to reopen",
         |task, _| has_status(task, |status| status != Status::Open),
-        Box::new(|id, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        Box::new(|id, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::reopen(tree, ctx, &id)
             })
         }),
@@ -737,9 +741,9 @@ fn edit_kind(
         "Kind",
         labels,
         selected,
-        Box::new(move |choice, workspace, _, cx| {
+        Box::new(move |choice, workspace, window, cx| {
             let kind = KINDS[choice];
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::edit(
                     tree,
                     ctx,
@@ -773,8 +777,8 @@ fn todo_add(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                 "Name of the new todo",
                 "",
                 false,
-                Box::new(move |name, workspace, _, cx| {
-                    submit(workspace, cx, move |tree, ctx| {
+                Box::new(move |name, workspace, window, cx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::todo_add(
                             tree,
                             ctx,
@@ -840,11 +844,11 @@ fn todo_remove(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         ),
         |task, tree| is_leaf_with(task, tree, |_| true),
         |_, _| true,
-        |id, index, workspace, _, cx| {
+        |id, index, workspace, window, cx| {
             if refuse_active_run(&id, workspace, cx) {
                 return;
             }
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::todo_remove(tree, ctx, &id, index)
             })
         },
@@ -863,11 +867,11 @@ fn todo_skip(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
         ),
         |task, tree| is_open_leaf(task, tree) && is_leaf_with(task, tree, is_open),
         |_, todo| is_open(todo),
-        |id, index, workspace, _, cx| {
+        |id, index, workspace, window, cx| {
             if refuse_active_run(&id, workspace, cx) {
                 return;
             }
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::todo_skip(tree, ctx, &id, Some(index))
             })
         },
@@ -890,8 +894,8 @@ fn todo_reopen(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         ),
         |task, tree| is_leaf_with(task, tree, |todo| !is_open(todo)),
         |_, todo| !is_open(todo),
-        |id, index, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        |id, index, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::todo_reopen(tree, ctx, &id, index)
             })
         },
@@ -918,8 +922,8 @@ fn todo_move(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 &id.clone(),
                 "Move it to the place of which todo?",
                 |_, _| true,
-                Box::new(move |to, workspace, _, cx| {
-                    submit(workspace, cx, move |tree, ctx| {
+                Box::new(move |to, workspace, window, cx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::todo_move(tree, ctx, &id, from, to)
                     })
                 }),
@@ -957,9 +961,9 @@ fn todo_set_workflow(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
                 "Workflow name; leave empty to make the todo manual",
                 &current,
                 true,
-                Box::new(move |workflow, workspace, _, cx| {
+                Box::new(move |workflow, workspace, window, cx| {
                     let workflow = (!workflow.is_empty()).then_some(workflow);
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::todo_set_workflow(tree, ctx, &id, index, workflow.clone())
                     })
                 }),
@@ -994,9 +998,9 @@ fn todo_set_role(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
                 "Role",
                 labels,
                 0,
-                Box::new(move |choice, workspace, _, cx| {
+                Box::new(move |choice, workspace, window, cx| {
                     let role = ROLES[choice];
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::todo_set_role(tree, ctx, &id, index, role)
                     })
                 }),
@@ -1022,8 +1026,8 @@ fn todo_start(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 && is_leaf_with(task, tree, |todo| is_open(todo) && todo.started.is_none())
         },
         |_, todo| is_open(todo) && todo.started.is_none(),
-        |id, index, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        |id, index, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::todo_start(tree, ctx, &id, Some(index))
             })
         },

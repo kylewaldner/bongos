@@ -18,6 +18,7 @@ mod tasks;
 mod todos;
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub use artifacts::*;
@@ -27,6 +28,7 @@ pub use structure::*;
 pub use tasks::*;
 pub use todos::*;
 
+use crate::author::{Author, PersonAtKeyboard};
 use crate::derive::{self, Shape};
 use crate::error::{Error, ErrorKind, Result};
 use crate::files::write_atomic;
@@ -44,21 +46,83 @@ use crate::types::{
     Status, TaskFile, Timestamp, now,
 };
 
-/// Who runs a command and when: `by` is `kyle`, `workflow:<name>`, `agent` or `tree-run`.
-#[derive(Clone, Debug, PartialEq)]
+/// Who runs a command and when. `by` is what history entries record (such as `workflow:<name>`,
+/// `agent` or `tree-run`); `author` says who wrote the change.
+///
+/// A context built from a [`PersonAtKeyboard`] holds it as its attestation. A clone never does,
+/// and `Debug` and `PartialEq` ignore it.
 pub struct Context {
     pub by: String,
     pub at: Timestamp,
+    pub author: Author,
+    attestation: Option<PersonAtKeyboard>,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            by: self.by.clone(),
+            at: self.at,
+            author: self.author.clone(),
+            attestation: None,
+        }
+    }
+}
+
+impl fmt::Debug for Context {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Context")
+            .field("by", &self.by)
+            .field("at", &self.at)
+            .field("author", &self.author)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for Context {
+    fn eq(&self, other: &Self) -> bool {
+        self.by == other.by && self.at == other.at && self.author == other.author
+    }
 }
 
 impl Context {
+    /// A context whose author is unattributed, named `by` verbatim.
     pub fn new(by: impl Into<String>, at: Timestamp) -> Self {
-        Self { by: by.into(), at }
+        let by = by.into();
+        Self {
+            author: Author::unattributed(by.clone()),
+            by,
+            at,
+            attestation: None,
+        }
     }
 
-    /// Kyle, now.
-    pub fn kyle() -> Self {
-        Self::new("kyle", now())
+    /// A person at the keyboard, now. The marker moves into the context as its attestation.
+    pub fn at_keyboard(marker: PersonAtKeyboard) -> Self {
+        let name = person_name();
+        Self {
+            author: Author::person(name.clone()),
+            by: name,
+            at: now(),
+            attestation: Some(marker),
+        }
+    }
+
+    /// The same context written by `author`; `by` becomes the author's name.
+    pub fn with_author(mut self, author: Author) -> Self {
+        self.by = author.name.clone();
+        self.author = author;
+        self
+    }
+
+    /// Moves the attestation out, so it is used at most once.
+    pub fn take_attestation(&mut self) -> Option<PersonAtKeyboard> {
+        self.attestation.take()
+    }
+
+    /// Whether the context still holds its attestation.
+    pub fn has_attestation(&self) -> bool {
+        self.attestation.is_some()
     }
 
     fn entry(&self, event: &str, detail: Option<String>) -> HistoryEntry {
@@ -70,6 +134,15 @@ impl Context {
             extra: Extra::new(),
         }
     }
+}
+
+/// The name of the person at the keyboard: the OS user name, else "person".
+fn person_name() -> String {
+    ["USER", "LOGNAME"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "person".to_string())
 }
 
 /// The whole new content of one file.

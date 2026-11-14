@@ -1,4 +1,4 @@
-use bongos_work_model::{ProposalRecord, ProposalState, Status, TodoState};
+use bongos_work_model::{ByKind, ProposalRecord, ProposalState, Status, TodoState};
 use futures::executor::block_on;
 use uuid::Uuid;
 
@@ -295,6 +295,35 @@ fn finish_create_refuses_a_ticket_another_task_links() {
     assert!(!is_synced(file(&tree, "a")));
 }
 
+fn who_applied(by: &str, by_kind: Option<ByKind>) -> bool {
+    let disk = Disk::new(vec![synced(
+        group("g", vec![applied_as(leaf("x"), 1, by, by_kind)]),
+        "SEQ-1",
+    )]);
+    let found = unoffered(&disk.tree());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].by, by);
+    found[0].by_person
+}
+
+#[test]
+fn a_record_is_by_a_person_by_its_stored_kind_not_its_name() {
+    // A person under any name.
+    assert!(who_applied("alice", Some(ByKind::Person)));
+    // An agent or a workflow, whatever it is called.
+    assert!(!who_applied("kyle", Some(ByKind::Agent)));
+    assert!(!who_applied("kyle", Some(ByKind::Workflow)));
+    assert!(!who_applied("kyle", Some(ByKind::Unattributed)));
+    assert!(!who_applied("agent", Some(ByKind::Healer)));
+}
+
+#[test]
+fn an_old_record_with_no_kind_is_by_a_person_when_its_name_is_kyle() {
+    assert!(who_applied("kyle", None));
+    assert!(!who_applied("agent", None));
+    assert!(!who_applied("workflow:review", None));
+}
+
 fn applied_record(
     task: &mut bongos_work_model::store::Task,
     number: u32,
@@ -307,6 +336,7 @@ fn applied_record(
         state,
         at: timestamp("2026-11-09T10:00:00Z"),
         by: by.to_string(),
+        by_kind: None,
         hash: hash.to_string(),
         extra: Default::default(),
     });
