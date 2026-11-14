@@ -9,8 +9,8 @@ use gpui::{
     AppContext as _, Entity, Focusable as _, KeyBinding, KeyBindingContextPredicate,
     TestAppContext, VisualTestContext, WindowHandle,
 };
-use multi_buffer::ToOffset as _;
 use project::Project;
+use text::ToOffset as _;
 use workspace::{AppState, MinibufferRouting, MultiWorkspace, Workspace};
 
 use crate::actions::{BrowseKillRing, Yank, YankPop};
