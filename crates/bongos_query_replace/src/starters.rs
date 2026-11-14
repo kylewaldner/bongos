@@ -214,6 +214,7 @@ fn answered(
                     preserve_case,
                     template,
                     from: answer.from,
+                    to: answer.to,
                     regexp: answer.regexp,
                     region: bounded,
                 },

@@ -30,8 +30,18 @@ actions!(
         No,
         /// Replaces this match and ends the replace.
         ThisAndExit,
+        /// Replaces this match and waits, showing the result; the next key goes on.
+        ThisAndWait,
+        /// Shows the previous replacement, one older each time, without undoing anything.
+        Previous,
+        /// Undoes the last replacement and asks about that match again.
+        Undo,
+        /// Edits the replacement string of the replace.
+        EditReplacement,
         /// Ends the replace; the cursor stays at the end of the current match.
         Exit,
+        /// Scrolls the current match to the middle, then the top, then the bottom of the window.
+        Recenter,
         /// Shows the list of keys of the replace until the next key.
         Help,
     ]

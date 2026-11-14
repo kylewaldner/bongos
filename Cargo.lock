@@ -2602,6 +2602,7 @@ name = "bongos_query_replace"
 version = "0.1.0"
 dependencies = [
  "bongos_emacs",
+ "bongos_emacs_model",
  "bongos_isearch",
  "bongos_isearch_model",
  "bongos_minibuffer",

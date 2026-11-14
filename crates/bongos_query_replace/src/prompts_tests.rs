@@ -424,6 +424,7 @@ async fn the_replacement_can_be_edited(cx: &mut TestAppContext) {
             "(a)",
             "x\\1",
             move |to, _, _| log.borrow_mut().push(to),
+            |_, _| {},
             window,
             cx,
         )

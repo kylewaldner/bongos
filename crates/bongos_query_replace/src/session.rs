@@ -18,11 +18,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
 
+use bongos_emacs::recenter::scroll_row_to;
+use bongos_emacs_model::recenter::Cycle;
 use bongos_isearch::display::Display;
 use bongos_isearch::engine::Cancel;
+use bongos_isearch_model::CaseMode;
 use bongos_query_replace_model::session::{Effect, End, Found, Key, Phase, Reason, Session};
-use bongos_query_replace_model::template::Template;
-use bongos_query_replace_model::text::{counter, decision_prompt, end_message, help};
+use bongos_query_replace_model::template::{self, Template};
+use bongos_query_replace_model::text::{
+    SHOWN_PROMPT, WALKING_PROMPT, counter, decision_prompt, end_message, help, notice,
+};
 use editor::{Addon, Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
@@ -30,14 +35,17 @@ use gpui::{
     Action, App, AppContext as _, Entity, EntityId, Global, KeyContext, Subscription, WeakEntity,
     Window,
 };
-use multi_buffer::{Anchor, MultiBufferOffset};
+use multi_buffer::{Anchor, MultiBufferOffset, ToOffset as _};
 use project::search::SearchQuery;
 use workspace::Workspace;
 
-use crate::actions::{Abort, Exit, Help, No, ThisAndExit, Yes};
+use crate::actions::{
+    Abort, EditReplacement, Exit, Help, No, Previous, Recenter, ThisAndExit, ThisAndWait, Undo, Yes,
+};
 use crate::display::{self, Shown};
-use crate::edits::{Edits, READ_ONLY, Replace, match_anchors};
+use crate::edits::{Edits, NO_TRANSACTION, READ_ONLY, Replace, match_anchors};
 use crate::engine::{self, Replacer, ScanEnd};
+use crate::prompts::{self, Mode};
 use crate::view::QueryReplaceView;
 
 /// The key context of an editor while a batch replaces in it.
@@ -65,6 +73,11 @@ pub(crate) fn init(cx: &mut App) {
         register_key::<Yes>(workspace, Input::Key(Key::Yes));
         register_key::<No>(workspace, Input::Key(Key::No));
         register_key::<ThisAndExit>(workspace, Input::Key(Key::ThisAndExit));
+        register_key::<ThisAndWait>(workspace, Input::Key(Key::ThisAndWait));
+        register_key::<Previous>(workspace, Input::Key(Key::Previous));
+        register_key::<Undo>(workspace, Input::Key(Key::Undo));
+        register_key::<EditReplacement>(workspace, Input::Edit);
+        register_key::<Recenter>(workspace, Input::Recenter);
         register_key::<Exit>(workspace, Input::Key(Key::Exit));
         register_key::<Abort>(workspace, Input::Key(Key::Abort));
         register_key::<Help>(workspace, Input::Help);
@@ -265,6 +278,8 @@ pub(crate) struct InteractiveRequest {
     pub template: Template,
     /// The string to replace, as typed.
     pub from: String,
+    /// The replacement, as typed.
+    pub to: String,
     pub regexp: bool,
     /// Whether the scope is a region the user made, which is kept visible.
     pub region: bool,
@@ -275,6 +290,10 @@ pub(crate) struct InteractiveRequest {
 enum Input {
     Key(Key),
     Help,
+    /// `e`: edit the replacement string.
+    Edit,
+    /// `C-l`: recenter.
+    Recenter,
 }
 
 /// The open interactive replace of a workspace.
@@ -286,10 +305,19 @@ struct Interactive {
     query: Arc<SearchQuery>,
     scope: Range<Anchor>,
     from: String,
+    /// The replacement string, as typed, which `e` starts from.
+    to: String,
     regexp: bool,
     edits: Option<Edits>,
     /// The replacement of the last decision, highlighted until the next one.
     replacement: Option<Range<Anchor>>,
+    /// The inserted text of every replacement the model's stack holds, oldest first, for `^`.
+    history: Vec<Range<Anchor>>,
+    /// The position of the last `C-l`, while it is the last thing pressed.
+    recenter: Option<Cycle>,
+    /// Whether the replacement string is being edited: the view is closed meanwhile, which is
+    /// not an exit.
+    editing: bool,
     /// The folds and collapsed excerpts the session opened.
     folds: Display,
     _editor_events: Option<Subscription>,
@@ -359,6 +387,7 @@ pub(crate) fn open(
         preserve_case,
         template,
         from,
+        to,
         regexp,
         region,
     } = request;
@@ -374,9 +403,13 @@ pub(crate) fn open(
         query,
         scope,
         from,
+        to,
         regexp,
         edits: Some(edits),
         replacement: None,
+        history: Vec::new(),
+        recenter: None,
+        editing: false,
         folds: Display::default(),
         _editor_events: None,
         current: None,
@@ -387,33 +420,14 @@ pub(crate) fn open(
         count: Cancel::new(),
         done: false,
     }));
-    let on_dismiss = {
-        let state = state.clone();
-        Box::new(move |window: &mut Window, cx: &mut App| {
-            let counts = state.borrow().model.counts();
-            let end = End {
-                reason: Reason::Exit,
-                counts,
-            };
-            finish(&state, end, false, window, cx);
-        })
-    };
-    let mut on_dismiss = Some(on_dismiss);
-    workspace.update(cx, |workspace, cx| {
-        workspace.hide_modal(window, cx);
-        workspace.toggle_modal(window, cx, |_, cx| {
-            QueryReplaceView::new("", on_dismiss.take().expect("built once"), cx)
-        });
-    });
-    let Some(view) = workspace.read(cx).active_modal::<QueryReplaceView>(cx) else {
+    if !show_view(&state, window, cx) {
         // The modal could not open (the one before it refused to close): nothing was asked.
         let edits = state.borrow_mut().edits.take();
         if let Some(edits) = edits {
             editor.update(cx, |editor, cx| edits.finish(editor, cx));
         }
         return;
-    };
-    state.borrow_mut().view = view.downgrade();
+    }
     let events = window.subscribe(editor, cx, {
         let state = Rc::downgrade(&state);
         move |_, event: &EditorEvent, _, cx| {
@@ -440,6 +454,49 @@ pub(crate) fn open(
         .insert(workspace_id, state.clone());
     start_count(&state, first.range.start, window, cx);
     land(&state, first, window, cx);
+}
+
+/// What closing the view does: the session ends as `Exit`, unless the replacement string is being
+/// edited.
+fn dismiss_handler(state: &Shared) -> Box<dyn FnOnce(&mut Window, &mut App)> {
+    let state = state.clone();
+    Box::new(move |window, cx| {
+        let counts = {
+            let mut state = state.borrow_mut();
+            if state.editing {
+                return;
+            }
+            // Out of `^` shown on a replacement, the cursor stays on it.
+            if matches!(state.model.phase(), Phase::Walking { .. }) {
+                state.rest = None;
+            }
+            state.model.counts()
+        };
+        let end = End {
+            reason: Reason::Exit,
+            counts,
+        };
+        finish(&state, end, false, window, cx);
+    })
+}
+
+/// Opens the decision view in the session's workspace. False when the modal could not open.
+fn show_view(state: &Shared, window: &mut Window, cx: &mut App) -> bool {
+    let Some(workspace) = state.borrow().workspace.upgrade() else {
+        return false;
+    };
+    let mut on_dismiss = Some(dismiss_handler(state));
+    workspace.update(cx, |workspace, cx| {
+        workspace.hide_modal(window, cx);
+        workspace.toggle_modal(window, cx, |_, cx| {
+            QueryReplaceView::new("", on_dismiss.take().expect("built once"), cx)
+        });
+    });
+    let Some(view) = workspace.read(cx).active_modal::<QueryReplaceView>(cx) else {
+        return false;
+    };
+    state.borrow_mut().view = view.downgrade();
+    true
 }
 
 /// Counts the matches of the session in the background, up to [`COUNT_CAP`].
@@ -515,7 +572,11 @@ fn refresh_status(state: &Shared, _: &mut Window, cx: &mut App) {
 fn press(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
     let (done, finding, view) = {
         let state = state.borrow();
-        (state.done, state.find.is_some(), state.view.clone())
+        (
+            state.done || state.editing,
+            state.find.is_some(),
+            state.view.clone(),
+        )
     };
     if done {
         return;
@@ -537,21 +598,45 @@ fn press(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
 }
 
 fn apply(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
+    if !matches!(input, Input::Recenter) {
+        state.borrow_mut().recenter = None;
+    }
     match input {
         Input::Help => {
             let view = state.borrow().view.clone();
             view.update(cx, |view, cx| view.set_help(help(), cx)).ok();
         }
+        Input::Edit => edit(state, window, cx),
+        Input::Recenter => recenter(state, window, cx),
         Input::Key(key) => {
-            let effects = {
+            let (effects, returned) = {
                 let mut state = state.borrow_mut();
-                state.replacement = None;
+                let previous = state.replacement.take();
+                let walking = matches!(state.model.phase(), Phase::Walking { .. });
                 // A skipped match is where the cursor ends if no more come.
-                if key == Key::No && state.model.phase() == &Phase::Asking {
+                if key == Key::No
+                    && (state.model.phase() == &Phase::Asking || walking && state.current.is_some())
+                {
                     state.rest = state.current.as_ref().map(|(_, anchors)| anchors.end);
                 }
-                state.model.on_key(key)
+                // Out of `^` shown on a replacement, the cursor stays on it.
+                if walking && state.current.is_none() && matches!(key, Key::Exit | Key::Abort) {
+                    state.rest = None;
+                }
+                let effects = state.model.on_key(key);
+                // A notice leaves everything as it was.
+                if matches!(effects.as_slice(), [Effect::Notice(_)]) {
+                    state.replacement = previous;
+                }
+                let returned = walking
+                    && !matches!(state.model.phase(), Phase::Walking { .. } | Phase::Done(_));
+                (effects, returned)
             };
+            if returned {
+                // A decision key after `^` acts on the match the session was on, so the cursor goes
+                // back to it first.
+                relocate(state, window, cx);
+            }
             run(state, effects, window, cx);
         }
     }
@@ -559,35 +644,51 @@ fn apply(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
 
 /// Does what the model asked for, in order, before anything else is sent to it.
 fn run(state: &Shared, effects: Vec<Effect>, window: &mut Window, cx: &mut App) {
+    // Where the search goes after an undo: the start of the restored match.
+    let mut restart = None;
     for effect in effects {
         match effect {
             Effect::Replace { with, .. } => {
                 if let Err(message) = replace(state, &with, window, cx) {
-                    let counts = state.borrow().model.counts();
-                    let end = End {
-                        reason: Reason::Aborted,
-                        counts,
-                    };
-                    finish_with(state, end, Some(message), true, window, cx);
+                    abort(state, message, window, cx);
                     return;
                 }
             }
+            Effect::UndoLast { id } => match undo(state, id, cx) {
+                Ok(start) => restart = start,
+                Err(message) => {
+                    abort(state, message, window, cx);
+                    return;
+                }
+            },
             Effect::Find { from } => {
-                find(state, from, window, cx);
+                find(state, restart.take().unwrap_or(from), window, cx);
                 return;
             }
             Effect::Finish(end) => {
                 finish(state, end, true, window, cx);
                 return;
             }
-            // The keys that make these are not bound yet.
-            Effect::UndoLast { .. }
-            | Effect::Show(_)
-            | Effect::StartBatch { .. }
-            | Effect::StopBatch
-            | Effect::Notice(_) => {}
+            Effect::Show(_) => show(state, window, cx),
+            Effect::Notice(notice_of) => {
+                let view = state.borrow().view.clone();
+                view.update(cx, |view, cx| view.set_status(notice(notice_of), cx))
+                    .ok();
+            }
+            // The key that makes these is not bound yet.
+            Effect::StartBatch { .. } | Effect::StopBatch => {}
         }
     }
+}
+
+/// Ends the session after an edit failed, with `message` as the end message.
+fn abort(state: &Shared, message: String, window: &mut Window, cx: &mut App) {
+    let counts = state.borrow().model.counts();
+    let end = End {
+        reason: Reason::Aborted,
+        counts,
+    };
+    finish_with(state, end, Some(message), true, window, cx);
 }
 
 /// Replaces the match on show with `with`, as its own undo entry.
@@ -625,9 +726,16 @@ fn replace(state: &Shared, with: &str, window: &mut Window, cx: &mut App) -> Res
                 .model
                 .on_replaced(replacement.model_id(), replacement.range.clone());
             state.rest = Some(replacement.anchors.end);
+            state.history.push(replacement.anchors.clone());
             state.replacement = Some(replacement.anchors);
         }
-        Ok(Replace::Changed(_)) => state.rest = Some(anchors.end),
+        // Nothing was replaced, but the model counted a replacement: it gets an entry that no
+        // transaction stands behind, so `u` has nothing to undo for it.
+        Ok(Replace::Changed(_)) => {
+            state.model.on_replaced(NO_TRANSACTION, found.range.clone());
+            state.history.push(anchors.clone());
+            state.rest = Some(anchors.end);
+        }
         Err(_) => return Err(READ_ONLY.to_string()),
     }
     Ok(())
@@ -696,21 +804,25 @@ fn landed(state: &Shared, found: Option<Found>, window: &mut Window, cx: &mut Ap
     }
 }
 
-/// Shows the match: the question on the line, and the cursor at its end with no selection,
-/// centered when the match was off screen.
-fn land(state: &Shared, found: Found, window: &mut Window, cx: &mut App) {
-    let Some(editor) = state.borrow().editor.upgrade() else {
-        return;
-    };
+/// Moves the cursor to the end of `range` with no selection (centered when it was off screen),
+/// opening the folds that hide it and closing the ones the session opened before. Returns the
+/// anchors of the range.
+fn place(
+    state: &Shared,
+    range: &Range<usize>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Range<Anchor>> {
+    let editor = state.borrow().editor.upgrade()?;
     // The folds are taken out of the state meanwhile so the editor events that come of the folding
     // can look at the rest.
     let mut folds = std::mem::take(&mut state.borrow_mut().folds);
     let anchors = editor.update(cx, |editor, cx| {
-        folds.open(editor, &found.range, cx);
+        folds.open(editor, range, cx);
         let snapshot = editor.buffer().read(cx).snapshot(cx);
-        let anchors = match_anchors(&snapshot, &found.range);
-        let start = snapshot.offset_to_point(MultiBufferOffset(found.range.start));
-        let end = snapshot.offset_to_point(MultiBufferOffset(found.range.end));
+        let anchors = match_anchors(&snapshot, range);
+        let start = snapshot.offset_to_point(MultiBufferOffset(range.start));
+        let end = snapshot.offset_to_point(MultiBufferOffset(range.end));
         let display = editor.display_snapshot(cx);
         let visible = editor.multi_buffer_visible_range(&display, cx);
         drop(display);
@@ -719,23 +831,215 @@ fn land(state: &Shared, found: Found, window: &mut Window, cx: &mut App) {
         } else {
             Autoscroll::center()
         };
-        let offset = MultiBufferOffset(found.range.end);
+        let offset = MultiBufferOffset(range.end);
         let effects = SelectionEffects::scroll(autoscroll)
             .nav_history(false)
             .from_search(true);
         editor.change_selections(effects, window, cx, |s| s.select_ranges([offset..offset]));
-        folds.refold(editor, Some(&found.range), window, cx);
+        folds.refold(editor, Some(range), window, cx);
         anchors
     });
     state.borrow_mut().folds = folds;
+    Some(anchors)
+}
+
+/// Shows the match: the question on the line, and the cursor at its end with no selection,
+/// centered when the match was off screen.
+fn land(state: &Shared, found: Found, window: &mut Window, cx: &mut App) {
+    let Some(anchors) = place(state, &found.range, window, cx) else {
+        return;
+    };
+    state.borrow_mut().current = Some((found, anchors));
+    show_prompt(state, cx);
+    refresh_status(state, window, cx);
+    refresh_highlights(state, cx);
+}
+
+/// Puts the question that goes with the phase of the model on the line.
+fn show_prompt(state: &Shared, cx: &mut App) {
     let (view, prompt) = {
-        let mut state = state.borrow_mut();
-        let replacement = state.model.replacement_for(&found);
-        let prompt = decision_prompt(&state.from, &replacement, state.regexp);
-        state.current = Some((found, anchors));
+        let state = state.borrow();
+        let prompt = match state.model.phase() {
+            Phase::Asking => state.current.as_ref().map(|(found, _)| {
+                let replacement = state.model.replacement_for(found);
+                decision_prompt(&state.from, &replacement, state.regexp)
+            }),
+            Phase::Shown => Some(SHOWN_PROMPT.to_string()),
+            Phase::Walking { .. } => Some(WALKING_PROMPT.to_string()),
+            _ => None,
+        };
         (state.view.clone(), prompt)
     };
-    view.update(cx, |view, cx| view.set_prompt(prompt, cx)).ok();
+    if let Some(prompt) = prompt {
+        view.update(cx, |view, cx| view.set_prompt(prompt, cx)).ok();
+    }
+}
+
+/// The offsets `range` stands for now.
+fn offsets_of(state: &Shared, range: &Range<Anchor>, cx: &mut App) -> Option<Range<usize>> {
+    let editor = state.borrow().editor.upgrade()?;
+    let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
+    Some(range.start.to_offset(&snapshot).0..range.end.to_offset(&snapshot).0)
+}
+
+/// Shows the replacement the model points at after `,` or `^`: the cursor at its end, the
+/// highlight of a replacement just made, and the question that goes with it.
+fn show(state: &Shared, window: &mut Window, cx: &mut App) {
+    let shown = {
+        let state = state.borrow();
+        match state.model.phase() {
+            Phase::Walking { depth } => state
+                .history
+                .len()
+                .checked_sub(*depth)
+                .and_then(|index| state.history.get(index))
+                .cloned(),
+            _ => state.replacement.clone(),
+        }
+    };
+    if let Some(shown) = shown {
+        if let Some(range) = offsets_of(state, &shown, cx) {
+            place(state, &range, window, cx);
+        }
+        state.borrow_mut().replacement = Some(shown);
+    }
+    show_prompt(state, cx);
+    refresh_status(state, window, cx);
+    refresh_highlights(state, cx);
+}
+
+/// Takes the cursor back to the match the session was on before `^`.
+fn relocate(state: &Shared, window: &mut Window, cx: &mut App) {
+    let anchors = state
+        .borrow()
+        .current
+        .as_ref()
+        .map(|(_, anchors)| anchors.clone());
+    if let Some(range) = anchors.and_then(|anchors| offsets_of(state, &anchors, cx)) {
+        place(state, &range, window, cx);
+    }
+}
+
+/// Undoes the replacement `id` and forgets it (`u`). Returns where the restored match starts.
+fn undo(state: &Shared, id: u64, cx: &mut App) -> Result<Option<usize>, String> {
+    let (editor, edits, anchors) = {
+        let mut state = state.borrow_mut();
+        state.current = None;
+        state.replacement = None;
+        let anchors = state.history.pop();
+        state.rest = anchors.as_ref().map(|anchors| anchors.start);
+        (state.editor.upgrade(), state.edits.take(), anchors)
+    };
+    let (Some(editor), Some(mut edits)) = (editor, edits) else {
+        return Ok(None);
+    };
+    let result = editor.update(cx, |editor, cx| {
+        edits.undo(id, editor, cx)?;
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        Ok(anchors.map(|anchors| anchors.start.to_offset(&snapshot).0))
+    });
+    state.borrow_mut().edits = Some(edits);
+    result.map_err(|error: crate::edits::ReadOnly| error.to_string())
+}
+
+/// Scrolls the match on show to the middle, the top and the bottom of the window in turn.
+fn recenter(state: &Shared, window: &mut Window, cx: &mut App) {
+    let (editor, previous) = {
+        let state = state.borrow();
+        (state.editor.upgrade(), state.recenter)
+    };
+    let Some(editor) = editor else {
+        return;
+    };
+    let cycle = Cycle::after(previous);
+    let scrolled = editor.update(cx, |editor, cx| {
+        let display = editor.display_snapshot(cx);
+        let row = editor.selections.newest_display(&display).head().row();
+        drop(display);
+        scroll_row_to(editor, row, cycle, window, cx)
+    });
+    state.borrow_mut().recenter = scrolled.then_some(cycle);
+}
+
+/// Asks for a new replacement string (`e`). The view closes while the prompt is open, and
+/// opens again on the same match when it is answered or cancelled.
+fn edit(state: &Shared, window: &mut Window, cx: &mut App) {
+    let (workspace, from, to, regexp) = {
+        let mut state = state.borrow_mut();
+        if !matches!(
+            state.model.phase(),
+            Phase::Asking | Phase::Shown | Phase::Walking { .. }
+        ) {
+            return;
+        }
+        state.editing = true;
+        (
+            state.workspace.upgrade(),
+            state.from.clone(),
+            state.to.clone(),
+            state.regexp,
+        )
+    };
+    let Some(workspace) = workspace else {
+        state.borrow_mut().editing = false;
+        return;
+    };
+    let on_done = {
+        let state = state.clone();
+        move |to: String, window: &mut Window, cx: &mut App| {
+            if let Ok(template) = template::parse(&to, regexp) {
+                let mut state = state.borrow_mut();
+                state.model.set_template(template);
+                state.to = to;
+            }
+            resume(&state, window, cx);
+        }
+    };
+    let on_cancel = {
+        let state = state.clone();
+        move |window: &mut Window, cx: &mut App| resume(&state, window, cx)
+    };
+    // Deferred: the key that asked for this runs inside an update of the workspace.
+    window.defer(cx, move |window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            let mode = Mode {
+                regexp,
+                interactive: true,
+            };
+            prompts::edit_replacement(
+                workspace,
+                mode,
+                CaseMode::Smart,
+                &from,
+                &to,
+                on_done,
+                on_cancel,
+                window,
+                cx,
+            );
+        });
+    });
+}
+
+/// The replacement string was answered or the prompt cancelled: the decision view comes back on
+/// the same match.
+fn resume(state: &Shared, window: &mut Window, cx: &mut App) {
+    {
+        let mut state = state.borrow_mut();
+        if state.done || !std::mem::replace(&mut state.editing, false) {
+            return;
+        }
+    }
+    if !show_view(state, window, cx) {
+        let counts = state.borrow().model.counts();
+        let end = End {
+            reason: Reason::Exit,
+            counts,
+        };
+        finish(state, end, false, window, cx);
+        return;
+    }
+    show_prompt(state, cx);
     refresh_status(state, window, cx);
     refresh_highlights(state, cx);
 }

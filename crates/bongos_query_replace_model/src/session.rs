@@ -269,6 +269,12 @@ impl Session {
         self.counts
     }
 
+    /// Replaces the template (`e`): the matches asked about from now on, and the one on show,
+    /// are replaced with it.
+    pub fn set_template(&mut self, template: Template) {
+        self.template = template;
+    }
+
     /// The text that replaces `found`: the template expanded with `\#` as the
     /// number of replacements made so far, then the match's case carried over.
     pub fn replacement_for(&self, found: &Found) -> String {
