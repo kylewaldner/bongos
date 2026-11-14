@@ -433,7 +433,6 @@ impl ActivityIndicator {
         // Show any language server installation info.
         let mut downloading = SmallVec::<[_; 3]>::new();
         let mut checking_for_update = SmallVec::<[_; 3]>::new();
-        let mut failed = SmallVec::<[_; 3]>::new();
         let mut health_messages = SmallVec::<[_; 3]>::new();
         let mut servers_to_clear_statuses = HashSet::<LanguageServerName>::default();
         for status in &self.statuses {
@@ -450,9 +449,8 @@ impl ActivityIndicator {
                 LanguageServerStatusUpdate::Binary(BinaryStatus::Downloading) => {
                     downloading.push(status.name.clone());
                 }
-                LanguageServerStatusUpdate::Binary(BinaryStatus::Failed { .. }) => {
-                    failed.push(status.name.clone());
-                }
+                // A failed server is the language status line's to report, not this indicator's.
+                LanguageServerStatusUpdate::Binary(BinaryStatus::Failed { .. }) => {}
                 LanguageServerStatusUpdate::Binary(BinaryStatus::None) => {}
                 LanguageServerStatusUpdate::Health(health, server_status) => match server_status {
                     Some(server_status) => {
@@ -518,29 +516,6 @@ impl ActivityIndicator {
                     this.statuses
                         .retain(|status| !checking_for_update.contains(&status.name));
                     this.dismiss_message(&DismissMessage, window, cx)
-                })),
-                tooltip_message: None,
-            });
-        }
-
-        if !failed.is_empty() {
-            return Some(Content {
-                icon: ActivityIcon::Icon(IconName::Warning),
-                message: format!(
-                    "Failed to run {}. Click to show error.",
-                    failed
-                        .iter()
-                        .map(|name| name.as_ref())
-                        .fold(String::new(), |mut acc, s| {
-                            if !acc.is_empty() {
-                                acc.push_str(", ");
-                            }
-                            acc.push_str(s);
-                            acc
-                        }),
-                ),
-                on_click: Some(Arc::new(|this, window, cx| {
-                    this.show_error_message(&ShowErrorMessage, window, cx)
                 })),
                 tooltip_message: None,
             });
@@ -777,5 +752,60 @@ impl StatusItemView for ActivityIndicator {
     fn hide_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
         // Activity indicator auto-hides when there's no work to display.
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use workspace::{AppState, MultiWorkspace};
+
+    #[gpui::test]
+    async fn test_a_failed_server_is_not_reported(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            AppState::test(cx);
+            editor::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let registry = project.read_with(cx, |project, _| project.languages().clone());
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let indicator = workspace.update_in(cx, |workspace, window, cx| {
+            ActivityIndicator::new(workspace, registry.clone(), window, cx)
+        });
+
+        registry.update_lsp_binary_status(
+            LanguageServerName::new_static("broken-server"),
+            BinaryStatus::Failed {
+                error: "could not install".into(),
+            },
+        );
+        cx.run_until_parked();
+        indicator.update(cx, |indicator, cx| {
+            assert_eq!(indicator.statuses.len(), 1);
+            assert!(
+                indicator.content_to_render(cx).is_none(),
+                "a failure has one line, the language status line"
+            );
+        });
+
+        // Other progress still shows.
+        registry.update_lsp_binary_status(
+            LanguageServerName::new_static("other-server"),
+            BinaryStatus::Downloading,
+        );
+        cx.run_until_parked();
+        indicator.update(cx, |indicator, cx| {
+            let content = indicator.content_to_render(cx).expect("a download shows");
+            assert!(
+                content.message.starts_with("Downloading"),
+                "{}",
+                content.message
+            );
+        });
     }
 }

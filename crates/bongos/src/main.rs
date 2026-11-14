@@ -526,6 +526,7 @@ fn main() {
             },
             cx,
         );
+        bongos_language_status::init(paths::logs_dir(), cx);
         bongos_work::init(
             fs.clone(),
             bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir()),
