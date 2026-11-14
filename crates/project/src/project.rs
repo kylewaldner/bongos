@@ -9,6 +9,7 @@ pub mod debounced_delay;
 pub mod debugger;
 pub mod git_store;
 pub mod image_store;
+pub mod language_server_policy;
 pub mod lsp_command;
 pub mod lsp_store;
 pub mod manifest_tree;
@@ -158,6 +159,9 @@ pub use task_inventory::{
 };
 
 pub use buffer_store::ProjectTransaction;
+pub use language_server_policy::{
+    LanguageServerPolicy, PolicyWorktree, register_language_server_policy,
+};
 pub use lsp_store::{
     DiagnosticSummary, InvalidationStrategy, LanguageServerLogType, LanguageServerProgress,
     LanguageServerPromptRequest, LanguageServerStatus, LanguageServerToQuery, LspStore,
