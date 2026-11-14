@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 
 use crate::approval::{NEEDS_A_WINDOW, PersonGrant};
 use crate::create::ProjectRepo;
+use crate::landing::{LandMode, LandRequest};
 use crate::peer::PeerIdentity;
 use crate::sink::{PersonClaim, RepoCommand, RepoReply};
 use crate::state_ops::StateOp;
@@ -114,6 +115,45 @@ impl HostBoundary {
                     change_id: started.change_id,
                 })
             }
+            RepoCommand::Revert {
+                change_id,
+                author,
+                person,
+            } => {
+                let author = as_received(&author)?;
+                // As for a quick edit: only a person's own revert is a person's landing. A claim
+                // sent with an agent's, a workflow's or an unattributed revert approves nothing.
+                let person = person.filter(|_| {
+                    matches!(
+                        author.kind(),
+                        AuthorKind::Person | AuthorKind::PersonClaimed
+                    )
+                });
+                let grant = grant(person, peer);
+                let copy = self.repo.revert(&change_id, &author, now).await?;
+                let request = LandRequest {
+                    meta: self.repo.revert_meta(&change_id, &author)?,
+                    mode: LandMode::Land,
+                };
+                let repo = self.repo.clone();
+                let revert_id = copy.change_id.clone();
+                // The landing runs on, as a quick edit's does.
+                smol::spawn(async move {
+                    if let Err(error) = repo
+                        .land_granted(&revert_id, request, grant, Utc::now())
+                        .await
+                    {
+                        log::error!("landing the revert {revert_id}: {error:#}");
+                    }
+                })
+                .detach();
+                Ok(RepoReply::Started {
+                    change_id: copy.change_id,
+                })
+            }
+            RepoCommand::ShowHistory { filter } => Ok(RepoReply::History {
+                entries: self.repo.change_history(&filter, now).await?,
+            }),
         }
     }
 

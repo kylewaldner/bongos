@@ -738,6 +738,50 @@ impl Git {
         self.run_bytes(directory, args, None).await
     }
 
+    /// The text of the diff from `from` to `to`, as `git diff` shows it (no color, no external
+    /// diff or text conversion).
+    pub async fn diff_text(
+        &self,
+        directory: &Path,
+        from: &str,
+        to: &str,
+    ) -> Result<String, GitError> {
+        let args = [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            from,
+            to,
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let output = self.run_bytes(directory, args, None).await?;
+        Ok(String::from_utf8_lossy(&output).into_owned())
+    }
+
+    /// The paths that differ between `from` and `to`, sorted.
+    pub async fn diff_names(
+        &self,
+        directory: &Path,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<String>, GitError> {
+        let output = self
+            .run(
+                directory,
+                &["diff", "--name-only", "--no-renames", from, to],
+            )
+            .await?;
+        Ok(output.lines().map(str::to_string).collect())
+    }
+
+    /// The best common ancestor of `a` and `b`.
+    pub async fn merge_base(&self, directory: &Path, a: &str, b: &str) -> Result<String, GitError> {
+        self.run(directory, &["merge-base", a, b]).await
+    }
+
     /// The id of the diff from `from` to `to` (binary contents included, renames off, no external
     /// diff or text conversion), or `"empty"` when they hold the same files: its stable
     /// `git patch-id`, then the SHA-256 of the diff without its hunk headers and `index` lines.

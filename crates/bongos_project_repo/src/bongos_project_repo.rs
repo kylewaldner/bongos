@@ -8,11 +8,14 @@ mod changes;
 mod check_run;
 mod create;
 mod declared_checks;
+mod diffs;
 mod git;
+mod history;
 mod host_boundary;
 mod landing;
 mod landing_checks;
 mod landing_queue;
+mod listing;
 mod loader;
 mod locations;
 mod master;
@@ -45,10 +48,12 @@ pub use check_run::CheckResult;
 pub use create::MAIN_BRANCH;
 pub use create::{CreateError, CreateRequest, LayoutTemplates, ProjectRepo};
 pub use declared_checks::DeclaredCheck;
+pub use diffs::{TaskAwareDiff, TaskMove};
 pub use git::{
     CommitId, DEFAULT_IDENTITY_EMAIL, DEFAULT_IDENTITY_NAME, Git, GitError, Identity,
     RebaseOutcome, TreeEntry, TreeId, TreeRef,
 };
+pub use history::{AuthorFilter, EndedState, HistoryEntry, HistoryFilter, MAX_HISTORY_DAYS};
 pub use host_boundary::HostBoundary;
 pub use landing::{
     ALREADY_LANDING, DEFAULT_SECRET_PATTERNS, LandMode, LandOptions, LandRequest, LandingEvent,
@@ -58,6 +63,7 @@ pub use landing_checks::{
     AmendingCheck, CheckInput, CheckKindParser, CheckKinds, CheckRegistry, DefinitionFolders,
     FolderValidator, LandingCheck, LandingChecks, LiveSources, WorkflowResolver, registered_checks,
 };
+pub use listing::{AmendedBy, ChangeListing, ListedChange};
 pub use loader::{LoadedProject, StateHandle, load_definition_tree};
 pub use locations::{Location, LocationError, RepositoryLocations};
 pub use master::{
@@ -100,6 +106,8 @@ mod check_fakes;
 mod create_tests;
 #[cfg(test)]
 mod git_tests;
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod landing_checks_tests;
 #[cfg(test)]

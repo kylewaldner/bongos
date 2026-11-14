@@ -155,6 +155,20 @@ pub mod project {
             /// Approves a change waiting for a person (the working copy of the current buffer,
             /// or one picked), or the outside commit on master once its checks passed.
             Approve,
+            /// Shows the project repository's changes in sections (waiting, landed,
+            /// abandoned), with a key for each thing to do to the one selected: `d` its diff
+            /// in terms of tasks, `D` its git diff, `o` check it out, `r` resolve a split
+            /// master, `a` approve, `k` abandon, `l` land, `R` revert a landed change.
+            ShowChanges,
+            /// Shows the changes that landed or were abandoned, newest first, through a
+            /// filter: by task, by kind of author, by date, landed or abandoned.
+            ShowHistory,
+            /// Picks a landed change and makes a new change that undoes it. The revert goes
+            /// through the checks and lands like any change; history is never rewritten.
+            Revert,
+            /// Resolves a split master (master was changed outside bongos while a change was
+            /// landing), keeping bongos' state.
+            ResolveSplit,
         ]
     );
 }

@@ -8,6 +8,7 @@ use bongos_project_repo_model::Author;
 use gpui::{BackgroundExecutor, Task};
 use serde::{Deserialize, Serialize};
 
+use crate::history::{HistoryEntry, HistoryFilter};
 use crate::landing::LandRequest;
 use crate::quick_edit::QuickEdit;
 use crate::state::StateWriter;
@@ -36,6 +37,15 @@ pub enum RepoCommand {
         edit: QuickEdit,
         person: Option<PersonClaim>,
     },
+    /// `project: revert` of a landed change: makes a change that undoes it and lands it. The
+    /// claim stands for the person's own landing only when `author` is a person.
+    Revert {
+        change_id: String,
+        author: Author,
+        person: Option<PersonClaim>,
+    },
+    /// `project: show history` through a filter.
+    ShowHistory { filter: HistoryFilter },
 }
 
 /// A window's claim that a person at its keyboard asked for a command, by the person's name.
@@ -53,6 +63,10 @@ pub enum RepoReply {
     /// The quick edit's change, whose landing runs on.
     Started {
         change_id: String,
+    },
+    /// The entries of a history, newest first.
+    History {
+        entries: Vec<HistoryEntry>,
     },
 }
 

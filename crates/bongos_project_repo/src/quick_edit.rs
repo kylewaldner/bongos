@@ -125,7 +125,7 @@ pub fn check_fresh(
 
 /// Refuses `base` unless it is a full commit id (40 or 64 hex digits): a quick edit from
 /// another process names it, and git must never read it as an option or a revision expression.
-fn check_commit_id(base: &str) -> Result<()> {
+pub(crate) fn check_commit_id(base: &str) -> Result<()> {
     if !matches!(base.len(), 40 | 64) || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("{base:?} is not a commit id");
     }
@@ -482,6 +482,13 @@ impl ProjectRepo {
         value
             .map(|value| value.try_into().context("reading a quick edit"))
             .transpose()
+    }
+
+    /// The subject and the mark (`landing` or `not landed`) of the quick edit `change_id`, when
+    /// it is one.
+    pub(crate) fn quick_edit_label(&self, change_id: &str) -> Option<(String, String)> {
+        let record = self.quick_edit_record(change_id).ok().flatten()?;
+        Some((record.subject, record.label))
     }
 
     fn relabel_quick_edit(&self, change_id: &str, label: &str) -> Result<()> {

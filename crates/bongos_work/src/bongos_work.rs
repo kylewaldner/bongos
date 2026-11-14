@@ -9,6 +9,8 @@ mod changes;
 mod commands;
 mod filters;
 mod focus;
+mod landing_commands;
+mod landing_view;
 mod links;
 mod master_files;
 mod modals;
@@ -131,6 +133,8 @@ mod command_tests;
 mod command_tests_more;
 #[cfg(test)]
 mod focus_tests;
+#[cfg(test)]
+mod landing_view_tests;
 #[cfg(test)]
 mod modal_route_tests;
 #[cfg(test)]

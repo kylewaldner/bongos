@@ -31,8 +31,8 @@ use crate::registry::LiveModesRegistry;
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
 use crate::{
-    artifacts, filters, focus, links, modes, open, panel, projects, rebase, repositories,
-    structure, working_copy_commands, worktrees,
+    artifacts, filters, focus, landing_commands, links, modes, open, panel, projects, rebase,
+    repositories, structure, working_copy_commands, worktrees,
 };
 
 /// The activity a task made with `task: new` goes under: it names no parent, and the Work view
@@ -93,6 +93,10 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::Land>(),
         TypeId::of::<project::Check>(),
         TypeId::of::<project::Approve>(),
+        TypeId::of::<project::ShowChanges>(),
+        TypeId::of::<project::ShowHistory>(),
+        TypeId::of::<project::Revert>(),
+        TypeId::of::<project::ResolveSplit>(),
         TypeId::of::<work::AddRepository>(),
         TypeId::of::<work::EditWorktreeRoot>(),
         TypeId::of::<task::SetDefaultVisibility>(),
@@ -167,6 +171,7 @@ pub fn register(workspace: &mut Workspace) {
     rebase::register(workspace);
     focus::register(workspace);
     working_copy_commands::register(workspace);
+    landing_commands::register(workspace);
     master_files::register(workspace);
     open::register(workspace);
     artifacts::register(workspace);

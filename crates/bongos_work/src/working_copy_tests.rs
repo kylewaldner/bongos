@@ -28,21 +28,21 @@ use crate::working_copy_commands::{change_at, land_options, landing_message, wor
 
 const MASTER_FILE: &str = "definitions/tasks/leaf/task.toml";
 
-struct Fixture {
-    workspace: Entity<Workspace>,
-    repo: ProjectRepo,
+pub(crate) struct Fixture {
+    pub(crate) workspace: Entity<Workspace>,
+    pub(crate) repo: ProjectRepo,
     master: PathBuf,
     outside: PathBuf,
     _temp: TempDir,
 }
 
-fn start() -> DateTime<Utc> {
+pub(crate) fn start() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-03-01T10:00:00Z")
         .unwrap()
         .with_timezone(&Utc)
 }
 
-async fn fixture(cx: &mut TestAppContext) -> (Fixture, &mut VisualTestContext) {
+pub(crate) async fn fixture(cx: &mut TestAppContext) -> (Fixture, &mut VisualTestContext) {
     cx.executor().allow_parking();
     let temp = TempDir::new().unwrap();
     let folder = canonical(&temp).join("project");
@@ -70,6 +70,7 @@ async fn fixture(cx: &mut TestAppContext) -> (Fixture, &mut VisualTestContext) {
         let multi_workspace = MultiWorkspace::test_new(project, window, cx);
         multi_workspace.workspace().update(cx, |workspace, _| {
             crate::working_copy_commands::register(workspace);
+            crate::landing_commands::register(workspace);
             crate::master_files::register(workspace);
         });
         multi_workspace
@@ -92,7 +93,7 @@ async fn fixture(cx: &mut TestAppContext) -> (Fixture, &mut VisualTestContext) {
 }
 
 impl Fixture {
-    async fn open(&self, cx: &mut VisualTestContext, path: &Path) -> Entity<Editor> {
+    pub(crate) async fn open(&self, cx: &mut VisualTestContext, path: &Path) -> Entity<Editor> {
         let path = path.to_path_buf();
         let opening = self.workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_abs_path(path, OpenOptions::default(), window, cx)
