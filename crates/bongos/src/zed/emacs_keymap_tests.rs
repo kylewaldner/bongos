@@ -198,7 +198,11 @@ const EDITOR_KEYS: &[(&str, &str)] = &[
     ("alt-g", "emacs::GotoLine"),
     ("ctrl-=", "emacs::ExpandRegion"),
     ("ctrl--", "emacs::ContractRegion"),
-    ("ctrl-y", "editor::Paste"),
+    ("ctrl-y", "emacs::Yank"),
+    ("alt-y", "emacs::YankPop"),
+    ("alt-shift-y", "emacs::BrowseKillRing"),
+    ("ctrl-alt-k", "emacs::KillWholeLine"),
+    ("ctrl-alt-w", "emacs::AppendNextKill"),
     ("ctrl-space", "emacs::SetMarkCommand"),
     ("ctrl-@", "emacs::SetMarkCommand"),
     ("ctrl-.", "emacs::SetMarkCommand"),
@@ -344,17 +348,8 @@ async fn the_key_table_covers_every_emacs_action(cx: &mut gpui::TestAppContext) 
         let names = cx.all_action_names();
         // Every emacs action has an editor key; the cursor toggle is left unbound on purpose.
         // `pop-global-mark` is a workspace key (`mark_keymap_tests`) and the implementations
-        // jump stays in the palette. The whole-line kill, append-next-kill, yank, yank-pop and browse-kill-ring
-        // commands are reachable by name until their keys are added.
-        const UNBOUND: [&str; 7] = [
-            "emacs::PopGlobalMark",
-            "emacs::XrefFindImplementations",
-            "emacs::KillWholeLine",
-            "emacs::AppendNextKill",
-            "emacs::Yank",
-            "emacs::YankPop",
-            "emacs::BrowseKillRing",
-        ];
+        // jump stays in the palette.
+        const UNBOUND: [&str; 2] = ["emacs::PopGlobalMark", "emacs::XrefFindImplementations"];
         for name in names
             .iter()
             .filter(|name| name.starts_with("emacs::") && !UNBOUND.contains(name))
@@ -604,8 +599,6 @@ const RESERVED: &[(&str, &[&str])] = &[
         "ctrl-r",
         &["isearch::Backward", "search::SelectPreviousMatch"],
     ),
-    ("ctrl-y", &["editor::Paste"]),
-    ("alt-shift-y", &[]),
     ("ctrl-/", &["editor::Undo"]),
     ("ctrl-_", &["editor::Undo"]),
     ("ctrl-x u", &["editor::Undo"]),
