@@ -31,11 +31,14 @@ use crate::approval::PersonGrant;
 use crate::changes::ChangeFilter;
 use crate::create::ProjectRepo;
 use crate::git::{CommitId, TreeRef};
-use crate::landing::{LandMode, LandRequest, LandingRecord, LandingResult, author_identity};
+use crate::landing::{
+    ALREADY_LANDING, LandMode, LandRequest, LandingRecord, LandingResult, author_identity,
+};
 use crate::loader::load_definition_tree;
 use crate::moves::{
     MovePhase, MoveRecord, MoveRole, claim, holding_dir, read_record, release_claims, write_record,
 };
+use crate::working_copies::AbandonRefused;
 
 /// What a move ended as.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +51,14 @@ pub enum MoveOutcome {
     RolledBack { reasons: Vec<String> },
     /// The rollback failed: the claims stay and both changes show "move <id> needs you".
     NeedsYou { reason: String },
+}
+
+/// What holding a plan's tasks came to.
+pub(crate) enum Claimed {
+    Confirmed(Box<MoveCoordinator>),
+    Refused(MoveRefusal),
+    /// The source's verified commit moved since the plan was made; nothing was written.
+    Stale,
 }
 
 /// The coordinator of one move.
@@ -156,6 +167,32 @@ fn copy_folder(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Why the subtree under the plan's root in `tree` is not the plan's tasks; `None` when it is.
+fn subtree_differs(
+    tree: &bongos_project_repo_model::DefinitionTree,
+    plan: &MovePlan,
+) -> Option<String> {
+    let root = plan.root_from();
+    let inside = format!("{root}/");
+    let found: std::collections::BTreeSet<(&str, &str)> = tree
+        .nodes()
+        .into_iter()
+        .filter(|node| node.folder == root || node.folder.starts_with(&inside))
+        .map(|node| (node.definition.id.as_str(), node.folder.as_str()))
+        .collect();
+    let planned: std::collections::BTreeSet<(&str, &str)> = plan
+        .tasks
+        .iter()
+        .map(|task| (task.id.as_str(), task.from.as_str()))
+        .collect();
+    (found != planned).then(|| {
+        format!(
+            "{} changed in {} since the move was confirmed; nothing was moved",
+            plan.slug, plan.source.title
+        )
+    })
+}
+
 fn remove_folder(path: &Path) -> Result<()> {
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -172,6 +209,17 @@ impl MoveCoordinator {
         target: &ProjectRepo,
         request: &MoveRequest,
     ) -> Result<std::result::Result<MovePlan, MoveRefusal>> {
+        Ok(Self::preview_at(source, target, request).await?.0)
+    }
+
+    /// [`Self::preview`], with the source's verified commit it was made from (`None` before
+    /// one is recorded).
+    pub(crate) async fn preview_at(
+        source: &ProjectRepo,
+        target: &ProjectRepo,
+        request: &MoveRequest,
+    ) -> Result<(std::result::Result<MovePlan, MoveRefusal>, Option<String>)> {
+        let verified = source.verified_commit()?.map(|commit| commit.0);
         let source_tree = verified_tree(source).await?;
         let target_tree = verified_tree(target).await?;
         let ids: Vec<String> = source_tree
@@ -180,28 +228,91 @@ impl MoveCoordinator {
             .map(|node| node.definition.id.clone())
             .collect();
         let live = source.live_facts_for(&ids)?;
-        Ok(move_plan(&source_tree, &target_tree, request, &live))
+        // A landing after `verified` was read makes the claim find it stale and plan again.
+        Ok((
+            move_plan(&source_tree, &target_tree, request, &live),
+            verified,
+        ))
     }
 
     /// Confirms the move the preview of `request` shows, by `author`; `ctx` is the context of
     /// the person who confirmed it at a window, when one did (its attestation is taken, and
     /// `author` should be its author). The source's tasks are held from here, in the same
-    /// transaction that checks again that none started and no other move holds one.
+    /// transaction that checks again that none started, no other move holds one and the
+    /// source's verified commit is still the one the plan was made from (a landing in between
+    /// makes it plan again).
     pub async fn confirm(
         source: &ProjectRepo,
         target: &ProjectRepo,
         request: &MoveRequest,
         author: Author,
-        ctx: Option<&mut WorkContext>,
+        mut ctx: Option<&mut WorkContext>,
     ) -> Result<std::result::Result<Self, MoveRefusal>> {
-        let plan = match Self::preview(source, target, request).await? {
-            Ok(plan) => plan,
-            Err(refusal) => return Ok(Err(refusal)),
+        const ATTEMPTS: usize = 3;
+        for _ in 0..ATTEMPTS {
+            let (plan, verified) = Self::preview_at(source, target, request).await?;
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            match Self::claim_plan(
+                source,
+                target,
+                plan,
+                verified.as_deref(),
+                author.clone(),
+                ctx.as_deref_mut(),
+            )? {
+                Claimed::Confirmed(coordinator) => return Ok(Ok(*coordinator)),
+                Claimed::Refused(refusal) => return Ok(Err(refusal)),
+                Claimed::Stale => {}
+            }
+        }
+        Ok(Err(MoveRefusal {
+            reasons: vec![
+                "the source project kept changing while the move was confirmed; try again"
+                    .to_string(),
+            ],
+        }))
+    }
+
+    /// [`Self::confirm`] of the plan `shown`, the one a person saw: `None`, and nothing held,
+    /// when the projects changed since and the move would now do something else.
+    pub async fn confirm_shown(
+        source: &ProjectRepo,
+        target: &ProjectRepo,
+        request: &MoveRequest,
+        shown: &MovePlan,
+        author: Author,
+        ctx: Option<&mut WorkContext>,
+    ) -> Result<Option<std::result::Result<Self, MoveRefusal>>> {
+        let (plan, verified) = Self::preview_at(source, target, request).await?;
+        let plan = match plan {
+            Ok(plan) if plan == *shown => plan,
+            Ok(_) => return Ok(None),
+            Err(refusal) => return Ok(Some(Err(refusal))),
         };
+        Ok(
+            match Self::claim_plan(source, target, plan, verified.as_deref(), author, ctx)? {
+                Claimed::Confirmed(coordinator) => Some(Ok(*coordinator)),
+                Claimed::Refused(refusal) => Some(Err(refusal)),
+                Claimed::Stale => None,
+            },
+        )
+    }
+
+    /// Holds the tasks of `plan`, made from the source's verified commit `verified`, and writes
+    /// the move's row, in one transaction; [`Claimed::Stale`] (and nothing written) when the
+    /// verified commit moved since.
+    pub(crate) fn claim_plan(
+        source: &ProjectRepo,
+        target: &ProjectRepo,
+        plan: MovePlan,
+        verified: Option<&str>,
+        author: Author,
+        ctx: Option<&mut WorkContext>,
+    ) -> Result<Claimed> {
         target.writer_or_error()?;
-        let person = ctx
-            .and_then(PersonGrant::from_context)
-            .map(PersonGrant::into_name);
         let move_id = new_id();
         let record = MoveRecord {
             move_id: move_id.clone(),
@@ -219,6 +330,9 @@ impl MoveCoordinator {
         let registry = source.check_registry();
         let writer = source.writer_or_error()?;
         let claimed = writer.transact(|tx| {
+            if tx.verified_commit()?.as_deref() != verified {
+                return Ok(None);
+            }
             let mut reasons = Vec::new();
             for task_id in plan.task_ids() {
                 let started_row = tx.task(&task_id)?.as_ref().is_some_and(state_is_started);
@@ -231,34 +345,39 @@ impl MoveCoordinator {
                 }
             }
             if !reasons.is_empty() {
-                return Ok(Err(MoveRefusal { reasons }));
+                return Ok(Some(Err(MoveRefusal { reasons })));
             }
             for task_id in plan.task_ids() {
                 if let Err(error) = claim(tx, &task_id, &move_id) {
-                    return Ok(Err(MoveRefusal {
+                    return Ok(Some(Err(MoveRefusal {
                         reasons: vec![format!("{error:#}")],
-                    }));
+                    })));
                 }
             }
             write_record(tx, &record)?;
-            Ok(Ok(()))
+            Ok(Some(Ok(())))
         })?;
-        if let Err(refusal) = claimed {
-            return Ok(Err(refusal));
+        match claimed {
+            None => return Ok(Claimed::Stale),
+            Some(Err(refusal)) => return Ok(Claimed::Refused(refusal)),
+            Some(Ok(())) => {}
         }
+        let person = ctx
+            .and_then(PersonGrant::from_context)
+            .map(PersonGrant::into_name);
         log::info!(
             "move {move_id}: {} from {} to {} confirmed",
             plan.slug,
             plan.source.title,
             plan.target.title
         );
-        Ok(Ok(Self {
+        Ok(Claimed::Confirmed(Box::new(Self {
             source: source.clone(),
             target: target.clone(),
             move_id,
             author,
             person,
-        }))
+        })))
     }
 
     /// The coordinator of the move `move_id`, rebuilt from its rows in `source` (after a
@@ -405,6 +524,13 @@ impl MoveCoordinator {
             &TreeRef::Commit(CommitId(source_commit.clone())),
         )
         .await?;
+        // A landing since the confirmation may have changed the subtree (a child added under
+        // the moved root): the copy below takes every file under the root, so the subtree has
+        // to be exactly the plan's.
+        if let Some(reason) = subtree_differs(&source_tree, plan) {
+            self.refuse(vec![reason], false, now).await?;
+            return Ok(());
+        }
 
         // The source's removal.
         let removal = self
@@ -491,8 +617,16 @@ impl MoveCoordinator {
         let mut states = std::collections::BTreeMap::new();
         for task_id in plan.task_ids() {
             let from = self.source.location.files.join(&task_id);
-            if from.is_dir() {
-                copy_folder(&from, &holding.join(&task_id))?;
+            // A symbolic link in place of the folder is left out, like one inside it.
+            match std::fs::symlink_metadata(&from) {
+                Ok(metadata) if metadata.is_dir() => {
+                    copy_folder(&from, &holding.join(&task_id))?;
+                }
+                Ok(_) => log::info!("a move leaves out {}: not a folder", from.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("reading {}", from.display()));
+                }
             }
             if let Some(state) = self.source.read_state(|read| read.task(&task_id))? {
                 states.insert(task_id, state);
@@ -572,42 +706,123 @@ impl MoveCoordinator {
             mode: LandMode::Land,
         };
         let result = self
-            .target
-            .land_granted(&target_change, request, self.grant(), now)
+            .land_side(&self.target, &target_change, request, now)
             .await?;
         self.target_ended(&result, now).await?;
         Ok(result)
     }
 
+    /// Lands `change_id` in `repo` with the move's grant. When another landing of it runs
+    /// already (a person's `project: land`), waits for that one to end and lands again, which
+    /// answers at once when it landed or was abandoned: a side is never taken as refused while
+    /// another landing of it may still land it.
+    async fn land_side(
+        &self,
+        repo: &ProjectRepo,
+        change_id: &str,
+        request: LandRequest,
+        now: DateTime<Utc>,
+    ) -> Result<LandingResult> {
+        loop {
+            let result = repo
+                .land_granted(change_id, request.clone(), self.grant(), now)
+                .await?;
+            if !matches!(&result, LandingResult::NoVerdict { reason } if reason == ALREADY_LANDING)
+            {
+                return Ok(result);
+            }
+            loop {
+                let wake = repo.engine.signal.listen();
+                if !repo.engine.is_landing(change_id) {
+                    break;
+                }
+                wake.await.ok();
+            }
+        }
+    }
+
     async fn target_ended(&self, result: &LandingResult, now: DateTime<Utc>) -> Result<()> {
         match result {
-            LandingResult::Landed { commit } => {
-                let commit = commit.clone();
-                self.update_source(|record| {
-                    if record.phase == MovePhase::Prepared {
-                        record.phase = MovePhase::TargetLanded;
-                        record.target_commit = Some(commit);
-                    }
-                })?;
-            }
+            LandingResult::Landed { commit } => self.record_target_landed(commit)?,
             other => {
                 if self.record()?.phase == MovePhase::Prepared {
-                    self.refuse(reasons_of(other), now).await?;
+                    self.refuse(reasons_of(other), false, now).await?;
                 }
             }
         }
         Ok(())
     }
 
+    /// Records in the source's row that the target landed as `commit`.
+    fn record_target_landed(&self, commit: &str) -> Result<()> {
+        self.update_source(|record| {
+            if record.phase == MovePhase::Prepared {
+                record.phase = MovePhase::TargetLanded;
+                record.target_commit = Some(commit.to_string());
+            }
+        })?;
+        Ok(())
+    }
+
+    /// Abandons the target's change; its commit when it landed instead. The abandon reads the
+    /// row in its own transaction, so a change it marked abandoned can never land after it; a
+    /// change holding the landing lock (committing, or in its in-queue checks) is waited for
+    /// and tried again.
+    async fn abandon_target(
+        &self,
+        target_change: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>> {
+        loop {
+            let wake = self.target.engine.signal.listen();
+            match self.target.abandon_now(target_change, now).await {
+                Ok(()) => return Ok(None),
+                Err(AbandonRefused::Landed { commit }) => return Ok(Some(commit)),
+                Err(AbandonRefused::Landing) => wake.await.ok(),
+                Err(error) => {
+                    bail!(
+                        "abandoning {target_change} of move {}: {error}",
+                        self.move_id
+                    )
+                }
+            };
+        }
+    }
+
     /// Ends a move refused before its target landed: both changes abandoned, the source's
-    /// claims and the target's held files cleared.
-    async fn refuse(&self, reasons: Vec<String>, now: DateTime<Utc>) -> Result<()> {
+    /// claims and the target's held files cleared. When the target's change landed after all
+    /// the move goes on from there instead: to the source's landing, or, when `source_refused`
+    /// (the source's own landing was refused), to the rollback.
+    async fn refuse(
+        &self,
+        reasons: Vec<String>,
+        source_refused: bool,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let record = self.record()?;
         let problem = reasons.join("; ");
-        log::info!("move {}: refused: {problem}", self.move_id);
-        if let Some(target_change) = &record.target_change {
-            self.target.abandon_now(target_change, now).await.ok();
+        if let Some(target_change) = &record.target_change
+            && let Some(commit) = self.abandon_target(target_change, now).await?
+        {
+            self.record_target_landed(&commit)?;
+            if source_refused {
+                log::info!(
+                    "move {}: {} refused it after {} landed: {problem}; rolling back",
+                    self.move_id,
+                    record.plan.source.title,
+                    record.plan.target.title
+                );
+                if let Some(source_change) = &record.source_change {
+                    self.source.abandon_now(source_change, now).await.ok();
+                }
+                self.update_source(|record| {
+                    record.phase = MovePhase::RollingBack;
+                    record.problem = Some(problem);
+                })?;
+            }
+            return Ok(());
         }
+        log::info!("move {}: refused: {problem}", self.move_id);
         if let Some(source_change) = &record.source_change {
             self.source.abandon_now(source_change, now).await.ok();
         }
@@ -642,8 +857,7 @@ impl MoveCoordinator {
     async fn land_both(&self, now: DateTime<Utc>) -> Result<()> {
         let (source_change, target_change) = self.change_ids()?;
         let source_landing = self
-            .source
-            .land_granted(&source_change, self.source_request()?, self.grant(), now)
+            .land_side(&self.source, &source_change, self.source_request()?, now)
             .boxed_local();
         let target_landing = self.land_target(now).boxed_local();
         let source_result = match futures::future::select(target_landing, source_landing).await {
@@ -667,8 +881,7 @@ impl MoveCoordinator {
     pub async fn land_source(&self, now: DateTime<Utc>) -> Result<LandingResult> {
         let (source_change, _) = self.change_ids()?;
         let result = self
-            .source
-            .land_granted(&source_change, self.source_request()?, self.grant(), now)
+            .land_side(&self.source, &source_change, self.source_request()?, now)
             .await?;
         self.source_ended(&result, now).await?;
         Ok(result)
@@ -698,7 +911,7 @@ impl MoveCoordinator {
                     record.problem = Some(problem);
                 })?;
             }
-            (other, MovePhase::Prepared) => self.refuse(reasons_of(other), now).await?,
+            (other, MovePhase::Prepared) => self.refuse(reasons_of(other), true, now).await?,
             _ => {}
         }
         Ok(())

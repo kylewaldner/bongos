@@ -208,31 +208,38 @@ pub(crate) async fn confirm_and_run(
     mut ctx: WorkContext,
     now: DateTime<Utc>,
 ) -> Result<String> {
-    match MoveCoordinator::preview(source, target, request).await? {
-        Ok(plan) if plan == *confirmed => {}
-        Ok(_) => return Ok(format!("Not moved: {PREVIEW_CHANGED}")),
-        Err(refusal) => return Ok(format!("Not moved: {refusal}")),
-    }
     let author = ctx.author.clone();
-    let coordinator =
-        match MoveCoordinator::confirm(source, target, request, author, Some(&mut ctx)).await? {
-            Ok(coordinator) => coordinator,
-            Err(refusal) => return Ok(format!("Not moved: {refusal}")),
-        };
+    let coordinator = match MoveCoordinator::confirm_shown(
+        source,
+        target,
+        request,
+        confirmed,
+        author,
+        Some(&mut ctx),
+    )
+    .await?
+    {
+        Some(Ok(coordinator)) => coordinator,
+        Some(Err(refusal)) => return Ok(format!("Not moved: {refusal}")),
+        None => return Ok(format!("Not moved: {PREVIEW_CHANGED}")),
+    };
     let move_id = coordinator.move_id().to_string();
-    let _running = Running::claim(&move_id);
+    let Some(_running) = Running::claim(&move_id) else {
+        anyhow::bail!("move {move_id} is already being driven");
+    };
     let outcome = coordinator.run(now).await?;
     Ok(outcome_message(confirmed, &move_id, &outcome))
 }
 
-/// Drives every move started in one of `repos` that a restart interrupted to its end, when its
-/// target is among `repos` too and no coordinator of this process drives it already. A move that
-/// needs a person is left for the person. Each move's outcome, by move id.
+/// Drives every move started in one of `repos` that a restart interrupted to its end, each on a
+/// thread of its own (one move waiting for an approval never holds up another), when its target
+/// is among `repos` too and no coordinator of this process drives it already. A move that needs a
+/// person is left for the person. Each move's outcome, by move id.
 pub(crate) async fn resume_moves(
     repos: &[ProjectRepo],
     now: DateTime<Utc>,
 ) -> Vec<(String, Result<MoveOutcome>)> {
-    let mut outcomes = Vec::new();
+    let mut runs = Vec::new();
     for source in repos {
         let in_flight = match source.moves_in_flight() {
             Ok(in_flight) => in_flight,
@@ -255,21 +262,27 @@ pub(crate) async fn resume_moves(
             else {
                 continue;
             };
-            let Some(_running) = Running::claim(&move_id) else {
+            let Some(running) = Running::claim(&move_id) else {
                 continue;
             };
-            let outcome = match MoveCoordinator::resume(source, target, &move_id) {
-                Ok(coordinator) => coordinator.run(now).await,
-                Err(error) => Err(error),
-            };
-            match &outcome {
-                Ok(outcome) => log::info!("resumed move {move_id}: {outcome:?}"),
-                Err(error) => log::error!("resuming move {move_id}: {error:#}"),
-            }
-            outcomes.push((move_id, outcome));
+            let (source, target) = (source.clone(), target.clone());
+            let id = move_id.clone();
+            let run = on_own_thread(move || {
+                let _running = running;
+                let outcome = match MoveCoordinator::resume(&source, &target, &id) {
+                    Ok(coordinator) => futures::executor::block_on(coordinator.run(now)),
+                    Err(error) => Err(error),
+                };
+                match &outcome {
+                    Ok(outcome) => log::info!("resumed move {id}: {outcome:?}"),
+                    Err(error) => log::error!("resuming move {id}: {error:#}"),
+                }
+                outcome
+            });
+            runs.push(async move { (move_id, run.await.and_then(|outcome| outcome)) });
         }
     }
-    outcomes
+    futures::future::join_all(runs).await
 }
 
 /// Runs `work` on a thread of its own and resolves with what it returned. A move's landings run

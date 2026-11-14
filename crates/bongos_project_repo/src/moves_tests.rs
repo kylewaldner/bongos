@@ -962,3 +962,244 @@ fn check_six_refuses_a_change_to_a_document_of_a_held_task() {
         "{reasons:?}"
     );
 }
+
+#[test]
+fn a_target_landing_already_running_elsewhere_is_waited_for_not_refused() {
+    let pair = pair(false);
+    let (source, target) = (&pair.source, &pair.target);
+    seed_state(source);
+    let coordinator = confirm(source, target);
+    block_on(coordinator.prepare(start())).unwrap();
+    let target_change = coordinator.record().unwrap().target_change.unwrap();
+    // A person's `project: land` of the move's own change starts first, so the coordinator's
+    // landing finds it already landing.
+    let (other, ours) = block_on(async {
+        futures::join!(
+            land_as(
+                target,
+                &target_change,
+                request("land it", &person()),
+                start()
+            ),
+            coordinator.land_target(start())
+        )
+    });
+    let commit = landed(other.unwrap());
+    assert_eq!(landed(ours.unwrap()), commit);
+    let record = coordinator.record().unwrap();
+    assert_eq!(record.phase, MovePhase::TargetLanded);
+    assert_eq!(record.target_commit.as_deref(), Some(commit.as_str()));
+
+    assert_eq!(run(&coordinator), MoveOutcome::Moved);
+    assert!(!has_path(source, "tasks/backfill/task.toml"));
+    assert!(has_path(target, "tasks/backfill/task.toml"));
+    assert_eq!(source.read_state(|read| read.task("l1")).unwrap(), None);
+    assert!(target.read_state(|read| read.task("l1")).unwrap().is_some());
+    assert!(claims(source).is_empty() && claims(target).is_empty());
+}
+
+/// A person's change in the source adding a new child task `late` (id l9) under the moved root
+/// (and dropping `report`'s edge, which closes a cycle no landing passes).
+fn late_child(source: &ProjectRepo) -> crate::WorkingCopy {
+    let copy = new_copy(source, "lucid-egret-0005", &person());
+    std::fs::write(
+        copy.path.join("definitions/tasks/report/task.toml"),
+        task("l2", "Report", ""),
+    )
+    .unwrap();
+    write_definition(
+        &copy,
+        "tasks/backfill/tasks/late/task.toml",
+        &definition_toml("l9", "Late", "other", &[]),
+    );
+    copy
+}
+
+fn land_late_child(source: &ProjectRepo, copy: &crate::WorkingCopy) -> LandingResult {
+    block_on(land_as(
+        source,
+        &copy.change_id,
+        request("late child", &person()),
+        start(),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_landing_between_the_preview_and_the_claim_makes_the_move_plan_again() {
+    let pair = pair(false);
+    let (source, target) = (&pair.source, &pair.target);
+    let (plan, verified) =
+        block_on(MoveCoordinator::preview_at(source, target, &move_request())).unwrap();
+    let plan = plan.unwrap();
+    assert_eq!(plan.task_ids(), ["l1", "l3"]);
+    landed(land_late_child(source, &late_child(source)));
+
+    // The claim of the plan made before the landing writes nothing.
+    let before = (fingerprint(source), fingerprint(target));
+    let claimed =
+        MoveCoordinator::claim_plan(source, target, plan, verified.as_deref(), mover(), None)
+            .unwrap();
+    assert!(matches!(claimed, crate::move_coordinator::Claimed::Stale));
+    assert_eq!((fingerprint(source), fingerprint(target)), before);
+    assert!(source.moves_in_flight().unwrap().is_empty());
+
+    // Confirming plans again from the newer commit and moves the late child too.
+    let coordinator = confirm(source, target);
+    assert_eq!(
+        coordinator.record().unwrap().plan.task_ids(),
+        ["l1", "l3", "l9"]
+    );
+    assert_eq!(run(&coordinator), MoveOutcome::Moved);
+    assert!(has_path(target, "tasks/backfill/tasks/late/task.toml"));
+    assert!(!has_path(source, "tasks/backfill/tasks/late/task.toml"));
+    assert!(claims(source).is_empty() && claims(target).is_empty());
+}
+
+#[test]
+fn a_subtree_that_changed_after_the_confirmation_refuses_the_move() {
+    let pair = pair(false);
+    let (source, target) = (&pair.source, &pair.target);
+    let late = late_child(source);
+    // The late child's landing passed its checks and stops before its state transaction; the
+    // move is confirmed there, before the landing's commit is verified.
+    let (reached_tx, reached) = futures::channel::oneshot::channel::<()>();
+    let (go, go_rx) = futures::channel::oneshot::channel::<()>();
+    let gates = Arc::new(parking_lot::Mutex::new(Some((reached_tx, go_rx))));
+    let late_id = late.change_id.clone();
+    source.set_probe(Arc::new(move |point, change| {
+        let gate = (point == crate::landing::ProbePoint::BeforeStateTransaction
+            && change == late_id)
+            .then(|| gates.lock().take())
+            .flatten();
+        async move {
+            if let Some((reached, go)) = gate {
+                reached.send(()).ok();
+                go.await.ok();
+            }
+            false
+        }
+        .boxed()
+    }));
+    let (result, coordinator) = block_on(async {
+        futures::join!(
+            land_as(
+                source,
+                &late.change_id,
+                request("late child", &person()),
+                start()
+            ),
+            async {
+                reached.await.unwrap();
+                let coordinator =
+                    MoveCoordinator::confirm(source, target, &move_request(), mover(), None)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                go.send(()).unwrap();
+                coordinator
+            }
+        )
+    });
+    landed(result.unwrap());
+    assert_eq!(coordinator.record().unwrap().plan.task_ids(), ["l1", "l3"]);
+
+    let target_before = fingerprint(target);
+    let outcome = run(&coordinator);
+    assert!(
+        matches!(&outcome, MoveOutcome::Refused { reasons }
+            if reasons[0].contains("changed in Invoicing since the move was confirmed")),
+        "{outcome:?}"
+    );
+    assert_eq!(fingerprint(target), target_before);
+    assert!(has_path(source, "tasks/backfill/tasks/late/task.toml"));
+    assert!(claims(source).is_empty());
+    assert!(
+        source
+            .changes(&Default::default())
+            .unwrap()
+            .iter()
+            .all(|row| { !row.name.starts_with("move-") })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_in_place_of_a_files_folder_is_left_out() {
+    let pair = pair(false);
+    let (source, target) = (&pair.source, &pair.target);
+    let outside = TempDir::new().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "secret\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), source.location().files.join("l1")).unwrap();
+    let coordinator = confirm(source, target);
+    assert_eq!(run(&coordinator), MoveOutcome::Moved);
+    assert!(
+        std::fs::symlink_metadata(target.location().files.join("l1")).is_err(),
+        "nothing of the link reaches the target"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+        "secret\n"
+    );
+}
+
+#[test]
+fn a_crash_after_the_target_landed_but_before_the_source_row_followed_resumes_to_completion() {
+    let pair = pair(false);
+    let Pair {
+        _roots,
+        source,
+        target,
+    } = pair;
+    seed_state(&source);
+    let state = source.read_state(|read| read.task("l1")).unwrap();
+    let coordinator = confirm(&source, &target);
+    let move_id = coordinator.move_id().to_string();
+    block_on(coordinator.prepare(start())).unwrap();
+    let target_change = coordinator.record().unwrap().target_change.unwrap();
+    // The target's landing commits (its step 8 imports the rows), and the process dies before
+    // the coordinator records it in the source.
+    let commit = landed(
+        block_on(target.land_now(&target_change, request("move in", &mover()), start())).unwrap(),
+    );
+    drop(coordinator);
+    let hooks = StateApplyHooks::new();
+    let source = reopen(source, &hooks);
+    let target = reopen(target, &hooks);
+    let coordinator = MoveCoordinator::resume(&source, &target, &move_id).unwrap();
+    assert_eq!(coordinator.record().unwrap().phase, MovePhase::Prepared);
+    assert_eq!(
+        target.move_record(&move_id).unwrap().unwrap().phase,
+        MovePhase::TargetLanded
+    );
+
+    assert_eq!(run(&coordinator), MoveOutcome::Moved);
+    let record = coordinator.record().unwrap();
+    assert_eq!(record.target_commit.as_deref(), Some(commit.as_str()));
+    // The target landed once: master's last move commit is that landing's, not a second one.
+    let moves_in_target = run_git(
+        &target,
+        &[
+            "log",
+            "--format=%H",
+            "--grep",
+            &format!("Bongos-Move: {move_id}"),
+            "main",
+        ],
+    );
+    assert_eq!(
+        moves_in_target.lines().collect::<Vec<_>>(),
+        [commit.as_str()]
+    );
+    assert!(has_path(&target, "tasks/backfill/task.toml"));
+    assert!(has_path(&target, "tasks/backfill/tasks/child/task.toml"));
+    assert!(!has_path(&source, "tasks/backfill/task.toml"));
+    assert_eq!(target.read_state(|read| read.task("l1")).unwrap(), state);
+    assert_eq!(source.read_state(|read| read.task("l1")).unwrap(), None);
+    assert_eq!(
+        std::fs::read(target.location().files.join("l3/chats/one.toml")).unwrap(),
+        b"\x00\x01binary"
+    );
+    assert!(!source.location().files.join("l1").exists());
+    assert!(claims(&source).is_empty() && claims(&target).is_empty());
+}
