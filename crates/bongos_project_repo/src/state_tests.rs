@@ -475,7 +475,7 @@ fn events_arrive_in_commit_order_from_many_threads() {
         }
     });
     let mut generations = Vec::new();
-    while let Ok(Some(StateEvent::Changed { generation, .. })) = events.try_next() {
+    while let Ok(StateEvent::Changed { generation, .. }) = events.try_recv() {
         generations.push(generation);
     }
     assert_eq!(generations, (1..=100).collect::<Vec<u64>>());

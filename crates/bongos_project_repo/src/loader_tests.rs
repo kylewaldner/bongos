@@ -209,7 +209,7 @@ fn the_loaded_project_follows_the_verified_commit() {
 
     // Before a verified commit is recorded, main is shown.
     assert!(block_on(loaded.load()).unwrap());
-    assert_eq!(loaded.commit(), Some(first.clone()));
+    assert_eq!(loaded.commit(), Some(first));
     assert!(!block_on(loaded.load()).unwrap());
     assert_eq!(repo.verified_commit().unwrap(), None);
     assert_eq!(writer(&repo).definitions(), loaded.definitions());
@@ -234,7 +234,7 @@ fn the_loaded_project_follows_the_verified_commit() {
     writer(&repo)
         .transact(|tx| tx.set_verified_commit(&edited.0, definitions.clone()))
         .unwrap();
-    assert_eq!(repo.verified_commit().unwrap(), Some(edited.clone()));
+    assert_eq!(repo.verified_commit().unwrap(), Some(edited));
     assert!(block_on(loaded.load()).unwrap());
     let projects = loaded.projects().unwrap();
     assert_eq!(projects.len(), 1);
@@ -257,7 +257,7 @@ fn a_dot_git_in_a_files_folder_is_not_an_artifact() {
     std::fs::create_dir_all(files.join(".git/refs")).unwrap();
     std::fs::write(files.join(".git/HEAD"), "x").unwrap();
     std::fs::write(files.join("notes.md"), "x").unwrap();
-    let loaded = LoadedProject::new(repo.clone());
+    let loaded = LoadedProject::new(repo);
     block_on(loaded.load()).unwrap();
     let tree = loaded.work_tree().unwrap();
     let names: Vec<&Path> = tree
