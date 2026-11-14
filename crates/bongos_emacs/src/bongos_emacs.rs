@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod apply;
+mod browse_kill_ring;
 mod comments;
 mod cursor;
 mod global_mark;
@@ -11,6 +12,7 @@ mod goto_line;
 mod jumps;
 mod kill;
 pub mod kill_ring_sink;
+pub mod kill_ring_store;
 pub mod kill_sink;
 pub mod last_command;
 mod lines;
@@ -30,6 +32,8 @@ mod zap;
 #[cfg(test)]
 mod apply_tests;
 #[cfg(test)]
+mod browse_kill_ring_tests;
+#[cfg(test)]
 mod comments_tests;
 #[cfg(test)]
 mod cursor_tests;
@@ -41,6 +45,8 @@ mod goto_line_tests;
 mod jumps_tests;
 #[cfg(test)]
 mod kill_ring_sink_tests;
+#[cfg(test)]
+mod kill_ring_store_tests;
 #[cfg(test)]
 mod kill_sink_tests;
 #[cfg(test)]
@@ -80,6 +86,7 @@ pub use last_command::last_command;
 /// tracker. Actions without a handler stay undispatchable, so only working commands reach M-x.
 pub fn init(cx: &mut App) {
     last_command::init(cx);
+    kill_ring_store::init(cx);
     kill_ring_sink::init(cx);
     quit::init(cx);
     cursor::init(cx);
@@ -103,6 +110,7 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, kill::append_next_kill_command);
         register(editor, &weak, yank::yank_command);
         register(editor, &weak, yank::yank_pop_command);
+        register(editor, &weak, browse_kill_ring::browse_kill_ring_command);
         register(editor, &weak, space::delete_horizontal_space_command);
         register(editor, &weak, space::just_one_space_command);
         register(editor, &weak, space::delete_blank_lines_command);

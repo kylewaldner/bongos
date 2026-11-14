@@ -11,6 +11,8 @@ mod emacs_keymap_tests;
 #[cfg(test)]
 mod isearch_keymap_tests;
 #[cfg(test)]
+mod kill_ring_keymap_tests;
+#[cfg(test)]
 mod linear_keymap_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
@@ -179,6 +181,16 @@ actions!(
         ShowWorkspaceError
     ]
 );
+
+/// Makes `C-y` in an incremental search yank what `C-y` in an editor would: the newest kill
+/// ring entry, or the clipboard's text when another app wrote it. Secret text is skipped,
+/// because a search saves its string to a history on disk.
+pub fn install_isearch_kill_source(cx: &mut App) {
+    bongos_isearch::seams::set_kill_source(
+        std::rc::Rc::new(editor::kill_ring::yank_text_unless_secret),
+        cx,
+    );
+}
 
 pub fn init(cx: &mut App) {
     #[cfg(target_os = "macos")]

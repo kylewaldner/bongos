@@ -102,6 +102,8 @@ pub enum Outcome {
 }
 
 pub(crate) type PreviewHandler = Rc<dyn Fn(Preview, &mut Window, &mut App)>;
+/// Describes a candidate in a panel under the list, from its value: `None` draws no panel.
+pub(crate) type DetailHandler = Rc<dyn Fn(&Value, &App) -> Option<SharedString>>;
 pub(crate) type InputHandler = Rc<dyn Fn(&str, &SessionHandle, &mut Window, &mut App)>;
 pub(crate) type ConfirmHandler = Box<dyn FnOnce(Outcome, &mut Window, &mut App)>;
 pub(crate) type CancelHandler = Box<dyn FnOnce(&mut Window, &mut App)>;
@@ -128,9 +130,11 @@ pub struct Session {
     free_input: bool,
     accept: Option<InputCheck>,
     history: String,
+    keep_history: bool,
     key_context: Option<KeyContext>,
     actions: Vec<SessionAction>,
     on_preview: Option<PreviewHandler>,
+    detail: Option<DetailHandler>,
     on_input: Option<InputHandler>,
     on_confirm: Option<ConfirmHandler>,
     on_cancel: Option<CancelHandler>,
@@ -150,9 +154,11 @@ impl Session {
             free_input: false,
             accept: None,
             history: host.to_string(),
+            keep_history: true,
             key_context: None,
             actions: Vec::new(),
             on_preview: None,
+            detail: None,
             on_input: None,
             on_confirm: None,
             on_cancel: None,
@@ -214,6 +220,13 @@ impl Session {
         self
     }
 
+    /// Keeps what the user confirms out of the history: nothing is written to it, though the
+    /// session can still walk the entries already there. For prompts whose text is private.
+    pub fn no_history(mut self) -> Self {
+        self.keep_history = false;
+        self
+    }
+
     /// A key context the session's view declares under `Minibuffer`, so the host can bind keys
     /// in `Minibuffer > <context> > Editor`.
     pub fn key_context(mut self, context: &str) -> Self {
@@ -243,6 +256,17 @@ impl Session {
         handler: impl Fn(Preview, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_preview = Some(Rc::new(handler));
+        self
+    }
+
+    /// Draws the text `handler` returns for the selected candidate's value in a panel directly
+    /// under the list, one line per line of text, in the buffer font. Nothing is drawn when the
+    /// handler returns `None` or no candidate is selected. The text is drawn as given.
+    pub fn detail(
+        mut self,
+        handler: impl Fn(&Value, &App) -> Option<SharedString> + 'static,
+    ) -> Self {
+        self.detail = Some(Rc::new(handler));
         self
     }
 
@@ -294,9 +318,11 @@ pub(crate) struct Core {
     /// Whether the status shows a refusal, which the next change of the input removes.
     pub(crate) refused: Cell<bool>,
     pub(crate) history_name: String,
+    pub(crate) keep_history: bool,
     pub(crate) history: HistoryStore,
     pub(crate) actions: Vec<SessionAction>,
     pub(crate) on_preview: Option<PreviewHandler>,
+    pub(crate) detail: Option<DetailHandler>,
     pub(crate) on_input: Option<InputHandler>,
     on_confirm: RefCell<Option<ConfirmHandler>>,
     on_cancel: RefCell<Option<CancelHandler>>,
@@ -331,6 +357,7 @@ impl Core {
             history: Some(entry),
             ..
         } = &finish
+            && self.keep_history
         {
             self.history.push(&self.history_name, entry, cx);
         }
@@ -446,9 +473,11 @@ pub fn open(
         free_input,
         accept,
         history,
+        keep_history,
         key_context,
         actions,
         on_preview,
+        detail,
         on_input,
         on_confirm,
         on_cancel,
@@ -466,8 +495,10 @@ pub fn open(
         refused: Cell::new(false),
         history: HistoryStore::global(cx),
         history_name: history,
+        keep_history,
         actions,
         on_preview,
+        detail,
         on_input,
         on_confirm: RefCell::new(on_confirm),
         on_cancel: RefCell::new(on_cancel),

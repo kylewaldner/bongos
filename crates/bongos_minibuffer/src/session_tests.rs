@@ -195,6 +195,27 @@ async fn minibuffer_session_of_a_host_a_list_and_confirm_gets_the_rest(cx: &mut 
 }
 
 #[gpui::test]
+async fn minibuffer_session_without_history_writes_nothing_on_confirm(cx: &mut TestAppContext) {
+    let store = HistoryStore::new(KeyValueStore::open_test_db("minibuffer_no_history").await);
+    cx.update(|cx| store.clone().install(cx));
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Shared::default();
+    let cx = &mut cx;
+
+    open_session(
+        &workspace,
+        cx,
+        session(&log, fixed(&["alpha", "beta"])).no_history(),
+    );
+    cx.simulate_input("alp");
+    cx.dispatch_action(minibuffer::Confirm);
+    cx.run_until_parked();
+
+    assert_eq!(log.borrow().confirmed.len(), 1);
+    assert!(store.ring(HOST).entries().is_empty());
+}
+
+#[gpui::test]
 async fn minibuffer_session_is_centered_when_its_host_is_not_routed(cx: &mut TestAppContext) {
     for routes in [&[][..], &["other"][..]] {
         let (workspace, mut cx) = window(cx, routes).await;
@@ -566,4 +587,87 @@ async fn minibuffer_host_key_context_sits_under_minibuffer(cx: &mut TestAppConte
     );
     cx.simulate_keystrokes("ctrl-t");
     assert_eq!(*pings.borrow(), 1);
+}
+
+fn detail_text(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    let view = view(workspace, cx).expect("a session is open");
+    view.read_with(cx, |view, cx| {
+        view.picker
+            .read(cx)
+            .delegate
+            .detail_text(cx)
+            .map(|text| text.to_string())
+    })
+}
+
+fn detail_drawn(cx: &mut VisualTestContext) -> bool {
+    cx.debug_bounds("minibuffer-detail").is_some()
+}
+
+fn detailed(log: &Shared) -> Session {
+    session(log, fixed(&["alpha", "beta"]))
+        .detail(|value, _| Some(format!("about {}\n\nsecond line", text_of(value)).into()))
+}
+
+#[gpui::test]
+async fn minibuffer_detail_shows_the_selected_candidate_in_both_presentations(
+    cx: &mut TestAppContext,
+) {
+    for enabled_for in [&[HOST][..], &[][..]] {
+        let (workspace, mut cx) = window(cx, enabled_for).await;
+        let log = Shared::default();
+        let cx = &mut cx;
+        open_session(&workspace, cx, detailed(&log));
+        assert_eq!(in_strip(&workspace, cx), !enabled_for.is_empty());
+        assert_eq!(
+            detail_text(&workspace, cx).as_deref(),
+            Some("about alpha\n\nsecond line")
+        );
+        assert!(detail_drawn(cx));
+    }
+}
+
+#[gpui::test]
+async fn minibuffer_detail_follows_the_selection(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Shared::default();
+    let cx = &mut cx;
+    open_session(&workspace, cx, detailed(&log));
+    cx.dispatch_action(minibuffer::SelectNext);
+    cx.run_until_parked();
+    assert_eq!(
+        detail_text(&workspace, cx).as_deref(),
+        Some("about beta\n\nsecond line")
+    );
+    assert!(detail_drawn(cx));
+    cx.simulate_input("al");
+    cx.run_until_parked();
+    assert_eq!(
+        detail_text(&workspace, cx).as_deref(),
+        Some("about alpha\n\nsecond line")
+    );
+}
+
+#[gpui::test]
+async fn minibuffer_detail_is_absent_when_the_handler_returns_none(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Shared::default();
+    let cx = &mut cx;
+    open_session(
+        &workspace,
+        cx,
+        session(&log, fixed(&["alpha", "beta"])).detail(|_, _| None),
+    );
+    assert_eq!(detail_text(&workspace, cx), None);
+    assert!(!detail_drawn(cx));
+}
+
+#[gpui::test]
+async fn minibuffer_detail_is_absent_without_a_handler(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Shared::default();
+    let cx = &mut cx;
+    open_session(&workspace, cx, session(&log, fixed(&["alpha", "beta"])));
+    assert_eq!(detail_text(&workspace, cx), None);
+    assert!(!detail_drawn(cx));
 }

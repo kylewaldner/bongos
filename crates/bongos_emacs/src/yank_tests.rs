@@ -388,8 +388,44 @@ async fn yank_captures_text_copied_outside(cx: &mut TestAppContext) {
     cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("outside".into())));
     cx.simulate_keystrokes("ctrl-y");
     cx.assert_editor_state("outsideˇ");
+    assert_eq!(ring_texts(&mut cx), ["outside", "ring"]);
     cx.simulate_keystrokes("alt-y");
     cx.assert_editor_state("ringˇ");
+}
+
+#[gpui::test]
+async fn yank_does_not_push_clipboard_text_equal_to_the_newest_entry(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇ").await;
+    seed(&mut cx, plain(&["older", "ring"]));
+    cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("ring".into())));
+    cx.simulate_keystrokes("ctrl-y");
+    cx.assert_editor_state("ringˇ");
+    assert_eq!(ring_texts(&mut cx), ["ring", "older"]);
+}
+
+#[gpui::test]
+async fn yank_skips_ignored_clipboard_text(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇ").await;
+    seed(&mut cx, plain(&["ring"]));
+    cx.update(|_, cx| {
+        kill_ring::ignore_clipboard_text("private", cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("private".into()));
+    });
+    cx.simulate_keystrokes("ctrl-y");
+    cx.assert_editor_state("ringˇ");
+    assert_eq!(ring_texts(&mut cx), ["ring"]);
+}
+
+#[gpui::test]
+async fn yank_captures_a_concealed_outside_copy_as_secret(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx, "ˇ").await;
+    seed(&mut cx, plain(&["ring"]));
+    cx.write_concealed_to_clipboard(ClipboardItem::new_string("hunter2".into()));
+    cx.simulate_keystrokes("ctrl-y");
+    cx.assert_editor_state("hunter2ˇ");
+    let secret = cx.update(|_, cx| kill_ring::read(cx).unwrap().newest().unwrap().secret);
+    assert!(secret);
+    assert_eq!(ring_texts(&mut cx), ["hunter2", "ring"]);
 }
 
 #[gpui::test]

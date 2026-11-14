@@ -435,6 +435,10 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 |---|---|
 | C-d, M-d, M-DEL | delete a character, kill word, kill word backward |
 | C-k, C-w, M-w, C-y | kill line, kill region or line, copy, yank |
+| M-y | yank-pop: right after a yank, replace the yanked text with the previous entry of the kill ring |
+| M-Y | browse-kill-ring: pick an entry from the kill ring in the minibuffer strip |
+| C-M-k | kill-whole-line |
+| C-M-w | append-next-kill: the next kill is added to the last entry |
 | C-/, C-_, C-x u | undo |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
@@ -465,6 +469,25 @@ bar.
 
 ```json
 { "base_keymap": "VSCode", "emacs": { "cursor_style": "auto" } }
+```
+
+### Kill ring
+
+Every kill and copy goes into one kill ring, shared by all editors, and C-y yanks the newest
+entry. Kills made one after another (C-k, C-M-k, M-d and the like) join into a single entry, so
+three C-M-k in a row followed by C-y brings all three lines back; C-M-w makes the next kill join
+the last entry even after other commands. M-y, right after a yank, swaps the yanked text for the
+next older entry, and again for the one before it. M-Y opens the ring in the minibuffer strip,
+newest first, narrowed as you type, with the highlighted entry previewed under the list; Enter
+inserts it. A C-u prefix will change how many lines these commands take once the prefix-argument
+feature lands.
+
+Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` is `true`
+(default `false`); then a copy in a terminal goes into the ring and a paste there reads it.
+`emacs.save_kill_ring` (default `true`) keeps the ring across restarts; see Privacy.
+
+```json
+{ "emacs": { "save_kill_ring": true, "terminal_uses_kill_ring": true } }
 ```
 
 ### Mark and region
@@ -563,7 +586,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
@@ -585,6 +608,12 @@ plugins.gradle.org, Maven repositories and Artifact Registry.
 Linear (`api.linear.app`) is contacted only when `linear.enabled` is on (the default) and a token
 is set, for a linked task or a Linear command. The token is stored in the credential store and
 never written to a log or a file.
+
+The kill ring is saved in the app database so it survives a restart. Text marked secret on Linux
+and the contents of masked fields (passwords) are never saved, nor is an entry over 1 MiB. Setting
+`emacs.save_kill_ring` to `false` turns saving off and deletes the saved ring.
+The secret hint is advisory: text from a password manager that sets no hint, from any macOS
+manager, or typed by hand is saved like any other kill. `emacs.save_kill_ring: false` turns saving off.
 
 bongos never contacts bongos.rocks. The list of kotlin-lsp builds is compiled in.
 

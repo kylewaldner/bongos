@@ -204,6 +204,110 @@ async fn outside_clipboard_text_becomes_its_own_entry(cx: &mut TestAppContext) {
     assert_eq!(clipboard_text(&mut cx).as_deref(), Some(" two"));
 }
 
+fn secrets(cx: &mut EditorTestContext) -> Vec<bool> {
+    cx.update(|_, cx| {
+        kill_ring::read(cx).map_or(Vec::new(), |ring| {
+            (0..ring.len())
+                .filter_map(|ix| ring.get(ix).map(|entry| entry.secret))
+                .collect()
+        })
+    })
+}
+
+#[gpui::test]
+async fn an_outside_copy_between_two_kill_lines_splits_the_sequence(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("ˇone\ntwo\nthree");
+    cx.simulate_keystrokes("ctrl-k");
+    cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("outside".into())));
+    cx.simulate_keystrokes("ctrl-k");
+
+    // The second kill is not appended to the outside text nor to the first kill.
+    cx.assert_editor_state("ˇthree");
+    assert_eq!(ring_texts(&mut cx), ["two\n", "outside", "one\n"]);
+    assert_eq!(secrets(&mut cx), [false, false, false]);
+    assert_eq!(clipboard_text(&mut cx).as_deref(), Some("two\n"));
+
+    // With no outside copy the sequence goes on and joins.
+    cx.simulate_keystrokes("ctrl-k");
+    assert_eq!(ring_texts(&mut cx), ["two\nthree", "outside", "one\n"]);
+}
+
+#[gpui::test]
+async fn a_concealed_outside_copy_is_secret_but_the_kill_after_it_is_not(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("ˇone\ntwo\nthree");
+    cx.simulate_keystrokes("ctrl-k");
+    cx.write_concealed_to_clipboard(ClipboardItem::new_string("hunter2".into()));
+    cx.simulate_keystrokes("ctrl-k");
+
+    assert_eq!(ring_texts(&mut cx), ["two\n", "hunter2", "one\n"]);
+    assert_eq!(secrets(&mut cx), [false, true, false]);
+    assert_eq!(clipboard_text(&mut cx).as_deref(), Some("two\n"));
+
+    // The next kill joins the unmarked one and nothing becomes secret.
+    cx.simulate_keystrokes("ctrl-k");
+    assert_eq!(ring_texts(&mut cx), ["two\nthree", "hunter2", "one\n"]);
+    assert_eq!(secrets(&mut cx), [false, true, false]);
+}
+
+#[gpui::test]
+async fn clipboard_text_equal_to_the_newest_entry_is_not_pushed_before_a_kill(
+    cx: &mut TestAppContext,
+) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("ˇone\ntwo\nthree");
+    cx.simulate_keystrokes("ctrl-k");
+    // Another app copied the same text the ring already has.
+    cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("one\n".into())));
+    cx.simulate_keystrokes("ctrl-k");
+
+    // Not captured a second time, so the kill still joins the first one.
+    assert_eq!(ring_texts(&mut cx), ["one\ntwo\n"]);
+}
+
+#[gpui::test]
+async fn ignored_clipboard_text_is_skipped_before_a_kill(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("ˇone\ntwo\nthree");
+    cx.simulate_keystrokes("ctrl-k");
+    cx.update(|_, cx| {
+        kill_ring::ignore_clipboard_text("private", cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("private".into()));
+    });
+    cx.simulate_keystrokes("ctrl-k");
+
+    assert_eq!(ring_texts(&mut cx), ["one\ntwo\n"]);
+    assert_eq!(clipboard_text(&mut cx).as_deref(), Some("one\ntwo\n"));
+}
+
+#[gpui::test]
+async fn an_editor_copy_from_outside_keeps_its_pieces_before_a_kill(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("«one ˇ»two «three ˇ»four");
+    cx.simulate_keystrokes("alt-w");
+    let copied = cx.update(|_, cx| cx.read_from_clipboard()).unwrap();
+    // The ring forgets it; the clipboard item, as another window would write it, comes back.
+    cx.update(|_, cx| {
+        kill_ring::update(cx, |ring| *ring = Default::default());
+        cx.write_to_clipboard(copied);
+    });
+    cx.set_state("ˇfive");
+    cx.simulate_keystrokes("ctrl-k");
+
+    assert_eq!(ring_texts(&mut cx), ["five", "one \nthree "]);
+    let pieces = cx.update(|_, cx| {
+        let ring = kill_ring::read(cx).unwrap();
+        let entry = ring.get(1).unwrap();
+        entry
+            .piece_texts()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(pieces, ["one ", "three "]);
+}
+
 #[gpui::test]
 async fn a_masked_editor_never_kills_or_copies(cx: &mut TestAppContext) {
     let mut cx = test_context(cx).await;
@@ -314,6 +418,32 @@ async fn append_next_kill_joins_a_kill_in_another_editor(cx: &mut TestAppContext
     });
 
     assert_eq!(ring_texts(&mut cx), ["one two"]);
+}
+
+#[gpui::test]
+async fn append_next_kill_after_a_copy_appends_to_the_copied_entry(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("«oneˇ» two\nthree");
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+
+    cx.simulate_keystrokes("alt-w ctrl-alt-w ctrl-k");
+
+    // The copy keeps the selection, so the next kill takes "one" again and joins it to the copy.
+    assert_eq!(ring_texts(&mut cx), ["oneone"]);
+}
+
+#[gpui::test]
+async fn append_next_kill_after_a_click_appends_to_the_newest_entry(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("oˇne\ntwo\nthree");
+
+    cx.simulate_keystrokes("ctrl-k");
+    let position = cx.pixel_position("o\ntˇwo\nthree");
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("ctrl-alt-w ctrl-k");
+
+    assert_eq!(ring_texts(&mut cx), ["newo"]);
 }
 
 /// Every `emacs` action that sends a kill is in `KILL_COMMANDS`, and every member sends one.

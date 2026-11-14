@@ -60,6 +60,18 @@ pub(crate) fn yank_command(
         message(window, cx, "Kill ring is empty");
         return;
     };
+    yank_entry(editor, index, &entry, window, cx);
+}
+
+/// Inserts `entry` (the ring's `index`th) the way a yank does: at every caret, the mark pushed
+/// at the insert start, the yank remembered so a yank-pop can replace it.
+pub(crate) fn yank_entry(
+    editor: &Entity<Editor>,
+    index: usize,
+    entry: &Entry,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let replaces_region = EditorSettings::get_global(cx).typing_replaces_selection;
     let starts = editor.update(cx, |editor, cx| {
         editor.set_selection_mark_mode(false, cx);
@@ -86,7 +98,7 @@ pub(crate) fn yank_command(
     });
     let (mark_at, starts) = starts;
     mark::push_mark(editor, Some(mark_at), false, window, cx);
-    if let Some(ranges) = insert(editor, &entry, starts, None, window, cx) {
+    if let Some(ranges) = insert(editor, entry, starts, None, window, cx) {
         remember(editor, window, ranges, index, cx);
     }
 }
@@ -100,17 +112,7 @@ pub(crate) fn yank_pop_command(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let after_yank = matches!(
-        last_command(window, cx),
-        Some(name) if name == Yank::name_for_type() || name == YankPop::name_for_type()
-    );
-    let window_id = window.window_handle().window_id();
-    let yanked = cx
-        .try_global::<YankState>()
-        .and_then(|state| state.0.as_ref())
-        .filter(|yanked| yanked.window == window_id && yanked.editor == editor.entity_id())
-        .map(|yanked| (yanked.ranges.clone(), yanked.index));
-    let Some((ranges, from)) = yanked.filter(|_| after_yank) else {
+    let Some((ranges, from)) = yanked_here(editor, window, cx) else {
         message(window, cx, "Previous command was not a yank");
         return;
     };
@@ -122,14 +124,56 @@ pub(crate) fn yank_pop_command(
         message(window, cx, "Kill ring is empty");
         return;
     };
+    if !replace_yanked(editor, index, &entry, ranges, window, cx) {
+        message(window, cx, "Previous command was not a yank");
+    }
+}
+
+/// The ranges and ring index of the yank this editor just made, when the last command was a
+/// yank or yank-pop here.
+pub(crate) fn yanked_here(
+    editor: &Entity<Editor>,
+    window: &Window,
+    cx: &App,
+) -> Option<(Vec<(Anchor, Anchor)>, usize)> {
+    let after_yank = matches!(
+        last_command(window, cx),
+        Some(name) if name == Yank::name_for_type() || name == YankPop::name_for_type()
+    );
+    yank_state(editor, window, cx).filter(|_| after_yank)
+}
+
+/// The ranges and ring index of the last yank, when it was made in this editor.
+pub(crate) fn yank_state(
+    editor: &Entity<Editor>,
+    window: &Window,
+    cx: &App,
+) -> Option<(Vec<(Anchor, Anchor)>, usize)> {
+    let window_id = window.window_handle().window_id();
+    cx.try_global::<YankState>()
+        .and_then(|state| state.0.as_ref())
+        .filter(|yanked| yanked.window == window_id && yanked.editor == editor.entity_id())
+        .map(|yanked| (yanked.ranges.clone(), yanked.index))
+}
+
+/// Replaces the yanked `ranges` with `entry` (the ring's `index`th) and remembers the result.
+/// `false`, with the yank forgotten, when the ranges cannot be replaced one by one.
+pub(crate) fn replace_yanked(
+    editor: &Entity<Editor>,
+    index: usize,
+    entry: &Entry,
+    ranges: Vec<(Anchor, Anchor)>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
     let starts = ranges.iter().map(|(start, _)| *start).collect();
-    let Some(ranges) = insert(editor, &entry, starts, Some(&ranges), window, cx) else {
+    let Some(ranges) = insert(editor, entry, starts, Some(&ranges), window, cx) else {
         // Touching ranges would merge into one selection and misplace the pieces.
         cx.set_global(YankState(None));
-        message(window, cx, "Previous command was not a yank");
-        return;
+        return false;
     };
     remember(editor, window, ranges, index, cx);
+    true
 }
 
 /// The ring entry at the index `pick` chooses, with that index.
