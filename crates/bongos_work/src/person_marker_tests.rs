@@ -76,7 +76,8 @@ fn from_action_is_called_only_in_the_files_that_hold_action_handlers() {
         }
         let text = std::fs::read_to_string(&file).unwrap();
         let code = &text;
-        if !code.contains("PersonAtKeyboard::from_action") {
+        // Any call, however the type is named: a full path, an alias or `Self`.
+        if !code.contains("from_action(") {
             continue;
         }
         seen.push(relative.clone());
