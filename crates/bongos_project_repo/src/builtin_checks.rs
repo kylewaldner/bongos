@@ -17,7 +17,8 @@ use bongos_project_repo_model::layout::{
     DEFINITIONS_DIR, PROJECT_FILE, TASK_FILE, WORKFLOW_FILE, WORKFLOWS_DIR,
 };
 use bongos_project_repo_model::{
-    Author, ChangeMeta, ChangeSummary, DefinitionTree, FileChange, Problem, RelPath, summarize,
+    Author, ChangeMeta, ChangeSummary, DefinitionTree, FileChange, Problem, RelPath, TaskDefinition,
+    summarize,
 };
 
 use crate::git::{Git, TreeEntry};
@@ -187,6 +188,35 @@ impl ChangeFacts {
             changed,
             summary,
         })
+    }
+
+    /// The ids of the tasks the change adds, removes, moves or redefines; every task id of
+    /// either tree when one of them does not parse.
+    pub(crate) fn touched_task_ids(&self) -> Vec<String> {
+        let (Ok(master), Ok(new)) = (&self.master.definitions, &self.new.definitions) else {
+            return self.task_ids();
+        };
+        let shape = |tree: &DefinitionTree| -> BTreeMap<String, (String, TaskDefinition)> {
+            tree.nodes()
+                .into_iter()
+                .map(|node| {
+                    (
+                        node.definition.id.clone(),
+                        (node.folder.clone(), node.definition.clone()),
+                    )
+                })
+                .collect()
+        };
+        let (before, after) = (shape(master), shape(new));
+        let mut ids: Vec<String> = before
+            .keys()
+            .chain(after.keys())
+            .filter(|id| before.get(*id) != after.get(*id))
+            .cloned()
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// Every task id of either tree.

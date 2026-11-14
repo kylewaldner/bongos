@@ -516,6 +516,7 @@ impl ProjectRepo {
                 Amended::Done { stamps, run } => (stamps, run),
                 Amended::NoVerdict(reason) => return Ok(LandingResult::NoVerdict { reason }),
             };
+            let started_seen = run.started_touched();
             let meta = landing_meta(&request.meta, &run.facts.summary);
             run.meta = meta.clone();
             let mut checks = self.run_builtins(&writer, &run)?;
@@ -600,6 +601,15 @@ impl ProjectRepo {
             // A before-queue or amending check whose stamp moved runs again: back to step 3,
             // and in at the back of the queue.
             if !self.moved_stamps(&mut run, &seen).await?.is_empty() {
+                drop(run);
+                drop(slot);
+                continue;
+            }
+            // A task the change touches was started while it waited: its amendments were
+            // bounded by the tasks started then, so it goes back to step 3, where they are
+            // dropped and redone (or the checks judge the author's part again), and in at the
+            // back of the queue.
+            if run.started_touched() != started_seen {
                 drop(run);
                 drop(slot);
                 continue;

@@ -453,3 +453,69 @@ fn a_listed_amend_commit_the_branch_never_got_is_skipped_when_the_amendments_are
             .is_empty()
     );
 }
+
+#[test]
+fn a_task_started_while_the_change_waits_sends_it_back_to_have_its_amendment_redone() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let amender = Arc::new(FakeAmender::new(
+        "rebalance",
+        2,
+        replace_in(
+            "tasks/backfill/task.toml",
+            "kind = \"other\"\n",
+            "kind = \"other\"\nareas = [\"billing\"]\n",
+        ),
+    ));
+    repo.add_amending_check(amender.clone());
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    // The author's part redefines `backfill`, so the amendment may tag it while it is unstarted.
+    write_definition(
+        &copy,
+        "tasks/backfill/task.toml",
+        &crate::test_support::definition_toml(
+            "l1",
+            "Backfill all",
+            "other",
+            &[("t1", "implement"), ("t2", "review"), ("t3", "check")],
+        ),
+    );
+    // `backfill` is started while the change waits in the queue.
+    let writer = repo.writer_or_error().unwrap();
+    let change_id = copy.change_id.clone();
+    let queued = Arc::new(AtomicUsize::new(0));
+    {
+        let queued = queued.clone();
+        repo.set_probe(Arc::new(move |point, change| {
+            if point == ProbePoint::InQueue && change == change_id {
+                queued.fetch_add(1, Ordering::SeqCst);
+                writer
+                    .transact(|tx| tx.set_task("l1", task_with_todos(&[("t1", TodoState::Done)])))
+                    .unwrap();
+            }
+            async { false }.boxed()
+        }));
+    }
+    let old = main_commit(&repo);
+
+    let result = land(&repo, &copy, &author);
+    // Not refused for changing a started task: the amendment was dropped and redone, and redone
+    // now it is outside its bounds.
+    let LandingResult::NoVerdict { reason } = &result else {
+        panic!("expected no verdict, got {result:?}");
+    };
+    assert!(
+        reason.starts_with("rebalance: amendment outside its bounds") && reason.contains("backfill"),
+        "{reason}"
+    );
+    assert_eq!(*amender.times.lock(), 0, "the amendment ran twice");
+    assert_eq!(queued.load(Ordering::SeqCst), 1);
+    assert_eq!(main_commit(&repo), old);
+    let row = repo.change(&copy.change_id).unwrap().unwrap();
+    assert!(row.amend_commits.is_empty());
+    assert_eq!(
+        run_git(&repo, &["log", "-1", "--format=%s", &row.branch]),
+        "land it"
+    );
+}

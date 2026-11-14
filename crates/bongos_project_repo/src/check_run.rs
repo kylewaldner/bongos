@@ -145,6 +145,12 @@ impl CheckRun {
         }
     }
 
+    /// The started tasks among those the change touches.
+    pub(crate) fn started_touched(&self) -> BTreeSet<String> {
+        let ids = self.facts.touched_task_ids();
+        self.live.started_set(ids.iter().map(String::as_str))
+    }
+
     fn builtin_input<'a>(&'a self, options: &'a crate::LandOptions) -> BuiltinInput<'a> {
         BuiltinInput {
             facts: &self.facts,
