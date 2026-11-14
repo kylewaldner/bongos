@@ -9,6 +9,7 @@ use gpui::{BackgroundExecutor, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::landing::LandRequest;
+use crate::quick_edit::QuickEdit;
 use crate::state::StateWriter;
 use crate::state_ops::StateOp;
 
@@ -30,6 +31,11 @@ pub enum RepoCommand {
         change_id: String,
         person: PersonClaim,
     },
+    /// A quick edit, landed at once; a person's claim stands for the `PersonEdit` approval.
+    QuickEdit {
+        edit: QuickEdit,
+        person: Option<PersonClaim>,
+    },
 }
 
 /// A window's claim that a person at its keyboard asked for a command, by the person's name.
@@ -44,6 +50,10 @@ pub struct PersonClaim {
 #[non_exhaustive]
 pub enum RepoReply {
     Done,
+    /// The quick edit's change, whose landing runs on.
+    Started {
+        change_id: String,
+    },
 }
 
 /// Where one open project's writes go: the writer in this process, another process's writer, or

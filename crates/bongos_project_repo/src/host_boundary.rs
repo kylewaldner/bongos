@@ -89,6 +89,23 @@ impl HostBoundary {
                     .await?;
                 Ok(RepoReply::Done)
             }
+            RepoCommand::QuickEdit { mut edit, person } => {
+                edit.meta.author = as_received(&edit.meta.author)?;
+                let grant = grant(person, peer);
+                let started = self.repo.start_quick_edit(edit, grant, now).await?;
+                let repo = self.repo.clone();
+                let change_id = started.change_id.clone();
+                // The landing runs on; the caller hears of it through the landing events.
+                smol::spawn(async move {
+                    if let Err(error) = repo.land_quick_edit(&change_id, Utc::now()).await {
+                        log::error!("landing the quick edit {change_id}: {error:#}");
+                    }
+                })
+                .detach();
+                Ok(RepoReply::Started {
+                    change_id: started.change_id,
+                })
+            }
         }
     }
 

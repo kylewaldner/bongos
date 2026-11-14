@@ -134,6 +134,18 @@ impl Git {
         args: Vec<OsString>,
         stdin: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, GitError> {
+        self.run_bytes_with_index(directory, None, args, stdin)
+            .await
+    }
+
+    /// [`Self::run_bytes`] with `GIT_INDEX_FILE` set to `index`, when given.
+    async fn run_bytes_with_index(
+        &self,
+        directory: &Path,
+        index: Option<&Path>,
+        args: Vec<OsString>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, GitError> {
         use futures::AsyncWriteExt as _;
 
         let shown = args
@@ -150,6 +162,9 @@ impl Git {
             .current_dir(directory)
             .env("GIT_TERMINAL_PROMPT", "0")
             .args(args);
+        if let Some(index) = index {
+            command.env("GIT_INDEX_FILE", index);
+        }
         if self.isolated {
             command
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -331,6 +346,63 @@ impl Git {
         ];
         self.run_os(repository, args).await?;
         Ok(())
+    }
+
+    /// Adds a worktree at `path` with the existing branch `branch` checked out.
+    pub async fn worktree_checkout(
+        &self,
+        repository: &Path,
+        path: &Path,
+        branch: &str,
+    ) -> Result<(), GitError> {
+        let args = vec![
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("-q"),
+            path.as_os_str().to_owned(),
+            OsString::from(branch),
+        ];
+        self.run_os(repository, args).await?;
+        Ok(())
+    }
+
+    /// Runs git with `args` in `directory` against the index file `index` instead of the
+    /// repository's, feeding it `stdin`, and returns its raw output.
+    pub async fn run_on_index(
+        &self,
+        directory: &Path,
+        index: &Path,
+        args: &[&str],
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, GitError> {
+        let args = args.iter().map(OsString::from).collect();
+        self.run_bytes_with_index(directory, Some(index), args, stdin)
+            .await
+    }
+
+    /// Writes each of `files` (paths of files on disk) as a blob and returns their ids, in order.
+    pub async fn hash_objects(
+        &self,
+        directory: &Path,
+        files: &[PathBuf],
+    ) -> Result<Vec<String>, GitError> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut input = Vec::new();
+        for file in files {
+            input.extend_from_slice(file.as_os_str().as_encoded_bytes());
+            input.push(b'\n');
+        }
+        let args = ["hash-object", "-w", "--no-filters", "--stdin-paths"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let output = self.run_bytes(directory, args, Some(input)).await?;
+        Ok(String::from_utf8_lossy(&output)
+            .lines()
+            .map(str::to_string)
+            .collect())
     }
 
     /// Adds a worktree at `path` with `commit` checked out and no branch.

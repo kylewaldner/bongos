@@ -506,7 +506,14 @@ impl ProjectRepo {
             ChangeState::Open | ChangeState::Requested => {}
         }
         let path = self.working_copy_path(&row.name);
-        if !path.is_dir() {
+        // A quick edit has only its branch: the landing checks it out.
+        if !path.is_dir()
+            && (!self
+                .git
+                .branch_exists(&self.location.repository, &row.branch)
+                .await
+                || self.check_out_change(change_id).await.is_err())
+        {
             return Ok(LandingResult::NoVerdict {
                 reason: format!("the working copy {} is not checked out", row.name),
             });

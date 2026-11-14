@@ -18,6 +18,7 @@ mod locations;
 mod master;
 mod peer;
 mod pins;
+mod quick_edit;
 mod registries;
 pub mod router;
 mod script_check;
@@ -65,6 +66,10 @@ pub use master::{
 };
 pub use peer::{ClientKind, PeerIdentity, peer_identity};
 pub use pins::PinGuard;
+pub use quick_edit::{
+    LANDING_MARK, NOT_LANDED_MARK, QUICK_EDITS_NAMESPACE, QuickEdit, QuickEditStarted,
+    STALE_SNAPSHOT, check_fresh, written_tasks,
+};
 pub use registries::{ActivitySource, ActivitySources, StateExporter, StateExporters};
 pub use script_check::ScriptCheck;
 pub use settings::ProjectRepositorySettings;
@@ -109,6 +114,8 @@ mod locations_tests;
 mod master_tests;
 #[cfg(test)]
 mod peer_tests;
+#[cfg(test)]
+mod quick_edit_tests;
 #[cfg(test)]
 mod router_tests;
 #[cfg(test)]

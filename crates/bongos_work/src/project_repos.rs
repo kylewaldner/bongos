@@ -1,26 +1,28 @@
 //! Fills the seams for one open project repository: a [`ProjectSource`] serving its loaded
 //! definitions joined with its state, and a [`DefinitionWriter`] that routes the changes of
 //! commands on its tasks. State-only changes are applied at once in one state transaction;
-//! changes to definitions need a landing, which is refused until landings exist.
+//! changes to definitions become quick edits: a branch made from the commit the command read,
+//! their state ops staged, and a landing that runs on in the background.
 
 use std::sync::Arc;
 
 use bongos_project_repo::router::{self, Routed};
-use bongos_project_repo::{LoadedProject, ProjectRepo, Recovery, StateEvent};
+use bongos_project_repo::{
+    LoadedProject, ProjectRepo, QuickEdit, Recovery, StateEvent, check_fresh, written_tasks,
+};
+use bongos_project_repo_model::ChangeMeta;
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{Change, Context};
 use bongos_work_model::store::{Project, WorkTree};
+use chrono::Utc;
 use fs::Fs;
 use futures::StreamExt as _;
-use gpui::{App, AppContext as _, AsyncApp, Task};
+use gpui::{App, AppContext as _, AsyncApp, BackgroundExecutor, Task};
 use util::ResultExt as _;
 
 use crate::ref_watch::{REF_WATCH_LATENCY, RefDirs};
 use crate::seams::{DefinitionWriter, DefinitionWriters, ProjectSource, ProjectSources};
 use crate::{WorkStore, WriteError, WriteOutcome};
-
-/// The refusal of a change to definitions until landings exist.
-pub const LANDING_UNAVAILABLE: &str = "landing is not available yet";
 
 /// The project repositories open in this process, which the commands on working copies and the
 /// handling of master files serve.
@@ -67,6 +69,7 @@ impl ProjectSource for RepoSource {
 struct RepoWriter {
     name: String,
     loaded: Arc<LoadedProject>,
+    executor: BackgroundExecutor,
 }
 
 impl DefinitionWriter for RepoWriter {
@@ -82,7 +85,7 @@ impl DefinitionWriter for RepoWriter {
         &self,
         tree: &WorkTree,
         ctx: &Context,
-        _attestation: Option<PersonAtKeyboard>,
+        attestation: Option<PersonAtKeyboard>,
         change: Change,
     ) -> Result<WriteOutcome, WriteError> {
         match router::route(tree, &change).map_err(WriteError::Refused)? {
@@ -104,7 +107,43 @@ impl DefinitionWriter for RepoWriter {
                 .map_err(|error| WriteError::Failed(format!("{error:#}")))?;
                 Ok(WriteOutcome::Applied(change))
             }
-            Routed::Definition { .. } => Err(WriteError::Refused(LANDING_UNAVAILABLE.to_string())),
+            Routed::Definition {
+                definition,
+                state,
+                files,
+            } => {
+                let (commit, definitions) = self.loaded.shown();
+                let Some(base) = commit else {
+                    return Err(WriteError::Refused(
+                        "the project is still loading; try again".to_string(),
+                    ));
+                };
+                check_fresh(tree, &change, &definitions).map_err(WriteError::Refused)?;
+                let edit = QuickEdit {
+                    base: base.0,
+                    definition,
+                    state,
+                    files,
+                    meta: ChangeMeta::new(String::new(), ctx.author.clone()),
+                    tasks: written_tasks(&change),
+                };
+                let repo = self.loaded.repo().clone();
+                // The store's serial writer runs on a background thread and waits for the
+                // branch and the row, so the snapshot it publishes next shows the change pending.
+                let started =
+                    futures::executor::block_on(repo.quick_edit(edit, attestation, Utc::now()))
+                        .map_err(|error| WriteError::Failed(format!("{error:#}")))?;
+                let change_id = started.change_id;
+                let landing_id = change_id.clone();
+                self.executor
+                    .spawn(async move {
+                        if let Err(error) = repo.land_quick_edit(&landing_id, Utc::now()).await {
+                            log::error!("landing the quick edit {landing_id}: {error:#}");
+                        }
+                    })
+                    .detach();
+                Ok(WriteOutcome::Landing { change, change_id })
+            }
         }
     }
 }
@@ -122,10 +161,12 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
         .state()
         .and_then(|state| state.writer())
         .map(|writer| writer.subscribe());
+    loaded.repo().use_registered_checks(cx);
     DefinitionWriters::register(
         Arc::new(RepoWriter {
             name: name.clone(),
             loaded: loaded.clone(),
+            executor: cx.background_executor().clone(),
         }),
         cx,
     );

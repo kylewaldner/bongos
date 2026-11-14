@@ -21,12 +21,14 @@ use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{
     ProjectFile, TaskFile, TaskId, new_id, serialize_artifacts, serialize_link, serialize_project,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::state::StateWriter;
 use crate::state_ops::{SETTABLE_FIELDS, StateOp, move_work, work_of};
 
 /// A change to the files of `definitions/`, relative to it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DefinitionOp {
     Write {
         path: RelPath,
@@ -43,7 +45,8 @@ pub enum DefinitionOp {
 }
 
 /// A change in the files folders, relative to the files root (`<task id>/...`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FileOp {
     Write {
         path: PathBuf,
@@ -118,13 +121,31 @@ impl Places {
         Ok(join_folder(&place.folder, rest))
     }
 
-    /// The path under the files root a path maps to: `<id>/<rest>`.
+    /// The path under the files root a path maps to: `<id>/<rest>`. A path that would leave
+    /// the task's files folder (a `..` part) is refused.
     fn files_path(&self, path: &Path) -> Result<PathBuf, String> {
         let (place, rest) = self
             .owner(path)
             .ok_or_else(|| format!("{} is not in a new-format project", path.display()))?;
+        if !is_plain(rest) || !is_plain(Path::new(&place.id)) {
+            return Err(format!("{} is not a files path", path.display()));
+        }
         Ok(Path::new(&place.id).join(rest))
     }
+}
+
+/// Whether `path` is relative and has only plain parts (no `..`, `.` or root).
+pub(crate) fn is_plain(path: &Path) -> bool {
+    path.components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+/// `folder` (relative to `definitions/`) as a definitions path, refused when it is empty or
+/// leaves `definitions/`.
+fn checked_folder(folder: String) -> Result<String, String> {
+    RelPath::new(folder.clone())
+        .map(|_| folder.clone())
+        .ok_or_else(|| format!("{folder} is not a definitions folder"))
 }
 
 fn join_folder(folder: &str, rest: &Path) -> String {
@@ -276,8 +297,8 @@ pub fn route(tree: &WorkTree, change: &Change) -> Result<Routed, String> {
             .and_then(|task| task.definition.as_ref());
         match task_folder {
             Some(from) => {
-                let from = from.to_string_lossy().into_owned();
-                let to = places.folder_of(&moved.to)?;
+                let from = checked_folder(from.to_string_lossy().into_owned())?;
+                let to = checked_folder(places.folder_of(&moved.to)?)?;
                 if from != to {
                     definition.push(DefinitionOp::Move { from, to });
                 }
@@ -467,7 +488,7 @@ pub fn apply_state_only(
     Ok(())
 }
 
-fn apply_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
+pub(crate) fn apply_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
     match op {
         FileOp::Write { path, bytes } => {
             let path = files_root.join(path);

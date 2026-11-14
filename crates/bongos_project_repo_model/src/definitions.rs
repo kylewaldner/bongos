@@ -16,8 +16,25 @@ use crate::layout::{PROJECT_FILE, TASK_FILE, TASKS_DIR};
 use crate::split::{TaskDefinition, TaskStateRecord, join, reserved_keys_in};
 
 /// A path relative to `definitions/`, with `/` separators, no empty, `.` or `..` parts.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
 pub struct RelPath(String);
+
+impl TryFrom<String> for RelPath {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, String> {
+        Self::new(text.clone()).ok_or_else(|| format!("{text} is not a definitions path"))
+    }
+}
+
+impl From<RelPath> for String {
+    fn from(path: RelPath) -> String {
+        path.0
+    }
+}
 
 impl RelPath {
     /// `None` when `text` is absolute or names a part that is empty, `.` or `..`.
