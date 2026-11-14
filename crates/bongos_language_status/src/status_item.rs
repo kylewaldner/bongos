@@ -524,7 +524,7 @@ mod tests {
 
         // A new attempt and its success clear the line.
         registry.update_lsp_binary_status(server.clone(), BinaryStatus::Downloading);
-        registry.update_lsp_binary_status(server.clone(), BinaryStatus::Starting);
+        registry.update_lsp_binary_status(server, BinaryStatus::Starting);
         cx.run_until_parked();
         assert_eq!(text(&item, cx), None);
 
@@ -574,7 +574,7 @@ mod tests {
             "Rust: downloading fake-rust-server 38% (6/16 MB)"
         );
         delegate.report_download_progress(server.clone(), 7 * MB, Some(16 * MB));
-        delegate.report_download_progress(server.clone(), 8 * MB, Some(16 * MB));
+        delegate.report_download_progress(server, 8 * MB, Some(16 * MB));
         cx.run_until_parked();
         let log = read_log(logs.path());
         assert_eq!(log.matches("download 25%").count(), 1, "{log}");
@@ -599,7 +599,7 @@ mod tests {
         registry.update_lsp_binary_status(server.clone(), BinaryStatus::Downloading);
         cx.run_until_parked();
 
-        let flag = delegate.download_cancel_flag(server.clone());
+        let flag = delegate.download_cancel_flag(server);
         item.update(cx, |item, cx| item.cancel_downloads(cx));
         assert!(flag.load(Ordering::SeqCst));
         assert!(read_log(logs.path()).contains("cancelling the download of fake-rust-server"));
@@ -653,7 +653,7 @@ mod tests {
         let second_a = servers_a.next().await.unwrap();
         assert_ne!(first_a.server.server_id(), second_a.server.server_id());
         assert!(
-            servers_b.try_next().is_err(),
+            servers_b.try_recv().is_err(),
             "server-b must not start again"
         );
         assert!(read_log(logs.path()).contains("retrying server-a"));
