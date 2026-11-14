@@ -14,8 +14,9 @@ use language::{FakeLspAdapter, LanguageName, rust_lang};
 use lsp::LanguageServerName;
 use parking_lot::Mutex;
 use project::{
-    LanguageServerPolicy, PolicyWorktree, Project, register_language_server_policy,
+    LanguageServerPolicy, PolicyWorktree, Project,
     lsp_store::{FormatTrigger, LspFormatTarget},
+    register_language_server_policy,
 };
 use serde_json::json;
 use settings::{SettingsStore, WorktreeId};
@@ -56,8 +57,8 @@ impl LanguageServerPolicy for SwitchPolicy {
         server: &LanguageServerName,
         _: &App,
     ) -> bool {
-        let use_new = (worktree.has_entry)(rel_path("switch-marker"))
-            && self.switched.load(Ordering::SeqCst);
+        let use_new =
+            (worktree.has_entry)(rel_path("switch-marker")) && self.switched.load(Ordering::SeqCst);
         match server.0.as_ref() {
             "old-server" => !use_new,
             "new-server" => use_new,
@@ -69,7 +70,13 @@ impl LanguageServerPolicy for SwitchPolicy {
 struct FormatterPolicy;
 
 impl LanguageServerPolicy for FormatterPolicy {
-    fn allows(&self, _: &PolicyWorktree, _: &LanguageName, _: &LanguageServerName, _: &App) -> bool {
+    fn allows(
+        &self,
+        _: &PolicyWorktree,
+        _: &LanguageName,
+        _: &LanguageServerName,
+        _: &App,
+    ) -> bool {
         true
     }
 
@@ -97,7 +104,10 @@ fn worktree_ids(project: &Entity<Project>, cx: &mut TestAppContext) -> (Worktree
     })
 }
 
-fn running_servers(project: &Entity<Project>, cx: &mut TestAppContext) -> Vec<(WorktreeId, String)> {
+fn running_servers(
+    project: &Entity<Project>,
+    cx: &mut TestAppContext,
+) -> Vec<(WorktreeId, String)> {
     project.read_with(cx, |project, cx| {
         let mut servers = project
             .lsp_store()
@@ -159,7 +169,10 @@ async fn test_refused_server_starts_only_where_allowed(cx: &mut TestAppContext) 
         .await
         .text_document
         .uri;
-    assert_eq!(opened, lsp::Uri::from_file_path(path!("/b/main.rs")).unwrap());
+    assert_eq!(
+        opened,
+        lsp::Uri::from_file_path(path!("/b/main.rs")).unwrap()
+    );
     cx.run_until_parked();
     assert!(
         fake_servers.try_recv().is_err(),
@@ -238,7 +251,9 @@ async fn test_policy_switch_stops_old_server_before_starting_new(cx: &mut TestAp
     events.lock().clear();
 
     let lib_buffer = project
-        .update(cx, |project, cx| project.open_local_buffer(path!("/a/lib.rs"), cx))
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/a/lib.rs"), cx)
+        })
         .await
         .unwrap();
     policy.switched.store(true, Ordering::SeqCst);
@@ -257,7 +272,10 @@ async fn test_policy_switch_stops_old_server_before_starting_new(cx: &mut TestAp
 
     assert_eq!(
         *events.lock(),
-        vec!["old-server stopped".to_string(), "new-server started".to_string()],
+        vec![
+            "old-server stopped".to_string(),
+            "new-server started".to_string()
+        ],
         "the old server must be stopped before the new one starts"
     );
     assert_eq!(
@@ -295,7 +313,8 @@ async fn test_policy_formatter_replaces_prettier_for_auto(cx: &mut TestAppContex
     });
 
     let fs = FakeFs::new(cx.executor());
-    fs.insert_tree(path!("/a"), json!({ "main.rs": "one" })).await;
+    fs.insert_tree(path!("/a"), json!({ "main.rs": "one" }))
+        .await;
     fs.insert_tree(path!("/b"), json!({})).await;
     let project = Project::test(fs, [path!("/a").as_ref(), path!("/b").as_ref()], cx).await;
     let language_registry = project.read_with(cx, |project, _| project.languages().clone());
@@ -345,5 +364,8 @@ async fn test_policy_formatter_replaces_prettier_for_auto(cx: &mut TestAppContex
         })
         .await
         .unwrap();
-    assert_eq!(buffer.read_with(cx, |buffer, _| buffer.text()), "one policy\n");
+    assert_eq!(
+        buffer.read_with(cx, |buffer, _| buffer.text()),
+        "one policy\n"
+    );
 }

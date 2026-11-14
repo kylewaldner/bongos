@@ -98,10 +98,7 @@ pub(crate) fn policy_formatter_server(
 }
 
 /// The policy's choice of formatting server for a local buffer, if any.
-pub(crate) fn policy_formatter_for_buffer(
-    buffer: &Buffer,
-    cx: &App,
-) -> Option<LanguageServerName> {
+pub(crate) fn policy_formatter_for_buffer(buffer: &Buffer, cx: &App) -> Option<LanguageServerName> {
     let file = File::from_dyn(buffer.file())?;
     let language = buffer.language()?;
     with_policy_worktree(file.worktree.read(cx), |worktree| {

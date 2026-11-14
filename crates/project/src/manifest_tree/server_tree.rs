@@ -146,8 +146,7 @@ impl LanguageServerTree {
         cx: &mut App,
     ) -> impl Iterator<Item = LanguageServerId> + 'a {
         let manifest_location = self.manifest_location_for_path(&path, manifest_name, delegate, cx);
-        let adapters =
-            self.adapters_for_language(&manifest_location, &language_name, delegate, cx);
+        let adapters = self.adapters_for_language(&manifest_location, &language_name, delegate, cx);
         self.get_with_adapters(manifest_location, adapters)
     }
 
@@ -161,8 +160,7 @@ impl LanguageServerTree {
         cx: &'a mut App,
     ) -> impl Iterator<Item = LanguageServerTreeNode> + 'a {
         let manifest_location = self.manifest_location_for_path(&path, manifest_name, delegate, cx);
-        let adapters =
-            self.adapters_for_language(&manifest_location, &language_name, delegate, cx);
+        let adapters = self.adapters_for_language(&manifest_location, &language_name, delegate, cx);
         self.init_with_adapters(manifest_location, language_name, adapters, cx)
     }
 
@@ -269,13 +267,11 @@ impl LanguageServerTree {
             .worktree_for_id(manifest_location.worktree_id, cx)
             .map(|worktree| worktree.read(cx).abs_path());
         let has_entry = |path: &RelPath| delegate.exists(path, None);
-        let policy_worktree = worktree_abs_path
-            .as_deref()
-            .map(|abs_path| PolicyWorktree {
-                id: manifest_location.worktree_id,
-                abs_path,
-                has_entry: &has_entry,
-            });
+        let policy_worktree = worktree_abs_path.as_deref().map(|abs_path| PolicyWorktree {
+            id: manifest_location.worktree_id,
+            abs_path,
+            has_entry: &has_entry,
+        });
 
         let desired_language_servers =
             settings.customized_language_servers(&available_language_servers);
@@ -425,9 +421,9 @@ impl ServerTreeRebase {
         let manifest =
             self.new_tree
                 .manifest_location_for_path(&path, manifest_name, &delegate, cx);
-        let adapters = self
-            .new_tree
-            .adapters_for_language(&manifest, &language_name, &delegate, cx);
+        let adapters =
+            self.new_tree
+                .adapters_for_language(&manifest, &language_name, &delegate, cx);
 
         self.new_tree
             .init_with_adapters(manifest, language_name, adapters, cx)

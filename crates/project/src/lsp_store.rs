@@ -1677,8 +1677,8 @@ impl LocalLspStore {
         logger: zlog::Logger,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        let (adapters_and_servers, settings, request_timeout, policy_formatter) =
-            lsp_store.update(cx, |lsp_store, cx| {
+        let (adapters_and_servers, settings, request_timeout, policy_formatter) = lsp_store
+            .update(cx, |lsp_store, cx| {
                 buffer.handle.update(cx, |buffer, cx| {
                     let adapters_and_servers = lsp_store
                         .as_local()
@@ -5728,7 +5728,10 @@ impl LspStore {
         };
         let mut refused = BTreeSet::new();
         for (worktree_id, servers) in &local.lsp_tree.instances {
-            let Some(worktree) = local.worktree_store.read(cx).worktree_for_id(*worktree_id, cx)
+            let Some(worktree) = local
+                .worktree_store
+                .read(cx)
+                .worktree_for_id(*worktree_id, cx)
             else {
                 continue;
             };
