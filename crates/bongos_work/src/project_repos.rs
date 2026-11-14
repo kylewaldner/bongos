@@ -52,18 +52,45 @@ pub(crate) fn note_open_repo(loaded: &Arc<LoadedProject>, cx: &mut App) {
 /// person whose context `ctx` is (refused unless it still holds the attestation of a person at
 /// a window). Resolves with the approved branch tip.
 pub fn approve_proposal(change_id: &str, ctx: Context, cx: &App) -> Task<Result<String, String>> {
+    let approving = approving(change_id, ctx, cx);
+    cx.background_spawn(approving)
+}
+
+/// [`approve_proposal`] for a caller that follows the landing with `watch`: the moment the
+/// approval is written, the waits the landing announced before it are passed over (see
+/// [`LandingWatch::pass_waits`]); a wait announced after it still holds. Resolves with the watch.
+pub fn approve_and_watch(
+    change_id: &str,
+    ctx: Context,
+    mut watch: LandingWatch,
+    cx: &App,
+) -> Task<Result<LandingWatch, String>> {
+    let approving = approving(change_id, ctx, cx);
+    let change_id = change_id.to_string();
+    cx.background_spawn(async move {
+        approving.await?;
+        watch.pass_waits(&change_id);
+        Ok(watch)
+    })
+}
+
+fn approving(
+    change_id: &str,
+    ctx: Context,
+    cx: &App,
+) -> impl std::future::Future<Output = Result<String, String>> + Send + 'static {
     let found = open_repos(cx)
         .into_iter()
         .map(|loaded| loaded.repo().clone())
         .find(|repo| repo.change(change_id).ok().flatten().is_some());
     let change_id = change_id.to_string();
-    cx.background_spawn(async move {
+    async move {
         let repo = found.ok_or_else(|| format!("there is no change {change_id}"))?;
         repo.approve(&change_id, ctx, Utc::now())
             .await
             .map(|approval| approval.commit)
             .map_err(|error| format!("{error:#}"))
-    })
+    }
 }
 
 /// Abandons every open working copy of proposal `number` of the task `root` (its branch and
@@ -107,25 +134,44 @@ pub enum LandingVerdict {
 
 /// The landing events of every open repository from the moment it was made, so a landing that
 /// starts with the next write is never missed.
-pub struct LandingWatch(Vec<futures::channel::mpsc::UnboundedReceiver<(String, LandingEvent)>>);
+pub struct LandingWatch {
+    receivers: Vec<futures::channel::mpsc::UnboundedReceiver<(String, LandingEvent)>>,
+    /// Events already taken from the receivers by [`LandingWatch::pass_waits`].
+    early: Vec<(String, LandingEvent)>,
+}
 
 /// Starts watching; call before the write whose landing is to be followed.
 pub fn watch_landings(cx: &App) -> LandingWatch {
-    LandingWatch(
-        open_repos(cx)
+    LandingWatch {
+        receivers: open_repos(cx)
             .iter()
             .map(|loaded| loaded.repo().landing_events())
             .collect(),
-    )
+        early: Vec::new(),
+    }
 }
 
 impl LandingWatch {
-    /// Resolves when `change_id` landed, is held (refused, conflicting, and, when
-    /// `through_waiting` is false, waiting for approval) or its landing ended otherwise
-    /// (abandoned, failed). `through_waiting` is for a caller that approved the change: a wait
-    /// the landing announced before the approval was written is over.
-    pub async fn verdict(self, change_id: &str, through_waiting: bool) -> LandingVerdict {
-        let mut events = futures::stream::select_all(self.0);
+    /// Passes over every wait of `change_id` announced so far: for a caller that has just
+    /// approved the change, a wait the landing announced before the approval is over. Every other
+    /// event, and every wait announced from now on, still counts.
+    pub fn pass_waits(&mut self, change_id: &str) {
+        for receiver in &mut self.receivers {
+            while let Ok(Some(event)) = receiver.try_next() {
+                let passed =
+                    event.0 == change_id && matches!(event.1, LandingEvent::Waiting { .. });
+                if !passed {
+                    self.early.push(event);
+                }
+            }
+        }
+    }
+
+    /// Resolves when `change_id` landed, is held (refused, conflicting, or waiting for a person
+    /// or for master) or its landing ended otherwise (abandoned, failed).
+    pub async fn verdict(self, change_id: &str) -> LandingVerdict {
+        let early = futures::stream::iter(self.early);
+        let mut events = early.chain(futures::stream::select_all(self.receivers));
         while let Some((id, event)) = events.next().await {
             if id != change_id {
                 continue;
@@ -138,13 +184,9 @@ impl LandingWatch {
                 LandingEvent::Conflict { files } => {
                     return LandingVerdict::Held(format!("conflict in {}", files.join(", ")));
                 }
-                LandingEvent::Waiting { reason } if !through_waiting => {
-                    return LandingVerdict::Held(reason);
-                }
+                LandingEvent::Waiting { reason } => return LandingVerdict::Held(reason),
                 LandingEvent::Ended { reason } => return LandingVerdict::Ended(reason),
-                LandingEvent::Waiting { .. }
-                | LandingEvent::Queued { .. }
-                | LandingEvent::Checking => {}
+                LandingEvent::Queued { .. } | LandingEvent::Checking => {}
             }
         }
         LandingVerdict::Held("the repository was closed".to_string())

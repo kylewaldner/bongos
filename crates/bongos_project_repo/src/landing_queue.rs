@@ -187,6 +187,11 @@ impl Engine {
         })
     }
 
+    /// Whether a `land` or `check` of `change_id` runs in this process.
+    pub(crate) fn is_landing(&self, change_id: &str) -> bool {
+        self.landing.lock().contains(change_id)
+    }
+
     /// Releases the lock if `change_id` holds it.
     pub(crate) fn release(&self, change_id: &str) {
         let mut holder = self.holder.lock();

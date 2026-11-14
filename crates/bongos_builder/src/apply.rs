@@ -557,7 +557,8 @@ pub(crate) fn apply_and_approve(
 /// Approves the proposal's working copy `change_id` as the person `approver` and follows its
 /// landing with `watch` (made before the write). The landing runs from the write on, so it may
 /// have said it waits for approval before the approval was written: once approved, that wait is
-/// over, and only a refusal, a conflict or the end of the landing holds it.
+/// over. A wait it announces after the approval (the approval is not enough, or master is split)
+/// holds it, as a refusal, a conflict or the end of the landing does.
 pub(crate) async fn approve_and_follow(
     watch: LandingWatch,
     change_id: &str,
@@ -566,11 +567,12 @@ pub(crate) async fn approve_and_follow(
     summary: String,
     cx: &mut gpui::AsyncApp,
 ) -> String {
-    let approved = cx.update(|cx| bongos_work::approve_proposal(change_id, approver, cx));
-    if let Err(error) = approved.await {
-        return format!("Proposal {number} was not approved: {error}");
-    }
-    match watch.verdict(change_id, true).await {
+    let approved = cx.update(|cx| bongos_work::approve_and_watch(change_id, approver, watch, cx));
+    let watch = match approved.await {
+        Ok(watch) => watch,
+        Err(error) => return format!("Proposal {number} was not approved: {error}"),
+    };
+    match watch.verdict(change_id).await {
         LandingVerdict::Landed => summary,
         LandingVerdict::Held(reason) => {
             let held = format!("Proposal {number} pending: {reason}");

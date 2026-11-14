@@ -52,7 +52,7 @@ pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
 pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root_tasks};
 pub use panel::{WorkPanel, init_panel, task_at_point};
 pub use project_repos::{
-    LandingVerdict, LandingWatch, abandon_proposal, approve_proposal, register_project_repo,
+    LandingVerdict, LandingWatch, abandon_proposal, approve_and_watch, approve_proposal, register_project_repo,
     watch_landings,
 };
 pub use rebase::RebaseState;

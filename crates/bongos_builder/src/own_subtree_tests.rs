@@ -11,9 +11,12 @@ use std::time::Duration;
 use bongos_builder_model::apply::{Request, file_hash};
 use bongos_builder_model::{Choices, LiveSet, applied_summary, diff, fingerprint};
 use bongos_project_repo::{
-    ChangeFilter, ChangeState, Git, Identity, LoadedProject, Location, MAIN_BRANCH, NEEDS_A_WINDOW,
+    AmendOutcome, AmendingCheck, ApprovalHook, ApprovalInput, ApprovalOpinion, ChangeFilter,
+    ChangeState, CheckInput, Git, Identity, LoadedProject, Location, MAIN_BRANCH, NEEDS_A_WINDOW,
     ProjectRepo, ProjectRepositorySettings, StateApplyHooks, StateHandle, StateStore,
 };
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use bongos_work::model::commands::Context as WorkContext;
 use bongos_work::model::store::WorkTree;
 use bongos_work::model::{Author, PersonAtKeyboard, ProposalState};
@@ -245,7 +248,7 @@ async fn agent_apply(
     let WriteOutcome::Landing { change_id, .. } = write.await.unwrap() else {
         panic!("expected a working copy");
     };
-    (watch.verdict(&change_id, false).await, change_id)
+    (watch.verdict(&change_id).await, change_id)
 }
 
 #[gpui::test]
@@ -478,7 +481,6 @@ async fn an_agent_never_receives_a_person_approval(cx: &mut TestAppContext) {
 
 /// `future`, failing the test when it takes longer than a landing ever should.
 async fn within<T>(cx: &mut TestAppContext, future: impl std::future::Future<Output = T>) -> T {
-    use futures::FutureExt as _;
     let timeout = cx.executor().timer(Duration::from_secs(60));
     futures::select_biased! {
         value = future.fuse() => value,
@@ -497,7 +499,7 @@ async fn an_apply_whose_landing_waited_before_the_approval_still_lands(cx: &mut 
     let probe = cx.update(|cx| bongos_work::watch_landings(cx));
     let (change_id, _) = write_without_approving(cx, &fixture, 1).await;
     // The landing runs first: it says it waits for approval before any approval exists.
-    let LandingVerdict::Held(reason) = within(cx, probe.verdict(&change_id, false)).await else {
+    let LandingVerdict::Held(reason) = within(cx, probe.verdict(&change_id)).await else {
         panic!("expected the landing to wait");
     };
     assert!(reason.starts_with("waiting for approval"), "{reason}");
@@ -520,6 +522,121 @@ async fn an_apply_whose_landing_waited_before_the_approval_still_lands(cx: &mut 
     assert_eq!(fixture.rows(Some(ChangeState::Landed)).len(), 1);
 }
 
+/// The `task.toml` under `folder` whose text holds `needle`.
+fn task_file_holding(folder: &Path, needle: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(folder).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = task_file_holding(&path, needle) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|name| name == "task.toml")
+            && std::fs::read_to_string(&path).is_ok_and(|text| text.contains(needle))
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// An amending check that waits until the change has an approval row, then sizes the task the
+/// proposal adds: the approval was written before the amendment, so it no longer covers the
+/// change.
+struct AmendsAfterTheApproval {
+    repo: ProjectRepo,
+    executor: gpui::BackgroundExecutor,
+}
+
+impl AmendingCheck for AmendsAfterTheApproval {
+    fn name(&self) -> &str {
+        "late-amender"
+    }
+
+    fn amend(&self, _input: CheckInput, writable: &Path) -> BoxFuture<'static, AmendOutcome> {
+        let (repo, executor) = (self.repo.clone(), self.executor.clone());
+        let definitions = writable.join("definitions");
+        async move {
+            loop {
+                let changes = repo.changes(&ChangeFilter::default()).unwrap();
+                if changes
+                    .iter()
+                    .any(|row| !repo.approvals(&row.change_id).unwrap().is_empty())
+                {
+                    break;
+                }
+                executor.timer(Duration::from_millis(20)).await;
+            }
+            let task = task_file_holding(&definitions, "Helper 1").unwrap();
+            let text = std::fs::read_to_string(&task).unwrap();
+            if text.contains("size = ") {
+                return AmendOutcome::Unchanged;
+            }
+            std::fs::write(&task, text.replacen("schema = 1\n", "schema = 1\nsize = 3\n", 1))
+                .unwrap();
+            AmendOutcome::Amended {
+                message: "size".to_string(),
+            }
+        }
+        .boxed()
+    }
+}
+
+/// A protected-section rule on every change: only a person's approval of the change as amended
+/// covers it.
+struct EveryChangeNeedsAPerson;
+
+impl ApprovalHook for EveryChangeNeedsAPerson {
+    fn name(&self) -> &str {
+        "protected-section"
+    }
+
+    fn judge(&self, _input: &ApprovalInput) -> ApprovalOpinion {
+        ApprovalOpinion::NeedsPerson("the change touches the protected section".to_string())
+    }
+}
+
+#[gpui::test]
+async fn an_apply_whose_landing_waits_after_the_approval_reports_it_held(
+    cx: &mut TestAppContext,
+) {
+    let fixture = fixture(cx, &[]).await;
+    fixture.repo.add_amending_check(Arc::new(AmendsAfterTheApproval {
+        repo: fixture.repo.clone(),
+        executor: cx.executor(),
+    }));
+    fixture
+        .repo
+        .add_approval_hook(Arc::new(EveryChangeNeedsAPerson));
+    let before = fixture.main();
+    let watch = cx.update(|cx| bongos_work::watch_landings(cx));
+    let (change_id, _) = write_without_approving(cx, &fixture, 1).await;
+    let following = cx.spawn({
+        let change_id = change_id.clone();
+        |mut cx| async move {
+            crate::apply::approve_and_follow(
+                watch,
+                &change_id,
+                person(),
+                ("g1".to_string(), 1),
+                "applied".to_string(),
+                &mut cx,
+            )
+            .await
+        }
+    });
+    // The amendment after the approval makes it stale: the landing waits for a person again,
+    // and the Apply says so instead of following it forever.
+    let message = within(cx, following).await;
+    assert!(
+        message.starts_with("Proposal 1 pending: ")
+            && message.contains("the change touches the protected section"),
+        "{message}"
+    );
+    assert_eq!(fixture.repo.approvals(&change_id).unwrap().len(), 1);
+    assert_eq!(fixture.main(), before);
+    assert!(fixture.rows(Some(ChangeState::Landed)).is_empty());
+}
+
 #[gpui::test]
 async fn a_reject_ends_the_watch_on_the_proposals_landing(cx: &mut TestAppContext) {
     let fixture = fixture(cx, &[]).await;
@@ -527,7 +644,7 @@ async fn a_reject_ends_the_watch_on_the_proposals_landing(cx: &mut TestAppContex
     let probe = cx.update(|cx| bongos_work::watch_landings(cx));
     let (change_id, text) = write_without_approving(cx, &fixture, 1).await;
     assert!(matches!(
-        within(cx, probe.verdict(&change_id, false)).await,
+        within(cx, probe.verdict(&change_id)).await,
         LandingVerdict::Held(_)
     ));
     let bytes = text.into_bytes();
@@ -543,9 +660,11 @@ async fn a_reject_ends_the_watch_on_the_proposals_landing(cx: &mut TestAppContex
         })
         .await;
     assert_eq!(message, crate::apply::rejected_message(1));
-    // Even a watcher that looks past waits hears that the landing is over.
+    // Even a watcher that passed over the waits hears that the landing is over.
+    let mut watch = watch;
+    watch.pass_waits(&change_id);
     assert_eq!(
-        within(cx, watch.verdict(&change_id, true)).await,
+        within(cx, watch.verdict(&change_id)).await,
         LandingVerdict::Ended(bongos_project_repo::LANDING_ABANDONED.to_string())
     );
 }

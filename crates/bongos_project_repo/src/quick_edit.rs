@@ -479,13 +479,16 @@ impl ProjectRepo {
         let request = match request {
             Ok(request) => request,
             Err(error) => {
-                // The landing never started, so no landing reports its end.
-                self.engine.emit(
+                // The landing never started, so no landing reports its end, unless a landing
+                // of the change already runs: that one reports its own.
+                if !self.engine.is_landing(change_id) {
+                    self.engine.emit(
                     change_id,
-                    crate::LandingEvent::Ended {
-                        reason: format!("the landing failed: {error:#}"),
-                    },
-                );
+                        crate::LandingEvent::Ended {
+                            reason: format!("the landing failed: {error:#}"),
+                        },
+                    );
+                }
                 return Err(error);
             }
         };

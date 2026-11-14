@@ -38,7 +38,7 @@ use futures::future::Either;
 use serde::{Deserialize, Serialize};
 
 use crate::amending::Amended;
-use crate::approval::{NEEDS_A_WINDOW, PersonGrant, approved_line};
+use crate::approval::{ApprovalRow, NEEDS_A_WINDOW, PersonGrant, approved_line};
 use crate::builtin_checks::{schema_check, tree_facts};
 use crate::changes::{ChangeRow, ChangeState};
 use crate::check_run::{CheckResult, verdict};
@@ -459,8 +459,13 @@ impl ProjectRepo {
         grant: Option<PersonGrant>,
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
-        let result = self.land_steps(change_id, &request, grant, now).await;
-        if let Some(event) = event_for(&result) {
+        let mut running_elsewhere = false;
+        let result = self
+            .land_steps(change_id, &request, grant, now, &mut running_elsewhere)
+            .await;
+        // A call that found the change already landing reports nothing, not even its own error:
+        // the running landing reports its end.
+        if !running_elsewhere && let Some(event) = event_for(&result) {
             self.engine.emit(change_id, event);
         }
         self.engine.signal.notify();
@@ -507,9 +512,11 @@ impl ProjectRepo {
         request: &LandRequest,
         mut grant: Option<PersonGrant>,
         now: DateTime<Utc>,
+        running_elsewhere: &mut bool,
     ) -> Result<LandingResult> {
         let writer = self.writer_or_error()?;
         let Some(_landing) = self.engine.start_landing(change_id) else {
+            *running_elsewhere = true;
             // A person's `project: land` of a change already landing (waiting for approval)
             // approves what it holds committed; the running landing goes on.
             if let Some(grant) = grant
@@ -650,8 +657,10 @@ impl ProjectRepo {
             }
             seen.extend(amend_stamps);
 
-            // Step 4: approval, waited for here, outside the queue and its lock.
-            let mut told = false;
+            // Step 4: approval, waited for here, outside the queue and its lock. The wait is
+            // announced again whenever the approval rows changed and still are not enough, so a
+            // person who approved hears that the landing waits on.
+            let mut told: Option<Vec<ApprovalRow>> = None;
             let approval_result = loop {
                 let wake = self.engine.signal.listen();
                 match self.change(change_id)?.map(|row| row.state) {
@@ -674,14 +683,15 @@ impl ProjectRepo {
                 if approval.is_approved() {
                     break result;
                 }
-                if !told {
+                let rows = self.approvals(change_id)?;
+                if told.as_ref() != Some(&rows) {
                     self.engine.emit(
                         change_id,
                         LandingEvent::Waiting {
                             reason: approval.waiting_reason().unwrap_or_default(),
                         },
                     );
-                    told = true;
+                    told = Some(rows);
                 }
                 wake.await.ok();
             };

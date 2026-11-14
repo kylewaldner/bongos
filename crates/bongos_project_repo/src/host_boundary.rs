@@ -22,13 +22,16 @@ pub struct HostBoundary {
 }
 
 /// `author` as it is after crossing a process boundary: a person becomes a claimed person, and
-/// the chat it claims to act in is dropped. An automatic approval rule (`own-subtree`) trusts the
-/// chat of an author, so only this process binds one: an author built here, by the store's
-/// writer for a chat or proposal of this process. No peer is bound to a chat by anything the host
-/// can verify, so a peer's agent change has no chat and waits for a person.
+/// the chat it claims to act in and the proposal it claims to write are dropped. An automatic
+/// approval rule (`own-subtree`) trusts the chat of an author, and a proposal's working copy is
+/// named for it and approved by `project: approve` of that proposal, so only this process binds
+/// either: an author built here, by the store's writer for a chat or proposal of this process. No
+/// peer is bound to a chat or a proposal by anything the host can verify, so a peer's agent change
+/// has neither and waits for a person.
 pub(crate) fn as_received(author: &Author) -> Result<Author> {
     let mut received: Author = serde_json::from_value(serde_json::to_value(author)?)?;
     received.chat = None;
+    received.proposal = None;
     Ok(received)
 }
 

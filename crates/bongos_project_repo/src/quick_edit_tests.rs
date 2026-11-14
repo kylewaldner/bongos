@@ -1145,12 +1145,17 @@ fn an_agent_chat_sent_by_a_peer_is_never_trusted_by_own_subtree() {
 }
 
 #[test]
-fn a_received_author_keeps_everything_but_its_chat() {
-    let author = Author::agent("agent").with_chat("c1");
+fn a_received_author_keeps_everything_but_its_chat_and_proposal() {
+    let mut author = Author::agent("agent").with_chat("c1");
+    author.proposal = Some(("g1".to_string(), 1));
     let received = crate::host_boundary::as_received(&author).unwrap();
     assert_eq!(received.kind(), author.kind());
     assert_eq!(received.name, "agent");
     assert_eq!(received.chat, None);
+    assert_eq!(received.proposal, None);
+    // In this process the author keeps both: only the boundary drops them.
+    assert_eq!(author.chat.as_deref(), Some("c1"));
+    assert_eq!(author.proposal, Some(("g1".to_string(), 1)));
     // A person stays only a claim.
     let received = crate::host_boundary::as_received(&keyboard().author).unwrap();
     assert_eq!(

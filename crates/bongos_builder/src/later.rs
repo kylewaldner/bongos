@@ -684,7 +684,7 @@ fn run_queue(cx: &mut App) {
                     // chat's subtree it lands; otherwise it waits for a person, and a failed
                     // check holds it, both reported as pending with the reason.
                     Ok(WriteOutcome::Landing { change, change_id }) => {
-                        match watch.verdict(&change_id, false).await {
+                        match watch.verdict(&change_id).await {
                             LandingVerdict::Landed => Ok(change.entry.detail.unwrap_or_default()),
                             LandingVerdict::Held(reason) | LandingVerdict::Ended(reason) => {
                                 Err(reason)
