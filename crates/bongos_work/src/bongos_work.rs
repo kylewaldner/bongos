@@ -16,10 +16,12 @@ mod open;
 mod overview;
 mod panel;
 mod projects;
+mod project_repos;
 mod rebase;
 mod ref_watch;
 mod registry;
 mod repositories;
+mod seams;
 mod settings;
 mod status;
 mod store;
@@ -49,6 +51,10 @@ pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};
 pub use registry::{
     ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
     NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart, observe_view_opened,
+};
+pub use project_repos::register_project_repo;
+pub use seams::{
+    ChangeId, DefinitionWriter, DefinitionWriters, ProjectSource, ProjectSources, WriteOutcome,
 };
 pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
@@ -139,6 +145,8 @@ mod ref_watch_tests;
 mod registry_tests;
 #[cfg(test)]
 mod repository_tests;
+#[cfg(test)]
+mod seam_tests;
 #[cfg(test)]
 mod store_tests;
 #[cfg(test)]
