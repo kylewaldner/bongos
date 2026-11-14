@@ -2606,6 +2606,7 @@ dependencies = [
  "bongos_query_replace_model",
  "buffer_diff",
  "command_palette_hooks",
+ "editor",
  "fancy-regex 0.17.0",
  "gpui",
  "language",
@@ -2613,6 +2614,8 @@ dependencies = [
  "project",
  "regex",
  "settings",
+ "theme",
+ "theme_settings",
 ]
 
 [[package]]
