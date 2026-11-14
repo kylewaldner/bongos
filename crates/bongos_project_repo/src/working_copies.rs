@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 
 use crate::changes::{ChangeFilter, ChangeRow, ChangeState};
 use crate::create::ProjectRepo;
+use crate::landing::LandingResult;
 
 /// A working copy that is checked out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,18 +20,6 @@ pub struct WorkingCopy {
     pub path: PathBuf,
     pub branch: String,
     pub change_id: String,
-}
-
-/// What a change landed as, or why it never will. A change that is `Requested` has no result
-/// yet; the landing engine adds the other outcomes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LandingResult {
-    Landed {
-        commit: String,
-    },
-    Abandoned,
-    /// The change is open and `land` was never called for it.
-    NotRequested,
 }
 
 /// Why a change could not be abandoned.
@@ -122,6 +111,7 @@ impl ProjectRepo {
             updated: now,
             state: ChangeState::Open,
             commit: None,
+            amend_commits: Vec::new(),
         };
         if let Err(error) = writer.transact(|tx| tx.set_change(&row)) {
             self.git.worktree_remove(repository, &path).await.ok();
@@ -135,7 +125,10 @@ impl ProjectRepo {
         })
     }
 
-    fn read_state<T>(&self, f: impl FnOnce(&crate::StateRead) -> Result<T>) -> Result<T> {
+    pub(crate) fn read_state<T>(
+        &self,
+        f: impl FnOnce(&crate::StateRead) -> Result<T>,
+    ) -> Result<T> {
         self.state
             .as_ref()
             .context("the project's state store is not open")?
@@ -201,8 +194,10 @@ impl ProjectRepo {
                 });
             }
             ChangeState::Abandoned => return Ok(()),
-            // The landing lock arrives with the landing engine.
             ChangeState::Open | ChangeState::Requested => {}
+        }
+        if self.engine.holder_id().as_deref() == Some(change_id) {
+            return Err(AbandonRefused::Landing);
         }
         let writer = self
             .state
@@ -228,7 +223,17 @@ impl ProjectRepo {
         }
         row.state = ChangeState::Abandoned;
         row.updated = now;
-        writer.transact(|tx| tx.set_change(&row)).map_err(failed)
+        let marked = writer
+            .transact(|tx| {
+                tx.queue_remove(change_id)?;
+                if tx.staged(change_id)?.is_some() {
+                    tx.drop_staged(change_id)?;
+                }
+                tx.set_change(&row)
+            })
+            .map_err(failed);
+        self.engine.signal.notify();
+        marked
     }
 
     /// Makes every file of the checkout `repository/` read-only, so a save that bypassed the

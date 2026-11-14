@@ -79,6 +79,8 @@ pub struct ProjectRepo {
     pub(crate) location: Location,
     pub(crate) git: Git,
     pub(crate) state: Option<StateHandle>,
+    /// The landing queue and its waiters, shared by every clone.
+    pub(crate) engine: std::sync::Arc<crate::landing_queue::Engine>,
 }
 
 impl std::fmt::Debug for ProjectRepo {
@@ -98,6 +100,7 @@ impl ProjectRepo {
             location,
             git,
             state: None,
+            engine: Default::default(),
         }
     }
 

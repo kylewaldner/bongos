@@ -40,17 +40,21 @@ impl StateHandle {
     }
 }
 
-/// Reads the definitions of the tree `at` in the repository at `repository`.
-pub async fn load_definition_tree(
+/// Every file path of the tree `treeish` (relative to the repository root), and the blobs of
+/// `project.toml` and the `task.toml` files under `definitions/` with their paths relative to
+/// it: one `git ls-tree -r` and one `git cat-file --batch`.
+pub(crate) async fn definition_blobs(
     git: &Git,
     repository: &Path,
-    at: &TreeRef,
-) -> Result<DefinitionTree> {
-    let entries = git.ls_tree_r(repository, at.treeish()).await?;
+    treeish: &str,
+) -> Result<(Vec<String>, Vec<(RelPath, Vec<u8>)>)> {
+    let entries = git.ls_tree_r(repository, treeish).await?;
     let prefix = format!("{DEFINITIONS_DIR}/");
+    let mut all = Vec::with_capacity(entries.len());
     let mut paths = Vec::new();
     let mut objects = Vec::new();
     for entry in entries {
+        all.push(entry.path.clone());
         if entry.kind != "blob" {
             continue;
         }
@@ -71,7 +75,18 @@ pub async fn load_definition_tree(
     let files = paths
         .into_iter()
         .zip(blobs)
-        .filter_map(|(path, blob)| blob.map(|bytes| (path, bytes)));
+        .filter_map(|(path, blob)| blob.map(|bytes| (path, bytes)))
+        .collect();
+    Ok((all, files))
+}
+
+/// Reads the definitions of the tree `at` in the repository at `repository`.
+pub async fn load_definition_tree(
+    git: &Git,
+    repository: &Path,
+    at: &TreeRef,
+) -> Result<DefinitionTree> {
+    let (_, files) = definition_blobs(git, repository, at.treeish()).await?;
     DefinitionTree::parse_files(files).map_err(|problems| {
         let list: Vec<String> = problems.iter().map(ToString::to_string).collect();
         anyhow!(
@@ -186,7 +201,7 @@ impl LoadedProject {
             .await?,
         );
         if let Some(writer) = self.repo.state.as_ref().and_then(StateHandle::writer) {
-            writer.set_definitions(definitions.clone());
+            writer.set_definitions_at(&commit.0, definitions.clone());
         }
         *self.shown.lock() = (Some(commit), definitions);
         Ok(true)

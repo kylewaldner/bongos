@@ -4,8 +4,11 @@
 mod changes;
 mod create;
 mod git;
+mod landing;
+mod landing_queue;
 mod loader;
 mod locations;
+mod master;
 mod registries;
 pub mod router;
 mod settings;
@@ -15,15 +18,24 @@ mod state_hooks;
 mod state_ops;
 mod working_copies;
 
-pub use changes::{ChangeFilter, ChangeRow, ChangeState};
+pub use changes::{AmendCommit, ChangeFilter, ChangeRow, ChangeState};
 pub use create::MAIN_BRANCH;
 pub use create::{CreateError, CreateRequest, LayoutTemplates, ProjectRepo};
 pub use git::{
-    CommitId, DEFAULT_IDENTITY_EMAIL, DEFAULT_IDENTITY_NAME, Git, GitError, Identity, TreeEntry,
-    TreeId, TreeRef,
+    CommitId, DEFAULT_IDENTITY_EMAIL, DEFAULT_IDENTITY_NAME, Git, GitError, Identity,
+    RebaseOutcome, TreeEntry, TreeId, TreeRef,
+};
+pub use landing::{
+    AmendOutcome, AmendingCheck, CheckOutcome, CheckResult, LandMode, LandOptions, LandRequest,
+    LandingEvent, LandingResult, MAIN_REF, MASTER_IS_SPLIT, RepoEvent, UNSAVED_EDITS,
+    WAITING_MASTER_SPLIT,
 };
 pub use loader::{LoadedProject, StateHandle, load_definition_tree};
 pub use locations::{Location, LocationError, RepositoryLocations};
+pub use master::{
+    HistoryKind, HistoryRow, MasterStatus, NOT_A_LANDING, OutsideChange, Recovery, Resolved,
+    SplitMaster, SplitResolution, UNAPPROVED_OUTSIDE_CHANGE, outside_ref,
+};
 pub use registries::{ActivitySource, ActivitySources, StateExporter, StateExporters};
 pub use settings::ProjectRepositorySettings;
 pub use sink::{LocalSink, RefusingSink, RepoCommand, RepoReply, StateSink};
@@ -34,8 +46,7 @@ pub use state::{
 pub use state_hooks::{StateApplyChange, StateApplyHook, StateApplyHooks, TaskTouch};
 pub use state_ops::{SETTABLE_FIELDS, StateOp};
 pub use working_copies::{
-    AbandonRefused, LandingResult, WorkingCopy, clean_name, fresh_name, generated_name,
-    protect_files,
+    AbandonRefused, WorkingCopy, clean_name, fresh_name, generated_name, protect_files,
 };
 
 /// Registers the settings of project repositories.
@@ -49,9 +60,13 @@ mod create_tests;
 #[cfg(test)]
 mod git_tests;
 #[cfg(test)]
+mod landing_tests;
+#[cfg(test)]
 mod loader_tests;
 #[cfg(test)]
 mod locations_tests;
+#[cfg(test)]
+mod master_tests;
 #[cfg(test)]
 mod router_tests;
 #[cfg(test)]

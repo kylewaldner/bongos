@@ -5,8 +5,8 @@
 //! `todos(task_id, position, todo_id, state, started)` the state of its todos, `history(task_id,
 //! seq, entry_toml)` its history, `kv(namespace, key, value_toml)` the state of other features,
 //! `staged_state(change_id, ops)` the state ops a pending change applies when it lands, and
-//! `landings`, `changes`, `check_results`, `approvals` and `meta(key, value)` for the landing
-//! machinery and the store itself.
+//! `landings`, `changes`, `check_results`, `approvals`, `landing_queue`, `resolutions` and
+//! `meta(key, value)` for the landing machinery and the store itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -85,6 +85,14 @@ const SCHEMA: &[&str] = &[
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS landing_queue (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        change_id TEXT NOT NULL UNIQUE
+    )",
+    "CREATE TABLE IF NOT EXISTS resolutions (
+        commit_id TEXT PRIMARY KEY NOT NULL,
+        record_toml TEXT NOT NULL
+    )",
 ];
 
 const GENERATION_KEY: &str = "generation";
@@ -148,7 +156,7 @@ impl StateStore {
         }
         Ok(StateWriter {
             connection: Mutex::new(connection),
-            definitions: Mutex::new(Arc::new(DefinitionTree::default())),
+            definitions: Mutex::new((None, Arc::new(DefinitionTree::default()))),
             hooks,
             subscribers: Mutex::new(Vec::new()),
             _lock: lock,
@@ -259,8 +267,8 @@ fn exec(connection: &Connection, sql: &str) -> Result<()> {
 pub struct StateWriter {
     // Declared before the lock so the database closes before the lock is released.
     connection: Mutex<Connection>,
-    /// The definitions at the verified commit, which the hooks see.
-    definitions: Mutex<Arc<DefinitionTree>>,
+    /// The definitions at the verified commit, which the hooks see, with that commit when known.
+    definitions: Mutex<(Option<String>, Arc<DefinitionTree>)>,
     hooks: Arc<[Arc<dyn StateApplyHook>]>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<StateEvent>>>,
     _lock: File,
@@ -296,7 +304,7 @@ impl StateWriter {
             connection: &connection,
             open: true,
         };
-        let definitions = self.definitions.lock().clone();
+        let definitions = self.definitions.lock().1.clone();
         let outcome = run_transaction(&connection, &self.hooks, &definitions, origin, ops, f);
         let (value, event, new_definitions) = match outcome {
             Ok(done) => {
@@ -310,8 +318,8 @@ impl StateWriter {
             Err(error) => return Err(error),
         };
         drop(guard);
-        if let Some(definitions) = new_definitions {
-            *self.definitions.lock() = definitions;
+        if let Some((commit, definitions)) = new_definitions {
+            *self.definitions.lock() = (Some(commit), definitions);
         }
         // Sent while the connection is still held, so events reach subscribers in the order
         // their transactions committed.
@@ -326,13 +334,23 @@ impl StateWriter {
 
     /// The definitions the hooks see as the verified commit's.
     pub fn definitions(&self) -> Arc<DefinitionTree> {
-        self.definitions.lock().clone()
+        self.definitions.lock().1.clone()
+    }
+
+    /// The commit whose definitions the hooks see, when known.
+    pub fn definitions_commit(&self) -> Option<String> {
+        self.definitions.lock().0.clone()
     }
 
     /// Sets the definitions the hooks see without a transaction: when a project opens, before
     /// any write.
     pub fn set_definitions(&self, definitions: Arc<DefinitionTree>) {
-        *self.definitions.lock() = definitions;
+        *self.definitions.lock() = (None, definitions);
+    }
+
+    /// [`Self::set_definitions`] for the definitions of `commit`.
+    pub fn set_definitions_at(&self, commit: &str, definitions: Arc<DefinitionTree>) {
+        *self.definitions.lock() = (Some(commit.to_string()), definitions);
     }
 
     /// A consistent read on the writer's connection. Not callable from inside `transact`.
@@ -366,7 +384,7 @@ impl Drop for RollbackGuard<'_> {
     }
 }
 
-type TransactionDone<T> = (T, Option<StateEvent>, Option<Arc<DefinitionTree>>);
+type TransactionDone<T> = (T, Option<StateEvent>, Option<(String, Arc<DefinitionTree>)>);
 
 fn run_transaction<T>(
     connection: &Connection,
@@ -379,7 +397,7 @@ fn run_transaction<T>(
     let mut tx = StateTx::new(connection);
     let value = f(&mut tx)?;
     run_hooks(&mut tx, hooks, definitions, origin, ops)?;
-    let new_definitions = tx.verified.take().map(|(_, tree)| tree);
+    let new_definitions = tx.verified.take();
     if !tx.dirty {
         return Ok((value, None, new_definitions));
     }
@@ -542,6 +560,37 @@ impl<'a> StateRead<'a> {
     /// The last commit that passed the deterministic checks; `None` before one is recorded.
     pub fn verified_commit(&self) -> Result<Option<String>> {
         read_meta(self.connection, VERIFIED_COMMIT_KEY)
+    }
+
+    /// The value of the `meta` key `key`.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        read_meta(self.connection, key)
+    }
+
+    /// Every landing as `(change id, record)`, newest first.
+    pub(crate) fn landings(&self) -> Result<Vec<(String, String)>> {
+        self.connection.select::<(String, String)>(
+            "SELECT change_id, record_toml FROM landings ORDER BY rowid DESC",
+        )?()
+    }
+
+    /// Every resolution of a split master as `(commit, record)`, newest first.
+    pub(crate) fn resolutions(&self) -> Result<Vec<(String, String)>> {
+        self.connection.select::<(String, String)>(
+            "SELECT commit_id, record_toml FROM resolutions ORDER BY rowid DESC",
+        )?()
+    }
+
+    /// The change ids in the landing queue, first in first.
+    pub fn landing_queue(&self) -> Result<Vec<String>> {
+        read_queue(self.connection)
+    }
+
+    /// The stored results of the checks of `change_id` as `(check, record)`.
+    pub(crate) fn check_results(&self, change_id: &str) -> Result<Vec<(String, String)>> {
+        self.connection.select_bound::<&str, (String, String)>(
+            "SELECT check_name, result_toml FROM check_results WHERE change_id = ? ORDER BY check_name",
+        )?(change_id)
     }
 }
 
@@ -737,6 +786,95 @@ impl<'a> StateTx<'a> {
         Ok(())
     }
 
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        read_meta(self.connection, key)
+    }
+
+    /// Sets the `meta` key `key`; not for the verified commit or the generation.
+    pub(crate) fn set_meta(&mut self, key: &str, value: &str) -> Result<()> {
+        self.only_kv_in_hook(key)?;
+        debug_assert!(key != VERIFIED_COMMIT_KEY && key != GENERATION_KEY);
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )?((key, value))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn delete_meta(&mut self, key: &str) -> Result<()> {
+        self.only_kv_in_hook(key)?;
+        self.connection
+            .exec_bound::<&str>("DELETE FROM meta WHERE key = ?")?(key)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn add_landing(&mut self, change_id: &str, record: &str) -> Result<()> {
+        self.only_kv_in_hook("a landing")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO landings (change_id, record_toml) VALUES (?1, ?2)",
+        )?((change_id, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn add_resolution(&mut self, commit: &str, record: &str) -> Result<()> {
+        self.only_kv_in_hook("a resolution")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO resolutions (commit_id, record_toml) VALUES (?1, ?2)",
+        )?((commit, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn landing_queue(&self) -> Result<Vec<String>> {
+        read_queue(self.connection)
+    }
+
+    /// Puts `change_id` at the back of the landing queue, unless it is in it already.
+    pub(crate) fn queue_push(&mut self, change_id: &str) -> Result<()> {
+        self.only_kv_in_hook("the landing queue")?;
+        self.connection.exec_bound::<&str>(
+            "INSERT INTO landing_queue (change_id) VALUES (?) ON CONFLICT (change_id) DO NOTHING",
+        )?(change_id)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn queue_remove(&mut self, change_id: &str) -> Result<()> {
+        self.only_kv_in_hook("the landing queue")?;
+        self.connection
+            .exec_bound::<&str>("DELETE FROM landing_queue WHERE change_id = ?")?(
+            change_id
+        )?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Empties the landing queue: at startup, when nobody of a former process waits in it.
+    pub(crate) fn queue_clear(&mut self) -> Result<()> {
+        self.only_kv_in_hook("the landing queue")?;
+        self.connection.exec("DELETE FROM landing_queue")?()?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn set_check_result(
+        &mut self,
+        change_id: &str,
+        check: &str,
+        record: &str,
+    ) -> Result<()> {
+        self.only_kv_in_hook("a check result")?;
+        self.connection.exec_bound::<(&str, &str, &str)>(
+            "INSERT INTO check_results (change_id, check_name, result_toml) VALUES (?1, ?2, ?3)
+             ON CONFLICT (change_id, check_name) DO UPDATE SET result_toml = excluded.result_toml",
+        )?((change_id, check, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
     pub fn kv(&mut self, namespace: &str) -> KvTx<'_, 'a> {
         KvTx {
             tx: self,
@@ -892,6 +1030,10 @@ fn read_task_ids(connection: &Connection) -> Result<Vec<TaskId>> {
         "SELECT id FROM tasks UNION SELECT task_id FROM todos UNION SELECT task_id FROM history
          ORDER BY 1",
     )?()
+}
+
+fn read_queue(connection: &Connection) -> Result<Vec<String>> {
+    connection.select::<String>("SELECT change_id FROM landing_queue ORDER BY seq")?()
 }
 
 fn read_meta(connection: &Connection, key: &str) -> Result<Option<String>> {
