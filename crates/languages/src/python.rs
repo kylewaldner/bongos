@@ -1269,6 +1269,57 @@ fn wr_distance(
     }
 }
 
+/// The environment name a project declares in its `environment.yml` or
+/// `environment.yaml`, if any.
+fn conda_environment_name(environment_file: &str) -> Option<String> {
+    environment_file.lines().find_map(|line| {
+        let value = line.strip_prefix("name:")?;
+        let value = value.split(" #").next().unwrap_or(value).trim();
+        let value = value.trim_matches(|c| c == '"' || c == '\'');
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+/// Moves the conda environment a project wants to the front of `environments`.
+///
+/// A conda environment whose name matches the `name:` in the `environment.yml`
+/// (or `environment.yaml`) at one of `project_roots` wins. Otherwise the
+/// environment under `conda_prefix` (the active `CONDA_PREFIX`) is preferred.
+/// With neither, the order is unchanged. The inputs are passed in so the rule
+/// never reads the real environment or home directory.
+fn prefer_project_conda_environment(
+    project_roots: &[PathBuf],
+    environments: &mut Vec<PythonEnvironment>,
+    conda_prefix: Option<&str>,
+) {
+    let is_conda = |env: &PythonEnvironment| env.kind == Some(PythonEnvironmentKind::Conda);
+    let declared_name = project_roots.iter().find_map(|root| {
+        ["environment.yml", "environment.yaml"]
+            .into_iter()
+            .find_map(|file| std::fs::read_to_string(root.join(file)).ok())
+            .and_then(|text| conda_environment_name(&text))
+    });
+    let by_name = declared_name.and_then(|name| {
+        environments
+            .iter()
+            .position(|env| is_conda(env) && env.name.as_deref() == Some(name.as_str()))
+    });
+    let by_prefix = || {
+        let prefix = conda_prefix.filter(|prefix| !prefix.is_empty())?;
+        environments.iter().position(|env| {
+            is_conda(env)
+                && env
+                    .executable
+                    .as_ref()
+                    .is_some_and(|exe| exe.starts_with(prefix))
+        })
+    };
+    if let Some(index) = by_name.or_else(by_prefix) {
+        let preferred = environments.remove(index);
+        environments.insert(0, preferred);
+    }
+}
+
 fn micromamba_shell_name(kind: ShellKind) -> &'static str {
     match kind {
         ShellKind::Csh => "csh",
@@ -1391,6 +1442,13 @@ impl ToolchainLister for PythonToolchainProvider {
                 .then_with(conda_ordering)
                 .then_with(exe_ordering)
         });
+
+        let project_roots = subroot_relative_path
+            .ancestors()
+            .map(|ancestor| wr.join(ancestor.as_std_path()))
+            .collect::<Vec<_>>();
+        let conda_prefix = environment.get_env_var("CONDA_PREFIX".to_string());
+        prefer_project_conda_environment(&project_roots, &mut toolchains, conda_prefix.as_deref());
 
         let mut out_toolchains = Vec::new();
         for toolchain in toolchains {
@@ -3237,6 +3295,277 @@ mod tests {
         assert!(enum_values.contains(&serde_json::json!("double")));
         assert!(enum_values.contains(&serde_json::json!("single")));
         assert!(enum_values.contains(&serde_json::json!("preserve")));
+    }
+
+    mod environment_tests {
+        use super::super::*;
+        use gpui::TestAppContext;
+        use language::LanguageName;
+        use settings::SettingsStore;
+        use std::fs;
+
+        fn fixture(name: &str, into: &Path) {
+            let from = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../script/bongos/fixtures/languages")
+                .join(name);
+            fn copy(from: &Path, to: &Path) {
+                fs::create_dir_all(to).unwrap();
+                for entry in fs::read_dir(from).unwrap() {
+                    let entry = entry.unwrap();
+                    let target = to.join(entry.file_name());
+                    if entry.path().is_dir() {
+                        copy(&entry.path(), &target);
+                    } else {
+                        fs::copy(entry.path(), target).unwrap();
+                    }
+                }
+            }
+            copy(&from, into);
+        }
+
+        /// Creates a fake environment: a directory with an interpreter file,
+        /// optionally with a `pyvenv.cfg` or a `conda-meta` directory.
+        fn fake_env(dir: &Path, pyvenv_cfg: Option<&str>, conda: bool) -> PathBuf {
+            fs::create_dir_all(dir.join("bin")).unwrap();
+            let python = dir.join("bin").join("python");
+            fs::write(&python, "").unwrap();
+            if let Some(cfg) = pyvenv_cfg {
+                fs::write(dir.join("pyvenv.cfg"), cfg).unwrap();
+            }
+            if conda {
+                fs::create_dir_all(dir.join("conda-meta")).unwrap();
+                fs::write(
+                    dir.join("conda-meta").join("python-3.11.0-h0_0.json"),
+                    "{\"name\": \"python\", \"version\": \"3.11.0\"}",
+                )
+                .unwrap();
+            }
+            python
+        }
+
+        struct Sandbox {
+            _dir: tempfile::TempDir,
+            home: PathBuf,
+            project: PathBuf,
+            env: HashMap<String, String>,
+        }
+
+        /// A project copied from a fixture inside a temp tree, with an empty
+        /// home, an empty `PATH` and no real environment variables consulted.
+        fn sandbox(fixture_name: &str) -> Sandbox {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let home = root.join("home");
+            let empty_path = root.join("empty-path");
+            fs::create_dir_all(&home).unwrap();
+            fs::create_dir_all(&empty_path).unwrap();
+            let project = root.join("project");
+            fixture(fixture_name, &project);
+            let mut env = HashMap::default();
+            env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
+            env.insert("PATH".to_string(), empty_path.to_string_lossy().into_owned());
+            Sandbox {
+                _dir: dir,
+                home,
+                project,
+                env,
+            }
+        }
+
+        async fn list(sandbox: &Sandbox, cx: &TestAppContext) -> Vec<String> {
+            let fs = project::FakeFs::new(cx.executor());
+            let provider = PythonToolchainProvider::new(fs);
+            provider
+                .list(
+                    sandbox.project.clone(),
+                    RelPath::empty().into(),
+                    Some(sandbox.env.clone()),
+                )
+                .await
+                .toolchains
+                .into_iter()
+                .map(|toolchain| toolchain.path.to_string())
+                .collect()
+        }
+
+        #[gpui::test]
+        async fn test_venv_environment_is_found(cx: &mut TestAppContext) {
+            cx.executor().allow_parking();
+            let sandbox = sandbox("python-venv");
+            let python = fake_env(
+                &sandbox.project.join(".venv"),
+                Some("home = /usr/bin\nversion = 3.11.0\n"),
+                false,
+            );
+            let found = list(&sandbox, cx).await;
+            assert_eq!(found.first(), Some(&python.to_string_lossy().into_owned()));
+        }
+
+        #[gpui::test]
+        async fn test_uv_environment_is_found(cx: &mut TestAppContext) {
+            cx.executor().allow_parking();
+            let sandbox = sandbox("python-uv");
+            let python = fake_env(
+                &sandbox.project.join(".venv"),
+                Some("home = /usr/bin\nuv = 0.5.0\nversion_info = 3.11.0\n"),
+                false,
+            );
+            let found = list(&sandbox, cx).await;
+            assert_eq!(found.first(), Some(&python.to_string_lossy().into_owned()));
+        }
+
+        #[gpui::test]
+        async fn test_poetry_environment_is_found(cx: &mut TestAppContext) {
+            cx.executor().allow_parking();
+            let mut sandbox = sandbox("python-poetry");
+            let cache = sandbox.home.join("poetry-cache");
+            let name = pet_poetry::environment_locations::generate_env_name(
+                "fixture-poetry",
+                &sandbox.project,
+            );
+            let python = fake_env(
+                &cache.join("virtualenvs").join(format!("{name}3.11")),
+                Some("home = /usr/bin\nversion = 3.11.0\n"),
+                false,
+            );
+            sandbox.env.insert(
+                "POETRY_CACHE_DIR".to_string(),
+                cache.to_string_lossy().into_owned(),
+            );
+            let found = list(&sandbox, cx).await;
+            assert_eq!(found.first(), Some(&python.to_string_lossy().into_owned()));
+        }
+
+        #[gpui::test]
+        async fn test_conda_environment_is_found_and_preferred(cx: &mut TestAppContext) {
+            cx.executor().allow_parking();
+            let mut sandbox = sandbox("python-conda");
+            let envs = sandbox.home.join("conda-root").join("envs");
+            fake_env(&envs.join("aaa-other"), None, true);
+            let python = fake_env(&envs.join("fixture-conda"), None, true);
+            sandbox.env.insert(
+                "CONDA_ENVS_PATH".to_string(),
+                envs.to_string_lossy().into_owned(),
+            );
+            let found = list(&sandbox, cx).await;
+            assert_eq!(found.first(), Some(&python.to_string_lossy().into_owned()));
+            assert!(found.len() >= 2, "{found:?}");
+        }
+
+        fn conda(name: &str, exe: &str) -> PythonEnvironment {
+            PythonEnvironment {
+                name: Some(name.to_string()),
+                kind: Some(PythonEnvironmentKind::Conda),
+                executable: Some(PathBuf::from(exe)),
+                ..Default::default()
+            }
+        }
+
+        fn names(environments: &[PythonEnvironment]) -> Vec<&str> {
+            environments
+                .iter()
+                .filter_map(|env| env.name.as_deref())
+                .collect()
+        }
+
+        fn envs() -> Vec<PythonEnvironment> {
+            vec![
+                conda("a", "/c/envs/a/bin/python"),
+                conda("b", "/c/envs/b/bin/python"),
+                conda("c", "/c/envs/c/bin/python"),
+            ]
+        }
+
+        #[test]
+        fn test_conda_environment_name_parsing() {
+            assert_eq!(
+                conda_environment_name("name: foo\ndependencies:\n  - x\n").as_deref(),
+                Some("foo")
+            );
+            assert_eq!(
+                conda_environment_name("name: \"bar\" # note\n").as_deref(),
+                Some("bar")
+            );
+            assert_eq!(conda_environment_name("dependencies:\n  - name: x\n"), None);
+            assert_eq!(conda_environment_name("name:\n"), None);
+        }
+
+        #[test]
+        fn test_matching_conda_name_wins_over_prefix() {
+            for file in ["environment.yml", "environment.yaml"] {
+                let dir = tempfile::tempdir().unwrap();
+                fs::write(dir.path().join(file), "name: c\n").unwrap();
+                let mut list = envs();
+                prefer_project_conda_environment(
+                    &[dir.path().to_path_buf()],
+                    &mut list,
+                    Some("/c/envs/b"),
+                );
+                assert_eq!(names(&list), ["c", "a", "b"], "{file}");
+            }
+        }
+
+        #[test]
+        fn test_conda_prefix_preferred_without_matching_name() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("environment.yml"), "name: missing\n").unwrap();
+            let mut list = envs();
+            prefer_project_conda_environment(
+                &[dir.path().to_path_buf()],
+                &mut list,
+                Some("/c/envs/b"),
+            );
+            assert_eq!(names(&list), ["b", "a", "c"]);
+        }
+
+        #[test]
+        fn test_conda_order_unchanged_without_name_or_prefix() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut list = envs();
+            prefer_project_conda_environment(&[dir.path().to_path_buf()], &mut list, None);
+            assert_eq!(names(&list), ["a", "b", "c"]);
+            prefer_project_conda_environment(&[dir.path().to_path_buf()], &mut list, Some(""));
+            assert_eq!(names(&list), ["a", "b", "c"]);
+        }
+
+        #[gpui::test]
+        async fn test_pyproject_toml_selects_toml(cx: &mut TestAppContext) {
+            let registry = Arc::new(language::LanguageRegistry::test(cx.executor()));
+            bongos_languages::init(&registry);
+            let available = registry
+                .language_for_file_path(Path::new(
+                    "script/bongos/fixtures/languages/python-poetry/pyproject.toml",
+                ))
+                .expect("a language for pyproject.toml");
+            assert_eq!(available.name().as_ref(), "TOML");
+        }
+
+        #[gpui::test]
+        async fn test_basedpyright_and_ruff_are_the_python_servers(cx: &mut TestAppContext) {
+            let registry = Arc::new(language::LanguageRegistry::test(cx.executor()));
+            let fs = project::FakeFs::new(cx.executor());
+            cx.update(|cx| {
+                let store = SettingsStore::test(cx);
+                cx.set_global(store);
+                crate::init(registry.clone(), fs, NodeRuntime::unavailable(), cx);
+
+                let registered = registry
+                    .lsp_adapters(&LanguageName::new("Python"))
+                    .into_iter()
+                    .map(|adapter| adapter.name().to_string())
+                    .collect::<Vec<_>>();
+                for server in ["basedpyright", "ruff"] {
+                    assert!(registered.iter().any(|name| name == server), "{registered:?}");
+                }
+
+            });
+
+            let defaults: Value = serde_json_lenient::from_str(&settings::default_settings())
+                .expect("default settings parse");
+            let servers = &defaults["languages"]["Python"]["language_servers"];
+            assert_eq!(servers[0], "basedpyright");
+            assert_eq!(servers[1], "ruff");
+        }
     }
 
     mod pyproject_manifest_tests {
