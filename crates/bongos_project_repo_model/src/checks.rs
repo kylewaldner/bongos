@@ -1,6 +1,41 @@
-//! The built-in landing check `schema`, pure over the paths and blobs of one tree: every file is
-//! in `definitions/` (or is `.gitattributes`), in a known file or folder, and the definitions
-//! parse.
+//! The built-in landing checks, pure over parsed trees, and the data a landing check works with.
+//! This file holds check 1, `schema`, over the paths and blobs of one tree: every file is in
+//! `definitions/` (or is `.gitattributes`), in a known file or folder, and the definitions parse;
+//! [`landing_declaration_problems`] adds the project's `[[landing.checks]]` entries.
+
+mod declared;
+mod live;
+mod no_cycle;
+mod no_state;
+mod outcome;
+mod references;
+mod secrets;
+mod size_and_kind;
+mod started;
+
+pub use declared::{
+    APPROVAL_CHECK, CANNOT_DISABLE, NO_CYCLE_CHECK, NO_STATE_CHECK, REFERENCES_CHECK,
+    SECRETS_CHECK, SIZE_AND_KIND_CHECK, STARTED_UNCHANGED_CHECK, landing_declaration_problems,
+};
+pub use live::{HoldReason, LiveFacts, LiveSource, MoveHold, state_is_started};
+pub use no_cycle::no_cycle;
+pub use no_state::no_state;
+pub use outcome::{AmendOutcome, CheckOutcome, CheckPhase, Stamp};
+pub use references::references;
+pub use secrets::{compile_secret_patterns, secrets};
+pub use size_and_kind::{
+    BINARY_SNIFF_BYTES, FileFacts, IMAGE_EXTENSIONS, SizeLimits, size_and_kind,
+};
+pub use started::{
+    MOVE_MARKER, StagedTodoMove, StartedInput, started_unchanged, strip_move_meta, strip_move_text,
+};
+
+#[cfg(test)]
+mod declared_tests;
+#[cfg(test)]
+mod pure_checks_tests;
+#[cfg(test)]
+mod started_tests;
 
 use crate::definitions::{DefinitionTree, Problem, RelPath};
 use crate::layout::{
