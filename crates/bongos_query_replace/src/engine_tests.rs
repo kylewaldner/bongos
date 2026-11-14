@@ -611,15 +611,9 @@ fn test_groups_of_a_match_across_two_excerpts_of_one_buffer(cx: &mut TestAppCont
     let snapshot = multibuffer.read_with(cx, |multibuffer, cx| multibuffer.snapshot(cx));
     let text = snapshot.text();
     assert!(text.starts_with("foo\nbbb"), "{text:?}");
-    let all = scope(&snapshot, at(0), Some(offsets(0..text.len())));
-    let found = next(
-        &snapshot,
-        &regexp("(fo+)\\n(b+)"),
-        at(0),
-        &all,
-        &Cancel::new(),
-    )
-    .expect("found across the excerpts");
+    // The groups of a match over the excerpt boundary come from the text shown, not from the
+    // buffer stretch between the two ends.
+    let found = found_at(&snapshot, &regexp("(fo+)\\n(b+)"), offsets(0..7));
     assert_eq!(found.range, 0..7);
     assert_eq!(
         found.groups,
