@@ -9,7 +9,7 @@
 
 pub mod actions;
 mod commands;
-mod display;
+pub mod display;
 pub mod engine;
 mod intercept;
 mod occur;

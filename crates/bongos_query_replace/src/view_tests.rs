@@ -37,7 +37,7 @@ impl Scene {
         view.read_with(&self.cx, |view, _| view.help_lines().to_vec())
     }
 
-    fn keys(&mut self, keys: &str) {
+    pub(crate) fn keys(&mut self, keys: &str) {
         self.cx.simulate_keystrokes(keys);
         self.cx.run_until_parked();
     }
