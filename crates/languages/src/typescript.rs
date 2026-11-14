@@ -26,7 +26,7 @@ use task::{TaskTemplate, TaskTemplates, VariableName};
 use util::rel_path::RelPath;
 use util::{ResultExt, maybe};
 
-use crate::package_json::LOCKFILES;
+use crate::package_json::detect_lockfiles;
 use crate::{PackageJson, PackageJsonData};
 
 pub(crate) struct TypeScriptContextProvider {
@@ -235,10 +235,7 @@ impl PackageJsonData {
                 label: format!("{} file test", "bun test".to_owned()),
                 command: "bun".to_owned(),
                 args: vec!["test".to_owned(), VariableName::File.template_value()],
-                cwd: self
-                    .bun_package_path
-                    .is_some()
-                    .then(|| TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE.template_value()),
+                cwd: Some(TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE.template_value()),
                 ..TaskTemplate::default()
             });
             task_templates.0.push(TaskTemplate {
@@ -255,10 +252,7 @@ impl PackageJsonData {
                     "js-test".to_owned(),
                     "tsx-test".to_owned(),
                 ],
-                cwd: self
-                    .bun_package_path
-                    .is_some()
-                    .then(|| TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE.template_value()),
+                cwd: Some(TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE.template_value()),
                 ..TaskTemplate::default()
             });
         }
@@ -359,13 +353,7 @@ impl TypeScriptContextProvider {
             for new_data in join_all(new_json_data).await.into_iter().flatten() {
                 package_json_data.merge(new_data);
             }
-            for directory in &directories {
-                for (file_name, manager) in LOCKFILES {
-                    if fs.is_file(&directory.join(file_name)).await {
-                        package_json_data.lockfiles.push(manager);
-                    }
-                }
-            }
+            package_json_data.lockfiles = detect_lockfiles(fs.as_ref(), &directories).await;
             Ok(package_json_data)
         })
     }
@@ -450,18 +438,7 @@ impl ContextProvider for TypeScriptContextProvider {
                 .as_ref()
                 .is_ok_and(PackageJsonData::is_bun);
             let mut task_templates = TaskTemplates(Vec::new());
-            task_templates.0.push(TaskTemplate {
-                label: format!(
-                    "execute selection {}",
-                    VariableName::SelectedText.template_value()
-                ),
-                command: if is_bun { "bun" } else { "node" }.to_owned(),
-                args: vec![
-                    "-e".to_owned(),
-                    format!("\"{}\"", VariableName::SelectedText.template_value()),
-                ],
-                ..TaskTemplate::default()
-            });
+            task_templates.0.push(execute_selection_template(is_bun));
 
             match package_json_data {
                 Ok(package_json) => {
@@ -566,7 +543,10 @@ impl ContextProvider for TypeScriptContextProvider {
                         );
                     }
 
-                    if let Some(path) = package_json_data.bun_package_path {
+                    if let Some(path) = package_json_data
+                        .bun_package_path
+                        .or(package_json_data.nearest_package_json_path)
+                    {
                         vars.insert(
                             TYPESCRIPT_BUN_PACKAGE_PATH_VARIABLE,
                             path.parent()
@@ -589,6 +569,21 @@ impl ContextProvider for TypeScriptContextProvider {
             }
             Ok(vars)
         })
+    }
+}
+
+fn execute_selection_template(is_bun: bool) -> TaskTemplate {
+    TaskTemplate {
+        label: format!(
+            "execute selection {}",
+            VariableName::SelectedText.template_value()
+        ),
+        command: if is_bun { "bun" } else { "node" }.to_owned(),
+        args: vec![
+            "-e".to_owned(),
+            format!("\"{}\"", VariableName::SelectedText.template_value()),
+        ],
+        ..TaskTemplate::default()
     }
 }
 
@@ -890,6 +885,7 @@ mod tests {
     use std::path::Path;
 
     use gpui::{AppContext as _, BackgroundExecutor, TestAppContext};
+    use super::execute_selection_template;
     use project::FakeFs;
     use serde_json::json;
     use task::TaskTemplates;
@@ -1495,6 +1491,7 @@ mod tests {
                 jasmine_package_path: None,
                 bun_package_path: None,
                 node_package_path: None,
+                nearest_package_json_path: Some(Path::new(path!("/root/sub/package.json")).into()),
                 scripts: [
                     (
                         Path::new(path!("/root/package.json")).into(),
@@ -1841,6 +1838,20 @@ mod tests {
                 (script.command.as_str(), script.args.clone()),
                 ("bun", vec!["run".to_owned(), "build".to_owned()])
             );
+            for template in templates.iter().filter(|t| t.label.starts_with("bun test")) {
+                assert_eq!(
+                    template.cwd.as_deref(),
+                    Some("$ZED_CUSTOM_TYPESCRIPT_BUN_PACKAGE_PATH")
+                );
+            }
+            assert_eq!(
+                data.nearest_package_json_path.as_deref(),
+                Some(Path::new(path!("/root/package.json")))
+            );
+            let selection = execute_selection_template(data.is_bun());
+            assert_eq!(selection.command, "bun");
+            assert_eq!(selection.args[0], "-e");
+            assert!(!["npm", "npx", "node"].contains(&selection.command.as_str()));
             assert!(
                 templates.iter().any(|t| t.label == "bun test file test"
                     && t.command == "bun"
