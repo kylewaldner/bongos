@@ -721,11 +721,16 @@ fn check_only_runs_the_checks_without_queueing_or_landing() {
         matches!(&checks[0].outcome, crate::CheckOutcome::Fail { message, .. } if message.contains("junk.txt"))
     );
     assert!(
-        checks[1..]
+        checks[1..7]
             .iter()
             .all(|result| result.outcome == crate::CheckOutcome::Pass),
         "{checks:?}"
     );
+    // A check is no approval: nobody approved the change yet.
+    assert!(matches!(
+        &checks[7].outcome,
+        crate::CheckOutcome::NoVerdict { reason, .. } if reason.starts_with("waiting for approval")
+    ));
     assert_eq!(main_commit(&repo), before);
     assert_eq!(
         repo.change(&copy.change_id).unwrap().unwrap().state,
