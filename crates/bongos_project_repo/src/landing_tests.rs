@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use bongos_project_repo_model::{
-    Author, AuthorKind, ChangeMeta, CompatibilityMark, TaskStateRecord, parse_trailers,
+    Author, AuthorKind, ChangeMeta, CompatibilityMark, RelPath, TaskStateRecord, parse_trailers,
 };
 use futures::FutureExt as _;
 use futures::StreamExt as _;
@@ -21,8 +21,8 @@ use crate::test_support::{
     new_copy, person, reopen, request, run_git, start, verified, write_definition,
 };
 use crate::{
-    AbandonRefused, AmendOutcome, AmendingCheck, ChangeFilter, ChangeState, LandMode, LandRequest,
-    LandingEvent, LandingResult, Recovery, StateApplyHooks, StateOp,
+    AbandonRefused, AmendOutcome, AmendingCheck, ChangeFilter, ChangeState, CheckInput, LandMode,
+    LandRequest, LandingEvent, LandingResult, Recovery, StateApplyHooks, StateOp,
 };
 
 /// An amending check that writes the sorted task folder names into `definitions/stamp.txt`.
@@ -33,11 +33,11 @@ impl AmendingCheck for StampCheck {
         "stamp"
     }
 
-    fn stamp_paths(&self) -> Vec<String> {
-        vec!["stamp.txt".to_string()]
+    fn stamp_paths(&self) -> Vec<RelPath> {
+        vec![RelPath::new("stamp.txt").unwrap()]
     }
 
-    fn amend(&self, writable: &Path) -> BoxFuture<'static, AmendOutcome> {
+    fn amend(&self, _input: CheckInput, writable: &Path) -> BoxFuture<'static, AmendOutcome> {
         let definitions = writable.join("definitions");
         let mut slugs: Vec<String> = std::fs::read_dir(definitions.join("tasks"))
             .unwrap()
@@ -136,7 +136,10 @@ fn a_landing_is_one_squashed_commit_with_subject_body_and_trailers() {
     );
     assert_eq!(
         trailer(&message, "Bongos-Checks").as_deref(),
-        Some("schema=pass")
+        Some(
+            "schema=pass, no-state=pass, no-cycle=pass, references=pass, \
+             started-unchanged=pass, size-and-kind=pass, secrets=pass"
+        )
     );
     assert_eq!(
         trailer(&message, "Bongos-Tree"),
@@ -365,11 +368,15 @@ fn two_simultaneous_landings_serialize_and_the_second_lands_rebased() {
     assert!(files.contains("definitions/tasks/alpha/task.toml"));
     assert!(files.contains("definitions/tasks/beta/task.toml"));
     // The second change's checks ran again on the rebased tree.
-    let results = repo.check_results(&second.change_id).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(
-        results[0].tree,
-        run_git(&repo, &["rev-parse", "main^{tree}"])
+    let landed_tree = run_git(&repo, &["rev-parse", "main^{tree}"]);
+    let results = repo
+        .check_results_on(&second.change_id, &landed_tree)
+        .unwrap();
+    assert_eq!(results.len(), 7, "{results:?}");
+    assert!(
+        results
+            .iter()
+            .all(|result| result.outcome == crate::CheckOutcome::Pass)
     );
     assert!(repo.landing_holder().is_none());
     assert!(
@@ -702,9 +709,16 @@ fn check_only_runs_the_checks_without_queueing_or_landing() {
     let LandingResult::Checked { checks, .. } = result else {
         panic!("expected check results, got {result:?}");
     };
-    assert_eq!(checks.len(), 1);
+    assert_eq!(checks.len(), 7);
+    assert_eq!(checks[0].check, "schema");
     assert!(
-        matches!(&checks[0].outcome, crate::CheckOutcome::Fail { message } if message.contains("junk.txt"))
+        matches!(&checks[0].outcome, crate::CheckOutcome::Fail { message, .. } if message.contains("junk.txt"))
+    );
+    assert!(
+        checks[1..]
+            .iter()
+            .all(|result| result.outcome == crate::CheckOutcome::Pass),
+        "{checks:?}"
     );
     assert_eq!(main_commit(&repo), before);
     assert_eq!(
@@ -873,15 +887,13 @@ impl AmendingCheck for NoVerdictTheSecondTime {
         "flaky"
     }
 
-    fn amend(&self, _writable: &Path) -> BoxFuture<'static, AmendOutcome> {
+    fn amend(&self, _input: CheckInput, _writable: &Path) -> BoxFuture<'static, AmendOutcome> {
         let mut calls = self.0.lock();
         *calls += 1;
         let outcome = if *calls == 1 {
             AmendOutcome::Unchanged
         } else {
-            AmendOutcome::NoVerdict {
-                reason: "not sure".to_string(),
-            }
+            AmendOutcome::no_verdict("not sure")
         };
         async move { outcome }.boxed()
     }
@@ -942,16 +954,16 @@ impl AmendingCheck for TypingCheck {
         "stamp"
     }
 
-    fn stamp_paths(&self) -> Vec<String> {
-        vec!["stamp.txt".to_string()]
+    fn stamp_paths(&self) -> Vec<RelPath> {
+        vec![RelPath::new("stamp.txt").unwrap()]
     }
 
-    fn amend(&self, writable: &Path) -> BoxFuture<'static, AmendOutcome> {
+    fn amend(&self, input: CheckInput, writable: &Path) -> BoxFuture<'static, AmendOutcome> {
         if !self.typed.exists() {
             std::fs::create_dir_all(self.typed.parent().unwrap()).unwrap();
             std::fs::write(&self.typed, "mine\n").unwrap();
         }
-        StampCheck.amend(writable)
+        StampCheck.amend(input, writable)
     }
 }
 

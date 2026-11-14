@@ -6,9 +6,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use futures::FutureExt as _;
 use futures::channel::oneshot;
+use futures::future::BoxFuture;
 use parking_lot::Mutex;
 
 use crate::state::StateWriter;
@@ -115,6 +118,15 @@ impl Holder {
     }
 }
 
+/// Resolves once the duration has passed: what bounds the in-queue checks and a script check.
+/// The tests replace it with one they fire themselves.
+pub(crate) type Timer = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
+
+/// The timer of a running app: [`crate::landing::backoff`]'s.
+pub(crate) fn real_timer() -> Timer {
+    Arc::new(|duration| crate::landing::backoff(duration).boxed())
+}
+
 /// The landing machinery one project shares across the clones of its `ProjectRepo`.
 #[derive(Default)]
 pub(crate) struct Engine {
@@ -123,10 +135,15 @@ pub(crate) struct Engine {
     pub(crate) landing_events:
         Mutex<Vec<futures::channel::mpsc::UnboundedSender<(String, crate::LandingEvent)>>>,
     pub(crate) repo_events: Mutex<Vec<futures::channel::mpsc::UnboundedSender<crate::RepoEvent>>>,
-    pub(crate) amending: Mutex<Vec<Arc<dyn crate::AmendingCheck>>>,
+    /// The checks registered in the app, as the last `land` with an app saw them.
+    pub(crate) registered: Mutex<crate::landing_checks::CheckRegistry>,
+    /// The checks added to this project only.
+    pub(crate) local: Mutex<crate::landing_checks::CheckRegistry>,
     pub(crate) options: Mutex<crate::LandOptions>,
     /// The changes a `land` or `check` of this process is working on.
     pub(crate) landing: Mutex<std::collections::HashSet<String>>,
+    /// The timer of the deadlines; the real one unless a test set its own.
+    pub(crate) timer: Mutex<Option<Timer>>,
     #[cfg(test)]
     pub(crate) probe: Mutex<Option<crate::landing::Probe>>,
 }
@@ -144,6 +161,10 @@ impl Engine {
         self.repo_events
             .lock()
             .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
+    }
+
+    pub(crate) fn timer(&self) -> Timer {
+        self.timer.lock().clone().unwrap_or_else(real_timer)
     }
 
     /// The change holding the landing lock in this process.

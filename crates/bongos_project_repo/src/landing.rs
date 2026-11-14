@@ -1,12 +1,14 @@
 //! The landing transaction: a working copy's change becomes the next commit of master.
 //!
 //! 1. Commit what is uncommitted in the working copy. 2. Drop earlier amend commits and rebase
-//! on the verified commit; a conflict stops here. 3. Run the amending checks, in a scratch copy
-//! of the working copy's commit, and fast-forward the working copy to their commits. 5. Enter the
-//! project's FIFO landing queue; its head holds `flock` on `state/landing.lock`. 6. Re-verify
-//! master; when an earlier landing moved it, rebase (a change with amend commits goes back to
-//! step 2 and re-enters at the back), then run the deterministic checks on the rebased tree.
-//! 7. Squash into one commit whose parent is master. 8. State first, then the ref: one state
+//! on the verified commit; a conflict stops here. 3. Run the amending checks (`amending.rs`),
+//! then the built-in checks and the before-queue checks on the final tree (`check_run.rs`); a
+//! failure refuses and a no verdict leaves the change waiting. 5. Enter the project's FIFO
+//! landing queue; its head holds `flock` on `state/landing.lock`. 6. Re-verify master; when an
+//! earlier landing moved it, rebase (a change with amend commits goes back to step 2 first). A
+//! before-queue or amending check whose stamp differs on the tree now sends the change back to
+//! step 3, and it re-enters the queue at the back; otherwise the in-queue checks run on the
+//! rebased tree. 7. Squash into one commit whose parent is master. 8. State first, then the ref: one state
 //! transaction records the staged state ops, the landing, the new verified commit, the closed
 //! change row and `meta.landing_in_flight`, with the state apply hooks; only after it commits
 //! does `main` move, by compare-and-swap. Then the checkout fast-forwards, its files are made
@@ -20,21 +22,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use bongos_project_repo_model::checks::{SCHEMA_CHECK, schema_problems};
-use bongos_project_repo_model::layout::LANDING_LOCK_FILE;
+use bongos_project_repo_model::checks::{CheckPhase, SizeLimits, strip_move_meta};
+use bongos_project_repo_model::layout::{DEFINITIONS_DIR, LANDING_LOCK_FILE};
 use bongos_project_repo_model::{
-    Author, AuthorKind, ChangeMeta, LandingFacts, Problem, commit_message, strip_trailers,
+    Author, AuthorKind, ChangeMeta, DefinitionTree, LandingFacts, Problem, commit_message,
+    strip_trailers, summarize,
 };
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc;
+#[cfg(test)]
 use futures::future::BoxFuture;
+use futures::future::Either;
 use serde::{Deserialize, Serialize};
 
-use crate::changes::{AmendCommit, ChangeRow, ChangeState};
+use crate::amending::Amended;
+use crate::builtin_checks::{schema_check, tree_facts};
+use crate::changes::{ChangeRow, ChangeState};
+use crate::check_run::{CheckResult, verdict};
 use crate::create::{MAIN_BRANCH, ProjectRepo};
 use crate::git::{CommitId, DEFAULT_IDENTITY_EMAIL, Identity, RebaseOutcome, TreeRef};
 use crate::landing_queue::{Holder, LandingLock, LockRefused, QueueSlot};
-use crate::loader::{definition_blobs, load_definition_tree};
+use crate::loader::load_definition_tree;
 use crate::master::MasterStatus;
 use crate::state::StateWriter;
 
@@ -50,8 +58,15 @@ pub const UNSAVED_EDITS: &str = "working copy has unsaved edits";
 /// Why a second `land` or `check` of a change waits while the first still runs.
 pub const ALREADY_LANDING: &str = "the change is already being landed or checked";
 
-/// The folder under `state/` that holds the scratch copies the amending checks run in.
-const AMENDING_SCRATCH_DIR: &str = "amending";
+/// The secret patterns a landing uses when no setting gives them (`default.json` has the same).
+pub const DEFAULT_SECRET_PATTERNS: [&str; 6] = [
+    "AKIA[0-9A-Z]{16}",
+    "gh[pousr]_[A-Za-z0-9]{36}",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "xox[abprs]-[A-Za-z0-9-]{10,}",
+    "sk-ant-[A-Za-z0-9_-]{20,}",
+    "sk-[A-Za-z0-9]{32,}",
+];
 
 /// The pauses between the tries of the move of `main` while it still is the old commit, so a
 /// lock file another git holds for a moment is gone by the next try.
@@ -85,6 +100,10 @@ pub struct LandOptions {
     pub queue_limit: Duration,
     pub keep_landed: bool,
     pub branch_prefix: String,
+    /// The limits of the `size-and-kind` check.
+    pub size_limits: SizeLimits,
+    /// The patterns of the `secrets` check.
+    pub secret_patterns: Vec<String>,
 }
 
 impl Default for LandOptions {
@@ -94,41 +113,10 @@ impl Default for LandOptions {
             queue_limit: Duration::from_secs(120),
             keep_landed: false,
             branch_prefix: "work/".to_string(),
+            size_limits: SizeLimits::default(),
+            secret_patterns: DEFAULT_SECRET_PATTERNS.map(str::to_string).to_vec(),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "kebab-case")]
-pub enum CheckOutcome {
-    Pass,
-    Fail {
-        message: String,
-    },
-    /// Neither pass nor fail: the change waits with the reason.
-    NoVerdict {
-        reason: String,
-    },
-}
-
-impl CheckOutcome {
-    /// The word the `Bongos-Checks` trailer uses.
-    pub fn word(&self) -> &'static str {
-        match self {
-            CheckOutcome::Pass => "pass",
-            CheckOutcome::Fail { .. } => "fail",
-            CheckOutcome::NoVerdict { .. } => "no-verdict",
-        }
-    }
-}
-
-/// A check's outcome on one tree. A result for another tree is never counted.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckResult {
-    pub check: String,
-    pub tree: String,
-    pub stamp: String,
-    pub outcome: CheckOutcome,
 }
 
 /// What a landing ended as.
@@ -195,29 +183,6 @@ pub enum RepoEvent {
     },
 }
 
-/// What an amending check did.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AmendOutcome {
-    Unchanged,
-    Amended { message: String },
-    NoVerdict { reason: String },
-}
-
-/// A check that may write into the change before it lands (feature 52's rebalancer). Only Rust
-/// code registers one. The landing engine commits what it writes as an amend commit and drops
-/// those commits again before every rebase.
-pub trait AmendingCheck: Send + Sync + 'static {
-    fn name(&self) -> &str;
-
-    /// Files under `definitions/` it may write besides task files, relative to it.
-    fn stamp_paths(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Looks at the checked-out working copy at `writable` and may change its files.
-    fn amend(&self, writable: &Path) -> BoxFuture<'static, AmendOutcome>;
-}
-
 /// The landing between its state transaction and its ref move: `main` goes from `old` to
 /// `commit`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,9 +192,15 @@ pub(crate) struct InFlight {
     pub(crate) old: String,
 }
 
-/// Waits `pause` before git is tried again. The landing engine holds no gpui executor and runs
-/// on whatever drives its futures (the tests use `block_on`), so it waits on the reactor's timer;
-/// only a ref move that failed reaches it.
+/// Waits `pause` before git is tried again. Only a ref move that failed (and the resolution of a
+/// split master that saw `main` move) reaches it.
+///
+/// `smol::Timer` is the one timer allowed here: the lint steers code to gpui's executor timer,
+/// but the landing engine holds no gpui executor. `land` runs it on a background task, and
+/// `land_now`, the recovery and the ref watch run it on whatever drives their futures (the tests
+/// use `block_on`, which has no gpui executor at all). smol's timer is driven by its own reactor
+/// thread, so it wakes under any executor; injecting a sleep would only move the same call into
+/// every caller.
 #[allow(clippy::disallowed_methods)]
 pub(crate) async fn backoff(pause: Duration) {
     smol::Timer::after(pause).await;
@@ -296,6 +267,19 @@ fn event_for(result: &LandingResult) -> Option<LandingEvent> {
     }
 }
 
+/// The meta a landing commits with: any `Bongos-Move` text stripped, and a subject generated
+/// from the change summary when the author wrote none.
+fn landing_meta(
+    meta: &ChangeMeta,
+    summary: &bongos_project_repo_model::ChangeSummary,
+) -> ChangeMeta {
+    let mut meta = strip_move_meta(meta);
+    if strip_trailers(&meta.subject).trim().is_empty() {
+        meta.subject = summary.generated_subject();
+    }
+    meta
+}
+
 /// Lane runs, workflows, agents and the healer wait while master is split; a person's landing
 /// is refused instead.
 fn waits_for_split(author: &Author) -> bool {
@@ -349,12 +333,6 @@ impl ProjectRepo {
         self.engine.options.lock().clone()
     }
 
-    /// Adds an amending check this project's landings run. Step 7 replaces this with the global
-    /// registry of landing checks.
-    pub fn add_amending_check(&self, check: Arc<dyn AmendingCheck>) {
-        self.engine.amending.lock().push(check);
-    }
-
     /// The events of every landing of this project from now on, with the change id.
     pub fn landing_events(&self) -> mpsc::UnboundedReceiver<(String, LandingEvent)> {
         let (sender, receiver) = mpsc::unbounded();
@@ -374,16 +352,6 @@ impl ProjectRepo {
         self.engine.holder_id()
     }
 
-    /// The stored check results of `change_id`, by check name.
-    pub fn check_results(&self, change_id: &str) -> Result<Vec<CheckResult>> {
-        let rows = self.read_state(|read| read.check_results(change_id))?;
-        rows.into_iter()
-            .map(|(check, record)| {
-                toml::from_str(&record).with_context(|| format!("reading the result of {check}"))
-            })
-            .collect()
-    }
-
     /// Lands `change_id` (or only checks it, by `request.mode`).
     pub fn land(
         &self,
@@ -391,6 +359,7 @@ impl ProjectRepo {
         request: LandRequest,
         cx: &gpui::App,
     ) -> gpui::Task<Result<LandingResult>> {
+        self.use_registered_checks(cx);
         let repo = self.clone();
         let change_id = change_id.to_string();
         gpui::AppContext::background_spawn(cx, async move {
@@ -442,6 +411,11 @@ impl ProjectRepo {
     #[cfg(test)]
     pub(crate) fn set_probe(&self, probe: Probe) {
         *self.engine.probe.lock() = Some(probe);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_timer(&self, timer: crate::landing_queue::Timer) {
+        *self.engine.timer.lock() = Some(timer);
     }
 
     async fn land_steps(
@@ -504,7 +478,7 @@ impl ProjectRepo {
         }
         let subject = strip_trailers(&request.meta.subject);
         let subject = if subject.is_empty() {
-            format!("change {}", row.name)
+            self.working_copy_subject(&path, &row.name)
         } else {
             subject
         };
@@ -533,17 +507,41 @@ impl ProjectRepo {
             }
             let mut based_on = verified;
 
-            // Step 3.
+            // Step 3: the amending checks first, then every other check on the final tree.
             self.engine.emit(change_id, LandingEvent::Checking);
-            if let Some(reason) = self.run_amending_checks(&writer, &mut row, &path).await? {
-                return Ok(LandingResult::NoVerdict { reason });
-            }
+            let (amend_stamps, mut run) = match self
+                .run_amending_checks(&writer, &mut row, &path, &based_on, &request.meta)
+                .await?
+            {
+                Amended::Done { stamps, run } => (stamps, run),
+                Amended::NoVerdict(reason) => return Ok(LandingResult::NoVerdict { reason }),
+            };
+            let started_seen = run.started_touched();
+            let meta = landing_meta(&request.meta, &run.facts.summary);
+            run.meta = meta.clone();
+            let mut checks = self.run_builtins(&writer, &run)?;
             if request.mode == LandMode::CheckOnly {
-                let tip = self.git.rev_parse(&path, "HEAD").await?;
-                let tree = self.git.tree_of(&path, &tip).await?;
-                let checks = self.run_checks(&writer, change_id, &tree).await?;
-                return Ok(LandingResult::Checked { tree, checks });
+                for phase in [CheckPhase::BeforeQueue, CheckPhase::InQueue] {
+                    checks.extend(self.run_registered(&writer, &mut run, phase).await?.0);
+                }
+                return Ok(LandingResult::Checked {
+                    tree: run.tree().to_string(),
+                    checks,
+                });
             }
+            // The cheap checks first: a change they refuse never waits for a slow one.
+            if let Some(ended) = verdict(&checks) {
+                return Ok(ended);
+            }
+            let (before, mut seen) = self
+                .run_registered(&writer, &mut run, CheckPhase::BeforeQueue)
+                .await?;
+            if let Some(ended) = verdict(&before) {
+                return Ok(ended);
+            }
+            seen.extend(amend_stamps);
+            // The materialized trees go; the queue step reads the tree it lands.
+            drop(run);
 
             // Step 5.
             let slot = match self.enter_queue(&writer, change_id, waits).await? {
@@ -564,7 +562,7 @@ impl ProjectRepo {
             }
 
             // Step 6.
-            match self.check_master().await? {
+            match self.check_master_as(Some(change_id)).await? {
                 MasterStatus::Clean => {}
                 MasterStatus::Split(_) if waits => {
                     drop(slot);
@@ -597,39 +595,66 @@ impl ProjectRepo {
                 based_on = verified_now;
             }
             let tip = self.git.rev_parse(&path, "HEAD").await?;
-            let tree = self.git.tree_of(&path, &tip).await?;
-            let checks = self.run_checks(&writer, change_id, &tree).await?;
-            let failures: Vec<String> = checks
-                .iter()
-                .filter_map(|result| match &result.outcome {
-                    CheckOutcome::Fail { message } => Some(message.clone()),
-                    _ => None,
-                })
-                .collect();
-            if !failures.is_empty() {
-                return Ok(LandingResult::Refused { reasons: failures });
+            let mut run = self
+                .prepare_checks(change_id, &based_on, &tip, &meta, &row.author)
+                .await?;
+            // A before-queue or amending check whose stamp moved runs again: back to step 3,
+            // and in at the back of the queue.
+            if !self.moved_stamps(&mut run, &seen).await?.is_empty() {
+                drop(run);
+                drop(slot);
+                continue;
             }
-            if let Some(reason) = checks.iter().find_map(|result| match &result.outcome {
-                CheckOutcome::NoVerdict { reason } => Some(reason.clone()),
-                _ => None,
-            }) {
-                return Ok(LandingResult::NoVerdict { reason });
+            // A task the change touches was started while it waited: its amendments were
+            // bounded by the tasks started then, so it goes back to step 3, where they are
+            // dropped and redone (or the checks judge the author's part again), and in at the
+            // back of the queue.
+            if run.started_touched() != started_seen {
+                drop(run);
+                drop(slot);
+                continue;
             }
+            // The in-queue checks run under the lock, so they get what is left of the queue
+            // limit: a check still running then is dropped, the change waits with no verdict,
+            // and the lock goes to the next change as the slot is dropped.
             let options = self.land_options();
-            if entered.elapsed() > options.queue_limit {
+            let remaining = options.queue_limit.saturating_sub(entered.elapsed());
+            let in_queue = {
+                let checks = std::pin::pin!(async {
+                    let mut results = self.run_builtins(&writer, &run)?;
+                    results.extend(
+                        self.run_registered(&writer, &mut run, CheckPhase::InQueue)
+                            .await?
+                            .0,
+                    );
+                    anyhow::Ok(results)
+                });
+                let deadline = (self.engine.timer())(remaining);
+                match futures::future::select(checks, deadline).await {
+                    Either::Left((results, _)) => Some(results?),
+                    Either::Right(_) => None,
+                }
+            };
+            let Some(in_queue) = in_queue else {
                 return Ok(LandingResult::NoVerdict {
                     reason: format!(
                         "the landing took longer than the queue limit of {} seconds; land again",
                         options.queue_limit.as_secs()
                     ),
                 });
+            };
+            if let Some(ended) = verdict(&in_queue) {
+                return Ok(ended);
             }
+            let tree = run.tree().to_string();
+            drop(run);
 
             // Step 7.
             let repository = &self.location.repository;
             let new = if options.squash {
-                let words: Vec<(String, String)> = checks
+                let words: Vec<(String, String)> = before
                     .iter()
+                    .chain(&in_queue)
                     .map(|result| (result.check.clone(), result.outcome.word().to_string()))
                     .collect();
                 let facts = LandingFacts {
@@ -637,7 +662,7 @@ impl ProjectRepo {
                     checks: &words,
                     tree: &tree,
                 };
-                let message = commit_message(&request.meta, &facts);
+                let message = commit_message(&meta, &facts);
                 self.git
                     .commit_tree(repository, &tree, &[&based_on], &message, &identity)
                     .await?
@@ -655,8 +680,21 @@ impl ProjectRepo {
 
             // Steps 8 and 9.
             return self
-                .finish_landing(&writer, slot, &mut row, &request.meta, &based_on, &new, now)
+                .finish_landing(&writer, slot, &mut row, &meta, &based_on, &new, now)
                 .await;
+        }
+    }
+
+    /// The subject of the commit of what a working copy holds uncommitted when its author wrote
+    /// none: generated from what it does to the verified definitions.
+    fn working_copy_subject(&self, path: &Path, name: &str) -> String {
+        let master = self
+            .writer_or_error()
+            .map(|writer| writer.definitions())
+            .unwrap_or_default();
+        match DefinitionTree::parse_dir(&path.join(DEFINITIONS_DIR)) {
+            Ok(tree) => summarize(&master, &tree).generated_subject(),
+            Err(_) => format!("Change {name}"),
         }
     }
 
@@ -777,181 +815,16 @@ impl ProjectRepo {
         }
     }
 
-    /// Takes the amend commits off the branch (they sit on top of the author's commits).
-    async fn drop_amendments(
-        &self,
-        writer: &StateWriter,
-        row: &mut ChangeRow,
-        path: &Path,
-        identity: &Identity,
-    ) -> Result<Option<LandingResult>> {
-        let (Some(first), Some(last)) = (row.amend_commits.first(), row.amend_commits.last())
-        else {
-            return Ok(None);
-        };
-        let (first, last) = (first.commit.clone(), last.commit.clone());
-        let tip = self.git.rev_parse(path, "HEAD").await?;
-        if self.git.is_ancestor(path, &last, &tip).await {
-            if !self.git.is_clean(path).await? {
-                return Ok(Some(LandingResult::NoVerdict {
-                    reason: UNSAVED_EDITS.to_string(),
-                }));
-            }
-            let base = format!("{first}^");
-            if tip == last {
-                self.git.reset_keep(path, &base).await?;
-            } else if let RebaseOutcome::Conflict { files } =
-                self.git.rebase_onto(path, &base, &last, identity).await?
-            {
-                return Ok(Some(LandingResult::Conflict { files }));
-            }
-        }
-        row.amend_commits.clear();
-        writer.transact(|tx| tx.set_change(row))?;
-        Ok(None)
-    }
-
-    /// Step 3's amending checks; `Some` is a reason for no verdict.
-    async fn run_amending_checks(
-        &self,
-        writer: &StateWriter,
-        row: &mut ChangeRow,
-        path: &Path,
-    ) -> Result<Option<String>> {
-        let checks = self.engine.amending.lock().clone();
-        if checks.is_empty() {
-            return Ok(None);
-        }
-        // The checks run in a scratch copy of the working copy's commit, never in the working
-        // copy: what the person types while a check runs is neither committed nor discarded.
-        let scratch = self
-            .location
-            .state
-            .join(AMENDING_SCRATCH_DIR)
-            .join(&row.name);
-        self.remove_scratch(path, &scratch).await?;
-        if let Some(parent) = scratch.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        let result = self
-            .amend_in_scratch(writer, row, path, &scratch, checks)
-            .await;
-        if let Err(error) = self.remove_scratch(path, &scratch).await {
-            log::error!("removing the amending scratch copy: {error:#}");
-        }
-        result
-    }
-
-    async fn remove_scratch(&self, path: &Path, scratch: &Path) -> Result<()> {
-        if scratch.exists() {
-            self.git.worktree_remove(path, scratch).await?;
-        }
-        Ok(())
-    }
-
-    async fn amend_in_scratch(
-        &self,
-        writer: &StateWriter,
-        row: &mut ChangeRow,
-        path: &Path,
-        scratch: &Path,
-        checks: Vec<Arc<dyn AmendingCheck>>,
-    ) -> Result<Option<String>> {
-        if !self.git.is_clean(path).await? {
-            return Ok(Some(UNSAVED_EDITS.to_string()));
-        }
-        let mut head = self.git.rev_parse(path, "HEAD").await?;
-        self.git.worktree_add_detached(path, scratch, &head).await?;
-        for check in checks {
-            let mut amended = false;
-            loop {
-                match check.amend(scratch).await {
-                    AmendOutcome::Unchanged => break,
-                    AmendOutcome::NoVerdict { reason } => {
-                        return Ok(Some(format!("{}: {reason}", check.name())));
-                    }
-                    AmendOutcome::Amended { message } => {
-                        if amended {
-                            return Ok(Some(format!("{}: check keeps amending", check.name())));
-                        }
-                        let subject = format!("amend: {} {message}", check.name());
-                        let Some(commit) = self
-                            .git
-                            .commit_if_dirty(scratch, &subject, &Identity::default())
-                            .await?
-                        else {
-                            break;
-                        };
-                        // The working copy follows only when the person committed nothing
-                        // meanwhile and edited no file the amend commit changes; `--keep`
-                        // leaves their other edits as they are.
-                        if self.git.rev_parse(path, "HEAD").await? != head
-                            || self.git.reset_keep(path, &commit).await.is_err()
-                        {
-                            return Ok(Some(UNSAVED_EDITS.to_string()));
-                        }
-                        head = commit.clone();
-                        row.amend_commits.push(AmendCommit {
-                            commit,
-                            check: check.name().to_string(),
-                        });
-                        writer.transact(|tx| tx.set_change(row))?;
-                        amended = true;
-                    }
-                }
-            }
-        }
-        // Edits typed while the checks ran are still in the working copy, uncommitted.
-        if !self.git.is_clean(path).await? {
-            return Ok(Some(UNSAVED_EDITS.to_string()));
-        }
-        Ok(None)
-    }
-
     /// The problems the schema check finds in the tree `treeish`.
     pub(crate) async fn schema_problems_at(&self, treeish: &str) -> Result<Vec<Problem>> {
-        let (paths, files) =
-            definition_blobs(&self.git, &self.location.repository, treeish).await?;
-        let extra: Vec<String> = self
-            .engine
-            .amending
-            .lock()
+        let registry = self.check_registry();
+        let folders: Vec<String> = registry
+            .folders
             .iter()
-            .flat_map(|check| check.stamp_paths())
+            .map(|(name, _)| name.clone())
             .collect();
-        Ok(schema_problems(
-            paths.iter().map(String::as_str),
-            files,
-            &extra,
-        ))
-    }
-
-    /// The deterministic checks on `tree`, each result stored against the tree.
-    async fn run_checks(
-        &self,
-        writer: &StateWriter,
-        change_id: &str,
-        tree: &str,
-    ) -> Result<Vec<CheckResult>> {
-        let problems = self.schema_problems_at(tree).await?;
-        let outcome = if problems.is_empty() {
-            CheckOutcome::Pass
-        } else {
-            let list: Vec<String> = problems.iter().map(ToString::to_string).collect();
-            CheckOutcome::Fail {
-                message: format!("{SCHEMA_CHECK}: {}", list.join("; ")),
-            }
-        };
-        let result = CheckResult {
-            check: SCHEMA_CHECK.to_string(),
-            tree: tree.to_string(),
-            stamp: tree.to_string(),
-            outcome,
-        };
-        let record = toml::to_string(&result).context("serializing a check result")?;
-        writer.transact(|tx| tx.set_check_result(change_id, SCHEMA_CHECK, &record))?;
-        Ok(vec![result])
+        let tree = tree_facts(&self.git, &self.location.repository, treeish, &folders).await?;
+        Ok(schema_check(&tree, &registry))
     }
 
     /// Makes the hooks see the definitions of `commit` as the old ones.
@@ -999,12 +872,13 @@ impl ProjectRepo {
         let staged = writer
             .read(|read| read.staged(&change_id))?
             .unwrap_or_default();
-        let in_flight = toml::to_string(&InFlight {
+        let in_flight = InFlight {
             change_id: change_id.clone(),
             commit: new.to_string(),
             old: old.to_string(),
-        })
-        .context("serializing the landing in flight")?;
+        };
+        let in_flight_text =
+            toml::to_string(&in_flight).context("serializing the landing in flight")?;
         let mut landed = row.clone();
         landed.state = ChangeState::Landed;
         landed.commit = Some(new.to_string());
@@ -1051,7 +925,7 @@ impl ProjectRepo {
             )?;
             tx.set_verified_commit(new, definitions.clone())?;
             tx.set_change(&landed)?;
-            tx.set_meta(LANDING_IN_FLIGHT_KEY, &in_flight)?;
+            tx.set_meta(LANDING_IN_FLIGHT_KEY, &in_flight_text)?;
             tx.queue_remove(&change_id)?;
             Ok(None)
         });
@@ -1109,7 +983,7 @@ impl ProjectRepo {
             slot.keep();
             bail!(SIMULATED_CRASH);
         }
-        if let Err(error) = self.finish_checkout(writer).await {
+        if let Err(error) = self.finish_checkout(writer, &in_flight).await {
             log::error!("finishing the checkout after {change_id} landed: {error:#}");
         }
         drop(slot);
@@ -1148,28 +1022,47 @@ impl ProjectRepo {
     }
 
     /// After the ref moved: the checkout follows, its files are read-only again, and the
-    /// marker of the landing in flight (and of a split master) is cleared.
+    /// marker of the landing in flight (and of a split master) is cleared, only while it still
+    /// is `in_flight`: a later landing's marker is never cleared by an earlier one's completion.
     /// The marker is cleared even when the checkout could not be updated: `main` moved. When
     /// clearing it fails, the next `check_master` clears it.
-    pub(crate) async fn finish_checkout(&self, writer: &StateWriter) -> Result<()> {
+    pub(crate) async fn finish_checkout(
+        &self,
+        writer: &StateWriter,
+        in_flight: &InFlight,
+    ) -> Result<()> {
         if let Err(error) = self.git.update_checkout(&self.location.repository).await {
             log::error!("updating the checkout of master: {error}");
         } else if let Err(error) = self.protect_master_files() {
             log::error!("making master read-only: {error}");
         }
         writer.transact(|tx| {
-            tx.delete_meta(LANDING_IN_FLIGHT_KEY)?;
-            tx.delete_meta(crate::master::MASTER_SPLIT_KEY)
+            let current = tx
+                .meta(LANDING_IN_FLIGHT_KEY)?
+                .and_then(|text| toml::from_str::<InFlight>(&text).ok());
+            if current.as_ref() == Some(in_flight) {
+                tx.delete_meta(LANDING_IN_FLIGHT_KEY)?;
+                tx.delete_meta(crate::master::MASTER_SPLIT_KEY)?;
+            }
+            Ok(())
         })
     }
 
-    /// Removes a landed change's worktree and branch unless the keep setting is on.
+    /// Removes a landed change's worktree and branch unless the keep setting is on, or the
+    /// person typed into it while it landed (what they typed did not land and is kept).
     pub(crate) async fn remove_working_copy(&self, row: &ChangeRow) {
         if self.land_options().keep_landed {
             return;
         }
         let repository = &self.location.repository;
         let path = self.working_copy_path(&row.name);
+        if path.is_dir() && !self.git.is_clean(&path).await.unwrap_or(false) {
+            log::info!(
+                "keeping the landed working copy {}: it has edits that did not land",
+                row.name
+            );
+            return;
+        }
         if let Err(error) = self.git.worktree_remove(repository, &path).await {
             log::error!("removing the landed working copy {}: {error}", row.name);
         }

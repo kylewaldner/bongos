@@ -18,6 +18,7 @@ bongos_project_repo_model.workspace = true
 bongos_work_model = { workspace = true, features = ["gpui"] }
 chrono.workspace = true
 futures.workspace = true
+globset.workspace = true
 gpui.workspace = true
 libc.workspace = true
 log.workspace = true
