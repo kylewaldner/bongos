@@ -3354,7 +3354,13 @@ mod tests {
         assert_foreground_process_command_eventually(&terminal, "sleep", cx).await;
 
         // End the long-lived child deliberately now that it has been observed.
-        terminal.update(cx, |terminal, _| terminal.kill_active_task());
+        terminal.update(cx, |terminal, _| {
+            // kill_active_task is a no-op without a task, so kill the pty child directly.
+            if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
+                info.kill_current_process();
+                info.kill_child_process();
+            }
+        });
 
         assert!(
             completion_rx.recv().await.is_ok(),
