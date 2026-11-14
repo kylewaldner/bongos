@@ -3,6 +3,8 @@
 //! `move`, `move to project` and `make one off`. The last four rename directories, so each runs
 //! the model command once on the current snapshot to learn whether it is refused and what it
 //! would do, shows that, and writes only after a confirmation (the default answer cancels).
+//! `move to project` and `make one off` of a task in a project repository move it between
+//! project repositories instead, through [`crate::move_commands`].
 
 use bongos_project_repo::ProjectRepositorySettings;
 use bongos_work_model::PersonAtKeyboard;
@@ -17,6 +19,8 @@ use crate::DEFAULT_ACTIVITY;
 use crate::actions::task;
 use crate::commands::{new_task_todos, ready, show_toast, submit, with_project, with_task};
 use crate::modals;
+use crate::move_commands::{Destination, repository_id, repository_project_of, start_move};
+use crate::oneoffs::oneoffs_project;
 
 pub fn register(workspace: &mut Workspace) {
     workspace
@@ -228,6 +232,10 @@ fn move_to_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
             if refuse_project_top(workspace, &id, cx) {
                 return;
             }
+            if let Some(source) = repository_source(workspace, &id, cx) {
+                start_move(id, source, Destination::Pick, workspace, window, cx);
+                return;
+            }
             with_project(
                 workspace,
                 window,
@@ -261,6 +269,36 @@ fn make_one_off(workspace: &mut Workspace, window: &mut Window, cx: &mut Context
             if refuse_project_top(workspace, &id, cx) {
                 return;
             }
+            if let Some(source) = repository_source(workspace, &id, cx) {
+                let title = ProjectRepositorySettings::get_global(cx)
+                    .oneoffs_project
+                    .clone();
+                let oneoffs = ready(workspace, cx).and_then(|tree| {
+                    oneoffs_project(&tree, &title)
+                        .and_then(repository_id)
+                        .map(str::to_string)
+                });
+                match oneoffs {
+                    Some(oneoffs) if oneoffs != source => start_move(
+                        id,
+                        source,
+                        Destination::OneOffs(oneoffs),
+                        workspace,
+                        window,
+                        cx,
+                    ),
+                    Some(_) => show_toast(workspace, format!("The task is already in {title}"), cx),
+                    None => show_toast(
+                        workspace,
+                        format!(
+                            "There is no project {title} for one-offs yet; make one with \
+                             task: new one off first"
+                        ),
+                        cx,
+                    ),
+                }
+                return;
+            }
             modals::ask(
                 workspace,
                 "Activity of the one-off, such as general or research",
@@ -280,4 +318,20 @@ fn make_one_off(workspace: &mut Workspace, window: &mut Window, cx: &mut Context
             )
         }),
     );
+}
+
+/// The project repository holding the task `id`, by id, when it is in one and project
+/// repositories are on; `None` for a task of a project in the old format.
+fn repository_source(
+    workspace: &mut Workspace,
+    id: &str,
+    cx: &mut Context<Workspace>,
+) -> Option<String> {
+    if !ProjectRepositorySettings::get_global(cx).enabled {
+        return None;
+    }
+    let tree = ready(workspace, cx)?;
+    repository_project_of(&tree, id)
+        .and_then(repository_id)
+        .map(str::to_string)
 }

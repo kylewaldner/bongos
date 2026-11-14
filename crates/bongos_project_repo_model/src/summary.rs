@@ -20,7 +20,7 @@ pub enum FileChange {
 }
 
 /// Which list of a task an edge sits in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EdgeKind {
     After,

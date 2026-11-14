@@ -2,7 +2,8 @@
 //! `areas`, `work_kind`, `size`, edges, folder and presence stay; a todo with state is neither
 //! removed nor reordered (added todos are fine). Two exemptions: a split moves todos into a new
 //! child with matching staged `MoveTodo` ops, and a move's own coordinator changes may touch the
-//! tasks its move holds. Nothing a caller writes (subject, body, notes, trailers) makes a change
+//! tasks its move holds. Nothing else touches a held task: not its definition, its folder, or any
+//! file in its folder (its documents). Nothing a caller writes (subject, body, notes, trailers) makes a change
 //! part of a move.
 
 use std::collections::BTreeMap;
@@ -55,9 +56,15 @@ pub fn started_unchanged(input: &StartedInput) -> CheckOutcome {
         let after = now.get(id).copied();
         let name = task_name(before);
         if let Some(hold) = hold {
+            let in_folder = format!("{}/", before.folder);
             let touched = after.is_none_or(|after| {
                 after.definition != before.definition || after.folder != before.folder
-            });
+            }) || (!before.folder.is_empty()
+                && input
+                    .summary
+                    .files
+                    .iter()
+                    .any(|(path, _)| path.starts_with(&in_folder)));
             if touched {
                 refusals.push(held_refusal(&name, &hold, input.meta));
             }

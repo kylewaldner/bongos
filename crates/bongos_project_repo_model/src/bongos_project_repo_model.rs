@@ -8,6 +8,7 @@ pub mod checks;
 pub mod convert;
 mod definitions;
 pub mod layout;
+pub mod moves;
 mod split;
 mod summary;
 
@@ -35,6 +36,8 @@ mod convert_tests;
 mod definitions_tests;
 #[cfg(test)]
 mod layout_tests;
+#[cfg(test)]
+mod moves_tests;
 #[cfg(test)]
 mod split_tests;
 #[cfg(test)]

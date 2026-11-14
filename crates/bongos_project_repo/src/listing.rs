@@ -31,6 +31,8 @@ pub struct ListedChange {
     /// "not landed" when the last attempt to land it was refused, conflicted or gave no verdict.
     pub not_landed: Option<String>,
     pub amended: Option<AmendedBy>,
+    /// "move <id> needs you" on the changes of a move whose rollback failed.
+    pub move_note: Option<String>,
 }
 
 /// The project's changes and master, at one moment.
@@ -66,7 +68,9 @@ impl ProjectRepo {
             };
             let not_landed = self.not_landed_mark(&row);
             let amended = self.amended_by(&row).await;
+            let move_note = self.read_state(|read| crate::moves::note(read, &row.change_id))?;
             changes.push(ListedChange {
+                move_note,
                 subject: subjects.get(&row.change_id).cloned(),
                 row,
                 summary,

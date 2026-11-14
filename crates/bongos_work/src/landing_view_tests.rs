@@ -39,6 +39,7 @@ fn listed(row: ChangeRow, summary: &str) -> ListedChange {
         summary: summary.to_string(),
         not_landed: None,
         amended: None,
+        move_note: None,
     }
 }
 

@@ -110,8 +110,15 @@ pub(crate) fn work_of(record: &TaskStateRecord) -> TaskStateRecord {
     work
 }
 
-/// Applies `ops` in order. Returns a note for each op that kept a newer value.
-pub(crate) fn apply(tx: &mut StateTx, ops: &[StateOp]) -> Result<Vec<String>> {
+/// Applies `ops` in order. Returns a note for each op that kept a newer value. Refused, with
+/// nothing applied, when an op writes a task a move holds and `change_id` is not one of that
+/// move's own changes.
+pub(crate) fn apply(
+    tx: &mut StateTx,
+    ops: &[StateOp],
+    change_id: Option<&str>,
+) -> Result<Vec<String>> {
+    crate::moves::refuse_held(tx, ops, change_id)?;
     let mut notes = Vec::new();
     for op in ops {
         apply_one(tx, op, &mut notes)?;

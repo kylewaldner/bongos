@@ -150,6 +150,12 @@ impl PersonGrant {
         Self { name }
     }
 
+    /// The name of the person, the grant used up: a move confirmed by a person lands both of
+    /// its changes as that person's own.
+    pub(crate) fn into_name(self) -> String {
+        self.name
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(name: &str) -> Self {
         Self {

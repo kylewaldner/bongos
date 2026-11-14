@@ -207,6 +207,11 @@ impl ProjectRepo {
         now: DateTime<Utc>,
     ) -> Result<WorkingCopy> {
         check_change_id(change_id)?;
+        if let Some(reason) =
+            self.read_state(|read| crate::moves::revert_refusal(read, change_id))?
+        {
+            bail!(reason);
+        }
         let row = self
             .change(change_id)?
             .ok_or_else(|| anyhow!("there is no change {change_id}"))?;

@@ -402,6 +402,18 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
         .await
         .log_err();
         cx.update(|cx| ProjectSources::register(source, cx));
+        if is_writer {
+            // A move a restart interrupted goes on once both of its projects are open.
+            let repos: Vec<ProjectRepo> = cx.update(|cx| {
+                open_repos(cx)
+                    .iter()
+                    .map(|loaded| loaded.repo().clone())
+                    .collect()
+            });
+            drop(crate::move_commands::on_own_thread(move || {
+                futures::executor::block_on(crate::move_commands::resume_moves(&repos, Utc::now()));
+            }));
+        }
         let Some(mut events) = events else {
             return;
         };

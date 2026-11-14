@@ -1048,22 +1048,36 @@ impl<'a> StateTx<'a> {
     }
 
     /// The move rollbacks: written only by the move coordinator, never by a state hook.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the move coordinator is its only writer")
-    )]
     pub(crate) fn move_rollbacks(&mut self) -> KvTx<'_, 'a> {
+        self.engine_kv(MOVE_ROLLBACK_NAMESPACE)
+    }
+
+    /// One of the namespaces only the engine writes (the moves' rows and claims, the move
+    /// rollbacks). Only the move coordinator and the landing's step 8 call it.
+    pub(crate) fn engine_kv(&mut self, namespace: &str) -> KvTx<'_, 'a> {
+        debug_assert!(ENGINE_NAMESPACES.contains(&namespace));
         KvTx {
             tx: self,
-            namespace: MOVE_ROLLBACK_NAMESPACE.to_string(),
+            namespace: namespace.to_string(),
             engine: true,
         }
     }
 
     /// Applies `ops` to the current rows (staged state, a router's state-only write). Returns
-    /// the notes of ops that kept a newer value.
+    /// the notes of ops that kept a newer value. An op on a task a move holds is refused, and
+    /// nothing is applied.
     pub fn apply_ops(&mut self, ops: &[StateOp]) -> Result<Vec<String>> {
-        state_ops::apply(self, ops)
+        state_ops::apply(self, ops, None)
+    }
+
+    /// [`Self::apply_ops`] for the staged ops of the change `change_id` as it lands: a change
+    /// a move's coordinator made may write the tasks its move holds.
+    pub(crate) fn apply_ops_for(
+        &mut self,
+        change_id: &str,
+        ops: &[StateOp],
+    ) -> Result<Vec<String>> {
+        state_ops::apply(self, ops, Some(change_id))
     }
 
     /// Keeps `ops` for a pending change, to apply when it lands.
@@ -1100,7 +1114,11 @@ pub struct KvTx<'t, 'a> {
 }
 
 /// The `kv` namespaces only the engine writes.
-const ENGINE_NAMESPACES: &[&str] = &[MOVE_ROLLBACK_NAMESPACE];
+const ENGINE_NAMESPACES: &[&str] = &[
+    MOVE_ROLLBACK_NAMESPACE,
+    crate::moves::MOVES_NAMESPACE,
+    crate::moves::MOVE_CLAIMS_NAMESPACE,
+];
 
 impl KvTx<'_, '_> {
     pub fn get(&self, key: &str) -> Result<Option<toml::Value>> {
