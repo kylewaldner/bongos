@@ -16,8 +16,8 @@ use bongos_project_repo_model::{
     ChangeMeta, DefinitionTree, PersonAtKeyboard, RelPath, split, strip_trailers,
 };
 use bongos_work_model::TaskId;
-use bongos_work_model::slug::MAX_SLUG_LEN;
 use bongos_work_model::commands::{Change, Write};
+use bongos_work_model::slug::MAX_SLUG_LEN;
 use bongos_work_model::store::{PendingMark, WorkTree};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

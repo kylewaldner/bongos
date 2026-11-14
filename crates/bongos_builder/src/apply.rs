@@ -31,9 +31,7 @@ use bongos_work::model::PersonAtKeyboard;
 use bongos_work::model::commands::{Context as WorkContext, Outcome};
 use bongos_work::model::store::WorkTree;
 use bongos_work::model::{ProposalState, TaskId};
-use bongos_work::{
-    LandingVerdict, LandingWatch, WorkStore, WriteError, WriteOutcome, pick, ready,
-};
+use bongos_work::{LandingVerdict, LandingWatch, WorkStore, WriteError, WriteOutcome, pick, ready};
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use settings::Settings as _;
 use workspace::Workspace;

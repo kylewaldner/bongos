@@ -1064,9 +1064,9 @@ fn a_person_claim_approves_no_quick_edit_by_another_author_or_from_an_unverified
 /// the leaf `l1`.
 fn own_subtree_project(root: &TempDir) -> ProjectRepo {
     let repo = crate::test_support::bare_fixture_project(root);
-    repo.add_approval_hook(Arc::new(crate::OwnSubtreeHook::new(Arc::new(|chat: &str| {
-        (chat == "c1").then(|| "l1".to_string())
-    }))));
+    repo.add_approval_hook(Arc::new(crate::OwnSubtreeHook::new(Arc::new(
+        |chat: &str| (chat == "c1").then(|| "l1".to_string()),
+    ))));
     repo
 }
 
@@ -1121,7 +1121,10 @@ fn an_agent_chat_sent_by_a_peer_is_never_trusted_by_own_subtree() {
         serde_json::from_value(serde_json::to_value(command).unwrap()).unwrap();
     let boundary = HostBoundary::new(repo.clone());
     block_on(async {
-        let mut landing = boundary.accept_now(command, &window, start()).boxed().fuse();
+        let mut landing = boundary
+            .accept_now(command, &window, start())
+            .boxed()
+            .fuse();
         loop {
             futures::select! {
                 result = landing => panic!("the peer's land ended before it waited: {result:?}"),
