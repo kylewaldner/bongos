@@ -11,7 +11,6 @@ use gpui::{
 use language::{BinaryStatus, LanguageName};
 use lsp::{LanguageServerName, LanguageServerSelector};
 use project::{LspStoreEvent, Project};
-use settings::WorktreeId;
 use ui::{
     Button, Color, ContextMenu, ContextMenuEntry, IconButton, IconName, IconSize, LabelSize,
     ParentElement as _, PopoverMenu, PopoverMenuHandle, Styled as _, Tooltip, prelude::*,
@@ -436,6 +435,7 @@ mod tests {
     use lsp::LanguageServerName;
     use project::lsp_store::LocalLspAdapterDelegate;
     use serde_json::json;
+    use settings::WorktreeId;
     use util::path;
     use workspace::{AppState, MultiWorkspace};
 
