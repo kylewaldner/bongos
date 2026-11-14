@@ -180,6 +180,12 @@ actions!(
     ]
 );
 
+/// Makes `C-y` in an incremental search yank what `C-y` in an editor would: the newest kill
+/// ring entry, or the clipboard's text when another app wrote it.
+pub fn install_isearch_kill_source(cx: &mut App) {
+    bongos_isearch::seams::set_kill_source(std::rc::Rc::new(editor::kill_ring::yank_text), cx);
+}
+
 pub fn init(cx: &mut App) {
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &Hide, cx| cx.hide());

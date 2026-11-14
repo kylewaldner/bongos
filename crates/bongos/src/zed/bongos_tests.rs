@@ -771,6 +771,25 @@ async fn emacs_yank_and_yank_pop_run_on_an_editor_by_name(cx: &mut TestAppContex
     assert_eq!(text(cx), "one\ntwo");
 }
 
+/// Isearch `C-y` reads the kill ring through the installed source: the newest kill, or text
+/// another app put on the clipboard since.
+#[gpui::test]
+async fn isearch_yank_reads_the_kill_ring(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("one two", cx).await;
+    cx.update(|_, cx| super::install_isearch_kill_source(cx));
+
+    select_offsets(&editor, &[0..0], cx);
+    run_emacs("emacs::KillWord", serde_json::json!({}), cx);
+    select_offsets(&editor, &[1..1], cx);
+    run_emacs("emacs::KillWord", serde_json::json!({}), cx);
+    let yanked =
+        |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| bongos_isearch::seams::kill_text(cx));
+    assert_eq!(yanked(cx).as_deref(), Some("two"));
+
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("outside".into())));
+    assert_eq!(yanked(cx).as_deref(), Some("outside"));
+}
+
 /// The zap commands run on an editor when dispatched by name with their count and character
 /// arguments; a character that is not there leaves the text and the clipboard alone.
 #[gpui::test]
