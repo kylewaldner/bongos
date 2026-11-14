@@ -216,11 +216,11 @@
       // Work panel (C-c w): tasks, todos, projects and artifacts. The unbound commands are in
       // the command palette.
       "ctrl-c w w": "work::TogglePanel",
-      "ctrl-c w g": "work::Graph",
-      "ctrl-c w G e": "project::Edit",
-      "ctrl-c w G w": "project::OpenWorkingCopy",
-      "ctrl-c w G k": "project::Abandon",
-      "ctrl-c w G o": "project::OpenRepository",
+      "ctrl-c w G": "work::Graph",
+      "ctrl-c w g e": "project::Edit",
+      "ctrl-c w g w": "project::OpenWorkingCopy",
+      "ctrl-c w g k": "project::Abandon",
+      "ctrl-c w g o": "project::OpenRepository",
       "ctrl-c w n": "task::New",
       "ctrl-c w N": "task::NewChild",
       "ctrl-c w o": "task::NewOneOff",

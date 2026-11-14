@@ -12,7 +12,7 @@ const MACOS: (&str, &str) = ("keymaps/default-macos.json", "keymaps/macos/emacs.
 /// Every key sequence of the D17 table and the action it runs.
 const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w w", "work::TogglePanel"),
-    ("ctrl-c w g", "work::Graph"),
+    ("ctrl-c w G", "work::Graph"),
     ("ctrl-c w n", "task::New"),
     ("ctrl-c w N", "task::NewChild"),
     ("ctrl-c w o", "task::NewOneOff"),
@@ -34,10 +34,10 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w d b", "todo::Start"),
     ("ctrl-c w p n", "project::New"),
     ("ctrl-c w P", "project::Focus"),
-    ("ctrl-c w G e", "project::Edit"),
-    ("ctrl-c w G w", "project::OpenWorkingCopy"),
-    ("ctrl-c w G k", "project::Abandon"),
-    ("ctrl-c w G o", "project::OpenRepository"),
+    ("ctrl-c w g e", "project::Edit"),
+    ("ctrl-c w g w", "project::OpenWorkingCopy"),
+    ("ctrl-c w g k", "project::Abandon"),
+    ("ctrl-c w g o", "project::OpenRepository"),
     ("ctrl-c w h", "artifact::Hide"),
     ("ctrl-c w u", "artifact::Share"),
     ("ctrl-c w H", "artifact::HideAll"),
@@ -137,7 +137,7 @@ async fn emacs_binds_every_work_key(cx: &mut TestAppContext) {
             "ctrl-c w",
             "ctrl-c w d",
             "ctrl-c w p",
-            "ctrl-c w G",
+            "ctrl-c w g",
         ] {
             assert!(
                 resolve(&keymap, prefix, &["Workspace", "Pane"]).1,

@@ -54,8 +54,8 @@ Any other file in a task directory is an artifact, described and made visible or
   again on the fresh state. An agent that moves or renames task files should do the same: reread
   `task.toml` first, and never write from a stale copy.
 - **Keys (Emacs keymap only).** `C-c w w` toggles the panel, `C-c w n` makes a task, `C-c w s`
-  starts one, `C-c w a` advances, `C-c w c` closes, `C-c w g` opens the graph, and the `C-c w d ...`,
-  `C-c w p ...` and artifact keys cover todos, projects and artifacts; the rest are in the command
+  starts one, `C-c w a` advances, `C-c w c` closes, `C-c w G` opens the graph, and the `C-c w d ...`,
+  `C-c w p ...`, `C-c w g ...` and artifact keys cover todos, projects, repositories and artifacts; the rest are in the command
   palette (`assets/keymaps/linux/emacs.json`). In the panel, `tab` expands a row inline and `^`
   goes up one level.
 
