@@ -186,6 +186,13 @@ pub mod project {
             /// Like `project: restore`, from a snapshot or replaced state picked from a list:
             /// this machine's, the remote's, and the states earlier restores kept.
             RestoreFrom,
+            /// Copies an old-format project, picked from a list, into a new project repository:
+            /// shows what it will make and asks first. The old folder is only read; afterwards
+            /// it is hidden from the Work view. Never runs by itself.
+            Convert,
+            /// Like `project: convert`, for every old-format project not converted yet (the old
+            /// one-offs among them), after one preview and one question.
+            ConvertAll,
         ]
     );
 }

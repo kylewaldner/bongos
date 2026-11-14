@@ -8,6 +8,7 @@ mod backup;
 mod builtin_checks;
 mod changes;
 mod check_run;
+mod convert;
 mod create;
 mod declared_checks;
 mod diffs;
@@ -56,8 +57,17 @@ pub use bongos_project_repo_model::checks::{
 pub use bongos_project_repo_model::checks::{
     ApprovalBasis, ApprovalOpinion, ApprovalPolicy, ApprovalVerdict, AutomaticRule,
 };
+pub use bongos_project_repo_model::convert::{
+    CONVERSION_COMMIT_MESSAGE, CONVERTING_PREFIX, ConversionSummary, DEFAULT_ONEOFFS_TITLE,
+    Rejected,
+};
 pub use changes::{AmendCommit, ChangeFilter, ChangeRow, ChangeState};
 pub use check_run::CheckResult;
+pub use convert::{
+    ConversionPreview, ConvertError, ConvertOptions, ConvertedProject, OldFormatState,
+    OldProjectClaim, OldSource, claim_old_project_start, clean_stale_conversions, convert,
+    convert_all, is_converting, preview, preview_all, unconverted_sources,
+};
 pub use create::MAIN_BRANCH;
 pub use create::{CreateError, CreateRequest, LayoutTemplates, ProjectRepo};
 pub use declared_checks::DeclaredCheck;
@@ -134,6 +144,8 @@ mod approval_tests;
 mod backup_tests;
 #[cfg(test)]
 mod check_fakes;
+#[cfg(test)]
+mod convert_tests;
 #[cfg(test)]
 mod create_tests;
 #[cfg(test)]

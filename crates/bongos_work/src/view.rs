@@ -55,6 +55,9 @@ pub enum Key {
     Section(Section),
 }
 
+/// What the row of an old-format project or one-off says while project repositories are on.
+pub const OLD_FORMAT_MARK: &str = "old format, needs conversion";
+
 /// The text shown above the guarantee of every task with artifacts while a session is open.
 pub(crate) const LIVE_SESSION_NOTE: &str = "Changes apply to new sessions and the next resume.";
 
@@ -529,6 +532,10 @@ fn add_task(
     }
     if !task.errors.is_empty() {
         details.push(format!("error: {}", task.errors[0].reason));
+    }
+    // An old-format project (or one-off) refuses every write until `project: convert`.
+    if task.needs_conversion && parent.is_none() {
+        details.push(OLD_FORMAT_MARK.to_string());
     }
     if let Some(key) = &key {
         level.groups.insert(key.clone(), shape == Shape::Group);

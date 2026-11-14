@@ -63,3 +63,41 @@ fn an_unknown_schema_is_refused() {
     std::fs::write(&path, "schema = 2\n").unwrap();
     assert!(RepositoryLocations::load(&path).is_err());
 }
+
+#[test]
+fn records_from_stale_copies_both_survive() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("project-repositories.toml");
+    // Two copies loaded before either writes, as a long conversion and a new project hold them.
+    let mut converting = RepositoryLocations::load(&path).unwrap();
+    let mut creating = RepositoryLocations::load(&path).unwrap();
+    creating.record(location("made")).unwrap();
+    converting.record(location("converted")).unwrap();
+
+    let reread = RepositoryLocations::load(&path).unwrap();
+    assert_eq!(
+        reread.locations(),
+        &[location("made"), location("converted")]
+    );
+    assert_eq!(converting.locations(), reread.locations());
+
+    // Records from many threads at once are all kept.
+    std::thread::scope(|scope| {
+        for n in 0..8 {
+            let mut copy = RepositoryLocations::load(&path).unwrap();
+            scope.spawn(move || copy.record(location(&format!("t{n}"))).unwrap());
+        }
+    });
+    let mut reread = RepositoryLocations::load(&path).unwrap();
+    assert_eq!(reread.locations().len(), 10);
+
+    // Forgetting one entry leaves the others, including one recorded by another copy since.
+    creating.record(location("later")).unwrap();
+    reread.forget(&location("converted")).unwrap();
+    let after = RepositoryLocations::load(&path).unwrap();
+    assert!(after.location("converted").is_none());
+    assert!(after.location("later").is_some());
+    assert_eq!(after.locations().len(), 10);
+    converting.reload().unwrap();
+    assert_eq!(converting.locations(), after.locations());
+}

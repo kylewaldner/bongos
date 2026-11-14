@@ -1155,6 +1155,7 @@ fn only_restore_and_conversion_write_without_the_hooks() {
         }
     }
     assert!(sources.iter().any(|(file, _)| file == "restore.rs"));
+    assert!(sources.iter().any(|(file, _)| file == "convert.rs"));
     assert_eq!(unallowed_import_calls(&sources), Vec::<String>::new());
 }
 

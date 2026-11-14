@@ -8,6 +8,7 @@ mod artifacts;
 mod backup_commands;
 mod changes;
 mod commands;
+mod convert_commands;
 mod filters;
 mod focus;
 mod landing_commands;
@@ -16,6 +17,7 @@ mod links;
 mod master_files;
 mod modals;
 mod modes;
+mod oneoffs;
 mod open;
 mod overview;
 mod panel;
@@ -70,7 +72,8 @@ pub use seams::{
 pub use settings::{DEFAULT_BRANCH_TEMPLATE, Repository, WorkSettings};
 pub use status::{FocusStatus, breadcrumb};
 pub use store::{
-    ECHO_TTL, MAX_RETRIES, OLD_WORKTREE_NOTICE_KEY, Stats, WATCH_LATENCY, WorkCommand, WorkStore,
+    CONVERSION_EXPLANATION, CONVERSION_NOTICE_KEY, ConversionNotice, ConvertedOld, ECHO_TTL,
+    MAX_RETRIES, OLD_WORKTREE_NOTICE_KEY, Stats, WATCH_LATENCY, WorkCommand, WorkStore,
     WorkStoreEvent, WriteError,
 };
 pub use worktrees::expand_home;
@@ -82,6 +85,9 @@ pub struct WorkDirs {
     pub root: PathBuf,
     /// The central directory for worktrees: `<data_dir>/worktrees`.
     pub worktrees: PathBuf,
+    /// The record of where this machine's project repositories are, which says which old-format
+    /// projects were converted. `None` reads no record: nothing counts as converted.
+    pub locations: Option<PathBuf>,
 }
 
 impl WorkDirs {
@@ -90,6 +96,7 @@ impl WorkDirs {
         Self {
             root: home.join(".bongos"),
             worktrees: data_dir.join("worktrees"),
+            locations: Some(bongos_project_repo::RepositoryLocations::default_path()),
         }
     }
 
@@ -97,7 +104,11 @@ impl WorkDirs {
     pub fn for_test(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let worktrees = root.with_file_name("central-worktrees");
-        Self { root, worktrees }
+        Self {
+            root,
+            worktrees,
+            locations: None,
+        }
     }
 }
 
@@ -115,11 +126,31 @@ impl Global for GlobalWorkStore {}
 pub fn init(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut App) {
     WorkSettings::register(cx);
     bongos_project_repo::init(cx);
+    clean_stale_conversions(cx);
     master_files::init(cx);
     let store = cx.new(|cx| WorkStore::new(fs, dirs, cx));
     cx.set_global(GlobalWorkStore(store));
     focus::init(cx);
     rebase::observe_focus(cx);
+}
+
+/// Removes, once at startup, what conversions killed halfway left in the projects folder. A
+/// conversion still running in another process is left alone.
+fn clean_stale_conversions(cx: &mut App) {
+    let settings = bongos_project_repo::ProjectRepositorySettings::get_global(cx);
+    if !settings.enabled {
+        return;
+    }
+    let projects = settings.projects_folder();
+    cx.background_spawn(async move {
+        for removed in bongos_project_repo::clean_stale_conversions(&projects) {
+            log::info!(
+                "removed what a stopped conversion left: {}",
+                removed.display()
+            );
+        }
+    })
+    .detach();
 }
 
 impl WorkStore {
@@ -136,6 +167,8 @@ mod artifact_tests;
 mod command_tests;
 #[cfg(test)]
 mod command_tests_more;
+#[cfg(test)]
+mod convert_command_tests;
 #[cfg(test)]
 mod focus_tests;
 #[cfg(test)]
