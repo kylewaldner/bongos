@@ -52,6 +52,7 @@ fn task(slug: &str, file: TaskFile) -> Task {
         file: Some(file),
         artifacts: None,
         errors: Vec::new(),
+        definition: None,
         broken_edges: Vec::new(),
         files: BTreeMap::new(),
         hashes: BTreeMap::new(),

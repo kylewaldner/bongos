@@ -50,7 +50,6 @@ impl Author {
     }
 
     /// A person author. Only this crate builds one, from a [`PersonAtKeyboard`].
-    #[allow(dead_code)]
     pub(crate) fn person(name: impl Into<String>) -> Self {
         Self::new(AuthorKind::Person, name)
     }
@@ -157,6 +156,12 @@ impl PersonAtKeyboard {
     /// Called by UI action handlers, which have a window to pass.
     #[cfg(feature = "gpui")]
     pub fn from_action(_window: &gpui::Window, _cx: &gpui::App) -> Self {
+        Self { _private: () }
+    }
+
+    /// A marker for tests, which have no window.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test() -> Self {
         Self { _private: () }
     }
 }

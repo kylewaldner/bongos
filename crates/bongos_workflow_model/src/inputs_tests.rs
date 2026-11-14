@@ -28,6 +28,7 @@ fn task(dir: &str, file: Option<TaskFile>, files: &[&str], manifest: Option<&str
         file,
         artifacts: manifest.map(|text| toml::from_str::<ArtifactsFile>(text).unwrap()),
         errors: Vec::new(),
+        definition: None,
         broken_edges: Vec::new(),
         files: files
             .iter()
