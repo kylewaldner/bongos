@@ -1,0 +1,8 @@
+{
+  "name": "fixture-react-router",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "react-router dev", "build": "react-router build" },
+  "dependencies": { "react": "^18.3.0", "react-dom": "^18.3.0", "react-router": "^7.0.0", "@react-router/dev": "^7.0.0" }
+}
