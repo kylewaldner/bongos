@@ -21,6 +21,7 @@ use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
 
 use crate::project_repos::LANDING_UNAVAILABLE;
+use crate::store::NO_DEFINITION_WRITER;
 use crate::store_tests::{canonical, project_toml, set_enabled, task_toml, write};
 use crate::{
     DefinitionWriter, DefinitionWriters, GlobalWorkStore, ProjectSource, ProjectSources, WorkDirs,
@@ -253,6 +254,65 @@ async fn a_source_is_merged_and_an_owning_writer_gets_the_change(cx: &mut TestAp
         tree.task_by_id("m2").is_none()
     })
     .await;
+}
+
+#[gpui::test]
+async fn a_new_format_change_no_writer_owns_is_refused(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp).join("work");
+    seed(&root);
+    let files = canonical(&temp).join("files");
+    let store = new_store(cx, &root);
+    wait_until(cx, &store, "the first load", |_| true).await;
+    let source = Arc::new(FakeSource {
+        projects: Mutex::new(vec![memory_project(&files)]),
+    });
+    cx.update(|cx| ProjectSources::register(source, cx));
+    wait_until(cx, &store, "the source's project", |tree| {
+        tree.task_by_id("m2").is_some()
+    })
+    .await;
+
+    // No writer at all.
+    let error = store
+        .update(cx, |store, cx| store.write(ctx(), close("m2"), cx))
+        .await
+        .unwrap_err();
+    assert_eq!(error, WriteError::Refused(NO_DEFINITION_WRITER.to_string()));
+    assert!(!files.exists());
+
+    // A writer that owns nothing.
+    struct OwnsNothing;
+    impl DefinitionWriter for OwnsNothing {
+        fn name(&self) -> &str {
+            "owns-nothing"
+        }
+        fn owns(&self, _tree: &WorkTree, _change: &Change) -> bool {
+            false
+        }
+        fn write(
+            &self,
+            _tree: &WorkTree,
+            _ctx: &Context,
+            _attestation: Option<PersonAtKeyboard>,
+            _change: Change,
+        ) -> Result<WriteOutcome, WriteError> {
+            panic!("owns nothing")
+        }
+    }
+    cx.update(|cx| DefinitionWriters::register(Arc::new(OwnsNothing), cx));
+    let error = store
+        .update(cx, |store, cx| store.write(ctx(), close("m2"), cx))
+        .await
+        .unwrap_err();
+    assert_eq!(error, WriteError::Refused(NO_DEFINITION_WRITER.to_string()));
+    assert!(!files.exists());
+
+    // An old-format task is still written to the disk.
+    store
+        .update(cx, |store, cx| store.write(ctx(), close("l1"), cx))
+        .await
+        .unwrap();
 }
 
 #[gpui::test]

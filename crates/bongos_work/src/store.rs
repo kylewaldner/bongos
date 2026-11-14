@@ -69,6 +69,10 @@ pub const MAX_RETRIES: usize = 3;
 /// How long the state a write left a path in is remembered for the self-echo filter.
 pub const ECHO_TTL: Duration = Duration::from_secs(10);
 
+/// The refusal of a change to a new-format task that no definition writer takes.
+pub const NO_DEFINITION_WRITER: &str =
+    "this task is kept in a project repository that is not loaded; nothing was written";
+
 /// A command as the writer runs it: the pure function from the tree to a change, which it may
 /// call again on a fresh tree.
 pub type WorkCommand = Box<dyn Fn(&WorkTree, &Context) -> Outcome + Send + 'static>;
@@ -826,6 +830,12 @@ impl Disk {
                     attempt,
                 );
             }
+            if touches_new_format(&tree, &change) {
+                return (
+                    Err(WriteError::Refused(NO_DEFINITION_WRITER.to_string())),
+                    attempt,
+                );
+            }
             match unchanged_since_read(&tree, &change) {
                 Ok(true) => {
                     if !self.alive.load(Ordering::SeqCst) {
@@ -873,6 +883,34 @@ impl Disk {
         self.reload();
         result
     }
+}
+
+/// Whether `change` touches a new-format task of `tree` (one with a definition): writes its
+/// task file, or writes or moves anything under its files folder. The disk writer must never
+/// write such a change: the task's state is not in a `task.toml` on disk.
+fn touches_new_format(tree: &WorkTree, change: &Change) -> bool {
+    let tasks = tree.tasks();
+    let new_format: Vec<&Path> = tasks
+        .iter()
+        .filter(|task| task.definition.is_some())
+        .map(|task| task.dir.as_path())
+        .collect();
+    let under_new_format = |path: &Path| new_format.iter().any(|dir| path.starts_with(dir));
+    let writes = change.writes.iter().any(|write| {
+        let new_format_id = match write {
+            commands::Write::Task { file, .. } => tree
+                .task_by_id(&file.id)
+                .is_some_and(|task| task.definition.is_some()),
+            _ => false,
+        };
+        new_format_id || under_new_format(&write.path())
+    });
+    writes
+        || under_new_format(&change.dir)
+        || change
+            .moves
+            .iter()
+            .any(|moved| under_new_format(&moved.from) || under_new_format(&moved.to))
 }
 
 /// Whether every file `change` replaces is still as `tree` read it: same content, or still
