@@ -1079,7 +1079,7 @@ fn record_rollback(repo: &ProjectRepo, change_id: &str, target_commit: &str, app
     value.insert("target_approved".into(), approved.into());
     writer
         .transact(|tx| {
-            tx.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+            tx.move_rollbacks()
                 .put(change_id, toml::Value::Table(value))
         })
         .unwrap();
@@ -1232,5 +1232,131 @@ fn an_amending_check_writing_outside_definitions_gives_no_verdict() {
             .unwrap()
             .amend_commits
             .is_empty()
+    );
+}
+
+#[test]
+fn a_commit_on_top_of_an_amendment_while_queued_does_not_land_on_the_old_approval() {
+    let root = TempDir::new().unwrap();
+    let repo = bare_fixture_project(&root);
+    // Its stamp does not move with the tree, so nothing but the approval sees the commit below.
+    let mut amender = edge_and_stamp(10);
+    amender.fixed_stamp = Some("balanced");
+    repo.add_amending_check(Arc::new(amender));
+    let agent = Author::agent("chat 1");
+    let change = new_copy(&repo, "amber-otter-0001", &agent);
+    add_task(&change, "alpha", "a1");
+    // Once the approved change is in the queue, the author commits on top of its amendment.
+    let id = change.change_id.clone();
+    let path = change.path.clone();
+    let git = repo.git().clone();
+    let sneaked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sneaked_in_probe = sneaked.clone();
+    repo.set_probe(Arc::new(move |point, at| -> BoxFuture<'static, bool> {
+        if point == ProbePoint::InQueue
+            && at == id
+            && !sneaked_in_probe.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let (git, path) = (git.clone(), path.clone());
+            return async move {
+                let document = path.join("definitions/documents/sneaked.md");
+                std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+                std::fs::write(&document, "never approved\n").unwrap();
+                git.commit_if_dirty(&path, "sneak", &crate::Identity::default())
+                    .await
+                    .unwrap();
+                false
+            }
+            .boxed();
+        }
+        async { false }.boxed()
+    }));
+
+    let before = main_commit(&repo);
+    let mut events = repo.landing_events();
+    let mut landing = landing(&repo, &change.change_id, engine_request("change", &agent));
+    block_on(async {
+        until_event(
+            &mut landing,
+            &mut events,
+            &change.change_id,
+            waits_for_approval,
+        )
+        .await;
+        let row = repo.change(&change.change_id).unwrap().unwrap();
+        assert_eq!(row.amend_commits.len(), 1);
+        repo.approve(&change.change_id, keyboard(), start())
+            .await
+            .unwrap();
+        // The sneaked commit, made once it is in the queue, makes a new author part: the
+        // change waits for a person again instead of landing.
+        until_event(
+            &mut landing,
+            &mut events,
+            &change.change_id,
+            waits_for_approval,
+        )
+        .await;
+        assert!(sneaked.load(std::sync::atomic::Ordering::SeqCst));
+        repo.abandon_now(&change.change_id, start()).await.unwrap();
+        assert_eq!(landing.await.unwrap(), LandingResult::Abandoned);
+    });
+    assert_eq!(main_commit(&repo), before, "the sneaked commit landed");
+}
+
+#[test]
+fn only_listed_amend_commits_at_the_tip_are_left_out_of_the_author_part() {
+    let root = TempDir::new().unwrap();
+    let repo = bare_fixture_project(&root);
+    let author = person();
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let authored = commit(&repo, &copy, "add alpha");
+    write_definition(&copy, "stamp.txt", "balanced\n");
+    let amend = commit(&repo, &copy, "amend: rebalance stamp");
+    let writer = repo.writer_or_error().unwrap();
+    let mut row = repo.change(&copy.change_id).unwrap().unwrap();
+    row.amend_commits.push(crate::changes::AmendCommit {
+        commit: amend.clone(),
+        check: "rebalance".to_string(),
+    });
+    writer.transact(|tx| tx.set_change(&row)).unwrap();
+    let master = main_commit(&repo);
+
+    let part = block_on(repo.author_part(&row, &amend, &master)).unwrap();
+    assert_eq!(part.last_author, authored);
+    assert_ne!(part.amend_patch_id, "");
+
+    // An author commit on top: the whole tip is the author's part, with no amendment.
+    write_definition(&copy, "documents/sneaked.md", "never approved\n");
+    let sneaked = commit(&repo, &copy, "sneak");
+    let part = block_on(repo.author_part(&row, &sneaked, &master)).unwrap();
+    assert_eq!(part.last_author, sneaked);
+    assert_eq!(part.amend_patch_id, "");
+    let approved = block_on(repo.author_part(&row, &amend, &master)).unwrap();
+    assert_ne!(part.patch_id, approved.patch_id);
+}
+
+#[test]
+fn whitespace_changed_inside_a_line_after_approval_needs_a_person_again() {
+    let root = TempDir::new().unwrap();
+    let repo = bare_fixture_project(&root);
+    let author = person();
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    write_definition(&copy, "documents/cleanup.md", "rm -rf /tmp/x\n");
+    commit(&repo, &copy, "add the cleanup");
+    let approved = record(&repo, &copy.change_id, ApprovalBasis::PersonApprove);
+
+    write_definition(&copy, "documents/cleanup.md", "rm -rf / tmp/x\n");
+    commit(&repo, &copy, "tidy the cleanup");
+    let row = repo.change(&copy.change_id).unwrap().unwrap();
+    let tip = block_on(repo.branch_tip(&row)).unwrap();
+    let part = block_on(repo.author_part(&row, &tip, &main_commit(&repo))).unwrap();
+    assert_ne!(part.patch_id, approved.author_patch_id);
+
+    let reason = waits_for_a_person(&repo, &copy.change_id, engine_request("cleanup", &author));
+    assert!(
+        reason.contains("no person approved this version"),
+        "{reason}"
     );
 }

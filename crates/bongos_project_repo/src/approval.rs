@@ -162,6 +162,8 @@ pub struct ApprovalRow {
     pub change_id: String,
     pub author_patch_id: String,
     pub amend_patch_id: String,
+    /// The branch tip the person approved; empty in a row written before it was kept.
+    pub commit: String,
     pub basis: ApprovalBasis,
     pub name: String,
     pub at: DateTime<Utc>,
@@ -172,6 +174,8 @@ struct ApprovalRecord {
     author_patch_id: String,
     #[serde(default)]
     amend_patch_id: String,
+    #[serde(default)]
+    commit: String,
     basis: ApprovalBasis,
     name: String,
     at: String,
@@ -196,20 +200,7 @@ impl ProjectRepo {
         master: &str,
     ) -> Result<AuthorPart> {
         let repository = &self.location.repository;
-        // Amend commits sit on top of the author's commits; the oldest one the branch holds
-        // starts them. One listed but not on the branch (a crash between the record and the
-        // branch move) is skipped, as when amendments are dropped. A commit is an amendment only
-        // because the engine listed it, never because of its subject.
-        let mut last_author = tip.to_string();
-        for amend in &row.amend_commits {
-            if self.git.is_ancestor(repository, &amend.commit, tip).await {
-                last_author = self
-                    .git
-                    .rev_parse(repository, &format!("{}^", amend.commit))
-                    .await?;
-                break;
-            }
-        }
+        let last_author = self.last_author_commit(row, tip).await?;
         let base = self
             .git
             .run(repository, &["merge-base", &last_author, master])
@@ -226,6 +217,42 @@ impl ProjectRepo {
             patch_id,
             amend_patch_id,
         })
+    }
+
+    /// The last author commit of `row` with its branch at `tip`. Amend commits sit on top of the
+    /// author's commits, so the commits from the oldest listed one the branch holds up to `tip`
+    /// are amendments only when `tip` is the newest listed one the branch holds and every one of
+    /// them is listed; a commit the author stacked on top (or between) makes the whole tip the
+    /// author's part, which no earlier approval matches. One listed but not on the branch (a
+    /// crash between the record and the branch move) is skipped, as when amendments are dropped.
+    /// A commit is an amendment only because the engine listed it, never because of its subject.
+    async fn last_author_commit(&self, row: &ChangeRow, tip: &str) -> Result<String> {
+        let repository = &self.location.repository;
+        let mut on_branch = Vec::new();
+        for amend in &row.amend_commits {
+            if self.git.is_ancestor(repository, &amend.commit, tip).await {
+                on_branch.push(amend.commit.as_str());
+            }
+        }
+        let (Some(oldest), Some(newest)) = (on_branch.first(), on_branch.last()) else {
+            return Ok(tip.to_string());
+        };
+        if *newest != tip {
+            return Ok(tip.to_string());
+        }
+        let author = self
+            .git
+            .rev_parse(repository, &format!("{oldest}^"))
+            .await?;
+        let range = self
+            .git
+            .run(repository, &["rev-list", &format!("{author}..{tip}")])
+            .await
+            .with_context(|| format!("listing the amendments of change {}", row.change_id))?;
+        let all_listed = range
+            .lines()
+            .all(|commit| row.amend_commits.iter().any(|amend| amend.commit == commit));
+        Ok(if all_listed { author } else { tip.to_string() })
     }
 
     /// The tip of `row`'s branch.
@@ -251,6 +278,7 @@ impl ProjectRepo {
                     change_id: change_id.to_string(),
                     author_patch_id: stored.author_patch_id,
                     amend_patch_id: stored.amend_patch_id,
+                    commit: stored.commit,
                     basis: stored.basis,
                     name: stored.name,
                     at: DateTime::parse_from_rfc3339(&stored.at)
@@ -279,6 +307,7 @@ impl ProjectRepo {
         let record = ApprovalRecord {
             author_patch_id: part.patch_id.clone(),
             amend_patch_id: part.amend_patch_id.clone(),
+            commit: tip.clone(),
             basis,
             name: grant.name.clone(),
             at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -286,16 +315,19 @@ impl ProjectRepo {
         let text = toml::to_string(&record).context("serializing an approval")?;
         writer.transact(|tx| tx.add_approval(&row.change_id, &text))?;
         log::info!(
-            "approved: {} {} (change {})",
+            "approved: {} {} (change {} on {} at {})",
             basis.words(),
             grant.name,
-            row.change_id
+            row.change_id,
+            row.branch,
+            short_commit(&tip)
         );
         self.engine.signal.notify();
         Ok(ApprovalRow {
             change_id: row.change_id.clone(),
             author_patch_id: part.patch_id,
             amend_patch_id: part.amend_patch_id,
+            commit: tip,
             basis,
             name: grant.name,
             at: now,
@@ -492,6 +524,11 @@ impl ProjectRepo {
         self.store_result(writer, &row.change_id, &result)?;
         Ok((verdict, result))
     }
+}
+
+/// The first eight hex digits of `commit`, as a person reads it.
+pub(crate) fn short_commit(commit: &str) -> &str {
+    &commit[..commit.len().min(8)]
 }
 
 /// The log line of an approved verdict.

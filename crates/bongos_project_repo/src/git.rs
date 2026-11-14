@@ -666,10 +666,12 @@ impl Git {
         self.run_bytes(directory, args, None).await
     }
 
-    /// The stable `git patch-id` of the diff from `from` to `to` (full blob ids and binary
-    /// contents included, renames off, no external diff or text conversion), or `"empty"` when
-    /// they hold the same files. It stays the same when both are rebased together onto another
-    /// base without touching the lines around the changed ones.
+    /// The id of the diff from `from` to `to` (binary contents included, renames off, no external
+    /// diff or text conversion), or `"empty"` when they hold the same files: its stable
+    /// `git patch-id`, then the SHA-256 of the diff without its hunk headers and `index` lines.
+    /// `git patch-id` ignores whitespace inside a line; the digest does not, so `rm -rf /tmp/x`
+    /// and `rm -rf / tmp/x` get different ids. Both stay the same when the two commits are
+    /// rebased together onto another base without touching the lines around the changed ones.
     pub async fn patch_id(
         &self,
         directory: &Path,
@@ -698,13 +700,11 @@ impl Git {
             .into_iter()
             .map(OsString::from)
             .collect();
+        let digest = rebase_stable_digest(&diff);
         let output = self.run_bytes(directory, args, Some(diff)).await?;
         let text = String::from_utf8_lossy(&output);
-        Ok(text
-            .split_whitespace()
-            .next()
-            .unwrap_or("empty")
-            .to_string())
+        let patch_id = text.split_whitespace().next().unwrap_or("empty");
+        Ok(format!("{patch_id}-{digest}"))
     }
 
     /// The tree of `git revert` of `commit` applied to `onto`, by a merge that touches no
@@ -764,4 +764,29 @@ pub enum RebaseOutcome {
     Conflict {
         files: Vec<String>,
     },
+}
+
+/// The hex SHA-256 of `diff` (a `git diff` without color) with each hunk header cut to `@@` and
+/// each `index` line left out: the line numbers and blob ids are all a rebase changes in it.
+/// A content line starts with a space, `+`, `-` or `\`, and a binary literal line with a length
+/// letter, so neither is mistaken for one of those.
+pub(crate) fn rebase_stable_digest(diff: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    for line in diff.split_inclusive(|byte| *byte == b'\n') {
+        if line.starts_with(b"index ") {
+            continue;
+        }
+        if line.starts_with(b"@@") {
+            hasher.update(b"@@\n");
+        } else {
+            hasher.update(line);
+        }
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

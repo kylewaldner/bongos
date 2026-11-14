@@ -664,6 +664,12 @@ impl ProjectRepo {
             {
                 return Ok(ended);
             }
+            // A commit made while it waited for the lock is a new author part, approved by
+            // nothing yet: back to step 2, and in at the back of the queue.
+            if self.git.rev_parse(&path, "HEAD").await? != checked_tip {
+                drop(slot);
+                continue;
+            }
 
             // Step 6.
             match self.check_master_as(Some(change_id)).await? {
@@ -679,7 +685,8 @@ impl ProjectRepo {
                 }
             }
             let verified_now = self.shown_commit().await?.0;
-            if verified_now != based_on {
+            let rebased = verified_now != based_on;
+            if rebased {
                 if !self.git.is_clean(&path).await? {
                     return Ok(LandingResult::NoVerdict {
                         reason: UNSAVED_EDITS.to_string(),
@@ -699,6 +706,10 @@ impl ProjectRepo {
                 based_on = verified_now;
             }
             let tip = self.git.rev_parse(&path, "HEAD").await?;
+            if !rebased && tip != checked_tip {
+                drop(slot);
+                continue;
+            }
             let mut run = self
                 .prepare_checks(change_id, &based_on, &tip, &meta, &row.author)
                 .await?;
