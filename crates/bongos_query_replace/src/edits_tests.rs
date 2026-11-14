@@ -592,9 +592,7 @@ fn undoing_a_replacement_that_changed_nothing_is_a_no_op_tests(cx: &mut TestAppC
     let empty = Engine::new().query(&spec).expect("valid pattern");
     let nothing = replace_next(&mut edits, &editor, &empty, &scope, 0, "", cx);
     assert_eq!(nothing.id, None);
-    let undone = editor.update(cx, |editor, cx| {
-        edits.undo(nothing.model_id(), editor, cx)
-    });
+    let undone = editor.update(cx, |editor, cx| edits.undo(nothing.model_id(), editor, cx));
     assert_eq!(undone, Ok(false));
     assert_eq!(text(&editor, cx), after);
 }
