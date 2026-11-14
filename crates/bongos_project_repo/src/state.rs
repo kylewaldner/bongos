@@ -829,6 +829,19 @@ impl<'a> StateTx<'a> {
         Ok(())
     }
 
+    /// Sets the `meta` key `key` without counting as a change of the state: no generation
+    /// bump and no event. For the backup's own records, which must not make the state look
+    /// changed since the snapshot they describe.
+    pub(crate) fn set_meta_quiet(&mut self, key: &str, value: &str) -> Result<()> {
+        self.only_kv_in_hook(key)?;
+        debug_assert!(key != VERIFIED_COMMIT_KEY && key != GENERATION_KEY);
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )?((key, value))?;
+        Ok(())
+    }
+
     pub(crate) fn delete_meta(&mut self, key: &str) -> Result<()> {
         self.only_kv_in_hook(key)?;
         self.connection

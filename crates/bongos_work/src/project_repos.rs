@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use bongos_project_repo::router::{self, Routed};
 use bongos_project_repo::{
-    ApprovalRow, LandingEvent, LoadedProject, ProjectRepo, QuickEdit, Recovery, StateEvent,
-    check_fresh, written_tasks,
+    ApprovalRow, BACKUP_TICK, LandingEvent, LoadedProject, ProjectRepo, ProjectRepositorySettings,
+    QuickEdit, Recovery, StateEvent, check_fresh, written_tasks,
 };
 use bongos_project_repo_model::ChangeMeta;
 use bongos_work_model::PersonAtKeyboard;
@@ -19,6 +19,7 @@ use chrono::Utc;
 use fs::Fs;
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, AsyncApp, BackgroundExecutor, Task};
+use settings::Settings as _;
 use util::ResultExt as _;
 
 use crate::ref_watch::{REF_WATCH_LATENCY, RefDirs};
@@ -407,8 +408,40 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
                 watch_master(loaded.repo().clone(), fs, cx).await;
             }
         };
-        futures::join!(refresh, watch);
+        let backups = run_backups(loaded.repo().clone(), cx);
+        futures::join!(refresh, watch, backups);
     })
+}
+
+/// Stops the backups of a repository when the task that runs its timer is dropped: when the
+/// host shuts down, before its state writer (and with it `host.lock`) is dropped.
+struct StopBackups(ProjectRepo);
+
+impl Drop for StopBackups {
+    fn drop(&mut self) {
+        self.0.stop_backups();
+    }
+}
+
+/// The backup timer of the host: every [`BACKUP_TICK`] it reads the backup settings and asks the
+/// repository whether a snapshot, a push, thinning or a copy of run records is due. The tick runs
+/// on the background executor, and the state store is held only while the snapshot is read.
+async fn run_backups(repo: ProjectRepo, cx: &AsyncApp) {
+    let _stop = StopBackups(repo.clone());
+    let background = cx.background_executor().clone();
+    loop {
+        background.timer(BACKUP_TICK).await;
+        if repo.backups_stopped() {
+            return;
+        }
+        cx.update(|cx| {
+            repo.set_backup_options(ProjectRepositorySettings::get_global(cx).backup_options())
+        });
+        let ticking = repo.clone();
+        background
+            .spawn(async move { ticking.backup_tick(Utc::now()).await })
+            .await;
+    }
 }
 
 /// Watches the refs of the repository's `.git` and compares master with the verified commit

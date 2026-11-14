@@ -44,6 +44,8 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w g h", "project::ShowHistory"),
     ("ctrl-c w g r", "project::Revert"),
     ("ctrl-c w g v", "project::ShowChanges"),
+    ("ctrl-c w g s", "project::BackupStatus"),
+    ("ctrl-c w g b", "project::BackupNow"),
     ("ctrl-c w h", "artifact::Hide"),
     ("ctrl-c w u", "artifact::Share"),
     ("ctrl-c w H", "artifact::HideAll"),

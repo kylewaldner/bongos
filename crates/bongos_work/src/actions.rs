@@ -169,6 +169,12 @@ pub mod project {
             /// Resolves a split master (master was changed outside bongos while a change was
             /// landing), keeping bongos' state.
             ResolveSplit,
+            /// Shows the backup of the project's state in a read-only buffer: the last
+            /// snapshot, the last push, the interval, the remote, unpushed snapshots, withheld
+            /// values, orphan state and the run record copy.
+            BackupStatus,
+            /// Takes a snapshot of the project's state at once and pushes it to the remote.
+            BackupNow,
         ]
     );
 }
