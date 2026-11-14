@@ -26,10 +26,7 @@ use std::ops::Range;
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, LazyLock, atomic::AtomicBool},
 };
 use task::{TaskTemplate, TaskTemplates, TaskVariables, VariableName};
 use util::command::{Stdio, new_command};
@@ -2401,7 +2398,7 @@ mod tests {
         use futures::AsyncReadExt as _;
         use http_client::{AsyncBody, FakeHttpClient, Response};
         use sha2::{Digest as _, Sha256};
-        use std::sync::Mutex;
+        use std::sync::{Mutex, atomic::Ordering};
 
         fn gzip(data: &[u8]) -> Vec<u8> {
             let mut encoder = async_compression::futures::bufread::GzipEncoder::new(
