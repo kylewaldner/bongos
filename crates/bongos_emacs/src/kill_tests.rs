@@ -312,13 +312,13 @@ async fn copy_region_or_line_leaves_the_caret_and_the_text(cx: &mut TestAppConte
     cx.assert_editor_state("one\ntwˇo");
     assert_eq!(kills.borrow()[1].pieces, vec!["two\n".to_string()]);
 
-    // A region is copied as it is and not as a line.
+    // A region is copied as it is and not as a line, and the copy clears the selection.
     cx.set_state("o«ne\ntˇ»wo");
     mark_mode(&mut cx);
     cx.dispatch_action(CopyRegionOrLine { count: None });
     assert_eq!(kills.borrow()[2].pieces, vec!["ne\nt".to_string()]);
     assert!(!kills.borrow()[2].metadata[0].is_entire_line);
-    cx.assert_editor_state("o«ne\ntˇ»wo");
+    cx.assert_editor_state("one\ntˇwo");
 }
 
 #[gpui::test]
