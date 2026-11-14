@@ -400,14 +400,15 @@ async fn project_land_lands_the_working_copy_of_the_current_buffer(cx: &mut Test
 
     dispatch(cx, "project::Land");
     fixture.type_text(cx, "Write the plan").await;
+    let repository = fixture.repo.location().repository.clone();
+    // The state says landed before `main` moves and the checkout follows.
     let landed = || {
         matches!(
             fixture.repo.landing_result(&copy.change_id).unwrap(),
             Some(LandingResult::Landed { .. })
-        )
+        ) && std::fs::read_to_string(repository.join("definitions/plan.md")).is_ok_and(|text| text == "the plan\n")
     };
     wait_until(cx, "the landing", |_| landed()).await;
-    let repository = fixture.repo.location().repository.clone();
     assert_eq!(
         std::fs::read_to_string(repository.join("definitions/plan.md")).unwrap(),
         "the plan\n"
