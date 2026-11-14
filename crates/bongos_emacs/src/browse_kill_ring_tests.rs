@@ -29,6 +29,9 @@ async fn workspace_editor(
         editor::init(cx);
         crate::init(cx);
         bongos_minibuffer::init(cx);
+        // Routed to the strip, the presentation whose picker answers the `minibuffer` actions.
+        cx.default_global::<MinibufferRouting>()
+            .set_routes(vec!["kill_ring".to_string()]);
         app_state
     });
     let project = Project::test(app_state.fs.clone(), [], cx).await;
@@ -61,8 +64,8 @@ async fn workspace_editor(
             KeyBinding::new("alt-y", YankPop::default(), Some("Editor")),
             KeyBinding::new("alt-shift-y", BrowseKillRing, Some("Editor")),
         ]);
-        bind(cx, "enter", "menu::Confirm");
-        bind(cx, "ctrl-g", "menu::Cancel");
+        bind(cx, "enter", "minibuffer::Confirm");
+        bind(cx, "ctrl-g", "minibuffer::Cancel");
         bind(cx, "alt-n", "minibuffer::SelectNext");
         bind(cx, "alt-p", "minibuffer::SelectPrev");
     });
