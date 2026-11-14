@@ -16,7 +16,12 @@
 //! file it replaces is reread and compared with the hash the snapshot was parsed from. If another
 //! writer changed one, the tree is reloaded and the command applied again to the fresh state
 //! (which may now refuse it), up to [`MAX_RETRIES`] times, so an external edit is never
-//! overwritten by a stale copy.
+//! overwritten by a stale copy. A change a registered [`DefinitionWriter`] owns (it writes a task
+//! of a new-format project) goes to that writer instead of the disk.
+//!
+//! Projects of registered [`crate::ProjectSource`]s are merged into every tree read, beside the
+//! old-format projects and one-offs read from the root. When project repositories are enabled,
+//! every old-format project task refuses writes until it is converted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -26,6 +31,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bongos_project_repo::ProjectRepositorySettings;
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{self, Change, Context, Outcome};
 use bongos_work_model::files::content_hash;
 use bongos_work_model::layout::{self, OP_FILE, TASKS_DIR, is_temp_file};
@@ -43,6 +50,7 @@ use util::ResultExt as _;
 use crate::changes::ChangedCount;
 use crate::overview::{self, Inputs, RepositoryRow};
 use crate::rebase::{RebaseChecks, RebaseState};
+use crate::seams::{DefinitionWriter, DefinitionWriters, ProjectSources, WriteOutcome};
 use crate::ref_watch::{GitDirInfo, RefWatches};
 use crate::settings::Repository;
 use crate::worktrees::Layout;
@@ -157,6 +165,9 @@ pub struct WorkStore {
     pub(crate) needs_you: BTreeMap<String, Vec<String>>,
     pub(crate) changed: HashMap<PathBuf, ChangedCount>,
     pub(crate) status_runs: usize,
+    /// Whether project repositories are enabled, which locks old-format projects; read by the
+    /// session's tree reads.
+    needs_conversion: Arc<AtomicBool>,
     _settings: Subscription,
 }
 
@@ -172,7 +183,7 @@ fn read_notice_dismissed(cx: &gpui::App) -> bool {
 
 /// An enabled period: the queue of writes and the task doing all disk work.
 struct Session {
-    requests: mpsc::UnboundedSender<WriteRequest>,
+    requests: mpsc::UnboundedSender<Request>,
     /// Cleared when the session ends, so a write that has not started yet never starts.
     alive: Arc<AtomicBool>,
     _run: Task<()>,
@@ -186,10 +197,19 @@ impl Drop for Session {
     }
 }
 
+enum Request {
+    Write(WriteRequest),
+    /// Read the tree again because a project source changed.
+    Refresh,
+}
+
 struct WriteRequest {
     ctx: Context,
+    /// Moved out of `ctx` before the command first runs, so no retry sees it; handed to a
+    /// definition writer that owns the change.
+    attestation: Option<PersonAtKeyboard>,
     command: WorkCommand,
-    reply: oneshot::Sender<Result<Change, WriteError>>,
+    reply: oneshot::Sender<Result<WriteOutcome, WriteError>>,
 }
 
 impl EventEmitter<WorkStoreEvent> for WorkStore {}
@@ -198,6 +218,7 @@ impl WorkStore {
     pub fn new(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut gpui::Context<Self>) -> Self {
         let settings = cx.observe_global::<SettingsStore>(|this, cx| {
             this.sync_enabled(cx);
+            this.sync_needs_conversion(cx);
             this.refresh_overview_for_settings(cx);
         });
         let mut this = Self {
@@ -221,6 +242,7 @@ impl WorkStore {
             needs_you: BTreeMap::new(),
             changed: HashMap::new(),
             status_runs: 0,
+            needs_conversion: Arc::new(AtomicBool::new(project_repositories_enabled(cx))),
             _settings: settings,
         };
         this.sync_enabled(cx);
@@ -359,27 +381,65 @@ impl WorkStore {
             .map(|session| &mut session.ref_watches)
     }
 
-    /// Queues `command` on the serial writer. The returned task resolves once the change is
-    /// written and the snapshot includes it, or with why it was not.
+    /// Queues `command` on the serial writer. The returned task resolves once the snapshot
+    /// includes the change: written (for a new-format project, applied to its state when the
+    /// change is state only) or shown as pending (`Task::pending`) when it waits to land. Or it
+    /// resolves with why it was not. A landing's later outcome is not in this result; see
+    /// [`Self::write_outcome`].
+    ///
+    /// The context's attestation is moved out before the command runs, so retries never see it;
+    /// a definition writer that owns the change receives it.
     pub fn write(
         &mut self,
         ctx: Context,
         command: impl Fn(&WorkTree, &Context) -> Outcome + Send + 'static,
         cx: &mut gpui::Context<Self>,
     ) -> Task<Result<Change, WriteError>> {
+        let outcome = self.write_outcome(ctx, command, cx);
+        cx.background_spawn(async move { outcome.await.map(WriteOutcome::into_change) })
+    }
+
+    /// [`Self::write`], resolving with whether the change was applied or waits to land.
+    pub fn write_outcome(
+        &mut self,
+        mut ctx: Context,
+        command: impl Fn(&WorkTree, &Context) -> Outcome + Send + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) -> Task<Result<WriteOutcome, WriteError>> {
+        let attestation = ctx.take_attestation();
         let Some(session) = &self.session else {
             return Task::ready(Err(WriteError::Off));
         };
         let (reply, response) = oneshot::channel();
         let request = WriteRequest {
             ctx,
+            attestation,
             command: Box::new(command),
             reply,
         };
-        if session.requests.unbounded_send(request).is_err() {
+        if session
+            .requests
+            .unbounded_send(Request::Write(request))
+            .is_err()
+        {
             return Task::ready(Err(WriteError::Off));
         }
         cx.background_spawn(async move { response.await.unwrap_or(Err(WriteError::Off)) })
+    }
+
+    /// Reads the tree again, with the projects every source has now. Sources call it when what
+    /// they report changed.
+    pub fn refresh_sources(&mut self, _cx: &mut gpui::Context<Self>) {
+        if let Some(session) = &self.session {
+            session.requests.unbounded_send(Request::Refresh).ok();
+        }
+    }
+
+    fn sync_needs_conversion(&mut self, cx: &mut gpui::Context<Self>) {
+        let enabled = project_repositories_enabled(cx);
+        if self.needs_conversion.swap(enabled, Ordering::SeqCst) != enabled {
+            self.refresh_sources(cx);
+        }
     }
 
     fn sync_enabled(&mut self, cx: &mut gpui::Context<Self>) {
@@ -413,9 +473,14 @@ impl WorkStore {
         let root = self.dirs.root.clone();
         let lock = self.disk_lock.clone();
         let alive = Arc::new(AtomicBool::new(true));
+        let seams = Seams {
+            sources: ProjectSources::global(cx),
+            writers: DefinitionWriters::global(cx),
+            needs_conversion: self.needs_conversion.clone(),
+        };
         let run = cx.spawn({
             let alive = alive.clone();
-            async move |this, cx| run(this, fs, root, lock, alive, receiver, cx).await
+            async move |this, cx| run(this, fs, root, lock, alive, seams, receiver, cx).await
         });
         self.session = Some(Session {
             requests,
@@ -429,6 +494,7 @@ impl WorkStore {
         match done.kind {
             DoneKind::Loaded => self.stats.loads += 1,
             DoneKind::Reloaded => self.stats.event_reloads += 1,
+            DoneKind::Refreshed => {}
             DoneKind::Ignored => self.stats.ignored_batches += 1,
             DoneKind::Wrote { retries } => {
                 self.stats.retries += retries;
@@ -460,15 +526,30 @@ impl WorkStore {
     }
 }
 
+/// Whether project repositories are enabled (the `project_repository.enabled` setting), false
+/// when its settings are not registered.
+fn project_repositories_enabled(cx: &gpui::App) -> bool {
+    ProjectRepositorySettings::try_get(cx).is_some_and(|settings| settings.enabled)
+}
+
+/// What the session reads besides the disk: the registered seams and the conversion lock.
+struct Seams {
+    sources: ProjectSources,
+    writers: DefinitionWriters,
+    needs_conversion: Arc<AtomicBool>,
+}
+
 /// The session: watch the root, load, then run one job at a time until the store or the session
 /// goes away.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     this: WeakEntity<WorkStore>,
     fs: Arc<dyn Fs>,
     root: PathBuf,
     lock: Arc<Mutex<()>>,
     alive: Arc<AtomicBool>,
-    mut requests: mpsc::UnboundedReceiver<WriteRequest>,
+    seams: Seams,
+    mut requests: mpsc::UnboundedReceiver<Request>,
     cx: &mut AsyncApp,
 ) {
     let background = cx.background_executor().clone();
@@ -489,6 +570,7 @@ async fn run(
         watcher,
         lock,
         alive,
+        seams,
         tree: None,
         echoes: Echoes::default(),
         watched: BTreeSet::new(),
@@ -507,7 +589,8 @@ async fn run(
         }
         job = select_biased! {
             request = requests.next() => match request {
-                Some(request) => Job::Write(request),
+                Some(Request::Write(request)) => Job::Write(request),
+                Some(Request::Refresh) => Job::Refresh,
                 None => return,
             },
             batch = events.next() => match batch {
@@ -525,11 +608,13 @@ enum Job {
     Load,
     Events(Vec<PathEvent>),
     Write(WriteRequest),
+    Refresh,
 }
 
 enum DoneKind {
     Loaded,
     Reloaded,
+    Refreshed,
     Ignored,
     Wrote { retries: usize },
 }
@@ -545,8 +630,8 @@ struct Done {
 /// session ended first (the store was disabled while the write ran), dropping it still sends the
 /// real result, so a write that landed never reports `Off`.
 struct Reply {
-    sender: Option<oneshot::Sender<Result<Change, WriteError>>>,
-    result: Option<Result<Change, WriteError>>,
+    sender: Option<oneshot::Sender<Result<WriteOutcome, WriteError>>>,
+    result: Option<Result<WriteOutcome, WriteError>>,
 }
 
 impl Reply {
@@ -573,6 +658,7 @@ struct Disk {
     watcher: Arc<dyn Watcher>,
     lock: Arc<Mutex<()>>,
     alive: Arc<AtomicBool>,
+    seams: Seams,
     tree: Option<Arc<WorkTree>>,
     echoes: Echoes,
     /// The directories added to the watcher, apart from the root.
@@ -611,12 +697,21 @@ impl Disk {
                     }
                 }
             }
+            Job::Refresh => {
+                self.reload();
+                Done {
+                    kind: DoneKind::Refreshed,
+                    tree: self.tree.clone(),
+                    reply: None,
+                }
+            }
             Job::Write(WriteRequest {
                 ctx,
+                mut attestation,
                 command,
                 reply,
             }) => {
-                let (result, retries) = self.write(&ctx, &command);
+                let (result, retries) = self.write(&ctx, &mut attestation, &command);
                 Done {
                     kind: DoneKind::Wrote { retries },
                     tree: self.tree.clone(),
@@ -641,11 +736,21 @@ impl Disk {
         }
     }
 
+    /// Reads the old-format tree from the root, locks its projects when project repositories
+    /// are enabled, and adds the projects of the sources.
     fn read_tree(&mut self) {
-        let tree = match &self.tree {
+        let mut tree = match &self.tree {
             Some(previous) => model_store::reload(&self.root, previous),
             None => model_store::load(&self.root),
         };
+        if self.seams.needs_conversion.load(Ordering::SeqCst) {
+            for project in &mut tree.projects {
+                project
+                    .task
+                    .walk_mut(&mut |task| task.needs_conversion = task.definition.is_none());
+            }
+        }
+        tree.projects.extend(self.seams.sources.projects());
         self.tree = Some(Arc::new(tree));
     }
 
@@ -701,8 +806,9 @@ impl Disk {
     fn write(
         &mut self,
         ctx: &Context,
+        attestation: &mut Option<PersonAtKeyboard>,
         command: &WorkCommand,
-    ) -> (Result<Change, WriteError>, usize) {
+    ) -> (Result<WriteOutcome, WriteError>, usize) {
         if self.tree.is_none() {
             self.reload();
         }
@@ -714,6 +820,9 @@ impl Disk {
                 Ok(change) => change,
                 Err(refusal) => return (Err(WriteError::Refused(refusal)), attempt),
             };
+            if let Some(writer) = self.seams.writers.owner(&tree, &change) {
+                return (self.write_owned(&*writer, &tree, ctx, attestation, change), attempt);
+            }
             match unchanged_since_read(&tree, &change) {
                 Ok(true) => {
                     if !self.alive.load(Ordering::SeqCst) {
@@ -724,7 +833,7 @@ impl Disk {
                     self.echoes.record(&self.root, &change);
                     self.reload();
                     let result = result
-                        .map(|()| change)
+                        .map(|()| WriteOutcome::Applied(change))
                         .map_err(|error| WriteError::Failed(error.to_string()));
                     return (result, attempt);
                 }
@@ -740,6 +849,26 @@ impl Disk {
             }
         }
         (Err(WriteError::Contended), MAX_RETRIES)
+    }
+}
+
+impl Disk {
+    /// Hands `change` to the definition writer that owns it, then reads the tree again so the
+    /// snapshot shows what the writer did.
+    fn write_owned(
+        &mut self,
+        writer: &dyn DefinitionWriter,
+        tree: &WorkTree,
+        ctx: &Context,
+        attestation: &mut Option<PersonAtKeyboard>,
+        change: Change,
+    ) -> Result<WriteOutcome, WriteError> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err(WriteError::Off);
+        }
+        let result = writer.write(tree, ctx, attestation.take(), change);
+        self.reload();
+        result
     }
 }
 
@@ -797,7 +926,11 @@ fn watch_dirs(root: &Path, tree: &WorkTree) -> BTreeSet<PathBuf> {
     for activity in &tree.activities {
         dirs.insert(activity.dir.clone());
     }
+    // Tasks of new-format projects live outside the root; their sources report changes.
     for task in tree.tasks() {
+        if task.definition.is_some() {
+            continue;
+        }
         dirs.insert(task.dir.clone());
         let children = layout::children_dir(&task.dir);
         if children.is_dir() {
@@ -945,8 +1078,8 @@ impl Echoes {
 
 #[cfg(test)]
 pub(crate) fn reply_for_test(
-    sender: oneshot::Sender<Result<Change, WriteError>>,
-    result: Result<Change, WriteError>,
+    sender: oneshot::Sender<Result<WriteOutcome, WriteError>>,
+    result: Result<WriteOutcome, WriteError>,
 ) -> impl Drop {
     Reply {
         sender: Some(sender),

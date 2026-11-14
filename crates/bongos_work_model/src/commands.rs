@@ -120,6 +120,11 @@ impl Context {
         self.attestation.take()
     }
 
+    /// Whether the context still holds its attestation.
+    pub fn has_attestation(&self) -> bool {
+        self.attestation.is_some()
+    }
+
     /// The old person context, kept until its callers build their context from a
     /// [`PersonAtKeyboard`]; the caller rename removes it.
     pub fn kyle() -> Self {
