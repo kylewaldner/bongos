@@ -136,6 +136,8 @@ mod overview_tests;
 #[cfg(test)]
 mod panel_tests;
 #[cfg(test)]
+mod person_marker_tests;
+#[cfg(test)]
 mod privacy_tests;
 #[cfg(test)]
 mod rebase_tests;
@@ -149,6 +151,8 @@ mod repository_tests;
 mod seam_tests;
 #[cfg(test)]
 mod store_tests;
+#[cfg(test)]
+mod structure_tests;
 #[cfg(test)]
 mod top_level_tests;
 #[cfg(test)]

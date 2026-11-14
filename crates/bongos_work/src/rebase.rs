@@ -94,12 +94,12 @@ fn clear_rebase(workspace: &mut Workspace, window: &mut gpui::Window, cx: &mut C
         "Clear the rebase flag of which task?",
         "No task needs a rebase",
         move |task, _| task.id().is_some_and(|id| flagged.iter().any(|f| f == id)),
-        Box::new(|id, workspace, _, cx| {
+        Box::new(|id, workspace, window, cx| {
             let state =
                 WorkStore::global(cx).and_then(|store| store.read(cx).rebase_state(&id).cloned());
             match state {
                 Some(RebaseState::RebaseNeeded { parent_head }) => {
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::clear_rebase(tree, ctx, &id, &parent_head)
                     })
                 }

@@ -3,9 +3,10 @@
 //! the model command once on the current snapshot to learn whether it is refused and what it
 //! would do, shows that, and writes only after a confirmation (the default answer cancels).
 
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{self as model, Context as WorkContext, NewTask};
 use bongos_work_model::rules::{self, Place};
-use bongos_work_model::store::WorkTree;
+use bongos_work_model::store::{Task, WorkTree};
 use gpui::{Context, Window};
 use workspace::Workspace;
 
@@ -38,13 +39,13 @@ fn new_one_off(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
                 "Goal of the new one-off, in one sentence",
                 "",
                 false,
-                Box::new(move |goal, workspace, _, cx| {
+                Box::new(move |goal, workspace, window, cx| {
                     let new = NewTask {
                         goal,
                         todos: new_task_todos(cx),
                         ..NewTask::default()
                     };
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::new_oneoff(tree, ctx, &activity, new.clone())
                     })
                 }),
@@ -70,7 +71,10 @@ fn confirm_then_submit(
     let Some(tree) = ready(workspace, cx) else {
         return;
     };
-    let change = match command(&tree, &WorkContext::kyle()) {
+    let change = match command(
+        &tree,
+        &WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx)),
+    ) {
         Ok(change) => change,
         Err(refusal) => {
             show_toast(workspace, refusal, cx);
@@ -86,9 +90,9 @@ fn confirm_then_submit(
         format!("{verb}?"),
         vec![yes, "Cancel".to_string()],
         1,
-        Box::new(move |choice, workspace, _, cx| {
+        Box::new(move |choice, workspace, window, cx| {
             if choice == 0 {
-                submit(workspace, cx, command);
+                submit(workspace, window, cx, command);
             }
         }),
         window,
@@ -170,9 +174,10 @@ fn move_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
             let Some(tree) = ready(workspace, cx) else {
                 return;
             };
-            let Some(moved) = tree.task_by_id(&id).map(|task| task.dir.clone()) else {
+            if tree.task_by_id(&id).is_none() {
                 return;
-            };
+            }
+            let moved = id.clone();
             with_task(
                 workspace,
                 window,
@@ -180,7 +185,7 @@ fn move_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 "Move it under which task?",
                 "There is no task to move it under",
                 // Not under itself or one of its own tasks.
-                move |task, _| task.file.is_some() && !task.dir.starts_with(&moved),
+                move |task, tree| can_move_under(task, tree, &moved),
                 Box::new(move |parent, workspace, window, cx| {
                     confirm_then_submit(
                         workspace,
@@ -193,6 +198,15 @@ fn move_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
             )
         }),
     );
+}
+
+/// Whether the task `moved` may move under `task`: not under itself or one of its own tasks.
+/// Decided through the tree, so it holds for a folder layout that does not nest tasks.
+pub(crate) fn can_move_under(task: &Task, tree: &WorkTree, moved: &str) -> bool {
+    task.file.is_some()
+        && task
+            .id()
+            .is_some_and(|task_id| !tree.is_ancestor(moved, task_id))
 }
 
 fn move_to_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {

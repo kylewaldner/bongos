@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::activity::activity_time;
 use bongos_work_model::commands::{self, Context, NewTodo};
 use bongos_work_model::layout;
@@ -177,7 +178,11 @@ async fn nothing_loads_or_watches_while_disabled(cx: &mut TestAppContext) {
     assert!(!missing_root.exists(), "a disabled store created its root");
     let refused = store
         .update(cx, |store, cx| {
-            store.write(Context::kyle(), add_todo("x"), cx)
+            store.write(
+                Context::at_keyboard(PersonAtKeyboard::for_test()),
+                add_todo("x"),
+                cx,
+            )
         })
         .await;
     assert_eq!(refused, Err(WriteError::Off));
@@ -288,7 +293,13 @@ async fn edit_between_snapshot_and_write_is_kept_and_the_command_reapplied(
         }
     };
     let change = store
-        .update(cx, |store, cx| store.write(Context::kyle(), command, cx))
+        .update(cx, |store, cx| {
+            store.write(
+                Context::at_keyboard(PersonAtKeyboard::for_test()),
+                command,
+                cx,
+            )
+        })
         .await
         .expect("the write succeeds on the fresh tree");
     assert_eq!(calls.load(Ordering::SeqCst), 2, "the command ran again");
@@ -329,7 +340,13 @@ async fn a_file_that_keeps_changing_is_never_overwritten(cx: &mut TestAppContext
         }
     };
     let result = store
-        .update(cx, |store, cx| store.write(Context::kyle(), command, cx))
+        .update(cx, |store, cx| {
+            store.write(
+                Context::at_keyboard(PersonAtKeyboard::for_test()),
+                command,
+                cx,
+            )
+        })
         .await;
     assert_eq!(result, Err(WriteError::Contended));
     assert_eq!(calls.load(Ordering::SeqCst), crate::MAX_RETRIES + 1);
@@ -349,7 +366,11 @@ async fn own_write_does_not_reload(cx: &mut TestAppContext) {
 
     store
         .update(cx, |store, cx| {
-            store.write(Context::kyle(), add_todo("Write the migration"), cx)
+            store.write(
+                Context::at_keyboard(PersonAtKeyboard::for_test()),
+                add_todo("Write the migration"),
+                cx,
+            )
         })
         .await
         .unwrap();
@@ -515,7 +536,11 @@ async fn external_edit_right_after_own_write_reaches_the_snapshot(cx: &mut TestA
 
     store
         .update(cx, |store, cx| {
-            store.write(Context::kyle(), add_todo("Write the migration"), cx)
+            store.write(
+                Context::at_keyboard(PersonAtKeyboard::for_test()),
+                add_todo("Write the migration"),
+                cx,
+            )
         })
         .await
         .unwrap();
@@ -541,7 +566,11 @@ async fn external_edit_and_back_within_the_echo_window_reach_the_snapshot(cx: &m
 
     store
         .update(cx, |store, cx| {
-            store.write(Context::kyle(), add_todo("Write the migration"), cx)
+            store.write(
+                Context::at_keyboard(PersonAtKeyboard::for_test()),
+                add_todo("Write the migration"),
+                cx,
+            )
         })
         .await
         .unwrap();
@@ -574,7 +603,11 @@ async fn disabling_before_a_queued_write_runs_writes_nothing(cx: &mut TestAppCon
     let before = std::fs::read_to_string(&task_path).unwrap();
 
     let write_task = store.update(cx, |store, cx| {
-        store.write(Context::kyle(), add_todo("Never written"), cx)
+        store.write(
+            Context::at_keyboard(PersonAtKeyboard::for_test()),
+            add_todo("Never written"),
+            cx,
+        )
     });
     set_enabled(cx, false);
     assert_eq!(write_task.await, Err(WriteError::Off));

@@ -30,12 +30,12 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         "Name of the new project",
         "",
         false,
-        Box::new(|title, workspace, _, cx| {
+        Box::new(|title, workspace, window, cx| {
             if ProjectRepositorySettings::get_global(cx).enabled {
                 new_repository_project(title, cx);
                 return;
             }
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::project_new(
                     tree,
                     ctx,
@@ -102,8 +102,8 @@ fn archive(
                 .as_ref()
                 .is_some_and(|file| file.archived != archive)
         },
-        Box::new(move |slug, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        Box::new(move |slug, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 if archive {
                     model::project_archive(tree, ctx, &slug)
                 } else {
