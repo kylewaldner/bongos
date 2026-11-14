@@ -374,7 +374,7 @@ pub(crate) fn run_builtin(name: &str, input: &BuiltinInput) -> CheckOutcome {
 }
 
 /// The stamp of a built-in's result: the tree, and for check 6 also the started tasks it saw,
-/// so a task started since reruns it (PRD 16).
+/// so a task started since reruns it: a result judged against an older started set is stale.
 pub(crate) fn builtin_stamp(name: &str, input: &BuiltinInput) -> Stamp {
     if name != STARTED_UNCHANGED_CHECK {
         return Stamp::tree(input.facts.new.id.clone());

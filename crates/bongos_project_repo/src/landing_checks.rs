@@ -1,4 +1,4 @@
-//! Landing checks other features register (D12): the checks that judge a change, the amending
+//! Landing checks other features register: the checks that judge a change, the amending
 //! checks that may write into it before it lands, the kinds a project's `[[landing.checks]]`
 //! entries are parsed by, the folders under `definitions/` check 1 knows, and the live sources
 //! that make a task started. Each registry is a global the app fills from the features' `init`;
@@ -51,7 +51,7 @@ pub trait LandingCheck: Send + Sync + 'static {
     fn run(&self, input: CheckInput) -> BoxFuture<'static, CheckOutcome>;
 }
 
-/// A check that may write into the change before it lands (feature 52's rebalancer). Only Rust
+/// A check that may write into the change before it lands (such as a rebalancer). Only Rust
 /// code registers one; no `[[landing.checks]]` entry can become one. The landing engine commits
 /// what it writes, inside the bounds of an amendment, as an amend commit on the change's branch.
 pub trait AmendingCheck: Send + Sync + 'static {

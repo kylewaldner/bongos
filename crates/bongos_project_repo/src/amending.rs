@@ -1,9 +1,10 @@
-//! Amending checks in D11 step 3, and dropping their commits again. The checks run first, in a
-//! scratch checkout of the change's commit under `state/amending/<name>` (never in the working
-//! copy, so what a person types meanwhile is neither committed nor discarded). The engine diffs
-//! what a check wrote against the author's tree, refuses an amendment outside its bounds with no
-//! verdict and commits nothing then, and otherwise commits it as "amend: <check> <message>",
-//! fast-forwards the working copy to it, records it in `changes.amend_commits`, and runs the
+//! Amending checks, which run first among a landing's checks (step 3), and dropping their
+//! commits again. The checks run in a scratch checkout of the change's commit under
+//! `state/amending/<name>` (never in the working copy, so what a person types meanwhile is
+//! neither committed nor discarded). The engine diffs what a check wrote against the author's
+//! tree, refuses an amendment outside its bounds with no verdict and commits nothing then, and
+//! otherwise commits it as "amend: <check> <message>", records it in `changes.amend_commits`,
+//! fast-forwards the working copy to it (taking the record back when that fails), and runs the
 //! amending checks again on the amended tree. A second consecutive amendment by the same check
 //! is no verdict.
 

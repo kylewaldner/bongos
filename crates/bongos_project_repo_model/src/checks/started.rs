@@ -1,4 +1,4 @@
-//! Check 6, `started-unchanged` (D12a): a change leaves the shape of a started task alone. Its
+//! Check 6, `started-unchanged`: a change leaves the shape of a started task alone. Its
 //! `areas`, `work_kind`, `size`, edges, folder and presence stay; a todo with state is neither
 //! removed nor reordered (added todos are fine). Two exemptions: a split moves todos into a new
 //! child with matching staged `MoveTodo` ops, and a move's own coordinator changes may touch the
@@ -16,8 +16,8 @@ use crate::summary::{ChangeSummary, edges_of, nodes_by_id, parent_folder};
 /// The marker of a move's trailers; text carrying it is stripped from a change's message.
 pub const MOVE_MARKER: &str = "Bongos-Move";
 
-/// A staged `MoveTodo` op of the change (D9): the todo `todo_id` moves from one task's state to
-/// another's when the change lands.
+/// A staged `MoveTodo` op of the change (a state op recorded with it and applied when it
+/// lands): the todo `todo_id` moves from one task's state to another's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StagedTodoMove {
     pub from_task: String,

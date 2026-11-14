@@ -1,4 +1,4 @@
-//! "Started" (D12a): which tasks have work that a definition change must not disturb, read from
+//! "Started": which tasks have work that a definition change must not disturb, read from
 //! the state store at check time and from the registered live sources (active runs, claims, lane
 //! ownership, queue claims, a move's `moving` claims). Never read from the repository.
 
@@ -50,8 +50,8 @@ impl fmt::Display for HoldReason {
     }
 }
 
-/// Something besides the task's state row that makes tasks started or holds them: an active run
-/// (feature 20), claims and lane ownership (48), queue claims (51), a move's claims (D19).
+/// Something besides the task's state row that makes tasks started or holds them: an active run,
+/// claims and lane ownership, queue claims, or the `moving` claims of a move in progress.
 pub trait LiveSource: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn started(&self, task_id: &str) -> bool;

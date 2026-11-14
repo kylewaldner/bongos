@@ -4,8 +4,9 @@
 use std::fmt;
 use std::path::PathBuf;
 
-/// When a landing check runs: before the change enters the queue (slow checks, D11 step 3) or in
-/// the queue on the rebased tree (cheap checks, D11 step 6).
+/// When a landing check runs: before the change enters the queue (slow checks, run on the
+/// change's own tree) or in the queue, under the landing lock, on the tree rebased onto master
+/// (cheap checks).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CheckPhase {
     BeforeQueue,

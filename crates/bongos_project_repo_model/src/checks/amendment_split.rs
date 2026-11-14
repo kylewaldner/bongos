@@ -1,4 +1,4 @@
-//! A split inside an amendment (D12): an unstarted task the author's part adds may hand its todos
+//! A split inside an amendment: an unstarted task the author's part adds may hand its todos
 //! to new child folders under it, or to one new sibling folder. Nothing is lost or invented: the
 //! todo ids and each todo's text are preserved exactly. Each new task takes `kind`, `work_kind`,
 //! `repository`, `repositories`, `merge_is_ship` and `checks` from the task it splits (`areas` and

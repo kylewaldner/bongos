@@ -1,4 +1,4 @@
-//! The bounds of an amendment (D12): what an amending check may change in the working copy
+//! The bounds of an amendment: what an amending check may change in the working copy
 //! before the landing engine commits it. Only `after`, `stacked_on`, `areas` and `size` in the
 //! `task.toml` of an unstarted task the author's part adds or redefines, a bounded split of a
 //! task the author's part adds ([`super::amendment_split`]), and the check's own stamp paths.
