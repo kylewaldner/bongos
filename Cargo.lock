@@ -2597,6 +2597,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_query_replace_model"
+version = "0.1.0"
+
+[[package]]
 name = "bongos_version"
 version = "0.1.0"
 

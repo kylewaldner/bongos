@@ -215,6 +215,7 @@ members = [
     "crates/bongos_emacs_model",
     "crates/bongos_isearch",
     "crates/bongos_isearch_model",
+    "crates/bongos_query_replace_model",
     "crates/bongos_minibuffer",
     "crates/bongos_minibuffer_model",
     "crates/bongos_net",
@@ -479,6 +480,7 @@ bongos_emacs = { path = "crates/bongos_emacs" }
 bongos_emacs_model = { path = "crates/bongos_emacs_model" }
 bongos_isearch = { path = "crates/bongos_isearch" }
 bongos_isearch_model = { path = "crates/bongos_isearch_model" }
+bongos_query_replace_model = { path = "crates/bongos_query_replace_model" }
 bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
 bongos_net = { path = "crates/bongos_net" }
