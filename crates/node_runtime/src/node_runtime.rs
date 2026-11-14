@@ -301,6 +301,7 @@ impl NodeRuntime {
             directory.display()
         );
 
+        let names: Vec<_> = packages.iter().map(|(name, _)| *name).collect();
         let packages: Vec<_> = packages
             .iter()
             .map(|(name, version)| format!("{name}@{version}"))
@@ -321,8 +322,12 @@ impl NodeRuntime {
             .collect();
 
         // This is also wrong because the directory is wrong.
-        self.run_npm_subcommand(Some(directory), "install", &arguments)
-            .await?;
+        install_removing_partial_updates(
+            directory,
+            &names,
+            self.run_npm_subcommand(Some(directory), "install", &arguments),
+        )
+        .await?;
         Ok(())
     }
 
@@ -384,6 +389,93 @@ impl NodeRuntime {
             "npm package cache check package={package_name:?} installed={installed_version} strategy={version_strategy_label} should_install={should_install}"
         );
         should_install
+    }
+}
+
+/// The files `npm install` writes into the directory it installs into.
+const NPM_INSTALL_ENTRIES: [&str; 3] = ["node_modules", "package.json", "package-lock.json"];
+
+/// Runs `install`, an `npm install` of `packages` into `directory`, so that it never leaves a
+/// half-updated install behind.
+///
+/// npm updates packages in place, so an install that stops partway over an existing one can
+/// leave a mix of old and new files that still looks installed. Copying the old install aside
+/// first would cost a full copy on every update, so instead an install that does not succeed
+/// is checked when it ends: dropped (npm is killed with it, by a cancel or a stopped start),
+/// it is removed, since a killed npm leaves no record of what it changed. Failed on its own, npm
+/// has rolled its changes back, so the old install is kept when every package was installed
+/// before and still has its old version, and removed otherwise. Either way the result is the
+/// intact old install or nothing, and the next start installs again.
+async fn install_removing_partial_updates<T>(
+    directory: &Path,
+    packages: &[&str],
+    install: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let mut guard = RemovePartialInstallOnDrop {
+        directory,
+        versions_before: packages
+            .iter()
+            .map(|name| (*name, installed_version_now(directory, name)))
+            .collect(),
+        npm_exited: false,
+        armed: true,
+    };
+    let result = install.await;
+    guard.npm_exited = true;
+    guard.armed = result.is_err();
+    result
+}
+
+/// The version of package `name` installed in `directory`, read synchronously.
+fn installed_version_now(directory: &Path, name: &str) -> Option<Version> {
+    #[derive(Deserialize)]
+    struct PackageJson {
+        version: Version,
+    }
+    let path = directory
+        .join("node_modules")
+        .join(name)
+        .join("package.json");
+    let contents = std::fs::read_to_string(path).ok()?;
+    Some(serde_json::from_str::<PackageJson>(&contents).ok()?.version)
+}
+
+struct RemovePartialInstallOnDrop<'a> {
+    directory: &'a Path,
+    versions_before: Vec<(&'a str, Option<Version>)>,
+    npm_exited: bool,
+    armed: bool,
+}
+
+impl Drop for RemovePartialInstallOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let old_install_intact = self.npm_exited
+            && self.versions_before.iter().all(|(name, before)| {
+                before.is_some() && *before == installed_version_now(self.directory, name)
+            });
+        if old_install_intact {
+            return;
+        }
+        log::info!(
+            "removing the unfinished npm install in {}",
+            self.directory.display()
+        );
+        for entry in NPM_INSTALL_ENTRIES {
+            let path = self.directory.join(entry);
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(error) = result
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                log::warn!("removing the unfinished npm install {path:?}: {error}");
+            }
+        }
     }
 }
 
@@ -1448,5 +1540,93 @@ mod tests {
             .recv_timeout(Duration::from_secs(30))
             .expect("npm kept running after its install was dropped");
         reader.join().unwrap();
+    }
+
+    /// An installed `pkg` 1.0.0 in a temporary directory, the way an npm install leaves it.
+    fn existing_install() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write_package_version(dir.path(), "1.0.0");
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+        dir
+    }
+
+    fn write_package_version(directory: &Path, version: &str) {
+        let package = directory.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            format!(r#"{{"name": "pkg", "version": "{version}"}}"#),
+        )
+        .unwrap();
+    }
+
+    fn installed(directory: &Path) -> Option<Version> {
+        super::installed_version_now(directory, "pkg")
+    }
+
+    fn assert_removed(directory: &Path) {
+        for entry in super::NPM_INSTALL_ENTRIES {
+            assert!(
+                !directory.join(entry).exists(),
+                "{entry} is left from the half-updated install"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_dropped_update_removes_the_half_updated_install() {
+        let dir = existing_install();
+        let update = super::install_removing_partial_updates(dir.path(), &["pkg"], async {
+            write_package_version(dir.path(), "2.0.0");
+            std::fs::write(dir.path().join("node_modules").join("half-written.js"), "").unwrap();
+            futures::future::pending::<Result<()>>().await
+        });
+        // Polled once, then dropped mid-install the way a cancel drops it.
+        assert!(futures::FutureExt::now_or_never(update).is_none());
+        assert_removed(dir.path());
+    }
+
+    #[test]
+    fn test_a_failed_update_that_npm_rolled_back_keeps_the_old_install() {
+        let dir = existing_install();
+        let result = smol::block_on(super::install_removing_partial_updates(
+            dir.path(),
+            &["pkg"],
+            async { Err::<(), _>(anyhow::anyhow!("network is unreachable")) },
+        ));
+        assert!(result.is_err());
+        assert_eq!(installed(dir.path()), Some(Version::new(1, 0, 0)));
+        assert!(dir.path().join("package-lock.json").exists());
+    }
+
+    #[test]
+    fn test_a_failed_update_that_changed_the_install_removes_it() {
+        let dir = existing_install();
+        let result = smol::block_on(super::install_removing_partial_updates(
+            dir.path(),
+            &["pkg"],
+            async {
+                write_package_version(dir.path(), "2.0.0");
+                Err::<(), _>(anyhow::anyhow!("npm failed"))
+            },
+        ));
+        assert!(result.is_err());
+        assert_removed(dir.path());
+    }
+
+    #[test]
+    fn test_a_finished_update_is_kept() {
+        let dir = existing_install();
+        smol::block_on(super::install_removing_partial_updates(
+            dir.path(),
+            &["pkg"],
+            async {
+                write_package_version(dir.path(), "2.0.0");
+                Ok(())
+            },
+        ))
+        .unwrap();
+        assert_eq!(installed(dir.path()), Some(Version::new(2, 0, 0)));
     }
 }

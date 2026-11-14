@@ -198,16 +198,29 @@ fn answers(body: &'static str) -> Arc<dyn HttpClient> {
     })
 }
 
+type BinaryCache = Arc<futures::lock::Mutex<Option<(bool, LanguageServerBinary)>>>;
+
 /// What a start of the server runs: the command lookup, then `binary_to_start`.
 fn start(
     installer: &Arc<TestInstaller>,
     delegate: &Arc<TestDelegate>,
     cx: &mut TestAppContext,
 ) -> Task<Result<LanguageServerBinary>> {
+    start_with_cache(installer, delegate, &BinaryCache::default(), cx)
+}
+
+/// A start that shares `cache` with other starts, the way an adapter's starts do.
+fn start_with_cache(
+    installer: &Arc<TestInstaller>,
+    delegate: &Arc<TestDelegate>,
+    cache: &BinaryCache,
+    cx: &mut TestAppContext,
+) -> Task<Result<LanguageServerBinary>> {
     let installer = installer.clone();
     let delegate: Arc<dyn LspAdapterDelegate> = delegate.clone();
+    let cache = cache.clone();
     cx.spawn(async move |cx| {
-        let cache = Arc::new(futures::lock::Mutex::new(None)).lock_owned().await;
+        let cache = cache.lock_owned().await;
         let options = LanguageServerBinaryOptions {
             allow_path_lookup: false,
             allow_binary_download: true,
@@ -339,5 +352,60 @@ async fn test_without_a_cache_a_failing_client_fails_with_its_cause(cx: &mut Tes
         }
         status => panic!("expected a failed status, got {status:?}"),
     }
+    assert_eq!(installer.downloads(), 0);
+}
+
+#[gpui::test]
+async fn test_a_start_stopped_while_downloading_leaves_nothing_and_the_next_start_downloads_again(
+    cx: &mut TestAppContext,
+) {
+    let container = tempfile::tempdir().unwrap();
+    let delegate = TestDelegate::new(container.path(), answers("1.0"));
+    let installer = Arc::new(TestInstaller::default());
+    installer.hang.store(true, Ordering::SeqCst);
+
+    let first = start(&installer, &delegate, cx);
+    cx.run_until_parked();
+    assert!(container.path().join("1.0").join("partial").exists());
+
+    // What stopping the server does with its start: the start is dropped, not cancelled.
+    drop(first);
+    cx.run_until_parked();
+    assert_eq!(
+        entries(container.path()),
+        Vec::<std::ffi::OsString>::new(),
+        "the dropped download left files behind"
+    );
+
+    installer.hang.store(false, Ordering::SeqCst);
+    let second = start(&installer, &delegate, cx).await.unwrap();
+    assert_eq!(installer.downloads(), 2);
+    assert_eq!(second.path, container.path().join("1.0").join("server"));
+}
+
+#[gpui::test]
+async fn test_a_second_start_does_not_wait_for_the_first_ones_update_check(
+    cx: &mut TestAppContext,
+) {
+    let container = tempfile::tempdir().unwrap();
+    let cached = container.path().join("0.9");
+    std::fs::create_dir(&cached).unwrap();
+    std::fs::write(cached.join("server"), "").unwrap();
+    let http = FakeHttpClient::create(|_| futures::future::pending());
+    let delegate = TestDelegate::new(container.path(), http);
+    let installer = Arc::new(TestInstaller::default());
+    let cache = BinaryCache::default();
+
+    let first = start_with_cache(&installer, &delegate, &cache, cx);
+    cx.run_until_parked();
+    assert_eq!(first.await.unwrap().path, cached.join("server"));
+
+    // The first start's update check never ends; the second start must not wait for it.
+    let second = start_with_cache(&installer, &delegate, &cache, cx);
+    cx.run_until_parked();
+    let binary = futures::FutureExt::now_or_never(second)
+        .expect("the second start waited for the first one's update check")
+        .unwrap();
+    assert_eq!(binary.path, cached.join("server"));
     assert_eq!(installer.downloads(), 0);
 }

@@ -499,7 +499,23 @@ fn dir_entry_names(dir: &Path) -> HashSet<std::ffi::OsString> {
         .unwrap_or_default()
 }
 
-/// Removes what a failed or cancelled download left in `dir`: every entry not in `before`.
+/// Removes what a failed, cancelled or dropped download left in `dir` when dropped while armed:
+/// every entry not in `before`.
+struct RemoveNewEntriesOnDrop {
+    dir: PathBuf,
+    before: HashSet<std::ffi::OsString>,
+    armed: bool,
+}
+
+impl Drop for RemoveNewEntriesOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_new_entries(&self.dir, &self.before);
+        }
+    }
+}
+
+/// Removes every entry of `dir` not in `before`.
 fn remove_new_entries(dir: &Path, before: &HashSet<std::ffi::OsString>) {
     for name in dir_entry_names(dir).difference(before) {
         let path = dir.join(name);
@@ -816,12 +832,18 @@ where
             let binary = cx
                 .background_executor()
                 .spawn(async move {
-                    let before = dir_entry_names(&container_dir);
+                    // Armed until the download succeeds, so a failure, a cancel, or dropping
+                    // the start (a restart or stop while it downloads) all remove what it wrote,
+                    // and the next start downloads again instead of finding a partial install.
+                    // The download future is a later local, so it is dropped first and a killed
+                    // installer has stopped writing before the cleanup runs.
+                    let mut cleanup = RemoveNewEntriesOnDrop {
+                        before: dir_entry_names(&container_dir),
+                        dir: container_dir,
+                        armed: true,
+                    };
                     let binary = download_unless_cancelled(download, &cancel, &executor).await;
-                    if binary.is_err() {
-                        // The next start downloads again instead of finding a partial install.
-                        remove_new_entries(&container_dir, &before);
-                    }
+                    cleanup.armed = binary.is_err();
                     binary
                 })
                 .await;
@@ -865,8 +887,11 @@ where
                 return (Ok(binary), None);
             }
 
+            // A cached binary an update has since removed (a GitHub download replaces the old
+            // version's directory) is looked up on disk again below.
             if let Some((pre_release, cached_binary)) = cached_binary_deref
                 && *pre_release == binary_options.pre_release
+                && cached_binary.path.exists()
             {
                 return (Ok(cached_binary.clone()), None);
             }
@@ -892,6 +917,17 @@ where
                 .context(
                     "did not find existing language server binary, falling back to downloading",
                 );
+            // With a binary on disk the start runs it at once and the update goes on beside it,
+            // so the cache is filled now and released: a second start of this server must not
+            // wait on the lock for as long as the network takes. The update's binary is found
+            // on disk by a later start once the cached one is gone, or at the next launch.
+            let mut cached_binary = match &last_downloaded_binary {
+                Ok(existing) => {
+                    *cached_binary = Some((binary_options.pre_release, existing.clone()));
+                    None
+                }
+                Err(_) => Some(cached_binary),
+            };
             let download_binary = async move {
                 let mut binary = self
                     .try_fetch_server_binary(
@@ -925,8 +961,10 @@ where
                     }
                 }
 
-                if let Ok(binary) = &binary {
-                    *cached_binary = Some((binary_options.pre_release, binary.clone()));
+                if let Ok(binary) = &binary
+                    && let Some(cached_binary) = cached_binary.as_mut()
+                {
+                    **cached_binary = Some((binary_options.pre_release, binary.clone()));
                 }
 
                 binary

@@ -85,6 +85,11 @@ async fn test_server_download_progress_and_cancel(cx: &mut TestAppContext) {
         !other.load(Ordering::SeqCst),
         "a cancel stops only its own server"
     );
+    drop(second);
+    assert!(
+        !lsp_store.read_with(cx, |lsp_store, _| lsp_store.cancel_server_download(&server)),
+        "the download ended, so there is nothing to cancel"
+    );
 }
 
 #[gpui::test]

@@ -11632,7 +11632,7 @@ impl LspStore {
     }
 
     /// Cancels the running download of `name`: it stops, removes what it wrote, and its status
-    /// becomes `Failed` with "download cancelled". False when `name` never started a download here.
+    /// becomes `Failed` with "download cancelled". False when no download of `name` runs here.
     pub fn cancel_server_download(&self, name: &LanguageServerName) -> bool {
         self.as_local()
             .is_some_and(|local| local.server_downloads.cancel(name))
@@ -15067,10 +15067,11 @@ struct ServerDownloadProgress {
 }
 
 /// What the delegates of a local `LspStore` share about language server downloads: where progress
-/// goes, and one cancel flag per server.
+/// goes, and one cancel flag per server. A flag is held only by its download, so it is gone once
+/// the download ends.
 pub struct ServerDownloads {
     progress: futures::channel::mpsc::UnboundedSender<ServerDownloadProgress>,
-    cancel_flags: parking_lot::Mutex<HashMap<LanguageServerName, Arc<AtomicBool>>>,
+    cancel_flags: parking_lot::Mutex<HashMap<LanguageServerName, std::sync::Weak<AtomicBool>>>,
 }
 
 impl ServerDownloads {
@@ -15089,17 +15090,24 @@ impl ServerDownloads {
     /// A fresh flag for a download of `server` that starts now.
     fn start(&self, server: LanguageServerName) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
-        self.cancel_flags.lock().insert(server, flag.clone());
+        let mut flags = self.cancel_flags.lock();
+        flags.retain(|_, flag| flag.strong_count() > 0);
+        flags.insert(server, Arc::downgrade(&flag));
         flag
     }
 
+    /// Cancels `server`'s running download; false when none runs.
     fn cancel(&self, server: &LanguageServerName) -> bool {
-        match self.cancel_flags.lock().get(server) {
+        let mut flags = self.cancel_flags.lock();
+        match flags.get(server).and_then(std::sync::Weak::upgrade) {
             Some(flag) => {
                 flag.store(true, atomic::Ordering::SeqCst);
                 true
             }
-            None => false,
+            None => {
+                flags.remove(server);
+                false
+            }
         }
     }
 }
