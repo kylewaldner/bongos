@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_compression::futures::bufread::GzipDecoder;
 use async_tar::Archive;
 use chrono::{DateTime, Utc};
@@ -7,6 +7,7 @@ use http_client::{Host, HttpClient, Url};
 use log::Level;
 use semver::Version;
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use smol::io::BufReader;
 use smol::{fs, lock::Mutex};
 use std::collections::HashMap;
@@ -799,21 +800,25 @@ impl ManagedNodeRuntime {
             );
 
             let url = format!("https://nodejs.org/dist/{version}/{file_name}");
+            let Some(expected_sha256) = expected_archive_sha256(version, os, arch) else {
+                _ = fs::remove_dir_all(&node_containing_dir).await;
+                bail!(
+                    "no pinned SHA-256 for Node.js {version} on {os}-{arch}; refusing to run unverified code"
+                );
+            };
             log::info!("Downloading Node.js binary from {url}");
-            let mut response = http
-                .get(&url, Default::default(), true)
-                .await
-                .context("error downloading Node binary tarball")?;
-            log::info!("Download of Node.js complete, extracting...");
-
-            let body = response.body_mut();
-            match archive_type {
-                ArchiveType::TarGz => {
-                    let decompressed_bytes = GzipDecoder::new(BufReader::new(response.body_mut()));
-                    let archive = Archive::new(decompressed_bytes);
-                    archive.unpack(&node_containing_dir).await?;
-                }
-                ArchiveType::Zip => extract_zip(&node_containing_dir, body).await?,
+            if let Err(error) = download_verify_and_extract(
+                http.as_ref(),
+                &url,
+                expected_sha256,
+                archive_type,
+                &node_containing_dir,
+            )
+            .await
+            {
+                // Leave no partial state behind.
+                _ = fs::remove_dir_all(&node_containing_dir).await;
+                return Err(error);
             }
             log::info!("Extracted Node.js to {}", node_containing_dir.display())
         }
@@ -827,6 +832,102 @@ impl ManagedNodeRuntime {
             installation_path: node_dir,
         })
     }
+}
+
+/// SHA-256 digests of the official Node.js archives, copied from
+/// `https://nodejs.org/dist/<version>/SHASUMS256.txt`: `(version, os, arch, digest)`.
+/// Bumping `ManagedNodeRuntime::VERSION` requires adding its rows here.
+const NODE_ARCHIVE_SHA256: &[(&str, &str, &str, &str)] = &[
+    (
+        "v24.11.0",
+        "linux",
+        "x64",
+        "b3c071cdf47aab867c3b2aa287257df12ec5d7c962bf922b32fd33226c4295fd",
+    ),
+    (
+        "v24.11.0",
+        "linux",
+        "arm64",
+        "4786d00c4d259d3ff0b2328307f764ef3ced65f2d6e9502d433e68d66238509d",
+    ),
+    (
+        "v24.11.0",
+        "darwin",
+        "x64",
+        "3884671e87f46f773832d98a0a6cabcc5ec4f637084f0f3515b69e66ea27f2f1",
+    ),
+    (
+        "v24.11.0",
+        "darwin",
+        "arm64",
+        "0be2ab2816a4fa02d1acff014a434f29f56d8d956f5af6a98b70ced6c5f4d201",
+    ),
+    (
+        "v24.11.0",
+        "win",
+        "x64",
+        "1054540bce22b54ec7e50ebc078ec5d090700a77657607a58f6a64df21f49fdd",
+    ),
+    (
+        "v24.11.0",
+        "win",
+        "arm64",
+        "12d3b1aa9696b7411e115a4fa2aef57f95560b5ee16bb62cd69843e535ec72be",
+    ),
+];
+
+fn expected_archive_sha256(version: &str, os: &str, arch: &str) -> Option<&'static str> {
+    NODE_ARCHIVE_SHA256
+        .iter()
+        .find(|(v, o, a, _)| *v == version && *o == os && *a == arch)
+        .map(|(_, _, _, digest)| *digest)
+}
+
+/// Fails unless the SHA-256 of `bytes` equals `expected_sha256` (lowercase hex).
+fn verify_sha256(bytes: &[u8], expected_sha256: &str) -> Result<()> {
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    ensure!(
+        actual.eq_ignore_ascii_case(expected_sha256),
+        "Node.js archive SHA-256 mismatch. Expected: {expected_sha256}, Got: {actual}"
+    );
+    Ok(())
+}
+
+/// Downloads the whole archive into memory, verifies its SHA-256, and only then extracts it.
+/// Nothing is extracted when the digest does not match.
+async fn download_verify_and_extract(
+    http: &dyn HttpClient,
+    url: &str,
+    expected_sha256: &str,
+    archive_type: ArchiveType,
+    destination: &Path,
+) -> Result<()> {
+    let mut response = http
+        .get(url, Default::default(), true)
+        .await
+        .context("error downloading Node binary tarball")?;
+    ensure!(
+        response.status().is_success(),
+        "downloading {url}: the server answered {}",
+        response.status()
+    );
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut bytes)
+        .await
+        .with_context(|| format!("reading {url}"))?;
+    verify_sha256(&bytes, expected_sha256).with_context(|| format!("verifying {url}"))?;
+    log::info!("Download of Node.js verified, extracting...");
+    match archive_type {
+        ArchiveType::TarGz => {
+            let decompressed_bytes =
+                GzipDecoder::new(BufReader::new(futures::io::Cursor::new(bytes)));
+            Archive::new(decompressed_bytes).unpack(destination).await?;
+        }
+        ArchiveType::Zip => extract_zip(destination, futures::io::Cursor::new(bytes)).await?,
+    }
+    Ok(())
 }
 
 fn path_with_node_binary_prepended(node_binary: &Path) -> Option<OsString> {
@@ -1392,10 +1493,13 @@ mod tests {
     use anyhow::{Result, bail};
     use http_client::Url;
     use semver::Version;
+    use sha2::Digest as _;
 
     use super::{
-        NpmInfo, VersionStrategy, build_npm_command_args, proxy_argument,
-        select_npm_package_version, should_install_npm_package_version,
+        ArchiveType, ManagedNodeRuntime, NODE_ARCHIVE_SHA256, NpmInfo, VersionStrategy,
+        build_npm_command_args, download_verify_and_extract, expected_archive_sha256,
+        proxy_argument, select_npm_package_version, should_install_npm_package_version,
+        verify_sha256,
     };
 
     // Map localhost to 127.0.0.1
@@ -1894,5 +1998,60 @@ mod tests {
             }
         }
         assert!(log.calls().is_empty());
+    }
+
+    #[test]
+    fn every_supported_platform_has_a_digest_for_the_pinned_version() {
+        let version = ManagedNodeRuntime::VERSION;
+        for (os, arch) in [
+            ("linux", "x64"),
+            ("linux", "arm64"),
+            ("darwin", "x64"),
+            ("darwin", "arm64"),
+        ] {
+            let digest = expected_archive_sha256(version, os, arch)
+                .unwrap_or_else(|| panic!("no digest for {version} {os}-{arch}"));
+            assert_eq!(digest.len(), 64);
+            assert!(
+                digest
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
+        }
+        assert!(NODE_ARCHIVE_SHA256.iter().all(|row| row.0 == version));
+    }
+
+    #[test]
+    fn verify_sha256_accepts_only_the_matching_digest() {
+        let digest = format!("{:x}", sha2::Sha256::digest(b"abc"));
+        assert!(verify_sha256(b"abc", &digest).is_ok());
+        let error = verify_sha256(b"abd", &digest).unwrap_err();
+        assert!(error.to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn tampered_node_archive_is_refused_and_nothing_is_extracted() {
+        futures::executor::block_on(async {
+            let destination = tempfile::tempdir().unwrap();
+            let genuine = b"genuine archive bytes".to_vec();
+            let expected = format!("{:x}", sha2::Sha256::digest(&genuine));
+            let client = http_client::FakeHttpClient::create(|_| async {
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(b"tampered archive bytes".to_vec().into())
+                    .unwrap())
+            });
+            let error = download_verify_and_extract(
+                client.as_ref(),
+                "https://nodejs.org/dist/test/node.tar.gz",
+                &expected,
+                ArchiveType::TarGz,
+                destination.path(),
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("mismatch"), "{error:#}");
+            assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+        });
     }
 }
