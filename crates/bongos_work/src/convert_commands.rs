@@ -228,8 +228,8 @@ fn setup(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Conve
         root: tree.root.clone(),
         locations_path: locations_path(cx),
         projects_dir: settings.projects_folder(),
-        layout: settings.layout.clone(),
-        oneoffs_title: settings.oneoffs_project.clone(),
+        layout: settings.layout,
+        oneoffs_title: settings.oneoffs_project,
         now: bongos_work_model::now(),
     })
 }
