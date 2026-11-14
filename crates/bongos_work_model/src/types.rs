@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::author::AuthorKind;
+
 /// A TOML datetime (`2026-11-08T10:00:00Z`). It reads and writes as a native TOML datetime, not a
 /// string, so the files stay as the design shows them.
 pub type Timestamp = toml::value::Datetime;
@@ -190,11 +192,50 @@ pub struct ProposalRecord {
     pub number: u32,
     pub state: ProposalState,
     pub at: Timestamp,
-    /// `kyle`, `agent` or `workflow:<name>`.
+    /// The author's name.
     pub by: String,
+    /// What kind of author wrote it. Absent in a record written before kinds were stored; read
+    /// those through [`ProposalRecord::by_person`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_kind: Option<ByKind>,
     pub hash: String,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+impl ProposalRecord {
+    /// Whether a person applied it: its stored kind says so, or, for a record with no stored
+    /// kind, its `by` is the name old records gave a person (`kyle`).
+    pub fn by_person(&self) -> bool {
+        match self.by_kind {
+            Some(kind) => kind == ByKind::Person,
+            None => self.by == "kyle",
+        }
+    }
+}
+
+/// The kind of an author as a record stores it. A person that was read back is still `person`: the
+/// record only says what to show, it never proves who acted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ByKind {
+    Person,
+    Agent,
+    Workflow,
+    Healer,
+    Unattributed,
+}
+
+impl From<AuthorKind> for ByKind {
+    fn from(kind: AuthorKind) -> Self {
+        match kind {
+            AuthorKind::Person | AuthorKind::PersonClaimed => Self::Person,
+            AuthorKind::Agent => Self::Agent,
+            AuthorKind::Workflow => Self::Workflow,
+            AuthorKind::Healer => Self::Healer,
+            AuthorKind::Unattributed => Self::Unattributed,
+        }
+    }
 }
 
 /// How a linked task ended on the Linear side.

@@ -71,6 +71,12 @@ impl Author {
         Self::new(AuthorKind::Unattributed, by)
     }
 
+    /// The same author acting in the chat `chat`.
+    pub fn with_chat(mut self, chat: impl Into<String>) -> Self {
+        self.chat = Some(chat.into());
+        self
+    }
+
     pub fn kind(&self) -> AuthorKind {
         self.kind
     }

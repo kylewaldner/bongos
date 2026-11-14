@@ -422,6 +422,7 @@ fn the_number_follows_the_highest_proposal() {
             state: ProposalState::Applied,
             at: timestamp("2026-11-08T10:00:00Z"),
             by: "kyle".to_string(),
+            by_kind: None,
             hash: String::new(),
             extra: Default::default(),
         });
