@@ -15,13 +15,13 @@ use bongos_project_repo::{
     ChangeState, CheckInput, Git, Identity, LoadedProject, Location, MAIN_BRANCH, NEEDS_A_WINDOW,
     ProjectRepo, ProjectRepositorySettings, StateApplyHooks, StateHandle, StateStore,
 };
-use futures::FutureExt as _;
-use futures::future::BoxFuture;
 use bongos_work::model::commands::Context as WorkContext;
 use bongos_work::model::store::WorkTree;
 use bongos_work::model::{Author, PersonAtKeyboard, ProposalState};
 use bongos_work::{LandingVerdict, WorkDirs, WorkSettings, WorkStore, WriteOutcome};
 use fs::RealFs;
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use gpui::{Entity, TestAppContext, UpdateGlobal as _};
 use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
@@ -571,8 +571,11 @@ impl AmendingCheck for AmendsAfterTheApproval {
             if text.contains("size = ") {
                 return AmendOutcome::Unchanged;
             }
-            std::fs::write(&task, text.replacen("schema = 1\n", "schema = 1\nsize = 3\n", 1))
-                .unwrap();
+            std::fs::write(
+                &task,
+                text.replacen("schema = 1\n", "schema = 1\nsize = 3\n", 1),
+            )
+            .unwrap();
             AmendOutcome::Amended {
                 message: "size".to_string(),
             }
@@ -596,14 +599,14 @@ impl ApprovalHook for EveryChangeNeedsAPerson {
 }
 
 #[gpui::test]
-async fn an_apply_whose_landing_waits_after_the_approval_reports_it_held(
-    cx: &mut TestAppContext,
-) {
+async fn an_apply_whose_landing_waits_after_the_approval_reports_it_held(cx: &mut TestAppContext) {
     let fixture = fixture(cx, &[]).await;
-    fixture.repo.add_amending_check(Arc::new(AmendsAfterTheApproval {
-        repo: fixture.repo.clone(),
-        executor: cx.executor(),
-    }));
+    fixture
+        .repo
+        .add_amending_check(Arc::new(AmendsAfterTheApproval {
+            repo: fixture.repo.clone(),
+            executor: cx.executor(),
+        }));
     fixture
         .repo
         .add_approval_hook(Arc::new(EveryChangeNeedsAPerson));

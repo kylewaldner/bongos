@@ -52,8 +52,8 @@ pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
 pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root_tasks};
 pub use panel::{WorkPanel, init_panel, task_at_point};
 pub use project_repos::{
-    LandingVerdict, LandingWatch, abandon_proposal, approve_and_watch, approve_proposal, register_project_repo,
-    watch_landings,
+    LandingVerdict, LandingWatch, abandon_proposal, approve_and_watch, approve_proposal,
+    register_project_repo, watch_landings,
 };
 pub use rebase::RebaseState;
 pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};

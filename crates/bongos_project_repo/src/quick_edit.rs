@@ -483,7 +483,7 @@ impl ProjectRepo {
                 // of the change already runs: that one reports its own.
                 if !self.engine.is_landing(change_id) {
                     self.engine.emit(
-                    change_id,
+                        change_id,
                         crate::LandingEvent::Ended {
                             reason: format!("the landing failed: {error:#}"),
                         },
