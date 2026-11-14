@@ -349,3 +349,107 @@ fn scratch_copies_left_by_a_former_process_are_removed_at_open() {
         "the scratch worktree is still registered"
     );
 }
+
+#[test]
+fn an_amend_commit_the_working_copy_cannot_fast_forward_to_is_not_listed() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    // While the check writes its stamp, the person creates the same file in the working copy,
+    // which is in the way of the fast-forward.
+    let in_copy = copy.path.join("definitions/stamp.txt");
+    let mut stamp = FakeAmender::new(
+        "stamp",
+        1,
+        Arc::new(move |writable: &std::path::Path| {
+            std::fs::write(writable.join("definitions/stamp.txt"), "stamped\n").unwrap();
+            std::fs::write(&in_copy, "mine\n").unwrap();
+            true
+        }),
+    );
+    stamp.stamp_paths = vec!["stamp.txt"];
+    repo.add_amending_check(Arc::new(stamp));
+    let old = main_commit(&repo);
+
+    assert_eq!(
+        land(&repo, &copy, &author),
+        LandingResult::NoVerdict {
+            reason: UNSAVED_EDITS.to_string()
+        }
+    );
+    assert_eq!(main_commit(&repo), old);
+    let row = repo.change(&copy.change_id).unwrap().unwrap();
+    assert!(row.amend_commits.is_empty(), "{:?}", row.amend_commits);
+    assert_eq!(
+        run_git(&repo, &["log", "-1", "--format=%s", &row.branch]),
+        "land it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(copy.path.join("definitions/stamp.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[test]
+fn a_listed_amend_commit_the_branch_never_got_is_skipped_when_the_amendments_are_dropped() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let mut stamp = FakeAmender::new("stamp", 1, write_in("stamp.txt", "stamped\n"));
+    stamp.stamp_paths = vec!["stamp.txt"];
+    repo.add_amending_check(Arc::new(stamp));
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let checked = block_on(repo.land_now(
+        &copy.change_id,
+        LandRequest {
+            meta: bongos_project_repo_model::ChangeMeta::new("check", author),
+            mode: LandMode::CheckOnly,
+        },
+        start(),
+    ))
+    .unwrap();
+    assert!(
+        matches!(checked, LandingResult::Checked { .. }),
+        "{checked:?}"
+    );
+    let mut row = repo.change(&copy.change_id).unwrap().unwrap();
+    assert_eq!(row.amend_commits.len(), 1);
+    let author_commit = run_git(&repo, &["rev-parse", &format!("{}^", row.branch)]);
+    // A crash between recording a second amend commit and moving the branch to it.
+    let tree = run_git(&repo, &["rev-parse", &format!("{}^{{tree}}", row.branch)]);
+    let stray = run_git(
+        &repo,
+        &[
+            "-c",
+            "user.name=bongos",
+            "-c",
+            "user.email=bongos@localhost",
+            "commit-tree",
+            &tree,
+            "-m",
+            "amend: stamp edit",
+        ],
+    );
+    row.amend_commits.push(crate::changes::AmendCommit {
+        commit: stray,
+        check: "stamp".to_string(),
+    });
+    let writer = repo.writer_or_error().unwrap();
+    writer.transact(|tx| tx.set_change(&row)).unwrap();
+
+    let ended =
+        block_on(repo.drop_amendments(&writer, &mut row, &copy.path, &crate::Identity::default()))
+            .unwrap();
+    assert_eq!(ended, None);
+    assert_eq!(head(&copy, &repo), author_commit);
+    assert!(
+        repo.change(&copy.change_id)
+            .unwrap()
+            .unwrap()
+            .amend_commits
+            .is_empty()
+    );
+}

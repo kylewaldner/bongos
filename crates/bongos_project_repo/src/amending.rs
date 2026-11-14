@@ -56,32 +56,45 @@ impl ProjectRepo {
         path: &Path,
         identity: &Identity,
     ) -> Result<Option<LandingResult>> {
-        let (Some(first), Some(last)) = (row.amend_commits.first(), row.amend_commits.last())
-        else {
+        let Some(first) = row.amend_commits.first() else {
             return Ok(None);
         };
-        let (first, last) = (first.commit.clone(), last.commit.clone());
-        let base = format!("{first}^");
-        if !path.is_dir() {
-            let repository = &self.location.repository;
-            let reference = format!("refs/heads/{}", row.branch);
-            let tip = self.git.rev_parse(repository, &reference).await?;
-            if tip == last {
-                let author = self.git.rev_parse(repository, &base).await?;
-                self.git
-                    .update_ref_cas(repository, &reference, &author, &last)
-                    .await?;
-            } else if self.git.is_ancestor(repository, &last, &tip).await {
-                return Ok(Some(LandingResult::NoVerdict {
-                    reason: format!(
-                        "{} has commits on top of its amendments and no working copy",
-                        row.branch
-                    ),
-                }));
-            }
+        let base = format!("{}^", first.commit);
+        let repository = &self.location.repository;
+        let reference = format!("refs/heads/{}", row.branch);
+        let (at, tip) = if path.is_dir() {
+            (path, self.git.rev_parse(path, "HEAD").await?)
         } else {
-            let tip = self.git.rev_parse(path, "HEAD").await?;
-            if self.git.is_ancestor(path, &last, &tip).await {
+            (
+                repository.as_path(),
+                self.git.rev_parse(repository, &reference).await?,
+            )
+        };
+        // The newest listed amend commit the branch holds: one recorded just before a crash
+        // stopped the fast-forward to it is listed but not on the branch.
+        let mut last = None;
+        for amend in row.amend_commits.iter().rev() {
+            if self.git.is_ancestor(at, &amend.commit, &tip).await {
+                last = Some(amend.commit.clone());
+                break;
+            }
+        }
+        if let Some(last) = last {
+            if !path.is_dir() {
+                if tip == last {
+                    let author = self.git.rev_parse(repository, &base).await?;
+                    self.git
+                        .update_ref_cas(repository, &reference, &author, &last)
+                        .await?;
+                } else {
+                    return Ok(Some(LandingResult::NoVerdict {
+                        reason: format!(
+                            "{} has commits on top of its amendments and no working copy",
+                            row.branch
+                        ),
+                    }));
+                }
+            } else {
                 if !self.git.is_clean(path).await? {
                     return Ok(Some(LandingResult::NoVerdict {
                         reason: UNSAVED_EDITS.to_string(),
@@ -262,17 +275,23 @@ impl ProjectRepo {
                 // The working copy follows by a fast-forward only when the person committed
                 // nothing meanwhile and has no file in the way; their other edits stay as
                 // they are.
-                if self.git.rev_parse(path, "HEAD").await? != head
-                    || self.git.merge_ff_only(path, &commit).await.is_err()
-                {
+                if self.git.rev_parse(path, "HEAD").await? != head {
                     return Ok(Amended::NoVerdict(UNSAVED_EDITS.to_string()));
                 }
-                head = commit.clone();
+                // Recorded before the branch moves, so a crash in between never leaves an amend
+                // commit on the branch that the change does not list (a listed commit that is
+                // not on the branch is skipped when the amendments are dropped).
                 row.amend_commits.push(AmendCommit {
-                    commit,
+                    commit: commit.clone(),
                     check: name.clone(),
                 });
                 writer.transact(|tx| tx.set_change(row))?;
+                if self.git.merge_ff_only(path, &commit).await.is_err() {
+                    row.amend_commits.pop();
+                    writer.transact(|tx| tx.set_change(row))?;
+                    return Ok(Amended::NoVerdict(UNSAVED_EDITS.to_string()));
+                }
+                head = commit;
                 last = Some(name);
                 current = self
                     .prepare_checks(&row.change_id, master, &head, meta, &row.author)

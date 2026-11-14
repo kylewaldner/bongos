@@ -365,6 +365,7 @@ pub(crate) fn run_builtin(name: &str, input: &BuiltinInput) -> CheckOutcome {
                     Some((file.path.as_str(), text))
                 }),
                 &patterns,
+                // The schema marks no key secret yet; the patterns are the whole check for now.
                 &[],
             ),
             Err(error) => CheckOutcome::no_verdict(error),
