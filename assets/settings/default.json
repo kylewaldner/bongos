@@ -2655,7 +2655,7 @@
   "minibuffer": {
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
-    // "goto_line", "zap", "isearch".
+    // "goto_line", "zap", "isearch", "kill_ring".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2667,7 +2667,8 @@
       "key_hint",
       "goto_line",
       "zap",
-      "isearch"
+      "isearch",
+      "kill_ring"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,

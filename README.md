@@ -563,7 +563,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
