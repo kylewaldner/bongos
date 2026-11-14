@@ -195,6 +195,27 @@ async fn minibuffer_session_of_a_host_a_list_and_confirm_gets_the_rest(cx: &mut 
 }
 
 #[gpui::test]
+async fn minibuffer_session_without_history_writes_nothing_on_confirm(cx: &mut TestAppContext) {
+    let store = HistoryStore::new(KeyValueStore::open_test_db("minibuffer_no_history").await);
+    cx.update(|cx| store.clone().install(cx));
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Shared::default();
+    let cx = &mut cx;
+
+    open_session(
+        &workspace,
+        cx,
+        session(&log, fixed(&["alpha", "beta"])).no_history(),
+    );
+    cx.simulate_input("alp");
+    cx.dispatch_action(minibuffer::Confirm);
+    cx.run_until_parked();
+
+    assert_eq!(log.borrow().confirmed.len(), 1);
+    assert!(store.ring(HOST).entries().is_empty());
+}
+
+#[gpui::test]
 async fn minibuffer_session_is_centered_when_its_host_is_not_routed(cx: &mut TestAppContext) {
     for routes in [&[][..], &["other"][..]] {
         let (workspace, mut cx) = window(cx, routes).await;

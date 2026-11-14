@@ -130,6 +130,7 @@ pub struct Session {
     free_input: bool,
     accept: Option<InputCheck>,
     history: String,
+    keep_history: bool,
     key_context: Option<KeyContext>,
     actions: Vec<SessionAction>,
     on_preview: Option<PreviewHandler>,
@@ -153,6 +154,7 @@ impl Session {
             free_input: false,
             accept: None,
             history: host.to_string(),
+            keep_history: true,
             key_context: None,
             actions: Vec::new(),
             on_preview: None,
@@ -215,6 +217,13 @@ impl Session {
     /// Names the history of this session, which is shared with every session of the same name.
     pub fn history(mut self, name: impl Into<String>) -> Self {
         self.history = name.into();
+        self
+    }
+
+    /// Keeps what the user confirms out of the history: nothing is written to it, though the
+    /// session can still walk the entries already there. For prompts whose text is private.
+    pub fn no_history(mut self) -> Self {
+        self.keep_history = false;
         self
     }
 
@@ -309,6 +318,7 @@ pub(crate) struct Core {
     /// Whether the status shows a refusal, which the next change of the input removes.
     pub(crate) refused: Cell<bool>,
     pub(crate) history_name: String,
+    pub(crate) keep_history: bool,
     pub(crate) history: HistoryStore,
     pub(crate) actions: Vec<SessionAction>,
     pub(crate) on_preview: Option<PreviewHandler>,
@@ -347,6 +357,7 @@ impl Core {
             history: Some(entry),
             ..
         } = &finish
+            && self.keep_history
         {
             self.history.push(&self.history_name, entry, cx);
         }
@@ -462,6 +473,7 @@ pub fn open(
         free_input,
         accept,
         history,
+        keep_history,
         key_context,
         actions,
         on_preview,
@@ -483,6 +495,7 @@ pub fn open(
         refused: Cell::new(false),
         history: HistoryStore::global(cx),
         history_name: history,
+        keep_history,
         actions,
         on_preview,
         detail,

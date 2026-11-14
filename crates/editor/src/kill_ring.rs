@@ -194,6 +194,19 @@ pub fn yank_text(cx: &App) -> Option<String> {
     }
 }
 
+/// [`yank_text`] for a consumer that persists what it yanks (incremental search saves its
+/// string to a history): `None` when the text would be secret, a concealed clipboard text or a
+/// secret ring entry.
+pub fn yank_text_unless_secret(cx: &App) -> Option<String> {
+    match clipboard_candidate(cx) {
+        Some(entry) => (!entry.secret).then_some(entry.text),
+        None => read(cx)?
+            .newest()
+            .filter(|entry| !entry.secret)
+            .map(|entry| entry.text.clone()),
+    }
+}
+
 /// Splits `text` into its pieces by `do_paste`'s rule: each piece is `len`
 /// bytes and is followed by a newline unless it is a whole line or the last.
 /// `None` when the pieces do not fit the text exactly on char boundaries.

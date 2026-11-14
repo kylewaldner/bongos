@@ -420,6 +420,31 @@ async fn append_next_kill_joins_a_kill_in_another_editor(cx: &mut TestAppContext
     assert_eq!(ring_texts(&mut cx), ["one two"]);
 }
 
+#[gpui::test]
+async fn append_next_kill_after_a_copy_appends_to_the_copied_entry(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("«oneˇ» two\nthree");
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+
+    cx.simulate_keystrokes("alt-w ctrl-alt-w ctrl-k");
+
+    assert_eq!(ring_texts(&mut cx), ["one two\n"]);
+}
+
+#[gpui::test]
+async fn append_next_kill_after_a_click_appends_to_the_newest_entry(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("oˇne\ntwo\nthree");
+
+    cx.simulate_keystrokes("ctrl-k");
+    let position = cx.pixel_position("o\ntˇwo\nthree");
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("ctrl-alt-w ctrl-k");
+
+    assert_eq!(ring_texts(&mut cx), ["newo"]);
+}
+
 /// Every `emacs` action that sends a kill is in `KILL_COMMANDS`, and every member sends one.
 #[gpui::test]
 async fn the_kill_command_set_matches_the_commands_that_kill(cx: &mut TestAppContext) {

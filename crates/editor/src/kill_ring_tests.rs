@@ -392,3 +392,26 @@ async fn test_capture_keeps_the_pieces_of_an_editor_copy(cx: &mut TestAppContext
     assert!(!cx.update(|_, cx| capture_clipboard(cx)));
     assert_eq!(ring_texts(&mut cx).len(), 1);
 }
+
+#[gpui::test]
+async fn test_yank_text_unless_secret_skips_secret_text(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    let text = |cx: &mut EditorTestContext| {
+        cx.update(|_, cx| kill_ring::yank_text_unless_secret(cx))
+    };
+
+    // A concealed clipboard text is never offered.
+    cx.write_concealed_to_clipboard(ClipboardItem::new_string("hunter2".to_string()));
+    assert_eq!(text(&mut cx), None);
+
+    // Once captured it is a secret ring entry, still not offered.
+    assert!(cx.update(|_, cx| capture_clipboard(cx)));
+    assert_eq!(text(&mut cx), None);
+
+    // Plain text is offered as before.
+    cx.write_to_clipboard(ClipboardItem::new_string("plain".to_string()));
+    assert_eq!(text(&mut cx).as_deref(), Some("plain"));
+    assert!(cx.update(|_, cx| capture_clipboard(cx)));
+    assert_eq!(text(&mut cx).as_deref(), Some("plain"));
+}

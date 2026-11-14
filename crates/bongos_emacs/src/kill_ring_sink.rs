@@ -126,15 +126,18 @@ fn kill_to_ring(kill: Kill, window: &mut Window, cx: &mut App) {
     let window_id = window.window_handle().window_id();
     let previous = last_command(window, cx);
     let armed = previous == Some(APPEND_NEXT_KILL);
-    let continues = previous.is_some_and(|command| armed || KILL_COMMANDS.contains(&command))
-        && cx
-            .try_global::<LastKill>()
-            .and_then(|last| last.0.as_ref())
-            .is_some_and(|last| {
-                last.window == window_id
-                    && (armed || last.editor == kill.editor)
-                    && last.kind == KillKind::Kill
-            });
+    // An armed C-M-w appends to the newest entry whatever came before; otherwise the kill must
+    // follow a kill from the same editor.
+    let continues = armed
+        || (previous.is_some_and(|command| KILL_COMMANDS.contains(&command))
+            && cx
+                .try_global::<LastKill>()
+                .and_then(|last| last.0.as_ref())
+                .is_some_and(|last| {
+                    last.window == window_id
+                        && last.editor == kill.editor
+                        && last.kind == KillKind::Kill
+                }));
     // Text copied outside since the last kill becomes its own entry, and breaks the sequence.
     let captured = kill_ring::capture_clipboard(cx);
     let side = match kill.direction {

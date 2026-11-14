@@ -612,6 +612,8 @@ never written to a log or a file.
 The kill ring is saved in the app database so it survives a restart. Text marked secret on Linux
 and the contents of masked fields (passwords) are never saved, nor is an entry over 1 MiB. Setting
 `emacs.save_kill_ring` to `false` turns saving off and deletes the saved ring.
+The secret hint is advisory: text from a password manager that sets no hint, from any macOS
+manager, or typed by hand is saved like any other kill. `emacs.save_kill_ring: false` turns saving off.
 
 bongos never contacts bongos.rocks. The list of kotlin-lsp builds is compiled in.
 

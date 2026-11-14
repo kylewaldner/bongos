@@ -75,6 +75,8 @@ pub(crate) fn browse_kill_ring_command(
     let on_confirm = editor.downgrade();
     let on_cancel = editor.downgrade();
     let session = Session::completing_read(MINIBUFFER_NAME, "Kill ring: ")
+        // Kill text must never reach the persisted minibuffer history.
+        .no_history()
         .key_context(KEY_CONTEXT)
         .source(Source::Dynamic(Box::new(|query, _cancel, cx| {
             let (mut sender, receiver) = mpsc::channel(1);
