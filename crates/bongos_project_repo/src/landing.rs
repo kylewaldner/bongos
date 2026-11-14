@@ -716,6 +716,12 @@ impl ProjectRepo {
             // The materialized trees go; the queue step reads the tree it lands.
             drop(run);
 
+            // A move's source removal waits here, outside the queue and its lock, until the
+            // move's target landed (it is checked again at step 6, under the lock).
+            if let Some(ended) = self.wait_for_move_gate(change_id).await? {
+                return Ok(ended);
+            }
+
             // Step 5.
             let slot = match self.enter_queue(&writer, change_id, waits).await? {
                 Ok(slot) => slot,
@@ -751,6 +757,18 @@ impl ProjectRepo {
                     return Ok(LandingResult::Refused {
                         reasons: vec![status.refusal()],
                     });
+                }
+            }
+            match self.read_state(|read| crate::moves::gate(read, change_id))? {
+                crate::moves::Gate::Go => {}
+                crate::moves::Gate::Refuse(reason) => {
+                    return Ok(LandingResult::Refused {
+                        reasons: vec![reason],
+                    });
+                }
+                crate::moves::Gate::Wait(_) => {
+                    drop(slot);
+                    continue;
                 }
             }
             let verified_now = self.shown_commit().await?.0;
@@ -855,7 +873,13 @@ impl ProjectRepo {
                     checks: &words,
                     tree: &tree,
                 };
-                let message = commit_message(&meta, &facts);
+                let mut message = commit_message(&meta, &facts);
+                // Only the move's coordinator makes a change of a move; the caller's text never
+                // carries these (`landing_meta` stripped it).
+                for trailer in self.read_state(|read| crate::moves::trailers(read, change_id))? {
+                    message.push_str(&trailer);
+                    message.push('\n');
+                }
                 self.git
                     .commit_tree(repository, &tree, &[&based_on], &message, &identity)
                     .await?
@@ -897,6 +921,40 @@ impl ProjectRepo {
         match DefinitionTree::parse_dir(&path.join(DEFINITIONS_DIR)) {
             Ok(tree) => summarize(&master, &tree).generated_subject(),
             Err(_) => format!("Change {name}"),
+        }
+    }
+
+    /// Waits while `change_id` is a move's source removal whose target has not landed; `None`
+    /// to go on. The wait is for the source's own signal, which the coordinator notifies once
+    /// the target landed or failed, and is taken before the gate is read.
+    async fn wait_for_move_gate(&self, change_id: &str) -> Result<Option<LandingResult>> {
+        let mut told = false;
+        loop {
+            let wake = self.engine.signal.listen();
+            if self.is_abandoned(change_id)? {
+                return Ok(Some(LandingResult::Abandoned));
+            }
+            match self.read_state(|read| crate::moves::gate(read, change_id))? {
+                crate::moves::Gate::Go => return Ok(None),
+                crate::moves::Gate::Refuse(reason) => {
+                    return Ok(Some(LandingResult::Refused {
+                        reasons: vec![reason],
+                    }));
+                }
+                crate::moves::Gate::Wait(reason) => {
+                    if !told {
+                        self.engine.emit(
+                            change_id,
+                            LandingEvent::Waiting {
+                                reason,
+                                approvals: 0,
+                            },
+                        );
+                        told = true;
+                    }
+                    wake.await.ok();
+                }
+            }
         }
     }
 
@@ -1076,7 +1134,8 @@ impl ProjectRepo {
         let staged = writer
             .read(|read| read.staged(&change_id))?
             .unwrap_or_default();
-        let moves = staged_file_ops(&staged);
+        let mut moves = staged_file_ops(&staged);
+        moves.extend(writer.read(|read| crate::moves::landing_files(read, &change_id))?);
         if let Err(error) = moves
             .iter()
             .try_for_each(|op| check_file_op(&self.location.files, op))
@@ -1120,10 +1179,11 @@ impl ProjectRepo {
             let notes = if staged.is_empty() {
                 Vec::new()
             } else {
-                let notes = tx.apply_ops(&staged)?;
+                let notes = tx.apply_ops_for(&change_id, &staged)?;
                 tx.drop_staged(&change_id)?;
                 notes
             };
+            crate::moves::landing_step8(tx, &change_id)?;
             let record = LandingRecord {
                 commit: new.to_string(),
                 old: old.to_string(),

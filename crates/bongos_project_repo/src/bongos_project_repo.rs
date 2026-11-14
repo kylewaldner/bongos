@@ -22,6 +22,8 @@ mod listing;
 mod loader;
 mod locations;
 mod master;
+mod move_coordinator;
+mod moves;
 mod peer;
 mod pins;
 mod project_values;
@@ -52,7 +54,7 @@ pub use backup::{
     SnapshotRecord, retry_delay,
 };
 pub use bongos_project_repo_model::checks::{
-    AmendOutcome, CheckOutcome, CheckPhase, HoldReason, LiveFacts, LiveSource, Stamp,
+    AmendOutcome, CheckOutcome, CheckPhase, HoldReason, LiveFacts, LiveSource, MoveHold, Stamp,
 };
 pub use bongos_project_repo_model::checks::{
     ApprovalBasis, ApprovalOpinion, ApprovalPolicy, ApprovalVerdict, AutomaticRule,
@@ -60,6 +62,9 @@ pub use bongos_project_repo_model::checks::{
 pub use bongos_project_repo_model::convert::{
     CONVERSION_COMMIT_MESSAGE, CONVERTING_PREFIX, ConversionSummary, DEFAULT_ONEOFFS_TITLE,
     Rejected,
+};
+pub use bongos_project_repo_model::moves::{
+    DroppedEdge, MovePlan, MoveRefusal, MoveRequest, MovedTask, ProjectRef,
 };
 pub use changes::{AmendCommit, ChangeFilter, ChangeRow, ChangeState};
 pub use check_run::CheckResult;
@@ -94,6 +99,8 @@ pub use master::{
     HistoryKind, HistoryRow, MasterStatus, NOT_A_LANDING, OutsideChange, Recovery, Resolved,
     SplitMaster, SplitResolution, UNAPPROVED_OUTSIDE_CHANGE, landed_ref, outside_ref,
 };
+pub use move_coordinator::{MoveCoordinator, MoveOutcome};
+pub use moves::{MOVE_CLAIMS_NAMESPACE, MOVES_NAMESPACE, MovePhase, MoveRecord, MoveRole};
 pub use peer::{ClientKind, PeerIdentity, peer_identity};
 pub use pins::PinGuard;
 pub use project_values::{
@@ -164,6 +171,8 @@ mod loader_tests;
 mod locations_tests;
 #[cfg(test)]
 mod master_tests;
+#[cfg(test)]
+mod moves_tests;
 #[cfg(test)]
 mod peer_tests;
 #[cfg(test)]

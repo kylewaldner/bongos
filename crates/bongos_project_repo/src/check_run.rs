@@ -234,11 +234,27 @@ impl ProjectRepo {
             }
             Ok(states)
         })?;
+        let holds = self.read_state(crate::moves::holds_in)?;
         let mut live = LiveFacts::from_states(states);
+        live.register(std::sync::Arc::new(crate::moves::MoveClaims(holds)));
         for source in &registry.live {
             live.register(source.clone());
         }
         Ok(live)
+    }
+
+    /// The live facts over the tasks `ids` now: their state rows, the moves' `moving` claims and
+    /// the registered sources. [`LiveFacts::held`] says which a move holds.
+    pub fn live_facts_for(&self, ids: &[String]) -> Result<LiveFacts> {
+        self.live_facts(&self.check_registry(), ids)
+    }
+
+    /// The hold on `task_id`, when a move holds it.
+    pub fn hold(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<bongos_project_repo_model::checks::HoldReason>> {
+        Ok(self.read_state(crate::moves::holds_in)?.remove(task_id))
     }
 
     /// Materializes the change's tree and master for the registered checks of `run`.
