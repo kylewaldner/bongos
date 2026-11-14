@@ -118,11 +118,12 @@
     },
   },
   {
-    // The agent's message editor keeps its thinking-mode key over kill-whole-line. Keep this
+    // The agent's message editor keeps its thinking-mode and keep-all keys over the Emacs ones. Keep this
     // block after the `Editor` block above.
     "context": "AcpThread > Editor",
     "bindings": {
       "ctrl-alt-k": "agent::ToggleThinkingMode",
+      "alt-shift-y": "agent::KeepAll",
     },
   },
   {

@@ -105,7 +105,9 @@ async fn kill_ring_keys_resolve_to_the_emacs_actions_in_editors(cx: &mut TestApp
 #[gpui::test]
 async fn yank_keys_shadow_the_git_and_agent_keys_only_inside_editors(cx: &mut TestAppContext) {
     init_keymap_test(cx);
-    // Zed binds these in editors; the Emacs base takes them over there.
+    // Zed binds these in editors; the Emacs base takes them over there. The agent's message
+    // editor gets its keep-all key back, so alt-shift-y is lost only in the editor-agent-diff
+    // context (`Editor && editor_agent_diff`), which is accepted.
     let zed = Keymap::new(load_all(&LINUX, false, cx));
     assert_eq!(first(&zed, "alt-y", &EDITOR), Some("git::StageAndNext"));
     assert_eq!(
@@ -156,6 +158,26 @@ async fn yank_keys_shadow_the_git_and_agent_keys_only_inside_editors(cx: &mut Te
         first(&keymap, "ctrl-alt-y", &AGENT_DIFF),
         Some("agent::Keep")
     );
+}
+
+#[gpui::test]
+async fn the_agent_editor_keeps_its_keep_all_key(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        let keymap = Keymap::new(load_all(&platform, true, cx));
+        assert_eq!(
+            first(&keymap, "alt-shift-y", &AGENT_EDITOR),
+            Some("agent::KeepAll"),
+            "{}",
+            platform.emacs
+        );
+        assert_eq!(
+            first(&keymap, "alt-shift-y", &EDITOR),
+            Some("emacs::BrowseKillRing"),
+            "{}",
+            platform.emacs
+        );
+    }
 }
 
 #[gpui::test]

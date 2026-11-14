@@ -113,6 +113,14 @@
     },
   },
   {
+    // The agent's message editor keeps its keep-all key. Keep this block after the `Editor`
+    // block above.
+    "context": "AcpThread > Editor",
+    "bindings": {
+      "alt-shift-y": "agent::KeepAll",
+    },
+  },
+  {
     // Prompts mode (feature 25). `ctrl-c` is already a prefix here (C-c w, C-c c). Keep this
     // block after every `Editor`-level `ctrl-c ctrl-<letter>` binding. `prompts: open` and
     // `prompts: mode` stay unbound; `C-c c e` (chat::FocusPrompts) still works.
