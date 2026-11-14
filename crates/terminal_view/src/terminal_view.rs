@@ -2311,7 +2311,10 @@ mod tests {
     fn set_terminal_uses_kill_ring(on: bool, cx: &mut App) {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
-                content.emacs.get_or_insert_default().terminal_uses_kill_ring = Some(on);
+                content
+                    .emacs
+                    .get_or_insert_default()
+                    .terminal_uses_kill_ring = Some(on);
             })
         });
     }

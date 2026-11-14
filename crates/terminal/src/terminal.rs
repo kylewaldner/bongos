@@ -4064,7 +4064,8 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let clipboard_text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        let clipboard_text =
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
         let clipboard_text = clipboard_text.expect("the copy writes the clipboard");
         assert_eq!(clipboard_text.trim_end(), "copied");
         assert_eq!(*written.borrow(), vec![clipboard_text]);
