@@ -19,8 +19,8 @@ use std::ops::Range;
 pub const SCAN_CHUNK: usize = 2_000;
 
 /// The scope of a session: the region when there is one (its start stays before text inserted
-/// there, its end after), else the excerpt at `point` in a multibuffer of several excerpts, else
-/// `point` to the end. A region spanning excerpts is the scope as given.
+/// there, its end after), else `point` to the end of the excerpt at `point` in a multibuffer of
+/// several excerpts, else `point` to the end. A region spanning excerpts is the scope as given.
 pub fn scope(
     snapshot: &MultiBufferSnapshot,
     point: MultiBufferOffset,
@@ -39,6 +39,9 @@ pub fn scope(
         && let Some(start) = snapshot.anchor_in_excerpt(excerpt.context.start)
         && let Some(end) = snapshot.anchor_in_excerpt(excerpt.context.end)
     {
+        if start.to_offset(snapshot) < point {
+            return snapshot.anchor_before(point)..end;
+        }
         return start..end;
     }
     snapshot.anchor_before(point)..snapshot.anchor_after(snapshot.len())
@@ -54,9 +57,9 @@ pub fn within(
     found.start >= scope.start.to_offset(snapshot) && found.end <= scope.end.to_offset(snapshot)
 }
 
-/// The first match starting at or after `from`, when it lies inside `scope`. `None` when there is
-/// none, when the first one passes an end of the scope (which ends the session), or when the
-/// search was canceled.
+/// The first match starting at or after `from` (or the scope start, when `from` is before it),
+/// when it lies inside `scope`. `None` when there is none, when the first one passes the end of
+/// the scope (which ends the session), or when the search was canceled.
 pub fn next(
     snapshot: &MultiBufferSnapshot,
     query: &SearchQuery,
@@ -67,6 +70,7 @@ pub fn next(
     if from > scope.end.to_offset(snapshot) {
         return None;
     }
+    let from = from.max(scope.start.to_offset(snapshot));
     let range = first_match(snapshot, query, from, cancel).found()?;
     within(scope, &range, snapshot).then(|| found_at(snapshot, query, range))
 }
@@ -329,7 +333,12 @@ fn groups(
     range: Range<MultiBufferOffset>,
 ) -> Vec<Option<String>> {
     let Some((buffer, in_buffer)) = buffer_range(snapshot, range.clone()) else {
-        return vec![Some(snapshot.text_for_range(range).collect())];
+        // The match spans excerpts: its groups come from the text shown.
+        let matched: String = snapshot.text_for_range(range).collect();
+        return match query {
+            SearchQuery::Regex { regex, .. } => whole_match_groups(regex, matched),
+            _ => vec![Some(matched)],
+        };
     };
     let matched: String = buffer.text_for_range(in_buffer.clone()).collect();
     let SearchQuery::Regex {
@@ -368,6 +377,12 @@ fn groups(
             return collect(&captures);
         }
     }
+    whole_match_groups(regex, matched)
+}
+
+/// The groups of `regex` matched against `matched` alone, or just `matched` when the regex does
+/// not match all of it.
+fn whole_match_groups(regex: &fancy_regex::Regex, matched: String) -> Vec<Option<String>> {
     match regex.captures(&matched) {
         Ok(Some(captures))
             if captures.get(0).map(|found| found.range()) == Some(0..matched.len()) =>
@@ -385,8 +400,9 @@ fn collect(captures: &Captures) -> Vec<Option<String>> {
         .collect()
 }
 
-/// The buffer and buffer range under `range`, which lies in one excerpt. Deleted hunks inside it
-/// are left out, as the search leaves them out.
+/// The buffer and buffer range under `range`, when it shows one contiguous stretch of one buffer.
+/// Deleted hunks inside it are left out, as the search leaves them out. `None` when it spans two
+/// buffers, or two excerpts of one buffer with hidden text between them.
 fn buffer_range(
     snapshot: &MultiBufferSnapshot,
     range: Range<MultiBufferOffset>,
@@ -398,10 +414,13 @@ fn buffer_range(
         return Some((buffer, first.start.0..first.start.0));
     }
     let (_, last, _) = ranges.last()?;
-    ranges
+    let one_stretch = ranges
         .iter()
         .all(|(other, _, _)| other.remote_id() == buffer.remote_id())
-        .then(|| (*buffer, first.start.0..last.end.0))
+        && ranges
+            .windows(2)
+            .all(|pair| pair[0].1.end == pair[1].1.start);
+    one_stretch.then(|| (*buffer, first.start.0..last.end.0))
 }
 
 fn line_start(snapshot: &MultiBufferSnapshot, offset: usize) -> usize {

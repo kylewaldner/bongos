@@ -130,8 +130,11 @@ fn test_region_scope(cx: &mut TestAppContext) {
     assert_eq!(next_range(&snapshot, &query, 4, &region), Some(8..11));
     assert_eq!(next_range(&snapshot, &query, 11, &region), Some(16..19));
     assert_eq!(next_range(&snapshot, &query, 19, &region), None);
-    // A search from before the region finds the match before it, which is outside.
-    assert_eq!(next_range(&snapshot, &query, 0, &region), None);
+    // A search from before the region starts at the region, past the match before it.
+    assert_eq!(next_range(&snapshot, &query, 0, &region), Some(8..11));
+    // A match straddling the region start is outside it.
+    let straddled = scope(&snapshot, at(0), Some(offsets(9..20)));
+    assert_eq!(next_range(&snapshot, &query, 0, &straddled), Some(16..19));
     assert!(within(&region, &offsets(4..20), &snapshot));
     assert!(!within(&region, &offsets(3..6), &snapshot));
 
@@ -218,9 +221,14 @@ fn test_excerpt_scope_in_a_multibuffer(cx: &mut TestAppContext) {
     let first = text.find("needle one").expect("first excerpt");
     let second = text.find("needle three").expect("second excerpt");
 
-    let excerpt = scope(&snapshot, at(first + 2), None);
+    let excerpt = scope(&snapshot, at(first), None);
     let bounds = excerpt.start.to_offset(&snapshot).0..excerpt.end.to_offset(&snapshot).0;
     assert_eq!(bounds, first..first + "needle one".len(), "{text:?}");
+    // From inside the excerpt the scope starts at point, as it does in a single buffer.
+    let from_point = scope(&snapshot, at(first + 2), None);
+    let bounds = from_point.start.to_offset(&snapshot).0..from_point.end.to_offset(&snapshot).0;
+    assert_eq!(bounds, first + 2..first + "needle one".len(), "{text:?}");
+    assert_eq!(next_range(&snapshot, &query, first, &from_point), None);
 
     assert_eq!(
         next_range(&snapshot, &query, first, &excerpt),
@@ -233,7 +241,7 @@ fn test_excerpt_scope_in_a_multibuffer(cx: &mut TestAppContext) {
     assert_eq!(hits[0].found.range, first..first + 6);
 
     // The scope of the second excerpt holds only its own match.
-    let excerpt = scope(&snapshot, at(second + 3), None);
+    let excerpt = scope(&snapshot, at(second), None);
     let hits = scan_all(&snapshot, &query, second, &excerpt, None);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].found.range, second..second + 6);
@@ -580,4 +588,39 @@ fn test_scan_across_search_windows(cx: &mut TestAppContext) {
         .collect::<Vec<_>>();
     assert_eq!(ranges.len(), expected.len());
     assert_eq!(ranges, expected);
+}
+
+#[gpui::test]
+fn test_groups_of_a_match_across_two_excerpts_of_one_buffer(cx: &mut TestAppContext) {
+    // The excerpts show "foo" and "bbb" with "bar" hidden between them in the buffer.
+    let buffer = cx.new(|cx| Buffer::local("foo\nbar\nbbb\n", cx));
+    let multibuffer = cx.new(|cx| {
+        let mut multibuffer = MultiBuffer::new(Capability::ReadWrite);
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(0),
+            buffer.clone(),
+            [
+                Point::new(0, 0)..Point::new(0, 3),
+                Point::new(2, 0)..Point::new(2, 3),
+            ],
+            0,
+            cx,
+        );
+        multibuffer
+    });
+    let snapshot = multibuffer.read_with(cx, |multibuffer, cx| multibuffer.snapshot(cx));
+    let text = snapshot.text();
+    assert!(text.starts_with("foo\nbbb"), "{text:?}");
+    // The groups of a match over the excerpt boundary come from the text shown, not from the
+    // buffer stretch between the two ends.
+    let found = found_at(&snapshot, &regexp("(fo+)\\n(b+)"), offsets(0..7));
+    assert_eq!(found.range, 0..7);
+    assert_eq!(
+        found.groups,
+        vec![
+            Some("foo\nbbb".into()),
+            Some("foo".into()),
+            Some("bbb".into())
+        ]
+    );
 }
