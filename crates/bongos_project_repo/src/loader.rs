@@ -40,17 +40,21 @@ impl StateHandle {
     }
 }
 
-/// Reads the definitions of the tree `at` in the repository at `repository`.
-pub async fn load_definition_tree(
+/// Every file path of the tree `treeish` (relative to the repository root), and the blobs of
+/// `project.toml` and the `task.toml` files under `definitions/` with their paths relative to
+/// it: one `git ls-tree -r` and one `git cat-file --batch`.
+pub(crate) async fn definition_blobs(
     git: &Git,
     repository: &Path,
-    at: &TreeRef,
-) -> Result<DefinitionTree> {
-    let entries = git.ls_tree_r(repository, at.treeish()).await?;
+    treeish: &str,
+) -> Result<(Vec<String>, Vec<(RelPath, Vec<u8>)>)> {
+    let entries = git.ls_tree_r(repository, treeish).await?;
     let prefix = format!("{DEFINITIONS_DIR}/");
+    let mut all = Vec::with_capacity(entries.len());
     let mut paths = Vec::new();
     let mut objects = Vec::new();
     for entry in entries {
+        all.push(entry.path.clone());
         if entry.kind != "blob" {
             continue;
         }
@@ -71,7 +75,18 @@ pub async fn load_definition_tree(
     let files = paths
         .into_iter()
         .zip(blobs)
-        .filter_map(|(path, blob)| blob.map(|bytes| (path, bytes)));
+        .filter_map(|(path, blob)| blob.map(|bytes| (path, bytes)))
+        .collect();
+    Ok((all, files))
+}
+
+/// Reads the definitions of the tree `at` in the repository at `repository`.
+pub async fn load_definition_tree(
+    git: &Git,
+    repository: &Path,
+    at: &TreeRef,
+) -> Result<DefinitionTree> {
+    let (_, files) = definition_blobs(git, repository, at.treeish()).await?;
     DefinitionTree::parse_files(files).map_err(|problems| {
         let list: Vec<String> = problems.iter().map(ToString::to_string).collect();
         anyhow!(
@@ -97,16 +112,33 @@ impl ProjectRepo {
             .map(CommitId))
     }
 
-    /// The commit the Work view shows: the verified commit, or `main` before one is recorded
-    /// (the first commit, made by bongos itself, needs no checks).
+    /// The commit the Work view shows: the verified commit, or before one is recorded the
+    /// commit that created the project (made by bongos itself, it needs no checks). A commit
+    /// made on `main` outside bongos before the first landing is therefore an outside commit.
+    /// A project made before the creation commit was recorded falls back to the root of the
+    /// first-parent history of `main`.
     pub async fn shown_commit(&self) -> Result<CommitId> {
         if let Some(commit) = self.verified_commit()? {
             return Ok(commit);
         }
-        let commit = self
+        if let Some(commit) = self
+            .state_or_error()?
+            .read(|read| read.meta(crate::create::CREATION_COMMIT_KEY))?
+        {
+            return Ok(CommitId(commit));
+        }
+        let roots = self
             .git
-            .rev_parse(&self.location.repository, MAIN_BRANCH)
+            .run(
+                &self.location.repository,
+                &["rev-list", "--first-parent", "--max-parents=0", MAIN_BRANCH],
+            )
             .await?;
+        let commit = roots
+            .lines()
+            .last()
+            .context("master has no first commit")?
+            .to_string();
         Ok(CommitId(commit))
     }
 
@@ -186,7 +218,7 @@ impl LoadedProject {
             .await?,
         );
         if let Some(writer) = self.repo.state.as_ref().and_then(StateHandle::writer) {
-            writer.set_definitions(definitions.clone());
+            writer.set_definitions_at(&commit.0, definitions.clone());
         }
         *self.shown.lock() = (Some(commit), definitions);
         Ok(true)

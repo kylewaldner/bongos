@@ -37,6 +37,17 @@ pub struct ChangeRow {
     pub state: ChangeState,
     /// The commit in master, once landed.
     pub commit: Option<String>,
+    /// The commits the landing engine made on the branch for amending checks, oldest first.
+    /// A commit is an amendment because it is listed here, never because of its message.
+    pub amend_commits: Vec<AmendCommit>,
+}
+
+/// One commit an amending check made on a change's branch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmendCommit {
+    pub commit: String,
+    /// The name of the amending check that made it.
+    pub check: String,
 }
 
 impl ChangeRow {
@@ -90,12 +101,14 @@ fn same_kind(wanted: AuthorKind, found: AuthorKind) -> bool {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ChangeMeta {
+struct ChangeRecord {
     name: String,
     state: ChangeState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     commit: Option<String>,
     updated: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    amend_commits: Vec<AmendCommit>,
 }
 
 fn time_text(time: DateTime<Utc>) -> String {
@@ -118,13 +131,14 @@ fn row_from(raw: Raw) -> Result<ChangeRow> {
         toml::from_str(&author).with_context(|| format!("reading the author of {change_id}"))?;
     let created = parse_time(&created)?;
     let meta = match meta {
-        Some(text) => toml::from_str::<ChangeMeta>(&text)
+        Some(text) => toml::from_str::<ChangeRecord>(&text)
             .with_context(|| format!("reading the record of change {change_id}"))?,
-        None => ChangeMeta {
+        None => ChangeRecord {
             name: branch.clone(),
             state: ChangeState::Open,
             commit: None,
             updated: time_text(created),
+            amend_commits: Vec::new(),
         },
     };
     Ok(ChangeRow {
@@ -136,6 +150,7 @@ fn row_from(raw: Raw) -> Result<ChangeRow> {
         updated: parse_time(&meta.updated)?,
         state: meta.state,
         commit: meta.commit,
+        amend_commits: meta.amend_commits,
     })
 }
 
@@ -155,11 +170,12 @@ pub(crate) fn read_changes(connection: &Connection) -> Result<Vec<ChangeRow>> {
 /// Inserts `row`, or replaces the row with its id.
 pub(crate) fn write_change(connection: &Connection, row: &ChangeRow) -> Result<()> {
     let author = toml::to_string(&row.author).context("serializing a change author")?;
-    let meta = toml::to_string(&ChangeMeta {
+    let meta = toml::to_string(&ChangeRecord {
         name: row.name.clone(),
         state: row.state,
         commit: row.commit.clone(),
         updated: time_text(row.updated),
+        amend_commits: row.amend_commits.clone(),
     })
     .context("serializing a change record")?;
     connection.exec_bound::<(&str, &str, String, String, String)>(

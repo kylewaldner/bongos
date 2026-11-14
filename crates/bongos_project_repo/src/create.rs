@@ -14,6 +14,8 @@ use crate::locations::{Location, LocationError, RepositoryLocations};
 /// The branch master is.
 pub const MAIN_BRANCH: &str = "main";
 const FIRST_COMMIT_MESSAGE: &str = "create the project";
+/// The `meta` key of the commit that created the project.
+pub(crate) const CREATION_COMMIT_KEY: &str = "creation_commit";
 
 /// The template of each part of a project folder; `{folder}` is the only token.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +81,8 @@ pub struct ProjectRepo {
     pub(crate) location: Location,
     pub(crate) git: Git,
     pub(crate) state: Option<StateHandle>,
+    /// The landing queue and its waiters, shared by every clone.
+    pub(crate) engine: std::sync::Arc<crate::landing_queue::Engine>,
 }
 
 impl std::fmt::Debug for ProjectRepo {
@@ -98,6 +102,7 @@ impl ProjectRepo {
             location,
             git,
             state: None,
+            engine: Default::default(),
         }
     }
 
@@ -199,7 +204,8 @@ impl ProjectRepo {
         write(&definitions.join(layout::PLAN_FILE), "")?;
 
         git.init_repo(&repository, MAIN_BRANCH).await?;
-        git.commit_all(&repository, FIRST_COMMIT_MESSAGE, &Identity::default())
+        let first = git
+            .commit_all(&repository, FIRST_COMMIT_MESSAGE, &Identity::default())
             .await?;
         crate::working_copies::protect_files(&repository).map_err(|source| CreateError::Io {
             context: "making master read-only".to_string(),
@@ -216,9 +222,25 @@ impl ProjectRepo {
             remote: request.remote,
             converted_from: None,
         };
+        record_creation_commit(&location, &first)?;
         locations.record(location.clone())?;
         Ok(Self::new(location, git.clone()))
     }
+}
+
+/// Records `commit` in the new state store as the commit that created the project: what master
+/// is before the first landing.
+fn record_creation_commit(location: &Location, commit: &str) -> Result<(), CreateError> {
+    let failed = |error: String| CreateError::Io {
+        context: "recording the first commit in the state store".to_string(),
+        source: std::io::Error::other(error),
+    };
+    let writer =
+        crate::StateStore::open_writer_with_hooks(location, &crate::StateApplyHooks::new())
+            .map_err(|error| failed(error.to_string()))?;
+    writer
+        .transact(|tx| tx.set_meta(CREATION_COMMIT_KEY, commit))
+        .map_err(|error| failed(format!("{error:#}")))
 }
 
 /// Creates `path` and the missing directories above it, noting the topmost one made so a

@@ -90,6 +90,8 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::OpenWorkingCopy>(),
         TypeId::of::<project::Abandon>(),
         TypeId::of::<project::OpenRepository>(),
+        TypeId::of::<project::Land>(),
+        TypeId::of::<project::Check>(),
         TypeId::of::<work::AddRepository>(),
         TypeId::of::<work::EditWorktreeRoot>(),
         TypeId::of::<task::SetDefaultVisibility>(),

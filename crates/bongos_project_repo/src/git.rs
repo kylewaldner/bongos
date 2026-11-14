@@ -333,6 +333,25 @@ impl Git {
         Ok(())
     }
 
+    /// Adds a worktree at `path` with `commit` checked out and no branch.
+    pub async fn worktree_add_detached(
+        &self,
+        repository: &Path,
+        path: &Path,
+        commit: &str,
+    ) -> Result<(), GitError> {
+        let args = vec![
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("-q"),
+            OsString::from("--detach"),
+            path.as_os_str().to_owned(),
+            OsString::from(commit),
+        ];
+        self.run_os(repository, args).await?;
+        Ok(())
+    }
+
     /// Removes the worktree at `path`, with whatever is uncommitted in it, and forgets worktrees
     /// whose folder is gone.
     pub async fn worktree_remove(&self, repository: &Path, path: &Path) -> Result<(), GitError> {
@@ -363,4 +382,314 @@ impl Git {
         self.run(repository, &["branch", "-D", branch]).await?;
         Ok(())
     }
+
+    /// Runs git with `identity` as author and committer and signing off.
+    async fn run_as(
+        &self,
+        directory: &Path,
+        identity: &Identity,
+        args: &[&str],
+    ) -> Result<String, GitError> {
+        let mut all = vec![
+            "-c".to_string(),
+            format!("user.name={}", identity.name),
+            "-c".to_string(),
+            format!("user.email={}", identity.email),
+            "-c".to_string(),
+            "commit.gpgsign=false".to_string(),
+            "-c".to_string(),
+            "core.editor=true".to_string(),
+        ];
+        all.extend(args.iter().map(|arg| arg.to_string()));
+        self.run_os(directory, all.into_iter().map(OsString::from).collect())
+            .await
+    }
+
+    /// Whether the checkout at `directory` has no uncommitted change, untracked files included.
+    pub async fn is_clean(&self, directory: &Path) -> Result<bool, GitError> {
+        Ok(self
+            .run(
+                directory,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await?
+            .is_empty())
+    }
+
+    /// The tree of `commit`.
+    pub async fn tree_of(&self, directory: &Path, commit: &str) -> Result<String, GitError> {
+        self.rev_parse(directory, &format!("{commit}^{{tree}}"))
+            .await
+    }
+
+    /// Makes a commit of `tree` with `parents` and `message` without touching any ref.
+    pub async fn commit_tree(
+        &self,
+        directory: &Path,
+        tree: &str,
+        parents: &[&str],
+        message: &str,
+        identity: &Identity,
+    ) -> Result<String, GitError> {
+        let mut args = vec!["commit-tree", tree];
+        for parent in parents {
+            args.push("-p");
+            args.push(parent);
+        }
+        args.push("-m");
+        args.push(message);
+        self.run_as(directory, identity, &args).await
+    }
+
+    /// Moves `reference` to `new` only while it is `old`. Fails, changing nothing, otherwise.
+    pub async fn update_ref_cas(
+        &self,
+        directory: &Path,
+        reference: &str,
+        new: &str,
+        old: &str,
+    ) -> Result<(), GitError> {
+        self.run(directory, &["update-ref", reference, new, old])
+            .await?;
+        Ok(())
+    }
+
+    /// Creates or moves `reference` to `commit`.
+    pub async fn update_ref(
+        &self,
+        directory: &Path,
+        reference: &str,
+        commit: &str,
+    ) -> Result<(), GitError> {
+        self.run(directory, &["update-ref", reference, commit])
+            .await?;
+        Ok(())
+    }
+
+    /// Deletes `reference`.
+    pub async fn delete_ref(&self, directory: &Path, reference: &str) -> Result<(), GitError> {
+        self.run(directory, &["update-ref", "-d", reference])
+            .await?;
+        Ok(())
+    }
+
+    /// Brings the index and files of the checkout at `directory` to its `HEAD` after the branch
+    /// moved forward under it, removing the files the new commit no longer has.
+    pub async fn update_checkout(&self, directory: &Path) -> Result<(), GitError> {
+        self.run(directory, &["read-tree", "--reset", "-u", "HEAD"])
+            .await?;
+        Ok(())
+    }
+
+    /// Whether `ancestor` is `descendant` or one of its ancestors.
+    pub async fn is_ancestor(&self, directory: &Path, ancestor: &str, descendant: &str) -> bool {
+        self.run(
+            directory,
+            &["merge-base", "--is-ancestor", ancestor, descendant],
+        )
+        .await
+        .is_ok()
+    }
+
+    /// The commits reachable from `to` and not from `from`, oldest first.
+    pub async fn commits_between(
+        &self,
+        directory: &Path,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<String>, GitError> {
+        let range = format!("{from}..{to}");
+        Ok(self
+            .run(directory, &["rev-list", "--reverse", &range])
+            .await?
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// The full message of `commit`.
+    pub async fn message_of(&self, directory: &Path, commit: &str) -> Result<String, GitError> {
+        self.run(directory, &["log", "-1", "--format=%B", commit])
+            .await
+    }
+
+    /// The parents of `commit`, in order.
+    pub async fn parents_of(
+        &self,
+        directory: &Path,
+        commit: &str,
+    ) -> Result<Vec<String>, GitError> {
+        let line = self
+            .run(directory, &["rev-list", "--parents", "-n", "1", commit])
+            .await?;
+        Ok(line
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Commits what is uncommitted in the checkout at `directory` as `identity`; `None` when
+    /// there was nothing to commit.
+    pub async fn commit_if_dirty(
+        &self,
+        directory: &Path,
+        message: &str,
+        identity: &Identity,
+    ) -> Result<Option<String>, GitError> {
+        if self.is_clean(directory).await? {
+            return Ok(None);
+        }
+        self.run(directory, &["add", "-A"]).await?;
+        self.run_as(directory, identity, &["commit", "-q", "-m", message])
+            .await?;
+        Ok(Some(self.rev_parse(directory, "HEAD").await?))
+    }
+
+    /// The files with unmerged entries in the checkout at `directory`.
+    pub async fn conflicted_files(&self, directory: &Path) -> Result<Vec<String>, GitError> {
+        Ok(self
+            .run(directory, &["diff", "--name-only", "--diff-filter=U"])
+            .await?
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Whether a rebase is stopped in the checkout at `directory`.
+    pub async fn rebase_in_progress(&self, directory: &Path) -> bool {
+        for name in ["rebase-merge", "rebase-apply"] {
+            if let Ok(path) = self
+                .run(directory, &["rev-parse", "--git-path", name])
+                .await
+            {
+                let path = PathBuf::from(path);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    directory.join(path)
+                };
+                if path.exists() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Rebases the branch checked out at `directory` onto `onto`. A conflict leaves the rebase
+    /// stopped, with markers in the files, for repair.
+    pub async fn rebase(
+        &self,
+        directory: &Path,
+        onto: &str,
+        identity: &Identity,
+    ) -> Result<RebaseOutcome, GitError> {
+        self.rebase_args(directory, identity, &["rebase", "-q", onto])
+            .await
+    }
+
+    /// Moves the commits after `upstream` up to `HEAD` onto `onto`, dropping those up to and
+    /// including `upstream`.
+    pub async fn rebase_onto(
+        &self,
+        directory: &Path,
+        onto: &str,
+        upstream: &str,
+        identity: &Identity,
+    ) -> Result<RebaseOutcome, GitError> {
+        self.rebase_args(
+            directory,
+            identity,
+            &["rebase", "-q", "--onto", onto, upstream],
+        )
+        .await
+    }
+
+    /// Continues a stopped rebase once its files are resolved and staged.
+    pub async fn rebase_continue(
+        &self,
+        directory: &Path,
+        identity: &Identity,
+    ) -> Result<RebaseOutcome, GitError> {
+        self.run(directory, &["add", "-A"]).await?;
+        self.rebase_args(directory, identity, &["rebase", "--continue"])
+            .await
+    }
+
+    async fn rebase_args(
+        &self,
+        directory: &Path,
+        identity: &Identity,
+        args: &[&str],
+    ) -> Result<RebaseOutcome, GitError> {
+        match self.run_as(directory, identity, args).await {
+            Ok(_) => Ok(RebaseOutcome::Done),
+            Err(error) => {
+                let files = self.conflicted_files(directory).await.unwrap_or_default();
+                if files.is_empty() {
+                    Err(error)
+                } else {
+                    Ok(RebaseOutcome::Conflict { files })
+                }
+            }
+        }
+    }
+
+    /// `git reset --keep commit`: moves the branch checked out at `directory` to `commit`,
+    /// refusing when that would lose an uncommitted change.
+    pub async fn reset_keep(&self, directory: &Path, commit: &str) -> Result<(), GitError> {
+        self.run(directory, &["reset", "-q", "--keep", commit])
+            .await?;
+        Ok(())
+    }
+
+    /// The binary diff from `from` to `to`.
+    pub async fn diff_binary(
+        &self,
+        directory: &Path,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<u8>, GitError> {
+        let args = ["diff", "--binary", from, to]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        self.run_bytes(directory, args, None).await
+    }
+
+    /// Applies `patch` to the files and index of the checkout at `directory`.
+    pub async fn apply_index(&self, directory: &Path, patch: Vec<u8>) -> Result<(), GitError> {
+        if patch.is_empty() {
+            return Ok(());
+        }
+        let args = ["apply", "--index"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        self.run_bytes(directory, args, Some(patch)).await?;
+        Ok(())
+    }
+
+    /// Pushes `refspec` to `remote` (a URL or a remote name).
+    pub async fn push(
+        &self,
+        directory: &Path,
+        remote: &str,
+        refspec: &str,
+    ) -> Result<(), GitError> {
+        self.run(directory, &["push", "-q", remote, refspec])
+            .await?;
+        Ok(())
+    }
+}
+
+/// How a rebase ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RebaseOutcome {
+    Done,
+    /// Stopped on a textual conflict in `files`, left in place with markers.
+    Conflict {
+        files: Vec<String>,
+    },
 }

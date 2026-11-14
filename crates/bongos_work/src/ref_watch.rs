@@ -128,13 +128,25 @@ fn walk(dir: &Path, dirs: &mut BTreeSet<PathBuf>) {
 }
 
 /// The watcher of one common git dir and the directories added to it.
-struct RefDirs {
+pub(crate) struct RefDirs {
     common_dir: PathBuf,
     watcher: Arc<dyn Watcher>,
     dirs: BTreeSet<PathBuf>,
 }
 
 impl RefDirs {
+    /// Watches the ref directories of `common_dir` with `watcher`, which already watches the
+    /// dir itself. Blocking file system calls: run it on the background executor.
+    pub(crate) fn new(common_dir: PathBuf, watcher: Arc<dyn Watcher>) -> Self {
+        let mut dirs = Self {
+            common_dir,
+            watcher,
+            dirs: BTreeSet::new(),
+        };
+        dirs.sync();
+        dirs
+    }
+
     /// Adds the directories that appeared and removes the ones that are gone, so a directory
     /// deleted and made again (`git pack-refs` prunes empty ones) is watched again.
     fn sync(&mut self) {
@@ -150,7 +162,7 @@ impl RefDirs {
 
     /// Whether `batch` touches a ref. A rescan always counts. Brings the watched directories up
     /// to date when one appeared or went away.
-    fn handle(&mut self, batch: &[PathEvent]) -> bool {
+    pub(crate) fn handle(&mut self, batch: &[PathEvent]) -> bool {
         let mut matters = false;
         let mut resync = false;
         for event in batch {
@@ -247,13 +259,7 @@ fn watch_task(fs: Arc<dyn Fs>, common_dir: PathBuf, cx: &mut Context<WorkStore>)
                 let common_dir = common_dir.clone();
                 async move {
                     let (events, watcher) = fs.watch(&common_dir, REF_WATCH_LATENCY).await;
-                    let mut dirs = RefDirs {
-                        common_dir,
-                        watcher,
-                        dirs: BTreeSet::new(),
-                    };
-                    dirs.sync();
-                    (events, dirs)
+                    (events, RefDirs::new(common_dir, watcher))
                 }
             })
             .await;

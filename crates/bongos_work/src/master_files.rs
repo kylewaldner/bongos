@@ -238,8 +238,17 @@ fn pick_existing(
     );
 }
 
-/// Writes the text of `buffer` to the same relative path in the working copy at `copy`, opens
-/// that file, and reloads the buffer from disk, which leaves it clean.
+/// Whether the file at `target` in a working copy has edits of its own: it exists and differs
+/// from the master file at `original`.
+pub(crate) fn has_own_edits(target: &Path, original: &Path) -> bool {
+    match std::fs::read(target) {
+        Ok(bytes) => std::fs::read(original).map_or(true, |master| master != bytes),
+        Err(_) => false,
+    }
+}
+
+/// Moves the edit in `buffer` to the same relative path in the working copy at `copy`. When
+/// that file already has edits of its own, asks before replacing them.
 fn move_edit(
     buffer: Entity<Buffer>,
     master: MasterFile,
@@ -248,13 +257,64 @@ fn move_edit(
     cx: &mut Context<Workspace>,
 ) {
     let target = copy.join(&master.relative);
+    let original = master.repo().location().repository.join(&master.relative);
+    let checked = cx.background_spawn({
+        let target = target.clone();
+        async move { has_own_edits(&target, &original) }
+    });
+    cx.spawn_in(window, async move |workspace, cx| {
+        let own_edits = checked.await;
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                if !own_edits {
+                    write_edit(buffer, target, window, cx);
+                    return;
+                }
+                let name = target
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                modals::pick(
+                    workspace,
+                    format!("{name} has its own edits in that working copy. Replace them?"),
+                    vec![
+                        format!("Replace {name} there"),
+                        "Keep it; leave my edit here".to_string(),
+                    ],
+                    1,
+                    Box::new(move |choice, _, window, cx| {
+                        if choice == 0 {
+                            write_edit(buffer, target, window, cx);
+                        }
+                    }),
+                    window,
+                    cx,
+                );
+            })
+            .log_err();
+    })
+    .detach();
+}
+
+/// Writes the text of `buffer` to `target`, opens it, and reloads the buffer from disk, which
+/// leaves it clean; but only while its text is still what was written, so an edit typed in the
+/// meantime is never lost.
+fn write_edit(
+    buffer: Entity<Buffer>,
+    target: PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let text = buffer.read(cx).text();
-    let written = cx.background_spawn(async move {
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+    let written = cx.background_spawn({
+        let text = text.clone();
+        async move {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, text)?;
+            anyhow::Ok(target)
         }
-        std::fs::write(&target, text)?;
-        anyhow::Ok(target)
     });
     cx.spawn_in(window, async move |workspace, cx| {
         match written.await {
@@ -279,7 +339,25 @@ fn move_edit(
                 return;
             }
         }
-        buffer.update(cx, |buffer, cx| drop(buffer.reload(cx)));
+        let unchanged = buffer.update(cx, |buffer, cx| {
+            let unchanged = buffer.text() == text;
+            if unchanged {
+                drop(buffer.reload(cx));
+            }
+            unchanged
+        });
+        if !unchanged {
+            workspace
+                .update(cx, |workspace, cx| {
+                    show_toast(
+                        workspace,
+                        "The master buffer was edited again after the edit was moved; save it to move that too"
+                            .to_string(),
+                        cx,
+                    )
+                })
+                .log_err();
+        }
     })
     .detach();
 }

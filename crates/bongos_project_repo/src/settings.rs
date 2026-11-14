@@ -19,6 +19,10 @@ pub struct ProjectRepositorySettings {
     pub keep_landed: bool,
     /// Days of idleness after which a change is shown as stale.
     pub stale_after_days: u32,
+    /// Whether a landing squashes a working copy's commits into one commit on master.
+    pub squash: bool,
+    /// How long a change may hold the landing queue before it is sent out.
+    pub queue_limit_seconds: u32,
 }
 
 impl ProjectRepositorySettings {
@@ -57,6 +61,12 @@ impl Settings for ProjectRepositorySettings {
             stale_after_days: settings
                 .stale_after_days
                 .expect("default.json defines `project_repository.stale_after_days`"),
+            squash: settings
+                .squash
+                .expect("default.json defines `project_repository.squash`"),
+            queue_limit_seconds: settings
+                .queue_limit_seconds
+                .expect("default.json defines `project_repository.queue_limit_seconds`"),
             layout: LayoutTemplates {
                 repository: templates
                     .repository
