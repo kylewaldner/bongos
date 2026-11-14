@@ -155,9 +155,11 @@ impl LspAdapter for YamlLspAdapter {
                 .tab_size
         });
 
+        // The server's usage reporting is switched off by `redhat.telemetry.enabled`.
         let mut options = serde_json::json!({
             "[yaml]": {"editor.tabSize": tab_size},
-            "yaml": {"format": {"enable": true}}
+            "yaml": {"format": {"enable": true}},
+            "redhat": {"telemetry": {"enabled": false}}
         });
 
         let project_options = cx.update(|cx| {

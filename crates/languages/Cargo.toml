@@ -65,7 +65,13 @@ url.workspace = true
 util.workspace = true
 
 [dev-dependencies]
+dap.workspace = true
+dap_adapters.workspace = true
 fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+node_runtime = { workspace = true, features = ["test-support"] }
+paths.workspace = true
 pretty_assertions.workspace = true
 tempfile = { workspace = true}
 settings = { workspace = true, features = ["test-support"] }
@@ -81,3 +87,4 @@ tree-sitter-typescript.workspace = true
 tree-sitter.workspace = true
 toml.workspace = true
 unindent.workspace = true
+watch.workspace = true

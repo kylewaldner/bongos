@@ -1145,6 +1145,152 @@ impl NodeRuntimeTrait for UnavailableNodeRuntime {
     }
 }
 
+/// One npm command a fake runtime was asked to run.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug)]
+pub struct FakeNpmCall {
+    pub directory: Option<PathBuf>,
+    pub subcommand: String,
+    /// The arguments npm would get, after its entrypoint, as the real runtimes build them.
+    pub args: Vec<String>,
+    /// The environment npm would get, as the real runtimes build it.
+    pub env: HashMap<String, String>,
+}
+
+/// The npm commands a fake runtime was asked to run, in order.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Default)]
+pub struct FakeNpmLog(Arc<std::sync::Mutex<Vec<FakeNpmCall>>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl FakeNpmLog {
+    pub fn calls(&self) -> Vec<FakeNpmCall> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Returns the calls so far and forgets them.
+    pub fn take(&self) -> Vec<FakeNpmCall> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn push(&self, call: FakeNpmCall) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(call);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl NodeRuntime {
+    /// A runtime that runs nothing: it records every npm command in `log`, answers `npm info`
+    /// with version 1.0.0 and every other command with empty success, and finds no package
+    /// installed. Node.js itself is said to be at `/fake-node/bin/node`.
+    pub fn fake(http: Arc<dyn HttpClient>, log: FakeNpmLog) -> Self {
+        let options = NodeBinaryOptions::default();
+        NodeRuntime(Arc::new(Mutex::new(NodeRuntimeState {
+            http,
+            instance: Some(Box::new(FakeNodeRuntime { log })),
+            last_options: Some(options.clone()),
+            options: watch::channel(Some(options)).1,
+            shell_env_loaded: oneshot::channel().1.shared(),
+        })))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+struct FakeNodeRuntime {
+    log: FakeNpmLog,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FakeNodeRuntime {
+    const NODE: &str = "/fake-node/bin/node";
+    const NPM: &str = "/fake-node/bin/npm";
+
+    fn record(
+        &self,
+        directory: Option<&Path>,
+        proxy: Option<&Url>,
+        subcommand: &str,
+        args: &[&str],
+    ) -> NpmCommand {
+        let command = NpmCommand {
+            path: PathBuf::from(Self::NPM),
+            args: build_npm_command_args(
+                None,
+                directory,
+                Path::new("/fake-node/cache"),
+                None,
+                None,
+                proxy,
+                subcommand,
+                args,
+            ),
+            env: npm_command_env(Some(Path::new(Self::NODE))),
+        };
+        self.log.push(FakeNpmCall {
+            directory: directory.map(Path::to_path_buf),
+            subcommand: subcommand.to_string(),
+            args: command.args.clone(),
+            env: command.env.clone(),
+        });
+        command
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait::async_trait]
+impl NodeRuntimeTrait for FakeNodeRuntime {
+    fn boxed_clone(&self) -> Box<dyn NodeRuntimeTrait> {
+        Box::new(self.clone())
+    }
+
+    fn binary_path(&self) -> Result<PathBuf> {
+        Ok(PathBuf::from(Self::NODE))
+    }
+
+    async fn run_npm_subcommand(
+        &self,
+        directory: Option<&Path>,
+        proxy: Option<&Url>,
+        subcommand: &str,
+        args: &[&str],
+    ) -> Result<Output> {
+        self.record(directory, proxy, subcommand, args);
+        let stdout = match subcommand {
+            "info" => br#"{"dist-tags":{"latest":"1.0.0"},"versions":["1.0.0"]}"#.to_vec(),
+            "config" => b"{}".to_vec(),
+            _ => Vec::new(),
+        };
+        #[cfg(unix)]
+        let status = std::os::unix::process::ExitStatusExt::from_raw(0);
+        #[cfg(windows)]
+        let status = std::os::windows::process::ExitStatusExt::from_raw(0);
+        Ok(Output {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        })
+    }
+
+    async fn npm_command(
+        &self,
+        prefix_dir: Option<&Path>,
+        proxy: Option<&Url>,
+        subcommand: &str,
+        args: &[&str],
+    ) -> Result<NpmCommand> {
+        Ok(self.record(prefix_dir, proxy, subcommand, args))
+    }
+
+    async fn npm_package_installed_version(
+        &self,
+        _local_package_directory: &Path,
+        _name: &str,
+    ) -> Result<Option<Version>> {
+        Ok(None)
+    }
+}
+
 fn proxy_argument(proxy: Option<&Url>) -> Option<String> {
     let mut proxy = proxy.cloned()?;
     // Map proxy settings from `http://localhost:10809` to `http://127.0.0.1:10809`
@@ -1196,8 +1342,19 @@ fn build_npm_command_args(
     command_args
 }
 
+/// npm settings, given as `npm_config_*` variables to every npm command, that keep npm from
+/// contacting the registry for anything but the packages it was asked about: no check for a newer
+/// npm, and no audit report of the installed packages.
+pub const NPM_PRIVACY_ENV: [(&str, &str); 2] = [
+    ("npm_config_update_notifier", "false"),
+    ("npm_config_audit", "false"),
+];
+
 fn npm_command_env(node_binary: Option<&Path>) -> HashMap<String, String> {
     let mut command_env = HashMap::new();
+    for (name, value) in NPM_PRIVACY_ENV {
+        command_env.insert(name.to_string(), value.to_string());
+    }
     if let Some(node_binary) = node_binary {
         let env_path = path_with_node_binary_prepended(node_binary).unwrap_or_default();
         command_env.insert("PATH".into(), env_path.to_string_lossy().into_owned());
@@ -1709,5 +1866,33 @@ mod tests {
         .unwrap();
         assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(2, 0, 0)));
         assert_rest_intact(dir.path());
+    }
+
+    #[test]
+    fn test_every_npm_command_turns_off_the_update_check_and_audit() {
+        let log = super::FakeNpmLog::default();
+        let node = super::NodeRuntime::fake(
+            std::sync::Arc::new(http_client::BlockedHttpClient),
+            log.clone(),
+        );
+        let version = smol::block_on(node.npm_package_latest_version("some-package")).unwrap();
+        assert_eq!(version, Version::new(1, 0, 0));
+        smol::block_on(node.npm_install_latest_packages(Path::new("/nowhere"), &["some-package"]))
+            .unwrap();
+        smol::block_on(node.npm_command(None, "exec", &["--yes"])).unwrap();
+
+        let calls = log.take();
+        let subcommands: Vec<_> = calls.iter().map(|call| call.subcommand.as_str()).collect();
+        assert_eq!(subcommands, ["info", "config", "install", "exec"]);
+        for call in &calls {
+            for (name, value) in super::NPM_PRIVACY_ENV {
+                assert_eq!(
+                    call.env.get(name).map(String::as_str),
+                    Some(value),
+                    "{call:?}"
+                );
+            }
+        }
+        assert!(log.calls().is_empty());
     }
 }
