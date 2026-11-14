@@ -406,7 +406,8 @@ async fn project_land_lands_the_working_copy_of_the_current_buffer(cx: &mut Test
         matches!(
             fixture.repo.landing_result(&copy.change_id).unwrap(),
             Some(LandingResult::Landed { .. })
-        ) && std::fs::read_to_string(repository.join("definitions/plan.md")).is_ok_and(|text| text == "the plan\n")
+        ) && std::fs::read_to_string(repository.join("definitions/plan.md"))
+            .is_ok_and(|text| text == "the plan\n")
     };
     wait_until(cx, "the landing", |_| landed()).await;
     assert_eq!(

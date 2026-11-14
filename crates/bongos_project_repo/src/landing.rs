@@ -30,9 +30,9 @@ use bongos_project_repo_model::{
 };
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc;
-use futures::future::Either;
 #[cfg(test)]
 use futures::future::BoxFuture;
+use futures::future::Either;
 use serde::{Deserialize, Serialize};
 
 use crate::amending::Amended;

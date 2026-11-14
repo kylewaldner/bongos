@@ -506,7 +506,8 @@ fn a_task_started_while_the_change_waits_sends_it_back_to_have_its_amendment_red
         panic!("expected no verdict, got {result:?}");
     };
     assert!(
-        reason.starts_with("rebalance: amendment outside its bounds") && reason.contains("backfill"),
+        reason.starts_with("rebalance: amendment outside its bounds")
+            && reason.contains("backfill"),
         "{reason}"
     );
     assert_eq!(*amender.times.lock(), 0, "the amendment ran twice");

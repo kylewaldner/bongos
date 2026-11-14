@@ -195,7 +195,9 @@ fn edits_typed_while_the_checks_run_do_not_land_and_are_kept() {
 }
 
 /// A change whose in-queue check never ends, holding the lock, with a timer the test fires.
-fn hung_in_queue(repo: &crate::ProjectRepo) -> (ManualTimer, oneshot::Receiver<()>, oneshot::Sender<()>) {
+fn hung_in_queue(
+    repo: &crate::ProjectRepo,
+) -> (ManualTimer, oneshot::Receiver<()>, oneshot::Sender<()>) {
     let hung = Arc::new(FakeCheck::new("hung", CheckPhase::InQueue));
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();

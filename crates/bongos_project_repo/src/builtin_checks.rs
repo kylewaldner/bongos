@@ -17,8 +17,8 @@ use bongos_project_repo_model::layout::{
     DEFINITIONS_DIR, PROJECT_FILE, TASK_FILE, WORKFLOW_FILE, WORKFLOWS_DIR,
 };
 use bongos_project_repo_model::{
-    Author, ChangeMeta, ChangeSummary, DefinitionTree, FileChange, Problem, RelPath, TaskDefinition,
-    summarize,
+    Author, ChangeMeta, ChangeSummary, DefinitionTree, FileChange, Problem, RelPath,
+    TaskDefinition, summarize,
 };
 
 use crate::git::{Git, TreeEntry};

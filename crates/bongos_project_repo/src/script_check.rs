@@ -93,8 +93,11 @@ impl LandingCheck for ScriptCheck {
                 .arg(summary)
                 .arg(meta)
                 .kill_on_drop(true);
-            let output = match futures::future::select(command.output().boxed(), timer(SCRIPT_TIMEOUT))
-                .await
+            let output = match futures::future::select(
+                command.output().boxed(),
+                timer(SCRIPT_TIMEOUT),
+            )
+            .await
             {
                 Either::Left((Ok(output), _)) => output,
                 Either::Left((Err(error), _)) => {
