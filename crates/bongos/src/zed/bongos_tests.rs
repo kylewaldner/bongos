@@ -503,6 +503,7 @@ const EMACS_ACTIONS: [(&str, &str); 48] = [
     ("emacs::AppendNextKill", "emacs: append next kill"),
     ("emacs::Yank", "emacs: yank"),
     ("emacs::YankPop", "emacs: yank pop"),
+    ("emacs::BrowseKillRing", "emacs: browse kill ring"),
     ("emacs::Recenter", "emacs: recenter"),
     ("emacs::Reposition", "emacs: reposition"),
     ("emacs::GotoLine", "emacs: goto line"),

@@ -108,6 +108,16 @@
       "ctrl-c ctrl-o": "isearch::Occur",
     },
   },
+  // The kill ring browser (the `KillRing` context of its prompt). M-n and M-p move the
+  // highlight instead of walking the prompt history; without `Minibuffer`, so they also hold
+  // when the prompt opens centered.
+  {
+    "context": "KillRing > Editor",
+    "bindings": {
+      "alt-n": "minibuffer::SelectNext",
+      "alt-p": "minibuffer::SelectPrev",
+    },
+  },
   {
     "context": "Minibuffer",
     "bindings": {
