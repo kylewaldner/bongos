@@ -170,6 +170,7 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
         }),
         cx,
     );
+    crate::registry::register_pending_chips(cx);
     let source = Arc::new(RepoSource {
         name,
         loaded: loaded.clone(),

@@ -346,3 +346,30 @@ async fn an_open_worktree_is_counted_through_the_git_store(cx: &mut TestAppConte
         assert_eq!(store.status_runs(), 0);
     });
 }
+
+#[test]
+fn pending_marks_draw_as_landing_and_not_landed_chips() {
+    use bongos_work_model::store::{PendingMark, Task};
+    let mut task = Task {
+        slug: "leaf".to_string(),
+        dir: Path::new("files/l1").to_path_buf(),
+        definition: None,
+        pending: None,
+        needs_conversion: false,
+        file: None,
+        artifacts: None,
+        errors: Vec::new(),
+        broken_edges: Vec::new(),
+        files: Default::default(),
+        hashes: Default::default(),
+        children: Vec::new(),
+    };
+    assert_eq!(crate::registry::pending_chip(&task), None);
+    for label in ["landing", "not landed"] {
+        task.pending = Some(PendingMark {
+            change_id: "c1".to_string(),
+            label: label.to_string(),
+        });
+        assert_eq!(crate::registry::pending_chip(&task).as_deref(), Some(label));
+    }
+}

@@ -401,6 +401,17 @@ impl ProjectRepo {
         in_flight: &InFlight,
     ) -> Result<Recovery> {
         let repository = &self.location.repository;
+        // The landing's files moved after its state transaction; a crash may have kept them.
+        let moves = self
+            .read_state(|read| read.meta(crate::landing::LANDING_FILE_MOVES_KEY))?
+            .and_then(|text| toml::from_str::<crate::landing::LandingFiles>(&text).ok())
+            .unwrap_or_default();
+        if let Err(error) = crate::router::run_file_ops(&self.location.files, &moves.ops) {
+            log::error!(
+                "moving the files of {} again: {error:#}",
+                in_flight.change_id
+            );
+        }
         match self
             .move_main(repository, &in_flight.commit, &in_flight.old)
             .await

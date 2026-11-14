@@ -481,6 +481,9 @@ async fn a_project_repository_serves_its_tasks_and_applies_state_only_writes(
     let pending = leaf.pending.clone().expect("the leaf is pending");
     assert_eq!(pending.change_id, change_id);
     assert_eq!(pending.label, bongos_project_repo::LANDING_MARK);
+    // The row shows the mark as a chip.
+    let chips = cx.update(|cx| crate::RowChipsRegistry::chips("r1", cx));
+    assert_eq!(chips, [gpui::SharedString::from("landing")]);
     let main = || {
         futures::executor::block_on(
             repo.git()

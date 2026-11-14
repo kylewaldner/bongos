@@ -27,13 +27,13 @@ use crate::{
     check_fresh, written_tasks,
 };
 
-type Landing = Fuse<BoxFuture<'static, anyhow::Result<LandingResult>>>;
+pub(crate) type Landing = Fuse<BoxFuture<'static, anyhow::Result<LandingResult>>>;
 
-fn unattributed() -> Context {
+pub(crate) fn unattributed() -> Context {
     Context::new("tester", "2026-11-13T10:00:00Z".parse().unwrap())
 }
 
-fn loaded(repo: &ProjectRepo) -> Arc<LoadedProject> {
+pub(crate) fn loaded(repo: &ProjectRepo) -> Arc<LoadedProject> {
     let loaded = LoadedProject::new(repo.clone());
     block_on(loaded.load()).unwrap();
     loaded
@@ -55,7 +55,7 @@ fn rename(id: &'static str, goal: &'static str) -> impl Fn(&WorkTree, &Context) 
 }
 
 /// What the store's definition writer makes of `change`, computed on the loaded tree `tree`.
-fn quick_edit_of(
+pub(crate) fn quick_edit_of(
     loaded: &LoadedProject,
     tree: &WorkTree,
     change: &Change,
@@ -83,7 +83,7 @@ fn quick_edit_of(
 
 /// Runs `command` as the store would with `ctx` (its marker taken out first) and starts the
 /// quick edit.
-fn start_edit(
+pub(crate) fn start_edit(
     repo: &ProjectRepo,
     loaded: &LoadedProject,
     mut ctx: Context,
@@ -96,7 +96,7 @@ fn start_edit(
     block_on(repo.quick_edit(edit, marker, start())).unwrap()
 }
 
-fn landing(repo: &ProjectRepo, change_id: &str) -> Landing {
+pub(crate) fn landing(repo: &ProjectRepo, change_id: &str) -> Landing {
     let repo = repo.clone();
     let change_id = change_id.to_string();
     async move { repo.land_quick_edit(&change_id, start()).await }
@@ -105,7 +105,7 @@ fn landing(repo: &ProjectRepo, change_id: &str) -> Landing {
 }
 
 /// Drives `landing` until it waits for approval; a landing that ends first fails the test.
-async fn until_waiting(
+pub(crate) async fn until_waiting(
     mut landing: &mut Landing,
     events: &mut UnboundedReceiver<(String, LandingEvent)>,
     change_id: &str,
@@ -125,7 +125,7 @@ async fn until_waiting(
     }
 }
 
-fn goal(loaded: &LoadedProject, id: &str) -> String {
+pub(crate) fn goal(loaded: &LoadedProject, id: &str) -> String {
     block_on(loaded.load()).unwrap();
     loaded
         .work_tree()
@@ -146,7 +146,7 @@ fn history_events(repo: &ProjectRepo, id: &str) -> Vec<String> {
         .collect()
 }
 
-fn staged(repo: &ProjectRepo, change_id: &str) -> Option<Vec<StateOp>> {
+pub(crate) fn staged(repo: &ProjectRepo, change_id: &str) -> Option<Vec<StateOp>> {
     repo.read_state(|read| read.staged(change_id)).unwrap()
 }
 
@@ -159,7 +159,7 @@ fn landing_record(repo: &ProjectRepo, change_id: &str) -> LandingRecord {
     toml::from_str(&text).unwrap()
 }
 
-fn copy_path(repo: &ProjectRepo, change_id: &str) -> PathBuf {
+pub(crate) fn copy_path(repo: &ProjectRepo, change_id: &str) -> PathBuf {
     let row = repo.change(change_id).unwrap().unwrap();
     repo.working_copy_path(&row.name)
 }
@@ -548,19 +548,19 @@ fn two_hundred_new_tasks_are_one_quick_edit_and_one_commit() {
             .count(),
         200
     );
-    // Every new task has its files folder with prompts.txt at once.
+    // The files folders of the new tasks wait for the landing, with the state.
     let ids = written_tasks(&change);
     assert_eq!(ids.len(), 200);
     assert!(
         ids.iter()
-            .all(|id| repo.location().files.join(id).join("prompts.txt").is_file())
+            .all(|id| !repo.location().files.join(id).exists())
     );
     assert!(!copy_path(&repo, &started.change_id).exists());
 }
 
 /// Records a landing in flight from `old` to a new commit of `old`'s tree for the change
 /// `change_id`, with staged ops for it that a rerun would apply. Returns the new commit.
-fn in_flight(repo: &ProjectRepo, change_id: &str, old: &str) -> String {
+pub(crate) fn in_flight(repo: &ProjectRepo, change_id: &str, old: &str) -> String {
     let tree = run_git(repo, &["rev-parse", &format!("{old}^{{tree}}")]);
     let commit = run_git(
         repo,
@@ -599,7 +599,7 @@ fn in_flight(repo: &ProjectRepo, change_id: &str, old: &str) -> String {
     commit
 }
 
-fn marker(repo: &ProjectRepo) -> Option<String> {
+pub(crate) fn marker(repo: &ProjectRepo) -> Option<String> {
     repo.read_state(|read| read.meta(LANDING_IN_FLIGHT_KEY))
         .unwrap()
 }

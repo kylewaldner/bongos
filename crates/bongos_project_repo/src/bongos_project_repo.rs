@@ -121,6 +121,8 @@ mod router_tests;
 #[cfg(test)]
 mod sink_tests;
 #[cfg(test)]
+mod split_tests;
+#[cfg(test)]
 mod state_hooks_tests;
 #[cfg(test)]
 mod state_ops_tests;

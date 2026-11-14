@@ -488,6 +488,84 @@ pub fn apply_state_only(
     Ok(())
 }
 
+/// The file ops among staged `ops`, which wait for the landing.
+pub(crate) fn staged_file_ops(ops: &[StateOp]) -> Vec<FileOp> {
+    ops.iter()
+        .filter_map(|op| match op {
+            StateOp::MoveFiles { from, to } => Some(FileOp::Move {
+                from: from.clone(),
+                to: to.clone(),
+            }),
+            StateOp::CreatePrompts { task } => Some(FileOp::CreatePrompts { task: task.clone() }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The staged op that waits for the landing to make `op`, if it is one of those that do.
+pub(crate) fn staged_file_op(op: &FileOp) -> Option<StateOp> {
+    match op {
+        FileOp::Move { from, to } => Some(StateOp::MoveFiles {
+            from: from.clone(),
+            to: to.clone(),
+        }),
+        FileOp::CreatePrompts { task } => Some(StateOp::CreatePrompts { task: task.clone() }),
+        FileOp::Write { .. } => None,
+    }
+}
+
+/// Refuses a move of files that would leave the files root (a `..` part, an absolute path) or
+/// overwrite what is at the destination. A source that is not there is not refused: there is
+/// nothing to move (or the move was done).
+pub(crate) fn check_file_move(files_root: &Path, from: &Path, to: &Path) -> Result<()> {
+    if !is_plain(from) || !is_plain(to) || from.as_os_str().is_empty() || to.as_os_str().is_empty()
+    {
+        anyhow::bail!(
+            "{} to {} is not a move inside the files folders",
+            from.display(),
+            to.display()
+        );
+    }
+    if files_root.join(from).symlink_metadata().is_ok()
+        && files_root.join(to).symlink_metadata().is_ok()
+    {
+        anyhow::bail!("{} already exists", to.display());
+    }
+    Ok(())
+}
+
+/// Refuses a file op that waits for a landing when it would leave the files root or overwrite.
+pub(crate) fn check_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
+    match op {
+        FileOp::Move { from, to } => check_file_move(files_root, from, to),
+        FileOp::CreatePrompts { task } => {
+            let path = Path::new(task);
+            if !is_plain(path) || path.components().count() != 1 {
+                anyhow::bail!("{task} is not a task id");
+            }
+            Ok(())
+        }
+        FileOp::Write { path, .. } => {
+            if !is_plain(path) {
+                anyhow::bail!("{} is not a files path", path.display());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Makes every op of `ops`, after checking all of them first, so a refused one makes none.
+/// Running it again changes nothing.
+pub(crate) fn run_file_ops(files_root: &Path, ops: &[FileOp]) -> Result<()> {
+    for op in ops {
+        check_file_op(files_root, op)?;
+    }
+    for op in ops {
+        apply_file_op(files_root, op)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
     match op {
         FileOp::Write { path, bytes } => {

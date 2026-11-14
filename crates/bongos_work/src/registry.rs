@@ -178,6 +178,39 @@ impl RowChipsRegistry {
     }
 }
 
+/// The name of the source of pending marks in the registry.
+pub(crate) const PENDING_SOURCE: &str = "pending";
+
+/// The chip of a task whose change waits to land or did not: its mark's label, `landing` or
+/// `not landed`. Drawn in the row like every chip, so in the theme's colors.
+pub(crate) fn pending_chip(task: &bongos_work_model::store::Task) -> Option<SharedString> {
+    task.pending
+        .as_ref()
+        .map(|mark| SharedString::from(mark.label.clone()))
+}
+
+/// Shows the pending marks the snapshot carries (`Task::pending`) as row chips.
+struct PendingChips;
+
+impl RowChipsSource for PendingChips {
+    fn chips(&self, task_id: &str, cx: &App) -> Vec<SharedString> {
+        let Some(snapshot) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot())
+        else {
+            return Vec::new();
+        };
+        snapshot
+            .task_by_id(task_id)
+            .and_then(pending_chip)
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Registers the pending-mark chips; the refreshes of the store redraw them.
+pub(crate) fn register_pending_chips(cx: &mut App) {
+    RowChipsRegistry::add_source(PENDING_SOURCE, Rc::new(PendingChips), cx);
+}
+
 #[derive(Default)]
 struct ViewOpenedObservers(Vec<Rc<dyn Fn(&mut App)>>);
 

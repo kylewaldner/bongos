@@ -25,7 +25,7 @@ use crate::approval::PersonGrant;
 use crate::changes::{ChangeRow, ChangeState};
 use crate::create::ProjectRepo;
 use crate::landing::{ALREADY_LANDING, LandMode, LandRequest, LandingResult, author_identity};
-use crate::router::{DefinitionOp, FileOp, apply_file_op};
+use crate::router::{DefinitionOp, FileOp, apply_file_op, check_file_op, staged_file_op};
 use crate::state::StateRead;
 use crate::state_ops::StateOp;
 use crate::working_copies::fresh_name;
@@ -195,6 +195,19 @@ impl ProjectRepo {
         if edit.definition.is_empty() {
             bail!("a quick edit needs a change to definitions");
         }
+        // Moves and new task folders wait for the landing, with the state: a change that does not
+        // land makes none.
+        let mut state = edit.state.clone();
+        let mut files = Vec::new();
+        for op in &edit.files {
+            match staged_file_op(op) {
+                Some(staged) => {
+                    check_file_op(&self.location.files, op)?;
+                    state.push(staged);
+                }
+                None => files.push(op.clone()),
+            }
+        }
         let repository = self.location.repository.clone();
         let prefix = self.land_options().branch_prefix;
         let mut name = fresh_name();
@@ -254,8 +267,8 @@ impl ProjectRepo {
         let record = toml::Value::try_from(&record).context("serializing a quick edit")?;
         let written = writer.transact(|tx| {
             tx.set_change(&row)?;
-            if !edit.state.is_empty() {
-                tx.stage(&change_id, &edit.state)?;
+            if !state.is_empty() {
+                tx.stage(&change_id, &state)?;
             }
             tx.kv(QUICK_EDITS_NAMESPACE).put(&change_id, record.clone())
         });
@@ -263,7 +276,7 @@ impl ProjectRepo {
             self.git.branch_delete(&repository, &branch).await.ok();
             return Err(error);
         }
-        for op in &edit.files {
+        for op in &files {
             apply_file_op(&self.location.files, op)?;
         }
         if let Some(grant) = grant {
