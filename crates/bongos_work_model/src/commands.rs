@@ -125,12 +125,6 @@ impl Context {
         self.attestation.is_some()
     }
 
-    /// The old person context, kept until its callers build their context from a
-    /// [`PersonAtKeyboard`]; the caller rename removes it.
-    pub fn kyle() -> Self {
-        Self::new("kyle", now())
-    }
-
     fn entry(&self, event: &str, detail: Option<String>) -> HistoryEntry {
         HistoryEntry {
             at: self.at,
