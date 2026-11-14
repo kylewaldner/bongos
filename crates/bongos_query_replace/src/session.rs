@@ -19,9 +19,7 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use bongos_isearch::engine::Cancel;
-use bongos_query_replace_model::session::{
-    Effect, End, Found, Key, Phase, Reason, Session,
-};
+use bongos_query_replace_model::session::{Effect, End, Found, Key, Phase, Reason, Session};
 use bongos_query_replace_model::template::Template;
 use bongos_query_replace_model::text::{counter, decision_prompt, end_message, help};
 use editor::{Addon, Editor, SelectionEffects, scroll::Autoscroll};
@@ -622,7 +620,8 @@ fn find(state: &Shared, from: usize, window: &mut Window, cx: &mut App) {
     window
         .spawn(cx, async move |cx| {
             let found = task.await;
-            cx.update(|window, cx| landed(&state, found, window, cx)).ok();
+            cx.update(|window, cx| landed(&state, found, window, cx))
+                .ok();
         })
         .detach();
 }

@@ -480,10 +480,7 @@ const QUERY_REPLACE_ACTIONS: [(&str, &str); 12] = [
     ("query_replace::Abort", "query replace: abort"),
     ("query_replace::Yes", "query replace: yes"),
     ("query_replace::No", "query replace: no"),
-    (
-        "query_replace::ThisAndExit",
-        "query replace: this and exit",
-    ),
+    ("query_replace::ThisAndExit", "query replace: this and exit"),
     ("query_replace::Exit", "query replace: exit"),
     ("query_replace::Help", "query replace: help"),
 ];

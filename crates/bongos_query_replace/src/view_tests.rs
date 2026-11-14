@@ -236,7 +236,10 @@ async fn zero_width_matches_are_asked_about_once_each(cx: &mut TestAppContext) {
     scene.select(&[0..0]);
     scene.replace(QueryReplaceRegexp, "^", "> ");
     assert!(scene.view_open());
-    assert_eq!(scene.prompt(), "Query replacing regexp ^ with > : (y/n/!/./,/^/q/?)");
+    assert_eq!(
+        scene.prompt(),
+        "Query replacing regexp ^ with > : (y/n/!/./,/^/q/?)"
+    );
     scene.keys("y");
     scene.keys("y");
     scene.keys("y");

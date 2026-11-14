@@ -257,7 +257,9 @@ async fn query_replace_opens_the_decision_view_on_the_first_match(cx: &mut TestA
     assert_eq!(scene.selections(), vec![5..5]);
     assert_eq!(scene.mark(), Some(0));
     assert!(scene.workspace.read_with(&scene.cx, |workspace, cx| {
-        workspace.active_modal::<crate::view::QueryReplaceView>(cx).is_some()
+        workspace
+            .active_modal::<crate::view::QueryReplaceView>(cx)
+            .is_some()
     }));
 }
 
