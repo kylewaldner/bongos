@@ -435,34 +435,11 @@ fn start_landing(
     .detach();
 }
 
-/// `project: approve`: the outside commit on master once its checks passed, else the working
-/// copy of the current buffer, or one picked. The approval is the person's at this window; a
+/// `project: approve`: the change of the current buffer, else the outside commit on master once
+/// its checks passed, else a change picked. A person in a change's buffer approves that change,
+/// never an outside commit they did not look at. The approval is the person's at this window; a
 /// landing waiting for it goes on.
 fn approve(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    for loaded in open_repos(cx) {
-        let repo = loaded.repo().clone();
-        if let Ok(Some(outside)) = repo.outside_change()
-            && outside.passed
-        {
-            let Some(marker) = keyboard_context(window, cx).take_attestation() else {
-                return;
-            };
-            cx.spawn_in(window, async move |workspace, cx| {
-                let message = match repo.approve_outside(marker).await {
-                    Ok(commit) => format!(
-                        "Approved the outside commit {}",
-                        &commit[..commit.len().min(8)]
-                    ),
-                    Err(error) => format!("{error:#}"),
-                };
-                workspace
-                    .update(cx, |workspace, cx| show_toast(workspace, message, cx))
-                    .log_err();
-            })
-            .detach();
-            return;
-        }
-    }
     if let Some(path) = active_path(workspace, cx) {
         for loaded in open_repos(cx) {
             let repo = loaded.repo().clone();
@@ -476,6 +453,34 @@ fn approve(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Work
             }
         }
     }
+    for loaded in open_repos(cx) {
+        let repo = loaded.repo().clone();
+        if let Ok(Some(outside)) = repo.outside_change()
+            && outside.passed
+        {
+            let Some(marker) = keyboard_context(window, cx).take_attestation() else {
+                return;
+            };
+            cx.spawn_in(window, async move |workspace, cx| {
+                let message = match repo.approve_outside(marker).await {
+                    Ok(commit) => {
+                        let message = format!(
+                            "Approved the outside commit {} on master",
+                            short_commit(&commit)
+                        );
+                        log::info!("{message}");
+                        message
+                    }
+                    Err(error) => format!("{error:#}"),
+                };
+                workspace
+                    .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+                    .log_err();
+            })
+            .detach();
+            return;
+        }
+    }
     pick_working_copy(
         workspace,
         window,
@@ -483,6 +488,11 @@ fn approve(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Work
         "Approve which change?",
         |repo, row, _, window, cx| approve_change(repo, row, window, cx),
     );
+}
+
+/// The first eight hex digits of `commit`.
+fn short_commit(commit: &str) -> &str {
+    &commit[..commit.len().min(8)]
 }
 
 fn approve_change(
@@ -494,7 +504,13 @@ fn approve_change(
     let ctx = keyboard_context(window, cx);
     cx.spawn_in(window, async move |workspace, cx| {
         let message = match repo.approve(&row.change_id, ctx, now()).await {
-            Ok(approval) => format!("Approved {} ({})", row.name, approval.name),
+            Ok(approval) => format!(
+                "Approved change {} on {} at {} ({})",
+                row.change_id,
+                row.branch,
+                short_commit(&approval.commit),
+                approval.name
+            ),
             Err(error) => format!("Approving {} failed: {error:#}", row.name),
         };
         workspace

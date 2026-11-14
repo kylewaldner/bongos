@@ -482,6 +482,105 @@ async fn project_approve_approves_a_change_waiting_for_a_person(cx: &mut TestApp
     );
 }
 
+/// Commits `definitions/documents/<name>` on `main` with plain git, as someone outside bongos.
+async fn commit_outside(repo: &ProjectRepo, name: &str) -> String {
+    let git = repo.git().clone();
+    let repository = repo.location().repository.clone();
+    let scratch = repository.parent().unwrap().join(format!("outside-{name}"));
+    let scratch_text = scratch.to_str().unwrap().to_string();
+    let main = git.rev_parse(&repository, "main").await.unwrap();
+    git.run(
+        &repository,
+        &["worktree", "add", "-q", "--detach", &scratch_text, &main],
+    )
+    .await
+    .unwrap();
+    let document = scratch.join(format!("definitions/documents/{name}"));
+    std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+    std::fs::write(&document, format!("{name}\n")).unwrap();
+    git.run(&scratch, &["add", "-A"]).await.unwrap();
+    git.run(
+        &scratch,
+        &[
+            "-c",
+            "user.name=someone",
+            "-c",
+            "user.email=someone@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "an edit made with git",
+        ],
+    )
+    .await
+    .unwrap();
+    let commit = git.rev_parse(&scratch, "HEAD").await.unwrap();
+    git.run(
+        &repository,
+        &["update-ref", "refs/heads/main", &commit, &main],
+    )
+    .await
+    .unwrap();
+    git.run(
+        &repository,
+        &["worktree", "remove", "--force", &scratch_text],
+    )
+    .await
+    .unwrap();
+    commit
+}
+
+#[gpui::test]
+async fn project_approve_in_a_change_buffer_approves_that_change_and_not_an_outside_commit(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, cx) = fixture(cx).await;
+    let copy = fixture
+        .repo
+        .create_working_copy("agent-plan", "work/", &Author::agent("chat 1"), start())
+        .await
+        .unwrap();
+    let plan = copy.path.join("definitions/plan.md");
+    std::fs::write(&plan, "the agent's plan\n").unwrap();
+    let outside = commit_outside(&fixture.repo, "note.md").await;
+    fixture.repo.check_master().await.unwrap();
+    let pending = fixture.repo.outside_change().unwrap().unwrap();
+    assert_eq!(pending.commit, outside);
+    assert!(pending.passed, "{:?}", pending.problems);
+
+    fixture.open(cx, &plan).await;
+    dispatch(cx, "project::Approve");
+    wait_until(cx, "the approval", |_| {
+        !fixture.repo.approvals(&copy.change_id).unwrap().is_empty()
+    })
+    .await;
+
+    // The outside commit the person did not look at is still waiting for its own approval.
+    assert_eq!(
+        fixture
+            .repo
+            .outside_change()
+            .unwrap()
+            .map(|change| change.commit),
+        Some(outside)
+    );
+    let row = fixture.repo.change(&copy.change_id).unwrap().unwrap();
+    let tip = fixture
+        .repo
+        .git()
+        .rev_parse(
+            &fixture.repo.location().repository,
+            &format!("refs/heads/{}", row.branch),
+        )
+        .await
+        .unwrap();
+    let approvals = fixture.repo.approvals(&copy.change_id).unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].commit, tip);
+}
+
 #[gpui::test]
 async fn moving_an_edit_to_an_existing_copy_with_its_own_edits_asks_first(cx: &mut TestAppContext) {
     let (fixture, cx) = fixture(cx).await;
