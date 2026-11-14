@@ -18,7 +18,7 @@ fn add_existing_tells_a_folder_from_a_remote_address() {
     std::fs::create_dir_all(repository.join(".git")).unwrap();
     let template = "{folder}/repository";
 
-    for path in [project.clone(), repository.clone()] {
+    for path in [project, repository] {
         assert_eq!(
             add_source(path.to_str().unwrap(), template, folder),
             AddExistingSource::Path { path }

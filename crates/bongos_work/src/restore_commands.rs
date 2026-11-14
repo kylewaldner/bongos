@@ -300,7 +300,7 @@ fn ask(
         return;
     }
     let label = preview_label(&preview);
-    let source = preview.source.clone();
+    let source = preview.source;
     modals::pick(
         workspace,
         format!("Replace the live state with the {label}?"),
