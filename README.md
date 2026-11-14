@@ -619,6 +619,68 @@ kotlin-lsp builds are early access and expire about 29 days after build, so bong
 build per release and releases roughly monthly. A new Kotlin build needs a new bongos release. If
 the pinned build has expired, update bongos.
 
+### Kotlin server manifest file
+
+To run a Kotlin server build other than the one pinned in your bongos release (a newer kotlin-lsp
+build, say), put a file named `kotlin-server-manifest.toml` in the config directory, next to
+`settings.json` (`~/.config/bongos/` on Linux). It is optional; bongos reads it at start.
+
+The schema is that of `crates/bongos_kotlin/servers.toml`. There is one table per server,
+`kotlin-lsp` or `intellij`:
+
+- `version`: the build's version.
+- `built` (optional) and `expires`: dates, `YYYY-MM-DD`; `expires` is the last day a kotlin-lsp
+  build runs.
+- `args`: the start arguments (a list of strings).
+- `[<server>.env]`: environment variables for the server.
+- `[<server>.platform.<key>]`, one per platform (`linux-x64`, `linux-arm64`, `macos-arm64`,
+  `macos-x64`): `url`, `sha256`, `archive` (`tar.gz` or `zip`), `strip_components`, `launcher`
+  (the executable inside the archive) and, optionally, `runtime` (a bundled Java, relative to the
+  archive root).
+
+`sha256` is required for every platform, and the download is checked against it before it is
+extracted. An example with two servers:
+
+```toml
+[kotlin-lsp]
+version = "263.9999.0"
+expires = "2026-12-20"
+
+[kotlin-lsp.platform.linux-x64]
+url = "https://download.jetbrains.com/language-server/kotlin-server/263.9999.0/kotlin-server-263.9999.0.tar.gz"
+sha256 = "<64 hex digits>"
+archive = "tar.gz"
+strip_components = 1
+launcher = "bin/intellij-server"
+runtime = "jbr/bin/java"
+
+[intellij]
+version = "2026.1"
+
+[intellij.platform.linux-x64]
+url = "https://example.com/intellij-server-2026.1.tar.gz"
+sha256 = "<64 hex digits>"
+archive = "tar.gz"
+strip_components = 1
+launcher = "bin/intellij-server"
+```
+
+Get a `sha256` by downloading the archive yourself and running `sha256sum kotlin-server.tar.gz`
+(`shasum -a 256` on macOS).
+
+Rules:
+
+- A server table in the file replaces the built-in one whole; omitted `args` and `[<server>.env]`
+  keep the built-in values. A server you leave out keeps its built-in table.
+- A `url` must be `https` (a debug build also accepts loopback `http`), carry no user name or
+  password, and never name `bongos.rocks` or a subdomain of it.
+- In a debug build, `BONGOS_KOTLIN_SERVERS` still wins over this file.
+- A malformed or unreadable file is ignored and the built-in table is used. You see one toast, one
+  line in the Kotlin status menu ("Server manifest ignored: <path>: <error>") and one line in
+  `kotlin.log`.
+
+bongos never contacts bongos.rocks, and it reads nothing from the network to find this file.
+
 ## JetBrains servers and their terms
 
 bongos ships neither Kotlin language server, so the GPL work does not include them. Both come from

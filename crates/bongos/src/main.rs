@@ -522,6 +522,7 @@ fn main() {
                 state_dir: paths::state_dir().clone(),
                 logs_dir: paths::logs_dir().clone(),
                 install_root: paths::languages_dir().join("kotlin"),
+                config_dir: paths::config_dir().clone(),
             },
             cx,
         );
