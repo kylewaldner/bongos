@@ -146,6 +146,12 @@ pub mod project {
             Abandon,
             /// Opens the project repository's definitions, master, in a new window.
             OpenRepository,
+            /// Lands the working copy of the current buffer, or one picked: commits what is
+            /// uncommitted, rebases on master, checks, queues and fast-forwards master.
+            Land,
+            /// Runs the landing checks on the working copy of the current buffer, or one
+            /// picked, without landing it.
+            Check,
         ]
     );
 }

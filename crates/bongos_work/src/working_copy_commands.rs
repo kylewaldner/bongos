@@ -1,17 +1,22 @@
-//! The handlers of `project: edit`, `project: open working copy`, `project: abandon` and
-//! `project: open repository`.
+//! The handlers of `project: edit`, `project: open working copy`, `project: abandon`,
+//! `project: open repository`, `project: land` and `project: check`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use ::project::File as ProjectFile;
 use bongos_project_repo::{
-    ChangeFilter, ChangeRow, ProjectRepo, ProjectRepositorySettings, clean_name, fresh_name,
+    ChangeFilter, ChangeRow, CheckOutcome, LandMode, LandOptions, LandRequest, LandingResult,
+    ProjectRepo, ProjectRepositorySettings, clean_name, fresh_name,
 };
+use bongos_project_repo_model::ChangeMeta;
 use bongos_project_repo_model::layout::DEFINITIONS_DIR;
 use chrono::{DateTime, Utc};
+use editor::Editor;
 use gpui::{AppContext as _, Context, Window};
 use settings::Settings as _;
 use util::ResultExt as _;
-use workspace::{MultiWorkspace, OpenMode, Workspace};
+use workspace::{MultiWorkspace, OpenMode, OpenOptions, Workspace};
 
 use crate::actions::project;
 use crate::commands::{keyboard_author, show_toast};
@@ -32,6 +37,10 @@ pub fn register(workspace: &mut Workspace) {
         .register_action(|w, _: &project::Abandon, window, cx| abandon(w, window, cx))
         .register_action(|w, _: &project::OpenRepository, window, cx| {
             open_repository(w, window, cx)
+        })
+        .register_action(|w, _: &project::Land, window, cx| land(w, LandMode::Land, window, cx))
+        .register_action(|w, _: &project::Check, window, cx| {
+            land(w, LandMode::CheckOnly, window, cx)
         });
 }
 
@@ -248,4 +257,165 @@ fn open_repository(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
     with_repo(workspace, window, cx, |repo, _, window, cx| {
         open_in_new_workspace(repo.location().repository.join(DEFINITIONS_DIR), window, cx);
     });
+}
+
+/// What a landing reads from the `project_repository` settings.
+pub(crate) fn land_options(settings: &ProjectRepositorySettings) -> LandOptions {
+    LandOptions {
+        squash: settings.squash,
+        queue_limit: Duration::from_secs(u64::from(settings.queue_limit_seconds)),
+        keep_landed: settings.keep_landed,
+        branch_prefix: settings.branch_prefix.clone(),
+    }
+}
+
+/// The change among `rows` whose working copy holds `path`.
+pub(crate) fn change_at(repo: &ProjectRepo, rows: &[ChangeRow], path: &Path) -> Option<ChangeRow> {
+    rows.iter()
+        .find(|row| path.starts_with(repo.working_copy_path(&row.name)))
+        .cloned()
+}
+
+/// What a person is told when a landing or a check of the working copy `name` ends.
+pub(crate) fn landing_message(name: &str, result: &LandingResult) -> String {
+    match result {
+        LandingResult::Landed { commit } => {
+            format!("Landed {name} as {}", &commit[..commit.len().min(8)])
+        }
+        LandingResult::Abandoned => format!("{name} was abandoned"),
+        LandingResult::NotRequested => format!("{name} was not requested for landing"),
+        LandingResult::Checked { checks, .. } => {
+            let lines: Vec<String> = checks
+                .iter()
+                .map(|result| match &result.outcome {
+                    CheckOutcome::Pass => format!("{}: pass", result.check),
+                    CheckOutcome::Fail { message } => format!("{}: fail, {message}", result.check),
+                    CheckOutcome::NoVerdict { reason } => {
+                        format!("{}: no verdict, {reason}", result.check)
+                    }
+                })
+                .collect();
+            format!("Checks of {name}: {}", lines.join("; "))
+        }
+        LandingResult::Refused { reasons } => {
+            format!("{name} was not landed: {}", reasons.join("; "))
+        }
+        LandingResult::Conflict { files } => format!(
+            "{name} conflicts with master in {}; resolve the markers and land again",
+            files.join(", ")
+        ),
+        LandingResult::NoVerdict { reason } => format!("{name} is waiting: {reason}"),
+    }
+}
+
+/// The file of the buffer of the active editor.
+fn active_path(workspace: &Workspace, cx: &gpui::App) -> Option<PathBuf> {
+    let editor = workspace.active_item_as::<Editor>(cx)?;
+    let buffer = editor.read(cx).buffer().read(cx).as_singleton()?;
+    let buffer = buffer.read(cx);
+    let file = ProjectFile::from_dyn(buffer.file())?;
+    Some(file.worktree.read(cx).absolutize(&file.path))
+}
+
+/// `project: land` and `project: check`: the working copy of the current buffer, else one picked.
+fn land(
+    workspace: &mut Workspace,
+    mode: LandMode,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if let Some(path) = active_path(workspace, cx) {
+        for loaded in open_repos(cx) {
+            let repo = loaded.repo().clone();
+            let rows = repo
+                .changes(&ChangeFilter::default())
+                .log_err()
+                .unwrap_or_default();
+            if let Some(row) = change_at(&repo, &rows, &path) {
+                ask_and_land(repo, row, mode, workspace, window, cx);
+                return;
+            }
+        }
+    }
+    let placeholder = match mode {
+        LandMode::Land => "Land which working copy?",
+        LandMode::CheckOnly => "Check which working copy?",
+    };
+    pick_working_copy(
+        workspace,
+        window,
+        cx,
+        placeholder,
+        move |repo, row, workspace, window, cx| {
+            ask_and_land(repo, row, mode, workspace, window, cx)
+        },
+    );
+}
+
+/// Asks for the subject of a landing (a check needs none), then lands or checks `row`.
+fn ask_and_land(
+    repo: ProjectRepo,
+    row: ChangeRow,
+    mode: LandMode,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    match mode {
+        LandMode::CheckOnly => start_landing(repo, row, mode, String::new(), window, cx),
+        LandMode::Land => {
+            let initial = format!("Change {}", row.name);
+            modals::ask(
+                workspace,
+                "Subject of the change",
+                &initial,
+                false,
+                Box::new(move |subject, _, window, cx| {
+                    start_landing(repo, row, mode, subject, window, cx)
+                }),
+                window,
+                cx,
+            );
+        }
+    }
+}
+
+fn start_landing(
+    repo: ProjectRepo,
+    row: ChangeRow,
+    mode: LandMode,
+    subject: String,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    repo.set_land_options(land_options(ProjectRepositorySettings::get_global(cx)));
+    let request = LandRequest {
+        meta: ChangeMeta::new(subject, keyboard_author(window, cx)),
+        mode,
+    };
+    let copy = repo.working_copy_path(&row.name);
+    let landing = repo.land(&row.change_id, request, cx);
+    cx.spawn_in(window, async move |workspace, cx| {
+        let message = match landing.await {
+            Ok(result) => {
+                if let LandingResult::Conflict { files } = &result {
+                    for file in files {
+                        let path = copy.join(file);
+                        let opening = workspace.update_in(cx, |workspace, window, cx| {
+                            workspace.open_abs_path(path, OpenOptions::default(), window, cx)
+                        });
+                        if let Ok(opening) = opening {
+                            opening.await.log_err();
+                        }
+                    }
+                }
+                landing_message(&row.name, &result)
+            }
+            Err(error) => format!("Landing {} failed: {error:#}", row.name),
+        };
+        workspace
+            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+            .log_err();
+    })
+    .detach();
 }

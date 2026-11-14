@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bongos_project_repo::{
-    ChangeFilter, ChangeState, LoadedProject, ProjectRepo, ProjectRepositorySettings,
+    ChangeFilter, ChangeState, CheckOutcome, CheckResult, LandingResult, LoadedProject,
+    ProjectRepo, ProjectRepositorySettings,
 };
 use bongos_work_model::Author;
 use chrono::{DateTime, Duration as Days, Utc};
@@ -23,7 +24,7 @@ use crate::command_tests::{dispatch, wait_until};
 use crate::modals::{ChoicePicker, TextPrompt};
 use crate::seam_tests::project_repo;
 use crate::store_tests::canonical;
-use crate::working_copy_commands::working_copy_label;
+use crate::working_copy_commands::{change_at, land_options, landing_message, working_copy_label};
 
 const MASTER_FILE: &str = "definitions/tasks/leaf/task.toml";
 
@@ -376,5 +377,143 @@ fn the_settings_for_working_copies_have_their_defaults(cx: &mut TestAppContext) 
         assert_eq!(settings.branch_prefix, "work/");
         assert!(!settings.keep_landed);
         assert_eq!(settings.stale_after_days, 14);
+        assert!(settings.squash);
+        assert_eq!(settings.queue_limit_seconds, 120);
+        let options = land_options(settings);
+        assert_eq!(options.queue_limit, Duration::from_secs(120));
+        assert!(options.squash && !options.keep_landed);
     });
+}
+
+#[gpui::test]
+async fn project_land_lands_the_working_copy_of_the_current_buffer(cx: &mut TestAppContext) {
+    let (fixture, cx) = fixture(cx).await;
+    let before = fixture.master_bytes();
+    let copy = fixture
+        .repo
+        .create_working_copy("plan-edit", "work/", &Author::agent("tester"), start())
+        .await
+        .unwrap();
+    let plan = copy.path.join("definitions/plan.md");
+    std::fs::write(&plan, "the plan\n").unwrap();
+    fixture.open(cx, &plan).await;
+
+    dispatch(cx, "project::Land");
+    fixture.type_text(cx, "Write the plan").await;
+    let landed = || {
+        matches!(
+            fixture.repo.landing_result(&copy.change_id).unwrap(),
+            Some(LandingResult::Landed { .. })
+        )
+    };
+    wait_until(cx, "the landing", |_| landed()).await;
+    let repository = fixture.repo.location().repository.clone();
+    assert_eq!(
+        std::fs::read_to_string(repository.join("definitions/plan.md")).unwrap(),
+        "the plan\n"
+    );
+    let subject = futures::executor::block_on(
+        fixture
+            .repo
+            .git()
+            .run(&repository, &["log", "-1", "--format=%s", "main"]),
+    )
+    .unwrap();
+    assert_eq!(subject, "Write the plan");
+    // The landed file in master is read-only again; the other master file is unchanged.
+    assert!(
+        std::fs::metadata(repository.join("definitions/plan.md"))
+            .unwrap()
+            .permissions()
+            .readonly()
+    );
+    assert_eq!(fixture.master_bytes(), before);
+}
+
+#[gpui::test]
+async fn moving_an_edit_to_an_existing_copy_with_its_own_edits_asks_first(cx: &mut TestAppContext) {
+    let (fixture, cx) = fixture(cx).await;
+    let existing = fixture
+        .repo
+        .create_working_copy("existing-one", "work/", &Author::agent("tester"), start())
+        .await
+        .unwrap();
+    std::fs::write(existing.path.join(MASTER_FILE), "its own edit\n").unwrap();
+    let editor = fixture.open(cx, &fixture.master).await;
+    edit(&editor, "moved = true\n", cx);
+
+    fixture.pick(cx, "Existing working copy").await;
+    fixture.pick(cx, "existing-one").await;
+    fixture.pick(cx, "Keep it").await;
+    assert_eq!(
+        std::fs::read_to_string(existing.path.join(MASTER_FILE)).unwrap(),
+        "its own edit\n"
+    );
+    assert!(is_dirty(&editor, cx));
+
+    cx.dispatch_action(Save { save_intent: None });
+    cx.run_until_parked();
+    fixture.pick(cx, "Existing working copy").await;
+    fixture.pick(cx, "existing-one").await;
+    fixture.pick(cx, "Replace").await;
+    wait_for_clean(&editor, cx).await;
+    assert_eq!(
+        std::fs::read_to_string(existing.path.join(MASTER_FILE)).unwrap(),
+        "moved = true\n"
+    );
+}
+
+#[test]
+fn a_landing_message_says_how_the_landing_ended() {
+    let landed = LandingResult::Landed {
+        commit: "0123456789abcdef".to_string(),
+    };
+    assert_eq!(landing_message("copy", &landed), "Landed copy as 01234567");
+    let conflict = LandingResult::Conflict {
+        files: vec!["definitions/plan.md".to_string()],
+    };
+    assert!(landing_message("copy", &conflict).contains("definitions/plan.md"));
+    let checked = LandingResult::Checked {
+        tree: "t".to_string(),
+        checks: vec![CheckResult {
+            check: "schema".to_string(),
+            tree: "t".to_string(),
+            stamp: "t".to_string(),
+            outcome: CheckOutcome::Fail {
+                message: "junk.txt".to_string(),
+            },
+        }],
+    };
+    assert_eq!(
+        landing_message("copy", &checked),
+        "Checks of copy: schema: fail, junk.txt"
+    );
+    let waiting = LandingResult::NoVerdict {
+        reason: "waiting: master is split".to_string(),
+    };
+    assert!(landing_message("copy", &waiting).contains("master is split"));
+}
+
+#[test]
+fn the_change_of_a_path_is_the_working_copy_holding_it() {
+    let temp = TempDir::new().unwrap();
+    let repo = project_repo(&temp.path().join("project"));
+    let copy = futures::executor::block_on(repo.create_working_copy(
+        "holder",
+        "work/",
+        &Author::agent("tester"),
+        start(),
+    ))
+    .unwrap();
+    let rows = repo.changes(&ChangeFilter::default()).unwrap();
+    let found = change_at(&repo, &rows, &copy.path.join("definitions/plan.md")).unwrap();
+    assert_eq!(found.change_id, copy.change_id);
+    assert!(
+        change_at(
+            &repo,
+            &rows,
+            &repo.location().repository.join("definitions")
+        )
+        .is_none()
+    );
 }
