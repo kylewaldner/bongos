@@ -88,7 +88,7 @@ fn a_landing_is_one_squashed_commit_with_subject_body_and_trailers() {
         subject: "Add alpha and beta".to_string(),
         body: "Two new leaves.".to_string(),
         notes: "nothing started".to_string(),
-        author: author.clone(),
+        author,
         compatibility: Some(CompatibilityMark {
             safe: true,
             reason: "adds tasks only".to_string(),

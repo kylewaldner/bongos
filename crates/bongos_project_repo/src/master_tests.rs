@@ -257,7 +257,7 @@ fn split_by_outside_commit(repo: &ProjectRepo, remote: &PathBuf) -> (String, Str
     assert_eq!(
         split_event,
         Some(RepoEvent::MasterSplit {
-            change_id: copy.change_id.clone(),
+            change_id: copy.change_id,
             main: outside.clone(),
             verified: new.clone(),
         })
@@ -276,7 +276,7 @@ fn a_live_split_keeps_the_lock_refuses_landings_and_keep_bongos_fast_forwards_to
         (split.main.as_str(), split.verified.as_str()),
         (outside.as_str(), new.as_str())
     );
-    assert_eq!(repo.landing_holder(), Some(split.change_id.clone()));
+    assert_eq!(repo.landing_holder(), Some(split.change_id));
     assert_eq!(verified(&repo).as_deref(), Some(new.as_str()));
     assert_eq!(main_commit(&repo), outside);
     let status = block_on(repo.check_master()).unwrap();
