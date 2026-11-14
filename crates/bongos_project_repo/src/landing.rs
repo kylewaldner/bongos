@@ -3,7 +3,9 @@
 //! 1. Commit what is uncommitted in the working copy. 2. Drop earlier amend commits and rebase
 //! on the verified commit; a conflict stops here. 3. Run the amending checks (`amending.rs`),
 //! then the built-in checks and the before-queue checks on the final tree (`check_run.rs`); a
-//! failure refuses and a no verdict leaves the change waiting. 5. Enter the project's FIFO
+//! failure refuses and a no verdict leaves the change waiting. 4. Wait, outside the queue and
+//! its lock, until check 9 approves the change (`approval.rs`); it is judged again in the queue
+//! on the tree that lands. 5. Enter the project's FIFO
 //! landing queue; its head holds `flock` on `state/landing.lock`. 6. Re-verify master; when an
 //! earlier landing moved it, rebase (a change with amend commits goes back to step 2 first). A
 //! before-queue or amending check whose stamp differs on the tree now sends the change back to
