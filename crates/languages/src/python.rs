@@ -3363,7 +3363,10 @@ mod tests {
             fixture(fixture_name, &project);
             let mut env = HashMap::default();
             env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
-            env.insert("PATH".to_string(), empty_path.to_string_lossy().into_owned());
+            env.insert(
+                "PATH".to_string(),
+                empty_path.to_string_lossy().into_owned(),
+            );
             Sandbox {
                 _dir: dir,
                 home,
@@ -3555,9 +3558,11 @@ mod tests {
                     .map(|adapter| adapter.name().to_string())
                     .collect::<Vec<_>>();
                 for server in ["basedpyright", "ruff"] {
-                    assert!(registered.iter().any(|name| name == server), "{registered:?}");
+                    assert!(
+                        registered.iter().any(|name| name == server),
+                        "{registered:?}"
+                    );
                 }
-
             });
 
             let defaults: Value = serde_json_lenient::from_str(&settings::default_settings())
