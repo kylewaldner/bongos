@@ -5,6 +5,7 @@
 
 mod change_record;
 pub mod checks;
+pub mod convert;
 mod definitions;
 pub mod layout;
 mod split;
@@ -28,6 +29,8 @@ pub use summary::{ChangeSummary, EdgeChange, EdgeKind, FileChange, summarize};
 mod change_record_tests;
 #[cfg(test)]
 mod checks_tests;
+#[cfg(test)]
+mod convert_tests;
 #[cfg(test)]
 mod definitions_tests;
 #[cfg(test)]
