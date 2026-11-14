@@ -107,3 +107,7 @@ script/bongos/lib.sh bongos.rocks
 script/bongos/lib.sh bongos\.rocks
 # OpenRouter attribution header: the string is sent to openrouter.ai as HTTP-Referer, bongos.rocks itself is never contacted
 crates/open_router/src/open_router.rs bongos.rocks
+# The user Kotlin server manifest refuses download URLs on bongos.rocks; the strings are the refused host and test URLs, never contacted
+crates/bongos_kotlin/src/manifest.rs bongos.rocks
+crates/bongos_kotlin/src/manifest.rs www.bongos.rocks
+crates/bongos_kotlin/src/manifest.rs notbongos.rocks

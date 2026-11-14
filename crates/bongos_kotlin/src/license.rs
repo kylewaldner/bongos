@@ -1320,6 +1320,7 @@ mod tests {
             state_dir: root.join("state"),
             logs_dir: root.join("logs"),
             install_root: root.join("languages"),
+            config_dir: root.join("config"),
         }
     }
 
