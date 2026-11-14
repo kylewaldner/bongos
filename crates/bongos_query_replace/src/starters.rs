@@ -2,7 +2,8 @@
 //! `replace-string` and `replace-regexp`. Each refuses a read-only buffer, keeps only the primary
 //! cursor (and its region), asks for the strings, and searches from point or within the region.
 //! With no match the echo area says `Nothing to replace`; with one the mark is pushed where the
-//! command started, so popping the mark returns there.
+//! command started, so popping the mark returns there. The interactive commands then open the
+//! decision view on the first match; the other two replace every match.
 
 use std::ops::Range;
 
@@ -14,7 +15,7 @@ use bongos_query_replace_model::case::preserves_case;
 use bongos_query_replace_model::session::{Effect, Session};
 use bongos_query_replace_model::template;
 use bongos_query_replace_model::text::end_message;
-use editor::{Editor, SelectionEffects, scroll::Autoscroll};
+use editor::{Editor, SelectionEffects};
 use gpui::{Action, App, Entity, WeakEntity, Window};
 use multi_buffer::{Anchor, MultiBufferOffset, ToOffset as _};
 
@@ -22,7 +23,7 @@ use crate::actions::{QueryReplace, QueryReplaceRegexp, ReplaceRegexp, ReplaceStr
 use crate::edits::READ_ONLY;
 use crate::engine;
 use crate::prompts::{self, Answer, Mode};
-use crate::session::{BatchRequest, batch_running, run_batch};
+use crate::session::{BatchRequest, InteractiveRequest, batch_running, open, run_batch};
 
 /// Registers the starters on every editor.
 pub(crate) fn init(cx: &mut App) {
@@ -200,17 +201,24 @@ fn answered(
     push_mark(editor, Some(origin.point), false, window, cx);
 
     if mode.interactive {
-        // Asking about each match is not built yet: the command shows the first match and stops.
-        let range = snapshot.anchor_after(MultiBufferOffset(first.range.start))
-            ..snapshot.anchor_before(MultiBufferOffset(first.range.end));
-        editor.update(cx, |editor, cx| {
-            editor.change_selections(
-                SelectionEffects::scroll(Autoscroll::fit()),
+        let workspace = editor.read(cx).workspace();
+        if let Some(workspace) = workspace {
+            open(
+                editor,
+                &workspace,
+                InteractiveRequest {
+                    query,
+                    scope,
+                    first,
+                    preserve_case,
+                    template,
+                    from: answer.from,
+                    regexp: answer.regexp,
+                },
                 window,
                 cx,
-                |s| s.select_anchor_ranges([range]),
-            )
-        });
+            );
+        }
         return;
     }
     run_batch(

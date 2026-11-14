@@ -11,6 +11,7 @@ pub mod engine;
 pub mod prompts;
 pub mod session;
 pub mod starters;
+pub mod view;
 
 #[cfg(test)]
 mod commands_tests;
@@ -20,6 +21,8 @@ mod edits_tests;
 mod engine_tests;
 #[cfg(test)]
 mod prompts_tests;
+#[cfg(test)]
+mod view_tests;
 
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::App;

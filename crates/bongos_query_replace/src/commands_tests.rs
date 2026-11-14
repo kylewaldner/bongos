@@ -24,16 +24,16 @@ use crate::actions::{QueryReplace, ReplaceRegexp, ReplaceString};
 use crate::engine::SCAN_CHUNK;
 use crate::session::batch_running;
 
-type Messages = Rc<RefCell<Vec<String>>>;
+pub(crate) type Messages = Rc<RefCell<Vec<String>>>;
 
-struct Scene {
-    workspace: Entity<Workspace>,
-    editor: Entity<Editor>,
-    messages: Messages,
-    cx: VisualTestContext,
+pub(crate) struct Scene {
+    pub(crate) workspace: Entity<Workspace>,
+    pub(crate) editor: Entity<Editor>,
+    pub(crate) messages: Messages,
+    pub(crate) cx: VisualTestContext,
 }
 
-async fn scene(text: &str, cx: &mut TestAppContext) -> Scene {
+pub(crate) async fn scene(text: &str, cx: &mut TestAppContext) -> Scene {
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
         command_palette_hooks::init(cx);
@@ -87,7 +87,7 @@ async fn scene(text: &str, cx: &mut TestAppContext) -> Scene {
 }
 
 impl Scene {
-    fn select(&mut self, ranges: &[Range<usize>]) {
+    pub(crate) fn select(&mut self, ranges: &[Range<usize>]) {
         self.editor.update_in(&mut self.cx, |editor, window, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {
                 s.select_ranges(
@@ -100,13 +100,13 @@ impl Scene {
         self.cx.run_until_parked();
     }
 
-    fn text(&mut self) -> String {
+    pub(crate) fn text(&mut self) -> String {
         self.editor
             .read_with(&self.cx, |editor, cx| editor.text(cx))
     }
 
     /// The selections as offsets, oldest first.
-    fn selections(&mut self) -> Vec<Range<usize>> {
+    pub(crate) fn selections(&mut self) -> Vec<Range<usize>> {
         self.editor.update(&mut self.cx, |editor, cx| {
             let display = editor.display_snapshot(cx);
             editor
@@ -118,7 +118,7 @@ impl Scene {
         })
     }
 
-    fn mark(&mut self) -> Option<usize> {
+    pub(crate) fn mark(&mut self) -> Option<usize> {
         let editor = self.editor.clone();
         self.cx.update(|_, cx| {
             let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
@@ -126,23 +126,23 @@ impl Scene {
         })
     }
 
-    fn prompt_open(&mut self) -> bool {
+    pub(crate) fn prompt_open(&mut self) -> bool {
         self.workspace.read_with(&self.cx, |workspace, cx| {
             workspace.active_modal::<SessionView>(cx).is_some()
         })
     }
 
-    fn messages(&self) -> Vec<String> {
+    pub(crate) fn messages(&self) -> Vec<String> {
         self.messages.borrow().clone()
     }
 
-    fn type_answer(&mut self, text: &str) {
+    pub(crate) fn type_answer(&mut self, text: &str) {
         self.cx.simulate_input(text);
         self.cx.run_until_parked();
     }
 
     /// Runs `action` and answers both prompts.
-    fn replace(&mut self, action: impl gpui::Action, from: &str, to: &str) {
+    pub(crate) fn replace(&mut self, action: impl gpui::Action, from: &str, to: &str) {
         self.cx.dispatch_action(action);
         assert!(self.prompt_open(), "the FROM prompt opens");
         self.type_answer(from);
@@ -152,7 +152,7 @@ impl Scene {
         self.cx.run_until_parked();
     }
 
-    fn undo(&mut self) {
+    pub(crate) fn undo(&mut self) {
         self.editor.update_in(&mut self.cx, |editor, window, cx| {
             editor.undo(&editor::actions::Undo, window, cx)
         });
@@ -248,13 +248,17 @@ async fn no_match_says_nothing_to_replace_and_pushes_no_mark(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-async fn query_replace_stops_at_the_first_match(cx: &mut TestAppContext) {
+async fn query_replace_opens_the_decision_view_on_the_first_match(cx: &mut TestAppContext) {
     let mut scene = scene("x foo foo\n", cx).await;
     scene.select(&[0..0]);
     scene.replace(QueryReplace, "foo", "bar");
     assert_eq!(scene.text(), "x foo foo\n");
-    assert_eq!(scene.selections(), vec![2..5]);
+    // The cursor is at the end of the match, with no selection.
+    assert_eq!(scene.selections(), vec![5..5]);
     assert_eq!(scene.mark(), Some(0));
+    assert!(scene.workspace.read_with(&scene.cx, |workspace, cx| {
+        workspace.active_modal::<crate::view::QueryReplaceView>(cx).is_some()
+    }));
 }
 
 #[gpui::test]
