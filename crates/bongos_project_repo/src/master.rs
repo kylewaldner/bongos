@@ -332,6 +332,9 @@ impl ProjectRepo {
         self.sweep_amending_scratch().await;
         self.sweep_pins();
         let Some(in_flight) = self.in_flight()? else {
+            // The files a finished landing could not move are tried again.
+            self.run_landing_file_ops(&writer)
+                .context("a landed change")?;
             return Ok(Recovery::Nothing);
         };
         self.complete_in_flight(&writer, &in_flight).await
@@ -401,6 +404,9 @@ impl ProjectRepo {
         in_flight: &InFlight,
     ) -> Result<Recovery> {
         let repository = &self.location.repository;
+        // The landing's files moved after its state transaction; a crash may have kept them.
+        // One that fails again stays recorded, and the recovery ends with its error.
+        let files = self.run_landing_file_ops(writer);
         match self
             .move_main(repository, &in_flight.commit, &in_flight.old)
             .await
@@ -432,6 +438,7 @@ impl ProjectRepo {
             self.remove_working_copy(&row).await;
         }
         self.push_main().await;
+        files.with_context(|| format!("the landing of {}", in_flight.change_id))?;
         Ok(Recovery::Completed {
             commit: in_flight.commit.clone(),
         })

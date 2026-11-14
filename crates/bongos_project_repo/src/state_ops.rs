@@ -24,6 +24,24 @@ pub enum StateOp {
         from_task: TaskId,
         to_task: TaskId,
     },
+    /// Moves files (relative to the files root, `<task id>/...`) from one place to another when
+    /// the change lands: a split's chats, for one. The state transaction does not touch them;
+    /// the landing checks them first and moves them right after it, and its recovery moves them
+    /// again if it was interrupted.
+    MoveFiles {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+    },
+    /// An empty `prompts.txt` in a new task's files folder, made when the change lands.
+    CreatePrompts {
+        task: TaskId,
+    },
+    /// Writes a file (relative to the files root: a task's artifacts or a link) when the change
+    /// lands, as [`StateOp::MoveFiles`] moves one.
+    WriteFile {
+        path: std::path::PathBuf,
+        bytes: Vec<u8>,
+    },
     /// Sets one field of a task's state record, only if it still holds `expected`; `None` is an
     /// absent field. Only the fields in [`SETTABLE_FIELDS`] can be set: todos and history have
     /// their own ops.
@@ -141,6 +159,7 @@ fn apply_one(tx: &mut StateTx, op: &StateOp, notes: &mut Vec<String>) -> Result<
             tx.set_task(from_task, from)?;
             tx.set_task(to_task, to)?;
         }
+        StateOp::MoveFiles { .. } | StateOp::CreatePrompts { .. } | StateOp::WriteFile { .. } => {}
         StateOp::Set {
             task,
             field,

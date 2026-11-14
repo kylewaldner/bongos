@@ -47,6 +47,7 @@ use crate::git::{CommitId, DEFAULT_IDENTITY_EMAIL, Identity, RebaseOutcome, Tree
 use crate::landing_queue::{Holder, LandingLock, LockRefused, QueueSlot};
 use crate::loader::load_definition_tree;
 use crate::master::MasterStatus;
+use crate::router::{check_file_op, run_file_ops, staged_file_ops};
 use crate::state::StateWriter;
 use bongos_work_model::commands::Context as WorkContext;
 
@@ -82,6 +83,9 @@ pub(crate) const REF_MOVE_BACKOFF: [Duration; 3] = [
 
 /// The `meta` key of the landing between its state transaction and its ref move.
 pub(crate) const LANDING_IN_FLIGHT_KEY: &str = "landing_in_flight";
+/// The file ops of landed changes not yet made: those of the landing in flight, and any that
+/// failed after a landing. The recovery makes them again.
+pub(crate) const LANDING_FILE_MOVES_KEY: &str = "landing_file_moves";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -194,6 +198,12 @@ pub(crate) struct InFlight {
     pub(crate) change_id: String,
     pub(crate) commit: String,
     pub(crate) old: String,
+}
+
+/// The file ops of a landing, as kept for its recovery.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct LandingFiles {
+    pub(crate) ops: Vec<crate::router::FileOp>,
 }
 
 /// Waits `pause` before git is tried again. Only a ref move that failed (and the resolution of a
@@ -506,7 +516,14 @@ impl ProjectRepo {
             ChangeState::Open | ChangeState::Requested => {}
         }
         let path = self.working_copy_path(&row.name);
-        if !path.is_dir() {
+        // A quick edit has only its branch: the landing checks it out.
+        if !path.is_dir()
+            && (!self
+                .git
+                .branch_exists(&self.location.repository, &row.branch)
+                .await
+                || self.check_out_change(change_id).await.is_err())
+        {
             return Ok(LandingResult::NoVerdict {
                 reason: format!("the working copy {} is not checked out", row.name),
             });
@@ -1005,6 +1022,15 @@ impl ProjectRepo {
         let staged = writer
             .read(|read| read.staged(&change_id))?
             .unwrap_or_default();
+        let moves = staged_file_ops(&staged);
+        if let Err(error) = moves
+            .iter()
+            .try_for_each(|op| check_file_op(&self.location.files, op))
+        {
+            return Ok(LandingResult::Refused {
+                reasons: vec![format!("{error:#}")],
+            });
+        }
         let in_flight = InFlight {
             change_id: change_id.clone(),
             commit: new.to_string(),
@@ -1060,6 +1086,17 @@ impl ProjectRepo {
             tx.set_verified_commit(new, definitions.clone())?;
             tx.set_change(&landed)?;
             tx.set_meta(LANDING_IN_FLIGHT_KEY, &in_flight_text)?;
+            if !moves.is_empty() {
+                // After those an earlier landing could not make, which are tried again.
+                let mut kept = tx
+                    .meta(LANDING_FILE_MOVES_KEY)?
+                    .and_then(|text| toml::from_str::<LandingFiles>(&text).ok())
+                    .unwrap_or_default();
+                kept.ops.extend(moves.iter().cloned());
+                let text =
+                    toml::to_string(&kept).context("serializing the file moves of the landing")?;
+                tx.set_meta(LANDING_FILE_MOVES_KEY, &text)?;
+            }
             tx.queue_remove(&change_id)?;
             Ok(None)
         });
@@ -1084,6 +1121,11 @@ impl ProjectRepo {
         {
             slot.keep();
             bail!(SIMULATED_CRASH);
+        }
+        // The files follow the state, before the ref; a crash before this moves them in the
+        // recovery, and those that fail stay recorded for it.
+        if let Err(error) = self.run_landing_file_ops(writer) {
+            log::error!("{change_id} landed, but {error:#}");
         }
         self.probe(ProbePoint::BeforeRefMove, &change_id).await;
         // From here the state says landed, so nothing returns an error: what fails is logged
@@ -1126,6 +1168,42 @@ impl ProjectRepo {
         Ok(LandingResult::Landed {
             commit: new.to_string(),
         })
+    }
+
+    /// Makes the file ops recorded for the landings (under [`LANDING_FILE_MOVES_KEY`]), and
+    /// clears the record of those made. Those that fail stay recorded, for the recovery at the
+    /// next open to try again, and the error names them.
+    pub(crate) fn run_landing_file_ops(&self, writer: &StateWriter) -> Result<()> {
+        let Some(text) = writer.read(|read| read.meta(LANDING_FILE_MOVES_KEY))? else {
+            return Ok(());
+        };
+        let recorded: LandingFiles =
+            toml::from_str(&text).context("reading the file moves of a landing")?;
+        let failed = run_file_ops(&self.location.files, &recorded.ops);
+        let kept = LandingFiles {
+            ops: failed.iter().map(|(op, _)| op.clone()).collect(),
+        };
+        let kept_text = toml::to_string(&kept).context("serializing the file moves kept")?;
+        writer.transact(|tx| {
+            // Only while the record is the one read: a landing that recorded more meanwhile
+            // keeps its own.
+            if tx.meta(LANDING_FILE_MOVES_KEY)?.as_deref() == Some(text.as_str()) {
+                if kept.ops.is_empty() {
+                    tx.delete_meta(LANDING_FILE_MOVES_KEY)?;
+                } else {
+                    tx.set_meta(LANDING_FILE_MOVES_KEY, &kept_text)?;
+                }
+            }
+            Ok(())
+        })?;
+        if !failed.is_empty() {
+            let reasons: Vec<String> = failed.into_iter().map(|(_, error)| error).collect();
+            bail!(
+                "its files could not be moved, and the recovery tries again: {}",
+                reasons.join("; ")
+            );
+        }
+        Ok(())
     }
 
     /// Moves `main` from `old` to `new` by compare-and-swap. A failure while `main` still is

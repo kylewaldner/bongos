@@ -6,7 +6,7 @@
 //! approve` from a verified window.
 
 use anyhow::{Result, anyhow};
-use bongos_project_repo_model::Author;
+use bongos_project_repo_model::{Author, AuthorKind};
 use chrono::{DateTime, Utc};
 
 use crate::approval::{NEEDS_A_WINDOW, PersonGrant};
@@ -88,6 +88,31 @@ impl HostBoundary {
                     .land_granted(&change_id, request, grant, now)
                     .await?;
                 Ok(RepoReply::Done)
+            }
+            RepoCommand::QuickEdit { mut edit, person } => {
+                edit.meta.author = as_received(&edit.meta.author)?;
+                // As in-process: only a person's own edit is a person's edit. A claim sent with
+                // an agent's, a workflow's or an unattributed edit approves nothing.
+                let person = person.filter(|_| {
+                    matches!(
+                        edit.meta.author.kind(),
+                        AuthorKind::Person | AuthorKind::PersonClaimed
+                    )
+                });
+                let grant = grant(person, peer);
+                let started = self.repo.start_quick_edit(edit, grant, now).await?;
+                let repo = self.repo.clone();
+                let change_id = started.change_id.clone();
+                // The landing runs on; the caller hears of it through the landing events.
+                smol::spawn(async move {
+                    if let Err(error) = repo.land_quick_edit(&change_id, Utc::now()).await {
+                        log::error!("landing the quick edit {change_id}: {error:#}");
+                    }
+                })
+                .detach();
+                Ok(RepoReply::Started {
+                    change_id: started.change_id,
+                })
             }
         }
     }

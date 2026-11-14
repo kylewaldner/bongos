@@ -21,12 +21,14 @@ use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{
     ProjectFile, TaskFile, TaskId, new_id, serialize_artifacts, serialize_link, serialize_project,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::state::StateWriter;
 use crate::state_ops::{SETTABLE_FIELDS, StateOp, move_work, work_of};
 
 /// A change to the files of `definitions/`, relative to it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DefinitionOp {
     Write {
         path: RelPath,
@@ -43,7 +45,8 @@ pub enum DefinitionOp {
 }
 
 /// A change in the files folders, relative to the files root (`<task id>/...`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FileOp {
     Write {
         path: PathBuf,
@@ -118,13 +121,31 @@ impl Places {
         Ok(join_folder(&place.folder, rest))
     }
 
-    /// The path under the files root a path maps to: `<id>/<rest>`.
+    /// The path under the files root a path maps to: `<id>/<rest>`. A path that would leave
+    /// the task's files folder (a `..` part) is refused.
     fn files_path(&self, path: &Path) -> Result<PathBuf, String> {
         let (place, rest) = self
             .owner(path)
             .ok_or_else(|| format!("{} is not in a new-format project", path.display()))?;
+        if !is_plain(rest) || !is_plain(Path::new(&place.id)) {
+            return Err(format!("{} is not a files path", path.display()));
+        }
         Ok(Path::new(&place.id).join(rest))
     }
+}
+
+/// Whether `path` is relative and has only plain parts (no `..`, `.` or root).
+pub(crate) fn is_plain(path: &Path) -> bool {
+    path.components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+/// `folder` (relative to `definitions/`) as a definitions path, refused when it is empty or
+/// leaves `definitions/`.
+fn checked_folder(folder: String) -> Result<String, String> {
+    RelPath::new(folder.clone())
+        .map(|_| folder.clone())
+        .ok_or_else(|| format!("{folder} is not a definitions folder"))
 }
 
 fn join_folder(folder: &str, rest: &Path) -> String {
@@ -276,8 +297,8 @@ pub fn route(tree: &WorkTree, change: &Change) -> Result<Routed, String> {
             .and_then(|task| task.definition.as_ref());
         match task_folder {
             Some(from) => {
-                let from = from.to_string_lossy().into_owned();
-                let to = places.folder_of(&moved.to)?;
+                let from = checked_folder(from.to_string_lossy().into_owned())?;
+                let to = checked_folder(places.folder_of(&moved.to)?)?;
                 if from != to {
                     definition.push(DefinitionOp::Move { from, to });
                 }
@@ -300,7 +321,7 @@ pub fn route(tree: &WorkTree, change: &Change) -> Result<Routed, String> {
     })
 }
 
-fn project_of<'a>(tree: &'a WorkTree, dir: &Path) -> Option<&'a ProjectFile> {
+pub(crate) fn project_of<'a>(tree: &'a WorkTree, dir: &Path) -> Option<&'a ProjectFile> {
     tree.projects
         .iter()
         .find(|project| project.task.dir == dir)
@@ -467,7 +488,93 @@ pub fn apply_state_only(
     Ok(())
 }
 
-fn apply_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
+/// The file ops among staged `ops`, which wait for the landing.
+pub(crate) fn staged_file_ops(ops: &[StateOp]) -> Vec<FileOp> {
+    ops.iter()
+        .filter_map(|op| match op {
+            StateOp::MoveFiles { from, to } => Some(FileOp::Move {
+                from: from.clone(),
+                to: to.clone(),
+            }),
+            StateOp::CreatePrompts { task } => Some(FileOp::CreatePrompts { task: task.clone() }),
+            StateOp::WriteFile { path, bytes } => Some(FileOp::Write {
+                path: path.clone(),
+                bytes: bytes.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The staged op that waits for the landing to make `op`.
+pub(crate) fn staged_file_op(op: &FileOp) -> StateOp {
+    match op {
+        FileOp::Move { from, to } => StateOp::MoveFiles {
+            from: from.clone(),
+            to: to.clone(),
+        },
+        FileOp::CreatePrompts { task } => StateOp::CreatePrompts { task: task.clone() },
+        FileOp::Write { path, bytes } => StateOp::WriteFile {
+            path: path.clone(),
+            bytes: bytes.clone(),
+        },
+    }
+}
+
+/// Refuses a move of files that would leave the files root (a `..` part, an absolute path) or
+/// overwrite what is at the destination. A source that is not there is not refused: there is
+/// nothing to move (or the move was done).
+pub(crate) fn check_file_move(files_root: &Path, from: &Path, to: &Path) -> Result<()> {
+    if !is_plain(from) || !is_plain(to) || from.as_os_str().is_empty() || to.as_os_str().is_empty()
+    {
+        anyhow::bail!(
+            "{} to {} is not a move inside the files folders",
+            from.display(),
+            to.display()
+        );
+    }
+    if files_root.join(from).symlink_metadata().is_ok()
+        && files_root.join(to).symlink_metadata().is_ok()
+    {
+        anyhow::bail!("{} already exists", to.display());
+    }
+    Ok(())
+}
+
+/// Refuses a file op that waits for a landing when it would leave the files root or overwrite.
+pub(crate) fn check_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
+    match op {
+        FileOp::Move { from, to } => check_file_move(files_root, from, to),
+        FileOp::CreatePrompts { task } => {
+            let path = Path::new(task);
+            if !is_plain(path) || path.components().count() != 1 {
+                anyhow::bail!("{task} is not a task id");
+            }
+            Ok(())
+        }
+        FileOp::Write { path, .. } => {
+            if !is_plain(path) || path.as_os_str().is_empty() {
+                anyhow::bail!("{} is not a files path", path.display());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Makes each op of `ops` that passes [`check_file_op`], one at a time: one that fails does not
+/// stop the others. Returns the ops that failed, each with why. Running it again changes nothing.
+pub(crate) fn run_file_ops(files_root: &Path, ops: &[FileOp]) -> Vec<(FileOp, String)> {
+    ops.iter()
+        .filter_map(|op| {
+            check_file_op(files_root, op)
+                .and_then(|()| apply_file_op(files_root, op))
+                .err()
+                .map(|error| (op.clone(), format!("{error:#}")))
+        })
+        .collect()
+}
+
+pub(crate) fn apply_file_op(files_root: &Path, op: &FileOp) -> Result<()> {
     match op {
         FileOp::Write { path, bytes } => {
             let path = files_root.join(path);

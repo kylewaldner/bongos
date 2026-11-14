@@ -165,11 +165,15 @@ impl ProjectRepo {
         self.join_with_state(&definitions)
     }
 
-    /// `definitions` joined with one consistent read of the state.
+    /// `definitions` joined with one consistent read of the state, with the pending mark of
+    /// every task an open quick edit changes.
     pub fn join_with_state(&self, definitions: &DefinitionTree) -> Result<WorkTree> {
         let files = self.location.files.clone();
-        self.state_or_error()?
-            .read(|read| Ok(work_tree_from(definitions, read, &files)))
+        self.state_or_error()?.read(|read| {
+            let mut tree = work_tree_from(definitions, read, &files);
+            crate::quick_edit::mark_pending(&mut tree, read)?;
+            Ok(tree)
+        })
     }
 }
 
@@ -200,6 +204,11 @@ impl LoadedProject {
 
     pub fn definitions(&self) -> Arc<DefinitionTree> {
         self.shown.lock().1.clone()
+    }
+
+    /// The loaded commit and its definitions, read together.
+    pub fn shown(&self) -> (Option<CommitId>, Arc<DefinitionTree>) {
+        self.shown.lock().clone()
     }
 
     /// Loads the definitions of the commit to show when it differs from the loaded one, and

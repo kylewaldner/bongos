@@ -10,7 +10,7 @@ use bongos_project_repo::{
     Git, Identity, LoadedProject, Location, MAIN_BRANCH, ProjectRepo, ProjectRepositorySettings,
     StateApplyHooks, StateHandle, StateStore,
 };
-use bongos_work_model::commands::{self, Change, Context, NewTask};
+use bongos_work_model::commands::{self, Change, Context};
 use bongos_work_model::layout;
 use bongos_work_model::store::{Project, Task as WorkTask, WorkTree};
 use bongos_work_model::{Kind, PersonAtKeyboard, Status, TaskFile};
@@ -20,7 +20,6 @@ use parking_lot::Mutex;
 use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
 
-use crate::project_repos::LANDING_UNAVAILABLE;
 use crate::store::NO_DEFINITION_WRITER;
 use crate::store_tests::{canonical, project_toml, set_enabled, task_toml, write};
 use crate::{
@@ -450,21 +449,21 @@ async fn a_project_repository_serves_its_tasks_and_applies_state_only_writes(
     );
     assert_eq!(refs(), refs_before);
 
-    // A change to definitions needs a landing.
-    let error = store
+    // A change to definitions is a quick edit: a branch and a landing, the task shown pending,
+    // master untouched until it lands. Unattributed, it waits for project: approve.
+    let outcome = store
         .update(cx, |store, cx| {
-            store.write(
+            store.write_outcome(
                 ctx(),
                 |tree, ctx| {
-                    commands::new_child(
+                    commands::edit(
                         tree,
                         ctx,
-                        "g1",
-                        NewTask {
-                            goal: "Another".to_string(),
-                            kind: Some(Kind::Other),
+                        "r1",
+                        commands::TaskEdit {
+                            goal: Some("Renamed leaf".to_string()),
+                            kind: None,
                             repository: None,
-                            todos: None,
                         },
                     )
                 },
@@ -472,7 +471,27 @@ async fn a_project_repository_serves_its_tasks_and_applies_state_only_writes(
             )
         })
         .await
-        .unwrap_err();
-    assert_eq!(error, WriteError::Refused(LANDING_UNAVAILABLE.to_string()));
-    assert_eq!(refs(), refs_before);
+        .unwrap();
+    let WriteOutcome::Landing { change_id, .. } = outcome else {
+        panic!("expected a landing, got {outcome:?}");
+    };
+    let tree = store.read_with(cx, |store, _| store.snapshot().unwrap());
+    let leaf = tree.task_by_id("r1").unwrap();
+    assert_eq!(leaf.goal(), "Repo leaf");
+    let pending = leaf.pending.clone().expect("the leaf is pending");
+    assert_eq!(pending.change_id, change_id);
+    assert_eq!(pending.label, bongos_project_repo::LANDING_MARK);
+    // The row shows the mark as a chip.
+    let chips = cx.update(|cx| crate::RowChipsRegistry::chips("r1", cx));
+    assert_eq!(chips, [gpui::SharedString::from("landing")]);
+    let main = || {
+        futures::executor::block_on(
+            repo.git()
+                .rev_parse(&repo.location().repository, "refs/heads/main"),
+        )
+        .unwrap()
+    };
+    assert!(refs_before.contains(&main()));
+    let row = repo.change(&change_id).unwrap().unwrap();
+    assert!(refs().contains(&format!("refs/heads/{}", row.branch)));
 }
