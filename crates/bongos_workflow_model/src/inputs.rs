@@ -8,10 +8,9 @@
 //! with no value is `missing`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use bongos_work_model::artifacts::task_artifacts;
-use bongos_work_model::layout::{PLAN_FILE, TASKS_DIR};
+use bongos_work_model::layout::PLAN_FILE;
 use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{TaskFile, Visibility};
 use serde::{Deserialize, Serialize};
@@ -158,11 +157,8 @@ fn plan(task: &Task, tree: &WorkTree) -> Option<String> {
     None
 }
 
-/// A nested task lives in `<parent>/tasks/<slug>/`.
+/// The task above `task` in the tree: right for both folder layouts, since it follows `children`
+/// and not the folder a task is in.
 fn parent<'a>(task: &Task, tree: &'a WorkTree) -> Option<&'a Task> {
-    let tasks_dir = task.dir.parent()?;
-    if tasks_dir.file_name()? != TASKS_DIR {
-        return None;
-    }
-    tree.task_by_dir(tasks_dir.parent().unwrap_or(Path::new("")))
+    tree.parent_of(task.id()?)
 }
