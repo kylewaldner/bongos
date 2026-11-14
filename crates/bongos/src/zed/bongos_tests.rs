@@ -454,6 +454,40 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+/// The `query_replace` commands, with the palette text of each.
+const QUERY_REPLACE_ACTIONS: [(&str, &str); 2] = [
+    ("query_replace::ToggleCase", "query replace: toggle case"),
+    (
+        "query_replace::QuotedInsert",
+        "query replace: quoted insert",
+    ),
+];
+
+#[gpui::test]
+async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in QUERY_REPLACE_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        let names = cx
+            .all_action_names()
+            .iter()
+            .filter(|name| name.starts_with("query_replace::"))
+            .count();
+        assert_eq!(names, QUERY_REPLACE_ACTIONS.len());
+        assert!(
+            cx.build_action("query_replace::ToggleCase", None)
+                .unwrap()
+                .partial_eq(&bongos_query_replace::actions::ToggleCase)
+        );
+    });
+}
+
 /// The `emacs` commands, with the palette text of each.
 const EMACS_ACTIONS: [(&str, &str); 49] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),

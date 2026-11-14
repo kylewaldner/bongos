@@ -2603,6 +2603,7 @@ version = "0.1.0"
 dependencies = [
  "bongos_isearch",
  "bongos_isearch_model",
+ "bongos_minibuffer",
  "bongos_query_replace_model",
  "buffer_diff",
  "command_palette_hooks",
@@ -2616,6 +2617,8 @@ dependencies = [
  "settings",
  "theme",
  "theme_settings",
+ "workspace",
+ "zed_actions",
 ]
 
 [[package]]

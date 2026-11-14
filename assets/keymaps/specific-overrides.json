@@ -125,4 +125,14 @@
       "escape": "minibuffer::Cancel",
     },
   },
+  // The query replace prompts (the `QueryReplacePrompt` context). Without `Minibuffer`, so the
+  // keys also hold when the prompt opens centered. They are deeper than the Emacs `Editor` rows
+  // (`alt-c`, capitalize word) and the default `ctrl-q` (quit).
+  {
+    "context": "QueryReplacePrompt > Editor",
+    "bindings": {
+      "alt-c": "query_replace::ToggleCase",
+      "ctrl-q": "query_replace::QuotedInsert",
+    },
+  },
 ]
