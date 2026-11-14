@@ -167,6 +167,7 @@ bongos_chat.workspace = true
 bongos_emacs.workspace = true
 bongos_isearch.workspace = true
 bongos_kotlin.workspace = true
+bongos_language_status.workspace = true
 bongos_languages.workspace = true
 bongos_linear.workspace = true
 bongos_minibuffer.workspace = true

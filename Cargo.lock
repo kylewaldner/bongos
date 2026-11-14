@@ -2051,6 +2051,7 @@ dependencies = [
  "bongos_emacs",
  "bongos_isearch",
  "bongos_kotlin",
+ "bongos_language_status",
  "bongos_languages",
  "bongos_linear",
  "bongos_minibuffer",
@@ -2408,6 +2409,30 @@ dependencies = [
  "workspace",
  "worktree",
  "zed_actions",
+]
+
+[[package]]
+name = "bongos_language_status"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "log",
+ "lsp",
+ "project",
+ "proto",
+ "serde_json",
+ "settings",
+ "tempfile",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]

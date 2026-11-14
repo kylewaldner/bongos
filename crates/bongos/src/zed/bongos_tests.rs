@@ -218,6 +218,37 @@ async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn language_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let cases: [(&str, Box<dyn gpui::Action>, &str); 3] = [
+            (
+                "languages::ShowLogs",
+                Box::new(bongos_language_status::ShowLogs),
+                "languages: show logs",
+            ),
+            (
+                "languages::RetryServer",
+                Box::new(bongos_language_status::RetryServer),
+                "languages: retry server",
+            ),
+            (
+                "languages::CancelDownload",
+                Box::new(bongos_language_status::CancelDownload),
+                "languages: cancel download",
+            ),
+        ];
+        for (name, expected, humanized) in cases {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert!(action.partial_eq(expected.as_ref()), "{name}");
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+    });
+}
+
+#[gpui::test]
 async fn cursor_toggle_style_dispatches_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     cx.update(|cx| {
