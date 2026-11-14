@@ -161,6 +161,8 @@ pub(crate) enum Phase {
     Import,
     Rename,
     LocationRecord,
+    /// After the location record is written, as when only syncing its folder fails.
+    AfterLocationRecord,
 }
 
 /// The test seams of a conversion.
@@ -953,6 +955,10 @@ pub(crate) async fn convert_with(
 ) -> Result<ConvertedProject, ConvertError> {
     let old_dir = source.old_dir();
     let _claim = claim_conversion(&old_dir)?;
+    // What another command recorded since the caller loaded the record counts.
+    locations
+        .reload()
+        .map_err(|error| ConvertError::Failed(error.into()))?;
     if let Some(location) = locations.converted_from(&old_dir) {
         return Err(ConvertError::AlreadyConverted {
             old: old_dir,
@@ -972,6 +978,14 @@ pub(crate) async fn convert_with(
     }
     let projects_dir = options.projects_dir;
     let destination = destination(source, &plan, projects_dir, locations)?;
+    if let Some(orphan) = unrecorded_folder(projects_dir, &plan.slug, locations) {
+        log::warn!(
+            "{} is in the projects folder but no location record names it; it may be left by a \
+             conversion stopped before it recorded the project. Add it with project: add \
+             existing, or remove it",
+            orphan.display()
+        );
+    }
     let summary = plan.summary();
 
     let made_projects_dir = std::fs::symlink_metadata(projects_dir).is_err();
@@ -1026,6 +1040,22 @@ pub(crate) async fn convert_with(
         location.folder.display()
     );
     Ok(ConvertedProject { location, summary })
+}
+
+/// The folder `<projects_dir>/<slug>` when it exists and no location record names it, as a
+/// conversion stopped between moving its folder into place and recording it leaves.
+pub(crate) fn unrecorded_folder(
+    projects_dir: &Path,
+    slug: &str,
+    locations: &RepositoryLocations,
+) -> Option<PathBuf> {
+    let folder = projects_dir.join(slug);
+    let is_dir = std::fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.is_dir());
+    let recorded = locations
+        .locations()
+        .iter()
+        .any(|location| same_path(&location.folder, &folder));
+    (is_dir && !recorded).then_some(folder)
 }
 
 fn resolve(template: &str, folder: &Path) -> PathBuf {
@@ -1188,6 +1218,20 @@ async fn execute(
         converted_from: Some(plan.old_dir.clone()),
     };
     seams.check(Phase::LocationRecord)?;
-    locations.record(location.clone())?;
+    let recorded = locations
+        .record(location.clone())
+        .map_err(anyhow::Error::from)
+        .and_then(|()| seams.check(Phase::AfterLocationRecord));
+    if let Err(error) = recorded {
+        // The write may have reached the disk though it failed (syncing the folder after the
+        // rename): take the entry out again, since the caller removes the folder it names.
+        if let Err(forget_error) = locations.forget(&location) {
+            log::warn!(
+                "removing the location record of {} after a failed conversion: {forget_error}",
+                location.folder.display()
+            );
+        }
+        return Err(error);
+    }
     Ok(location)
 }

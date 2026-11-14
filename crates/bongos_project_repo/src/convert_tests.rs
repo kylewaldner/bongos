@@ -15,7 +15,7 @@ use futures::executor::block_on;
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
-use crate::convert::{Phase, Seams, TempLock, claim_conversion, convert_with};
+use crate::convert::{Phase, Seams, TempLock, claim_conversion, convert_with, unrecorded_folder};
 use crate::test_support::git;
 use crate::{
     CONVERSION_COMMIT_MESSAGE, ConversionPreview, ConvertError, ConvertOptions, LayoutTemplates,
@@ -395,6 +395,7 @@ fn a_failure_at_any_phase_leaves_nothing_and_the_old_folder_untouched() {
         Phase::Import,
         Phase::Rename,
         Phase::LocationRecord,
+        Phase::AfterLocationRecord,
     ] {
         let world = World::new();
         write_fixture(&world);
@@ -419,10 +420,12 @@ fn a_failure_at_any_phase_leaves_nothing_and_the_old_folder_untouched() {
         );
         assert!(locations.locations().is_empty(), "{phase:?}");
         assert!(world.locations().locations().is_empty(), "{phase:?}");
-        assert!(
-            !world.dir.path().join("locations.toml").exists(),
-            "{phase:?}"
-        );
+        if phase != Phase::AfterLocationRecord {
+            assert!(
+                !world.dir.path().join("locations.toml").exists(),
+                "{phase:?}"
+            );
+        }
         assert_eq!(world.hook_calls(), 0, "{phase:?}");
 
         // Nothing stands in the way of converting again.
@@ -758,11 +761,48 @@ fn a_taken_folder_name_gives_the_next_free_one() {
     ))
     .unwrap();
     assert_eq!(converted.location.folder, expected);
+    // The folder in the way is named as one no record knows, as one left by a stopped
+    // conversion would be.
+    let taken = world.projects_dir().join("invoicing");
+    assert_eq!(
+        unrecorded_folder(&world.projects_dir(), "invoicing", &world.locations()),
+        Some(taken)
+    );
+    assert_eq!(
+        unrecorded_folder(&world.projects_dir(), "invoicing-2", &world.locations()),
+        None
+    );
     assert_eq!(
         std::fs::read_dir(world.projects_dir().join("invoicing"))
             .unwrap()
             .count(),
         0
+    );
+}
+
+#[test]
+fn a_location_written_while_converting_is_kept() {
+    let world = World::new();
+    write_fixture(&world);
+    let tree = world.load();
+    // The conversion's copy of the record is loaded before another command records a project.
+    let mut stale = world.locations();
+    let mut other = world.locations();
+    let made = crate::test_support::location(&world.dir);
+    other.record(made.clone()).unwrap();
+    let converted = block_on(convert(
+        &the_project(&tree),
+        world.options(),
+        &mut stale,
+        &git(),
+        ids(),
+    ))
+    .unwrap();
+    let reread = world.locations();
+    assert_eq!(reread.location(&made.id), Some(&made));
+    assert_eq!(
+        reread.location(&converted.location.id),
+        Some(&converted.location)
     );
 }
 
