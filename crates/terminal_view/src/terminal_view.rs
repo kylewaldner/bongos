@@ -5,7 +5,7 @@ mod terminal_path_like_target;
 pub mod terminal_scrollbar;
 
 use editor::{
-    Editor, EditorSettings, actions::SelectAll, blink_manager::BlinkManager,
+    Editor, EditorSettings, actions::SelectAll, blink_manager::BlinkManager, kill_ring,
     ui_scrollbar_settings_from_raw,
 };
 use gpui::{
@@ -873,6 +873,7 @@ impl TerminalView {
 
     ///Attempt to paste the clipboard into the terminal
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        capture_clipboard_if_opted_in(cx);
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
@@ -907,6 +908,7 @@ impl TerminalView {
 
     ///Attempt to paste the clipboard text into the terminal
     fn paste_text(&mut self, _: &PasteText, _: &mut Window, cx: &mut Context<Self>) {
+        capture_clipboard_if_opted_in(cx);
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
@@ -1195,10 +1197,32 @@ fn subscribe_for_terminal_events(
                     window.invalidate_character_coordinates();
                     cx.emit(SearchEvent::ActiveMatchChanged)
                 }
+                Event::ClipboardWritten(text) => record_clipboard_write(text, cx),
             }
         },
     );
     vec![terminal_subscription, terminal_events_subscription]
+}
+
+/// Records text the terminal wrote to the clipboard. Opted in with
+/// `emacs.terminal_uses_kill_ring`, the text becomes the newest kill ring
+/// entry; otherwise the ring stays as it was and the text is marked ignored,
+/// so the next yank in an editor does not capture it.
+fn record_clipboard_write(text: &str, cx: &mut App) {
+    if EditorSettings::get_global(cx).terminal_uses_kill_ring {
+        kill_ring::push_plain_text(text.to_string(), cx);
+    } else {
+        kill_ring::ignore_clipboard_text(text, cx);
+    }
+}
+
+/// Before a terminal paste opted in with `emacs.terminal_uses_kill_ring`,
+/// captures the clipboard into the kill ring as a yank would. Not opted in, a
+/// paste leaves the ring alone.
+fn capture_clipboard_if_opted_in(cx: &mut App) {
+    if EditorSettings::get_global(cx).terminal_uses_kill_ring {
+        kill_ring::capture_clipboard(cx);
+    }
 }
 
 fn regex_search_for_query(query: &SearchQuery) -> Option<Search> {
@@ -2282,6 +2306,136 @@ mod tests {
             vec![SHIFT_UP_ESCAPE.to_vec()],
             "shift-up should be forwarded to the program in the alternate screen",
         );
+    }
+
+    fn set_terminal_uses_kill_ring(on: bool, cx: &mut App) {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.emacs.get_or_insert_default().terminal_uses_kill_ring = Some(on);
+            })
+        });
+    }
+
+    fn newest_kill(cx: &App) -> Option<String> {
+        kill_ring::read(cx)
+            .and_then(|ring| ring.newest())
+            .map(|entry| entry.text.clone())
+    }
+
+    /// Opens a terminal view with the kill ring setting at `on` and one older
+    /// entry on the ring.
+    async fn kill_ring_terminal(
+        on: bool,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Terminal>, VisualTestContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        let (_pane, terminal, _terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+        cx.update(|cx| {
+            set_terminal_uses_kill_ring(on, cx);
+            kill_ring::push_plain_text("older".to_string(), cx);
+        });
+        let cx = VisualTestContext::from_window(window_handle.into(), cx);
+        (terminal, cx)
+    }
+
+    /// Copies the terminal's whole content and returns the copied text.
+    fn copy_terminal_selection(terminal: &Entity<Terminal>, cx: &mut VisualTestContext) -> String {
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(b"copied", cx);
+                terminal.select_all();
+                terminal.copy(Some(true));
+                terminal.sync(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        let text = text.expect("the copy writes the clipboard");
+        assert!(text.contains("copied"), "copied {text:?}");
+        text
+    }
+
+    fn store_from_program(terminal: &Entity<Terminal>, cx: &mut VisualTestContext) {
+        terminal.update(cx, |terminal, cx| {
+            terminal.simulate_clipboard_store("stored".to_string(), cx);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn terminal_copy_leaves_the_kill_ring_alone_by_default(cx: &mut TestAppContext) {
+        let (terminal, mut cx) = kill_ring_terminal(false, cx).await;
+        let generation = cx.update(|_, cx| kill_ring::generation(cx));
+        copy_terminal_selection(&terminal, &mut cx);
+        cx.update(|_, cx| {
+            assert_eq!(kill_ring::generation(cx), generation);
+            assert_eq!(newest_kill(cx).as_deref(), Some("older"));
+            assert!(!kill_ring::capture_clipboard(cx), "the copy is ignored");
+            assert_eq!(newest_kill(cx).as_deref(), Some("older"));
+        });
+    }
+
+    #[gpui::test]
+    async fn terminal_copy_pushes_onto_the_kill_ring_when_opted_in(cx: &mut TestAppContext) {
+        let (terminal, mut cx) = kill_ring_terminal(true, cx).await;
+        let copied = copy_terminal_selection(&terminal, &mut cx);
+        cx.update(|_, cx| assert_eq!(newest_kill(cx), Some(copied)));
+    }
+
+    #[gpui::test]
+    async fn program_clipboard_store_leaves_the_kill_ring_alone_by_default(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, mut cx) = kill_ring_terminal(false, cx).await;
+        let generation = cx.update(|_, cx| kill_ring::generation(cx));
+        store_from_program(&terminal, &mut cx);
+        cx.update(|_, cx| {
+            let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+            assert_eq!(clipboard.as_deref(), Some("stored"));
+            assert_eq!(kill_ring::generation(cx), generation);
+            assert!(!kill_ring::capture_clipboard(cx), "the store is ignored");
+            assert_eq!(newest_kill(cx).as_deref(), Some("older"));
+        });
+    }
+
+    #[gpui::test]
+    async fn program_clipboard_store_pushes_onto_the_kill_ring_when_opted_in(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, mut cx) = kill_ring_terminal(true, cx).await;
+        store_from_program(&terminal, &mut cx);
+        cx.update(|_, cx| assert_eq!(newest_kill(cx).as_deref(), Some("stored")));
+    }
+
+    fn paste_outside_text(terminal: &Entity<Terminal>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("outside".to_string()));
+            terminal.update(cx, |terminal, _| terminal.take_input_log());
+            window.dispatch_action(Box::new(Paste), cx);
+        });
+        cx.run_until_parked();
+        let input_log = terminal.update(cx, |terminal, _| terminal.take_input_log());
+        assert_eq!(input_log, vec![b"outside".to_vec()]);
+    }
+
+    #[gpui::test]
+    async fn terminal_paste_leaves_the_kill_ring_alone_by_default(cx: &mut TestAppContext) {
+        let (terminal, mut cx) = kill_ring_terminal(false, cx).await;
+        let generation = cx.update(|_, cx| kill_ring::generation(cx));
+        paste_outside_text(&terminal, &mut cx);
+        cx.update(|_, cx| {
+            assert_eq!(kill_ring::generation(cx), generation);
+            assert_eq!(newest_kill(cx).as_deref(), Some("older"));
+        });
+    }
+
+    #[gpui::test]
+    async fn terminal_paste_captures_the_clipboard_when_opted_in(cx: &mut TestAppContext) {
+        let (terminal, mut cx) = kill_ring_terminal(true, cx).await;
+        paste_outside_text(&terminal, &mut cx);
+        cx.update(|_, cx| assert_eq!(newest_kill(cx).as_deref(), Some("outside")));
     }
 
     // Working directory calculation tests
