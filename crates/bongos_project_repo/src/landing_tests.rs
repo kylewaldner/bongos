@@ -930,3 +930,233 @@ fn edits_typed_while_a_landing_waits_for_a_split_master_are_never_discarded() {
     );
     assert_eq!(std::fs::read_to_string(&typed).unwrap(), "my notes\n");
 }
+
+/// An amending check that writes the stamp, and while it runs the person types `typed` into the
+/// working copy.
+struct TypingCheck {
+    typed: PathBuf,
+}
+
+impl AmendingCheck for TypingCheck {
+    fn name(&self) -> &str {
+        "stamp"
+    }
+
+    fn stamp_paths(&self) -> Vec<String> {
+        vec!["stamp.txt".to_string()]
+    }
+
+    fn amend(&self, writable: &Path) -> BoxFuture<'static, AmendOutcome> {
+        if !self.typed.exists() {
+            std::fs::create_dir_all(self.typed.parent().unwrap()).unwrap();
+            std::fs::write(&self.typed, "mine\n").unwrap();
+        }
+        StampCheck.amend(writable)
+    }
+}
+
+fn land_typing_into(file: &str) {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let typed = copy.path.join("definitions").join(file);
+    repo.add_amending_check(Arc::new(TypingCheck {
+        typed: typed.clone(),
+    }));
+    let old = main_commit(&repo);
+    assert_eq!(
+        land(&repo, &copy, &author),
+        LandingResult::NoVerdict {
+            reason: crate::UNSAVED_EDITS.to_string()
+        },
+        "{file}"
+    );
+    assert_eq!(main_commit(&repo), old);
+    // What the person typed is still there, uncommitted.
+    assert_eq!(std::fs::read_to_string(&typed).unwrap(), "mine\n", "{file}");
+    let status = block_on(repo.git().run(
+        &copy.path,
+        &["status", "--porcelain", "--untracked-files=all"],
+    ))
+    .unwrap();
+    assert!(status.contains(file), "{file}: {status}");
+    // No scratch copy is left behind.
+    assert!(
+        !repo
+            .location()
+            .state
+            .join("amending/amber-otter-0001")
+            .exists()
+    );
+}
+
+#[test]
+fn edits_typed_while_an_amending_check_runs_are_neither_committed_nor_discarded() {
+    // A file the check does not write: the amend commit goes in beside it.
+    land_typing_into("documents/mine.md");
+    // The file the check writes: the working copy keeps the person's version.
+    land_typing_into("stamp.txt");
+}
+
+#[test]
+fn a_ref_move_held_up_by_a_git_lock_lands_once_the_lock_is_gone() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let author = person();
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let lock = repo.location().repository.join(".git/refs/heads/main.lock");
+    {
+        let lock = lock.clone();
+        repo.set_probe(Arc::new(move |point, _| {
+            if point == ProbePoint::BeforeRefMove {
+                std::fs::write(&lock, "").unwrap();
+                let lock = lock.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    std::fs::remove_file(&lock).unwrap();
+                });
+            }
+            async { false }.boxed()
+        }));
+    }
+    let commit = landed(land(&repo, &copy, &author));
+    assert_eq!(main_commit(&repo), commit);
+    assert!(repo.landing_holder().is_none());
+    assert_eq!(
+        repo.state()
+            .unwrap()
+            .read(|read| read.meta(crate::landing::LANDING_IN_FLIGHT_KEY))
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_ref_move_that_never_got_through_is_finished_by_the_next_master_check() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let author = person();
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let old = main_commit(&repo);
+    let lock = repo.location().repository.join(".git/refs/heads/main.lock");
+    {
+        let lock = lock.clone();
+        let first = copy.change_id.clone();
+        repo.set_probe(Arc::new(move |point, change| {
+            if point == ProbePoint::BeforeRefMove && change == first {
+                std::fs::write(&lock, "").unwrap();
+            }
+            async { false }.boxed()
+        }));
+    }
+    // The state says landed; the lock is let go and the marker stays.
+    let commit = landed(land(&repo, &copy, &author));
+    assert_eq!(main_commit(&repo), old);
+    assert!(repo.landing_holder().is_none());
+    let marker = || {
+        repo.state()
+            .unwrap()
+            .read(|read| read.meta(crate::landing::LANDING_IN_FLIGHT_KEY))
+            .unwrap()
+    };
+    assert!(marker().is_some());
+
+    // Once git lets go of `main`, the next master check (the ref watch, or the next landing)
+    // finishes the move.
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(
+        block_on(repo.check_master()).unwrap(),
+        crate::MasterStatus::Clean
+    );
+    assert_eq!(main_commit(&repo), commit);
+    assert_eq!(marker(), None);
+    let next = new_copy(&repo, "calm-heron-0002", &author);
+    add_task(&next, "beta", "b1");
+    let next_commit = landed(land(&repo, &next, &author));
+    assert_eq!(main_commit(&repo), next_commit);
+}
+
+#[test]
+fn a_marker_left_after_the_ref_moved_is_cleared_by_the_next_master_check() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let author = person();
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let old = main_commit(&repo);
+    let commit = landed(land(&repo, &copy, &author));
+    // As when the transaction that clears the marker failed.
+    let in_flight = toml::to_string(&crate::landing::InFlight {
+        change_id: copy.change_id.clone(),
+        commit: commit.clone(),
+        old,
+    })
+    .unwrap();
+    let writer = repo.writer_or_error().unwrap();
+    writer
+        .transact(|tx| tx.set_meta(crate::landing::LANDING_IN_FLIGHT_KEY, &in_flight))
+        .unwrap();
+    assert_eq!(
+        block_on(repo.check_master()).unwrap(),
+        crate::MasterStatus::Clean
+    );
+    assert_eq!(
+        writer
+            .read(|read| read.meta(crate::landing::LANDING_IN_FLIGHT_KEY))
+            .unwrap(),
+        None
+    );
+    assert_eq!(main_commit(&repo), commit);
+}
+
+#[test]
+fn an_abandon_just_before_the_state_transaction_is_refused_and_one_already_committed_wins() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let old = main_commit(&repo);
+    let seen = Arc::new(Mutex::new(None));
+    {
+        let repo_in_probe = repo.clone();
+        let seen = seen.clone();
+        repo.set_probe(Arc::new(move |point, change| {
+            let repo = repo_in_probe.clone();
+            let seen = seen.clone();
+            async move {
+                if point == ProbePoint::BeforeStateTransaction {
+                    // The change holds the lock: `abandon` refuses.
+                    let refused = repo.abandon_now(&change, start()).await;
+                    *seen.lock() = Some(format!("{refused:?}"));
+                    // An abandon that committed anyway (from the row it read before the lock)
+                    // is seen by the transaction, which reads the row again.
+                    let mut row = repo.change(&change).unwrap().unwrap();
+                    row.state = ChangeState::Abandoned;
+                    repo.writer_or_error()
+                        .unwrap()
+                        .transact(|tx| tx.set_change(&row))
+                        .unwrap();
+                }
+                false
+            }
+            .boxed()
+        }));
+    }
+    assert_eq!(land(&repo, &copy, &author), LandingResult::Abandoned);
+    assert_eq!(seen.lock().as_deref(), Some("Err(Landing)"));
+    assert_eq!(main_commit(&repo), old);
+    assert_eq!(verified(&repo), None);
+    assert!(repo.landing_holder().is_none());
+    assert_eq!(
+        repo.state()
+            .unwrap()
+            .read(|read| read.meta(crate::landing::LANDING_IN_FLIGHT_KEY))
+            .unwrap(),
+        None
+    );
+}

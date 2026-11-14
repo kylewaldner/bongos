@@ -333,6 +333,25 @@ impl Git {
         Ok(())
     }
 
+    /// Adds a worktree at `path` with `commit` checked out and no branch.
+    pub async fn worktree_add_detached(
+        &self,
+        repository: &Path,
+        path: &Path,
+        commit: &str,
+    ) -> Result<(), GitError> {
+        let args = vec![
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("-q"),
+            OsString::from("--detach"),
+            path.as_os_str().to_owned(),
+            OsString::from(commit),
+        ];
+        self.run_os(repository, args).await?;
+        Ok(())
+    }
+
     /// Removes the worktree at `path`, with whatever is uncommitted in it, and forgets worktrees
     /// whose folder is gone.
     pub async fn worktree_remove(&self, repository: &Path, path: &Path) -> Result<(), GitError> {
@@ -622,15 +641,6 @@ impl Git {
     pub async fn reset_keep(&self, directory: &Path, commit: &str) -> Result<(), GitError> {
         self.run(directory, &["reset", "-q", "--keep", commit])
             .await?;
-        Ok(())
-    }
-
-    /// Throws away every uncommitted change in the checkout at `directory`, untracked files
-    /// included.
-    pub async fn discard_changes(&self, directory: &Path) -> Result<(), GitError> {
-        self.run(directory, &["reset", "-q", "--hard", "HEAD"])
-            .await?;
-        self.run(directory, &["clean", "-fdq"]).await?;
         Ok(())
     }
 

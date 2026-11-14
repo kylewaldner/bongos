@@ -1,7 +1,8 @@
 //! The landing transaction: a working copy's change becomes the next commit of master.
 //!
 //! 1. Commit what is uncommitted in the working copy. 2. Drop earlier amend commits and rebase
-//! on the verified commit; a conflict stops here. 3. Run the amending checks. 5. Enter the
+//! on the verified commit; a conflict stops here. 3. Run the amending checks, in a scratch copy
+//! of the working copy's commit, and fast-forward the working copy to their commits. 5. Enter the
 //! project's FIFO landing queue; its head holds `flock` on `state/landing.lock`. 6. Re-verify
 //! master; when an earlier landing moved it, rebase (a change with amend commits goes back to
 //! step 2 and re-enters at the back), then run the deterministic checks on the rebased tree.
@@ -49,8 +50,16 @@ pub const UNSAVED_EDITS: &str = "working copy has unsaved edits";
 /// Why a second `land` or `check` of a change waits while the first still runs.
 pub const ALREADY_LANDING: &str = "the change is already being landed or checked";
 
-/// How many times the move of `main` is tried while it still is the old commit.
-const REF_MOVE_ATTEMPTS: usize = 3;
+/// The folder under `state/` that holds the scratch copies the amending checks run in.
+const AMENDING_SCRATCH_DIR: &str = "amending";
+
+/// The pauses between the tries of the move of `main` while it still is the old commit, so a
+/// lock file another git holds for a moment is gone by the next try.
+pub(crate) const REF_MOVE_BACKOFF: [Duration; 3] = [
+    Duration::from_millis(50),
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+];
 
 /// The `meta` key of the landing between its state transaction and its ref move.
 pub(crate) const LANDING_IN_FLIGHT_KEY: &str = "landing_in_flight";
@@ -218,8 +227,16 @@ pub(crate) struct InFlight {
     pub(crate) old: String,
 }
 
+/// Waits `pause` before git is tried again. The landing engine holds no gpui executor and runs
+/// on whatever drives its futures (the tests use `block_on`), so it waits on the reactor's timer;
+/// only a ref move that failed reaches it.
+#[allow(clippy::disallowed_methods)]
+pub(crate) async fn backoff(pause: Duration) {
+    smol::Timer::after(pause).await;
+}
+
 /// What the compare-and-swap of `main` ended as.
-enum RefMove {
+pub(crate) enum RefMove {
     Moved,
     /// `main` is an outside commit.
     Split {
@@ -248,6 +265,7 @@ pub(crate) struct LandingRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProbePoint {
     InQueue,
+    BeforeStateTransaction,
     AfterStateTransaction,
     BeforeRefMove,
     AfterRefMove,
@@ -801,33 +819,79 @@ impl ProjectRepo {
         path: &Path,
     ) -> Result<Option<String>> {
         let checks = self.engine.amending.lock().clone();
+        if checks.is_empty() {
+            return Ok(None);
+        }
+        // The checks run in a scratch copy of the working copy's commit, never in the working
+        // copy: what the person types while a check runs is neither committed nor discarded.
+        let scratch = self
+            .location
+            .state
+            .join(AMENDING_SCRATCH_DIR)
+            .join(&row.name);
+        self.remove_scratch(path, &scratch).await?;
+        if let Some(parent) = scratch.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let result = self
+            .amend_in_scratch(writer, row, path, &scratch, checks)
+            .await;
+        if let Err(error) = self.remove_scratch(path, &scratch).await {
+            log::error!("removing the amending scratch copy: {error:#}");
+        }
+        result
+    }
+
+    async fn remove_scratch(&self, path: &Path, scratch: &Path) -> Result<()> {
+        if scratch.exists() {
+            self.git.worktree_remove(path, scratch).await?;
+        }
+        Ok(())
+    }
+
+    async fn amend_in_scratch(
+        &self,
+        writer: &StateWriter,
+        row: &mut ChangeRow,
+        path: &Path,
+        scratch: &Path,
+        checks: Vec<Arc<dyn AmendingCheck>>,
+    ) -> Result<Option<String>> {
+        if !self.git.is_clean(path).await? {
+            return Ok(Some(UNSAVED_EDITS.to_string()));
+        }
+        let mut head = self.git.rev_parse(path, "HEAD").await?;
+        self.git.worktree_add_detached(path, scratch, &head).await?;
         for check in checks {
             let mut amended = false;
             loop {
-                // A check only ever writes into a clean tree, so what it leaves behind is its
-                // own: the amend commit takes nothing else, and a discard loses nothing else.
-                if !self.git.is_clean(path).await? {
-                    return Ok(Some(UNSAVED_EDITS.to_string()));
-                }
-                match check.amend(path).await {
+                match check.amend(scratch).await {
                     AmendOutcome::Unchanged => break,
                     AmendOutcome::NoVerdict { reason } => {
-                        self.git.discard_changes(path).await?;
                         return Ok(Some(format!("{}: {reason}", check.name())));
                     }
                     AmendOutcome::Amended { message } => {
                         if amended {
-                            self.git.discard_changes(path).await?;
                             return Ok(Some(format!("{}: check keeps amending", check.name())));
                         }
                         let subject = format!("amend: {} {message}", check.name());
                         let Some(commit) = self
                             .git
-                            .commit_if_dirty(path, &subject, &Identity::default())
+                            .commit_if_dirty(scratch, &subject, &Identity::default())
                             .await?
                         else {
                             break;
                         };
+                        // The working copy follows only when the person committed nothing
+                        // meanwhile and edited no file the amend commit changes; `--keep`
+                        // leaves their other edits as they are.
+                        if self.git.rev_parse(path, "HEAD").await? != head
+                            || self.git.reset_keep(path, &commit).await.is_err()
+                        {
+                            return Ok(Some(UNSAVED_EDITS.to_string()));
+                        }
+                        head = commit.clone();
                         row.amend_commits.push(AmendCommit {
                             commit,
                             check: check.name().to_string(),
@@ -837,6 +901,10 @@ impl ProjectRepo {
                     }
                 }
             }
+        }
+        // Edits typed while the checks ran are still in the working copy, uncommitted.
+        if !self.git.is_clean(path).await? {
+            return Ok(Some(UNSAVED_EDITS.to_string()));
         }
         Ok(None)
     }
@@ -941,6 +1009,8 @@ impl ProjectRepo {
         landed.state = ChangeState::Landed;
         landed.commit = Some(new.to_string());
         landed.updated = now;
+        self.probe(ProbePoint::BeforeStateTransaction, &change_id)
+            .await;
         let transaction = writer.transact_with(&meta.author, &staged, |tx| {
             // Read again inside the transaction: an abandon that committed first wins.
             let current = tx.change(&change_id)?;
@@ -1025,10 +1095,11 @@ impl ProjectRepo {
                 });
             }
             RefMove::Unknown(error) => {
-                // `main` could not be read: the marker of the landing in flight stays, and
-                // the lock with it, so nothing lands on top until the next open completes it.
+                // The marker of the landing in flight stays and the lock is released: the
+                // next `check_master` (the ref watch, or the next landing's step 6) finishes
+                // the move, and nothing lands on top before it did.
                 log::error!("moving master to {new} for {change_id}: {error}");
-                slot.keep();
+                drop(slot);
                 return Ok(LandingResult::Landed {
                     commit: new.to_string(),
                 });
@@ -1050,10 +1121,14 @@ impl ProjectRepo {
     }
 
     /// Moves `main` from `old` to `new` by compare-and-swap. A failure while `main` still is
-    /// `old` (a lock file another git left for a moment) is tried again.
-    async fn move_main(&self, repository: &Path, new: &str, old: &str) -> RefMove {
+    /// `old` (a lock file another git holds for a moment) is tried again after a pause.
+    pub(crate) async fn move_main(&self, repository: &Path, new: &str, old: &str) -> RefMove {
         let mut last = String::new();
-        for _ in 0..REF_MOVE_ATTEMPTS {
+        let pauses = std::iter::once(None).chain(REF_MOVE_BACKOFF.into_iter().map(Some));
+        for pause in pauses {
+            if let Some(pause) = pause {
+                backoff(pause).await;
+            }
             let error = match self
                 .git
                 .update_ref_cas(repository, MAIN_REF, new, old)
@@ -1074,7 +1149,8 @@ impl ProjectRepo {
 
     /// After the ref moved: the checkout follows, its files are read-only again, and the
     /// marker of the landing in flight (and of a split master) is cleared.
-    /// The marker is cleared even when the checkout could not be updated: `main` moved.
+    /// The marker is cleared even when the checkout could not be updated: `main` moved. When
+    /// clearing it fails, the next `check_master` clears it.
     pub(crate) async fn finish_checkout(&self, writer: &StateWriter) -> Result<()> {
         if let Err(error) = self.git.update_checkout(&self.location.repository).await {
             log::error!("updating the checkout of master: {error}");

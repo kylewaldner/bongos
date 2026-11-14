@@ -115,9 +115,17 @@ impl ProjectRepo {
     /// The commit the Work view shows: the verified commit, or before one is recorded the
     /// commit that created the project (made by bongos itself, it needs no checks). A commit
     /// made on `main` outside bongos before the first landing is therefore an outside commit.
+    /// A project made before the creation commit was recorded falls back to the root of the
+    /// first-parent history of `main`.
     pub async fn shown_commit(&self) -> Result<CommitId> {
         if let Some(commit) = self.verified_commit()? {
             return Ok(commit);
+        }
+        if let Some(commit) = self
+            .state_or_error()?
+            .read(|read| read.meta(crate::create::CREATION_COMMIT_KEY))?
+        {
+            return Ok(CommitId(commit));
         }
         let roots = self
             .git

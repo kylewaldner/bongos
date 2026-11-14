@@ -17,7 +17,8 @@ use crate::changes::ChangeState;
 use crate::create::{MAIN_BRANCH, ProjectRepo};
 use crate::git::{CommitId, Identity, TreeRef};
 use crate::landing::{
-    InFlight, LANDING_IN_FLIGHT_KEY, LandingRecord, MAIN_REF, MASTER_IS_SPLIT, RepoEvent,
+    InFlight, LANDING_IN_FLIGHT_KEY, LandingRecord, MASTER_IS_SPLIT, REF_MOVE_BACKOFF, RefMove,
+    RepoEvent, backoff,
 };
 use crate::landing_queue::{Holder, LandingLock, LockRefused};
 use crate::loader::load_definition_tree;
@@ -77,7 +78,7 @@ impl MasterStatus {
         match self {
             MasterStatus::Clean => "master is clean".to_string(),
             MasterStatus::InFlight => {
-                "a landing is still in flight; reopen the project to complete it".to_string()
+                "a landing is still in flight; land again in a moment".to_string()
             }
             MasterStatus::Split(_) => MASTER_IS_SPLIT.to_string(),
             MasterStatus::Outside(_) => UNAPPROVED_OUTSIDE_CHANGE.to_string(),
@@ -254,22 +255,26 @@ impl ProjectRepo {
             return Ok(MasterStatus::Split(split));
         }
         let repository = &self.location.repository;
-        let main = self.git.rev_parse(repository, MAIN_BRANCH).await?;
+        let mut main = self.git.rev_parse(repository, MAIN_BRANCH).await?;
         if let Some(in_flight) = self.in_flight()? {
-            if main == in_flight.old || main == in_flight.commit {
-                return Ok(MasterStatus::InFlight);
+            if main != in_flight.old && main != in_flight.commit {
+                let writer = self.writer_or_error()?;
+                let split = self
+                    .record_split(
+                        &writer,
+                        &in_flight.change_id,
+                        &main,
+                        &in_flight.commit,
+                        &in_flight.old,
+                    )
+                    .await?;
+                return Ok(MasterStatus::Split(split));
             }
-            let writer = self.writer_or_error()?;
-            let split = self
-                .record_split(
-                    &writer,
-                    &in_flight.change_id,
-                    &main,
-                    &in_flight.commit,
-                    &in_flight.old,
-                )
-                .await?;
-            return Ok(MasterStatus::Split(split));
+            match self.complete_left_in_flight(&in_flight).await? {
+                None | Some(Recovery::Nothing) => return Ok(MasterStatus::InFlight),
+                Some(Recovery::Split(split)) => return Ok(MasterStatus::Split(split)),
+                Some(Recovery::Completed { commit }) => main = commit,
+            }
         }
         // Before anything landed, master is bongos' first commit.
         let verified = self.shown_commit().await?.0;
@@ -319,28 +324,90 @@ impl ProjectRepo {
         let Some(in_flight) = self.in_flight()? else {
             return Ok(Recovery::Nothing);
         };
+        self.complete_in_flight(&writer, &in_flight).await
+    }
+
+    /// Completes the landing in flight that no landing of this process or another is still
+    /// working on: one whose ref move failed and let go of the lock, or whose marker could not
+    /// be cleared. `None` while its landing still runs, or the lock is held elsewhere.
+    async fn complete_left_in_flight(&self, in_flight: &InFlight) -> Result<Option<Recovery>> {
+        const COMPLETION: &str = "completion of a landing in flight";
+        let took = {
+            let mut holder = self.engine.holder.lock();
+            match holder.as_ref() {
+                // Its own landing still runs, or a crash keeps its lock.
+                Some(held) if held.change_id == in_flight.change_id => return Ok(None),
+                // This process holds the lock for something else, so nothing else moves main.
+                Some(_) => false,
+                None => {
+                    let path = self
+                        .location
+                        .state
+                        .join(bongos_project_repo_model::layout::LANDING_LOCK_FILE);
+                    match LandingLock::try_take(&path) {
+                        Ok(lock) => {
+                            *holder = Some(Holder::new(COMPLETION, lock));
+                            true
+                        }
+                        Err(LockRefused::HeldBy(_)) => return Ok(None),
+                        Err(LockRefused::Failed(error)) => return Err(error),
+                    }
+                }
+            }
+        };
+        let writer = self.writer_or_error();
+        let completed = match writer {
+            Ok(writer) => self.complete_in_flight(&writer, in_flight).await,
+            Err(error) => Err(error),
+        };
+        if took {
+            self.release_lock(COMPLETION);
+        }
+        match completed {
+            Ok(recovery) => Ok(Some(recovery)),
+            Err(error) => {
+                log::error!(
+                    "completing the landing of {} in flight: {error:#}",
+                    in_flight.change_id
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Moves `main` to the commit of the landing in flight unless it is there already, then
+    /// finishes the checkout, clears the marker and pushes.
+    async fn complete_in_flight(
+        &self,
+        writer: &StateWriter,
+        in_flight: &InFlight,
+    ) -> Result<Recovery> {
         let repository = &self.location.repository;
-        let main = self.git.rev_parse(repository, MAIN_BRANCH).await?;
-        if main == in_flight.old {
-            self.git
-                .update_ref_cas(repository, MAIN_REF, &in_flight.commit, &in_flight.old)
-                .await?;
-        } else if main != in_flight.commit {
-            if let Some(split) = self.split_master()? {
+        match self
+            .move_main(repository, &in_flight.commit, &in_flight.old)
+            .await
+        {
+            RefMove::Moved => {}
+            RefMove::Split { main, .. } => {
+                if let Some(split) = self.split_master()? {
+                    return Ok(Recovery::Split(split));
+                }
+                let split = self
+                    .record_split(
+                        writer,
+                        &in_flight.change_id,
+                        &main,
+                        &in_flight.commit,
+                        &in_flight.old,
+                    )
+                    .await?;
                 return Ok(Recovery::Split(split));
             }
-            let split = self
-                .record_split(
-                    &writer,
-                    &in_flight.change_id,
-                    &main,
-                    &in_flight.commit,
-                    &in_flight.old,
-                )
-                .await?;
-            return Ok(Recovery::Split(split));
+            RefMove::Unknown(error) => {
+                bail!("moving master to {}: {error}", in_flight.commit)
+            }
         }
-        self.finish_checkout(&writer).await?;
+        self.finish_checkout(writer).await?;
         if let Some(row) = self.change(&in_flight.change_id)?
             && row.state == ChangeState::Landed
         {
@@ -348,7 +415,7 @@ impl ProjectRepo {
         }
         self.push_main().await;
         Ok(Recovery::Completed {
-            commit: in_flight.commit,
+            commit: in_flight.commit.clone(),
         })
     }
 
@@ -480,7 +547,11 @@ impl ProjectRepo {
         let new = &split.verified;
         let tree = self.git.tree_of(repository, new).await?;
         self.ensure_definitions(writer, new).await?;
-        loop {
+        // `main` moving again under the resolution starts it over from the new tip, a few times.
+        for round in 0..=REF_MOVE_BACKOFF.len() {
+            if round > 0 {
+                backoff(REF_MOVE_BACKOFF[round - 1]).await;
+            }
             let tip = self.git.rev_parse(repository, MAIN_BRANCH).await?;
             let saved = self
                 .git
@@ -532,17 +603,11 @@ impl ProjectRepo {
                 tx.set_verified_commit(&merge, definitions.clone())?;
                 tx.set_meta(LANDING_IN_FLIGHT_KEY, &in_flight)
             })?;
-            match self
-                .git
-                .update_ref_cas(repository, MAIN_REF, &merge, &tip)
-                .await
-            {
-                Ok(()) => {}
-                // `main` moved again since it was read: start over from the new tip.
-                Err(_) if self.git.rev_parse(repository, MAIN_BRANCH).await? != merge => {
-                    continue;
-                }
-                Err(_) => {}
+            match self.move_main(repository, &merge, &tip).await {
+                RefMove::Moved => {}
+                RefMove::Split { .. } => continue,
+                // The marker stays; the next `check_master` finishes the move.
+                RefMove::Unknown(error) => bail!("moving master to {merge}: {error}"),
             }
             self.finish_checkout(writer).await?;
             // The merge has bongos' commit as a parent now.
@@ -555,6 +620,7 @@ impl ProjectRepo {
             );
             return Ok((merge, tip, saved));
         }
+        bail!("master kept moving while the split was resolved; resolve it again")
     }
 
     /// A working copy on the verified commit with the diff from `old` to `outside` applied,
