@@ -56,8 +56,8 @@ pub use git::{
 pub use history::{AuthorFilter, EndedState, HistoryEntry, HistoryFilter, MAX_HISTORY_DAYS};
 pub use host_boundary::HostBoundary;
 pub use landing::{
-    ALREADY_LANDING, DEFAULT_SECRET_PATTERNS, LandMode, LandOptions, LandRequest, LandingEvent,
-    LandingResult, MAIN_REF, MASTER_IS_SPLIT, RepoEvent, UNSAVED_EDITS, WAITING_MASTER_SPLIT,
+    ALREADY_LANDING, DEFAULT_SECRET_PATTERNS, LANDING_ABANDONED, LandMode, LandOptions, LandRequest,
+    LandingEvent, LandingResult, MAIN_REF, MASTER_IS_SPLIT, RepoEvent, UNSAVED_EDITS, WAITING_MASTER_SPLIT,
 };
 pub use landing_checks::{
     AmendingCheck, CheckInput, CheckKindParser, CheckKinds, CheckRegistry, DefinitionFolders,

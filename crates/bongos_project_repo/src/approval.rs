@@ -85,7 +85,9 @@ impl ApprovalHooks {
 pub type ChatTaskLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// The `own-subtree` rule as a hook: an agent's change is approved inside the task subtree of its
-/// chat, whose task comes from the chat index (`lookup`), never from the change.
+/// chat, whose task comes from the chat index (`lookup`), never from the change. The chat itself
+/// is bound only in this process: the host drops the chat of every author a peer sends
+/// (`host_boundary.rs`), so a peer's agent change reads as from no chat and waits for a person.
 pub struct OwnSubtreeHook {
     lookup: ChatTaskLookup,
 }

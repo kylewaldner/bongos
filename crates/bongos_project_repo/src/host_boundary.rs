@@ -21,9 +21,15 @@ pub struct HostBoundary {
     repo: ProjectRepo,
 }
 
-/// `author` as it is after crossing a process boundary: a person becomes a claimed person.
-fn as_received(author: &Author) -> Result<Author> {
-    Ok(serde_json::from_value(serde_json::to_value(author)?)?)
+/// `author` as it is after crossing a process boundary: a person becomes a claimed person, and
+/// the chat it claims to act in is dropped. An automatic approval rule (`own-subtree`) trusts the
+/// chat of an author, so only this process binds one: an author built here, by the store's
+/// writer for a chat or proposal of this process. No peer is bound to a chat by anything the host
+/// can verify, so a peer's agent change has no chat and waits for a person.
+pub(crate) fn as_received(author: &Author) -> Result<Author> {
+    let mut received: Author = serde_json::from_value(serde_json::to_value(author)?)?;
+    received.chat = None;
+    Ok(received)
 }
 
 /// The person's grant for `claim`, only from a peer that may attest a person.
@@ -130,11 +136,13 @@ impl HostBoundary {
                     )
                 });
                 let grant = grant(person, peer);
-                let copy = self.repo.revert(&change_id, &author, now).await?;
+                // Everything that can fail runs before the revert makes its working copy, so a
+                // failure leaves none behind.
                 let request = LandRequest {
                     meta: self.repo.revert_meta(&change_id, &author)?,
                     mode: LandMode::Land,
                 };
+                let copy = self.repo.revert(&change_id, &author, now).await?;
                 let repo = self.repo.clone();
                 let revert_id = copy.change_id.clone();
                 // The landing runs on, as a quick edit's does.

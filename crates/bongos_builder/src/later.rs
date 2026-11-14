@@ -686,7 +686,9 @@ fn run_queue(cx: &mut App) {
                     Ok(WriteOutcome::Landing { change, change_id }) => {
                         match watch.verdict(&change_id, false).await {
                             LandingVerdict::Landed => Ok(change.entry.detail.unwrap_or_default()),
-                            LandingVerdict::Held(reason) => Err(reason),
+                            LandingVerdict::Held(reason) | LandingVerdict::Ended(reason) => {
+                                Err(reason)
+                            }
                         }
                     }
                     Err(error) => Err(error.to_string()),

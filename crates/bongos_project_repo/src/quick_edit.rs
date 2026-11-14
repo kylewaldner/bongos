@@ -16,6 +16,7 @@ use bongos_project_repo_model::{
     ChangeMeta, DefinitionTree, PersonAtKeyboard, RelPath, split, strip_trailers,
 };
 use bongos_work_model::TaskId;
+use bongos_work_model::slug::MAX_SLUG_LEN;
 use bongos_work_model::commands::{Change, Write};
 use bongos_work_model::store::{PendingMark, WorkTree};
 use chrono::{DateTime, Utc};
@@ -242,7 +243,16 @@ impl ProjectRepo {
         {
             attempt += 1;
             name = match &wanted {
-                Some(wanted) => format!("{wanted}-{attempt}"),
+                // Cleaned again, the stem shortened first so the suffix survives the length
+                // limit: a name that cleaned to the same text every time would never be free.
+                Some(wanted) => {
+                    let suffix = format!("-{attempt}");
+                    let stem: String = wanted
+                        .chars()
+                        .take(MAX_SLUG_LEN.saturating_sub(suffix.len()))
+                        .collect();
+                    clean_name(&format!("{stem}{suffix}"))?
+                }
                 None => fresh_name(),
             };
         }
@@ -455,14 +465,29 @@ impl ProjectRepo {
         change_id: &str,
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
-        let row = self
-            .change(change_id)?
-            .ok_or_else(|| anyhow!("there is no change {change_id}"))?;
-        let record = self.quick_edit_record(change_id)?;
-        let subject = record.map(|record| record.subject).unwrap_or_default();
-        let request = LandRequest {
-            meta: ChangeMeta::new(subject, row.author.clone()),
-            mode: LandMode::Land,
+        let request = (|| {
+            let row = self
+                .change(change_id)?
+                .ok_or_else(|| anyhow!("there is no change {change_id}"))?;
+            let record = self.quick_edit_record(change_id)?;
+            let subject = record.map(|record| record.subject).unwrap_or_default();
+            anyhow::Ok(LandRequest {
+                meta: ChangeMeta::new(subject, row.author.clone()),
+                mode: LandMode::Land,
+            })
+        })();
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                // The landing never started, so no landing reports its end.
+                self.engine.emit(
+                    change_id,
+                    crate::LandingEvent::Ended {
+                        reason: format!("the landing failed: {error:#}"),
+                    },
+                );
+                return Err(error);
+            }
         };
         let result = self.land_now(change_id, request, now).await?;
         let not_landed = match &result {

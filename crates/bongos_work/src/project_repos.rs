@@ -100,6 +100,9 @@ pub enum LandingVerdict {
     Landed,
     /// Refused, in conflict, or waiting for a person; the reason.
     Held(String),
+    /// The landing is over without landing and waits for nothing (the change was abandoned, or
+    /// the landing failed); the reason.
+    Ended(String),
 }
 
 /// The landing events of every open repository from the moment it was made, so a landing that
@@ -117,8 +120,10 @@ pub fn watch_landings(cx: &App) -> LandingWatch {
 }
 
 impl LandingWatch {
-    /// Resolves when `change_id` landed or is held (refused, conflicting, and, when
-    /// `through_waiting` is false, waiting for approval).
+    /// Resolves when `change_id` landed, is held (refused, conflicting, and, when
+    /// `through_waiting` is false, waiting for approval) or its landing ended otherwise
+    /// (abandoned, failed). `through_waiting` is for a caller that approved the change: a wait
+    /// the landing announced before the approval was written is over.
     pub async fn verdict(self, change_id: &str, through_waiting: bool) -> LandingVerdict {
         let mut events = futures::stream::select_all(self.0);
         while let Some((id, event)) = events.next().await {
@@ -136,6 +141,7 @@ impl LandingWatch {
                 LandingEvent::Waiting { reason } if !through_waiting => {
                     return LandingVerdict::Held(reason);
                 }
+                LandingEvent::Ended { reason } => return LandingVerdict::Ended(reason),
                 LandingEvent::Waiting { .. }
                 | LandingEvent::Queued { .. }
                 | LandingEvent::Checking => {}

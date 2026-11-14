@@ -475,3 +475,104 @@ async fn an_agent_never_receives_a_person_approval(cx: &mut TestAppContext) {
     assert!(fixture.repo.approvals(&change_id).unwrap().is_empty());
     assert_eq!(fixture.main(), before);
 }
+
+/// `future`, failing the test when it takes longer than a landing ever should.
+async fn within<T>(cx: &mut TestAppContext, future: impl std::future::Future<Output = T>) -> T {
+    use futures::FutureExt as _;
+    let timeout = cx.executor().timer(Duration::from_secs(60));
+    futures::select_biased! {
+        value = future.fuse() => value,
+        _ = timeout.fuse() => panic!("the landing never reached a verdict"),
+    }
+}
+
+#[gpui::test]
+async fn an_apply_whose_landing_waited_before_the_approval_still_lands(cx: &mut TestAppContext) {
+    let fixture = fixture(cx, &[]).await;
+    let before = fixture.main();
+    let tree = fixture.tree(cx);
+    let (_, summary) = request(&tree, &proposal(&tree, 1, "by kyle"), 1);
+    // The Apply's watch starts before the write, as `apply_and_approve`'s does.
+    let watch = cx.update(|cx| bongos_work::watch_landings(cx));
+    let probe = cx.update(|cx| bongos_work::watch_landings(cx));
+    let (change_id, _) = write_without_approving(cx, &fixture, 1).await;
+    // The landing runs first: it says it waits for approval before any approval exists.
+    let LandingVerdict::Held(reason) = within(cx, probe.verdict(&change_id, false)).await else {
+        panic!("expected the landing to wait");
+    };
+    assert!(reason.starts_with("waiting for approval"), "{reason}");
+    assert!(fixture.repo.approvals(&change_id).unwrap().is_empty());
+    let expected = summary.clone();
+    let following = cx.spawn(|mut cx| async move {
+        crate::apply::approve_and_follow(
+            watch,
+            &change_id,
+            person(),
+            ("g1".to_string(), 1),
+            summary,
+            &mut cx,
+        )
+        .await
+    });
+    let message = within(cx, following).await;
+    assert_eq!(message, expected);
+    assert_ne!(fixture.main(), before);
+    assert_eq!(fixture.rows(Some(ChangeState::Landed)).len(), 1);
+}
+
+#[gpui::test]
+async fn a_reject_ends_the_watch_on_the_proposals_landing(cx: &mut TestAppContext) {
+    let fixture = fixture(cx, &[]).await;
+    let watch = cx.update(|cx| bongos_work::watch_landings(cx));
+    let probe = cx.update(|cx| bongos_work::watch_landings(cx));
+    let (change_id, text) = write_without_approving(cx, &fixture, 1).await;
+    assert!(matches!(
+        within(cx, probe.verdict(&change_id, false)).await,
+        LandingVerdict::Held(_)
+    ));
+    let bytes = text.into_bytes();
+    let message = cx
+        .update(|cx| {
+            crate::apply::reject_and_abandon(
+                &fixture.store,
+                person(),
+                ("g1".to_string(), 1),
+                move |tree, ctx| reject_command("g1", 1, tree, ctx, &bytes),
+                cx,
+            )
+        })
+        .await;
+    assert_eq!(message, crate::apply::rejected_message(1));
+    // Even a watcher that looks past waits hears that the landing is over.
+    assert_eq!(
+        within(cx, watch.verdict(&change_id, true)).await,
+        LandingVerdict::Ended(bongos_project_repo::LANDING_ABANDONED.to_string())
+    );
+}
+
+#[gpui::test]
+async fn a_reject_that_was_not_written_leaves_the_working_copy_waiting(cx: &mut TestAppContext) {
+    let fixture = fixture(cx, &[]).await;
+    let before = fixture.main();
+    let (change_id, _) = write_without_approving(cx, &fixture, 1).await;
+    let message = cx
+        .update(|cx| {
+            crate::apply::reject_and_abandon(
+                &fixture.store,
+                person(),
+                ("g1".to_string(), 1),
+                |_, _| Err("the rejection was refused".to_string()),
+                cx,
+            )
+        })
+        .await;
+    assert!(message.contains("the rejection was refused"), "{message}");
+    let row = fixture.repo.change(&change_id).unwrap().unwrap();
+    assert!(
+        matches!(row.state, ChangeState::Open | ChangeState::Requested),
+        "{:?}",
+        row.state
+    );
+    assert!(fixture.branches().contains(&row.branch));
+    assert_eq!(fixture.main(), before);
+}

@@ -174,7 +174,15 @@ pub enum LandingEvent {
     Landed {
         commit: String,
     },
+    /// The landing stopped with no verdict and waits for nothing: the change was abandoned, it
+    /// cannot land as it is, or the landing failed.
+    Ended {
+        reason: String,
+    },
 }
+
+/// Why a landing ended for an abandoned change.
+pub const LANDING_ABANDONED: &str = "the change was abandoned";
 
 /// What other surfaces hear about the repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,7 +274,18 @@ pub(crate) type Probe = Arc<dyn Fn(ProbePoint, String) -> BoxFuture<'static, boo
 /// The error of a simulated crash.
 pub(crate) const SIMULATED_CRASH: &str = "simulated crash";
 
-fn event_for(result: &LandingResult) -> Option<LandingEvent> {
+/// The event a landing that returned `result` ends with. Every way a landing of the change can
+/// end has one, so a watcher never waits on a landing that is over; a call that found the change
+/// already landing has none, since that landing reports its own end.
+fn event_for(result: &Result<LandingResult>) -> Option<LandingEvent> {
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            return Some(LandingEvent::Ended {
+                reason: format!("the landing failed: {error:#}"),
+            });
+        }
+    };
     match result {
         LandingResult::Landed { commit } => Some(LandingEvent::Landed {
             commit: commit.clone(),
@@ -277,10 +296,17 @@ fn event_for(result: &LandingResult) -> Option<LandingEvent> {
         LandingResult::Conflict { files } => Some(LandingEvent::Conflict {
             files: files.clone(),
         }),
-        LandingResult::NoVerdict { reason } => Some(LandingEvent::Waiting {
+        LandingResult::NoVerdict { reason } if reason == ALREADY_LANDING => None,
+        LandingResult::NoVerdict { reason } => Some(LandingEvent::Ended {
             reason: reason.clone(),
         }),
-        _ => None,
+        LandingResult::Abandoned => Some(LandingEvent::Ended {
+            reason: LANDING_ABANDONED.to_string(),
+        }),
+        LandingResult::NotRequested => Some(LandingEvent::Ended {
+            reason: "the change was not asked to land".to_string(),
+        }),
+        LandingResult::Checked { .. } => None,
     }
 }
 
@@ -434,9 +460,7 @@ impl ProjectRepo {
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
         let result = self.land_steps(change_id, &request, grant, now).await;
-        if let Ok(result) = &result
-            && let Some(event) = event_for(result)
-        {
+        if let Some(event) = event_for(&result) {
             self.engine.emit(change_id, event);
         }
         self.engine.signal.notify();

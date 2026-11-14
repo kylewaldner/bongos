@@ -31,7 +31,9 @@ use bongos_work::model::PersonAtKeyboard;
 use bongos_work::model::commands::{Context as WorkContext, Outcome};
 use bongos_work::model::store::WorkTree;
 use bongos_work::model::{ProposalState, TaskId};
-use bongos_work::{LandingVerdict, WorkStore, WriteError, WriteOutcome, pick, ready};
+use bongos_work::{
+    LandingVerdict, LandingWatch, WorkStore, WriteError, WriteOutcome, pick, ready,
+};
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use settings::Settings as _;
 use workspace::Workspace;
@@ -548,21 +550,37 @@ pub(crate) fn apply_and_approve(
         // Written at once: not a project repository, or the change is state only.
         Ok(WriteOutcome::Applied(_)) => summary,
         Ok(WriteOutcome::Landing { change_id, .. }) => {
-            let approved = cx.update(|cx| bongos_work::approve_proposal(&change_id, approver, cx));
-            if let Err(error) = approved.await {
-                return format!("Proposal {number} was not approved: {error}");
-            }
-            match watch.verdict(&change_id, false).await {
-                LandingVerdict::Landed => summary,
-                LandingVerdict::Held(reason) => {
-                    let held = format!("Proposal {number} pending: {reason}");
-                    cx.update(|cx| later::hold(&root, number, reason, cx));
-                    held
-                }
-            }
+            approve_and_follow(watch, &change_id, approver, (root, number), summary, cx).await
         }
         Err(error) => error.to_string(),
     })
+}
+
+/// Approves the proposal's working copy `change_id` as the person `approver` and follows its
+/// landing with `watch` (made before the write). The landing runs from the write on, so it may
+/// have said it waits for approval before the approval was written: once approved, that wait is
+/// over, and only a refusal, a conflict or the end of the landing holds it.
+pub(crate) async fn approve_and_follow(
+    watch: LandingWatch,
+    change_id: &str,
+    approver: WorkContext,
+    (root, number): (TaskId, u32),
+    summary: String,
+    cx: &mut gpui::AsyncApp,
+) -> String {
+    let approved = cx.update(|cx| bongos_work::approve_proposal(change_id, approver, cx));
+    if let Err(error) = approved.await {
+        return format!("Proposal {number} was not approved: {error}");
+    }
+    match watch.verdict(change_id, true).await {
+        LandingVerdict::Landed => summary,
+        LandingVerdict::Held(reason) => {
+            let held = format!("Proposal {number} pending: {reason}");
+            cx.update(|cx| later::hold(&root, number, reason, cx));
+            held
+        }
+        LandingVerdict::Ended(reason) => format!("Proposal {number} was not applied: {reason}"),
+    }
 }
 
 /// `task: reject proposal`.
@@ -607,35 +625,47 @@ fn reject_chosen(
                 return;
             }
         };
-        let abandon_root = task_id.clone();
-        let Ok((write, abandon)) = workspace.update_in(cx, |_, window, cx| {
+        let Ok(rejecting) = workspace.update_in(cx, |_, window, cx| {
             let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
-            let write = store.update(cx, |store, cx| {
-                store.write(
-                    ctx,
-                    move |tree, ctx| reject_command(&task_id, number, tree, ctx, &bytes),
-                    cx,
-                )
-            });
-            (
-                write,
-                bongos_work::abandon_proposal(&abandon_root, number, cx),
+            let root = task_id.clone();
+            reject_and_abandon(
+                &store,
+                ctx,
+                (task_id, number),
+                move |tree, ctx| reject_command(&root, number, tree, ctx, &bytes),
+                cx,
             )
         }) else {
             return;
         };
-        // The record of the rejection goes to state; then the working copy of the proposal, if
-        // one waits to land, is abandoned with its branch and files. Master is never touched.
-        let message = match write.await {
-            Ok(_) => match abandon.await {
-                Ok(_) => rejected_message(number),
-                Err(error) => format!("Proposal {number} rejected, but its working copy: {error}"),
-            },
-            Err(error) => error.to_string(),
-        };
+        let message = rejecting.await;
         workspace
             .update(cx, |workspace, cx| show_toast(workspace, message, cx))
             .ok();
     })
     .detach();
+}
+
+/// Writes the rejection `command` of proposal `number` of `root` as `ctx`; only once that
+/// succeeded is the working copy of the proposal, if one waits to land, abandoned with its branch
+/// and files. A rejection that was not written leaves it waiting. Master is never touched.
+/// Resolves with the toast.
+pub(crate) fn reject_and_abandon(
+    store: &Entity<WorkStore>,
+    ctx: WorkContext,
+    (root, number): (TaskId, u32),
+    command: impl Fn(&WorkTree, &WorkContext) -> Outcome + Send + 'static,
+    cx: &mut App,
+) -> gpui::Task<String> {
+    let write = store.update(cx, |store, cx| store.write(ctx, command, cx));
+    cx.spawn(async move |cx| {
+        if let Err(error) = write.await {
+            return error.to_string();
+        }
+        let abandon = cx.update(|cx| bongos_work::abandon_proposal(&root, number, cx));
+        match abandon.await {
+            Ok(_) => rejected_message(number),
+            Err(error) => format!("Proposal {number} rejected, but its working copy: {error}"),
+        }
+    })
 }
