@@ -261,7 +261,7 @@ fn is_task_folder(folder: &str) -> bool {
         return true;
     }
     let parts: Vec<&str> = folder.split('/').collect();
-    parts.len() % 2 == 0 && parts.chunks(2).all(|pair| pair[0] == TASKS_DIR)
+    parts.len().is_multiple_of(2) && parts.chunks(2).all(|pair| pair[0] == TASKS_DIR)
 }
 
 /// The task folder holding the task folder `folder`; `None` for the top group.
