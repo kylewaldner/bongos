@@ -7,6 +7,7 @@ mod context_server_store;
 mod debugger;
 mod git_store;
 mod image_store;
+mod language_server_policy;
 mod lsp_command;
 mod lsp_store;
 mod manifest_tree;
