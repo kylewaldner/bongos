@@ -12,6 +12,7 @@ use crate::backup::{BackupStatus, SnapshotOutcome, SnapshotReason};
 use crate::history::{HistoryEntry, HistoryFilter};
 use crate::landing::LandRequest;
 use crate::quick_edit::QuickEdit;
+use crate::restore::{RestoreCandidates, RestoreOutcome, RestorePreview, RestoreSource};
 use crate::state::StateWriter;
 use crate::state_ops::StateOp;
 
@@ -54,6 +55,18 @@ pub enum RepoCommand {
     BackupNow,
     /// `project: backup status`.
     BackupStatus,
+    /// The states `project: restore` can start from.
+    RestoreCandidates,
+    /// What `project: restore` from `source` would do; changes nothing.
+    RestorePreview { source: RestoreSource },
+    /// `project: restore` from `source`: replaces the whole state, so only a person's claim
+    /// from a verified window is taken.
+    Restore {
+        source: RestoreSource,
+        person: PersonClaim,
+    },
+    /// Asks the project's running work to stop at its next job boundary, for a restore.
+    StopAtJobBoundary { person: PersonClaim },
 }
 
 /// A window's claim that a person at its keyboard asked for a command, by the person's name.
@@ -83,6 +96,19 @@ pub enum RepoReply {
     /// The backup status, computed by the host.
     BackupStatus {
         status: Box<BackupStatus>,
+    },
+    RestoreCandidates {
+        candidates: RestoreCandidates,
+    },
+    RestorePreview {
+        preview: Box<RestorePreview>,
+    },
+    Restore {
+        outcome: RestoreOutcome,
+    },
+    /// What could not be asked to stop.
+    Stopping {
+        problems: Vec<String>,
     },
 }
 

@@ -175,6 +175,17 @@ pub mod project {
             BackupStatus,
             /// Takes a snapshot of the project's state at once and pushes it to the remote.
             BackupNow,
+            /// Adds a project repository that already exists: a project or repository folder
+            /// on this machine, or a remote address cloned into a new project folder. Checks
+            /// master, sets its verified commit, and says when a snapshot is there to restore.
+            AddExisting,
+            /// Rebuilds the project's live state from the newer of this machine's and the
+            /// remote's snapshot, after showing what it replaces and asking. Refuses while work
+            /// runs, and keeps the replaced state so a wrong restore can be undone.
+            Restore,
+            /// Like `project: restore`, from a snapshot or replaced state picked from a list:
+            /// this machine's, the remote's, and the states earlier restores kept.
+            RestoreFrom,
         ]
     );
 }

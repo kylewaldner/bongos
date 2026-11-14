@@ -25,6 +25,7 @@ mod rebase;
 mod ref_watch;
 mod registry;
 mod repositories;
+mod restore_commands;
 mod seams;
 mod settings;
 mod status;
@@ -159,6 +160,8 @@ mod ref_watch_tests;
 mod registry_tests;
 #[cfg(test)]
 mod repository_tests;
+#[cfg(test)]
+mod restore_command_tests;
 #[cfg(test)]
 mod seam_tests;
 #[cfg(test)]

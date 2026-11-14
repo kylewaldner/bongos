@@ -182,6 +182,9 @@ impl ProjectRepo {
 pub struct LoadedProject {
     repo: ProjectRepo,
     shown: Mutex<(Option<CommitId>, Arc<DefinitionTree>)>,
+    /// The marks of tasks whose worktree or run record is not on this machine, as of the last
+    /// [`Self::refresh_marks`].
+    marks: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
 }
 
 impl LoadedProject {
@@ -190,7 +193,20 @@ impl LoadedProject {
         Arc::new(Self {
             repo,
             shown: Mutex::new((None, Arc::new(DefinitionTree::default()))),
+            marks: Mutex::new(Default::default()),
         })
+    }
+
+    /// Reads the marks of tasks whose worktree or run record is not on this machine again.
+    pub fn refresh_marks(&self) -> Result<()> {
+        let marks = self.repo.missing_marks()?;
+        *self.marks.lock() = marks;
+        Ok(())
+    }
+
+    /// The marks of task `id` ("worktree missing", "interrupted, record not on this machine").
+    pub fn marks_of(&self, id: &str) -> Vec<String> {
+        self.marks.lock().get(id).cloned().unwrap_or_default()
     }
 
     pub fn repo(&self) -> &ProjectRepo {

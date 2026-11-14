@@ -211,7 +211,7 @@ impl ProjectRepo {
         self.read_state(|read| read.meta(PUSH_FAILURE_KEY))
     }
 
-    fn in_flight(&self) -> Result<Option<InFlight>> {
+    pub(crate) fn in_flight(&self) -> Result<Option<InFlight>> {
         read_toml(
             self.read_state(|read| read.meta(LANDING_IN_FLIGHT_KEY))?,
             "the landing in flight",
@@ -445,7 +445,7 @@ impl ProjectRepo {
     }
 
     /// Takes the landing lock for work that is not a landing; fails while a landing holds it.
-    fn take_lock_for(&self, holder_id: &str) -> Result<()> {
+    pub(crate) fn take_lock_for(&self, holder_id: &str) -> Result<()> {
         let mut holder = self.engine.holder.lock();
         if let Some(held) = holder.as_ref() {
             if held.change_id == holder_id {
@@ -467,7 +467,7 @@ impl ProjectRepo {
         Ok(())
     }
 
-    fn release_lock(&self, holder_id: &str) {
+    pub(crate) fn release_lock(&self, holder_id: &str) {
         self.engine.release(holder_id);
         self.engine.signal.notify();
     }

@@ -41,6 +41,8 @@ pub struct ProjectRepositorySettings {
     pub push_retry_max_minutes: u32,
     /// Snapshots older than this are thinned to the last of each day.
     pub thinning_after_days: u32,
+    /// How long a restore keeps the state it replaced, so a wrong restore can be undone.
+    pub replaced_keep_days: u32,
     /// Where run records are copied; `None` keeps them on this machine only.
     pub run_record_copy_dir: Option<PathBuf>,
     pub run_record_copy_interval_minutes: u32,
@@ -113,6 +115,9 @@ impl Settings for ProjectRepositorySettings {
             thinning_after_days: settings
                 .thinning_after_days
                 .unwrap_or(crate::backup::DEFAULT_THINNING_AFTER_DAYS),
+            replaced_keep_days: settings
+                .replaced_keep_days
+                .unwrap_or(crate::backup::DEFAULT_REPLACED_KEEP_DAYS),
             run_record_copy_dir: settings
                 .run_record_copy_dir
                 .filter(|dir| !dir.trim().is_empty())

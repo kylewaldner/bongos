@@ -956,6 +956,57 @@ impl Git {
         self.run_bounded(directory, args, timeout).await?;
         Ok(())
     }
+
+    /// Fetches `refspecs` from `remote` (a validated remote name or URL) into the repository at
+    /// `directory`, and gives up when `timeout` resolves. Options end before the remote, tags
+    /// are not fetched, and the `ext` transport is refused.
+    pub async fn fetch_refspecs(
+        &self,
+        directory: &Path,
+        remote: &str,
+        refspecs: &[String],
+        timeout: impl std::future::Future<Output = ()>,
+    ) -> Result<(), GitError> {
+        let mut args = vec![
+            OsString::from("-c"),
+            OsString::from("protocol.ext.allow=never"),
+            OsString::from("fetch"),
+            OsString::from("-q"),
+            OsString::from("--no-tags"),
+            OsString::from("--"),
+            OsString::from(remote),
+        ];
+        args.extend(refspecs.iter().map(OsString::from));
+        self.run_bounded(directory, args, timeout).await?;
+        Ok(())
+    }
+
+    /// Clones `remote` (a validated remote name or URL) into `destination`, which must not
+    /// exist, checking out `branch`; gives up when `timeout` resolves. Options end before the
+    /// remote, and the `ext` transport is refused.
+    pub async fn clone_repo(
+        &self,
+        remote: &str,
+        destination: &Path,
+        branch: &str,
+        timeout: impl std::future::Future<Output = ()>,
+    ) -> Result<(), GitError> {
+        let parent = destination.parent().unwrap_or(destination);
+        let args = vec![
+            OsString::from("-c"),
+            OsString::from("protocol.ext.allow=never"),
+            OsString::from("clone"),
+            OsString::from("-q"),
+            OsString::from("--no-tags"),
+            OsString::from("--branch"),
+            OsString::from(branch),
+            OsString::from("--"),
+            OsString::from(remote),
+            destination.as_os_str().to_os_string(),
+        ];
+        self.run_bounded(parent, args, timeout).await?;
+        Ok(())
+    }
 }
 
 /// How a rebase ended.
