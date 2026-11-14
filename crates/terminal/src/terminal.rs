@@ -640,6 +640,9 @@ pub enum Event {
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
+    /// The terminal wrote this text to the system clipboard: a copy of the
+    /// selection or a program's OSC 52 store.
+    ClipboardWritten(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1449,7 +1452,8 @@ impl Terminal {
                 cx.emit(Event::BreadcrumbsChanged);
             }
             TerminalBackendEvent::ClipboardStore(data) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(data))
+                cx.write_to_clipboard(ClipboardItem::new_string(data.clone()));
+                cx.emit(Event::ClipboardWritten(data));
             }
             TerminalBackendEvent::ClipboardLoad(format) => {
                 self.write_to_pty(
@@ -1594,7 +1598,8 @@ impl Terminal {
             InternalEvent::Copy(keep_selection) => {
                 trace!("Copying selection: keep_selection={keep_selection:?}");
                 if let Some(txt) = selection_text(term) {
-                    cx.write_to_clipboard(ClipboardItem::new_string(txt));
+                    cx.write_to_clipboard(ClipboardItem::new_string(txt.clone()));
+                    cx.emit(Event::ClipboardWritten(txt));
                     if !keep_selection.unwrap_or_else(|| {
                         let settings = TerminalSettings::get_global(cx);
                         settings.keep_selection_on_copy
@@ -2030,6 +2035,12 @@ impl Terminal {
         self.input_log.push(input.to_vec());
 
         self.write_to_pty(input);
+    }
+
+    /// Handles a program's OSC 52 clipboard store as the pty event loop does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_clipboard_store(&mut self, data: String, cx: &mut Context<Self>) {
+        self.process_event(TerminalBackendEvent::ClipboardStore(data), cx);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3975,6 +3986,88 @@ mod tests {
             "Bare CR should allow overwriting: got '{}'",
             text
         );
+    }
+
+    fn clipboard_written_events(
+        terminal: &Entity<Terminal>,
+        cx: &mut TestAppContext,
+    ) -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = written.clone();
+        cx.update(|cx| {
+            cx.subscribe(terminal, move |_, event: &Event, _| {
+                if let Event::ClipboardWritten(text) = event {
+                    sink.borrow_mut().push(text.clone());
+                }
+            })
+            .detach();
+        });
+        written
+    }
+
+    #[gpui::test]
+    async fn osc52_store_writes_the_clipboard_and_reports_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let written = clipboard_written_events(&terminal, cx);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.simulate_clipboard_store("stored".to_string(), cx);
+        });
+        cx.run_until_parked();
+
+        let clipboard_text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(clipboard_text.as_deref(), Some("stored"));
+        assert_eq!(*written.borrow(), vec!["stored".to_string()]);
+    }
+
+    #[gpui::test]
+    async fn selection_copy_writes_the_clipboard_and_reports_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let written = clipboard_written_events(&terminal, cx);
+
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(b"copied", cx);
+                terminal.select_all();
+                terminal.copy(Some(true));
+                terminal.sync(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let clipboard_text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        let clipboard_text = clipboard_text.expect("the copy writes the clipboard");
+        assert_eq!(clipboard_text.trim_end(), "copied");
+        assert_eq!(*written.borrow(), vec![clipboard_text]);
     }
 
     #[gpui::test]

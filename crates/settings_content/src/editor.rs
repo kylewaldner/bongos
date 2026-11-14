@@ -804,6 +804,11 @@ pub struct EmacsSettingsContent {
     ///
     /// Default: true
     pub save_kill_ring: Option<bool>,
+    /// Whether copies and pastes in the terminal use the kill ring. While false, a terminal copy
+    /// or a program's clipboard write leaves the ring alone and a later yank does not capture it.
+    ///
+    /// Default: false
+    pub terminal_uses_kill_ring: Option<bool>,
 }
 
 /// Which cursor shape the Emacs mode asks for.

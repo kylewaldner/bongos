@@ -35,7 +35,10 @@
     "delete_selection": false,
     // Whether the kill ring is saved and restored at launch. Text marked secret and entries
     // larger than 1 MiB are never saved. Turning it off deletes the saved ring.
-    "save_kill_ring": true
+    "save_kill_ring": true,
+    // Whether copies and pastes in the terminal use the kill ring. While false, a terminal copy
+    // or a program's clipboard write leaves the ring alone.
+    "terminal_uses_kill_ring": false
   },
   // The name of a font to use for rendering text in the editor
   // ".ZedMono" currently aliases to Lilex
