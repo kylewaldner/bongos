@@ -428,7 +428,7 @@ async fn append_next_kill_after_a_copy_appends_to_the_copied_entry(cx: &mut Test
 
     cx.simulate_keystrokes("alt-w ctrl-alt-w ctrl-k");
 
-    assert_eq!(ring_texts(&mut cx), ["one two\n"]);
+    assert_eq!(ring_texts(&mut cx), ["one two"]);
 }
 
 #[gpui::test]
