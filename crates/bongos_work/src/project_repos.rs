@@ -157,7 +157,7 @@ impl LandingWatch {
     /// event, and every wait announced from now on, still counts.
     pub fn pass_waits(&mut self, change_id: &str) {
         for receiver in &mut self.receivers {
-            while let Ok(Some(event)) = receiver.try_next() {
+            while let Ok(event) = receiver.try_recv() {
                 let passed =
                     event.0 == change_id && matches!(event.1, LandingEvent::Waiting { .. });
                 if !passed {
