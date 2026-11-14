@@ -555,3 +555,45 @@ fn a_match_changed_by_an_outside_edit_is_searched_again_tests(cx: &mut TestAppCo
     );
     assert_eq!(text(&editor, cx), "> fxo bar fox");
 }
+
+/// A fresh multibuffer of two buffers, so its first transaction has id 0.
+#[gpui::test]
+fn the_first_transaction_of_a_fresh_multibuffer_undoes_tests(cx: &mut TestAppContext) {
+    let (editor, mut cx, _buffers) = two_buffers("foo x", "bar", cx);
+    let cx = &mut cx;
+    let query = text_query("foo");
+    let scope = whole(&editor, cx);
+    let mut edits = start(&editor, cx);
+    let replacement = replace_next(&mut edits, &editor, &query, &scope, 0, "a", cx);
+    assert_eq!(replacement.model_id(), 0);
+    let undone = editor.update(cx, |editor, cx| {
+        edits.undo(replacement.model_id(), editor, cx)
+    });
+    assert_eq!(undone, Ok(true));
+    assert!(!text(&editor, cx).contains('a'));
+}
+
+#[gpui::test]
+fn undoing_a_replacement_that_changed_nothing_is_a_no_op_tests(cx: &mut TestAppContext) {
+    let (editor, mut cx, _buffers) = two_buffers("foo x", "bar", cx);
+    let cx = &mut cx;
+    let query = text_query("foo");
+    let scope = whole(&editor, cx);
+    let mut edits = start(&editor, cx);
+    let real = replace_next(&mut edits, &editor, &query, &scope, 0, "a", cx);
+    assert_eq!(real.model_id(), 0);
+    let after = text(&editor, cx);
+
+    let mut spec = SearchSpec::new(true);
+    spec.string = "q*".to_string();
+    spec.lax = false;
+    spec.case = CaseMode::Sensitive;
+    let empty = Engine::new().query(&spec).expect("valid pattern");
+    let nothing = replace_next(&mut edits, &editor, &empty, &scope, 0, "", cx);
+    assert_eq!(nothing.id, None);
+    let undone = editor.update(cx, |editor, cx| {
+        edits.undo(nothing.model_id(), editor, cx)
+    });
+    assert_eq!(undone, Ok(false));
+    assert_eq!(text(&editor, cx), after);
+}

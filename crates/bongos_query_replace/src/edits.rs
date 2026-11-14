@@ -39,8 +39,9 @@ impl fmt::Display for ReadOnly {
 impl std::error::Error for ReadOnly {}
 
 /// The id the session model keeps for a replacement that made no transaction (an empty match
-/// replaced by nothing). A real transaction never has it.
-pub const NO_TRANSACTION: u64 = 0;
+/// replaced by nothing). `TransactionId::as_u64` never produces it, whereas 0 is a real id (the
+/// first transaction of a fresh multibuffer).
+pub const NO_TRANSACTION: u64 = u64::MAX;
 
 /// One interactive replacement made.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +181,9 @@ impl Edits {
         if editor.read_only(cx) {
             return Err(ReadOnly);
         }
+        if id == NO_TRANSACTION {
+            return Ok(false);
+        }
         let Some(index) = self
             .transactions
             .iter()
@@ -198,6 +202,10 @@ impl Edits {
     /// Replaces one chunk of a `!` batch as one undo entry, with a single edit of all its ranges.
     /// A match whose text is no longer what the scan found, or that has no replacement, is left
     /// alone. Meant to be called chunk by chunk from a task that yields between them.
+    ///
+    /// Callers must count [`Applied::replaced`], not the chunk length: skipped hits are reported
+    /// separately, and context-sensitive regexes are not re-run, so a hit is only checked for
+    /// still having the text the scan found.
     pub fn apply_chunk(
         &mut self,
         editor: &mut Editor,
@@ -241,6 +249,9 @@ impl Edits {
     /// Ends the session (every way it ends): the live transactions are merged, newest first, into
     /// the oldest of them, which then restores the selections from before the session when undone
     /// and the final selections when redone. Returns that transaction.
+    ///
+    /// The merge cost grows with the number of interactive (non-batch) replacements still on the
+    /// undo stack, which is fine at human scale; batches use at most one entry per 2,000.
     pub fn finish(self, editor: &mut Editor, cx: &mut Context<Editor>) -> Option<TransactionId> {
         let (&destination, newer) = self.transactions.split_first()?;
         editor.buffer().update(cx, |buffer, cx| {
