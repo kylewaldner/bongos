@@ -1,16 +1,23 @@
 //! Project repositories: a project's definitions kept in a git repository, the per-machine
 //! record of where each one lives, the creation of a new one, and its live state store.
 
+mod amending;
+mod builtin_checks;
 mod changes;
+mod check_run;
 mod create;
+mod declared_checks;
 mod git;
 mod landing;
+mod landing_checks;
 mod landing_queue;
 mod loader;
 mod locations;
 mod master;
+mod pins;
 mod registries;
 pub mod router;
+mod script_check;
 mod settings;
 mod sink;
 mod state;
@@ -25,11 +32,23 @@ pub use git::{
     CommitId, DEFAULT_IDENTITY_EMAIL, DEFAULT_IDENTITY_NAME, Git, GitError, Identity,
     RebaseOutcome, TreeEntry, TreeId, TreeRef,
 };
-pub use landing::{
-    ALREADY_LANDING, AmendOutcome, AmendingCheck, CheckOutcome, CheckResult, LandMode, LandOptions,
-    LandRequest, LandingEvent, LandingResult, MAIN_REF, MASTER_IS_SPLIT, RepoEvent, UNSAVED_EDITS,
-    WAITING_MASTER_SPLIT,
+pub use amending::KEEPS_AMENDING;
+pub use bongos_project_repo_model::checks::{
+    AmendOutcome, CheckOutcome, CheckPhase, HoldReason, LiveFacts, LiveSource, Stamp,
 };
+pub use check_run::CheckResult;
+pub use declared_checks::DeclaredCheck;
+pub use landing::{
+    ALREADY_LANDING, DEFAULT_SECRET_PATTERNS, LandMode, LandOptions, LandRequest, LandingEvent,
+    LandingResult, MAIN_REF, MASTER_IS_SPLIT, RepoEvent, UNSAVED_EDITS, WAITING_MASTER_SPLIT,
+};
+pub use landing_checks::{
+    AmendingCheck, CheckInput, CheckKindParser, CheckKinds, CheckRegistry, DefinitionFolders,
+    FolderValidator, LandingCheck, LandingChecks, LiveSources, WorkflowResolver,
+    registered_checks,
+};
+pub use pins::PinGuard;
+pub use script_check::ScriptCheck;
 pub use loader::{LoadedProject, StateHandle, load_definition_tree};
 pub use locations::{Location, LocationError, RepositoryLocations};
 pub use master::{
@@ -56,9 +75,17 @@ pub fn init(cx: &mut gpui::App) {
 }
 
 #[cfg(test)]
+mod amending_tests;
+#[cfg(test)]
+mod check_fakes;
+#[cfg(test)]
 mod create_tests;
 #[cfg(test)]
 mod git_tests;
+#[cfg(test)]
+mod landing_checks_tests;
+#[cfg(test)]
+mod landing_race_tests;
 #[cfg(test)]
 mod landing_tests;
 #[cfg(test)]

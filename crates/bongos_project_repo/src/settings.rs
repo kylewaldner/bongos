@@ -23,6 +23,12 @@ pub struct ProjectRepositorySettings {
     pub squash: bool,
     /// How long a change may hold the landing queue before it is sent out.
     pub queue_limit_seconds: u32,
+    /// The largest text file a landing lets through.
+    pub text_file_limit_bytes: u64,
+    /// The largest image a landing lets through.
+    pub image_limit_bytes: u64,
+    /// The regular expressions the secrets check refuses in changed text.
+    pub secret_patterns: Vec<String>,
 }
 
 impl ProjectRepositorySettings {
@@ -67,6 +73,13 @@ impl Settings for ProjectRepositorySettings {
             queue_limit_seconds: settings
                 .queue_limit_seconds
                 .expect("default.json defines `project_repository.queue_limit_seconds`"),
+            text_file_limit_bytes: settings
+                .text_file_limit_bytes
+                .expect("default.json defines `project_repository.text_file_limit_bytes`"),
+            image_limit_bytes: settings
+                .image_limit_bytes
+                .expect("default.json defines `project_repository.image_limit_bytes`"),
+            secret_patterns: settings.secret_patterns.unwrap_or_default(),
             layout: LayoutTemplates {
                 repository: templates
                     .repository

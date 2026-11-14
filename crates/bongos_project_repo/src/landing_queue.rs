@@ -123,7 +123,10 @@ pub(crate) struct Engine {
     pub(crate) landing_events:
         Mutex<Vec<futures::channel::mpsc::UnboundedSender<(String, crate::LandingEvent)>>>,
     pub(crate) repo_events: Mutex<Vec<futures::channel::mpsc::UnboundedSender<crate::RepoEvent>>>,
-    pub(crate) amending: Mutex<Vec<Arc<dyn crate::AmendingCheck>>>,
+    /// The checks registered in the app, as the last `land` with an app saw them.
+    pub(crate) registered: Mutex<crate::landing_checks::CheckRegistry>,
+    /// The checks added to this project only.
+    pub(crate) local: Mutex<crate::landing_checks::CheckRegistry>,
     pub(crate) options: Mutex<crate::LandOptions>,
     /// The changes a `land` or `check` of this process is working on.
     pub(crate) landing: Mutex<std::collections::HashSet<String>>,

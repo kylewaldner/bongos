@@ -644,6 +644,14 @@ impl Git {
         Ok(())
     }
 
+    /// `git merge --ff-only commit`: moves the branch checked out at `directory` forward to
+    /// `commit`, refusing when it is not a fast-forward or a file in the way would be lost.
+    pub async fn merge_ff_only(&self, directory: &Path, commit: &str) -> Result<(), GitError> {
+        self.run(directory, &["merge", "-q", "--ff-only", commit])
+            .await?;
+        Ok(())
+    }
+
     /// The binary diff from `from` to `to`.
     pub async fn diff_binary(
         &self,

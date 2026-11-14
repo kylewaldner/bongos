@@ -479,9 +479,7 @@ fn a_landing_message_says_how_the_landing_ended() {
             check: "schema".to_string(),
             tree: "t".to_string(),
             stamp: "t".to_string(),
-            outcome: CheckOutcome::Fail {
-                message: "junk.txt".to_string(),
-            },
+            outcome: CheckOutcome::fail("junk.txt"),
         }],
     };
     assert_eq!(

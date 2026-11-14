@@ -251,6 +251,13 @@ impl ProjectRepo {
     /// outside commit with the deterministic checks' verdict on it. The ref watch calls it on
     /// every change of the repository's refs, and every landing before it goes on.
     pub async fn check_master(&self) -> Result<MasterStatus> {
+        self.check_master_as(None).await
+    }
+
+    /// [`Self::check_master`] by `holder`, the change holding the landing lock when a landing's
+    /// queue step calls it. Only a caller holding the lock (or one that can take it) completes
+    /// a landing left in flight.
+    pub(crate) async fn check_master_as(&self, holder: Option<&str>) -> Result<MasterStatus> {
         if let Some(split) = self.split_master()? {
             return Ok(MasterStatus::Split(split));
         }
@@ -270,7 +277,7 @@ impl ProjectRepo {
                     .await?;
                 return Ok(MasterStatus::Split(split));
             }
-            match self.complete_left_in_flight(&in_flight).await? {
+            match self.complete_left_in_flight(&in_flight, holder).await? {
                 None | Some(Recovery::Nothing) => return Ok(MasterStatus::InFlight),
                 Some(Recovery::Split(split)) => return Ok(MasterStatus::Split(split)),
                 Some(Recovery::Completed { commit }) => main = commit,
@@ -313,7 +320,8 @@ impl ProjectRepo {
     }
 
     /// Run once when the project opens, after the writer and before the loader: empties the
-    /// landing queue of the former process and completes a landing a crash interrupted, by the
+    /// landing queue of the former process, removes the scratch copies of amending checks and
+    /// the materialized trees it left, and completes a landing a crash interrupted, by the
     /// hashes its state transaction recorded. The hooks already ran in that transaction and do
     /// not run again.
     pub async fn recover_landing(&self) -> Result<Recovery> {
@@ -321,6 +329,8 @@ impl ProjectRepo {
         if !writer.read(|read| read.landing_queue())?.is_empty() {
             writer.transact(|tx| tx.queue_clear())?;
         }
+        self.sweep_amending_scratch().await;
+        self.sweep_pins();
         let Some(in_flight) = self.in_flight()? else {
             return Ok(Recovery::Nothing);
         };
@@ -329,16 +339,24 @@ impl ProjectRepo {
 
     /// Completes the landing in flight that no landing of this process or another is still
     /// working on: one whose ref move failed and let go of the lock, or whose marker could not
-    /// be cleared. `None` while its landing still runs, or the lock is held elsewhere.
-    async fn complete_left_in_flight(&self, in_flight: &InFlight) -> Result<Option<Recovery>> {
+    /// be cleared. Only under the landing lock: taken here, or held by `caller` (a landing's
+    /// queue step). `None` while its landing still runs, or while another holds the lock (that
+    /// holder's own queue step completes it, and the ref watch must not race it).
+    async fn complete_left_in_flight(
+        &self,
+        in_flight: &InFlight,
+        caller: Option<&str>,
+    ) -> Result<Option<Recovery>> {
         const COMPLETION: &str = "completion of a landing in flight";
         let took = {
             let mut holder = self.engine.holder.lock();
             match holder.as_ref() {
                 // Its own landing still runs, or a crash keeps its lock.
                 Some(held) if held.change_id == in_flight.change_id => return Ok(None),
-                // This process holds the lock for something else, so nothing else moves main.
-                Some(_) => false,
+                // The caller holds the lock, so nothing else moves main meanwhile.
+                Some(held) if Some(held.change_id.as_str()) == caller => false,
+                // Another landing of this process holds it.
+                Some(_) => return Ok(None),
                 None => {
                     let path = self
                         .location
@@ -407,7 +425,7 @@ impl ProjectRepo {
                 bail!("moving master to {}: {error}", in_flight.commit)
             }
         }
-        self.finish_checkout(writer).await?;
+        self.finish_checkout(writer, in_flight).await?;
         if let Some(row) = self.change(&in_flight.change_id)?
             && row.state == ChangeState::Landed
         {
@@ -581,12 +599,13 @@ impl ProjectRepo {
                 )
                 .await?,
             );
-            let in_flight = toml::to_string(&InFlight {
+            let in_flight = InFlight {
                 change_id: split.change_id.clone(),
                 commit: merge.clone(),
                 old: tip.clone(),
-            })
-            .context("serializing the landing in flight")?;
+            };
+            let in_flight_text =
+                toml::to_string(&in_flight).context("serializing the landing in flight")?;
             writer.transact_as(author, |tx| {
                 let record = ResolutionRecord {
                     change_id: split.change_id.clone(),
@@ -601,15 +620,17 @@ impl ProjectRepo {
                     &toml::to_string(&record).context("serializing a resolution")?,
                 )?;
                 tx.set_verified_commit(&merge, definitions.clone())?;
-                tx.set_meta(LANDING_IN_FLIGHT_KEY, &in_flight)
+                tx.set_meta(LANDING_IN_FLIGHT_KEY, &in_flight_text)
             })?;
             match self.move_main(repository, &merge, &tip).await {
                 RefMove::Moved => {}
                 RefMove::Split { .. } => continue,
-                // The marker stays; the next `check_master` finishes the move.
+                // Both markers stay. The split marker is still set, so `check_master` keeps
+                // reporting the split (it returns before it looks at the landing in flight) and
+                // does not finish this move; resolving again starts over from `main`'s tip.
                 RefMove::Unknown(error) => bail!("moving master to {merge}: {error}"),
             }
-            self.finish_checkout(writer).await?;
+            self.finish_checkout(writer, &in_flight).await?;
             // The merge has bongos' commit as a parent now.
             if let Err(error) = self.git.delete_ref(repository, &landed_ref(new)).await {
                 log::error!("deleting {}: {error}", landed_ref(new));

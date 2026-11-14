@@ -10,6 +10,7 @@ use bongos_project_repo::{
     ProjectRepo, ProjectRepositorySettings, clean_name, fresh_name,
 };
 use bongos_project_repo_model::ChangeMeta;
+use bongos_project_repo_model::checks::SizeLimits;
 use bongos_project_repo_model::layout::DEFINITIONS_DIR;
 use chrono::{DateTime, Utc};
 use editor::Editor;
@@ -266,6 +267,11 @@ pub(crate) fn land_options(settings: &ProjectRepositorySettings) -> LandOptions 
         queue_limit: Duration::from_secs(u64::from(settings.queue_limit_seconds)),
         keep_landed: settings.keep_landed,
         branch_prefix: settings.branch_prefix.clone(),
+        size_limits: SizeLimits {
+            text_file_limit_bytes: settings.text_file_limit_bytes,
+            image_limit_bytes: settings.image_limit_bytes,
+        },
+        secret_patterns: settings.secret_patterns.clone(),
     }
 }
 
@@ -289,8 +295,10 @@ pub(crate) fn landing_message(name: &str, result: &LandingResult) -> String {
                 .iter()
                 .map(|result| match &result.outcome {
                     CheckOutcome::Pass => format!("{}: pass", result.check),
-                    CheckOutcome::Fail { message } => format!("{}: fail, {message}", result.check),
-                    CheckOutcome::NoVerdict { reason } => {
+                    CheckOutcome::Fail { message, .. } => {
+                        format!("{}: fail, {message}", result.check)
+                    }
+                    CheckOutcome::NoVerdict { reason, .. } => {
                         format!("{}: no verdict, {reason}", result.check)
                     }
                 })

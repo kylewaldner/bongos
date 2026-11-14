@@ -72,8 +72,10 @@ const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS check_results (
         change_id TEXT NOT NULL,
         check_name TEXT NOT NULL,
+        tree TEXT NOT NULL,
+        stamp TEXT NOT NULL,
         result_toml TEXT NOT NULL,
-        PRIMARY KEY (change_id, check_name)
+        PRIMARY KEY (change_id, check_name, tree, stamp)
     )",
     "CREATE TABLE IF NOT EXISTS approvals (
         change_id TEXT NOT NULL,
@@ -586,11 +588,27 @@ impl<'a> StateRead<'a> {
         read_queue(self.connection)
     }
 
-    /// The stored results of the checks of `change_id` as `(check, record)`.
+    /// The stored results of the checks of `change_id` as records, by check name, oldest first.
     pub(crate) fn check_results(&self, change_id: &str) -> Result<Vec<(String, String)>> {
         self.connection.select_bound::<&str, (String, String)>(
-            "SELECT check_name, result_toml FROM check_results WHERE change_id = ? ORDER BY check_name",
+            "SELECT check_name, result_toml FROM check_results WHERE change_id = ?
+             ORDER BY check_name, rowid",
         )?(change_id)
+    }
+
+    /// The stored result of `check` on `change_id` for exactly `tree` and `stamp`.
+    pub(crate) fn check_result(
+        &self,
+        change_id: &str,
+        check: &str,
+        tree: &str,
+        stamp: &str,
+    ) -> Result<Option<String>> {
+        self.connection
+            .select_row_bound::<(&str, &str, &str, &str), String>(
+                "SELECT result_toml FROM check_results
+                 WHERE change_id = ?1 AND check_name = ?2 AND tree = ?3 AND stamp = ?4",
+            )?((change_id, check, tree, stamp))
     }
 }
 
@@ -860,17 +878,23 @@ impl<'a> StateTx<'a> {
         Ok(())
     }
 
+    /// Stores the result of `check` on `change_id` for `tree` and `stamp`; a result for another
+    /// tree or stamp stays beside it and is never counted for this one.
     pub(crate) fn set_check_result(
         &mut self,
         change_id: &str,
         check: &str,
+        tree: &str,
+        stamp: &str,
         record: &str,
     ) -> Result<()> {
         self.only_kv_in_hook("a check result")?;
-        self.connection.exec_bound::<(&str, &str, &str)>(
-            "INSERT INTO check_results (change_id, check_name, result_toml) VALUES (?1, ?2, ?3)
-             ON CONFLICT (change_id, check_name) DO UPDATE SET result_toml = excluded.result_toml",
-        )?((change_id, check, record))?;
+        self.connection.exec_bound::<(&str, &str, &str, &str, &str)>(
+            "INSERT INTO check_results (change_id, check_name, tree, stamp, result_toml)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (change_id, check_name, tree, stamp)
+             DO UPDATE SET result_toml = excluded.result_toml",
+        )?((change_id, check, tree, stamp, record))?;
         self.dirty = true;
         Ok(())
     }
