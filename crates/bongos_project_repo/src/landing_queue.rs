@@ -125,6 +125,8 @@ pub(crate) struct Engine {
     pub(crate) repo_events: Mutex<Vec<futures::channel::mpsc::UnboundedSender<crate::RepoEvent>>>,
     pub(crate) amending: Mutex<Vec<Arc<dyn crate::AmendingCheck>>>,
     pub(crate) options: Mutex<crate::LandOptions>,
+    /// The changes a `land` or `check` of this process is working on.
+    pub(crate) landing: Mutex<std::collections::HashSet<String>>,
     #[cfg(test)]
     pub(crate) probe: Mutex<Option<crate::landing::Probe>>,
 }
@@ -152,6 +154,18 @@ impl Engine {
             .map(|holder| holder.change_id.clone())
     }
 
+    /// Marks `change_id` as being landed or checked by this process; `None` while another
+    /// `land` or `check` of it runs. Dropping the guard unmarks it.
+    pub(crate) fn start_landing(self: &Arc<Self>, change_id: &str) -> Option<LandingGuard> {
+        if !self.landing.lock().insert(change_id.to_string()) {
+            return None;
+        }
+        Some(LandingGuard {
+            engine: self.clone(),
+            change_id: change_id.to_string(),
+        })
+    }
+
     /// Releases the lock if `change_id` holds it.
     pub(crate) fn release(&self, change_id: &str) {
         let mut holder = self.holder.lock();
@@ -161,6 +175,18 @@ impl Engine {
         {
             *holder = None;
         }
+    }
+}
+
+/// A change a `land` or `check` of this process is working on.
+pub(crate) struct LandingGuard {
+    engine: Arc<Engine>,
+    change_id: String,
+}
+
+impl Drop for LandingGuard {
+    fn drop(&mut self) {
+        self.engine.landing.lock().remove(&self.change_id);
     }
 }
 

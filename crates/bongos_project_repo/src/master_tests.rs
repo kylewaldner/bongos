@@ -15,7 +15,7 @@ use crate::test_support::{
 use crate::{
     HistoryKind, LandingEvent, LandingResult, MASTER_IS_SPLIT, MasterStatus, NOT_A_LANDING,
     ProjectRepo, Recovery, RepoEvent, SplitResolution, StateApplyHooks, UNAPPROVED_OUTSIDE_CHANGE,
-    WAITING_MASTER_SPLIT, outside_ref,
+    WAITING_MASTER_SPLIT, landed_ref, outside_ref,
 };
 
 /// A project whose first change has landed, so there is a verified commit, pushing to a bare
@@ -279,6 +279,8 @@ fn a_live_split_keeps_the_lock_refuses_landings_and_keep_bongos_fast_forwards_to
     assert_eq!(repo.landing_holder(), Some(split.change_id));
     assert_eq!(verified(&repo).as_deref(), Some(new.as_str()));
     assert_eq!(main_commit(&repo), outside);
+    // Bongos' commit is pinned so gc cannot prune it while nothing else reaches it.
+    assert_eq!(run_git(&repo, &["rev-parse", &landed_ref(&new)]), new);
     let status = block_on(repo.check_master()).unwrap();
     assert!(status.warning().unwrap().contains("changed outside bongos"));
     // A person's landing is refused while master is split.
@@ -318,6 +320,8 @@ fn a_live_split_keeps_the_lock_refuses_landings_and_keep_bongos_fast_forwards_to
     assert_eq!(verified(&repo).as_deref(), Some(merge.as_str()));
     assert!(repo.split_master().unwrap().is_none());
     assert!(repo.landing_holder().is_none());
+    // The merge reaches it now, and the pin is gone.
+    assert!(!run_git(&repo, &["for-each-ref", "refs/bongos/landed/"]).contains(&new));
     // The remote that already held the outside commit took the merge as a fast-forward.
     assert_eq!(remote_main(&repo, &remote), merge);
     assert_eq!(repo.push_failure().unwrap(), None);
@@ -426,5 +430,46 @@ fn a_lane_landing_during_the_split_waits_and_resumes_after_the_resolve() {
     assert_eq!(
         run_git(&repo, &["rev-parse", &format!("{commit}^")]),
         resolved.merge
+    );
+}
+
+#[test]
+fn an_outside_commit_before_the_first_landing_is_outside_not_adopted() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project_with_hooks(&root, &StateApplyHooks::new());
+    let created = main_commit(&repo);
+    assert_eq!(verified(&repo), None);
+
+    let outside = outside_document(&repo, "note.md", "an edit made with git before any landing");
+    let MasterStatus::Outside(seen) = block_on(repo.check_master()).unwrap() else {
+        panic!("expected an outside change");
+    };
+    assert_eq!(seen.commit, outside);
+    // The Work view and new working copies stay on the commit that created the project.
+    assert_eq!(block_on(repo.shown_commit()).unwrap().0, created);
+    let author = person();
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    assert_eq!(
+        run_git(&repo, &["rev-parse", &copy.branch]),
+        created,
+        "a working copy starts from the creation commit"
+    );
+    add_task(&copy, "alpha", "a1");
+    assert_eq!(
+        land(&repo, &copy, &author),
+        LandingResult::Refused {
+            reasons: vec![UNAPPROVED_OUTSIDE_CHANGE.to_string()]
+        }
+    );
+    assert_eq!(main_commit(&repo), outside);
+
+    // Approved, it is adopted like any other outside commit, and landings go on from it.
+    let adopted = block_on(repo.approve_outside(PersonAtKeyboard::for_test())).unwrap();
+    assert_eq!(adopted, outside);
+    assert_eq!(verified(&repo).as_deref(), Some(outside.as_str()));
+    let commit = landed(land(&repo, &copy, &author));
+    assert_eq!(
+        run_git(&repo, &["rev-parse", &format!("{commit}^")]),
+        outside
     );
 }

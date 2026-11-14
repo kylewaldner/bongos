@@ -26,15 +26,15 @@ pub use git::{
     RebaseOutcome, TreeEntry, TreeId, TreeRef,
 };
 pub use landing::{
-    AmendOutcome, AmendingCheck, CheckOutcome, CheckResult, LandMode, LandOptions, LandRequest,
-    LandingEvent, LandingResult, MAIN_REF, MASTER_IS_SPLIT, RepoEvent, UNSAVED_EDITS,
+    ALREADY_LANDING, AmendOutcome, AmendingCheck, CheckOutcome, CheckResult, LandMode, LandOptions,
+    LandRequest, LandingEvent, LandingResult, MAIN_REF, MASTER_IS_SPLIT, RepoEvent, UNSAVED_EDITS,
     WAITING_MASTER_SPLIT,
 };
 pub use loader::{LoadedProject, StateHandle, load_definition_tree};
 pub use locations::{Location, LocationError, RepositoryLocations};
 pub use master::{
     HistoryKind, HistoryRow, MasterStatus, NOT_A_LANDING, OutsideChange, Recovery, Resolved,
-    SplitMaster, SplitResolution, UNAPPROVED_OUTSIDE_CHANGE, outside_ref,
+    SplitMaster, SplitResolution, UNAPPROVED_OUTSIDE_CHANGE, landed_ref, outside_ref,
 };
 pub use registries::{ActivitySource, ActivitySources, StateExporter, StateExporters};
 pub use settings::ProjectRepositorySettings;

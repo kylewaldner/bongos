@@ -447,6 +447,13 @@ impl Git {
         Ok(())
     }
 
+    /// Deletes `reference`.
+    pub async fn delete_ref(&self, directory: &Path, reference: &str) -> Result<(), GitError> {
+        self.run(directory, &["update-ref", "-d", reference])
+            .await?;
+        Ok(())
+    }
+
     /// Brings the index and files of the checkout at `directory` to its `HEAD` after the branch
     /// moved forward under it, removing the files the new commit no longer has.
     pub async fn update_checkout(&self, directory: &Path) -> Result<(), GitError> {

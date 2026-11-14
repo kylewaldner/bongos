@@ -46,6 +46,11 @@ pub const WAITING_MASTER_SPLIT: &str = "waiting: master is split";
 pub const MASTER_IS_SPLIT: &str = "master is split; resolve it first";
 /// Why a change with amend commits cannot go back to step 2 now.
 pub const UNSAVED_EDITS: &str = "working copy has unsaved edits";
+/// Why a second `land` or `check` of a change waits while the first still runs.
+pub const ALREADY_LANDING: &str = "the change is already being landed or checked";
+
+/// How many times the move of `main` is tried while it still is the old commit.
+const REF_MOVE_ATTEMPTS: usize = 3;
 
 /// The `meta` key of the landing between its state transaction and its ref move.
 pub(crate) const LANDING_IN_FLIGHT_KEY: &str = "landing_in_flight";
@@ -211,6 +216,18 @@ pub(crate) struct InFlight {
     pub(crate) change_id: String,
     pub(crate) commit: String,
     pub(crate) old: String,
+}
+
+/// What the compare-and-swap of `main` ended as.
+enum RefMove {
+    Moved,
+    /// `main` is an outside commit.
+    Split {
+        main: String,
+        error: String,
+    },
+    /// It failed every time and `main` is not known to have moved.
+    Unknown(String),
 }
 
 /// One row of the `landings` table.
@@ -416,6 +433,11 @@ impl ProjectRepo {
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
         let writer = self.writer_or_error()?;
+        let Some(_landing) = self.engine.start_landing(change_id) else {
+            return Ok(LandingResult::NoVerdict {
+                reason: ALREADY_LANDING.to_string(),
+            });
+        };
         let mut row = self
             .change(change_id)?
             .ok_or_else(|| anyhow!("there is no change {change_id}"))?;
@@ -471,6 +493,13 @@ impl ProjectRepo {
         self.git.commit_if_dirty(&path, &subject, &identity).await?;
 
         loop {
+            // Edits typed while the change waited (for a split master, or to go round again
+            // after an earlier landing) are never swept into an amend commit or a rebase.
+            if !self.git.is_clean(&path).await? {
+                return Ok(LandingResult::NoVerdict {
+                    reason: UNSAVED_EDITS.to_string(),
+                });
+            }
             // Step 2.
             if let Some(ended) = self
                 .drop_amendments(&writer, &mut row, &path, &identity)
@@ -507,6 +536,13 @@ impl ProjectRepo {
             if self.probe(ProbePoint::InQueue, change_id).await {
                 slot.keep();
                 bail!(SIMULATED_CRASH);
+            }
+
+            // Abandoned (or landed elsewhere) while it waited for the lock.
+            if request.mode == LandMode::Land
+                && let Some(ended) = self.landing_result(change_id)?
+            {
+                return Ok(ended);
             }
 
             // Step 6.
@@ -768,6 +804,11 @@ impl ProjectRepo {
         for check in checks {
             let mut amended = false;
             loop {
+                // A check only ever writes into a clean tree, so what it leaves behind is its
+                // own: the amend commit takes nothing else, and a discard loses nothing else.
+                if !self.git.is_clean(path).await? {
+                    return Ok(Some(UNSAVED_EDITS.to_string()));
+                }
                 match check.amend(path).await {
                     AmendOutcome::Unchanged => break,
                     AmendOutcome::NoVerdict { reason } => {
@@ -901,6 +942,24 @@ impl ProjectRepo {
         landed.commit = Some(new.to_string());
         landed.updated = now;
         let transaction = writer.transact_with(&meta.author, &staged, |tx| {
+            // Read again inside the transaction: an abandon that committed first wins.
+            let current = tx.change(&change_id)?;
+            if current.as_ref().map(|row| row.state) != Some(ChangeState::Requested) {
+                return Ok(Some(match current {
+                    Some(ChangeRow {
+                        state: ChangeState::Landed,
+                        commit,
+                        ..
+                    }) => LandingResult::Landed {
+                        commit: commit.unwrap_or_default(),
+                    },
+                    Some(ChangeRow {
+                        state: ChangeState::Open,
+                        ..
+                    }) => LandingResult::NotRequested,
+                    _ => LandingResult::Abandoned,
+                }));
+            }
             let notes = if staged.is_empty() {
                 Vec::new()
             } else {
@@ -924,13 +983,17 @@ impl ProjectRepo {
             tx.set_change(&landed)?;
             tx.set_meta(LANDING_IN_FLIGHT_KEY, &in_flight)?;
             tx.queue_remove(&change_id)?;
-            Ok(())
+            Ok(None)
         });
-        if let Err(error) = transaction {
-            // Rolled back: `main` never moved and the verified commit is still `old`.
-            return Ok(LandingResult::NoVerdict {
-                reason: format!("{error:#}"),
-            });
+        match transaction {
+            Ok(None) => {}
+            Ok(Some(ended)) => return Ok(ended),
+            Err(error) => {
+                // Rolled back: `main` never moved and the verified commit is still `old`.
+                return Ok(LandingResult::NoVerdict {
+                    reason: format!("{error:#}"),
+                });
+            }
         }
         *row = landed;
         self.engine
@@ -945,18 +1008,27 @@ impl ProjectRepo {
             bail!(SIMULATED_CRASH);
         }
         self.probe(ProbePoint::BeforeRefMove, &change_id).await;
-        if let Err(error) = self
-            .git
-            .update_ref_cas(&repository, MAIN_REF, new, old)
-            .await
-        {
-            let main = self.git.rev_parse(&repository, MAIN_BRANCH).await?;
-            if main != new {
+        // From here the state says landed, so nothing returns an error: what fails is logged
+        // and left to the recovery at the next open.
+        match self.move_main(&repository, new, old).await {
+            RefMove::Moved => {}
+            RefMove::Split { main, error } => {
                 log::error!("master was changed outside bongos while {change_id} landed: {error}");
-                self.record_split(writer, &change_id, &main, new, old)?;
                 // The lock stays held until a person resolves the split.
                 slot.keep();
+                if let Err(error) = self.record_split(writer, &change_id, &main, new, old).await {
+                    log::error!("recording the split master: {error:#}");
+                }
                 self.remove_working_copy(row).await;
+                return Ok(LandingResult::Landed {
+                    commit: new.to_string(),
+                });
+            }
+            RefMove::Unknown(error) => {
+                // `main` could not be read: the marker of the landing in flight stays, and
+                // the lock with it, so nothing lands on top until the next open completes it.
+                log::error!("moving master to {new} for {change_id}: {error}");
+                slot.keep();
                 return Ok(LandingResult::Landed {
                     commit: new.to_string(),
                 });
@@ -966,7 +1038,9 @@ impl ProjectRepo {
             slot.keep();
             bail!(SIMULATED_CRASH);
         }
-        self.finish_checkout(writer).await?;
+        if let Err(error) = self.finish_checkout(writer).await {
+            log::error!("finishing the checkout after {change_id} landed: {error:#}");
+        }
         drop(slot);
         self.remove_working_copy(row).await;
         self.push_main().await;
@@ -975,12 +1049,38 @@ impl ProjectRepo {
         })
     }
 
+    /// Moves `main` from `old` to `new` by compare-and-swap. A failure while `main` still is
+    /// `old` (a lock file another git left for a moment) is tried again.
+    async fn move_main(&self, repository: &Path, new: &str, old: &str) -> RefMove {
+        let mut last = String::new();
+        for _ in 0..REF_MOVE_ATTEMPTS {
+            let error = match self
+                .git
+                .update_ref_cas(repository, MAIN_REF, new, old)
+                .await
+            {
+                Ok(()) => return RefMove::Moved,
+                Err(error) => error.to_string(),
+            };
+            match self.git.rev_parse(repository, MAIN_BRANCH).await {
+                Ok(main) if main == new => return RefMove::Moved,
+                Ok(main) if main == old => last = error,
+                Ok(main) => return RefMove::Split { main, error },
+                Err(read) => last = format!("{error}; reading main: {read}"),
+            }
+        }
+        RefMove::Unknown(last)
+    }
+
     /// After the ref moved: the checkout follows, its files are read-only again, and the
     /// marker of the landing in flight (and of a split master) is cleared.
+    /// The marker is cleared even when the checkout could not be updated: `main` moved.
     pub(crate) async fn finish_checkout(&self, writer: &StateWriter) -> Result<()> {
-        self.git.update_checkout(&self.location.repository).await?;
-        self.protect_master_files()
-            .context("making master read-only")?;
+        if let Err(error) = self.git.update_checkout(&self.location.repository).await {
+            log::error!("updating the checkout of master: {error}");
+        } else if let Err(error) = self.protect_master_files() {
+            log::error!("making master read-only: {error}");
+        }
         writer.transact(|tx| {
             tx.delete_meta(LANDING_IN_FLIGHT_KEY)?;
             tx.delete_meta(crate::master::MASTER_SPLIT_KEY)

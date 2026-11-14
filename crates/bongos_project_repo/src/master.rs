@@ -172,6 +172,12 @@ pub enum HistoryKind {
     },
 }
 
+/// The ref that keeps bongos' commit of a split master from being pruned until the split is
+/// resolved.
+pub fn landed_ref(commit: &str) -> String {
+    format!("refs/bongos/landed/{commit}")
+}
+
 /// The ref an outside commit is saved on when a split is resolved.
 pub fn outside_ref(commit: &str) -> String {
     format!("refs/bongos/outside/{commit}")
@@ -211,7 +217,7 @@ impl ProjectRepo {
         )
     }
 
-    pub(crate) fn record_split(
+    pub(crate) async fn record_split(
         &self,
         writer: &StateWriter,
         change_id: &str,
@@ -225,6 +231,10 @@ impl ProjectRepo {
             verified: verified.to_string(),
             old: old.to_string(),
         };
+        // Until the split is resolved nothing but this ref reaches bongos' commit.
+        self.git
+            .update_ref(&self.location.repository, &landed_ref(verified), verified)
+            .await?;
         let text = toml::to_string(&split).context("serializing the split master")?;
         writer.transact(|tx| tx.set_meta(MASTER_SPLIT_KEY, &text))?;
         self.engine.emit_repo(RepoEvent::MasterSplit {
@@ -250,19 +260,19 @@ impl ProjectRepo {
                 return Ok(MasterStatus::InFlight);
             }
             let writer = self.writer_or_error()?;
-            let split = self.record_split(
-                &writer,
-                &in_flight.change_id,
-                &main,
-                &in_flight.commit,
-                &in_flight.old,
-            )?;
+            let split = self
+                .record_split(
+                    &writer,
+                    &in_flight.change_id,
+                    &main,
+                    &in_flight.commit,
+                    &in_flight.old,
+                )
+                .await?;
             return Ok(MasterStatus::Split(split));
         }
-        let Some(verified) = self.verified_commit()?.map(|commit| commit.0) else {
-            // Nothing landed yet: master is bongos' first commit.
-            return Ok(MasterStatus::Clean);
-        };
+        // Before anything landed, master is bongos' first commit.
+        let verified = self.shown_commit().await?.0;
         if main == verified {
             if self.outside_change()?.is_some()
                 && let Ok(writer) = self.writer_or_error()
@@ -319,13 +329,15 @@ impl ProjectRepo {
             if let Some(split) = self.split_master()? {
                 return Ok(Recovery::Split(split));
             }
-            let split = self.record_split(
-                &writer,
-                &in_flight.change_id,
-                &main,
-                &in_flight.commit,
-                &in_flight.old,
-            )?;
+            let split = self
+                .record_split(
+                    &writer,
+                    &in_flight.change_id,
+                    &main,
+                    &in_flight.commit,
+                    &in_flight.old,
+                )
+                .await?;
             return Ok(Recovery::Split(split));
         }
         self.finish_checkout(&writer).await?;
@@ -402,9 +414,7 @@ impl ProjectRepo {
         marker: PersonAtKeyboard,
     ) -> Result<()> {
         let author = WorkContext::at_keyboard(marker).author;
-        let verified = self
-            .verified_commit()?
-            .context("nothing has landed in this project yet")?;
+        let verified = self.shown_commit().await?;
         self.ensure_definitions(writer, &verified.0).await?;
         let definitions = std::sync::Arc::new(
             load_definition_tree(
@@ -535,6 +545,10 @@ impl ProjectRepo {
                 Err(_) => {}
             }
             self.finish_checkout(writer).await?;
+            // The merge has bongos' commit as a parent now.
+            if let Err(error) = self.git.delete_ref(repository, &landed_ref(new)).await {
+                log::error!("deleting {}: {error}", landed_ref(new));
+            }
             log::info!(
                 "kept bongos over outside commit {tip}, resolved by {}",
                 author.name

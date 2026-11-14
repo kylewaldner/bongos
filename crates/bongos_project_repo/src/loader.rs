@@ -112,16 +112,25 @@ impl ProjectRepo {
             .map(CommitId))
     }
 
-    /// The commit the Work view shows: the verified commit, or `main` before one is recorded
-    /// (the first commit, made by bongos itself, needs no checks).
+    /// The commit the Work view shows: the verified commit, or before one is recorded the
+    /// commit that created the project (made by bongos itself, it needs no checks). A commit
+    /// made on `main` outside bongos before the first landing is therefore an outside commit.
     pub async fn shown_commit(&self) -> Result<CommitId> {
         if let Some(commit) = self.verified_commit()? {
             return Ok(commit);
         }
-        let commit = self
+        let roots = self
             .git
-            .rev_parse(&self.location.repository, MAIN_BRANCH)
+            .run(
+                &self.location.repository,
+                &["rev-list", "--first-parent", "--max-parents=0", MAIN_BRANCH],
+            )
             .await?;
+        let commit = roots
+            .lines()
+            .last()
+            .context("master has no first commit")?
+            .to_string();
         Ok(CommitId(commit))
     }
 

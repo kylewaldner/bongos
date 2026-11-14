@@ -777,3 +777,156 @@ fn a_killed_queue_holder_releases_the_lock() {
     child.wait().unwrap();
     landed(land(&repo, &copy, &author));
 }
+
+#[test]
+fn a_change_abandoned_while_it_took_the_lock_never_lands() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let old = main_commit(&repo);
+    {
+        // An abandon whose transaction committed just before the landing took the lock.
+        let repo_in_probe = repo.clone();
+        repo.set_probe(Arc::new(move |point, change| {
+            let repo = repo_in_probe.clone();
+            async move {
+                if point == ProbePoint::InQueue {
+                    let mut row = repo.change(&change).unwrap().unwrap();
+                    row.state = ChangeState::Abandoned;
+                    repo.writer_or_error()
+                        .unwrap()
+                        .transact(|tx| tx.set_change(&row))
+                        .unwrap();
+                }
+                false
+            }
+            .boxed()
+        }));
+    }
+    assert_eq!(land(&repo, &copy, &author), LandingResult::Abandoned);
+    assert_eq!(main_commit(&repo), old);
+    assert_eq!(verified(&repo), None);
+    assert_eq!(
+        repo.change(&copy.change_id).unwrap().unwrap().state,
+        ChangeState::Abandoned
+    );
+    assert!(repo.landing_holder().is_none());
+    assert!(
+        repo.state()
+            .unwrap()
+            .read(|read| read.landing_queue())
+            .unwrap()
+            .is_empty()
+    );
+    // The abandon that marked the row first still removes what is left.
+    block_on(repo.abandon_now(&copy.change_id, start())).unwrap();
+    assert!(!copy.path.exists());
+}
+
+#[test]
+fn a_second_land_of_a_change_being_landed_waits_and_the_first_lands() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let seen = Arc::new(Mutex::new(None));
+    {
+        let repo_in_probe = repo.clone();
+        let seen = seen.clone();
+        repo.set_probe(Arc::new(move |point, change| {
+            let repo = repo_in_probe.clone();
+            let seen = seen.clone();
+            async move {
+                if point == ProbePoint::InQueue {
+                    let author = Author::agent("chat 1");
+                    let second = repo.land_now(&change, request("again", &author), start());
+                    *seen.lock() = Some(second.await.unwrap());
+                }
+                false
+            }
+            .boxed()
+        }));
+    }
+    let commit = landed(land(&repo, &copy, &author));
+    assert_eq!(
+        seen.lock().clone(),
+        Some(LandingResult::NoVerdict {
+            reason: crate::ALREADY_LANDING.to_string()
+        })
+    );
+    assert_eq!(main_commit(&repo), commit);
+    // Once the first is done, the change can be landed (here: is already landed) again.
+    assert_eq!(
+        land(&repo, &copy, &author),
+        LandingResult::Landed { commit }
+    );
+}
+
+/// An amending check that changes nothing on its first call and gives no verdict after.
+struct NoVerdictTheSecondTime(Mutex<usize>);
+
+impl AmendingCheck for NoVerdictTheSecondTime {
+    fn name(&self) -> &str {
+        "flaky"
+    }
+
+    fn amend(&self, _writable: &Path) -> BoxFuture<'static, AmendOutcome> {
+        let mut calls = self.0.lock();
+        *calls += 1;
+        let outcome = if *calls == 1 {
+            AmendOutcome::Unchanged
+        } else {
+            AmendOutcome::NoVerdict {
+                reason: "not sure".to_string(),
+            }
+        };
+        async move { outcome }.boxed()
+    }
+}
+
+#[test]
+fn edits_typed_while_a_landing_waits_for_a_split_master_are_never_discarded() {
+    let root = TempDir::new().unwrap();
+    let repo = fixture_project(&root);
+    repo.add_amending_check(Arc::new(NoVerdictTheSecondTime(Mutex::new(0))));
+    let author = Author::agent("chat 1");
+    let copy = new_copy(&repo, "amber-otter-0001", &author);
+    add_task(&copy, "alpha", "a1");
+    let typed = copy.path.join("definitions/documents/mine.md");
+    {
+        // In the queue, the person types into the working copy and master splits.
+        let repo_in_probe = repo.clone();
+        let typed = typed.clone();
+        repo.set_probe(Arc::new(move |point, change| {
+            let repo = repo_in_probe.clone();
+            let typed = typed.clone();
+            async move {
+                if point == ProbePoint::InQueue && !typed.exists() {
+                    std::fs::create_dir_all(typed.parent().unwrap()).unwrap();
+                    std::fs::write(&typed, "my notes\n").unwrap();
+                    let main = repo
+                        .git()
+                        .rev_parse(&repo.location().repository, "main")
+                        .await
+                        .unwrap();
+                    let writer = repo.writer_or_error().unwrap();
+                    repo.record_split(&writer, &change, &main, &main, &main)
+                        .await
+                        .unwrap();
+                }
+                false
+            }
+            .boxed()
+        }));
+    }
+    assert_eq!(
+        land(&repo, &copy, &author),
+        LandingResult::NoVerdict {
+            reason: crate::UNSAVED_EDITS.to_string()
+        }
+    );
+    assert_eq!(std::fs::read_to_string(&typed).unwrap(), "my notes\n");
+}
