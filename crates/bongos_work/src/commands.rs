@@ -9,6 +9,8 @@
 use std::any::TypeId;
 use std::sync::Arc;
 
+use bongos_project_repo::ProjectRepositorySettings;
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{
     self as model, Context as WorkContext, NewTask, NewTodo, Placement, TaskEdit,
 };
@@ -24,13 +26,15 @@ use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
 
 use crate::actions::{artifact, project, task, todo, work};
+use crate::master_files;
 use crate::modals::{self, Then};
 use crate::registry::LiveModesRegistry;
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
 use crate::{
-    artifacts, filters, focus, links, modes, open, panel, projects, rebase, repositories,
-    structure, worktrees,
+    artifacts, backup_commands, convert_commands, filters, focus, landing_commands, links, modes,
+    open, panel, projects, rebase, repositories, restore_commands, structure,
+    working_copy_commands, worktrees,
 };
 
 /// The activity a task made with `task: new` goes under: it names no parent, and the Work view
@@ -84,6 +88,24 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<project::Unarchive>(),
         TypeId::of::<project::OpenFolder>(),
         TypeId::of::<project::Focus>(),
+        TypeId::of::<project::Edit>(),
+        TypeId::of::<project::OpenWorkingCopy>(),
+        TypeId::of::<project::Abandon>(),
+        TypeId::of::<project::OpenRepository>(),
+        TypeId::of::<project::Land>(),
+        TypeId::of::<project::Check>(),
+        TypeId::of::<project::Approve>(),
+        TypeId::of::<project::ShowChanges>(),
+        TypeId::of::<project::ShowHistory>(),
+        TypeId::of::<project::Revert>(),
+        TypeId::of::<project::ResolveSplit>(),
+        TypeId::of::<project::BackupStatus>(),
+        TypeId::of::<project::BackupNow>(),
+        TypeId::of::<project::AddExisting>(),
+        TypeId::of::<project::Restore>(),
+        TypeId::of::<project::RestoreFrom>(),
+        TypeId::of::<project::Convert>(),
+        TypeId::of::<project::ConvertAll>(),
         TypeId::of::<work::AddRepository>(),
         TypeId::of::<work::EditWorktreeRoot>(),
         TypeId::of::<task::SetDefaultVisibility>(),
@@ -113,20 +135,52 @@ pub fn action_types() -> Vec<TypeId> {
 }
 
 /// Hides the actions from the command palette while `work.enabled` is false and shows them
-/// while it is true. Call after `command_palette_hooks::init`.
+/// while it is true; the repository actions also stay hidden while
+/// `project_repository.enabled` is false. Call after `command_palette_hooks::init`.
 pub fn init_palette(cx: &mut App) {
     sync_palette(cx);
     cx.observe_global::<SettingsStore>(sync_palette).detach();
 }
 
+/// The actions that only make sense while projects live in a repository.
+pub fn repository_action_types() -> Vec<TypeId> {
+    vec![
+        TypeId::of::<project::Edit>(),
+        TypeId::of::<project::OpenWorkingCopy>(),
+        TypeId::of::<project::Abandon>(),
+        TypeId::of::<project::OpenRepository>(),
+        TypeId::of::<project::Land>(),
+        TypeId::of::<project::Check>(),
+        TypeId::of::<project::Approve>(),
+        TypeId::of::<project::ShowChanges>(),
+        TypeId::of::<project::ShowHistory>(),
+        TypeId::of::<project::Revert>(),
+        TypeId::of::<project::ResolveSplit>(),
+        TypeId::of::<project::BackupStatus>(),
+        TypeId::of::<project::BackupNow>(),
+        TypeId::of::<project::AddExisting>(),
+        TypeId::of::<project::Restore>(),
+        TypeId::of::<project::RestoreFrom>(),
+        TypeId::of::<project::Convert>(),
+        TypeId::of::<project::ConvertAll>(),
+    ]
+}
+
 fn sync_palette(cx: &mut App) {
     let enabled = WorkSettings::get_global(cx).enabled;
+    // Without the setting registered nothing gates the repository actions.
+    let repositories =
+        enabled && ProjectRepositorySettings::try_get(cx).is_none_or(|settings| settings.enabled);
     let types = action_types();
+    let repository_types = repository_action_types();
     CommandPaletteFilter::update_global(cx, |filter, _| {
         if enabled {
             filter.show_action_types(&types);
         } else {
             filter.hide_action_types(&types);
+        }
+        if !repositories {
+            filter.hide_action_types(&repository_types);
         }
     });
 }
@@ -157,6 +211,12 @@ pub fn register(workspace: &mut Workspace) {
     worktrees::register(workspace);
     rebase::register(workspace);
     focus::register(workspace);
+    working_copy_commands::register(workspace);
+    landing_commands::register(workspace);
+    backup_commands::register(workspace);
+    restore_commands::register(workspace);
+    convert_commands::register(workspace);
+    master_files::register(workspace);
     open::register(workspace);
     artifacts::register(workspace);
     modes::register(workspace);
@@ -194,9 +254,21 @@ pub fn ready(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<A
     }
 }
 
+/// The author of what the person at the keyboard of this window does.
+pub(crate) fn keyboard_author(window: &Window, cx: &App) -> bongos_work_model::Author {
+    keyboard_context(window, cx).author
+}
+
+/// The context of the person at the keyboard of `window`, holding the person's attestation for
+/// one approval (`project: land` on the person's own change, `project: approve`).
+pub(crate) fn keyboard_context(window: &Window, cx: &App) -> WorkContext {
+    WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx))
+}
+
 /// Queues `command` on the store's writer. `None`, after a toast, when there is no store.
 pub(crate) fn queue(
     workspace: &mut Workspace,
+    window: &Window,
     cx: &mut Context<Workspace>,
     command: impl Fn(&WorkTree, &WorkContext) -> model::Outcome + Send + 'static,
 ) -> Option<gpui::Task<Result<model::Change, WriteError>>> {
@@ -204,18 +276,18 @@ pub(crate) fn queue(
         show_toast(workspace, WriteError::Off.to_string(), cx);
         return None;
     };
-    Some(store.update(cx, |store, cx| {
-        store.write(WorkContext::kyle(), command, cx)
-    }))
+    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    Some(store.update(cx, |store, cx| store.write(ctx, command, cx)))
 }
 
 /// Queues `command` on the store's writer and shows why it did not happen, if it did not.
 pub(crate) fn submit(
     workspace: &mut Workspace,
+    window: &Window,
     cx: &mut Context<Workspace>,
     command: impl Fn(&WorkTree, &WorkContext) -> model::Outcome + Send + 'static,
 ) {
-    let Some(write) = queue(workspace, cx, command) else {
+    let Some(write) = queue(workspace, window, cx, command) else {
         return;
     };
     cx.spawn(async move |workspace, cx| {
@@ -477,6 +549,48 @@ pub(crate) fn new_task_with_default_kind(placement: &Placement, goal: String, cx
     new
 }
 
+/// Whether `project_repository.ask_work_kind` makes `task: new` and `task: edit` ask for the work
+/// kind label.
+fn asks_work_kind(cx: &App) -> bool {
+    ProjectRepositorySettings::try_get(cx).is_some_and(|settings| settings.ask_work_kind)
+}
+
+/// Asks for the work kind label of a new task when the setting is on, then makes `new`; an empty
+/// answer leaves the task without a label.
+fn finish_new(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    new: NewTask,
+    submit_new: impl Fn(&WorkTree, &WorkContext, NewTask) -> model::Outcome + Send + 'static,
+) {
+    if !asks_work_kind(cx) {
+        submit(workspace, window, cx, move |tree, ctx| {
+            submit_new(tree, ctx, new.clone())
+        });
+        return;
+    }
+    modals::ask(
+        workspace,
+        WORK_KIND_PROMPT,
+        "",
+        true,
+        Box::new(move |label, workspace, window, cx| {
+            let new = NewTask {
+                work_kind: Some(label),
+                ..new
+            };
+            submit(workspace, window, cx, move |tree, ctx| {
+                submit_new(tree, ctx, new.clone())
+            })
+        }),
+        window,
+        cx,
+    );
+}
+
+const WORK_KIND_PROMPT: &str = "Work kind, free text (empty for none)";
+
 fn new_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if ready(workspace, cx).is_none() {
         return;
@@ -486,13 +600,13 @@ fn new_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         "Goal of the new task, in one sentence",
         "",
         false,
-        Box::new(|goal, workspace, _, cx| {
+        Box::new(|goal, workspace, window, cx| {
             let placement = Placement::OneOff {
                 activity: DEFAULT_ACTIVITY.to_string(),
             };
             let new = new_task_with_default_kind(&placement, goal, cx);
-            submit(workspace, cx, move |tree, ctx| {
-                model::new_task(tree, ctx, placement.clone(), new.clone())
+            finish_new(workspace, window, cx, new, move |tree, ctx, new| {
+                model::new_task(tree, ctx, placement.clone(), new)
             })
         }),
         window,
@@ -514,11 +628,11 @@ fn new_child(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 "Goal of the new task, in one sentence",
                 "",
                 false,
-                Box::new(move |goal, workspace, _, cx| {
+                Box::new(move |goal, workspace, window, cx| {
                     let new =
                         new_task_with_default_kind(&Placement::Under(parent.clone()), goal, cx);
-                    submit(workspace, cx, move |tree, ctx| {
-                        model::new_child(tree, ctx, &parent, new.clone())
+                    finish_new(workspace, window, cx, new, move |tree, ctx, new| {
+                        model::new_child(tree, ctx, &parent, new)
                     })
                 }),
                 window,
@@ -557,11 +671,11 @@ fn advance(
             }
             !override_ship || ship_waits(task, tree)
         },
-        Box::new(move |id, workspace, _, cx| {
+        Box::new(move |id, workspace, window, cx| {
             if refuse_active_run(&id, workspace, cx) {
                 return;
             }
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::advance(tree, ctx, &id, override_ship)
             })
         }),
@@ -592,8 +706,10 @@ fn close(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Worksp
         "Close which task?",
         "There is no open task to close",
         |task, _| has_status(task, |status| status == Status::Open),
-        Box::new(|id, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| model::close(tree, ctx, &id))
+        Box::new(|id, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
+                model::close(tree, ctx, &id)
+            })
         }),
     );
 }
@@ -620,7 +736,7 @@ fn drop_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 })
                 .unwrap_or_default();
             if open.is_empty() {
-                submit(workspace, cx, move |tree, ctx| {
+                submit(workspace, window, cx, move |tree, ctx| {
                     model::drop_task(tree, ctx, &id, false)
                 });
                 return;
@@ -636,9 +752,9 @@ fn drop_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                     "Keep them".to_string(),
                 ],
                 1,
-                Box::new(move |choice, workspace, _, cx| {
+                Box::new(move |choice, workspace, window, cx| {
                     if choice == 0 {
-                        submit(workspace, cx, move |tree, ctx| {
+                        submit(workspace, window, cx, move |tree, ctx| {
                             model::drop_task(tree, ctx, &id, true)
                         });
                     }
@@ -658,8 +774,8 @@ fn reopen(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Works
         "Reopen which task?",
         "There is no closed or cancelled task to reopen",
         |task, _| has_status(task, |status| status != Status::Open),
-        Box::new(|id, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        Box::new(|id, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::reopen(tree, ctx, &id)
             })
         }),
@@ -692,17 +808,18 @@ fn edit(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspa
             };
             // A goal that comes from Linear is not asked for: the edit goes straight to the kind.
             if rules::goal_locked(&file).is_some() {
-                edit_kind(workspace, window, cx, id, file.kind, None);
+                edit_kind(workspace, window, cx, id, file.kind, file.work_kind, None);
                 return;
             }
             let current = file.kind;
+            let work_kind = file.work_kind.clone();
             modals::ask(
                 workspace,
                 "Goal, in one sentence",
                 &file.goal,
                 false,
                 Box::new(move |goal, workspace, window, cx| {
-                    edit_kind(workspace, window, cx, id, current, Some(goal))
+                    edit_kind(workspace, window, cx, id, current, work_kind, Some(goal))
                 }),
                 window,
                 cx,
@@ -719,6 +836,7 @@ fn edit_kind(
     cx: &mut Context<Workspace>,
     id: String,
     current: Kind,
+    work_kind: Option<String>,
     goal: Option<String>,
 ) {
     let labels = KINDS
@@ -737,24 +855,53 @@ fn edit_kind(
         "Kind",
         labels,
         selected,
-        Box::new(move |choice, workspace, _, cx| {
+        Box::new(move |choice, workspace, window, cx| {
             let kind = KINDS[choice];
-            submit(workspace, cx, move |tree, ctx| {
-                model::edit(
-                    tree,
-                    ctx,
-                    &id,
-                    TaskEdit {
-                        goal: goal.clone(),
-                        kind: Some(kind),
-                        repository: None,
-                    },
-                )
-            })
+            if !asks_work_kind(cx) {
+                submit_edit(workspace, window, cx, id, goal, kind, None);
+                return;
+            }
+            modals::ask(
+                workspace,
+                WORK_KIND_PROMPT,
+                work_kind.as_deref().unwrap_or(""),
+                true,
+                Box::new(move |label, workspace, window, cx| {
+                    submit_edit(workspace, window, cx, id, goal, kind, Some(label))
+                }),
+                window,
+                cx,
+            )
         }),
         window,
         cx,
     )
+}
+
+/// Edits the task `id`; `work_kind` is `None` to leave the label alone, else the answer (an empty
+/// one clears it).
+fn submit_edit(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    id: String,
+    goal: Option<String>,
+    kind: Kind,
+    work_kind: Option<String>,
+) {
+    submit(workspace, window, cx, move |tree, ctx| {
+        model::edit(
+            tree,
+            ctx,
+            &id,
+            TaskEdit {
+                goal: goal.clone(),
+                kind: Some(kind),
+                repository: None,
+                work_kind: work_kind.clone().map(Some),
+            },
+        )
+    })
 }
 
 // Todos.
@@ -773,8 +920,8 @@ fn todo_add(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                 "Name of the new todo",
                 "",
                 false,
-                Box::new(move |name, workspace, _, cx| {
-                    submit(workspace, cx, move |tree, ctx| {
+                Box::new(move |name, workspace, window, cx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::todo_add(
                             tree,
                             ctx,
@@ -840,11 +987,11 @@ fn todo_remove(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         ),
         |task, tree| is_leaf_with(task, tree, |_| true),
         |_, _| true,
-        |id, index, workspace, _, cx| {
+        |id, index, workspace, window, cx| {
             if refuse_active_run(&id, workspace, cx) {
                 return;
             }
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::todo_remove(tree, ctx, &id, index)
             })
         },
@@ -863,11 +1010,11 @@ fn todo_skip(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
         ),
         |task, tree| is_open_leaf(task, tree) && is_leaf_with(task, tree, is_open),
         |_, todo| is_open(todo),
-        |id, index, workspace, _, cx| {
+        |id, index, workspace, window, cx| {
             if refuse_active_run(&id, workspace, cx) {
                 return;
             }
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::todo_skip(tree, ctx, &id, Some(index))
             })
         },
@@ -890,8 +1037,8 @@ fn todo_reopen(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         ),
         |task, tree| is_leaf_with(task, tree, |todo| !is_open(todo)),
         |_, todo| !is_open(todo),
-        |id, index, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        |id, index, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::todo_reopen(tree, ctx, &id, index)
             })
         },
@@ -918,8 +1065,8 @@ fn todo_move(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 &id.clone(),
                 "Move it to the place of which todo?",
                 |_, _| true,
-                Box::new(move |to, workspace, _, cx| {
-                    submit(workspace, cx, move |tree, ctx| {
+                Box::new(move |to, workspace, window, cx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::todo_move(tree, ctx, &id, from, to)
                     })
                 }),
@@ -957,9 +1104,9 @@ fn todo_set_workflow(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
                 "Workflow name; leave empty to make the todo manual",
                 &current,
                 true,
-                Box::new(move |workflow, workspace, _, cx| {
+                Box::new(move |workflow, workspace, window, cx| {
                     let workflow = (!workflow.is_empty()).then_some(workflow);
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::todo_set_workflow(tree, ctx, &id, index, workflow.clone())
                     })
                 }),
@@ -994,9 +1141,9 @@ fn todo_set_role(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
                 "Role",
                 labels,
                 0,
-                Box::new(move |choice, workspace, _, cx| {
+                Box::new(move |choice, workspace, window, cx| {
                     let role = ROLES[choice];
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::todo_set_role(tree, ctx, &id, index, role)
                     })
                 }),
@@ -1022,8 +1169,8 @@ fn todo_start(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 && is_leaf_with(task, tree, |todo| is_open(todo) && todo.started.is_none())
         },
         |_, todo| is_open(todo) && todo.started.is_none(),
-        |id, index, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        |id, index, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::todo_start(tree, ctx, &id, Some(index))
             })
         },

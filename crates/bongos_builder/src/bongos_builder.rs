@@ -19,6 +19,7 @@ mod language;
 mod later;
 mod live;
 mod needs_you;
+mod own_subtree;
 mod plan;
 mod preview_view;
 mod propose;
@@ -55,6 +56,7 @@ pub fn init(fs: Arc<dyn Fs>, dirs: BuilderDirs, cx: &mut App) {
     format_file::write_at_init(fs, dirs, cx);
     later::install(cx);
     needs_you::install(cx);
+    own_subtree::install(cx);
 }
 
 #[cfg(test)]
@@ -63,6 +65,8 @@ mod apply_tests;
 mod builder_tests;
 #[cfg(test)]
 mod later_tests;
+#[cfg(test)]
+mod own_subtree_tests;
 #[cfg(test)]
 mod plan_tests;
 #[cfg(test)]

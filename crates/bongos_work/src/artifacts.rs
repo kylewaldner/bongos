@@ -104,9 +104,9 @@ fn hide_or_share(
                 artifact_placeholder,
                 labels,
                 0,
-                Box::new(move |index, workspace, _, cx| {
+                Box::new(move |index, workspace, window, cx| {
                     let path = paths[index].clone();
-                    submit(workspace, cx, move |tree, ctx| match visibility {
+                    submit(workspace, window, cx, move |tree, ctx| match visibility {
                         Visibility::HumanOnly => model::artifact_hide(tree, ctx, &id, &path),
                         Visibility::Shared => model::artifact_share(tree, ctx, &id, &path),
                     })
@@ -141,8 +141,8 @@ fn set_all(
         placeholder,
         none,
         move |task, _| has_changeable(task, visibility),
-        Box::new(move |id, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| match visibility {
+        Box::new(move |id, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| match visibility {
                 Visibility::HumanOnly => model::artifact_hide_all(tree, ctx, &id),
                 Visibility::Shared => model::artifact_share_all(tree, ctx, &id),
             })
@@ -170,8 +170,8 @@ fn link(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspa
                         "Title of the link; empty uses the URL",
                         "",
                         true,
-                        Box::new(move |title, workspace, _, cx| {
-                            submit(workspace, cx, move |tree, ctx| {
+                        Box::new(move |title, workspace, window, cx| {
+                            submit(workspace, window, cx, move |tree, ctx| {
                                 model::artifact_link(tree, ctx, &id, &url, &title)
                             })
                         }),
@@ -230,9 +230,9 @@ fn set_default_visibility(
                     .iter()
                     .position(|visibility| *visibility != current)
                     .unwrap_or(0),
-                Box::new(move |choice, workspace, _, cx| {
+                Box::new(move |choice, workspace, window, cx| {
                     let visibility = VISIBILITIES[choice];
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::set_default_visibility(tree, ctx, &id, visibility)
                     })
                 }),

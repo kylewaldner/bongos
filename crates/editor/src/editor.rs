@@ -1042,6 +1042,8 @@ pub struct Editor {
     expects_character_input: bool,
     use_modal_editing: bool,
     read_only: bool,
+    /// Text shown after the title of a single buffer, such as "(master)".
+    title_suffix: Option<SharedString>,
     leader_id: Option<CollaboratorId>,
     remote_id: Option<ViewId>,
     pub hover_state: HoverState,
@@ -2253,6 +2255,7 @@ impl Editor {
             expects_character_input: !is_minimap,
             use_modal_editing: full_mode,
             read_only: is_minimap,
+            title_suffix: None,
             use_autoclose: true,
             use_auto_surround: true,
             use_selection_highlight: true,
@@ -2889,7 +2892,24 @@ impl Editor {
     }
 
     pub fn title<'a>(&self, cx: &'a App) -> Cow<'a, str> {
-        self.buffer().read(cx).title(cx)
+        let title = self.buffer().read(cx).title(cx);
+        match &self.title_suffix {
+            Some(suffix) => Cow::Owned(format!("{title} {suffix}")),
+            None => title,
+        }
+    }
+
+    /// Sets the text shown after the title, in the tab and wherever the title is shown.
+    pub fn set_title_suffix(&mut self, suffix: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.title_suffix != suffix {
+            self.title_suffix = suffix;
+            cx.emit(EditorEvent::TitleChanged);
+            cx.notify();
+        }
+    }
+
+    pub fn title_suffix(&self) -> Option<&SharedString> {
+        self.title_suffix.as_ref()
     }
 
     pub fn snapshot(&self, window: &Window, cx: &mut App) -> EditorSnapshot {

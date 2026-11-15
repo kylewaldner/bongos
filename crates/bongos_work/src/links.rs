@@ -219,8 +219,8 @@ fn add_edge(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                                 window,
                                 cx,
                                 Some(model::default_unblock(kind)),
-                                Box::new(move |point, workspace, _, cx| {
-                                    submit(workspace, cx, move |tree, ctx| {
+                                Box::new(move |point, workspace, window, cx| {
+                                    submit(workspace, window, cx, move |tree, ctx| {
                                         model::add_edge(tree, ctx, &id, &target, kind, Some(point))
                                     })
                                 }),
@@ -251,8 +251,8 @@ fn remove_edge(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
                 cx,
                 &task,
                 "Remove which edge?",
-                Box::new(move |target, workspace, _, cx| {
-                    submit(workspace, cx, move |tree, ctx| {
+                Box::new(move |target, workspace, window, cx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::remove_edge(tree, ctx, &id, &target)
                     })
                 }),
@@ -323,8 +323,8 @@ fn set_unblock_point(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
                         window,
                         cx,
                         None,
-                        Box::new(move |point, workspace, _, cx| {
-                            submit(workspace, cx, move |tree, ctx| {
+                        Box::new(move |point, workspace, window, cx| {
+                            submit(workspace, window, cx, move |tree, ctx| {
                                 model::set_unblock_point(tree, ctx, &id, &target, point)
                             })
                         }),
@@ -354,9 +354,9 @@ fn set_merge_ship(workspace: &mut Workspace, window: &mut Window, cx: &mut Conte
                     "repository default".to_string(),
                 ],
                 0,
-                Box::new(move |choice, workspace, _, cx| {
+                Box::new(move |choice, workspace, window, cx| {
                     let value = VALUES[choice];
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::set_merge_ship(tree, ctx, &id, value)
                     })
                 }),
@@ -412,13 +412,13 @@ fn retarget(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                 "Point it at",
                 labels,
                 0,
-                Box::new(move |choice, workspace, _, cx| {
+                Box::new(move |choice, workspace, window, cx| {
                     let to = match targets[choice].clone() {
                         Target::StackedOn(target) => Retarget::StackedOn(target),
                         Target::After(target) => Retarget::After(target),
                         Target::Main => Retarget::Main,
                     };
-                    submit(workspace, cx, move |tree, ctx| {
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::retarget(tree, ctx, &id, to.clone())
                     })
                 }),
@@ -479,10 +479,10 @@ fn set_result(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                                     .map(|(_, name)| name.to_string())
                                     .collect(),
                                 0,
-                                Box::new(move |choice, workspace, _, cx| {
+                                Box::new(move |choice, workspace, window, cx| {
                                     let state = RESULT_STATES[choice].0;
                                     let result = build_result(kind, &url, state);
-                                    submit(workspace, cx, move |tree, ctx| {
+                                    submit(workspace, window, cx, move |tree, ctx| {
                                         model::set_result(tree, ctx, &id, result.clone())
                                     })
                                 }),
@@ -524,8 +524,8 @@ fn clear_result(workspace: &mut Workspace, window: &mut Window, cx: &mut Context
         "Clear the result of which task?",
         "No task has a result",
         |task, _| task.file.as_ref().is_some_and(|file| file.result.is_some()),
-        Box::new(|id, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        Box::new(|id, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::clear_result(tree, ctx, &id)
             })
         }),

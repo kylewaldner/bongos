@@ -5,8 +5,8 @@
 //! `todos(task_id, position, todo_id, state, started)` the state of its todos, `history(task_id,
 //! seq, entry_toml)` its history, `kv(namespace, key, value_toml)` the state of other features,
 //! `staged_state(change_id, ops)` the state ops a pending change applies when it lands, and
-//! `landings`, `changes`, `check_results`, `approvals` and `meta(key, value)` for the landing
-//! machinery and the store itself.
+//! `landings`, `changes`, `check_results`, `approvals`, `landing_queue`, `resolutions` and
+//! `meta(key, value)` for the landing machinery and the store itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -15,7 +15,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use bongos_project_repo_model::{Author, TaskStateRecord, TodoStateRecord, layout};
+use bongos_project_repo_model::{
+    Author, DefinitionTree, StateLookup, TaskStateRecord, TodoStateRecord, layout,
+};
 use bongos_work_model::{HistoryEntry, TaskId, Timestamp, TodoState};
 use futures::channel::mpsc;
 use parking_lot::Mutex;
@@ -23,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use sqlez::connection::Connection;
 
 use crate::Location;
+use crate::approval::MOVE_ROLLBACK_NAMESPACE;
+use crate::changes::{self, ChangeRow};
 use crate::state_hooks::{StateApplyChange, StateApplyHook, StateApplyHooks, TaskTouch};
 use crate::state_ops::{self, StateOp};
 
@@ -69,8 +73,10 @@ const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS check_results (
         change_id TEXT NOT NULL,
         check_name TEXT NOT NULL,
+        tree TEXT NOT NULL,
+        stamp TEXT NOT NULL,
         result_toml TEXT NOT NULL,
-        PRIMARY KEY (change_id, check_name)
+        PRIMARY KEY (change_id, check_name, tree, stamp)
     )",
     "CREATE TABLE IF NOT EXISTS approvals (
         change_id TEXT NOT NULL,
@@ -82,9 +88,24 @@ const SCHEMA: &[&str] = &[
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS landing_queue (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        change_id TEXT NOT NULL UNIQUE
+    )",
+    "CREATE TABLE IF NOT EXISTS resolutions (
+        commit_id TEXT PRIMARY KEY NOT NULL,
+        record_toml TEXT NOT NULL
+    )",
 ];
 
 const GENERATION_KEY: &str = "generation";
+/// The `meta` key of the last commit that passed the deterministic checks.
+pub const VERIFIED_COMMIT_KEY: &str = "verified_commit";
+
+/// How long a second process waits for the writer's pid to appear in `host.lock`, which the
+/// writer empties and then fills right after it takes the lock.
+const PID_READ_ATTEMPTS: usize = 20;
+const PID_READ_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Sent after every committed transaction that wrote something.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,14 +118,41 @@ pub enum StateEvent {
     },
 }
 
+/// Why state is written without the state apply hooks: the two exceptions to them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportReason {
+    /// `project: restore` replaces the run state with one snapshot, read consistently.
+    Restore,
+    /// `project: convert` fills a new store from a project of the old format.
+    Conversion,
+}
+
+impl ImportReason {
+    fn label(self) -> &'static str {
+        match self {
+            ImportReason::Restore => "restore",
+            ImportReason::Conversion => "conversion",
+        }
+    }
+}
+
 /// Why the writer could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
-    /// Another process holds the writer; open a reader instead.
-    #[error("this project is open in another bongos process (pid {pid})")]
-    HeldBy { pid: u32 },
+    /// Another process holds the writer; open a reader instead. `pid` is `None` when the
+    /// holder's pid could not be read.
+    #[error("this project is open in another bongos process ({})", held_by(.pid))]
+    HeldBy { pid: Option<u32> },
     #[error(transparent)]
     Store(#[from] anyhow::Error),
+}
+
+fn held_by(pid: &Option<u32>) -> String {
+    match pid {
+        Some(pid) => format!("pid {pid}"),
+        None => "pid unknown".to_string(),
+    }
 }
 
 /// Opens a project's state store.
@@ -130,6 +178,7 @@ impl StateStore {
         }
         Ok(StateWriter {
             connection: Mutex::new(connection),
+            definitions: Mutex::new((None, Arc::new(DefinitionTree::default()))),
             hooks,
             subscribers: Mutex::new(Vec::new()),
             _lock: lock,
@@ -139,11 +188,16 @@ impl StateStore {
     /// Opens the store for reading only. It never takes the host lock, so it works beside the
     /// writer of another process.
     pub fn open_reader(location: &Location) -> Result<StateReader> {
-        let path = location.state.join(layout::STATE_DB_FILE);
-        if !path.exists() {
+        Self::open_reader_at(&location.state.join(layout::STATE_DB_FILE))
+    }
+
+    /// Opens the store file at `path` for reading only: a project's, or a replaced state kept
+    /// by a restore.
+    pub(crate) fn open_reader_at(path: &Path) -> Result<StateReader> {
+        if !path.is_file() {
             bail!("no state store at {}", path.display());
         }
-        let connection = open_connection(&path)?;
+        let connection = open_connection(path)?;
         exec(&connection, "PRAGMA query_only=ON")?;
         Ok(StateReader {
             connection: Mutex::new(connection),
@@ -180,10 +234,9 @@ fn take_host_lock(path: &Path) -> Result<File, OpenError> {
     if result != 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            let mut text = String::new();
-            file.read_to_string(&mut text).ok();
-            let pid = text.trim().parse().unwrap_or(0);
-            return Err(OpenError::HeldBy { pid });
+            return Err(OpenError::HeldBy {
+                pid: read_holder_pid(&mut file),
+            });
         }
         return Err(anyhow!(error)
             .context(format!("locking {}", path.display()))
@@ -206,6 +259,26 @@ fn take_host_lock(path: &Path) -> Result<File, OpenError> {
     Ok(file)
 }
 
+/// The pid in a held `host.lock`. The holder empties the file and then writes its pid, so an
+/// empty or zero read is retried briefly; `None` if no pid appears.
+pub(crate) fn read_holder_pid(file: &mut File) -> Option<u32> {
+    for attempt in 0..PID_READ_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(PID_READ_PAUSE);
+        }
+        let mut text = String::new();
+        if file.seek(SeekFrom::Start(0)).is_err() || file.read_to_string(&mut text).is_err() {
+            continue;
+        }
+        if let Ok(pid) = text.trim().parse::<u32>()
+            && pid != 0
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
 fn write_pid(file: &mut File) -> std::io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
@@ -221,6 +294,8 @@ fn exec(connection: &Connection, sql: &str) -> Result<()> {
 pub struct StateWriter {
     // Declared before the lock so the database closes before the lock is released.
     connection: Mutex<Connection>,
+    /// The definitions at the verified commit, which the hooks see, with that commit when known.
+    definitions: Mutex<(Option<String>, Arc<DefinitionTree>)>,
     hooks: Arc<[Arc<dyn StateApplyHook>]>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<StateEvent>>>,
     _lock: File,
@@ -250,27 +325,120 @@ impl StateWriter {
     ) -> Result<T> {
         let connection = self.connection.lock();
         exec(&connection, "BEGIN IMMEDIATE").context("starting a state transaction")?;
-        let outcome = run_transaction(&connection, &self.hooks, origin, ops, f);
-        let (value, event) = match outcome {
+        // Rolls back if `f` or a hook panics, so the connection is never left inside a
+        // transaction.
+        let mut guard = RollbackGuard {
+            connection: &connection,
+            open: true,
+        };
+        let definitions = self.definitions.lock().1.clone();
+        let outcome = run_transaction(&connection, &self.hooks, &definitions, origin, ops, f);
+        let (value, event, new_definitions) = match outcome {
             Ok(done) => {
+                guard.open = false;
                 if let Err(error) = exec(&connection, "COMMIT") {
                     exec(&connection, "ROLLBACK").ok();
                     return Err(error.context("committing a state transaction"));
                 }
                 done
             }
-            Err(error) => {
-                exec(&connection, "ROLLBACK").ok();
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        drop(connection);
+        drop(guard);
+        if let Some((commit, definitions)) = new_definitions {
+            *self.definitions.lock() = (Some(commit), definitions);
+        }
+        // Sent while the connection is still held, so events reach subscribers in the order
+        // their transactions committed.
         if let Some(event) = event {
             self.subscribers
                 .lock()
                 .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
         }
+        drop(connection);
         Ok(value)
+    }
+
+    /// Writes in one transaction without running any state apply hook: the rows `f` writes,
+    /// the hook-owned `kv` rows among them, are authoritative as written. Only a restore
+    /// (`restore.rs`) and a conversion (`convert.rs`) call it; a test scanning the crate's
+    /// sources holds that. When `keep_copy` is given, the store as it is before the transaction
+    /// is first copied there, under the same hold of the connection, so no other write falls
+    /// between the copy and the import. An error from `f` changes nothing (the copy stays).
+    pub(crate) fn import_without_hooks<T>(
+        &self,
+        reason: ImportReason,
+        keep_copy: Option<&Path>,
+        f: impl FnOnce(&mut StateTx) -> Result<T>,
+    ) -> Result<T> {
+        let connection = self.connection.lock();
+        if let Some(copy) = keep_copy {
+            let target = copy
+                .to_str()
+                .with_context(|| format!("the path {} is not UTF-8", copy.display()))?;
+            connection.exec_bound::<&str>("VACUUM INTO ?")?(target)
+                .with_context(|| format!("keeping the state in {}", copy.display()))?;
+        }
+        exec(&connection, "BEGIN IMMEDIATE").context("starting an import")?;
+        let mut guard = RollbackGuard {
+            connection: &connection,
+            open: true,
+        };
+        let mut tx = StateTx::new(&connection);
+        let value = f(&mut tx)?;
+        let event = if tx.dirty {
+            let generation = read_generation(&connection)? + 1;
+            connection.exec_bound::<(&str, String)>(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            )?((GENERATION_KEY, generation.to_string()))?;
+            Some(StateEvent::Changed {
+                generation,
+                task_ids: tx.task_ids.iter().cloned().collect(),
+                namespaces: tx.namespaces.iter().cloned().collect(),
+            })
+        } else {
+            None
+        };
+        let verified = tx.verified.take();
+        guard.open = false;
+        if let Err(error) = exec(&connection, "COMMIT") {
+            exec(&connection, "ROLLBACK").ok();
+            return Err(error.context(format!("committing the {}", reason.label())));
+        }
+        drop(guard);
+        if let Some((commit, definitions)) = verified {
+            *self.definitions.lock() = (Some(commit), definitions);
+        }
+        if let Some(event) = event {
+            self.subscribers
+                .lock()
+                .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
+        }
+        log::info!("state replaced by a {}", reason.label());
+        drop(connection);
+        Ok(value)
+    }
+
+    /// The definitions the hooks see as the verified commit's.
+    pub fn definitions(&self) -> Arc<DefinitionTree> {
+        self.definitions.lock().1.clone()
+    }
+
+    /// The commit whose definitions the hooks see, when known.
+    pub fn definitions_commit(&self) -> Option<String> {
+        self.definitions.lock().0.clone()
+    }
+
+    /// Sets the definitions the hooks see without a transaction: when a project opens, before
+    /// any write.
+    pub fn set_definitions(&self, definitions: Arc<DefinitionTree>) {
+        *self.definitions.lock() = (None, definitions);
+    }
+
+    /// [`Self::set_definitions`] for the definitions of `commit`.
+    pub fn set_definitions_at(&self, commit: &str, definitions: Arc<DefinitionTree>) {
+        *self.definitions.lock() = (Some(commit.to_string()), definitions);
     }
 
     /// A consistent read on the writer's connection. Not callable from inside `transact`.
@@ -290,18 +458,36 @@ impl StateWriter {
     }
 }
 
+/// Rolls back the open transaction when dropped while `open`.
+struct RollbackGuard<'a> {
+    connection: &'a Connection,
+    open: bool,
+}
+
+impl Drop for RollbackGuard<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            exec(self.connection, "ROLLBACK").ok();
+        }
+    }
+}
+
+type TransactionDone<T> = (T, Option<StateEvent>, Option<(String, Arc<DefinitionTree>)>);
+
 fn run_transaction<T>(
     connection: &Connection,
     hooks: &[Arc<dyn StateApplyHook>],
+    definitions: &Arc<DefinitionTree>,
     origin: &Author,
     ops: &[StateOp],
     f: impl FnOnce(&mut StateTx) -> Result<T>,
-) -> Result<(T, Option<StateEvent>)> {
+) -> Result<TransactionDone<T>> {
     let mut tx = StateTx::new(connection);
     let value = f(&mut tx)?;
-    run_hooks(&mut tx, hooks, origin, ops)?;
+    run_hooks(&mut tx, hooks, definitions, origin, ops)?;
+    let new_definitions = tx.verified.take();
     if !tx.dirty {
-        return Ok((value, None));
+        return Ok((value, None, new_definitions));
     }
     let generation = read_generation(connection)? + 1;
     connection.exec_bound::<(&str, String)>(
@@ -313,27 +499,45 @@ fn run_transaction<T>(
         task_ids: tx.task_ids.into_iter().collect(),
         namespaces: tx.namespaces.into_iter().collect(),
     };
-    Ok((value, Some(event)))
+    Ok((value, Some(event), new_definitions))
 }
 
 fn run_hooks(
     tx: &mut StateTx,
     hooks: &[Arc<dyn StateApplyHook>],
+    definitions: &Arc<DefinitionTree>,
     origin: &Author,
     ops: &[StateOp],
 ) -> Result<()> {
-    if tx.before.is_empty() || hooks.is_empty() {
+    let new_tree = tx.verified.as_ref().map(|(_, tree)| tree.clone());
+    if (tx.before.is_empty() && new_tree.is_none()) || hooks.is_empty() {
         return Ok(());
     }
-    let mut touched = Vec::with_capacity(tx.before.len());
-    for (id, before) in tx.before.clone() {
+    // When the verified commit changes, the hooks see the old and the new definitions, and
+    // every task whose definition differs counts as touched.
+    let (old_definitions, current) = match &new_tree {
+        Some(new_tree) => (Some(definitions.clone()), new_tree.clone()),
+        None => (None, definitions.clone()),
+    };
+    let mut ids: BTreeSet<TaskId> = tx.before.keys().cloned().collect();
+    if let Some(old) = &old_definitions {
+        ids.extend(old.differing_ids(&current));
+    }
+    let mut touched = Vec::with_capacity(ids.len());
+    for id in ids {
         let after = tx.task(&id)?;
+        let before = match tx.before.get(&id) {
+            Some(before) => before.clone(),
+            None => after.clone(),
+        };
+        let definition_before = old_definitions.as_deref().unwrap_or(&current).task(&id);
+        let definition_after = current.task(&id);
         touched.push(TaskTouch {
             id,
             before,
             after,
-            definition_before: None,
-            definition_after: None,
+            definition_before,
+            definition_after,
         });
     }
     let namespaces: Vec<String> = tx.namespaces.iter().cloned().collect();
@@ -341,6 +545,8 @@ fn run_hooks(
         ops,
         touched: &touched,
         namespaces: &namespaces,
+        old_definitions: old_definitions.as_deref(),
+        definitions: &current,
         origin,
     };
     for hook in hooks {
@@ -414,6 +620,16 @@ impl<'a> StateRead<'a> {
             .collect())
     }
 
+    /// The change with `change_id`.
+    pub fn change(&self, change_id: &str) -> Result<Option<ChangeRow>> {
+        changes::read_change(self.connection, change_id)
+    }
+
+    /// Every change, oldest first, whatever its state.
+    pub fn changes(&self) -> Result<Vec<ChangeRow>> {
+        changes::read_changes(self.connection)
+    }
+
     pub fn kv(&self, namespace: &str) -> KvRead<'_> {
         KvRead {
             connection: self.connection,
@@ -427,6 +643,72 @@ impl<'a> StateRead<'a> {
 
     pub fn generation(&self) -> Result<u64> {
         read_generation(self.connection)
+    }
+
+    /// The last commit that passed the deterministic checks; `None` before one is recorded.
+    pub fn verified_commit(&self) -> Result<Option<String>> {
+        read_meta(self.connection, VERIFIED_COMMIT_KEY)
+    }
+
+    /// The value of the `meta` key `key`.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        read_meta(self.connection, key)
+    }
+
+    /// Every landing as `(change id, record)`, newest first.
+    pub fn landings(&self) -> Result<Vec<(String, String)>> {
+        self.connection.select::<(String, String)>(
+            "SELECT change_id, record_toml FROM landings ORDER BY rowid DESC",
+        )?()
+    }
+
+    /// Every resolution of a split master as `(commit, record)`, newest first.
+    pub(crate) fn resolutions(&self) -> Result<Vec<(String, String)>> {
+        self.connection.select::<(String, String)>(
+            "SELECT commit_id, record_toml FROM resolutions ORDER BY rowid DESC",
+        )?()
+    }
+
+    /// The change ids in the landing queue, first in first.
+    pub fn landing_queue(&self) -> Result<Vec<String>> {
+        read_queue(self.connection)
+    }
+
+    /// The stored results of the checks of `change_id` as records, by check name, oldest first.
+    pub(crate) fn check_results(&self, change_id: &str) -> Result<Vec<(String, String)>> {
+        self.connection.select_bound::<&str, (String, String)>(
+            "SELECT check_name, result_toml FROM check_results WHERE change_id = ?
+             ORDER BY check_name, rowid",
+        )?(change_id)
+    }
+
+    /// The approval rows of `change_id` as records, oldest first. Only the approval check and
+    /// the views read them; nothing but a person's attestation writes them.
+    pub(crate) fn approvals(&self, change_id: &str) -> Result<Vec<String>> {
+        self.connection.select_bound::<&str, String>(
+            "SELECT record_toml FROM approvals WHERE change_id = ? ORDER BY seq",
+        )?(change_id)
+    }
+
+    /// The stored result of `check` on `change_id` for exactly `tree` and `stamp`.
+    pub(crate) fn check_result(
+        &self,
+        change_id: &str,
+        check: &str,
+        tree: &str,
+        stamp: &str,
+    ) -> Result<Option<String>> {
+        self.connection
+            .select_row_bound::<(&str, &str, &str, &str), String>(
+                "SELECT result_toml FROM check_results
+                 WHERE change_id = ?1 AND check_name = ?2 AND tree = ?3 AND stamp = ?4",
+            )?((change_id, check, tree, stamp))
+    }
+}
+
+impl StateLookup for StateRead<'_> {
+    fn task_state(&self, id: &str) -> std::result::Result<Option<TaskStateRecord>, String> {
+        self.task(id).map_err(|error| format!("{error:#}"))
     }
 }
 
@@ -457,6 +739,8 @@ pub struct StateTx<'a> {
     dirty: bool,
     /// The hook running now; it may write only `kv`.
     hook: Option<String>,
+    /// The verified commit this transaction records, with its parsed definitions.
+    verified: Option<(String, Arc<DefinitionTree>)>,
 }
 
 impl<'a> StateTx<'a> {
@@ -468,6 +752,7 @@ impl<'a> StateTx<'a> {
             namespaces: BTreeSet::new(),
             dirty: false,
             hook: None,
+            verified: None,
         }
     }
 
@@ -481,6 +766,35 @@ impl<'a> StateTx<'a> {
 
     pub fn generation(&self) -> Result<u64> {
         read_generation(self.connection)
+    }
+
+    pub fn verified_commit(&self) -> Result<Option<String>> {
+        read_meta(self.connection, VERIFIED_COMMIT_KEY)
+    }
+
+    /// A read of the state as this transaction sees it, for code that takes a [`StateRead`].
+    pub(crate) fn as_read(&self) -> StateRead<'a> {
+        StateRead {
+            connection: self.connection,
+        }
+    }
+
+    /// Records `commit` as the verified commit, whose parsed definitions are `definitions`. The
+    /// hooks of this transaction see the old and the new definitions, and once it commits the
+    /// writer's definitions are the new ones.
+    pub fn set_verified_commit(
+        &mut self,
+        commit: &str,
+        definitions: Arc<DefinitionTree>,
+    ) -> Result<()> {
+        self.only_kv_in_hook("the verified commit")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )?((VERIFIED_COMMIT_KEY, commit))?;
+        self.verified = Some((commit.to_string(), definitions));
+        self.dirty = true;
+        Ok(())
     }
 
     fn only_kv_in_hook(&self, what: &str) -> Result<()> {
@@ -579,17 +893,191 @@ impl<'a> StateTx<'a> {
         Ok(())
     }
 
+    /// Removes the rows of every task but those `keep` holds: what a restore does before it
+    /// writes the snapshot's.
+    pub(crate) fn clear_task_state(&mut self, keep: impl Fn(&str) -> bool) -> Result<()> {
+        for id in self.task_ids()? {
+            if !keep(&id) {
+                self.delete_task(&id)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn change(&self, change_id: &str) -> Result<Option<ChangeRow>> {
+        changes::read_change(self.connection, change_id)
+    }
+
+    /// Inserts `row`, or replaces the row with its id.
+    pub fn set_change(&mut self, row: &ChangeRow) -> Result<()> {
+        self.only_kv_in_hook("a change")?;
+        changes::write_change(self.connection, row)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        read_meta(self.connection, key)
+    }
+
+    /// Sets the `meta` key `key`; not for the verified commit or the generation.
+    pub(crate) fn set_meta(&mut self, key: &str, value: &str) -> Result<()> {
+        self.only_kv_in_hook(key)?;
+        debug_assert!(key != VERIFIED_COMMIT_KEY && key != GENERATION_KEY);
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )?((key, value))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Sets the `meta` key `key` without counting as a change of the state: no generation
+    /// bump and no event. For the backup's own records, which must not make the state look
+    /// changed since the snapshot they describe.
+    pub(crate) fn set_meta_quiet(&mut self, key: &str, value: &str) -> Result<()> {
+        self.only_kv_in_hook(key)?;
+        debug_assert!(key != VERIFIED_COMMIT_KEY && key != GENERATION_KEY);
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )?((key, value))?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_meta(&mut self, key: &str) -> Result<()> {
+        self.only_kv_in_hook(key)?;
+        self.connection
+            .exec_bound::<&str>("DELETE FROM meta WHERE key = ?")?(key)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn add_landing(&mut self, change_id: &str, record: &str) -> Result<()> {
+        self.only_kv_in_hook("a landing")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO landings (change_id, record_toml) VALUES (?1, ?2)",
+        )?((change_id, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn add_resolution(&mut self, commit: &str, record: &str) -> Result<()> {
+        self.only_kv_in_hook("a resolution")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO resolutions (commit_id, record_toml) VALUES (?1, ?2)",
+        )?((commit, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn landing_queue(&self) -> Result<Vec<String>> {
+        read_queue(self.connection)
+    }
+
+    /// Puts `change_id` at the back of the landing queue, unless it is in it already.
+    pub(crate) fn queue_push(&mut self, change_id: &str) -> Result<()> {
+        self.only_kv_in_hook("the landing queue")?;
+        self.connection.exec_bound::<&str>(
+            "INSERT INTO landing_queue (change_id) VALUES (?) ON CONFLICT (change_id) DO NOTHING",
+        )?(change_id)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn queue_remove(&mut self, change_id: &str) -> Result<()> {
+        self.only_kv_in_hook("the landing queue")?;
+        self.connection
+            .exec_bound::<&str>("DELETE FROM landing_queue WHERE change_id = ?")?(
+            change_id
+        )?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Empties the landing queue: at startup, when nobody of a former process waits in it.
+    pub(crate) fn queue_clear(&mut self) -> Result<()> {
+        self.only_kv_in_hook("the landing queue")?;
+        self.connection.exec("DELETE FROM landing_queue")?()?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Stores the result of `check` on `change_id` for `tree` and `stamp`; a result for another
+    /// tree or stamp stays beside it and is never counted for this one.
+    pub(crate) fn set_check_result(
+        &mut self,
+        change_id: &str,
+        check: &str,
+        tree: &str,
+        stamp: &str,
+        record: &str,
+    ) -> Result<()> {
+        self.only_kv_in_hook("a check result")?;
+        self.connection
+            .exec_bound::<(&str, &str, &str, &str, &str)>(
+                "INSERT INTO check_results (change_id, check_name, tree, stamp, result_toml)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (change_id, check_name, tree, stamp)
+             DO UPDATE SET result_toml = excluded.result_toml",
+            )?((change_id, check, tree, stamp, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Adds an approval row of `change_id`. Only `approval.rs` calls it, with a record built
+    /// from a person's attestation.
+    pub(crate) fn add_approval(&mut self, change_id: &str, record: &str) -> Result<()> {
+        self.only_kv_in_hook("an approval")?;
+        self.connection.exec_bound::<(&str, &str)>(
+            "INSERT INTO approvals (change_id, seq, record_toml)
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM approvals WHERE change_id = ?1), ?2)",
+        )?((change_id, record))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// One `kv` namespace. A write to a namespace only the engine keeps (the move rollbacks
+    /// that check 9 trusts) is refused through it.
     pub fn kv(&mut self, namespace: &str) -> KvTx<'_, 'a> {
         KvTx {
             tx: self,
             namespace: namespace.to_string(),
+            engine: false,
+        }
+    }
+
+    /// The move rollbacks: written only by the move coordinator, never by a state hook.
+    pub(crate) fn move_rollbacks(&mut self) -> KvTx<'_, 'a> {
+        self.engine_kv(MOVE_ROLLBACK_NAMESPACE)
+    }
+
+    /// One of the namespaces only the engine writes (the moves' rows and claims, the move
+    /// rollbacks). Only the move coordinator and the landing's step 8 call it.
+    pub(crate) fn engine_kv(&mut self, namespace: &str) -> KvTx<'_, 'a> {
+        debug_assert!(ENGINE_NAMESPACES.contains(&namespace));
+        KvTx {
+            tx: self,
+            namespace: namespace.to_string(),
+            engine: true,
         }
     }
 
     /// Applies `ops` to the current rows (staged state, a router's state-only write). Returns
-    /// the notes of ops that kept a newer value.
+    /// the notes of ops that kept a newer value. An op on a task a move holds is refused, and
+    /// nothing is applied.
     pub fn apply_ops(&mut self, ops: &[StateOp]) -> Result<Vec<String>> {
-        state_ops::apply(self, ops)
+        state_ops::apply(self, ops, None)
+    }
+
+    /// [`Self::apply_ops`] for the staged ops of the change `change_id` as it lands: a change
+    /// a move's coordinator made may write the tasks its move holds.
+    pub(crate) fn apply_ops_for(
+        &mut self,
+        change_id: &str,
+        ops: &[StateOp],
+    ) -> Result<Vec<String>> {
+        state_ops::apply(self, ops, Some(change_id))
     }
 
     /// Keeps `ops` for a pending change, to apply when it lands.
@@ -621,7 +1109,16 @@ impl<'a> StateTx<'a> {
 pub struct KvTx<'t, 'a> {
     tx: &'t mut StateTx<'a>,
     namespace: String,
+    /// Opened by the engine for a namespace it alone keeps.
+    engine: bool,
 }
+
+/// The `kv` namespaces only the engine writes.
+const ENGINE_NAMESPACES: &[&str] = &[
+    MOVE_ROLLBACK_NAMESPACE,
+    crate::moves::MOVES_NAMESPACE,
+    crate::moves::MOVE_CLAIMS_NAMESPACE,
+];
 
 impl KvTx<'_, '_> {
     pub fn get(&self, key: &str) -> Result<Option<toml::Value>> {
@@ -634,6 +1131,7 @@ impl KvTx<'_, '_> {
     }
 
     pub fn put(&mut self, key: &str, value: toml::Value) -> Result<()> {
+        self.writable()?;
         let text = value_to_text(value)?;
         self.tx.connection.exec_bound::<(&str, &str, &str)>(
             "INSERT INTO kv (namespace, key, value_toml) VALUES (?1, ?2, ?3)
@@ -644,6 +1142,7 @@ impl KvTx<'_, '_> {
     }
 
     pub fn delete(&mut self, key: &str) -> Result<()> {
+        self.writable()?;
         self.tx
             .connection
             .exec_bound::<(&str, &str)>("DELETE FROM kv WHERE namespace = ?1 AND key = ?2")?(
@@ -653,6 +1152,37 @@ impl KvTx<'_, '_> {
         )
         )?;
         self.written();
+        Ok(())
+    }
+
+    /// Removes every entry of the namespace.
+    pub fn clear(&mut self) -> Result<()> {
+        self.writable()?;
+        self.tx
+            .connection
+            .exec_bound::<&str>("DELETE FROM kv WHERE namespace = ?")?(
+            self.namespace.as_str()
+        )?;
+        self.written();
+        Ok(())
+    }
+
+    fn writable(&self) -> Result<()> {
+        if !ENGINE_NAMESPACES.contains(&self.namespace.as_str()) {
+            return Ok(());
+        }
+        if let Some(hook) = &self.tx.hook {
+            bail!(
+                "the {} namespace is the engine's, and {hook} wrote it",
+                self.namespace
+            );
+        }
+        if !self.engine {
+            bail!(
+                "the {} namespace is written only by the engine",
+                self.namespace
+            );
+        }
         Ok(())
     }
 
@@ -734,6 +1264,14 @@ fn read_task_ids(connection: &Connection) -> Result<Vec<TaskId>> {
         "SELECT id FROM tasks UNION SELECT task_id FROM todos UNION SELECT task_id FROM history
          ORDER BY 1",
     )?()
+}
+
+fn read_queue(connection: &Connection) -> Result<Vec<String>> {
+    connection.select::<String>("SELECT change_id FROM landing_queue ORDER BY seq")?()
+}
+
+fn read_meta(connection: &Connection, key: &str) -> Result<Option<String>> {
+    connection.select_row_bound::<&str, String>("SELECT value FROM meta WHERE key = ?")?(key)
 }
 
 fn read_generation(connection: &Connection) -> Result<u64> {

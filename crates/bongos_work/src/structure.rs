@@ -1,18 +1,26 @@
-//! The handlers of the commands that change the shape of the tree: `task: new one off`, `split`,
+//! The handlers of the commands that change the shape of the tree: `task: new one off` (into the
+//! one-offs project while project repositories are on, see [`crate::oneoffs`]), `split`,
 //! `move`, `move to project` and `make one off`. The last four rename directories, so each runs
 //! the model command once on the current snapshot to learn whether it is refused and what it
 //! would do, shows that, and writes only after a confirmation (the default answer cancels).
+//! `move to project` and `make one off` of a task in a project repository move it between
+//! project repositories instead, through [`crate::move_commands`].
 
+use bongos_project_repo::ProjectRepositorySettings;
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{self as model, Context as WorkContext, NewTask};
 use bongos_work_model::rules::{self, Place};
-use bongos_work_model::store::WorkTree;
+use bongos_work_model::store::{Task, WorkTree};
 use gpui::{Context, Window};
+use settings::Settings as _;
 use workspace::Workspace;
 
 use crate::DEFAULT_ACTIVITY;
 use crate::actions::task;
 use crate::commands::{new_task_todos, ready, show_toast, submit, with_project, with_task};
 use crate::modals;
+use crate::move_commands::{Destination, repository_id, repository_project_of, start_move};
+use crate::oneoffs::oneoffs_project;
 
 pub fn register(workspace: &mut Workspace) {
     workspace
@@ -38,13 +46,17 @@ fn new_one_off(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
                 "Goal of the new one-off, in one sentence",
                 "",
                 false,
-                Box::new(move |goal, workspace, _, cx| {
+                Box::new(move |goal, workspace, window, cx| {
                     let new = NewTask {
                         goal,
                         todos: new_task_todos(cx),
                         ..NewTask::default()
                     };
-                    submit(workspace, cx, move |tree, ctx| {
+                    if ProjectRepositorySettings::get_global(cx).enabled {
+                        crate::oneoffs::new_oneoff(activity, new, workspace, window, cx);
+                        return;
+                    }
+                    submit(workspace, window, cx, move |tree, ctx| {
                         model::new_oneoff(tree, ctx, &activity, new.clone())
                     })
                 }),
@@ -70,7 +82,10 @@ fn confirm_then_submit(
     let Some(tree) = ready(workspace, cx) else {
         return;
     };
-    let change = match command(&tree, &WorkContext::kyle()) {
+    let change = match command(
+        &tree,
+        &WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx)),
+    ) {
         Ok(change) => change,
         Err(refusal) => {
             show_toast(workspace, refusal, cx);
@@ -86,9 +101,9 @@ fn confirm_then_submit(
         format!("{verb}?"),
         vec![yes, "Cancel".to_string()],
         1,
-        Box::new(move |choice, workspace, _, cx| {
+        Box::new(move |choice, workspace, window, cx| {
             if choice == 0 {
-                submit(workspace, cx, command);
+                submit(workspace, window, cx, command);
             }
         }),
         window,
@@ -170,9 +185,10 @@ fn move_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
             let Some(tree) = ready(workspace, cx) else {
                 return;
             };
-            let Some(moved) = tree.task_by_id(&id).map(|task| task.dir.clone()) else {
+            if tree.task_by_id(&id).is_none() {
                 return;
-            };
+            }
+            let moved = id.clone();
             with_task(
                 workspace,
                 window,
@@ -180,7 +196,7 @@ fn move_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 "Move it under which task?",
                 "There is no task to move it under",
                 // Not under itself or one of its own tasks.
-                move |task, _| task.file.is_some() && !task.dir.starts_with(&moved),
+                move |task, tree| can_move_under(task, tree, &moved),
                 Box::new(move |parent, workspace, window, cx| {
                     confirm_then_submit(
                         workspace,
@@ -195,6 +211,15 @@ fn move_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
     );
 }
 
+/// Whether the task `moved` may move under `task`: not under itself or one of its own tasks.
+/// Decided through the tree, so it holds for a folder layout that does not nest tasks.
+pub(crate) fn can_move_under(task: &Task, tree: &WorkTree, moved: &str) -> bool {
+    task.file.is_some()
+        && task
+            .id()
+            .is_some_and(|task_id| !tree.is_ancestor(moved, task_id))
+}
+
 fn move_to_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     with_task(
         workspace,
@@ -205,6 +230,10 @@ fn move_to_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
         |task, _| task.file.is_some(),
         Box::new(|id, workspace, window, cx| {
             if refuse_project_top(workspace, &id, cx) {
+                return;
+            }
+            if let Some(source) = repository_source(workspace, &id, cx) {
+                start_move(id, source, Destination::Pick, workspace, window, cx);
                 return;
             }
             with_project(
@@ -240,6 +269,36 @@ fn make_one_off(workspace: &mut Workspace, window: &mut Window, cx: &mut Context
             if refuse_project_top(workspace, &id, cx) {
                 return;
             }
+            if let Some(source) = repository_source(workspace, &id, cx) {
+                let title = ProjectRepositorySettings::get_global(cx)
+                    .oneoffs_project
+                    .clone();
+                let oneoffs = ready(workspace, cx).and_then(|tree| {
+                    oneoffs_project(&tree, &title)
+                        .and_then(repository_id)
+                        .map(str::to_string)
+                });
+                match oneoffs {
+                    Some(oneoffs) if oneoffs != source => start_move(
+                        id,
+                        source,
+                        Destination::OneOffs(oneoffs),
+                        workspace,
+                        window,
+                        cx,
+                    ),
+                    Some(_) => show_toast(workspace, format!("The task is already in {title}"), cx),
+                    None => show_toast(
+                        workspace,
+                        format!(
+                            "There is no project {title} for one-offs yet; make one with \
+                             task: new one off first"
+                        ),
+                        cx,
+                    ),
+                }
+                return;
+            }
             modals::ask(
                 workspace,
                 "Activity of the one-off, such as general or research",
@@ -259,4 +318,20 @@ fn make_one_off(workspace: &mut Workspace, window: &mut Window, cx: &mut Context
             )
         }),
     );
+}
+
+/// The project repository holding the task `id`, by id, when it is in one and project
+/// repositories are on; `None` for a task of a project in the old format.
+fn repository_source(
+    workspace: &mut Workspace,
+    id: &str,
+    cx: &mut Context<Workspace>,
+) -> Option<String> {
+    if !ProjectRepositorySettings::get_global(cx).enabled {
+        return None;
+    }
+    let tree = ready(workspace, cx)?;
+    repository_project_of(&tree, id)
+        .and_then(repository_id)
+        .map(str::to_string)
 }

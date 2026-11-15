@@ -302,6 +302,8 @@ pub enum StartedBy {
     Person,
     TreeRun,
     Healer,
+    /// A landing check of a project repository started it.
+    Landing,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -325,6 +327,11 @@ pub struct Attempt {
     pub n: u32,
     pub created: String,
     pub definition_hash: String,
+    /// The commit of the project repository the attempt's definition was read from; `None` for
+    /// an old-format project, the shipped and profile layers, and records older than the field.
+    /// A restart and a fresh retry set it to the commit then verified, any other step keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_commit: Option<String>,
     pub worktree: String,
     pub branch: String,
 }
@@ -357,6 +364,8 @@ pub enum RunTomlError {
     Schema(u32),
     #[error("run.toml id '{0}' is not a UUID v7")]
     Id(String),
+    #[error("run.toml attempt {0} names a definition commit that is not a git commit id")]
+    Commit(u32),
 }
 
 impl RunToml {
@@ -367,6 +376,15 @@ impl RunToml {
         }
         if !is_uuid_v7(&run.id) {
             return Err(RunTomlError::Id(run.id));
+        }
+        // The commit is handed to git later; only a full hexadecimal id may get there.
+        if let Some(attempt) = run.attempts.iter().find(|attempt| {
+            attempt
+                .definition_commit
+                .as_deref()
+                .is_some_and(|commit| !is_commit_id(commit))
+        }) {
+            return Err(RunTomlError::Commit(attempt.n));
         }
         Ok(run)
     }
@@ -379,6 +397,14 @@ impl RunToml {
     pub fn current_attempt(&self) -> Option<&Attempt> {
         self.attempts.iter().max_by_key(|attempt| attempt.n)
     }
+}
+
+/// Whether `id` is a full git commit id: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal digits.
+pub fn is_commit_id(id: &str) -> bool {
+    matches!(id.len(), 40 | 64)
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// Whether `id` is a hyphenated UUID of version 7 with the RFC 9562 variant.

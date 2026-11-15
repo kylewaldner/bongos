@@ -178,6 +178,93 @@ impl RowChipsRegistry {
     }
 }
 
+/// The name of the source of pending marks in the registry.
+pub(crate) const PENDING_SOURCE: &str = "pending";
+
+/// The chip of a task whose change waits to land or did not: its mark's label, `landing` or
+/// `not landed`, the latter with why ("not landed: check tests failed: ..."). Drawn in the row
+/// like every chip, so in the theme's colors.
+pub(crate) fn pending_chip(task: &bongos_work_model::store::Task) -> Option<SharedString> {
+    task.pending.as_ref().map(|mark| match &mark.reason {
+        Some(reason) => SharedString::from(format!("{}: {reason}", mark.label)),
+        None => SharedString::from(mark.label.clone()),
+    })
+}
+
+/// Shows the pending marks the snapshot carries (`Task::pending`) as row chips.
+struct PendingChips;
+
+impl RowChipsSource for PendingChips {
+    fn chips(&self, task_id: &str, cx: &App) -> Vec<SharedString> {
+        let Some(snapshot) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot())
+        else {
+            return Vec::new();
+        };
+        snapshot
+            .task_by_id(task_id)
+            .and_then(pending_chip)
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Registers the pending-mark chips; the refreshes of the store redraw them.
+pub(crate) fn register_pending_chips(cx: &mut App) {
+    RowChipsRegistry::add_source(PENDING_SOURCE, Rc::new(PendingChips), cx);
+}
+
+/// The name of the source of the marks of worktrees and run records missing on this machine.
+pub(crate) const MISSING_SOURCE: &str = "missing on this machine";
+
+/// Shows "worktree missing" and "interrupted, record not on this machine" on the rows of the
+/// tasks of open project repositories whose state names a worktree or run record this machine
+/// lacks (after a restore from another machine, say). Nothing is recreated.
+struct MissingChips;
+
+impl RowChipsSource for MissingChips {
+    fn chips(&self, task_id: &str, cx: &App) -> Vec<SharedString> {
+        crate::project_repos::open_repos(cx)
+            .iter()
+            .flat_map(|loaded| loaded.marks_of(task_id))
+            .map(SharedString::from)
+            .collect()
+    }
+}
+
+/// Registers the chips of missing worktrees and run records; the refreshes of the store
+/// redraw them.
+pub(crate) fn register_missing_chips(cx: &mut App) {
+    RowChipsRegistry::add_source(MISSING_SOURCE, Rc::new(MissingChips), cx);
+}
+
+/// The name of the source of the master warnings of open project repositories.
+pub(crate) const MASTER_SOURCE: &str = "master";
+
+/// Shows the warning of a project repository whose master was changed outside landing (an
+/// outside commit waiting for approval, a split master) on the row of its project.
+struct MasterChips;
+
+impl RowChipsSource for MasterChips {
+    fn chips(&self, task_id: &str, cx: &App) -> Vec<SharedString> {
+        let Some(snapshot) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot())
+        else {
+            return Vec::new();
+        };
+        snapshot
+            .projects
+            .iter()
+            .filter(|project| project.task.id() == Some(task_id))
+            .filter_map(|project| crate::project_repos::master_warning_of(&project.task, cx))
+            .map(SharedString::from)
+            .collect()
+    }
+}
+
+/// Registers the master warning chips; a change of a warning redraws them.
+pub(crate) fn register_master_chips(cx: &mut App) {
+    RowChipsRegistry::add_source(MASTER_SOURCE, Rc::new(MasterChips), cx);
+}
+
 #[derive(Default)]
 struct ViewOpenedObservers(Vec<Rc<dyn Fn(&mut App)>>);
 

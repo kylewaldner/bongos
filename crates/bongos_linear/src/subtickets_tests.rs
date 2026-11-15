@@ -11,10 +11,12 @@ use bongos_linear_model::sync::is_synced;
 use bongos_linear_model::{LinearApi, NewIssue};
 use bongos_minibuffer::ReadKeyView;
 use bongos_work::{NeedsYouRegistry, RowChipsRegistry};
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{Change, Context as WorkContext, Write, default_todos};
 use bongos_work_model::rules::Place;
 use bongos_work_model::{
-    Extra, HistoryEntry, Kind, ProposalRecord, ProposalState, TaskFile, layout, serialize_task,
+    ByKind, Extra, HistoryEntry, Kind, ProposalRecord, ProposalState, TaskFile, layout,
+    serialize_task,
 };
 use editor::Editor;
 use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -75,12 +77,24 @@ async fn add_leaves(env: &Env, cx: &mut VisualTestContext) {
 
 /// Writes an applied `[[proposals]]` record on `root`, as feature 26's apply does.
 async fn apply(env: &Env, root: &str, number: u32, by: &str, cx: &mut VisualTestContext) {
+    apply_as(env, root, number, by, None, cx).await
+}
+
+/// [`apply`] with the author kind the record stores; `None` is an old record with no kind.
+async fn apply_as(
+    env: &Env,
+    root: &str,
+    number: u32,
+    by: &str,
+    by_kind: Option<ByKind>,
+    cx: &mut VisualTestContext,
+) {
     let before = env.writes(cx);
     let (root, by) = (root.to_string(), by.to_string());
     env.store.update(cx, |store, cx| {
         store
             .write(
-                WorkContext::kyle(),
+                WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
                 move |tree, ctx| {
                     let place = Place::locate(tree, &root)?;
                     let mut file = place.task.file.clone().unwrap();
@@ -89,6 +103,7 @@ async fn apply(env: &Env, root: &str, number: u32, by: &str, cx: &mut VisualTest
                         state: ProposalState::Applied,
                         at: ctx.at,
                         by: by.clone(),
+                        by_kind,
                         hash: format!("hash-{number}"),
                         extra: Extra::new(),
                     });
@@ -122,7 +137,7 @@ async fn begin(env: &Env, task_id: &str, id: Uuid, cx: &mut VisualTestContext) {
     env.store.update(cx, |store, cx| {
         store
             .write(
-                WorkContext::kyle(),
+                WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
                 move |tree, ctx| begin_create(tree, ctx, &task_id, id, true),
                 cx,
             )
@@ -199,6 +214,16 @@ fn declined(env: &Env, cx: &mut VisualTestContext) -> Vec<String> {
     let mut declined = env.file("stream", cx).linear_state.unwrap().declined;
     declined.sort();
     declined
+}
+
+#[test]
+fn the_sync_writes_as_the_linear_sync_workflow() {
+    let ctx = subtickets::sync_context();
+    assert_eq!(ctx.author.kind(), bongos_work_model::AuthorKind::Workflow);
+    assert_eq!(ctx.author.name, "linear sync");
+    assert_eq!(ctx.author.run, None);
+    assert_eq!(ctx.by, "linear sync");
+    assert!(!ctx.has_attestation());
 }
 
 #[gpui::test]
@@ -358,6 +383,30 @@ async fn confirming_two_of_three_creates_two_under_the_parent_and_links_them(
         .unwrap();
     assert_eq!(declined(&env, cx), vec![unchecked_id]);
     assert_eq!(offered(&env, cx), vec![(GROUP.to_string(), 1)]);
+}
+
+#[gpui::test]
+async fn the_offer_follows_the_stored_author_kind_not_the_name(cx: &mut TestAppContext) {
+    // A person under any name opens the offer at once.
+    let (env, cx) = start(cx).await;
+    apply_as(&env, GROUP, 1, "alice", Some(ByKind::Person), cx).await;
+    let (_, labels) = wait_checklist(&env, cx).await;
+    assert_eq!(labels, vec!["Sub"]);
+    assert!(preview(&env, cx).is_some());
+}
+
+#[gpui::test]
+async fn an_agent_named_kyle_gets_the_chip_and_no_modal(cx: &mut TestAppContext) {
+    let (env, cx) = start(cx).await;
+    apply_as(&env, GROUP, 1, "kyle", Some(ByKind::Agent), cx).await;
+    wait_until(cx, "the chip", |cx| {
+        cx.update(|_, cx| RowChipsRegistry::chips(GROUP, cx))
+            .iter()
+            .any(|chip| chip.as_ref() == "1 needs a ticket")
+    })
+    .await;
+    settle(cx).await;
+    assert!(!has_modal(&env, cx), "no modal for an agent");
 }
 
 #[gpui::test]

@@ -20,6 +20,8 @@ pub struct NewTask {
     pub repository: Option<String>,
     /// The todo list the task starts with; unset gives the kind's [`default_todos`].
     pub todos: Option<Vec<Todo>>,
+    /// The free-text work kind label; unset leaves the task without one.
+    pub work_kind: Option<String>,
 }
 
 /// Where a new task goes.
@@ -38,6 +40,8 @@ pub struct TaskEdit {
     pub kind: Option<Kind>,
     /// `Some(None)` clears the repository, so the task inherits it again.
     pub repository: Option<Option<String>>,
+    /// The work kind label; `Some(None)` clears it. A blank label clears it too.
+    pub work_kind: Option<Option<String>>,
 }
 
 /// The todo list a new leaf of `kind` starts with. The `pr-ship` and `pr-merge` lists set the
@@ -83,14 +87,23 @@ pub(super) fn check_goal(goal: &str) -> Result<&str, Refusal> {
     }
 }
 
+/// A work kind label trimmed; a blank one is none.
+fn clean_work_kind(label: Option<String>) -> Option<String> {
+    label
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+}
+
 fn new_file(
     ctx: &Context,
     goal: &str,
     kind: Kind,
     repository: Option<String>,
     todos: Option<Vec<Todo>>,
+    work_kind: Option<String>,
 ) -> TaskFile {
     let mut file = TaskFile::new(goal, kind);
+    file.work_kind = clean_work_kind(work_kind);
     file.created = ctx.at;
     file.repository = repository;
     file.todos = todos.unwrap_or_else(|| default_todos(kind));
@@ -127,6 +140,7 @@ pub fn new_child(tree: &WorkTree, ctx: &Context, parent: &str, new: NewTask) -> 
         new.kind.unwrap_or(Kind::PrShip),
         new.repository,
         new.todos,
+        new.work_kind,
     );
     let entry = ctx.entry("created", Some(goal.to_string()));
     file.history.push(entry.clone());
@@ -220,6 +234,7 @@ pub fn new_oneoff(tree: &WorkTree, ctx: &Context, activity: &str, new: NewTask) 
         new.kind.unwrap_or(Kind::Spike),
         new.repository,
         new.todos,
+        new.work_kind,
     );
     file.activity = Some(activity.to_string());
     let entry = ctx.entry("created", Some(goal.to_string()));
@@ -227,6 +242,105 @@ pub fn new_oneoff(tree: &WorkTree, ctx: &Context, activity: &str, new: NewTask) 
     Ok(Change {
         dir: dir.clone(),
         writes: vec![Write::Task { dir, file }],
+        entry,
+        moves: Vec::new(),
+    })
+}
+
+/// `task: new one off` while project repositories are on: a new task in the one-offs project
+/// whose top group is `top`, a child of the top-level group of `activity` (the group whose
+/// `activity` is that activity's slug), which is made with it when there is none yet.
+pub fn new_oneoff_in_project(
+    tree: &WorkTree,
+    ctx: &Context,
+    top: &str,
+    activity: &str,
+    new: NewTask,
+) -> Outcome {
+    let activity = activity.trim();
+    if activity.is_empty() {
+        return Err("a one-off needs an activity".to_string());
+    }
+    let goal = check_goal(&new.goal)?.to_string();
+    let activity_slug = slugify(activity);
+    if activity_slug.is_empty() {
+        return Err(format!("{activity} cannot name an activity"));
+    }
+    let (place, mut top_file) = writable(tree, top)?;
+    let kind = new.kind.unwrap_or(Kind::Spike);
+    let existing = place.task.children.iter().find(|child| {
+        child
+            .file
+            .as_ref()
+            .and_then(|file| file.activity.as_deref())
+            .is_some_and(|known| slugify(known) == activity_slug)
+    });
+    if let Some(group) = existing {
+        let group_id = group
+            .id()
+            .ok_or_else(|| format!("{} has no task.toml", group.slug))?
+            .to_string();
+        let mut change = new_child(
+            tree,
+            ctx,
+            &group_id,
+            NewTask {
+                goal,
+                kind: Some(kind),
+                ..new
+            },
+        )?;
+        for write in &mut change.writes {
+            if let Write::Task { dir, file } = write
+                && *dir == change.dir
+            {
+                file.activity = Some(activity.to_string());
+            }
+        }
+        return Ok(change);
+    }
+
+    rules::check_add_child(&place, tree)?;
+    let siblings: Vec<&str> = place
+        .task
+        .children
+        .iter()
+        .map(|child| child.slug.as_str())
+        .collect();
+    let group_slug = free_slug(&activity_slug, &siblings);
+    let group_dir = layout::child_dir(&place.task.dir, &group_slug);
+    let mut group = TaskFile::new(activity_slug.clone(), Kind::Other);
+    group.created = ctx.at;
+    group.todos = Vec::new();
+    group.activity = Some(activity_slug.clone());
+    group
+        .history
+        .push(ctx.entry("created", Some(activity_slug)));
+
+    let dir = layout::child_dir(&group_dir, &free_slug(&slugify(&goal), &[]));
+    let mut file = new_file(ctx, &goal, kind, new.repository, new.todos, new.work_kind);
+    file.activity = Some(activity.to_string());
+    let entry = ctx.entry("created", Some(goal));
+    file.history.push(entry.clone());
+    let mut writes = vec![
+        Write::Task {
+            dir: group_dir,
+            file: group,
+        },
+        Write::Task {
+            dir: dir.clone(),
+            file,
+        },
+    ];
+    if give_up_todos(ctx, &place, tree, &mut top_file, &group_slug) {
+        writes.push(Write::Task {
+            dir: place.task.dir.clone(),
+            file: top_file,
+        });
+    }
+    Ok(Change {
+        dir,
+        writes,
         entry,
         moves: Vec::new(),
     })
@@ -274,6 +388,19 @@ pub fn edit(tree: &WorkTree, ctx: &Context, id: &str, edit: TaskEdit) -> Outcome
                 name(repository)
             ));
             file.repository = repository.clone();
+        }
+        if let Some(label) = &edit.work_kind {
+            let label = clean_work_kind(label.clone());
+            if label != file.work_kind {
+                let name =
+                    |label: &Option<String>| label.clone().unwrap_or_else(|| "none".to_string());
+                changed.push(format!(
+                    "work kind: {} -> {}",
+                    name(&file.work_kind),
+                    name(&label)
+                ));
+                file.work_kind = label;
+            }
         }
         if changed.is_empty() {
             return Err(format!("{} already has those values", place.slug()));

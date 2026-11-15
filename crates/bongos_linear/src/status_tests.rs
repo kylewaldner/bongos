@@ -13,6 +13,7 @@ use bongos_linear_model::api::{
 use bongos_linear_model::fake::{Call, FakeLinear};
 use bongos_linear_model::status::{CancelAnswer, CancelQuestion, CancelTarget};
 use bongos_minibuffer::ReadKeyView;
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{Context as WorkContext, Outcome, advance, close, default_todos};
 use bongos_work_model::commands::{drop_task, reopen, set_result, todo_start};
 use bongos_work_model::store::WorkTree;
@@ -132,7 +133,13 @@ async fn run(
 ) {
     let before = env.writes(cx);
     env.store.update(cx, |store, cx| {
-        store.write(WorkContext::kyle(), command, cx).detach()
+        store
+            .write(
+                WorkContext::at_keyboard(PersonAtKeyboard::for_test()),
+                command,
+                cx,
+            )
+            .detach()
     });
     wait_until(cx, "the write", |cx| env.writes(cx) > before).await;
 }

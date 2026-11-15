@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use bongos_work_model::commands::{Change, Context, apply, default_todos};
 use bongos_work_model::store::{Project, Task, WorkTree, load};
 use bongos_work_model::{
-    Extra, Kind, LinearState, ProjectFile, ProposalRecord, ProposalState, StackedOn, TaskFile,
-    Timestamp, TodoRole, UnblockPoint, layout, serialize_project, serialize_task,
+    ByKind, Extra, Kind, LinearState, ProjectFile, ProposalRecord, ProposalState, StackedOn,
+    TaskFile, Timestamp, TodoRole, UnblockPoint, layout, serialize_project, serialize_task,
 };
 use futures::executor::block_on;
 use tempfile::TempDir;
@@ -43,6 +43,9 @@ fn make(slug: &str, goal: &str, kind: Kind, with_todos: bool) -> Task {
         file: Some(file),
         artifacts: None,
         errors: Vec::new(),
+        definition: None,
+        pending: None,
+        needs_conversion: false,
         broken_edges: Vec::new(),
         files: Default::default(),
         hashes: Default::default(),
@@ -127,12 +130,19 @@ pub fn stacked_on(mut task: Task, target: &str) -> Task {
     task
 }
 
-pub fn applied(mut task: Task, number: u32, by: &str) -> Task {
+/// An applied record by `by` with no stored kind, as an old record has.
+pub fn applied(task: Task, number: u32, by: &str) -> Task {
+    applied_as(task, number, by, None)
+}
+
+/// An applied record by `by` of the stored `kind`.
+pub fn applied_as(mut task: Task, number: u32, by: &str, by_kind: Option<ByKind>) -> Task {
     file_mut(&mut task).proposals.push(ProposalRecord {
         number,
         state: ProposalState::Applied,
         at: timestamp("2026-11-09T10:00:00Z"),
         by: by.to_string(),
+        by_kind,
         hash: format!("hash-{number}"),
         extra: Extra::new(),
     });

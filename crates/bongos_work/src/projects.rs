@@ -30,12 +30,12 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         "Name of the new project",
         "",
         false,
-        Box::new(|title, workspace, _, cx| {
+        Box::new(|title, workspace, window, cx| {
             if ProjectRepositorySettings::get_global(cx).enabled {
                 new_repository_project(title, cx);
                 return;
             }
-            submit(workspace, cx, move |tree, ctx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 model::project_new(
                     tree,
                     ctx,
@@ -55,21 +55,19 @@ fn new_project(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
 /// repository instead of an old-format project.
 fn new_repository_project(title: String, cx: &mut Context<Workspace>) {
     let settings = ProjectRepositorySettings::get_global(cx).clone();
-    let request = CreateRequest {
-        folder: settings.project_folder(&slugify(&title)),
-        layout: settings.layout,
-        title: title.clone(),
-        repositories: Vec::new(),
-        remote: None,
-    };
+    let request = create_request(&settings, &title);
+    let locations_path = locations_path(cx);
     let created = cx.background_spawn(async move {
-        let mut locations = RepositoryLocations::load(RepositoryLocations::default_path())?;
-        ProjectRepo::create(request, &mut locations).await?;
-        anyhow::Ok(())
+        let mut locations = RepositoryLocations::load(locations_path)?;
+        let repo = ProjectRepo::create(request, &mut locations).await?;
+        anyhow::Ok(repo.location().clone())
     });
     cx.spawn(async move |workspace, cx| {
         let message = match created.await {
-            Ok(()) => format!("Created project {title}"),
+            Ok(location) => match crate::oneoffs::open_location(location, cx).await {
+                Ok(()) => format!("Created project {title}"),
+                Err(error) => format!("Created project {title}, but opening it failed: {error:#}"),
+            },
             Err(error) => error.to_string(),
         };
         workspace
@@ -77,6 +75,25 @@ fn new_repository_project(title: String, cx: &mut Context<Workspace>) {
             .ok();
     })
     .detach();
+}
+
+/// What `project: new` makes for the project titled `title`, and what the one-offs project is
+/// made from.
+pub(crate) fn create_request(settings: &ProjectRepositorySettings, title: &str) -> CreateRequest {
+    CreateRequest {
+        folder: settings.project_folder(&slugify(title)),
+        layout: settings.layout.clone(),
+        title: title.to_string(),
+        repositories: Vec::new(),
+        remote: None,
+    }
+}
+
+/// The record of where this machine's project repositories are.
+pub(crate) fn locations_path(cx: &gpui::App) -> std::path::PathBuf {
+    crate::WorkStore::global(cx)
+        .map(|store| store.read(cx).locations_path())
+        .unwrap_or_else(RepositoryLocations::default_path)
 }
 
 fn archive(
@@ -102,8 +119,8 @@ fn archive(
                 .as_ref()
                 .is_some_and(|file| file.archived != archive)
         },
-        Box::new(move |slug, workspace, _, cx| {
-            submit(workspace, cx, move |tree, ctx| {
+        Box::new(move |slug, workspace, window, cx| {
+            submit(workspace, window, cx, move |tree, ctx| {
                 if archive {
                     model::project_archive(tree, ctx, &slug)
                 } else {

@@ -3,8 +3,8 @@
 //! when it is applied.
 
 use anyhow::{Context as _, Result, bail};
-use bongos_project_repo_model::TaskStateRecord;
-use bongos_work_model::{HistoryEntry, ProposalRecord, TaskId};
+use bongos_project_repo_model::{TaskStateRecord, TodoStateRecord};
+use bongos_work_model::{HistoryEntry, ProposalRecord, TaskId, TodoState};
 use serde::{Deserialize, Serialize};
 
 use crate::state::StateTx;
@@ -24,13 +24,39 @@ pub enum StateOp {
         from_task: TaskId,
         to_task: TaskId,
     },
+    /// Moves files (relative to the files root, `<task id>/...`) from one place to another when
+    /// the change lands: a split's chats, for one. The state transaction does not touch them;
+    /// the landing checks them first and moves them right after it, and its recovery moves them
+    /// again if it was interrupted.
+    MoveFiles {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+    },
+    /// An empty `prompts.txt` in a new task's files folder, made when the change lands.
+    CreatePrompts {
+        task: TaskId,
+    },
+    /// Writes a file (relative to the files root: a task's artifacts or a link) when the change
+    /// lands, as [`StateOp::MoveFiles`] moves one.
+    WriteFile {
+        path: std::path::PathBuf,
+        bytes: Vec<u8>,
+    },
     /// Sets one field of a task's state record, only if it still holds `expected`; `None` is an
-    /// absent field.
+    /// absent field. Only the fields in [`SETTABLE_FIELDS`] can be set: todos and history have
+    /// their own ops.
     Set {
         task: TaskId,
         field: String,
         expected: Option<toml::Value>,
         value: Option<toml::Value>,
+    },
+    /// Sets one todo's state, matched by its id, only if it still holds `expected`. A todo with
+    /// no record, and an `expected` of `None`, read as open and never started.
+    SetTodo {
+        task: TaskId,
+        expected: Option<TodoStateRecord>,
+        value: TodoStateRecord,
     },
     AppendHistory {
         task: TaskId,
@@ -47,8 +73,52 @@ pub enum StateOp {
     },
 }
 
-/// Applies `ops` in order. Returns a note for each op that kept a newer value.
-pub(crate) fn apply(tx: &mut StateTx, ops: &[StateOp]) -> Result<Vec<String>> {
+/// The fields of a task's state record that [`StateOp::Set`] may set.
+pub const SETTABLE_FIELDS: [&str; 13] = [
+    "status",
+    "closed",
+    "linear",
+    "linear_state",
+    "branch",
+    "base",
+    "base_sha",
+    "rebase_ack_sha",
+    "worktree",
+    "ship_overridden",
+    "result",
+    "default_visibility",
+    "proposals",
+];
+
+/// Moves the work (branch, base, base SHA, rebase acknowledgement, worktree, result and ship
+/// override) of `from` to `to`, leaving `from` with none.
+pub(crate) fn move_work(from: &mut TaskStateRecord, to: &mut TaskStateRecord) {
+    to.branch = from.branch.take();
+    to.base = from.base.take();
+    to.base_sha = from.base_sha.take();
+    to.rebase_ack_sha = from.rebase_ack_sha.take();
+    to.worktree = from.worktree.take();
+    to.result = from.result.take();
+    to.ship_overridden = from.ship_overridden.take();
+}
+
+/// The work of `record` alone, on an otherwise empty record.
+pub(crate) fn work_of(record: &TaskStateRecord) -> TaskStateRecord {
+    let mut from = record.clone();
+    let mut work = TaskStateRecord::default();
+    move_work(&mut from, &mut work);
+    work
+}
+
+/// Applies `ops` in order. Returns a note for each op that kept a newer value. Refused, with
+/// nothing applied, when an op writes a task a move holds and `change_id` is not one of that
+/// move's own changes.
+pub(crate) fn apply(
+    tx: &mut StateTx,
+    ops: &[StateOp],
+    change_id: Option<&str>,
+) -> Result<Vec<String>> {
+    crate::moves::refuse_held(tx, ops, change_id)?;
     let mut notes = Vec::new();
     for op in ops {
         apply_one(tx, op, &mut notes)?;
@@ -92,22 +162,20 @@ fn apply_one(tx: &mut StateTx, op: &StateOp, notes: &mut Vec<String>) -> Result<
                 return Ok(());
             };
             let mut to = tx.task(to_task)?.unwrap_or_default();
-            to.branch = from.branch.take();
-            to.base = from.base.take();
-            to.base_sha = from.base_sha.take();
-            to.rebase_ack_sha = from.rebase_ack_sha.take();
-            to.worktree = from.worktree.take();
-            to.result = from.result.take();
-            to.ship_overridden = from.ship_overridden.take();
+            move_work(&mut from, &mut to);
             tx.set_task(from_task, from)?;
             tx.set_task(to_task, to)?;
         }
+        StateOp::MoveFiles { .. } | StateOp::CreatePrompts { .. } | StateOp::WriteFile { .. } => {}
         StateOp::Set {
             task,
             field,
             expected,
             value,
         } => {
+            if !SETTABLE_FIELDS.contains(&field.as_str()) {
+                bail!("{field} is not a state field that can be set (task {task})");
+            }
             let current = tx.task(task)?.unwrap_or_default();
             let toml::Value::Table(mut table) = toml::Value::try_from(&current)
                 .with_context(|| format!("reading the state of {task}"))?
@@ -130,6 +198,32 @@ fn apply_one(tx: &mut StateTx, op: &StateOp, notes: &mut Vec<String>) -> Result<
                 .try_into()
                 .with_context(|| format!("setting {field} of {task}"))?;
             tx.set_task(task, record)?;
+        }
+        StateOp::SetTodo {
+            task,
+            expected,
+            value,
+        } => {
+            let Some(todo_id) = value.id.as_deref() else {
+                bail!("a todo state set alone needs a todo id (task {task})");
+            };
+            let current = tx.task(task)?.unwrap_or_default();
+            // A todo with no record reads as open and never started.
+            let open = TodoStateRecord {
+                id: Some(todo_id.to_string()),
+                state: TodoState::Open,
+                started: None,
+            };
+            let existing = current
+                .todos
+                .iter()
+                .find(|todo| todo.id.as_deref() == Some(todo_id))
+                .unwrap_or(&open);
+            if existing != expected.as_ref().unwrap_or(&open) {
+                notes.push(format!("kept newer state of todo {todo_id} of {task}"));
+                return Ok(());
+            }
+            tx.set_todo(task, value.clone())?;
         }
         StateOp::AppendHistory { task, entry } => {
             tx.append_history(task, entry.clone())?;

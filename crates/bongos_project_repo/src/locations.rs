@@ -101,17 +101,79 @@ impl RepositoryLocations {
             .find(|location| location.id == project_id)
     }
 
-    /// Adds `location`, or replaces the one with its id, and writes the record atomically. On a
-    /// failed write the record in memory is as it was.
+    /// Reads the record from disk again, replacing the copy in memory.
+    pub fn reload(&mut self) -> Result<(), LocationError> {
+        *self = Self::load(self.path.clone())?;
+        Ok(())
+    }
+
+    /// Adds `location`, or replaces the one with its id, and writes the record atomically. The
+    /// record is read again from disk under a lock first, so what another copy recorded since
+    /// this one was loaded is kept; the copy in memory is then the record on disk. On a failed
+    /// write the record in memory is as it was.
     pub fn record(&mut self, location: Location) -> Result<(), LocationError> {
-        let mut locations = self.locations.clone();
-        match locations.iter_mut().find(|known| known.id == location.id) {
-            Some(known) => *known = location,
-            None => locations.push(location),
+        self.change_on_disk(|locations| {
+            match locations.iter_mut().find(|known| known.id == location.id) {
+                Some(known) => *known = location,
+                None => locations.push(location),
+            }
+        })
+    }
+
+    /// Removes the entry equal to `location` from the record on disk (read again under the
+    /// lock, as `record` does), leaving any other entry with its id alone.
+    pub fn forget(&mut self, location: &Location) -> Result<(), LocationError> {
+        self.change_on_disk(|locations| locations.retain(|known| known != location))
+    }
+
+    /// Under an exclusive lock on the record's lock file: reads the record from disk, applies
+    /// `change`, and writes it atomically; then keeps the result in memory.
+    fn change_on_disk(
+        &mut self,
+        change: impl FnOnce(&mut Vec<Location>),
+    ) -> Result<(), LocationError> {
+        let write_error = |source| LocationError::Write {
+            path: self.path.clone(),
+            source,
+        };
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(write_error)?;
         }
+        let _lock = self.lock().map_err(write_error)?;
+        let mut locations = Self::load(self.path.clone())?.locations;
+        change(&mut locations);
         self.write(&locations)?;
         self.locations = locations;
         Ok(())
+    }
+
+    /// Takes the exclusive lock beside the record, waiting while another writer holds it. The
+    /// lock file stays; the lock is released when the returned file is closed.
+    fn lock(&self) -> io::Result<std::fs::File> {
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(PathBuf::from(name))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            loop {
+                // SAFETY: the descriptor is open for the duration of the call.
+                let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+                if result == 0 {
+                    break;
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(file)
     }
 
     fn write(&self, locations: &[Location]) -> Result<(), LocationError> {
@@ -123,12 +185,6 @@ impl RepositoryLocations {
             path: self.path.clone(),
             source: io::Error::other(error.to_string()),
         })?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| LocationError::Write {
-                path: self.path.clone(),
-                source,
-            })?;
-        }
         write_atomic(&self.path, text.as_bytes()).map_err(|source| LocationError::Write {
             path: self.path.clone(),
             source,

@@ -8,11 +8,14 @@ use bongos_work_model::ProjectFile;
 use bongos_work_model::{Kind, TaskFile, new_id, serialize_project};
 
 use crate::git::{Git, GitError, Identity};
+use crate::loader::StateHandle;
 use crate::locations::{Location, LocationError, RepositoryLocations};
 
 /// The branch master is.
-const MAIN_BRANCH: &str = "main";
+pub const MAIN_BRANCH: &str = "main";
 const FIRST_COMMIT_MESSAGE: &str = "create the project";
+/// The `meta` key of the commit that created the project.
+pub(crate) const CREATION_COMMIT_KEY: &str = "creation_commit";
 
 /// The template of each part of a project folder; `{folder}` is the only token.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,15 +74,55 @@ pub enum CreateError {
     },
 }
 
-/// A project repository on this machine.
-#[derive(Clone, Debug)]
+/// A project repository on this machine: where its parts are, the git that reads it, and its
+/// state store once opened.
+#[derive(Clone)]
 pub struct ProjectRepo {
-    location: Location,
+    pub(crate) location: Location,
+    pub(crate) git: Git,
+    pub(crate) state: Option<StateHandle>,
+    /// The landing queue and its waiters, shared by every clone.
+    pub(crate) engine: std::sync::Arc<crate::landing_queue::Engine>,
+}
+
+impl std::fmt::Debug for ProjectRepo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectRepo")
+            .field("location", &self.location)
+            .field("git", &self.git)
+            .field("state_open", &self.state.is_some())
+            .finish()
+    }
 }
 
 impl ProjectRepo {
+    /// The project at `location`, read with `git`, its state store not opened.
+    pub fn new(location: Location, git: Git) -> Self {
+        Self {
+            location,
+            git,
+            state: None,
+            engine: Default::default(),
+        }
+    }
+
+    /// The same project reading and writing its state through `state`.
+    pub fn with_state(mut self, state: StateHandle) -> Self {
+        self.state = Some(state);
+        self
+    }
+
     pub fn location(&self) -> &Location {
         &self.location
+    }
+
+    pub fn git(&self) -> &Git {
+        &self.git
+    }
+
+    /// The opened state store, if any.
+    pub fn state(&self) -> Option<&StateHandle> {
+        self.state.as_ref()
     }
 
     /// Creates the project folder, runs `git init`, commits the definitions on `main`, makes the
@@ -161,8 +204,13 @@ impl ProjectRepo {
         write(&definitions.join(layout::PLAN_FILE), "")?;
 
         git.init_repo(&repository, MAIN_BRANCH).await?;
-        git.commit_all(&repository, FIRST_COMMIT_MESSAGE, &Identity::default())
+        let first = git
+            .commit_all(&repository, FIRST_COMMIT_MESSAGE, &Identity::default())
             .await?;
+        crate::working_copies::protect_files(&repository).map_err(|source| CreateError::Io {
+            context: "making master read-only".to_string(),
+            source,
+        })?;
 
         let location = Location {
             id: project_id,
@@ -174,9 +222,25 @@ impl ProjectRepo {
             remote: request.remote,
             converted_from: None,
         };
+        record_creation_commit(&location, &first)?;
         locations.record(location.clone())?;
-        Ok(Self { location })
+        Ok(Self::new(location, git.clone()))
     }
+}
+
+/// Records `commit` in the new state store as the commit that created the project: what master
+/// is before the first landing.
+fn record_creation_commit(location: &Location, commit: &str) -> Result<(), CreateError> {
+    let failed = |error: String| CreateError::Io {
+        context: "recording the first commit in the state store".to_string(),
+        source: std::io::Error::other(error),
+    };
+    let writer =
+        crate::StateStore::open_writer_with_hooks(location, &crate::StateApplyHooks::new())
+            .map_err(|error| failed(error.to_string()))?;
+    writer
+        .transact(|tx| tx.set_meta(CREATION_COMMIT_KEY, commit))
+        .map_err(|error| failed(format!("{error:#}")))
 }
 
 /// Creates `path` and the missing directories above it, noting the topmost one made so a

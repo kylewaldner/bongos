@@ -1,4 +1,4 @@
-//! Workflow definitions on disk (D2): where the three layers live, materializing the shipped set,
+//! Workflow definitions on disk: where the three layers live, materializing the shipped set,
 //! checking definitions and creating a new one from the built-in minimal template.
 //!
 //! Everything here is synchronous and takes its directories as parameters, so tests run over a
@@ -11,8 +11,11 @@ use std::io::{self, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 use crate::shipped::{self, Template};
+use bongos_project_repo::{CommitId, PinGuard, ProjectRepo};
+use bongos_project_repo_model::layout::DEFINITIONS_DIR;
 use bongos_work_model::layout::{WORKFLOWS_DIR, project_dir};
 use bongos_work_model::slug::slugify;
+use bongos_work_model::store::Task;
 use bongos_workflow_model::layers::{self, DEFINITION_FILE};
 use bongos_workflow_model::{
     Definition, Diagnostic, Layer, LayerDirs, Resolved, Severity, ValidationContext, Warning,
@@ -69,6 +72,58 @@ pub fn profile_dir(home: &Path) -> PathBuf {
 /// `<work root>/projects/<slug>/workflows`, the project layer of the project `slug`.
 pub fn project_layer_dir(work_root: &Path, project_slug: &str) -> PathBuf {
     project_dir(work_root, project_slug).join(WORKFLOWS_DIR)
+}
+
+/// The project layer of a new-format project: `definitions/workflows/` of a commit of its
+/// repository, materialized read-only under the project's `state/pins/` until this is dropped.
+#[derive(Debug)]
+pub struct ProjectLayer {
+    /// What [`LayerDirs::project`] is set to; it need not exist (a commit with no workflows).
+    pub dir: PathBuf,
+    /// The commit the layer was read from, which a run records as its `definition_commit`.
+    pub commit: CommitId,
+    _pin: PinGuard,
+}
+
+/// The project layer of `repo` at `commit`, or at the commit the project shows (the last
+/// verified one) with none. Reads git on the calling thread, as creating a run worktree does.
+pub fn project_layer_in(
+    repo: &ProjectRepo,
+    commit: Option<CommitId>,
+) -> anyhow::Result<ProjectLayer> {
+    let commit = match commit {
+        Some(commit) => commit,
+        None => futures::executor::block_on(repo.shown_commit())?,
+    };
+    let pin = futures::executor::block_on(repo.materialize(&commit.0))?;
+    let dir = pin.path().join(DEFINITIONS_DIR).join(WORKFLOWS_DIR);
+    Ok(ProjectLayer {
+        dir,
+        commit,
+        _pin: pin,
+    })
+}
+
+/// The project layer of the new-format project `task` belongs to, at the project's verified
+/// commit: what the picker, `workflow: validate`, a start, a restart and a fresh retry read.
+/// `None` for an old-format task ([`project_layer_dir`] is its layer), for a project whose
+/// repository is not open, and when the commit cannot be read (logged). A run keeps reading the
+/// files copied into its attempt from the commit it recorded, so nothing pins an older commit.
+pub fn project_layer_for(task: &Task, cx: &gpui::App) -> Option<ProjectLayer> {
+    match try_project_layer_for(task, cx) {
+        Ok(layer) => layer,
+        Err(error) => {
+            log::warn!("workflows: could not read the project's workflows: {error:#}");
+            None
+        }
+    }
+}
+
+/// [`project_layer_for`] that says why the commit could not be read.
+pub fn try_project_layer_for(task: &Task, cx: &gpui::App) -> anyhow::Result<Option<ProjectLayer>> {
+    bongos_work::project_repo_of(task, cx)
+        .map(|repo| project_layer_in(&repo, None))
+        .transpose()
 }
 
 /// Writes the files of `files` that are missing under `dir` and returns how many it wrote. A file

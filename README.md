@@ -54,8 +54,8 @@ Any other file in a task directory is an artifact, described and made visible or
   again on the fresh state. An agent that moves or renames task files should do the same: reread
   `task.toml` first, and never write from a stale copy.
 - **Keys (Emacs keymap only).** `C-c w w` toggles the panel, `C-c w n` makes a task, `C-c w s`
-  starts one, `C-c w a` advances, `C-c w c` closes, `C-c w g` opens the graph, and the `C-c w d ...`,
-  `C-c w p ...` and artifact keys cover todos, projects and artifacts; the rest are in the command
+  starts one, `C-c w a` advances, `C-c w c` closes, `C-c w G` opens the graph, and the `C-c w d ...`,
+  `C-c w p ...`, `C-c w g ...` and artifact keys cover todos, projects, repositories and artifacts; the rest are in the command
   palette (`assets/keymaps/linux/emacs.json`). In the panel, `tab` expands a row inline and `^`
   goes up one level.
 
@@ -99,6 +99,28 @@ Any other file in a task directory is an artifact, described and made visible or
   timer. On a file system that delivers no change notifications (network mounts, most FUSE mounts)
   the refs cannot be watched, so the check runs every 5 minutes instead. Starting bongos with
   `ZED_FILE_WATCHER_MODE=poll` does the same for every repository.
+
+## Project repositories
+
+A project is a folder with four parts: `repository` (a git repository holding the definitions of
+its tasks, which only a landing changes), `working-copies` (where changes are made before they
+land), `state` (what stays on this machine: status, todos done, runs, history) and `files`.
+Every change to the definitions, from a command or a working copy, goes through checks and lands
+as one commit on `main` with trailers saying who made it; state changes never make a commit.
+
+- **Keys (Emacs keymap).** `C-c w p n` makes a project in `<data dir>/projects/<name>`. `C-c w g e`
+  makes a working copy and opens it, `C-c w g l` lands it, `C-c w g c` only checks it, `C-c w g
+  v` shows the changes and `C-c w g h` the history. `C-c w G` shows the tasks of a group as a graph.
+- **Setting.** `project_repository.enabled` turns this on (it is on by default); while it is off,
+  projects keep the old format. The same page of the settings window has the folder, the limits
+  and the backup intervals.
+- **Backup and restore.** The state is snapshotted to a branch (`bongos/state`) of the repository
+  and pushed to the project's backup remote when it has one. `C-c w g b` takes and pushes a
+  snapshot now, `C-c w g s` shows the backup. On a new machine, `C-c w g a` (`project: add
+  existing`) adds a project from a folder or a remote address and `C-c w g R` (`project: restore`)
+  rebuilds its state from the newest snapshot; the state it replaces is kept in `state/replaced/`.
+- **Old projects.** `C-c w g C` (`project: convert`) copies an old-format project into a project
+  repository after showing what it will make. The old folder is only read.
 
 ## Chat sessions
 
