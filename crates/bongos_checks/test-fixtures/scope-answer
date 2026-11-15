@@ -1,0 +1,7 @@
+#!/bin/sh
+# A scope script: copies the changed files it got to changed-seen and the names of its variables
+# to scope-env-names in the tree, then answers with the tree's scope.json.
+cp "$BONGOS_CHANGED_FILES" changed-seen
+env | sed 's/=.*//' > scope-env-names
+cp scope.json "$BONGOS_SCOPE_RESULT"
+exit 0

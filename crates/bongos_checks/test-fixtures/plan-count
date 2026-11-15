@@ -1,0 +1,6 @@
+#!/bin/sh
+# A part plan script: copies the durations file it got to durations-seen in the tree, then
+# prints the count written in the tree's plan-count file.
+cp "$BONGOS_CHECK_DURATIONS" durations-seen
+echo "planning" >&2
+cat plan-count

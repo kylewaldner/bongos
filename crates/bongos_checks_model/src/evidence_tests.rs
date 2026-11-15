@@ -309,6 +309,9 @@ fn part(n: u32, verdict: Verdict) -> PartRecord {
         pid: None,
         pid_start_time: None,
         token: None,
+        duration_ms: None,
+        summary: None,
+        failing: Vec::new(),
     }
 }
 

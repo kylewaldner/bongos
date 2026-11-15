@@ -38,6 +38,8 @@ pub const CHECK_PREFIX: &str = "BONGOS_CHECK_";
 pub const SCOPE_RESULT_VAR: &str = "BONGOS_SCOPE_RESULT";
 /// Set for a scope script only.
 pub const CHANGED_FILES_VAR: &str = "BONGOS_CHANGED_FILES";
+/// Set for a part plan script only.
+pub const DURATIONS_VAR: &str = "BONGOS_CHECK_DURATIONS";
 pub const TOKEN_VAR: &str = "BONGOS_CHECK_TOKEN";
 
 const POLL: Duration = Duration::from_millis(20);
@@ -70,6 +72,22 @@ pub enum PartScope {
     Items(PathBuf),
 }
 
+/// Which process of a check run this is: one part of the check, its scope script or its part
+/// plan script. The scripts get the common environment plus their own files, not the part's
+/// number or result file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ProcessRole {
+    #[default]
+    Part,
+    /// `BONGOS_CHANGED_FILES` and `BONGOS_SCOPE_RESULT` name these files.
+    Scope {
+        changed_files: PathBuf,
+        result: PathBuf,
+    },
+    /// `BONGOS_CHECK_DURATIONS` names this file.
+    Plan { durations: PathBuf },
+}
+
 /// What identifies a started part's process, recorded before its output is read so a crash
 /// leaves enough to stop it at the next load.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +113,10 @@ pub struct PartSpec {
     pub part: u32,
     pub parts: u32,
     pub scope: PartScope,
+    pub role: ProcessRole,
+    /// Where standard error goes when it must stay out of the output (a plan script's answer
+    /// is its standard output); `None` merges it into the output.
+    pub stderr: Option<PathBuf>,
     pub env: EnvBase,
     /// The output file; the result and params files go beside it.
     pub output: PathBuf,
@@ -247,11 +269,15 @@ struct PartFiles {
 }
 
 impl PartFiles {
-    fn of(output: &Path, part: u32) -> Self {
+    /// Named after the output file: `part-3.log` gives `part-3.result.json`.
+    fn of(output: &Path) -> Self {
         let dir = output.parent().unwrap_or(Path::new("."));
+        let stem = output
+            .file_stem()
+            .map_or_else(|| "part".into(), |stem| stem.to_string_lossy());
         Self {
-            result: dir.join(format!("part-{part}.result.json")),
-            params: dir.join(format!("part-{part}.params.json")),
+            result: dir.join(format!("{stem}.result.json")),
+            params: dir.join(format!("{stem}.params.json")),
         }
     }
 
@@ -272,10 +298,7 @@ impl PartFiles {
 fn check_vars(spec: &PartSpec, files: &PartFiles, token: &str) -> Vec<(String, OsString)> {
     let mut vars = vec![
         ("BONGOS_CHECK_NAME", OsString::from(&spec.decl.name)),
-        ("BONGOS_CHECK_PART", OsString::from(spec.part.to_string())),
-        ("BONGOS_CHECK_PARTS", OsString::from(spec.parts.to_string())),
         ("BONGOS_CHECK_PARAMS", files.params.clone().into_os_string()),
-        ("BONGOS_CHECK_RESULT", files.result.clone().into_os_string()),
         (
             "BONGOS_CHECK_TREE",
             OsString::from(match spec.tree_kind {
@@ -291,6 +314,23 @@ fn check_vars(spec: &PartSpec, files: &PartFiles, token: &str) -> Vec<(String, O
         ("BONGOS_CHECK_MASTER", spec.master.clone().into_os_string()),
         (TOKEN_VAR, OsString::from(token)),
     ];
+    match &spec.role {
+        ProcessRole::Part => {
+            vars.push(("BONGOS_CHECK_PART", OsString::from(spec.part.to_string())));
+            vars.push(("BONGOS_CHECK_PARTS", OsString::from(spec.parts.to_string())));
+            vars.push(("BONGOS_CHECK_RESULT", files.result.clone().into_os_string()));
+        }
+        ProcessRole::Scope {
+            changed_files,
+            result,
+        } => {
+            vars.push((CHANGED_FILES_VAR, changed_files.clone().into_os_string()));
+            vars.push((SCOPE_RESULT_VAR, result.clone().into_os_string()));
+        }
+        ProcessRole::Plan { durations } => {
+            vars.push((DURATIONS_VAR, durations.clone().into_os_string()));
+        }
+    }
     match &spec.scope {
         PartScope::Unscoped => {}
         PartScope::All => vars.push(("BONGOS_CHECK_SCOPE", OsString::from("all"))),
@@ -323,7 +363,7 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
         );
     }
     let token = uuid::Uuid::new_v4().to_string();
-    let files = PartFiles::of(&spec.output, spec.part);
+    let files = PartFiles::of(&spec.output);
     let env = part_env(
         &spec.env,
         &check_vars(&spec, &files, &token),
@@ -368,14 +408,28 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
             );
         }
     };
-    let pipe_write_too = match pipe_write.try_clone() {
-        Ok(pipe) => pipe,
-        Err(error) => {
-            return refuse(
-                NoVerdictReason::StartFailed(format!("no pipe for the output: {error}")),
-                argv,
-            );
-        }
+    let stderr = match &spec.stderr {
+        Some(path) => match std::fs::File::create(path) {
+            Ok(file) => Stdio::from(file),
+            Err(error) => {
+                return refuse(
+                    NoVerdictReason::StartFailed(format!(
+                        "creating the error output file {}: {error}",
+                        path.display()
+                    )),
+                    argv,
+                );
+            }
+        },
+        None => match pipe_write.try_clone() {
+            Ok(pipe) => Stdio::from(pipe),
+            Err(error) => {
+                return refuse(
+                    NoVerdictReason::StartFailed(format!("no pipe for the output: {error}")),
+                    argv,
+                );
+            }
+        },
     };
     let mut command = Command::new(&program);
     command
@@ -383,12 +437,7 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
         .current_dir(&spec.tree)
         .env_clear()
         .envs(&env);
-    let spawned = NodeProcess::spawn(
-        command,
-        Stdio::null(),
-        Stdio::from(pipe_write),
-        Stdio::from(pipe_write_too),
-    );
+    let spawned = NodeProcess::spawn(command, Stdio::null(), Stdio::from(pipe_write), stderr);
     let mut process = match spawned {
         Ok(process) => process,
         Err(error) => return refuse(spawn_failure(&error, &argv[0]), argv),
@@ -667,7 +716,8 @@ fn token_holders(_token: &str) -> Vec<Stray> {
 fn stray_alive(stray: Stray) -> bool {
     match (stray.start_time, start_time(stray.pid)) {
         (Some(recorded), Some(now)) => recorded == now && !is_zombie(stray.pid),
-        (None, _) => pid_alive(stray.pid),
+        // Never signalled on Linux (see `signal_stray`), so never waited for either.
+        (None, _) => !cfg!(target_os = "linux") && pid_alive(stray.pid),
         (Some(_), None) => false,
     }
 }
@@ -711,6 +761,11 @@ fn signal_stray(stray: Stray, signal: Signal) {
     // SAFETY: getpid only reads this process's id.
     let own = unsafe { libc::getpid() };
     if pid <= 1 || pid == own {
+        return;
+    }
+    // On Linux a live process always has a start time; one found without it may be gone, and
+    // its pid reused by now.
+    if cfg!(target_os = "linux") && stray.start_time.is_none() {
         return;
     }
     if let Some(recorded) = stray.start_time
