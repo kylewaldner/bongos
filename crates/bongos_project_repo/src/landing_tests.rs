@@ -694,6 +694,22 @@ fn master_is_pushed_to_the_remote_after_landing() {
 }
 
 #[test]
+fn a_failed_push_of_master_does_not_record_the_remote_credentials() {
+    let root = TempDir::new().unwrap();
+    let mut repo = fixture_project(&root);
+    // A remote refused before any push is tried: the message names it.
+    repo.location.remote = Some("https://user:tok_abcdefgh@example.com/x.git\n".to_string());
+    block_on(repo.push_main());
+    let failure = repo.push_failure().unwrap().unwrap();
+    assert!(!failure.contains("tok_abcdefgh"), "{failure}");
+
+    repo.location.remote = Some("https://user:tok_abcdefgh@127.0.0.1:1/x.git".to_string());
+    block_on(repo.push_main());
+    let failure = repo.push_failure().unwrap().unwrap();
+    assert!(!failure.contains("tok_abcdefgh"), "{failure}");
+}
+
+#[test]
 fn check_only_runs_the_checks_without_queueing_or_landing() {
     let root = TempDir::new().unwrap();
     let repo = fixture_project(&root);

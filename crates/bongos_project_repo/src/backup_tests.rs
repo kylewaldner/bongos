@@ -336,16 +336,16 @@ fn a_remote_that_reads_as_an_option_is_never_passed_to_git() {
 #[test]
 fn credentials_in_a_remote_url_are_not_shown() {
     assert_eq!(
-        shown_remote("https://kyle:tok_abcdefgh@example.com/state.git"),
+        shown_remote("https://user:tok_abcdefgh@example.com/state.git"),
         "https://<withheld: secret>@example.com/state.git"
     );
     assert_eq!(shown_remote("/backups/state.git"), "/backups/state.git");
     assert_eq!(shown_remote("origin"), "origin");
     // A password holding an unescaped `@` or `/` is withheld whole.
     for remote in [
-        "https://kyle:p@ss@example.com/state.git",
-        "https://kyle:pa/ss@example.com/state.git",
-        "https://kyle:p@s/s@example.com/state.git",
+        "https://user:p@ss@example.com/state.git",
+        "https://user:pa/ss@example.com/state.git",
+        "https://user:p@s/s@example.com/state.git",
     ] {
         assert_eq!(
             shown_remote(remote),

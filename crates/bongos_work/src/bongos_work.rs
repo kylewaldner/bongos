@@ -92,6 +92,9 @@ pub struct WorkDirs {
     /// The record of where this machine's project repositories are, which says which old-format
     /// projects were converted. `None` reads no record: nothing counts as converted.
     pub locations: Option<PathBuf>,
+    /// The folder project folders go in. `None` uses the `project_repository.projects_dir`
+    /// setting, else the data directory's `projects`.
+    pub projects: Option<PathBuf>,
 }
 
 impl WorkDirs {
@@ -101,17 +104,23 @@ impl WorkDirs {
             root: home.join(".bongos"),
             worktrees: data_dir.join("worktrees"),
             locations: Some(bongos_project_repo::RepositoryLocations::default_path()),
+            projects: None,
         }
     }
 
-    /// Dirs for a test: `worktrees` is a sibling of `root` named `central-worktrees`, outside it.
+    /// Dirs for a test: `worktrees`, `projects` and the `locations` record are siblings of `root`
+    /// (`central-worktrees`, `central-projects`, `central-locations.toml`), so nothing leaves the
+    /// temporary directory.
     pub fn for_test(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let worktrees = root.with_file_name("central-worktrees");
+        let projects = Some(root.with_file_name("central-projects"));
+        let locations = Some(root.with_file_name("central-locations.toml"));
         Self {
             root,
             worktrees,
-            locations: None,
+            locations,
+            projects,
         }
     }
 }
@@ -130,7 +139,7 @@ impl Global for GlobalWorkStore {}
 pub fn init(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut App) {
     WorkSettings::register(cx);
     bongos_project_repo::init(cx);
-    clean_stale_conversions(cx);
+    clean_stale_conversions(dirs.projects.clone(), cx);
     master_files::init(cx);
     let locations = dirs.locations.clone();
     let store = cx.new(|cx| WorkStore::new(fs, dirs, cx));
@@ -145,12 +154,12 @@ pub fn init(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut App) {
 
 /// Removes, once at startup, what conversions killed halfway left in the projects folder. A
 /// conversion still running in another process is left alone.
-fn clean_stale_conversions(cx: &mut App) {
+fn clean_stale_conversions(projects: Option<PathBuf>, cx: &mut App) {
     let settings = bongos_project_repo::ProjectRepositorySettings::get_global(cx);
     if !settings.enabled {
         return;
     }
-    let projects = settings.projects_folder();
+    let projects = projects.unwrap_or_else(|| settings.projects_folder());
     cx.background_spawn(async move {
         for removed in bongos_project_repo::clean_stale_conversions(&projects) {
             log::info!(

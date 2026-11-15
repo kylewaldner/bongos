@@ -735,14 +735,20 @@ impl ProjectRepo {
         let Some(remote) = self.location.remote.clone() else {
             return;
         };
-        let pushed = self
-            .git
-            .push(
-                &self.location.repository,
-                &remote,
-                "refs/heads/main:refs/heads/main",
-            )
-            .await;
+        let pushed = match crate::backup::remote_problem(&remote) {
+            Some(problem) => Err(format!("the remote {problem}; not pushing")),
+            None => self
+                .git
+                .push_branch(
+                    &self.location.repository,
+                    &remote,
+                    MAIN_BRANCH,
+                    None,
+                    crate::backup::real_push_timeout(),
+                )
+                .await
+                .map_err(|error| error.to_string()),
+        };
         let Ok(writer) = self.writer_or_error() else {
             return;
         };
@@ -754,8 +760,18 @@ impl ProjectRepo {
                 Ok(())
             }),
             Err(error) => {
-                log::warn!("pushing master to {remote}: {error}");
-                writer.transact(|tx| tx.set_meta(PUSH_FAILURE_KEY, &error.to_string()))
+                // The remote's URL may hold credentials, and git's message the URL.
+                let options = self.backup_options();
+                let error = error.replace(&remote, &crate::backup::shown_remote(&remote));
+                let error = match crate::snapshot::Secrets::new(
+                    &options.secret_patterns,
+                    &options.secret_keys,
+                ) {
+                    Ok(secrets) => secrets.clean(&error),
+                    Err(_) => error,
+                };
+                log::warn!("pushing master to {}: {error}", crate::backup::shown_remote(&remote));
+                writer.transact(|tx| tx.set_meta(PUSH_FAILURE_KEY, &error))
             }
         };
         if let Err(error) = recorded {
