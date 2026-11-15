@@ -3,7 +3,9 @@ use futures::executor::block_on;
 use tempfile::TempDir;
 
 use crate::changed_files::{ChangedFiles, ChangedFilesError, ChangedSet, changed_files};
-use crate::test_support::{commit_everything, git_in, init_git_repo, write_file};
+use crate::test_support::{
+    HOSTILE_CHILD, commit_everything, git_in, init_git_repo, rerun_with_hostile_git_env, write_file,
+};
 
 fn git() -> Git {
     Git::locate().unwrap().isolated()
@@ -130,5 +132,40 @@ fn changed_files_keeps_names_with_spaces_and_newlines_whole() {
             "line\nbreak.txt",
             "my notes.txt",
         ]
+    );
+}
+
+#[test]
+fn changed_files_of_a_subdirectory_of_a_repository_is_an_error() {
+    let (_root, tree) = fixture();
+    write_file(&tree, "src/a.kt", "a\n");
+    let result = block_on(changed_files(&git(), &tree.join("src"), Some("main")));
+    assert!(
+        matches!(result, Err(ChangedFilesError::NotTopLevel { .. })),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn changed_files_is_not_redirected_by_inherited_git_variables() {
+    if std::env::var_os(HOSTILE_CHILD).is_some() {
+        let tree = std::path::PathBuf::from(std::env::var_os("CHANGED_FILES_TEST_TREE").unwrap());
+        let set = changed(&tree);
+        assert_eq!(set.paths, ["base.txt", "untracked.kt"]);
+        return;
+    }
+    let (root, tree) = fixture();
+    write_file(&tree, "base.txt", "edited\n");
+    write_file(&tree, "untracked.kt", "u\n");
+    let decoy = root.path().join("decoy");
+    std::fs::create_dir_all(&decoy).unwrap();
+    init_git_repo(&decoy);
+    write_file(&decoy, "other.txt", "other\n");
+    commit_everything(&decoy, "decoy");
+    rerun_with_hostile_git_env(
+        module_path!(),
+        "changed_files_is_not_redirected_by_inherited_git_variables",
+        &decoy,
+        &[("CHANGED_FILES_TEST_TREE", tree.display().to_string())],
     );
 }

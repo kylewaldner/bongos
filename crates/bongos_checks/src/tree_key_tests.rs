@@ -5,7 +5,9 @@ use bongos_project_repo::Git;
 use futures::executor::block_on;
 use tempfile::TempDir;
 
-use crate::test_support::{commit_everything, git_in, init_git_repo, write_file};
+use crate::test_support::{
+    HOSTILE_CHILD, commit_everything, git_in, init_git_repo, rerun_with_hostile_git_env, write_file,
+};
 use crate::tree_key::{TreeError, TreeKey, combine_trees, key_inputs_digest, tree_key};
 
 fn git() -> Git {
@@ -223,4 +225,65 @@ fn tree_key_combined_over_two_repositories_ignores_order_and_follows_each_tree()
         forward
     );
     assert_ne!(combine_trees(&[("app", app)]), forward);
+}
+
+#[test]
+fn tree_key_ignores_the_executable_bit_setting_of_the_repository() {
+    let fixture = fixture();
+    git_in(&fixture.tree, &["config", "core.fileMode", "false"]);
+    let before = key_of(&fixture);
+    let script = fixture.tree.join("README.md");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_ne!(key_of(&fixture), before);
+}
+
+#[test]
+fn tree_key_of_a_subdirectory_of_a_repository_is_an_error() {
+    let fixture = fixture();
+    let result = block_on(tree_key(
+        &git(),
+        &fixture.tree.join("src"),
+        &fixture.indexes,
+    ));
+    assert!(
+        matches!(result, Err(TreeError::NotTopLevel { .. })),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn tree_key_is_not_redirected_by_inherited_git_variables() {
+    if std::env::var_os(HOSTILE_CHILD).is_some() {
+        // The child: git variables point at another repository; the key must still be the
+        // tree under test.
+        let tree = PathBuf::from(std::env::var_os("TREE_KEY_TEST_TREE").unwrap());
+        let indexes = PathBuf::from(std::env::var_os("TREE_KEY_TEST_INDEXES").unwrap());
+        let key = block_on(tree_key(&git(), &tree, &indexes)).unwrap();
+        assert_eq!(
+            key.as_str(),
+            std::env::var("TREE_KEY_TEST_EXPECTED").unwrap()
+        );
+        return;
+    }
+    let fixture = fixture();
+    write_file(&fixture.tree, "untracked.txt", "x\n");
+    let expected = key_of(&fixture);
+    let decoy = fixture._root.path().join("decoy");
+    std::fs::create_dir_all(&decoy).unwrap();
+    init_git_repo(&decoy);
+    write_file(&decoy, "other.txt", "other\n");
+    commit_everything(&decoy, "decoy");
+    rerun_with_hostile_git_env(
+        module_path!(),
+        "tree_key_is_not_redirected_by_inherited_git_variables",
+        &decoy,
+        &[
+            ("TREE_KEY_TEST_TREE", fixture.tree.display().to_string()),
+            (
+                "TREE_KEY_TEST_INDEXES",
+                fixture.indexes.display().to_string(),
+            ),
+            ("TREE_KEY_TEST_EXPECTED", expected.as_str().to_string()),
+        ],
+    );
 }

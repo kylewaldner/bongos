@@ -10,6 +10,7 @@ mod evidence_store;
 mod exporter;
 mod settings;
 mod tree_key;
+mod work_tree;
 
 pub use actions::{ChecksToast, action_types, init_palette, register, task};
 pub use changed_files::{ChangedFiles, ChangedFilesError, ChangedSet, changed_files};

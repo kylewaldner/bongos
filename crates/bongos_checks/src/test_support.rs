@@ -212,3 +212,37 @@ pub(crate) fn commit_everything(directory: &std::path::Path, message: &str) {
     git_in(directory, &["add", "-A"]);
     git_in(directory, &["commit", "-q", "-m", message]);
 }
+
+/// Set in the child process of [`rerun_with_hostile_git_env`].
+pub(crate) const HOSTILE_CHILD: &str = "BONGOS_TEST_HOSTILE_GIT_ENV_CHILD";
+
+/// Runs the test `module::name` again in a child process whose environment points git at
+/// `decoy` (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`) and carries `extra`, and panics unless
+/// the child passes. The process-wide environment of the running test is never changed, so
+/// other tests running in threads are not affected. The test calls this when `HOSTILE_CHILD` is
+/// unset and does its checks, with the values `extra` carries, when it is set.
+pub(crate) fn rerun_with_hostile_git_env(
+    module: &str,
+    name: &str,
+    decoy: &std::path::Path,
+    extra: &[(&str, String)],
+) {
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let output = block_on(
+        util::command::new_command(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::{name}"), "--nocapture"])
+            .env(HOSTILE_CHILD, "1")
+            .env("GIT_DIR", decoy.join(".git"))
+            .env("GIT_WORK_TREE", decoy)
+            .env("GIT_INDEX_FILE", decoy.join(".git/index"))
+            .envs(extra.iter().map(|(key, value)| (*key, value.as_str())))
+            .output(),
+    )
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "the child run failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

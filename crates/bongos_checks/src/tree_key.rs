@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use bongos_project_repo::{Git, GitError};
 use sha2::{Digest as _, Sha256};
 
+use crate::work_tree::{Problem, ensure_top_level};
+
 /// What a missing key input file hashes as; no file's content digest can equal it.
 const MISSING_INPUT: &str = "missing";
 
@@ -28,6 +30,8 @@ impl TreeKey {
 pub enum TreeError {
     #[error("{path} is not a git working tree: {detail}")]
     NotGitTree { path: PathBuf, detail: String },
+    #[error("{path} is inside the git working tree {top}, not at its top; pass the top directory")]
+    NotTopLevel { path: PathBuf, top: PathBuf },
     #[error(transparent)]
     Git(#[from] GitError),
     #[error("git returned {output:?} where a tree id was expected")]
@@ -55,21 +59,41 @@ impl TreeError {
 /// `git write-tree`. The repository's own index is never read or written, so its bytes and
 /// modification time stay as they were. The private index is kept between calls, so git's stat
 /// cache makes every call after the first cheap. A call only adds loose objects to the object
-/// store; it moves no ref. A nested repository is recorded as one entry (its HEAD commit), not
-/// by its files. Calls for the same tree at the same time contend for the private index's lock
-/// and the loser gets an error; the caller may retry.
+/// store; it moves no ref. A nested repository (a submodule, or a repository cloned inside) is
+/// recorded as one entry (its HEAD commit): the files inside it are not part of the key, so a
+/// change to them that is not committed there does not change the key. Calls for the same tree
+/// at the same time contend for the private index's lock and the loser gets an error; the caller
+/// may retry.
 ///
 /// A failure is an error, never a partial key. `--ignore-errors` only makes git stage every
 /// file it can before it reports the files it could not (an unreadable file, one that vanished
 /// while being read): git then exits non-zero and the call returns that as `TreeError::Git`,
 /// with git's stderr. No such failure counts as ignorable, because a key that skips a file could
 /// match a tree that differs in it.
+///
+/// `tree` must be the top directory of the working tree; a subdirectory of one is
+/// `TreeError::NotTopLevel`. The repository's `core.fileMode`, `core.fsmonitor`,
+/// `core.trustctime`, `core.autocrlf` and `core.safecrlf` settings are overridden for the
+/// calls, so the key does not depend on them, and the environment git inherits cannot redirect
+/// it to another repository or index (see [`Git`]).
 pub async fn tree_key(git: &Git, tree: &Path, index_dir: &Path) -> Result<TreeKey, TreeError> {
     let canonical = tree.canonicalize().map_err(|error| TreeError::NotGitTree {
         path: tree.to_path_buf(),
         detail: error.to_string(),
     })?;
-    ensure_work_tree(git, &canonical, tree).await?;
+    ensure_top_level(git, &canonical)
+        .await
+        .map_err(|problem| match problem {
+            Problem::NotWorkTree(detail) => TreeError::NotGitTree {
+                path: tree.to_path_buf(),
+                detail,
+            },
+            Problem::NotTopLevel(top) => TreeError::NotTopLevel {
+                path: tree.to_path_buf(),
+                top,
+            },
+            Problem::Git(error) => error.into(),
+        })?;
 
     std::fs::create_dir_all(index_dir)
         .map_err(|error| TreeError::io(format!("creating {}", index_dir.display()), error))?;
@@ -82,12 +106,17 @@ pub async fn tree_key(git: &Git, tree: &Path, index_dir: &Path) -> Result<TreeKe
     git.run_on_index(
         &canonical,
         &index,
-        &["add", "-A", "--ignore-errors", "."],
+        &with_fixed_settings(&["add", "-A", "--ignore-errors", "."]),
         None,
     )
     .await?;
     let output = git
-        .run_on_index(&canonical, &index, &["write-tree"], None)
+        .run_on_index(
+            &canonical,
+            &index,
+            &with_fixed_settings(&["write-tree"]),
+            None,
+        )
         .await?;
     let id = String::from_utf8_lossy(&output).trim().to_string();
     if id.len() < 40 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -96,21 +125,23 @@ pub async fn tree_key(git: &Git, tree: &Path, index_dir: &Path) -> Result<TreeKe
     Ok(TreeKey(id))
 }
 
-/// Fails unless `directory` is inside a git working tree.
-async fn ensure_work_tree(git: &Git, directory: &Path, shown: &Path) -> Result<(), TreeError> {
-    let not_a_tree = |detail: String| TreeError::NotGitTree {
-        path: shown.to_path_buf(),
-        detail,
-    };
-    match git
-        .run(directory, &["rev-parse", "--is-inside-work-tree"])
-        .await
-    {
-        Ok(answer) if answer == "true" => Ok(()),
-        Ok(_) => Err(not_a_tree("not inside a working tree".to_string())),
-        Err(GitError::Failed { stderr, .. }) => Err(not_a_tree(stderr)),
-        Err(error) => Err(error.into()),
+/// `args` preceded by the `-c` settings that make the key the same whatever the repository's or
+/// the user's configuration says: the executable bit and the change times are trusted, no
+/// file system monitor answers for the stat cache, and no line ending is converted.
+fn with_fixed_settings<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut all = Vec::new();
+    for setting in [
+        "core.fileMode=true",
+        "core.fsmonitor=false",
+        "core.trustctime=true",
+        "core.autocrlf=false",
+        "core.safecrlf=false",
+    ] {
+        all.push("-c");
+        all.push(setting);
     }
+    all.extend_from_slice(args);
+    all
 }
 
 /// One key for a check that spans several repositories: the SHA-256 hex of the

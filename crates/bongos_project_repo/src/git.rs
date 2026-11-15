@@ -1,5 +1,6 @@
 //! A runner over the `git` binary. Every call runs with `GIT_TERMINAL_PROMPT=0`, so a missing
-//! credential fails instead of waiting for input.
+//! credential fails instead of waiting for input, and without the inherited variables that point
+//! git at another repository (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and the like).
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -78,6 +79,22 @@ pub struct TreeEntry {
     /// Relative to the tree's root, `/`-separated.
     pub path: String,
 }
+
+/// The environment variables that make git work on another repository, index, object store or
+/// configuration than the one in the directory it runs in. They are removed from the inherited
+/// environment of every command.
+const REDIRECTING_VARIABLES: [&str; 10] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+];
 
 /// A located git binary.
 #[derive(Clone, Debug)]
@@ -203,7 +220,10 @@ impl Git {
     }
 
     /// A git command with `args` in `directory`, with `GIT_INDEX_FILE` set to `index` when
-    /// given.
+    /// given. The variables that point git at another repository, index or configuration are
+    /// removed from the inherited environment first, so the command works on `directory` and
+    /// nothing else, whatever environment the process runs in (a git hook, for one, sets
+    /// `GIT_DIR` and `GIT_INDEX_FILE`).
     fn command(
         &self,
         directory: &Path,
@@ -211,6 +231,17 @@ impl Git {
         args: Vec<OsString>,
     ) -> util::command::Command {
         let mut command = util::command::new_command(&self.binary);
+        for name in REDIRECTING_VARIABLES {
+            command.env_remove(name);
+        }
+        for (name, _) in std::env::vars_os() {
+            let numbered = name.to_str().is_some_and(|name| {
+                name.starts_with("GIT_CONFIG_KEY_") || name.starts_with("GIT_CONFIG_VALUE_")
+            });
+            if numbered {
+                command.env_remove(name);
+            }
+        }
         command
             .current_dir(directory)
             .env("GIT_TERMINAL_PROMPT", "0")

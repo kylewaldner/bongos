@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use bongos_project_repo::{Git, GitError};
 
+use crate::work_tree::{Problem, ensure_top_level};
+
 /// The outcome of [`changed_files`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangedFiles {
@@ -36,6 +38,8 @@ impl ChangedSet {
 pub enum ChangedFilesError {
     #[error("{path} is not a git working tree: {detail}")]
     NotGitTree { path: PathBuf, detail: String },
+    #[error("{path} is inside the git working tree {top}, not at its top; pass the top directory")]
+    NotTopLevel { path: PathBuf, top: PathBuf },
     #[error("the base branch {branch:?} does not name a commit")]
     BaseBranchMissing { branch: String },
     #[error("the base branch {branch:?} is not a valid ref name")]
@@ -56,7 +60,9 @@ pub enum ChangedFilesError {
 /// `git ls-files --others --exclude-standard -z` (untracked files that .gitignore does not
 /// exclude). Paths are read from NUL-separated output, so a name with a space or a newline
 /// arrives whole. A path that is not UTF-8 is an error rather than a lossy name that would point
-/// at no file. A missing base branch is `BaseBranchMissing`, never a guess.
+/// at no file. A missing base branch is `BaseBranchMissing`, never a guess. `tree` must be the
+/// top directory of the working tree; a subdirectory of one is `NotTopLevel`, because the paths
+/// are relative to the top.
 pub async fn changed_files(
     git: &Git,
     tree: &Path,
@@ -70,22 +76,19 @@ pub async fn changed_files(
             branch: branch.to_string(),
         });
     }
-    match git.run(tree, &["rev-parse", "--is-inside-work-tree"]).await {
-        Ok(answer) if answer == "true" => {}
-        Ok(_) => {
-            return Err(ChangedFilesError::NotGitTree {
+    ensure_top_level(git, tree)
+        .await
+        .map_err(|problem| match problem {
+            Problem::NotWorkTree(detail) => ChangedFilesError::NotGitTree {
                 path: tree.to_path_buf(),
-                detail: "not inside a working tree".to_string(),
-            });
-        }
-        Err(GitError::Failed { stderr, .. }) => {
-            return Err(ChangedFilesError::NotGitTree {
+                detail,
+            },
+            Problem::NotTopLevel(top) => ChangedFilesError::NotTopLevel {
                 path: tree.to_path_buf(),
-                detail: stderr,
-            });
-        }
-        Err(error) => return Err(error.into()),
-    }
+                top,
+            },
+            Problem::Git(error) => error.into(),
+        })?;
 
     let target = format!("{branch}^{{commit}}");
     let base = match git
