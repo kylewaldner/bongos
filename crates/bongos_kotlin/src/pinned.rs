@@ -131,12 +131,7 @@ pub async fn ensure_installed(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeMap,
-        ffi::OsString,
-        fs,
-        sync::Arc,
-    };
+    use std::{collections::BTreeMap, ffi::OsString, fs, sync::Arc};
 
     use futures::executor::block_on;
     use http_client::FakeHttpClient;
@@ -161,7 +156,11 @@ mod tests {
         for server in ALL {
             let table = raw[server.name].as_table().unwrap();
             assert!(!table.contains_key("expires"), "{} expires", server.name);
-            assert!(!table.contains_key("built"), "{} has a build date", server.name);
+            assert!(
+                !table.contains_key("built"),
+                "{} has a build date",
+                server.name
+            );
         }
 
         let manifest = Manifest::embedded();
@@ -182,9 +181,9 @@ mod tests {
             let terraform = entry(&manifest, "terraform-ls", platform).unwrap();
             assert_eq!(terraform.version, "0.39.1");
             assert!(
-                terraform
-                    .url
-                    .starts_with("https://releases.hashicorp.com/terraform-ls/0.39.1/terraform-ls_0.39.1_"),
+                terraform.url.starts_with(
+                    "https://releases.hashicorp.com/terraform-ls/0.39.1/terraform-ls_0.39.1_"
+                ),
                 "{}",
                 terraform.url
             );
@@ -204,10 +203,26 @@ mod tests {
     fn test_entry_by_name_for_every_platform() {
         let manifest = Manifest::embedded();
         let targets = [
-            ("linux-x64", "linux_amd64", "fe2a158e4a1a8ec8047dae9e06c439b468412aa579929ba28b2e1258cedef9c0"),
-            ("linux-arm64", "linux_arm64", "a72a6d9f72580cfc30cc06d3c973fd5f55790f62e3ddb195998435070d9af36d"),
-            ("macos-x64", "darwin_amd64", "25814afdbec9163de4ad8db58960195b9fc65ddc5405a5df7163bbdbd08b5325"),
-            ("macos-arm64", "darwin_arm64", "07748aa989fc3b9f6e4538ff83bc2e607ebc20c7587ce6556ae555d631e70b1b"),
+            (
+                "linux-x64",
+                "linux_amd64",
+                "fe2a158e4a1a8ec8047dae9e06c439b468412aa579929ba28b2e1258cedef9c0",
+            ),
+            (
+                "linux-arm64",
+                "linux_arm64",
+                "a72a6d9f72580cfc30cc06d3c973fd5f55790f62e3ddb195998435070d9af36d",
+            ),
+            (
+                "macos-x64",
+                "darwin_amd64",
+                "25814afdbec9163de4ad8db58960195b9fc65ddc5405a5df7163bbdbd08b5325",
+            ),
+            (
+                "macos-arm64",
+                "darwin_arm64",
+                "07748aa989fc3b9f6e4538ff83bc2e607ebc20c7587ce6556ae555d631e70b1b",
+            ),
         ];
         for (platform, target, digest) in targets {
             let terraform = entry(&manifest, TERRAFORM_LS.name, platform).unwrap();
@@ -342,7 +357,9 @@ launcher = "bin/jdtls"
         }
         let mut out = Vec::new();
         walk(root, root, &mut out);
-        out.retain(|name| !["java", "java/jdtls", "terraform", "terraform/terraform-ls"].contains(&name.as_str()));
+        out.retain(|name| {
+            !["java", "java/jdtls", "terraform", "terraform/terraform-ls"].contains(&name.as_str())
+        });
         out.sort();
         out
     }
@@ -356,7 +373,10 @@ launcher = "bin/jdtls"
 
     #[test]
     fn test_a_tampered_archive_is_never_extracted_tar_gz_or_zip() {
-        for (server, kind) in [(JDTLS, ArchiveKind::TarGz), (TERRAFORM_LS, ArchiveKind::Zip)] {
+        for (server, kind) in [
+            (JDTLS, ArchiveKind::TarGz),
+            (TERRAFORM_LS, ArchiveKind::Zip),
+        ] {
             let languages = tempfile::tempdir().unwrap();
             let archive = match kind {
                 ArchiveKind::TarGz => tar_gz(&files(0, true)),
@@ -392,7 +412,10 @@ launcher = "bin/jdtls"
                 &AtomicBool::new(false),
             )
             .unwrap();
-            assert_eq!(installed.dir, server.version_dir(languages.path(), &pin.version));
+            assert_eq!(
+                installed.dir,
+                server.version_dir(languages.path(), &pin.version)
+            );
             assert_eq!(installed.binary.path, installed.dir.join("bin/launcher"));
             assert_eq!(installed.binary.arguments, vec![OsString::from("--stdio")]);
         }
@@ -400,7 +423,10 @@ launcher = "bin/jdtls"
 
     #[test]
     fn test_a_cancelled_install_leaves_no_partial_files() {
-        for (server, kind) in [(JDTLS, ArchiveKind::TarGz), (TERRAFORM_LS, ArchiveKind::Zip)] {
+        for (server, kind) in [
+            (JDTLS, ArchiveKind::TarGz),
+            (TERRAFORM_LS, ArchiveKind::Zip),
+        ] {
             let languages = tempfile::tempdir().unwrap();
             let archive = match kind {
                 ArchiveKind::TarGz => tar_gz(&files(3 * 1024 * 1024, true)),
@@ -413,7 +439,10 @@ launcher = "bin/jdtls"
                 Some((crate::install::PROGRESS_STEP as usize, cancel.clone())),
             );
             let error = run(client.as_ref(), server, &pin, languages.path(), &cancel).unwrap_err();
-            assert!(error.downcast_ref::<InstallCancelled>().is_some(), "{error:#}");
+            assert!(
+                error.downcast_ref::<InstallCancelled>().is_some(),
+                "{error:#}"
+            );
             assert!(
                 tree(languages.path()).is_empty(),
                 "{}: left behind {:?}",
@@ -466,7 +495,11 @@ launcher = "bin/jdtls"
         );
         assert_eq!(binary.arguments, vec![OsString::from("serve")]);
         assert_eq!(
-            binary.env.unwrap().get("CHECKPOINT_DISABLE").map(String::as_str),
+            binary
+                .env
+                .unwrap()
+                .get("CHECKPOINT_DISABLE")
+                .map(String::as_str),
             Some("1")
         );
         // Another server's directory does not count.
@@ -493,7 +526,11 @@ launcher = "bin/jdtls"
         let languages = tempfile::tempdir().unwrap();
         let mut entries = files(0, true);
         entries.push(("server-1.2.3/../../escape".into(), 0o644, b"pwned".to_vec()));
-        entries.push(("server-1.2.3/../../../../escape".into(), 0o644, b"pwned".to_vec()));
+        entries.push((
+            "server-1.2.3/../../../../escape".into(),
+            0o644,
+            b"pwned".to_vec(),
+        ));
         let archive = zip(&entries);
         let pin = entry_for(&archive, ArchiveKind::Zip);
         let installed = run(
@@ -514,7 +551,9 @@ launcher = "bin/jdtls"
             assert!(!escaped.exists(), "{} was written", escaped.display());
         }
         assert!(
-            !tree(languages.path()).iter().any(|path| path.ends_with("escape")),
+            !tree(languages.path())
+                .iter()
+                .any(|path| path.ends_with("escape")),
             "{:?}",
             tree(languages.path())
         );

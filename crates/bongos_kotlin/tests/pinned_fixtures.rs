@@ -118,7 +118,11 @@ fn test_fixture_archives_install_and_tampered_copies_are_refused() {
 
     for (server, archive, tampered) in [
         (JDTLS, "jdtls.tar.gz", "jdtls.tampered.tar.gz"),
-        (TERRAFORM_LS, "terraform-ls.zip", "terraform-ls.tampered.zip"),
+        (
+            TERRAFORM_LS,
+            "terraform-ls.zip",
+            "terraform-ls.tampered.zip",
+        ),
     ] {
         let entry = pinned::entry(&manifest, server.name, "linux-x64").unwrap();
         assert_eq!(entry.version, "0.0.2");
