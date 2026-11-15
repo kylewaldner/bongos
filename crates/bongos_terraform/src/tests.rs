@@ -356,7 +356,10 @@ async fn test_terraform_formatting_goes_to_the_language_server(cx: &mut TestAppC
         cx.update(|cx| {
             let settings = AllLanguageSettings::get_global(cx).language(None, Some(&name), cx);
             assert!(
-                matches!(&settings.formatter, FormatterList::Single(Formatter::LanguageServer(_))),
+                matches!(
+                    &settings.formatter,
+                    FormatterList::Single(Formatter::LanguageServer(_))
+                ),
                 "{language}: {:?}",
                 settings.formatter
             );

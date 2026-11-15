@@ -301,7 +301,10 @@ pub fn init(languages: &LanguageRegistry, dirs: TerraformDirs, cx: &mut App) {
     // Kotlin reports a malformed user manifest; this reads the same file and falls back to the
     // embedded pins without a second report.
     let manifest = Manifest::load_for_app(cfg!(debug_assertions), &dirs.config_dir).manifest;
-    let adapter = Arc::new(TerraformLsAdapter::new(dirs.languages_dir, Arc::new(manifest)));
+    let adapter = Arc::new(TerraformLsAdapter::new(
+        dirs.languages_dir,
+        Arc::new(manifest),
+    ));
     for language in LANGUAGES {
         languages.register_lsp_adapter(LanguageName::new_static(language), adapter.clone());
     }
