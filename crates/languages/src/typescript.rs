@@ -1813,6 +1813,35 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_tsx_test_files_use_the_project_runner_and_manager(
+        executor: BackgroundExecutor,
+        cx: &mut TestAppContext,
+    ) {
+        for (lockfile, manager) in [
+            ("package-lock.json", "npm"),
+            ("pnpm-lock.yaml", "pnpm"),
+            ("yarn.lock", "yarn"),
+        ] {
+            let tree = json!({
+                "package.json": manifest(json!({})),
+                lockfile: "",
+                "src": { "App.test.tsx": "" },
+            });
+            let (_, templates) =
+                templates_for(cx, executor.clone(), tree, "src/App.test.tsx").await;
+            for runner in ["jest", "vitest"] {
+                let template = templates
+                    .iter()
+                    .find(|t| t.label == format!("{runner} test $ZED_SYMBOL"))
+                    .unwrap();
+                assert!(template.tags.contains(&"tsx-test".to_owned()));
+                assert_eq!(template.command, manager);
+                assert_eq!(template.args[..3], ["exec", "--", runner]);
+            }
+        }
+    }
+
+    #[gpui::test]
     async fn test_bun_project_never_uses_npm_or_node(
         executor: BackgroundExecutor,
         cx: &mut TestAppContext,

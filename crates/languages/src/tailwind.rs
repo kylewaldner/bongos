@@ -146,9 +146,7 @@ impl LspAdapter for TailwindLspAdapter {
         _: &Arc<dyn LspAdapterDelegate>,
         _: &mut AsyncApp,
     ) -> Result<Option<serde_json::Value>> {
-        Ok(Some(json!({
-            "provideFormatter": true,
-        })))
+        Ok(Some(initialization_options_value()))
     }
 
     async fn workspace_configuration(
@@ -166,6 +164,10 @@ impl LspAdapter for TailwindLspAdapter {
 
         if tailwind_user_settings.get("emmetCompletions").is_none() {
             tailwind_user_settings["emmetCompletions"] = Value::Bool(true);
+        }
+
+        if tailwind_user_settings.get("classAttributes").is_none() {
+            tailwind_user_settings["classAttributes"] = json!(CLASS_ATTRIBUTES);
         }
 
         if tailwind_user_settings.get("includeLanguages").is_none() {
@@ -212,6 +214,18 @@ impl LspAdapter for TailwindLspAdapter {
     }
 }
 
+/// Attributes whose value the server treats as a list of Tailwind classes.
+const CLASS_ATTRIBUTES: [&str; 4] = ["class", "className", "ngClass", "class:list"];
+
+fn initialization_options_value() -> Value {
+    json!({
+        "provideFormatter": true,
+        "userLanguages": {
+            "typescriptreact": "typescriptreact",
+        },
+    })
+}
+
 async fn get_cached_server_binary(
     container_dir: PathBuf,
     node: &NodeRuntime,
@@ -230,4 +244,24 @@ async fn get_cached_server_binary(
     })
     .await
     .log_err()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_initialization_options_cover_tsx_and_class_name() {
+        let options = initialization_options_value();
+        assert_eq!(
+            options["userLanguages"]["typescriptreact"],
+            "typescriptreact"
+        );
+        assert!(CLASS_ATTRIBUTES.contains(&"className"));
+        let adapter = TailwindLspAdapter::new(NodeRuntime::unavailable());
+        assert_eq!(
+            adapter.language_ids().get(&LanguageName::new_static("TSX")),
+            Some(&"typescriptreact".to_string())
+        );
+    }
 }
