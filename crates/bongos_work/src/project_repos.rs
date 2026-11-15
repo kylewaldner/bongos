@@ -14,7 +14,7 @@ use bongos_project_repo::{
 use bongos_project_repo_model::ChangeMeta;
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{Change, Context};
-use bongos_work_model::store::{Project, WorkTree};
+use bongos_work_model::store::{Project, Task as WorkTask, WorkTree};
 use chrono::Utc;
 use fs::Fs;
 use futures::StreamExt as _;
@@ -38,6 +38,17 @@ pub(crate) fn open_repos(cx: &App) -> Vec<Arc<LoadedProject>> {
     cx.try_global::<OpenRepos>()
         .map(|repos| repos.0.clone())
         .unwrap_or_default()
+}
+
+/// The open project repository a new-format task belongs to: the one whose files folder holds the
+/// task's directory. `None` for an old-format task, a one-off of the old layout, and a task of a
+/// repository that is not open.
+pub fn project_repo_of(task: &WorkTask, cx: &App) -> Option<ProjectRepo> {
+    task.definition.as_ref()?;
+    open_repos(cx)
+        .into_iter()
+        .map(|loaded| loaded.repo().clone())
+        .find(|repo| task.dir.starts_with(&repo.location().files))
 }
 
 /// Makes `loaded` known to the commands on working copies and to the handling of master files.
