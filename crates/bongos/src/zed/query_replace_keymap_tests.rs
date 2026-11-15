@@ -288,12 +288,7 @@ async fn the_starters_resolve_in_an_editor_under_the_emacs_base(cx: &mut TestApp
         let keymap = Keymap::new(load_all(&platform, true, cx));
         for (input, action) in CHORDS {
             let (names, pending) = resolve(&keymap, input, &EDITOR);
-            assert_eq!(
-                names.first(),
-                Some(&action),
-                "{}: {input}",
-                platform.emacs
-            );
+            assert_eq!(names.first(), Some(&action), "{}: {input}", platform.emacs);
             assert!(!pending, "{}: {input}", platform.emacs);
         }
     }
@@ -306,7 +301,11 @@ async fn the_starters_are_unbound_without_the_emacs_base(cx: &mut TestAppContext
         let keymap = Keymap::new(load_all(&platform, false, cx));
         for (input, _) in CHORDS {
             let (names, pending) = resolve(&keymap, input, &EDITOR);
-            assert!(names.is_empty() && !pending, "{}: {input}: {names:?}", platform.default);
+            assert!(
+                names.is_empty() && !pending,
+                "{}: {input}: {names:?}",
+                platform.default
+            );
         }
     }
 }
