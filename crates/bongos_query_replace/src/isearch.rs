@@ -68,6 +68,8 @@ pub fn start_from_isearch(seed: QueryReplaceSeed, window: &mut Window, cx: &mut 
             &seed.from,
             move |answer, window, cx| {
                 if let Some(editor) = weak.upgrade() {
+                    let mut spec = spec;
+                    spec.case = answer.case;
                     begin(&editor, mode, origin, spec, answer.to, window, cx);
                 }
             },

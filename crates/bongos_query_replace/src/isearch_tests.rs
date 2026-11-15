@@ -167,3 +167,19 @@ async fn case_insensitive_is_carried(cx: &mut TestAppContext) {
     scene.finish("x", 2);
     assert_eq!(scene.messages(), vec!["Replaced 2 occurrences"]);
 }
+
+#[gpui::test]
+async fn m_c_at_the_replacement_prompt_changes_the_search(cx: &mut TestAppContext) {
+    let mut scene = searching("Foo foo Foo\n", 0, "foo", cx).await;
+    scene.cx.dispatch_action(QueryReplace);
+    scene.cx.run_until_parked();
+    scene.cx.simulate_keystrokes("alt-c");
+    scene.cx.run_until_parked();
+    assert_eq!(
+        scene.prompt_line(),
+        "Query replace (case-sensitive) foo with: "
+    );
+    scene.finish("x", 1);
+    assert_eq!(scene.text(), "Foo x Foo\n");
+    assert_eq!(scene.messages(), vec!["Replaced 1 occurrence"]);
+}

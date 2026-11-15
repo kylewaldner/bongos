@@ -547,11 +547,6 @@ fn forget(state: &Shared, workspace: EntityId, cx: &mut App) {
     }
 }
 
-/// Whether an interactive replace is open in `workspace`.
-pub fn interactive_open(workspace: EntityId, cx: &mut App) -> bool {
-    session_of(workspace, cx).is_some()
-}
-
 fn register_key<A: Action>(workspace: &mut Workspace, input: Input) {
     workspace.register_action(move |_, _: &A, window, cx| {
         let Some(state) = session_of(cx.entity_id(), cx) else {
