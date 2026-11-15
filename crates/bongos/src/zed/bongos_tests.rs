@@ -1532,3 +1532,131 @@ async fn emacs_quit_in_a_picker_query_editor_closes_it_through_cancel(cx: &mut T
         assert!(!workspace.has_active_modal(window, cx));
     });
 }
+
+/// The `task` commands of task checks, with the palette text of each.
+const CHECKS_ACTIONS: [(&str, &str); 9] = [
+    ("task::RunChecks", "task: run checks"),
+    ("task::RunChecksClean", "task: run checks clean"),
+    ("task::RunCheck", "task: run check"),
+    ("task::ShowChecks", "task: show checks"),
+    ("task::ShowCheckSources", "task: show check sources"),
+    ("task::ShowCheckOutput", "task: show check output"),
+    ("task::EditChecks", "task: edit checks"),
+    ("task::CancelChecks", "task: cancel checks"),
+    ("task::DumpChecks", "task: dump checks"),
+];
+
+#[gpui::test]
+async fn task_checks_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let names: Vec<&str> = cx.all_action_names().iter().copied().collect();
+        for (name, humanized) in CHECKS_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+            assert_eq!(
+                names.iter().filter(|existing| **existing == name).count(),
+                1,
+                "{name} is taken by another action"
+            );
+        }
+        assert!(
+            cx.build_action("task::RunChecks", None)
+                .unwrap()
+                .partial_eq(&bongos_checks::task::RunChecks)
+        );
+        assert_eq!(CHECKS_ACTIONS.len(), bongos_checks::action_types().len());
+        for kept in ["task::Spawn", "task::Rerun", "task::Close"] {
+            assert!(names.contains(&kept), "{kept} is gone");
+        }
+    });
+}
+
+/// In the whole app with `task_checks.enabled` off, a checks command is hidden from the palette,
+/// finds a handler by name and says task checks are off.
+#[gpui::test]
+async fn task_checks_commands_are_hidden_and_toast_in_the_app_while_off(cx: &mut TestAppContext) {
+    use gpui::BorrowAppContext as _;
+    use serde_json::json;
+    use settings::SettingsStore;
+    use util::path;
+    use workspace::MultiWorkspace;
+    use workspace::notifications::NotificationId;
+
+    let app_state = super::tests::init_test(cx);
+    cx.update(|cx| {
+        bongos_checks::init(cx);
+        bongos_checks::init_palette(cx);
+    });
+    let palette_hidden = |name: &str, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let action = cx.build_action(name, None).unwrap();
+            command_palette_hooks::CommandPaletteFilter::try_global(cx)
+                .expect("the palette filter exists")
+                .is_hidden(&*action)
+        })
+    };
+    for (name, _) in CHECKS_ACTIONS {
+        assert!(palette_hidden(name, cx), "{name} is hidden while off");
+    }
+    // `task: close` is not one of them.
+    assert!(!palette_hidden("task::Close", cx));
+
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree(path!("/root"), json!({ "a": null }))
+        .await;
+    cx.update(|cx| {
+        workspace::open_paths(
+            &[path!("/root/a").into()],
+            app_state.clone(),
+            workspace::OpenOptions::default(),
+            cx,
+        )
+    })
+    .await
+    .unwrap();
+    let multi_workspace = cx.windows()[0].downcast::<MultiWorkspace>().unwrap();
+    let workspace = multi_workspace
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    let id = NotificationId::unique::<bongos_checks::ChecksToast>();
+    for (name, _) in CHECKS_ACTIONS {
+        workspace.update(cx, |workspace, cx| workspace.dismiss_notification(&id, cx));
+        assert!(!workspace.read_with(cx, |workspace, _| {
+            workspace.notification_ids().contains(&id)
+        }));
+        let available = multi_workspace
+            .update(cx, |_, window, cx| {
+                let action = cx.build_action(name, None).unwrap();
+                let available = window.is_action_available(action.as_ref(), cx);
+                window.dispatch_action(action, cx);
+                available
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(available, "{name} has a handler");
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace
+                .notification_ids()
+                .contains(&id)),
+            "{name} says task checks are off"
+        );
+    }
+
+    // Turned on, the commands show in the palette again.
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.task_checks.get_or_insert_default().enabled = Some(true);
+            });
+        });
+    });
+    for (name, _) in CHECKS_ACTIONS {
+        assert!(!palette_hidden(name, cx), "{name} shows while on");
+    }
+}
