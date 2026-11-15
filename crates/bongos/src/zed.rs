@@ -306,6 +306,40 @@ pub fn init(cx: &mut App) {
             .detach_and_log_err(cx);
         });
     })
+    .on_action(|_: &bongos_java::ShowJdk, cx| {
+        with_active_or_new_workspace(cx, |workspace, window, cx| {
+            let worktrees = workspace
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .filter_map(|worktree| {
+                    let worktree = worktree.read(cx);
+                    worktree
+                        .is_local()
+                        .then(|| (worktree.abs_path().to_path_buf(), worktree.id()))
+                })
+                .collect::<Vec<_>>();
+            let request = bongos_java::ShowJdkRequest::new(
+                worktrees,
+                &bongos_java::JdkEnvironment::from_process(),
+                cx,
+            );
+            cx.spawn_in(window, async move |workspace, cx| {
+                let text = cx.background_spawn(async move { request.text() }).await;
+                workspace.update_in(cx, |workspace, window, cx| {
+                    open_bundled_file(
+                        workspace,
+                        text.into(),
+                        bongos_java::SHOW_JDK_TITLE,
+                        "Plain Text",
+                        window,
+                        cx,
+                    );
+                })
+            })
+            .detach_and_log_err(cx);
+        });
+    })
     .on_action(|_: &OpenDefaultSettings, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
             open_bundled_file(

@@ -28,7 +28,6 @@ use crate::{
     install::{InstallCancelled, ProgressFn, spawn_ensure_installed},
     installed::{check_installed, not_installed, server_name, version_dir},
     intellij::{LICENSE_TIMEOUT, bundle_eula_hash, eula_accepted, eula_argument, license_check},
-    java::{JAVA_LANGUAGE, JAVA_LANGUAGE_ID},
     jdk,
     license::fallback_for,
     manager::{
@@ -74,22 +73,6 @@ impl KotlinAdapter {
 impl LspAdapter for KotlinAdapter {
     fn name(&self) -> LanguageServerName {
         LanguageServerName::new_static(ADAPTER_NAME)
-    }
-
-    /// The adapter also serves Java on the IntelliJ server (decision D12).
-    fn language_ids(&self) -> collections::HashMap<language::LanguageName, String> {
-        [
-            (
-                language::LanguageName::new_static("Kotlin"),
-                "kotlin".into(),
-            ),
-            (
-                language::LanguageName::new_static(JAVA_LANGUAGE),
-                JAVA_LANGUAGE_ID.into(),
-            ),
-        ]
-        .into_iter()
-        .collect()
     }
 }
 

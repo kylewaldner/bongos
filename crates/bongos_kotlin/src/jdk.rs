@@ -4,10 +4,10 @@
 //! Detection takes every input explicitly (setting, project root, `JAVA_HOME`, candidate locations),
 //! so tests run on a temp tree and never see the real machine. Order: the `kotlin.jdk_home` setting;
 //! a JDK that matches the project's Gradle toolchain; `JAVA_HOME`; then the highest version found
-//! under the candidate locations. A Gradle toolchain no detected JDK satisfies is a failure (a Maven
-//! level never is); with no toolchain and no JDK the server's bundled runtime does the import. A project without a Gradle
-//! toolchain can declare its Java version in the root `pom.xml` instead. [`server_jdk`] separately
-//! picks the JDK that runs the Java language server.
+//! under the candidate locations. A Gradle toolchain no detected JDK satisfies is a failure (a
+//! Maven level never is); with no toolchain and no JDK the server's bundled runtime does the
+//! import. A project without a Gradle toolchain can declare its Java version in the root
+//! `pom.xml` instead. [`server_jdk`] separately picks the JDK that runs the Java language server.
 
 use std::{
     ffi::OsString,
@@ -25,6 +25,9 @@ use crate::{
     manifest::{Manifest, current_platform},
     resolve::resolve,
 };
+
+/// The name of the Kotlin import JDK setting.
+pub const KOTLIN_JDK_HOME: &str = "kotlin.jdk_home";
 
 /// The label of the status menu entry that opens the settings file when no JDK fits.
 pub const SET_JDK_HOME_LABEL: &str = "Set kotlin.jdk_home";
@@ -68,8 +71,10 @@ pub fn set_jdk_home_entry() -> MenuEntry {
 /// in tests.
 #[derive(Clone, Debug)]
 pub struct JdkInputs {
-    /// The `kotlin.jdk_home` setting. A relative path resolves against `root`.
+    /// The import JDK setting. A relative path resolves against `root`.
     pub setting: Option<PathBuf>,
+    /// The name of that setting, `kotlin.jdk_home` or `java.jdk_home`, for reasons and notes.
+    pub setting_name: &'static str,
     /// The worktree's `.bongos/settings.json`, read only to say where the setting came from.
     pub project_settings: Option<PathBuf>,
     /// The worktree root.
@@ -85,6 +90,7 @@ impl JdkInputs {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         Self {
             setting,
+            setting_name: KOTLIN_JDK_HOME,
             project_settings: Some(root.join(".bongos").join("settings.json")),
             root: root.to_path_buf(),
             java_home: std::env::var_os("JAVA_HOME"),
@@ -190,12 +196,16 @@ pub fn detect(inputs: &JdkInputs) -> Detection {
         if path.is_dir() {
             let origin = settings_origin(inputs, "jdk_home");
             return done(
-                JdkChoice::Found(describe(path, format!("kotlin.jdk_home in {origin}"))),
+                JdkChoice::Found(describe(
+                    path,
+                    format!("{} in {origin}", inputs.setting_name),
+                )),
                 notes,
             );
         }
         notes.push(format!(
-            "kotlin.jdk_home {} is not a directory, so it is ignored",
+            "{} {} is not a directory, so it is ignored",
+            inputs.setting_name,
             path.display()
         ));
     }
@@ -718,10 +728,18 @@ pub fn server_jdk(inputs: &JdkInputs, setting: Option<&Path>, min_major: u32) ->
 
 /// The text of the Java JDK report for one worktree: the import JDK, then the server JDK.
 pub fn java_report(inputs: &JdkInputs, server_setting: Option<&Path>, min_major: u32) -> String {
+    format!(
+        "{}\n{}",
+        inputs.root.display(),
+        java_sections(inputs, server_setting, min_major)
+    )
+}
+
+/// [`java_report`] without the worktree line: the import JDK, the server JDK and the notes.
+pub fn java_sections(inputs: &JdkInputs, server_setting: Option<&Path>, min_major: u32) -> String {
     let detection = detect(inputs);
     let server = server_jdk(inputs, server_setting, min_major);
-    let mut text = format!("{}\n", inputs.root.display());
-    text.push_str(&import_section(&detection));
+    let mut text = import_section(&detection);
     text.push_str(&server_section(&server));
     for note in detection.notes.iter().chain(&server.notes) {
         text.push_str(&format!("Note: {note}\n"));
@@ -927,6 +945,7 @@ mod tests {
             let project = self.project();
             JdkInputs {
                 setting: None,
+                setting_name: KOTLIN_JDK_HOME,
                 project_settings: Some(project.join(".bongos/settings.json")),
                 root: project,
                 java_home: None,
@@ -981,6 +1000,25 @@ mod tests {
         assert_eq!(jdk.reason, "kotlin.jdk_home in settings");
         // The toolchain is still reported, even though the setting decided.
         assert_eq!(detection.toolchain.unwrap().version, 21);
+    }
+
+    #[test]
+    fn test_reason_and_note_name_the_setting_that_supplied_the_jdk() {
+        let tree = Tree::new();
+        let mut inputs = tree.inputs();
+        inputs.setting_name = "java.jdk_home";
+        let chosen = jdk(tree.path(), "chosen", "17.0.9");
+        inputs.setting = Some(chosen.clone());
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).reason, "java.jdk_home in settings");
+
+        inputs.setting = Some(tree.path().join("missing"));
+        let detection = detect(&inputs);
+        assert!(
+            detection.notes[0].starts_with("java.jdk_home "),
+            "{:?}",
+            detection.notes
+        );
     }
 
     #[test]

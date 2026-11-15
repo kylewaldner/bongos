@@ -150,6 +150,21 @@ async fn kotlin_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn java_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let show_jdk = cx
+            .build_action("java::ShowJdk", None)
+            .expect("java::ShowJdk is registered");
+        assert!(show_jdk.partial_eq(&bongos_java::ShowJdk));
+        assert_eq!(
+            command_palette::humanize_action_name("java::ShowJdk"),
+            "java: show jdk"
+        );
+    });
+}
+
+#[gpui::test]
 async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     cx.update(|cx| {

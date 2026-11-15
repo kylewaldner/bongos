@@ -42,9 +42,10 @@ pub use java::{
     MIXED_JVM_NOTICE, MIXED_JVM_NOTICE_KEY,
 };
 pub use jdk::{
-    Detection, Jdk, JdkChoice, JdkInputs, JdkQuery, MenuEntry, POM_SOURCE, SET_JDK_HOME_LABEL,
-    ServerJdk, ServerJdkChoice, Toolchain, default_candidate_patterns, detect, find_declared_java,
-    find_maven_java, find_toolchain, java_report, server_jdk, server_section, set_jdk_home_entry,
+    Detection, Jdk, JdkChoice, JdkInputs, JdkQuery, KOTLIN_JDK_HOME, MenuEntry, POM_SOURCE,
+    SET_JDK_HOME_LABEL, ServerJdk, ServerJdkChoice, Toolchain, default_candidate_patterns, detect,
+    find_declared_java, find_maven_java, find_toolchain, java_report, java_sections, server_jdk,
+    server_section, set_jdk_home_entry,
 };
 use language::{LanguageName, LanguageRegistry};
 pub use license::{
