@@ -770,7 +770,10 @@ impl ProjectRepo {
                     Ok(secrets) => secrets.clean(&error),
                     Err(_) => error,
                 };
-                log::warn!("pushing master to {}: {error}", crate::backup::shown_remote(&remote));
+                log::warn!(
+                    "pushing master to {}: {error}",
+                    crate::backup::shown_remote(&remote)
+                );
                 writer.transact(|tx| tx.set_meta(PUSH_FAILURE_KEY, &error))
             }
         };

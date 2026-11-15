@@ -6,13 +6,13 @@
 use std::path::{Component, Path};
 use std::sync::{Arc, RwLock};
 
-use bongos_project_repo::{LandingChecks, WorkflowResolver};
 use bongos_project_repo::{CheckInput, CheckKinds, CheckOutcome, CheckPhase, LandingCheck};
+use bongos_project_repo::{LandingChecks, WorkflowResolver};
 use bongos_project_repo_model::ChangeSummary;
 use bongos_project_repo_model::layout::{DEFINITIONS_DIR, WORKFLOWS_DIR};
 use bongos_workflow_model::layers::DEFINITION_FILE;
-use bongos_workflow_model::{Layer, LayerDirs, Resolved, Severity, parse};
 use bongos_workflow_model::layers::resolve;
+use bongos_workflow_model::{Layer, LayerDirs, Resolved, Severity, parse};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use gpui::App;

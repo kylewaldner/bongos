@@ -392,7 +392,8 @@ pub fn edit(tree: &WorkTree, ctx: &Context, id: &str, edit: TaskEdit) -> Outcome
         if let Some(label) = &edit.work_kind {
             let label = clean_work_kind(label.clone());
             if label != file.work_kind {
-                let name = |label: &Option<String>| label.clone().unwrap_or_else(|| "none".to_string());
+                let name =
+                    |label: &Option<String>| label.clone().unwrap_or_else(|| "none".to_string());
                 changed.push(format!(
                     "work kind: {} -> {}",
                     name(&file.work_kind),

@@ -65,7 +65,10 @@ pub(crate) fn note_master_warning(repo_id: &str, warning: Option<String>, cx: &m
     let warnings = &mut cx.default_global::<MasterWarnings>().0;
     let changed = match warning {
         Some(warning) => {
-            warnings.insert(repo_id.to_string(), warning.clone()).as_ref() != Some(&warning)
+            warnings
+                .insert(repo_id.to_string(), warning.clone())
+                .as_ref()
+                != Some(&warning)
         }
         None => warnings.remove(repo_id).is_some(),
     };
