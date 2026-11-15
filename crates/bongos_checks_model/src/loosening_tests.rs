@@ -2,7 +2,7 @@ use crate::decl::Inherit;
 use crate::effective::{
     Applicability, Declared, Dropped, EffectiveSet, LooseningKind as K, Row, Source, loosening,
 };
-use crate::evidence_tests::row;
+use crate::evidence_tests::{row, row_named};
 
 fn set(rows: Vec<Row>) -> EffectiveSet {
     EffectiveSet {
@@ -171,4 +171,61 @@ fn a_group_is_compared_on_its_closing_set() {
     let mut new = old.clone();
     new.closing.clear();
     assert_eq!(loosening(&old, &new)[0].kind, K::Removed);
+}
+
+fn accept_sets(old_b: &str, new_b: &str) -> Vec<K> {
+    let a = "or_accepted = \"flake\"\n";
+    loosening(
+        &set(vec![row(a), row_named("flake", old_b)]),
+        &set(vec![row(a), row_named("flake", new_b)]),
+    )
+    .into_iter()
+    .map(|l| l.kind)
+    .collect()
+}
+
+#[test]
+fn a_loosened_accepting_check_is_found() {
+    let found = accept_sets("required = false\n", "required = false\nrun = \"true\"\n");
+    assert!(matches!(
+        &found[..],
+        [K::AcceptorLoosened { by, kind }] if by == "flake" && matches!(**kind, K::ChangedRun { .. })
+    ));
+    let found = accept_sets("required = false\n", "required = false\npass = [0, 3]\n");
+    assert_eq!(found.len(), 1);
+    assert!(accept_sets("required = false\n", "required = false\n").is_empty());
+    let a = "or_accepted = \"flake\"\n";
+    let text = loosening(
+        &set(vec![row(a), row_named("flake", "")]),
+        &set(vec![row(a), row_named("flake", "pass = [0, 3]\n")]),
+    )[0]
+    .to_string();
+    assert_eq!(
+        text,
+        "check tests: accepting check flake: pass codes 0 -> 0, 3"
+    );
+}
+
+#[test]
+fn an_accepting_check_new_in_the_set_is_found() {
+    let a = "or_accepted = \"flake\"\n";
+    let found = loosening(
+        &set(vec![row(a)]),
+        &set(vec![row(a), row_named("flake", "required = false\n")]),
+    );
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].check, "tests");
+    assert_eq!(found[0].kind, K::AcceptorAdded { by: "flake".into() });
+}
+
+#[test]
+fn a_changed_summary_is_found() {
+    assert_eq!(
+        kinds("summary = \"ok\"\n", "summary = \".*\"\n"),
+        [K::ChangedSummary {
+            old: "ok".into(),
+            new: ".*".into()
+        }]
+    );
+    assert!(kinds("summary = \"ok\"\n", "summary = \"ok\"\n").is_empty());
 }

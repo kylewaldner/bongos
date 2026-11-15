@@ -29,6 +29,11 @@ pub enum LooseningKind {
         new: String,
     },
     RemovedSummary,
+    /// Another summary pattern; any change is reported, as a looser regex cannot be told apart.
+    ChangedSummary {
+        old: String,
+        new: String,
+    },
     RemovedResultFile,
     /// A scope script where there was none or another one (all, or unscoped, before).
     ScopeWidened {
@@ -37,6 +42,16 @@ pub enum LooseningKind {
     },
     /// An `or_accepted` the old check did not have.
     NewAccepted {
+        by: String,
+    },
+    /// The accepting check of an `or_accepted` row (named `by`) got looser, or is new in the set
+    /// where it was absent before, so the row is accepted more easily.
+    AcceptorLoosened {
+        by: String,
+        kind: Box<LooseningKind>,
+    },
+    /// The accepting check of an `or_accepted` row is in the new set and was not in the old one.
+    AcceptorAdded {
         by: String,
     },
 }
@@ -70,9 +85,23 @@ impl fmt::Display for Loosening {
             }
             LooseningKind::ChangedRun { old, new } => write!(f, "runs {old} -> {new}"),
             LooseningKind::RemovedSummary => f.write_str("summary removed"),
+            LooseningKind::ChangedSummary { old, new } => {
+                write!(f, "summary {old} -> {new}")
+            }
             LooseningKind::RemovedResultFile => f.write_str("result file no longer required"),
             LooseningKind::ScopeWidened { old, new } => write!(f, "scope {old} -> {new}"),
             LooseningKind::NewAccepted { by } => write!(f, "now also accepted by {by}"),
+            LooseningKind::AcceptorLoosened { by, kind } => {
+                let text = Loosening {
+                    check: by.clone(),
+                    kind: (**kind).clone(),
+                }
+                .to_string();
+                write!(f, "accepting {text}")
+            }
+            LooseningKind::AcceptorAdded { by } => {
+                write!(f, "accepting check {by} is newly in the set")
+            }
         }
     }
 }
@@ -123,6 +152,14 @@ fn kinds(old: &CheckDecl, new: &CheckDecl) -> Vec<LooseningKind> {
     if old.summary.is_some() && new.summary.is_none() {
         found.push(LooseningKind::RemovedSummary);
     }
+    if let (Some(before), Some(after)) = (&old.summary, &new.summary)
+        && before != after
+    {
+        found.push(LooseningKind::ChangedSummary {
+            old: before.clone(),
+            new: after.clone(),
+        });
+    }
     if old.writes_result_file() && !new.writes_result_file() {
         found.push(LooseningKind::RemovedResultFile);
     }
@@ -141,6 +178,34 @@ fn kinds(old: &CheckDecl, new: &CheckDecl) -> Vec<LooseningKind> {
         found.push(LooseningKind::NewAccepted { by: by.clone() });
     }
     found
+}
+
+/// Loosenings of the check that accepts `row` through `or_accepted`, when that check is in the
+/// new set. Becoming advisory is not one: an advisory check may still accept.
+fn acceptor_loosenings(old: &EffectiveSet, new: &EffectiveSet, row: &Row) -> Vec<LooseningKind> {
+    let Some(by) = row.decl.or_accepted.as_deref() else {
+        return Vec::new();
+    };
+    let find = |set: &EffectiveSet| set.judged().iter().find(|r| r.decl.name == by).cloned();
+    let Some(after) = find(new) else {
+        return Vec::new();
+    };
+    let Some(before) = find(old) else {
+        return vec![LooseningKind::AcceptorAdded { by: by.to_string() }];
+    };
+    kinds(&before.decl, &after.decl)
+        .into_iter()
+        .filter(|kind| {
+            !matches!(
+                kind,
+                LooseningKind::MadeAdvisory | LooseningKind::NewAccepted { .. }
+            )
+        })
+        .map(|kind| LooseningKind::AcceptorLoosened {
+            by: by.to_string(),
+            kind: Box::new(kind),
+        })
+        .collect()
 }
 
 /// What `new` loosens of the required checks `old` judges on the task (the ones in master, for
@@ -162,6 +227,10 @@ pub fn loosening(old: &EffectiveSet, new: &EffectiveSet) -> Vec<Loosening> {
             }
             None => vec![LooseningKind::Removed],
         };
+        let mut kinds = kinds;
+        if new_rows.iter().any(|other| &other.decl.name == name) {
+            kinds.extend(acceptor_loosenings(old, new, row));
+        }
         found.extend(kinds.into_iter().map(|kind| Loosening {
             check: name.clone(),
             kind,

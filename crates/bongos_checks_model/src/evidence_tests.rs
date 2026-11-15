@@ -4,7 +4,8 @@ use crate::decl::CheckDecl;
 use crate::effective::{Declared, Row, Source};
 use crate::evidence::{
     CheckState, Current, EvidenceRecord, Freshness, Output, Params, PartRecord, RowStatus, Scope,
-    Stale, StartedBy, TreeKind, Variant, freshness, or_accepted, row_status, satisfied,
+    Stale, StartedBy, TreeKind, Variant, freshness, or_accepted, records_of_task, row_status,
+    satisfied,
 };
 use crate::verdict::{NoVerdictReason, Verdict};
 
@@ -450,4 +451,85 @@ fn satisfaction_lists_each_kind_by_name() {
     assert_eq!(sat.stale, ["d"]);
     assert_eq!(sat.missing, ["e"]);
     assert_eq!(sat.unsatisfied_count(), 4);
+}
+
+#[test]
+fn the_newest_fresh_record_decides_pass_then_fail_and_fail_then_pass() {
+    let row = row("");
+    let pass = record("tests", "1", Scope::Unscoped);
+    let mut fail = record("tests", "2", Scope::Unscoped);
+    fail.verdict = Verdict::Fail;
+    let mut none = record("tests", "3", Scope::Unscoped);
+    none.verdict = Verdict::NoVerdict(NoVerdictReason::Environment { code: 1 });
+    assert_eq!(
+        status(&row, &[pass.clone(), fail.clone()]),
+        RowStatus::Failing
+    );
+    assert_eq!(
+        status(&row, &[pass.clone(), none.clone()]),
+        RowStatus::NoVerdict
+    );
+    let mut pass_again = pass;
+    pass_again.id = "4".into();
+    assert!(matches!(
+        status(&row, &[fail, none, pass_again]),
+        RowStatus::Satisfied { record_id, .. } if record_id == "4"
+    ));
+    // A newer narrow pass is no verdict against an older whole pass.
+    let scoped = row_named("tests", "scope = \"all\"\n");
+    let whole = record("tests", "5", Scope::All);
+    let narrow = record(
+        "tests",
+        "6",
+        Scope::Items {
+            digest: "x".into(),
+            count: 1,
+        },
+    );
+    assert!(matches!(
+        status(&scoped, &[whole, narrow]),
+        RowStatus::Satisfied { record_id, .. } if record_id == "5"
+    ));
+}
+
+#[test]
+fn a_later_failure_of_b_stops_it_accepting() {
+    let rows = accepted_rows();
+    let cur = current(&["tests", "flake"]);
+    let mut fail = record("flake", "3", Scope::Unscoped);
+    fail.verdict = Verdict::Fail;
+    let records = [record("flake", "2", Scope::Unscoped), fail];
+    assert_eq!(or_accepted(&rows[0], &records, &cur, &rows), None);
+}
+
+#[test]
+fn accepting_uses_the_tree_of_the_row_even_when_b_has_another_current_key() {
+    let rows = accepted_rows();
+    // A's current tree is tree1; B's current state is tree2, so B's tree1 pass is stale and
+    // B's tree2 pass is on another tree than A's: neither accepts.
+    let cur = Current {
+        checks: BTreeMap::from([
+            ("tests".to_string(), state("tree1")),
+            ("flake".to_string(), state("tree2")),
+        ]),
+    };
+    let on_tree1 = record("flake", "1", Scope::Unscoped);
+    let mut on_tree2 = record("flake", "2", Scope::Unscoped);
+    on_tree2.tree_key = "tree2".into();
+    assert_eq!(
+        or_accepted(&rows[0], &[on_tree1, on_tree2], &cur, &rows),
+        None
+    );
+}
+
+#[test]
+fn records_of_other_tasks_and_landings_do_not_count() {
+    let mine = record("tests", "1", Scope::Unscoped);
+    let mut other = record("tests", "2", Scope::Unscoped);
+    other.task_id = "t2".into();
+    let mut landing = record("tests", "3", Scope::Unscoped);
+    landing.started_by = StartedBy::Landing { tree: "x".into() };
+    let kept = records_of_task(&[mine, other, landing], "t1");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].id, "1");
 }

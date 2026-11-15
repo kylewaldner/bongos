@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::decl::Inherit;
 use crate::effective::{Applicability, Dropped, EffectiveSet, Row, Source};
-use crate::evidence::{Satisfaction, Scope, satisfied};
+use crate::evidence::Scope;
 use crate::evidence_tests::{current, record, row, row_named};
 use crate::section::{Live, Tone, TreeState, section};
 use crate::verdict::{NoVerdictReason, Verdict};
@@ -27,8 +27,7 @@ fn header(
     recs: &[crate::evidence::EvidenceRecord],
 ) -> String {
     let cur = current(&["tests", "lint", "a", "b"]);
-    let sat = satisfied(set.judged(), recs, &cur);
-    section(set, recs, &cur, &tree, &sat, live).header
+    section(set, recs, &cur, &tree, live).header
 }
 
 #[test]
@@ -79,8 +78,7 @@ fn text_of(
 ) -> Vec<(String, Tone, Vec<String>)> {
     let s = set(rows);
     let cur = current(&["tests", "lint"]);
-    let sat = Satisfaction::default();
-    section(&s, recs, &cur, &TreeState::Available, &sat, live)
+    section(&s, recs, &cur, &TreeState::Available, live)
         .rows
         .into_iter()
         .map(|r| (r.text, r.tone, r.detail))
@@ -210,14 +208,7 @@ fn live_state_and_dropped_rows() {
         row: row_named("lint", ""),
     });
     let cur = current(&["tests"]);
-    let sec = section(
-        &s,
-        &[],
-        &cur,
-        &TreeState::Available,
-        &Satisfaction::default(),
-        &BTreeMap::new(),
-    );
+    let sec = section(&s, &[], &cur, &TreeState::Available, &BTreeMap::new());
     assert_eq!(sec.rows.len(), 2);
     assert!(sec.rows[1].text.contains("dropped here"));
     assert_eq!(sec.title, "Checks");

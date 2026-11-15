@@ -198,7 +198,7 @@ pub fn freshness(record: &EvidenceRecord, state: Option<&CheckState>) -> Freshne
     }
 }
 
-/// Whether a record's variant is wide enough for the declared scope (PRD 8): `scope = "all"`
+/// Whether a record's variant is wide enough for the declared scope: `scope = "all"`
 /// needs `All`; a scope script takes `All`, `Items` or `None`; an unscoped check takes
 /// `Unscoped`. An invalid declaration is satisfied by nothing.
 fn scope_wide_enough(decl: &CheckDecl, scope: &Scope) -> bool {
@@ -239,7 +239,10 @@ fn whole_pass(decl: &CheckDecl, record: &EvidenceRecord) -> bool {
             .all(|part| part.verdict == Verdict::Pass && part.ended.is_some())
 }
 
-/// A fresh pass of `decl`'s check that satisfies it, on `required_tree` when given.
+/// The fresh pass of `decl`'s check that satisfies it, on `required_tree` when given. The
+/// newest fresh finished whole-check record decides, so a later fail or no verdict on the same
+/// tree means no pass (fail closed). A newer narrow or parameterized pass is no verdict either
+/// way and is skipped.
 fn passing<'a>(
     decl: &CheckDecl,
     records: &'a [EvidenceRecord],
@@ -247,12 +250,29 @@ fn passing<'a>(
     required_tree: Option<&str>,
 ) -> Option<&'a EvidenceRecord> {
     let state = current.checks.get(&decl.name);
-    records.iter().rev().find(|record| {
-        record.check == decl.name
-            && freshness(record, state) == Freshness::Fresh
-            && required_tree.is_none_or(|tree| record.tree_key == tree)
-            && whole_pass(decl, record)
-    })
+    records
+        .iter()
+        .rev()
+        .find(|record| {
+            record.check == decl.name
+                && record.is_finished()
+                && record.variant.params.is_none()
+                && freshness(record, state) == Freshness::Fresh
+                && required_tree.is_none_or(|tree| record.tree_key == tree)
+                && (record.verdict != Verdict::Pass || whole_pass(decl, record))
+        })
+        .filter(|record| record.verdict == Verdict::Pass)
+}
+
+/// The records of one task that count for its checks: its own, not those a landing started.
+pub fn records_of_task(records: &[EvidenceRecord], task_id: &str) -> Vec<EvidenceRecord> {
+    records
+        .iter()
+        .filter(|record| {
+            record.task_id == task_id && !matches!(record.started_by, StartedBy::Landing { .. })
+        })
+        .cloned()
+        .collect()
 }
 
 /// What accepted a row without its own pass.
@@ -263,8 +283,8 @@ pub struct Accepted {
     pub record_id: String,
 }
 
-/// `or_accepted = "B"`: a fresh pass of B on the same tree as the row's own current tree (PRD
-/// 28), under B's own scope and parts rules. B must be a check of `set`; its pass on another
+/// `or_accepted = "B"`: a fresh pass of B on the same tree as the row's own current tree,
+/// under B's own scope and parts rules. B must be a check of `set`; its pass on another
 /// tree, a stale or parameterized one, or a pass of a check not in the set accepts nothing.
 pub fn or_accepted(
     row: &Row,

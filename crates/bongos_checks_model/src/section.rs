@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 
 use crate::effective::{Applicability, EffectiveSet, Row, Source};
 use crate::evidence::{
-    Current, EvidenceRecord, RowStatus, Satisfaction, Scope, freshness, row_status,
+    Current, EvidenceRecord, RowStatus, Satisfaction, Scope, freshness, records_of_task,
+    row_status, satisfied,
 };
 use crate::verdict::Verdict;
 
@@ -281,17 +282,18 @@ fn row_line(
 }
 
 /// The Checks section of a task: `set` its effective set, `records` its evidence, `current`
-/// the state of each check on the tree now, `sat` from [`crate::evidence::satisfied`] over the
-/// rows judged on the task, `live` what is running or waiting by check name. A dropped row is
+/// the state of each check on the tree now, `live` what is running or waiting by check name. A dropped row is
 /// shown as dropped here.
 pub fn section(
     set: &EffectiveSet,
     records: &[EvidenceRecord],
     current: &Current,
     tree: &TreeState,
-    sat: &Satisfaction,
     live: &BTreeMap<String, Live>,
 ) -> TaskSection {
+    let records = records_of_task(records, &set.task_id);
+    let records = records.as_slice();
+    let sat = satisfied(set.judged(), records, current);
     let judged = set.judged();
     let mut rows: Vec<SectionRow> = judged
         .iter()
@@ -309,7 +311,7 @@ pub fn section(
     }
     TaskSection {
         title: "Checks".to_string(),
-        header: header(set, tree, sat, live),
+        header: header(set, tree, &sat, live),
         rows,
     }
 }
