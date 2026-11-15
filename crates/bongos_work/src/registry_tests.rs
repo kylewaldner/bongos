@@ -369,7 +369,18 @@ fn pending_marks_draw_as_landing_and_not_landed_chips() {
         task.pending = Some(PendingMark {
             change_id: "c1".to_string(),
             label: label.to_string(),
+            reason: None,
         });
         assert_eq!(crate::registry::pending_chip(&task).as_deref(), Some(label));
     }
+    // A change that did not land carries why on its chip.
+    task.pending = Some(PendingMark {
+        change_id: "c1".to_string(),
+        label: "not landed".to_string(),
+        reason: Some("check tests failed: 2 tests broke".to_string()),
+    });
+    assert_eq!(
+        crate::registry::pending_chip(&task).as_deref(),
+        Some("not landed: check tests failed: 2 tests broke")
+    );
 }

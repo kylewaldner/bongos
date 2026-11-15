@@ -7,7 +7,8 @@
 //! files", whose `d` shows the amend commit's diff instead of the change's.
 
 use bongos_project_repo::{
-    AmendedBy, ChangeListing, ChangeState, ListedChange, MasterStatus, NOT_LANDED_MARK,
+    AmendedBy, ChangeListing, ChangeState, CheckOutcome, CheckResult, LandingEvent, ListedChange,
+    MasterStatus,
 };
 use chrono::{DateTime, Utc};
 
@@ -125,13 +126,52 @@ fn change_text(listed: &ListedChange, now: DateTime<Utc>, stale_after_days: u32)
         text.push_str(": ");
         text.push_str(&listed.summary);
     }
-    if row.state == ChangeState::Requested && listed.not_landed.is_none() {
-        text.push_str(" [landing]");
+    if let Some(state) = state_text(listed) {
+        text.push_str(&format!(" [{state}]"));
     }
-    if listed.not_landed.is_some() {
-        text.push_str(&format!(" [{NOT_LANDED_MARK}]"));
+    if !listed.checks.is_empty() {
+        let checks: Vec<String> = listed.checks.iter().map(check_text).collect();
+        text.push_str(&format!(" (checks: {})", checks.join("; ")));
+    }
+    if let Some(note) = &listed.move_note {
+        text.push_str(&format!(" [{note}]"));
     }
     text
+}
+
+/// The state of a waiting change: its last landing event in this process (in queue, checking,
+/// waiting for approval, conflict, failed, no verdict), else its "not landed" mark, else
+/// "landing" while it is requested.
+fn state_text(listed: &ListedChange) -> Option<String> {
+    let row = &listed.row;
+    if !matches!(row.state, ChangeState::Open | ChangeState::Requested) {
+        return None;
+    }
+    let from_event = listed.landing.as_ref().and_then(|event| match event {
+        LandingEvent::Queued { position } => Some(format!("in queue at position {position}")),
+        LandingEvent::Checking => Some("checking".to_string()),
+        LandingEvent::Waiting { reason, .. } => Some(reason.clone()),
+        LandingEvent::Refused { reasons } => Some(format!("failed: {}", reasons.join("; "))),
+        LandingEvent::Conflict { files } => Some(format!("conflict in {}", files.join(", "))),
+        LandingEvent::Ended { reason } if reason.starts_with("the landing failed") => {
+            Some(reason.clone())
+        }
+        LandingEvent::Ended { reason } => Some(format!("no verdict: {reason}")),
+        LandingEvent::Landed { .. } => None,
+    });
+    from_event
+        .or_else(|| listed.not_landed.clone())
+        .or_else(|| (row.state == ChangeState::Requested).then(|| "landing".to_string()))
+}
+
+fn check_text(result: &CheckResult) -> String {
+    match &result.outcome {
+        CheckOutcome::Pass => format!("{} passed", result.check),
+        CheckOutcome::Fail { message, .. } => format!("{} failed: {message}", result.check),
+        CheckOutcome::NoVerdict { reason, .. } => {
+            format!("{} no verdict: {reason}", result.check)
+        }
+    }
 }
 
 impl LandingView {

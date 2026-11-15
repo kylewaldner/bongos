@@ -182,11 +182,13 @@ impl RowChipsRegistry {
 pub(crate) const PENDING_SOURCE: &str = "pending";
 
 /// The chip of a task whose change waits to land or did not: its mark's label, `landing` or
-/// `not landed`. Drawn in the row like every chip, so in the theme's colors.
+/// `not landed`, the latter with why ("not landed: check tests failed: ..."). Drawn in the row
+/// like every chip, so in the theme's colors.
 pub(crate) fn pending_chip(task: &bongos_work_model::store::Task) -> Option<SharedString> {
-    task.pending
-        .as_ref()
-        .map(|mark| SharedString::from(mark.label.clone()))
+    task.pending.as_ref().map(|mark| match &mark.reason {
+        Some(reason) => SharedString::from(format!("{}: {reason}", mark.label)),
+        None => SharedString::from(mark.label.clone()),
+    })
 }
 
 /// Shows the pending marks the snapshot carries (`Task::pending`) as row chips.

@@ -61,6 +61,8 @@ pub const NEEDS_CONVERSION: &str = "old format, needs conversion: run project: c
 pub struct PendingMark {
     pub change_id: String,
     pub label: String,
+    /// Why the change did not land (the failing check's message, the conflicting files).
+    pub reason: Option<String>,
 }
 
 /// A write refused because the task has an error badge, or because it is in the old format and

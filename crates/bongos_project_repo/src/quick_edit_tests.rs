@@ -357,8 +357,38 @@ fn a_refused_quick_edit_drops_its_staged_state_and_is_checked_out() {
         .unwrap()
         .pending
         .clone();
-    assert_eq!(pending.unwrap().label, NOT_LANDED_MARK);
+    let pending = pending.unwrap();
+    assert_eq!(pending.label, NOT_LANDED_MARK);
+    // The mark keeps why: the failing check's message.
+    let reason = pending.reason.unwrap();
+    assert!(reason.contains("not like this"), "{reason}");
     assert_eq!(goal(&loaded, "l1"), "Backfill");
+
+    // The landing view lists the change with its last landing event, the reason it did not
+    // land and the result of the check that refused it.
+    let listing = block_on(repo.change_listing()).unwrap();
+    let listed = listing
+        .changes
+        .iter()
+        .find(|listed| listed.row.change_id == started.change_id)
+        .unwrap();
+    assert!(
+        matches!(&listed.landing, Some(LandingEvent::Refused { .. })),
+        "{:?}",
+        listed.landing
+    );
+    let not_landed = listed.not_landed.clone().unwrap();
+    assert!(
+        not_landed.starts_with(NOT_LANDED_MARK) && not_landed.contains("not like this"),
+        "{not_landed}"
+    );
+    assert!(
+        listed.checks.iter().any(|result| result.check == "refuser"
+            && matches!(&result.outcome, CheckOutcome::Fail { message, .. }
+                if message == "not like this")),
+        "{:?}",
+        listed.checks
+    );
 }
 
 #[test]

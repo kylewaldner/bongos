@@ -386,6 +386,11 @@ impl ProjectRepo {
         receiver
     }
 
+    /// The last landing event of `change_id` in this process, if one was announced.
+    pub fn landing_status(&self, change_id: &str) -> Option<LandingEvent> {
+        self.engine.last_events.lock().get(change_id).cloned()
+    }
+
     /// The repository's events from now on.
     pub fn repo_events(&self) -> mpsc::UnboundedReceiver<RepoEvent> {
         let (sender, receiver) = mpsc::unbounded();

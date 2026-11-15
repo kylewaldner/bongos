@@ -74,6 +74,9 @@ struct QuickEditRecord {
     subject: String,
     tasks: Vec<TaskId>,
     label: String,
+    /// Why it did not land (the failing check's message, the conflicting files), once it did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 /// The tasks a change writes (a task file of each), for the pending marks.
@@ -156,6 +159,7 @@ pub(crate) fn mark_pending(tree: &mut WorkTree, read: &StateRead) -> Result<()> 
                 PendingMark {
                     change_id: row.change_id.clone(),
                     label: record.label.clone(),
+                    reason: record.reason.clone(),
                 },
             ));
         }
@@ -300,6 +304,7 @@ impl ProjectRepo {
             subject: edit.meta.subject.clone(),
             tasks: edit.tasks.clone(),
             label: LANDING_MARK.to_string(),
+            reason: None,
         };
         let record = toml::Value::try_from(&record).context("serializing a quick edit")?;
         // Everything that can fail runs before the one transaction that writes the row, the
@@ -494,7 +499,7 @@ impl ProjectRepo {
         };
         let result = self.land_now(change_id, request, now).await?;
         let not_landed = match &result {
-            LandingResult::Refused { .. } => {
+            LandingResult::Refused { reasons } => {
                 let writer = self.writer_or_error()?;
                 writer.transact(|tx| {
                     if tx.staged(change_id)?.is_some() {
@@ -502,14 +507,16 @@ impl ProjectRepo {
                     }
                     Ok(())
                 })?;
-                true
+                Some(reasons.join("; "))
             }
-            LandingResult::Conflict { .. } => true,
-            LandingResult::NoVerdict { reason } => reason != ALREADY_LANDING,
-            _ => false,
+            LandingResult::Conflict { files } => Some(format!("conflict in {}", files.join(", "))),
+            LandingResult::NoVerdict { reason } if reason != ALREADY_LANDING => {
+                Some(format!("no verdict: {reason}"))
+            }
+            _ => None,
         };
-        if not_landed {
-            self.relabel_quick_edit(change_id, NOT_LANDED_MARK)?;
+        if let Some(reason) = not_landed {
+            self.relabel_quick_edit(change_id, NOT_LANDED_MARK, Some(reason))?;
             self.check_out_change(change_id).await?;
         }
         Ok(result)
@@ -522,18 +529,24 @@ impl ProjectRepo {
             .transpose()
     }
 
-    /// The subject and the mark (`landing` or `not landed`) of the quick edit `change_id`, when
-    /// it is one.
-    pub(crate) fn quick_edit_label(&self, change_id: &str) -> Option<(String, String)> {
+    /// The mark (`landing` or `not landed`) of the quick edit `change_id`, when it is one, and
+    /// why it did not land.
+    pub(crate) fn quick_edit_label(&self, change_id: &str) -> Option<(String, Option<String>)> {
         let record = self.quick_edit_record(change_id).ok().flatten()?;
-        Some((record.subject, record.label))
+        Some((record.label, record.reason))
     }
 
-    fn relabel_quick_edit(&self, change_id: &str, label: &str) -> Result<()> {
+    fn relabel_quick_edit(
+        &self,
+        change_id: &str,
+        label: &str,
+        reason: Option<String>,
+    ) -> Result<()> {
         let Some(mut record) = self.quick_edit_record(change_id)? else {
             return Ok(());
         };
         record.label = label.to_string();
+        record.reason = reason;
         let value = toml::Value::try_from(&record).context("serializing a quick edit")?;
         self.writer_or_error()?
             .transact(|tx| tx.kv(QUICK_EDITS_NAMESPACE).put(change_id, value.clone()))

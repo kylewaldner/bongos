@@ -3,8 +3,8 @@
 //! `TempDir`; the key rules are checked on rows built by hand.
 
 use bongos_project_repo::{
-    AmendCommit, AmendedBy, ChangeListing, ChangeRow, ChangeState, Identity, LandMode, LandRequest,
-    ListedChange, OutsideChange, SplitMaster,
+    AmendCommit, AmendedBy, ChangeListing, ChangeRow, ChangeState, CheckOutcome, CheckResult,
+    Identity, LandMode, LandRequest, LandingEvent, ListedChange, OutsideChange, SplitMaster,
 };
 use bongos_project_repo_model::ChangeMeta;
 use bongos_work_model::Author;
@@ -38,6 +38,8 @@ fn listed(row: ChangeRow, summary: &str) -> ListedChange {
         row,
         summary: summary.to_string(),
         not_landed: None,
+        landing: None,
+        checks: Vec::new(),
         amended: None,
         move_note: None,
     }
@@ -88,6 +90,84 @@ fn the_view_has_a_section_for_each_kind_of_change_and_leaves_empty_ones_out() {
         LandingView::build(&listing(Vec::new()), start(), 14)
             .sections
             .is_empty()
+    );
+}
+
+#[test]
+fn a_waiting_row_shows_its_state_its_checks_and_its_move_note() {
+    let with = |state: ChangeState, landing: Option<LandingEvent>| {
+        let mut change = listed(row("c1", "fresh", state, 1), "adds 1 task");
+        change.landing = landing;
+        LandingView::build(&listing(vec![change]), start(), 14).lines()[1].clone()
+    };
+    let base = "  fresh (chat 1, idle 1d): adds 1 task";
+    assert_eq!(with(ChangeState::Open, None), base);
+    assert_eq!(
+        with(ChangeState::Requested, None),
+        format!("{base} [landing]")
+    );
+    for (event, state) in [
+        (LandingEvent::Checking, "checking"),
+        (
+            LandingEvent::Queued { position: 2 },
+            "in queue at position 2",
+        ),
+        (
+            LandingEvent::Waiting {
+                reason: "waiting for approval".to_string(),
+                approvals: 0,
+            },
+            "waiting for approval",
+        ),
+        (
+            LandingEvent::Conflict {
+                files: vec!["a.toml".to_string(), "b.toml".to_string()],
+            },
+            "conflict in a.toml, b.toml",
+        ),
+        (
+            LandingEvent::Refused {
+                reasons: vec!["check tests failed: 2 broke".to_string()],
+            },
+            "failed: check tests failed: 2 broke",
+        ),
+        (
+            LandingEvent::Ended {
+                reason: "the schema check timed out".to_string(),
+            },
+            "no verdict: the schema check timed out",
+        ),
+    ] {
+        assert_eq!(
+            with(ChangeState::Requested, Some(event)),
+            format!("{base} [{state}]")
+        );
+    }
+
+    // With no event in this process, the kept mark says why it did not land.
+    let mut change = listed(row("c1", "fresh", ChangeState::Open, 1), "adds 1 task");
+    change.not_landed = Some("not landed: check tests failed: 2 broke".to_string());
+    change.checks = vec![
+        CheckResult {
+            check: "schema".to_string(),
+            tree: "t".to_string(),
+            stamp: "s".to_string(),
+            outcome: CheckOutcome::Pass,
+        },
+        CheckResult {
+            check: "tests".to_string(),
+            tree: "t".to_string(),
+            stamp: "s".to_string(),
+            outcome: CheckOutcome::fail("2 broke"),
+        },
+    ];
+    change.move_note = Some("move m1 needs you".to_string());
+    assert_eq!(
+        LandingView::build(&listing(vec![change]), start(), 14).lines()[1],
+        format!(
+            "{base} [not landed: check tests failed: 2 broke] \
+             (checks: schema passed; tests failed: 2 broke) [move m1 needs you]"
+        )
     );
 }
 

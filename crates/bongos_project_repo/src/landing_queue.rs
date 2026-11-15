@@ -140,6 +140,9 @@ pub(crate) struct Engine {
     /// The checks added to this project only.
     pub(crate) local: Mutex<crate::landing_checks::CheckRegistry>,
     pub(crate) options: Mutex<crate::LandOptions>,
+    /// The last landing event of each change in this process, which the landing view shows as
+    /// the change's state (in queue, checking, waiting, failed).
+    pub(crate) last_events: Mutex<std::collections::HashMap<String, crate::LandingEvent>>,
     /// The changes a `land` or `check` of this process is working on.
     pub(crate) landing: Mutex<std::collections::HashMap<String, crate::landing::LandMode>>,
     /// The timer of the deadlines; the real one unless a test set its own.
@@ -152,6 +155,9 @@ pub(crate) struct Engine {
 
 impl Engine {
     pub(crate) fn emit(&self, change_id: &str, event: crate::LandingEvent) {
+        self.last_events
+            .lock()
+            .insert(change_id.to_string(), event.clone());
         self.landing_events.lock().retain(|subscriber| {
             subscriber
                 .unbounded_send((change_id.to_string(), event.clone()))
