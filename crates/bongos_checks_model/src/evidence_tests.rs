@@ -88,6 +88,7 @@ fn status(row: &Row, records: &[EvidenceRecord]) -> RowStatus {
         records,
         &current(&["tests", "flake"]),
         std::slice::from_ref(row),
+        "t1",
     )
 }
 
@@ -132,6 +133,7 @@ fn a_fresh_pass_satisfies_and_a_stale_one_does_not() {
         std::slice::from_ref(&row),
         std::slice::from_ref(&rec),
         &moved,
+        "t1",
     );
     assert_eq!(sat.stale, ["tests"]);
     assert!(!sat.is_satisfied());
@@ -141,7 +143,7 @@ fn a_fresh_pass_satisfies_and_a_stale_one_does_not() {
         checks: BTreeMap::from([("tests".to_string(), changed)]),
     };
     assert_eq!(
-        row_status(&row, &[rec], &moved, std::slice::from_ref(&row)),
+        row_status(&row, &[rec], &moved, std::slice::from_ref(&row), "t1"),
         RowStatus::Stale(Stale::CheckChanged)
     );
 }
@@ -152,7 +154,7 @@ fn no_records_is_missing_and_no_state_satisfies_nothing() {
     assert_eq!(status(&row, &[]), RowStatus::Missing);
     let rec = record("tests", "1", Scope::Unscoped);
     let none = Current::default();
-    assert!(!satisfied(std::slice::from_ref(&row), &[rec], &none).is_satisfied());
+    assert!(!satisfied(std::slice::from_ref(&row), &[rec], &none, "t1").is_satisfied());
 }
 
 #[test]
@@ -204,6 +206,7 @@ fn a_narrow_pass_does_not_satisfy_scope_all() {
             },
         )],
         &current(&["tests"]),
+        "t1",
     );
     assert_eq!(sat.missing, ["tests"]);
 }
@@ -273,7 +276,12 @@ fn a_parameterized_pass_satisfies_nothing() {
         tree: Some(TreeKind::Base),
     });
     assert_eq!(status(&row, std::slice::from_ref(&rec)), RowStatus::Missing);
-    let sat = satisfied(std::slice::from_ref(&row), &[rec], &current(&["tests"]));
+    let sat = satisfied(
+        std::slice::from_ref(&row),
+        &[rec],
+        &current(&["tests"]),
+        "t1",
+    );
     assert_eq!(sat.missing, ["tests"]);
     // And a parameterized fail does not count against a real pass.
     let pass = record("tests", "0", Scope::Unscoped);
@@ -354,13 +362,13 @@ fn accepted_by_b_on_the_same_tree_only() {
     assert_eq!(accepted.by, "flake");
     assert_eq!(accepted.record_id, "2");
     assert_eq!(
-        row_status(&rows[0], &records, &cur, &rows),
+        row_status(&rows[0], &records, &cur, &rows, "t1"),
         RowStatus::Satisfied {
             record_id: "2".into(),
             accepted_by: Some("flake".into())
         }
     );
-    assert!(satisfied(&rows, &records, &cur).is_satisfied());
+    assert!(satisfied(&rows, &records, &cur, "t1").is_satisfied());
 
     // B passed on another tree: accepts nothing, even if B itself is fresh there.
     let mut other_tree = flake_pass.clone();
@@ -423,7 +431,7 @@ fn accepting_check_must_be_in_the_set_and_not_itself() {
 #[test]
 fn advisory_rows_are_never_counted() {
     let rows = vec![row("required = false\n")];
-    let sat = satisfied(&rows, &[], &current(&["tests"]));
+    let sat = satisfied(&rows, &[], &current(&["tests"]), "t1");
     assert!(sat.is_satisfied());
     assert_eq!(sat.unsatisfied_count(), 0);
 }
@@ -445,7 +453,7 @@ fn satisfaction_lists_each_kind_by_name() {
     let mut d = record("d", "4", Scope::Unscoped);
     d.tree_key = "old".into();
     let a = record("a", "1", Scope::Unscoped);
-    let sat = satisfied(&rows, &[a, b, c, d], &cur);
+    let sat = satisfied(&rows, &[a, b, c, d], &cur, "t1");
     assert_eq!(sat.failing, ["b"]);
     assert_eq!(sat.no_verdict, ["c"]);
     assert_eq!(sat.stale, ["d"]);
@@ -532,4 +540,54 @@ fn records_of_other_tasks_and_landings_do_not_count() {
     let kept = records_of_task(&[mine, other, landing], "t1");
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].id, "1");
+}
+
+#[test]
+fn another_tasks_or_a_landings_records_neither_satisfy_nor_block() {
+    let row = row("");
+    let mut other_pass = record("tests", "2", Scope::Unscoped);
+    other_pass.task_id = "t2".into();
+    assert_eq!(status(&row, &[other_pass.clone()]), RowStatus::Missing);
+    assert!(
+        !satisfied(
+            std::slice::from_ref(&row),
+            &[other_pass],
+            &current(&["tests"]),
+            "t1"
+        )
+        .is_satisfied()
+    );
+    let mine = record("tests", "1", Scope::Unscoped);
+    let mut other_fail = record("tests", "3", Scope::Unscoped);
+    other_fail.task_id = "t2".into();
+    other_fail.verdict = Verdict::Fail;
+    let mut landing_fail = record("tests", "4", Scope::Unscoped);
+    landing_fail.verdict = Verdict::Fail;
+    landing_fail.started_by = StartedBy::Landing { tree: "x".into() };
+    assert!(matches!(
+        status(&row, &[mine, other_fail, landing_fail]),
+        RowStatus::Satisfied { record_id, .. } if record_id == "1"
+    ));
+}
+
+#[test]
+fn newest_is_decided_by_id_not_by_position() {
+    let row = row("");
+    let pass = record("tests", "1", Scope::Unscoped);
+    let mut fail = record("tests", "2", Scope::Unscoped);
+    fail.verdict = Verdict::Fail;
+    assert_eq!(
+        status(&row, &[fail.clone(), pass.clone()]),
+        RowStatus::Failing
+    );
+    assert!(matches!(
+        status(&row, &[pass.clone(), fail.clone()]),
+        RowStatus::Failing
+    ));
+    let mut pass_new = pass;
+    pass_new.id = "3".into();
+    assert!(matches!(
+        status(&row, &[pass_new, fail]),
+        RowStatus::Satisfied { record_id, .. } if record_id == "3"
+    ));
 }

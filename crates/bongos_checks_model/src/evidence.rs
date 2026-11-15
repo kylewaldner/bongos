@@ -240,7 +240,7 @@ fn whole_pass(decl: &CheckDecl, record: &EvidenceRecord) -> bool {
 }
 
 /// The fresh pass of `decl`'s check that satisfies it, on `required_tree` when given. The
-/// newest fresh finished whole-check record decides, so a later fail or no verdict on the same
+/// newest (by id, which orders by time) fresh finished whole-check record decides, so a later fail or no verdict on the same
 /// tree means no pass (fail closed). A newer narrow or parameterized pass is no verdict either
 /// way and is skipped.
 fn passing<'a>(
@@ -252,8 +252,7 @@ fn passing<'a>(
     let state = current.checks.get(&decl.name);
     records
         .iter()
-        .rev()
-        .find(|record| {
+        .filter(|record| {
             record.check == decl.name
                 && record.is_finished()
                 && record.variant.params.is_none()
@@ -261,6 +260,7 @@ fn passing<'a>(
                 && required_tree.is_none_or(|tree| record.tree_key == tree)
                 && (record.verdict != Verdict::Pass || whole_pass(decl, record))
         })
+        .max_by(|a, b| a.id.cmp(&b.id))
         .filter(|record| record.verdict == Verdict::Pass)
 }
 
@@ -325,14 +325,18 @@ pub enum RowStatus {
     Missing,
 }
 
-/// The status of one row against `records` (all records of the task; other checks' are
-/// ignored), with `set` the rows of the task so `or_accepted` can find its check.
+/// The status of one row against `records` (any records; only those of `task_id` count, and
+/// other checks' are ignored), with `set` the rows of the task so `or_accepted` can find its
+/// check.
 pub fn row_status(
     row: &Row,
     records: &[EvidenceRecord],
     current: &Current,
     set: &[Row],
+    task_id: &str,
 ) -> RowStatus {
+    let records = records_of_task(records, task_id);
+    let records = records.as_slice();
     if let Some(record) = passing(&row.decl, records, current, None) {
         return RowStatus::Satisfied {
             record_id: record.id.clone(),
@@ -357,13 +361,13 @@ pub fn row_status(
         .iter()
         .filter(|record| freshness(record, state) == Freshness::Fresh)
         .collect();
-    match fresh.last() {
+    match fresh.iter().max_by(|a, b| a.id.cmp(&b.id)) {
         Some(record) => match record.verdict {
             Verdict::Fail => RowStatus::Failing,
             Verdict::NoVerdict(_) => RowStatus::NoVerdict,
             Verdict::Pass => RowStatus::Narrow,
         },
-        None => match own.last() {
+        None => match own.iter().max_by(|a, b| a.id.cmp(&b.id)) {
             Some(record) => match freshness(record, state) {
                 Freshness::Stale(why) => RowStatus::Stale(why),
                 Freshness::Fresh => RowStatus::Missing,
@@ -400,11 +404,16 @@ impl Satisfaction {
 
 /// Whether the required rows of `rows` (the rows judged on the task) are satisfied on the
 /// current tree. Advisory rows are never counted (they may still accept a required one).
-pub fn satisfied(rows: &[Row], records: &[EvidenceRecord], current: &Current) -> Satisfaction {
+pub fn satisfied(
+    rows: &[Row],
+    records: &[EvidenceRecord],
+    current: &Current,
+    task_id: &str,
+) -> Satisfaction {
     let mut result = Satisfaction::default();
     for row in rows.iter().filter(|row| row.decl.is_required()) {
         let name = row.decl.name.clone();
-        match row_status(row, records, current, rows) {
+        match row_status(row, records, current, rows, task_id) {
             RowStatus::Satisfied { .. } => {}
             RowStatus::Failing => result.failing.push(name),
             RowStatus::NoVerdict => result.no_verdict.push(name),

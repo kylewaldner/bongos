@@ -186,6 +186,9 @@ fn acceptor_loosenings(old: &EffectiveSet, new: &EffectiveSet, row: &Row) -> Vec
     let Some(by) = row.decl.or_accepted.as_deref() else {
         return Vec::new();
     };
+    if by == row.decl.name {
+        return Vec::new();
+    }
     let find = |set: &EffectiveSet| set.judged().iter().find(|r| r.decl.name == by).cloned();
     let Some(after) = find(new) else {
         return Vec::new();

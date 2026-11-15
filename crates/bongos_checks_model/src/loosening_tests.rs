@@ -229,3 +229,14 @@ fn a_changed_summary_is_found() {
     );
     assert!(kinds("summary = \"ok\"\n", "summary = \"ok\"\n").is_empty());
 }
+
+#[test]
+fn a_row_accepted_by_itself_reports_no_acceptor_loosening() {
+    let old = set(vec![row("or_accepted = \"tests\"\n")]);
+    let new = set(vec![row("or_accepted = \"tests\"\nrequired = false\n")]);
+    assert!(
+        loosening(&old, &new)
+            .iter()
+            .all(|l| !matches!(l.kind, K::AcceptorLoosened { .. } | K::AcceptorAdded { .. }))
+    );
+}

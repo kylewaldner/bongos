@@ -159,12 +159,13 @@ fn record_result(record: &EvidenceRecord) -> String {
 fn row_line(
     row: &Row,
     set: &[Row],
+    task_id: &str,
     records: &[EvidenceRecord],
     current: &Current,
     live: Option<&Live>,
 ) -> SectionRow {
     let name = &row.decl.name;
-    let status = row_status(row, records, current, set);
+    let status = row_status(row, records, current, set, task_id);
     let state = current.checks.get(name);
     // The latest finished, non-parameterized record of this check, fresh or not.
     let latest = records
@@ -293,11 +294,20 @@ pub fn section(
 ) -> TaskSection {
     let records = records_of_task(records, &set.task_id);
     let records = records.as_slice();
-    let sat = satisfied(set.judged(), records, current);
+    let sat = satisfied(set.judged(), records, current, &set.task_id);
     let judged = set.judged();
     let mut rows: Vec<SectionRow> = judged
         .iter()
-        .map(|row| row_line(row, judged, records, current, live.get(&row.decl.name)))
+        .map(|row| {
+            row_line(
+                row,
+                judged,
+                &set.task_id,
+                records,
+                current,
+                live.get(&row.decl.name),
+            )
+        })
         .collect();
     if set.applicability == Applicability::Checks {
         for dropped in &set.dropped {
