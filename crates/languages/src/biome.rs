@@ -252,6 +252,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_react_fixtures_choose_the_same_servers(cx: &mut TestAppContext) {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../script/bongos/fixtures/languages");
+        cx.update(|cx| {
+            let mut chosen = Vec::new();
+            for fixture in ["react-vite", "react-next", "react-router"] {
+                let dir = root.join(fixture);
+                let mut files = vec![];
+                for entry in std::fs::read_dir(&dir).unwrap() {
+                    files.push(entry.unwrap().file_name().to_string_lossy().into_owned());
+                }
+                assert!(
+                    !files.iter().any(|f| f.starts_with("biome.json")),
+                    "{fixture}"
+                );
+                let names: Vec<&str> = files.iter().map(String::as_str).collect();
+                let (biome, eslint, formatter) = decide(&names, cx);
+                chosen.push((biome, eslint, formatter));
+            }
+            assert!(chosen.iter().all(|c| *c == (false, true, None)));
+        });
+    }
+
+    #[gpui::test]
     async fn test_not_installed_names_the_package_manager(cx: &mut TestAppContext) {
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(
