@@ -64,13 +64,13 @@ fn register<A: Action>(
 
 /// Where a replace starts, taken before the prompts open.
 #[derive(Clone)]
-struct Origin {
-    /// Point when the command started; the mark is pushed here.
-    point: Anchor,
+pub(crate) struct Origin {
+    /// Point when the command started; the mark is pushed here. `None` pushes no mark.
+    pub(crate) point: Option<Anchor>,
     /// Where the search starts: point, or the start of the region.
-    from: Anchor,
+    pub(crate) from: Anchor,
     /// The region spanning lines, which bounds the replace.
-    scope: Option<Range<Anchor>>,
+    pub(crate) scope: Option<Range<Anchor>>,
 }
 
 /// Starts a replace in `editor`: a full editor in a workspace; anywhere else the key goes on.
@@ -87,12 +87,7 @@ pub fn start(editor: &Entity<Editor>, mode: Mode, window: &mut Window, cx: &mut 
         cx.propagate();
         return;
     };
-    if editor.read(cx).read_only(cx) {
-        bongos_minibuffer::message(window, cx, READ_ONLY);
-        return;
-    }
-    // One replace at a time: a batch still running in this editor finishes first.
-    if batch_running(editor.read(cx)) {
+    if !can_start(editor, window, cx) {
         return;
     }
     let origin = editor.update(cx, |editor, cx| collapse(editor, window, cx));
@@ -112,6 +107,16 @@ pub fn start(editor: &Entity<Editor>, mode: Mode, window: &mut Window, cx: &mut 
             cx,
         )
     });
+}
+
+/// Whether a replace may start in `editor` now: not in a read-only buffer, and one replace at a
+/// time (a batch still running in this editor finishes first).
+pub(crate) fn can_start(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) -> bool {
+    if editor.read(cx).read_only(cx) {
+        bongos_minibuffer::message(window, cx, READ_ONLY);
+        return false;
+    }
+    !batch_running(editor.read(cx))
 }
 
 /// Keeps only the primary cursor, with its region, and turns mark mode off (the mark push needs
@@ -135,7 +140,7 @@ fn collapse(editor: &mut Editor, window: &mut Window, cx: &mut gpui::Context<Edi
         |s| s.select_anchors(vec![primary.clone()]),
     );
     Origin {
-        point: primary.head(),
+        point: Some(primary.head()),
         from: if active {
             primary.start
         } else {
@@ -156,9 +161,25 @@ fn answered(
     cx: &mut App,
 ) {
     let mut spec = SearchSpec::new(answer.regexp);
-    spec.string = answer.from.clone();
+    spec.string = answer.from;
     spec.lax = false;
     spec.case = answer.case;
+    begin(editor, mode, origin, spec, answer.to, window, cx);
+}
+
+/// The search and the replacement are known: finds the first match, then stops there or replaces
+/// every match.
+pub(crate) fn begin(
+    editor: &Entity<Editor>,
+    mode: Mode,
+    origin: Origin,
+    spec: SearchSpec,
+    to: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let regexp = spec.regexp;
+    let from_text = spec.string.clone();
     let query = match build_query(&compile(&spec)) {
         Ok(query) => query,
         Err(error) => {
@@ -166,14 +187,14 @@ fn answered(
             return;
         }
     };
-    let template = match template::parse(&answer.to, answer.regexp) {
+    let template = match template::parse(&to, regexp) {
         Ok(template) => template,
         Err(error) => {
             bongos_minibuffer::error(window, cx, error.to_string());
             return;
         }
     };
-    let preserve_case = preserves_case(spec.case_sensitive(), &answer.from);
+    let preserve_case = preserves_case(spec.case_sensitive(), &from_text);
 
     let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
     let from = origin.from.to_offset(&snapshot);
@@ -199,7 +220,9 @@ fn answered(
     };
 
     editor.update(cx, |editor, cx| editor.set_selection_mark_mode(false, cx));
-    push_mark(editor, Some(origin.point), false, window, cx);
+    if let Some(point) = origin.point {
+        push_mark(editor, Some(point), false, window, cx);
+    }
 
     if mode.interactive {
         let workspace = editor.read(cx).workspace();
@@ -213,9 +236,9 @@ fn answered(
                     first,
                     preserve_case,
                     template,
-                    from: answer.from,
-                    to: answer.to,
-                    regexp: answer.regexp,
+                    from: from_text,
+                    to,
+                    regexp,
                     region: bounded,
                 },
                 window,

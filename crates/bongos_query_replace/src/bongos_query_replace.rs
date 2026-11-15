@@ -2,7 +2,8 @@
 //! region, the rest of the buffer, or the excerpt at point) on a multibuffer snapshot, with their
 //! capture groups, one at a time for the questions or in chunks for a `!` batch, which replaces on
 //! the main thread one chunk at a time and keeps the window drawing between chunks. The edits make
-//! every buffer change of a session and turn them into one undo step. A key that is not the
+//! every buffer change of a session and turn them into one undo step. A search that ends in a query replace hands over its string and settings, and only the
+//! replacement is asked. A key that is not the
 //! decision view's ends the session and runs in the editor. The starters ask for the
 //! strings and begin a replace; a batch replaces without asking. The session state machine,
 //! the replacement templates and the case transfer live in `bongos_query_replace_model`.
@@ -12,6 +13,7 @@ pub mod display;
 pub mod edits;
 pub mod engine;
 mod intercept;
+mod isearch;
 pub mod prompts;
 pub mod session;
 pub mod starters;
@@ -32,6 +34,8 @@ mod history_tests;
 #[cfg(test)]
 mod intercept_tests;
 #[cfg(test)]
+mod isearch_tests;
+#[cfg(test)]
 mod perf_tests;
 #[cfg(test)]
 mod prompts_tests;
@@ -50,5 +54,6 @@ pub fn init(cx: &mut App) {
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_namespace(NAMESPACE));
     prompts::init(cx);
     starters::init(cx);
+    isearch::init(cx);
     session::init(cx);
 }
