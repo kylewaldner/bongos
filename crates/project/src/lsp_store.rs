@@ -12285,6 +12285,14 @@ impl LspStore {
                 {
                     continue;
                 }
+                // An adapter registered for several languages serves only those the policy
+                // allows it for in this worktree.
+                let refused = with_policy_worktree(file.worktree.read(cx), |policy_worktree| {
+                    !policy_allows(policy_worktree, &language.name(), &key.name, cx)
+                });
+                if refused {
+                    continue;
+                }
                 // didOpen
                 let file = match file.as_local() {
                     Some(file) => file,

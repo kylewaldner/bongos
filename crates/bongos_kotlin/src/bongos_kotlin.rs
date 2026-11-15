@@ -4,6 +4,7 @@ mod glue;
 mod install;
 mod installed;
 mod intellij;
+mod java;
 mod jdk;
 mod license;
 mod locks;
@@ -35,6 +36,10 @@ pub use installed::{MARKER as INSTALLED_MARKER, check_installed, server_name};
 pub use intellij::{
     EULA_FILE, LICENSE_TIMEOUT, LicenseOutcome, UNLICENSED_EXIT_CODE, accept_eula,
     bundle_eula_hash, eula_accepted, eula_argument, eula_hash, license_check,
+};
+pub use java::{
+    JAVA_LANGUAGE, JAVA_LANGUAGE_ID, JDTLS_ADAPTER, JavaRoutes, JavaServer, JavaServerPolicy,
+    MIXED_JVM_NOTICE, MIXED_JVM_NOTICE_KEY,
 };
 pub use jdk::{
     Detection, Jdk, JdkChoice, JdkInputs, JdkQuery, MenuEntry, POM_SOURCE, SET_JDK_HOME_LABEL,
@@ -263,10 +268,12 @@ pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
         manifest: manifest.clone(),
         manifest_error: loaded.error,
     });
-    languages.register_lsp_adapter(
-        LanguageName::new_static("Kotlin"),
-        Arc::new(KotlinAdapter::new(dirs.clone(), manifest.clone())),
-    );
+    // One adapter for both languages: on the IntelliJ server a Kotlin and a Java buffer of a
+    // worktree share one process. The policy decides where it may serve Java (D12).
+    let adapter = Arc::new(KotlinAdapter::new(dirs.clone(), manifest.clone()));
+    languages.register_lsp_adapter(LanguageName::new_static("Kotlin"), adapter.clone());
+    languages.register_lsp_adapter(LanguageName::new_static(JAVA_LANGUAGE), adapter);
+    project::register_language_server_policy(Arc::new(JavaServerPolicy), cx);
     KotlinUpdates::init(&dirs.install_root, &dirs.logs_dir, &manifest, cx);
     attach_managers(dirs, cx);
     attach_notices(cx);

@@ -2404,6 +2404,7 @@ dependencies = [
  "async-trait",
  "async_zip",
  "base64 0.22.1",
+ "bongos_language_status",
  "chrono",
  "collections",
  "editor",
