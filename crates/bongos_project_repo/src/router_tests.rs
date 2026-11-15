@@ -181,6 +181,7 @@ fn renaming_a_goal_is_a_definition_change_that_keeps_the_state() {
     let edit = commands::TaskEdit {
         goal: Some("Backfill usage events".to_string()),
         kind: None,
+        work_kind: None,
         repository: None,
     };
     let change = commands::edit(&tree, &ctx(), "l1", edit).unwrap();
