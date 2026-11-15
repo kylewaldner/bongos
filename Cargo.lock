@@ -2058,6 +2058,7 @@ dependencies = [
  "bongos_minibuffer",
  "bongos_net",
  "bongos_prompts",
+ "bongos_terraform",
  "bongos_version",
  "bongos_work",
  "bongos_workflow",
@@ -2645,6 +2646,30 @@ name = "bongos_prompts_model"
 version = "0.1.0"
 dependencies = [
  "chrono",
+]
+
+[[package]]
+name = "bongos_terraform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "async_zip",
+ "bongos_kotlin",
+ "bongos_language_status",
+ "bongos_net",
+ "collections",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "language",
+ "lsp",
+ "semver",
+ "serde_json",
+ "settings",
+ "sha2",
+ "tempfile",
+ "util",
 ]
 
 [[package]]

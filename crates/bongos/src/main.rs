@@ -534,6 +534,14 @@ fn main() {
             },
             cx,
         );
+        bongos_terraform::init(
+            &languages,
+            bongos_terraform::TerraformDirs {
+                languages_dir: paths::languages_dir().clone(),
+                config_dir: paths::config_dir().clone(),
+            },
+            cx,
+        );
         bongos_language_status::init(paths::logs_dir(), cx);
         bongos_work::init(
             fs.clone(),
