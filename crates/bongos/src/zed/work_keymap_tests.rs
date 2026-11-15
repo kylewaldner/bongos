@@ -368,7 +368,11 @@ async fn repository_keys_sit_under_ctrl_c_w_g_and_the_graph_moved(cx: &mut TestA
             .iter()
             .filter(|binding| {
                 let keystrokes = binding.keystrokes();
-                keystrokes.len() == 4 && keystrokes[..3].iter().map(|k| k.unparse()).eq(["ctrl-c", "w", "g"])
+                keystrokes.len() == 4
+                    && keystrokes[..3]
+                        .iter()
+                        .map(|k| k.unparse())
+                        .eq(["ctrl-c", "w", "g"])
             })
             .count();
         assert_eq!(under_prefix, REPOSITORY_KEYS.len(), "{emacs}");
@@ -383,9 +387,15 @@ async fn resolve_split_is_bound_only_in_the_landing_view(cx: &mut TestAppContext
         let (names, pending) = resolve(&keymap, "r", &["Workspace", "LandingView"]);
         assert_eq!(names.first(), Some(&"project::ResolveSplit"), "{emacs}");
         assert!(!pending, "{emacs}");
-        for contexts in [&["Workspace", "Pane"][..], &["Workspace", "Pane", "Editor mode=full"][..]] {
+        for contexts in [
+            &["Workspace", "Pane"][..],
+            &["Workspace", "Pane", "Editor mode=full"][..],
+        ] {
             let (names, _) = resolve(&keymap, "r", contexts);
-            assert!(!names.contains(&"project::ResolveSplit"), "{emacs}: {contexts:?}");
+            assert!(
+                !names.contains(&"project::ResolveSplit"),
+                "{emacs}: {contexts:?}"
+            );
         }
     }
 }

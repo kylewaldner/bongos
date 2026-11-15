@@ -452,7 +452,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.enabled"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.enabled.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .enabled
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -471,7 +475,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.projects_dir"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.projects_dir.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .projects_dir
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -490,7 +498,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.branch_prefix"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.branch_prefix.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .branch_prefix
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -509,7 +521,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.state_branch"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.state_branch.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .state_branch
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -528,7 +544,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.squash"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.squash.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .squash
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -547,7 +567,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.keep_landed"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.keep_landed.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .keep_landed
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -566,7 +590,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.stale_after_days"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.stale_after_days.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .stale_after_days
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -585,7 +613,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.queue_limit_seconds"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.queue_limit_seconds.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .queue_limit_seconds
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -604,7 +636,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.text_file_limit_bytes"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.text_file_limit_bytes.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .text_file_limit_bytes
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -623,7 +659,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.image_limit_bytes"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.image_limit_bytes.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .image_limit_bytes
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -642,7 +682,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.judgment_survives_unrelated"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.judgment_survives_unrelated.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .judgment_survives_unrelated
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -661,7 +705,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.min_snapshot_gap_seconds"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.min_snapshot_gap_seconds.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .min_snapshot_gap_seconds
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -680,7 +728,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.push_retry_min_minutes"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.push_retry_min_minutes.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .push_retry_min_minutes
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -699,7 +751,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.push_retry_max_minutes"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.push_retry_max_minutes.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .push_retry_max_minutes
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -718,7 +774,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.thinning_after_days"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.thinning_after_days.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .thinning_after_days
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -737,7 +797,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.replaced_keep_days"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.replaced_keep_days.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .replaced_keep_days
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -756,7 +820,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.run_record_copy_dir"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.run_record_copy_dir.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .run_record_copy_dir
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -775,7 +843,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.run_record_copy_interval_minutes"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.run_record_copy_interval_minutes.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .run_record_copy_interval_minutes
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -794,7 +866,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.oneoffs_project"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.oneoffs_project.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .oneoffs_project
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -813,7 +889,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.ask_work_kind"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.ask_work_kind.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .ask_work_kind
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -832,7 +912,11 @@ fn project_repository_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("project_repository.default_snapshot_interval_minutes"),
                     pick: |settings_content| {
-                        settings_content.project_repository.as_ref()?.default_snapshot_interval_minutes.as_ref()
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .default_snapshot_interval_minutes
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
@@ -873,10 +957,18 @@ fn project_repository_page() -> SettingsPage {
 /// The commands of the project repository: the command name, its key and the action it runs. The
 /// settings UI runs them by name, so it does not depend on the crate that defines them.
 const PROJECT_REPOSITORY_KEYS: &[(&str, &str, &str)] = &[
-    ("project: open repository", "C-c w g o", "project::OpenRepository"),
+    (
+        "project: open repository",
+        "C-c w g o",
+        "project::OpenRepository",
+    ),
     ("project: add existing", "C-c w g a", "project::AddExisting"),
     ("project: edit", "C-c w g e", "project::Edit"),
-    ("project: open working copy", "C-c w g w", "project::OpenWorkingCopy"),
+    (
+        "project: open working copy",
+        "C-c w g w",
+        "project::OpenWorkingCopy",
+    ),
     ("project: land", "C-c w g l", "project::Land"),
     ("project: check", "C-c w g c", "project::Check"),
     ("project: show changes", "C-c w g v", "project::ShowChanges"),
@@ -884,7 +976,11 @@ const PROJECT_REPOSITORY_KEYS: &[(&str, &str, &str)] = &[
     ("project: abandon", "C-c w g k", "project::Abandon"),
     ("project: show history", "C-c w g h", "project::ShowHistory"),
     ("project: revert", "C-c w g r", "project::Revert"),
-    ("project: backup status", "C-c w g s", "project::BackupStatus"),
+    (
+        "project: backup status",
+        "C-c w g s",
+        "project::BackupStatus",
+    ),
     ("project: backup now", "C-c w g b", "project::BackupNow"),
     ("project: restore", "C-c w g R", "project::Restore"),
     ("project: convert", "C-c w g C", "project::Convert"),
@@ -11245,11 +11341,20 @@ mod tests {
             .items
             .iter()
             .filter_map(|item| match item {
-                SettingsPageItem::ActionLink(link) => link.description.as_ref().map(|d| d.to_string()),
+                SettingsPageItem::ActionLink(link) => {
+                    link.description.as_ref().map(|d| d.to_string())
+                }
                 _ => None,
             })
             .collect();
-        for key in ["C-c w g o", "C-c w g a", "C-c w g l", "C-c w g R", "C-c w g C", "C-c w g m"] {
+        for key in [
+            "C-c w g o",
+            "C-c w g a",
+            "C-c w g l",
+            "C-c w g R",
+            "C-c w g C",
+            "C-c w g m",
+        ] {
             assert!(keys.iter().any(|listed| listed == key), "{key}");
         }
         assert_eq!(keys.len(), 16);

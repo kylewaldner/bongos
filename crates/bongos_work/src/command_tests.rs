@@ -13,7 +13,9 @@ use bongos_work_model::store::{Task as WorkTask, WorkTree};
 use bongos_work_model::{Kind, Status, TaskFile, TodoState, serialize_task};
 use command_palette_hooks::CommandPaletteFilter;
 use fs::RealFs;
-use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, UpdateGlobal as _, VisualTestContext};
+use gpui::{
+    AppContext as _, Entity, Focusable as _, TestAppContext, UpdateGlobal as _, VisualTestContext,
+};
 use project::Project;
 use settings::Settings as _;
 use tempfile::TempDir;
