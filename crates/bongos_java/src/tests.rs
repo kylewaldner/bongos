@@ -167,7 +167,10 @@ fn archive() -> Vec<u8> {
         for (path, mode) in [
             ("bin/jdtls", 0o644),
             ("plugins/org.eclipse.equinox.launcher_1.0.0.jar", 0o644),
-            ("plugins/org.eclipse.equinox.launcher_gtk.jar", 0o644),
+            (
+                "plugins/org.eclipse.equinox.launcher.gtk.linux.x86_64_1.jar",
+                0o644,
+            ),
             ("config_linux/config.ini", 0o644),
             ("config_linux_arm/config.ini", 0o644),
             ("config_mac/config.ini", 0o644),
