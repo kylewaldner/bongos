@@ -2275,11 +2275,8 @@
       "language_servers": ["herb", "!ruby-lsp", "..."],
     },
     "Java": {
+      "formatter": "language_server",
       "language_servers": ["jdtls", "kotlin", "..."],
-      "prettier": {
-        "allowed": true,
-        "plugins": ["prettier-plugin-java"],
-      },
     },
     "JavaScript": {
       "language_servers": ["!typescript-language-server", "vtsls", "..."],

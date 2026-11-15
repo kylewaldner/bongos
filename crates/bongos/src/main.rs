@@ -526,6 +526,14 @@ fn main() {
             },
             cx,
         );
+        bongos_java::init(
+            &languages,
+            bongos_java::JavaDirs {
+                languages_dir: paths::languages_dir().clone(),
+                config_dir: paths::config_dir().clone(),
+            },
+            cx,
+        );
         bongos_language_status::init(paths::logs_dir(), cx);
         bongos_work::init(
             fs.clone(),
