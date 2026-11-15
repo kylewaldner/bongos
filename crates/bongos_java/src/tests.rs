@@ -354,6 +354,9 @@ async fn test_java_the_command_uses_the_server_jdk_and_the_pinned_arguments(
         "-Dosgi.bundles.defaultStartLevel=4",
         "-Declipse.product=org.eclipse.jdt.ls.core.product",
         HEAP_LIMIT,
+        "-Djava.import.generatesMetadataFilesAtProjectRoot=false",
+        "-Djdk.xml.maxGeneralEntitySizeLimit=0",
+        "-Djdk.xml.totalEntitySizeLimit=0",
     ] {
         assert!(args.iter().any(|argument| argument == pinned), "{pinned}");
     }

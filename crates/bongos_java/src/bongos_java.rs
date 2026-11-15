@@ -315,7 +315,8 @@ impl DynLspInstaller for JdtlsAdapter {
 /// The initialization options for an import JDK, or the bare minimum without one.
 pub fn initialization_options(import_jdk: Option<&bongos_kotlin::Jdk>) -> Value {
     let mut java = json!({
-        // Without this jdtls writes `.project` and `.classpath` next to the build files.
+        // Kept for the LSP side; Maven projects also need the JVM property of the same name (see
+        // `jdtls_command`), because without it jdtls writes `.project` and `.settings/` there.
         "import": { "generatesMetadataFilesAtProjectRoot": false },
     });
     if let Some(jdk) = import_jdk {
@@ -395,6 +396,12 @@ pub fn jdtls_command(
         "-Dosgi.bundles.defaultStartLevel=4",
         "-Declipse.product=org.eclipse.jdt.ls.core.product",
         HEAP_LIMIT,
+        // The LSP option alone does not stop jdtls writing `.project` and `.settings/` into a
+        // Maven project; the JVM property does.
+        "-Djava.import.generatesMetadataFilesAtProjectRoot=false",
+        // Large pom files and generated sources trip the JDK's XML entity limits.
+        "-Djdk.xml.maxGeneralEntitySizeLimit=0",
+        "-Djdk.xml.totalEntitySizeLimit=0",
         "--add-modules=ALL-SYSTEM",
         "--add-opens",
         "java.base/java.util=ALL-UNNAMED",
