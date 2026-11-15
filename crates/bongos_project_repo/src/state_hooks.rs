@@ -5,23 +5,24 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use bongos_project_repo_model::{Author, TaskDefinition, TaskStateRecord};
+use bongos_project_repo_model::{Author, DefinitionTree, TaskDefinition, TaskStateRecord};
 use bongos_work_model::TaskId;
 use parking_lot::Mutex;
 
 use crate::state::StateTx;
 use crate::state_ops::StateOp;
 
-/// One task whose state changed in a transaction.
+/// One task whose state rows or definition changed in a transaction.
 pub struct TaskTouch<'a> {
     pub id: TaskId,
     /// The whole record, todo states included, before the transaction's first write to it.
     pub before: Option<TaskStateRecord>,
     /// The whole record after the transaction's own writes.
     pub after: Option<TaskStateRecord>,
-    /// The definition at the old verified commit; `None` until definitions are loaded.
+    /// The definition at the old verified commit (the current one when it did not change);
+    /// `None` when that commit has no such task or no definitions are loaded.
     pub definition_before: Option<&'a TaskDefinition>,
-    /// The definition at the new verified commit; `None` until definitions are loaded.
+    /// The definition at the verified commit after the transaction.
     pub definition_after: Option<&'a TaskDefinition>,
 }
 
@@ -29,10 +30,15 @@ pub struct TaskTouch<'a> {
 pub struct StateApplyChange<'a> {
     /// The ops applied, empty for a closure transaction.
     pub ops: &'a [StateOp],
-    /// Every task whose state rows were written.
+    /// Every task whose state rows were written, and when the verified commit changes every
+    /// task whose definition differs between the two commits.
     pub touched: &'a [TaskTouch<'a>],
     /// The `kv` namespaces written.
     pub namespaces: &'a [String],
+    /// The definitions at the old verified commit; `Some` only when the transaction changes it.
+    pub old_definitions: Option<&'a DefinitionTree>,
+    /// The definitions at the verified commit after the transaction.
+    pub definitions: &'a DefinitionTree,
     pub origin: &'a Author,
 }
 

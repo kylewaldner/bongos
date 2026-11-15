@@ -428,8 +428,36 @@ async fn append_next_kill_after_a_copy_appends_to_the_copied_entry(cx: &mut Test
 
     cx.simulate_keystrokes("alt-w ctrl-alt-w ctrl-k");
 
-    // The copy keeps the selection, so the next kill takes "one" again and joins it to the copy.
-    assert_eq!(ring_texts(&mut cx), ["oneone"]);
+    // The copy clears the selection and leaves the cursor after "one", so the next kill takes
+    // the rest of the line and joins it to the copy as one entry.
+    cx.assert_editor_state("oneˇ\nthree");
+    assert_eq!(ring_texts(&mut cx), ["one two"]);
+}
+
+#[gpui::test]
+async fn a_copy_clears_the_selection_and_leaves_the_cursor(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("«oneˇ» two");
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+
+    cx.simulate_keystrokes("alt-w");
+
+    cx.assert_editor_state("oneˇ two");
+    assert_eq!(ring_texts(&mut cx), ["one"]);
+    // The mark is off too: moving the cursor does not extend a selection.
+    cx.simulate_keystrokes("ctrl-f");
+    cx.assert_editor_state("one ˇtwo");
+}
+
+#[gpui::test]
+async fn a_copy_without_a_selection_copies_the_line_and_keeps_the_cursor(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("one\ntˇwo\nthree");
+
+    cx.simulate_keystrokes("alt-w");
+
+    cx.assert_editor_state("one\ntˇwo\nthree");
+    assert_eq!(ring_texts(&mut cx), ["two\n"]);
 }
 
 #[gpui::test]

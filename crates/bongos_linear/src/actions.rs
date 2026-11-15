@@ -25,7 +25,7 @@ use crate::dump;
 use crate::import;
 use crate::link;
 use crate::refresh;
-use crate::subtickets;
+use crate::subtickets_actions;
 use crate::suggestions;
 use crate::token;
 
@@ -155,7 +155,7 @@ pub fn register(workspace: &mut Workspace) {
     register_direct::<task::OpenInLinear>(workspace, link::open_in_linear);
     register_direct::<task::CreateMissingSubtickets>(
         workspace,
-        subtickets::create_missing_subtickets,
+        subtickets_actions::create_missing_subtickets,
     );
     register_direct::<task::RefreshFromLinear>(workspace, refresh::refresh_from_linear);
     register_direct::<task::ShowLinearSuggestions>(workspace, suggestions::show_linear_suggestions);

@@ -22,12 +22,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use bongos_project_repo::claim_old_project_start;
 use bongos_work_model::commands::{self as model, StartedWorktree};
 use bongos_work_model::derive::{self, Shape, State};
 use bongos_work_model::files::write_atomic;
 use bongos_work_model::rules::{Place, linear_branch_segment};
 use bongos_work_model::slug::oneoff_slug;
-use bongos_work_model::store::{Task, WorkTree};
+use bongos_work_model::store::{NEEDS_CONVERSION, Task, WorkTree};
 use bongos_work_model::worktree_path::{
     Configured, ResolveError, ResolveInput, Source, TemplateLayer, resolve,
 };
@@ -108,6 +109,9 @@ pub(crate) struct Request {
     worktree: PathBuf,
     location: Location,
     branch: Branch,
+    /// The old-format folder (`projects/<slug>` or `oneoffs`) the task is in, claimed while its
+    /// worktree is made so a conversion cannot copy it halfway; `None` for a new-format task.
+    old_dir: Option<PathBuf>,
 }
 
 /// Where the worktrees of `task: start` go besides the repository's own settings: the default
@@ -174,7 +178,7 @@ fn start_task(
     };
     match plan(&tree, id, &repositories, &layout) {
         Err(message) => show_toast(workspace, message, cx),
-        Ok(Plan::Ready(request)) => create(request, window, cx),
+        Ok(Plan::Ready(request)) => create(request, workspace, window, cx),
         Ok(Plan::ChoosePullRequest { request, urls }) => modals::pick(
             workspace,
             "Check out which PR?",
@@ -200,7 +204,7 @@ fn start_task(
                     },
                     ..request
                 };
-                create(request, window, cx);
+                create(request, workspace, window, cx);
             }),
             window,
             cx,
@@ -217,6 +221,17 @@ pub(crate) fn plan(
 ) -> Result<Plan, String> {
     let place = Place::locate(tree, id)?;
     let slug = place.slug();
+    if place.task.needs_conversion {
+        return Err(format!("{slug}: {NEEDS_CONVERSION}"));
+    }
+    let old_dir = place
+        .task
+        .definition
+        .is_none()
+        .then(|| match place.project {
+            Some(project) => project.task.dir.clone(),
+            None => bongos_work_model::layout::oneoffs_dir(&tree.root),
+        });
     let file = place
         .task
         .file
@@ -294,6 +309,7 @@ pub(crate) fn plan(
         worktree: worktree.clone(),
         location: location.clone(),
         branch,
+        old_dir: old_dir.clone(),
     };
     if file.kind == Kind::Babysit {
         let urls = pull_request_urls(file);
@@ -701,11 +717,27 @@ pub(crate) fn probe_writable(directory: &Path) -> Result<()> {
 
 /// Makes (or finds, after a start that was not recorded) the worktree on the background
 /// executor, records it on the task, then runs the repository's setup command in it.
-fn create(request: Request, window: &mut Window, cx: &mut Context<Workspace>) {
+fn create(
+    request: Request,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let Some(fs) = WorkStore::global(cx).map(|store| store.read(cx).fs()) else {
         return;
     };
+    // Work starting in an old-format project holds it until the start is recorded, so a
+    // conversion cannot run in the middle of it.
+    let claim = match request.old_dir.as_deref().map(claim_old_project_start) {
+        Some(Err(error)) => {
+            show_toast(workspace, error.to_string(), cx);
+            return;
+        }
+        Some(Ok(claim)) => Some(claim),
+        None => None,
+    };
     cx.spawn_in(window, async move |workspace, cx| {
+        let _claim = claim;
         let made = cx
             .background_spawn({
                 let request = request.clone();
@@ -718,8 +750,8 @@ fn create(request: Request, window: &mut Window, cx: &mut Context<Workspace>) {
         };
         let id = request.id.clone();
         let write = workspace
-            .update(cx, |workspace, cx| {
-                queue(workspace, cx, {
+            .update_in(cx, |workspace, window, cx| {
+                queue(workspace, window, cx, {
                     let started = started.clone();
                     move |tree, ctx| model::record_worktree(tree, ctx, &id, started.clone())
                 })

@@ -16,7 +16,14 @@
 //! file it replaces is reread and compared with the hash the snapshot was parsed from. If another
 //! writer changed one, the tree is reloaded and the command applied again to the fresh state
 //! (which may now refuse it), up to [`MAX_RETRIES`] times, so an external edit is never
-//! overwritten by a stale copy.
+//! overwritten by a stale copy. A change a registered [`DefinitionWriter`] owns (it writes a task
+//! of a new-format project) goes to that writer instead of the disk.
+//!
+//! Projects of registered [`crate::ProjectSource`]s are merged into every tree read, beside the
+//! old-format projects and one-offs read from the root. When project repositories are enabled,
+//! every old-format project and one-off refuses writes until it is converted, and the disk writer
+//! writes nothing at all. An old-format project (or the old one-offs) that the location record
+//! names as converted is left out of the tree; [`WorkStore::conversion_notice`] names it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -26,11 +33,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bongos_project_repo::{ProjectRepositorySettings, RepositoryLocations};
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{self, Change, Context, Outcome};
 use bongos_work_model::files::content_hash;
 use bongos_work_model::layout::{self, OP_FILE, TASKS_DIR, is_temp_file};
 use bongos_work_model::rules::Refusal;
-use bongos_work_model::store::{self as model_store, WorkTree};
+use bongos_work_model::store::{self as model_store, NEEDS_CONVERSION, WorkTree};
 use db::kvp::KeyValueStore;
 use fs::{Fs, PathEvent, PathEventKind, Watcher};
 use futures::channel::{mpsc, oneshot};
@@ -44,6 +53,7 @@ use crate::changes::ChangedCount;
 use crate::overview::{self, Inputs, RepositoryRow};
 use crate::rebase::{RebaseChecks, RebaseState};
 use crate::ref_watch::{GitDirInfo, RefWatches};
+use crate::seams::{DefinitionWriter, DefinitionWriters, ProjectSources, WriteOutcome};
 use crate::settings::Repository;
 use crate::worktrees::Layout;
 use crate::{WorkDirs, WorkSettings};
@@ -53,6 +63,17 @@ use crate::{WorkDirs, WorkSettings};
 /// left under the old `.bongos-worktrees` directories is dismissed.
 pub const OLD_WORKTREE_NOTICE_KEY: &str = "old_worktree_notice_dismissed";
 
+/// The key value store key (in [`crate::KVP_NAMESPACE`]) set once the notice explaining the
+/// conversion of old-format projects was shown.
+pub const CONVERSION_NOTICE_KEY: &str = "conversion_notice_shown";
+
+/// What the conversion notice says the first time it shows.
+pub const CONVERSION_EXPLANATION: &str = "Projects in the old plain-file layout cannot be changed \
+     while project repositories are on. project: convert (C-c w g C) copies one into a new \
+     project repository after showing what it will make and asking; project: convert all copies \
+     every one. The old folder is only read, never changed or removed, and nothing is ever \
+     converted without you asking.";
+
 pub const WATCH_LATENCY: Duration = Duration::from_millis(200);
 
 /// How many times a write is reapplied after its files changed under it.
@@ -60,6 +81,10 @@ pub const MAX_RETRIES: usize = 3;
 
 /// How long the state a write left a path in is remembered for the self-echo filter.
 pub const ECHO_TTL: Duration = Duration::from_secs(10);
+
+/// The refusal of a change to a new-format task that no definition writer takes.
+pub const NO_DEFINITION_WRITER: &str =
+    "this task is kept in a project repository that is not loaded; nothing was written";
 
 /// A command as the writer runs it: the pure function from the tree to a change, which it may
 /// call again on a fresh tree.
@@ -157,14 +182,78 @@ pub struct WorkStore {
     pub(crate) needs_you: BTreeMap<String, Vec<String>>,
     pub(crate) changed: HashMap<PathBuf, ChangedCount>,
     pub(crate) status_runs: usize,
+    /// Whether project repositories are enabled, which locks old-format projects; read by the
+    /// session's tree reads.
+    needs_conversion: Arc<AtomicBool>,
+    /// The old-format projects the last read left out because they were converted.
+    converted: Vec<ConvertedOld>,
+    /// Whether the conversion explanation was shown in an earlier run (or this one).
+    conversion_notice_seen: bool,
+    /// Whether the conversion explanation shows now: from its first showing until dismissed or
+    /// the end of the run.
+    explaining_conversion: bool,
     _settings: Subscription,
+}
+
+/// An old-format project left out of the tree because it was converted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConvertedOld {
+    /// The old folder: `projects/<slug>` or `oneoffs`.
+    pub old_dir: PathBuf,
+    /// Its name: the project's title, or `one-offs`.
+    pub name: String,
+    /// The project folder it was converted into.
+    pub folder: PathBuf,
+}
+
+/// What the Work view says about old-format projects while project repositories are enabled.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConversionNotice {
+    /// [`CONVERSION_EXPLANATION`] the first time the notice shows.
+    pub explanation: Option<&'static str>,
+    /// The old-format projects that need converting, by name.
+    pub needs_conversion: Vec<String>,
+    /// The converted ones, hidden from the view.
+    pub converted: Vec<ConvertedOld>,
+}
+
+impl ConversionNotice {
+    /// The notice as lines of text.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(explanation) = self.explanation {
+            lines.push(explanation.to_string());
+        }
+        if !self.needs_conversion.is_empty() {
+            lines.push(format!(
+                "Old format, needs conversion: {}",
+                self.needs_conversion.join(", ")
+            ));
+        }
+        if !self.converted.is_empty() {
+            let names: Vec<String> = self
+                .converted
+                .iter()
+                .map(|converted| format!("{} (now {})", converted.name, converted.folder.display()))
+                .collect();
+            lines.push(format!(
+                "Converted, so hidden here: {}; the old folders are kept as they were",
+                names.join(", ")
+            ));
+        }
+        lines
+    }
 }
 
 /// Whether the old worktree root notice was dismissed in an earlier run.
 fn read_notice_dismissed(cx: &gpui::App) -> bool {
+    read_kvp_flag(OLD_WORKTREE_NOTICE_KEY, cx)
+}
+
+fn read_kvp_flag(key: &str, cx: &gpui::App) -> bool {
     KeyValueStore::global(cx)
         .scoped(crate::KVP_NAMESPACE)
-        .read(OLD_WORKTREE_NOTICE_KEY)
+        .read(key)
         .log_err()
         .flatten()
         .is_some()
@@ -172,7 +261,7 @@ fn read_notice_dismissed(cx: &gpui::App) -> bool {
 
 /// An enabled period: the queue of writes and the task doing all disk work.
 struct Session {
-    requests: mpsc::UnboundedSender<WriteRequest>,
+    requests: mpsc::UnboundedSender<Request>,
     /// Cleared when the session ends, so a write that has not started yet never starts.
     alive: Arc<AtomicBool>,
     _run: Task<()>,
@@ -186,10 +275,19 @@ impl Drop for Session {
     }
 }
 
+enum Request {
+    Write(WriteRequest),
+    /// Read the tree again because a project source changed.
+    Refresh,
+}
+
 struct WriteRequest {
     ctx: Context,
+    /// Moved out of `ctx` before the command first runs, so no retry sees it; handed to a
+    /// definition writer that owns the change.
+    attestation: Option<PersonAtKeyboard>,
     command: WorkCommand,
-    reply: oneshot::Sender<Result<Change, WriteError>>,
+    reply: oneshot::Sender<Result<WriteOutcome, WriteError>>,
 }
 
 impl EventEmitter<WorkStoreEvent> for WorkStore {}
@@ -198,6 +296,7 @@ impl WorkStore {
     pub fn new(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut gpui::Context<Self>) -> Self {
         let settings = cx.observe_global::<SettingsStore>(|this, cx| {
             this.sync_enabled(cx);
+            this.sync_needs_conversion(cx);
             this.refresh_overview_for_settings(cx);
         });
         let mut this = Self {
@@ -221,6 +320,10 @@ impl WorkStore {
             needs_you: BTreeMap::new(),
             changed: HashMap::new(),
             status_runs: 0,
+            needs_conversion: Arc::new(AtomicBool::new(project_repositories_enabled(cx))),
+            converted: Vec::new(),
+            conversion_notice_seen: read_kvp_flag(CONVERSION_NOTICE_KEY, cx),
+            explaining_conversion: false,
             _settings: settings,
         };
         this.sync_enabled(cx);
@@ -285,6 +388,75 @@ impl WorkStore {
                 .await
         });
         cx.notify();
+    }
+
+    /// The record of where this machine's project repositories are.
+    pub fn locations_path(&self) -> PathBuf {
+        self.dirs
+            .locations
+            .clone()
+            .unwrap_or_else(RepositoryLocations::default_path)
+    }
+
+    /// What the Work view says about old-format projects: `None` while project repositories are
+    /// off or there is no old-format project. Never converts anything.
+    pub fn conversion_notice(&self) -> Option<ConversionNotice> {
+        if !self.needs_conversion.load(Ordering::SeqCst) {
+            return None;
+        }
+        let tree = self.snapshot.as_ref()?;
+        let mut needs_conversion: Vec<String> = tree
+            .projects
+            .iter()
+            .filter(|project| project.task.needs_conversion)
+            .map(|project| {
+                project
+                    .file
+                    .as_ref()
+                    .map(|file| file.title.clone())
+                    .unwrap_or_else(|| project.slug.clone())
+            })
+            .collect();
+        if tree
+            .activities
+            .iter()
+            .flat_map(|activity| &activity.oneoffs)
+            .any(|oneoff| oneoff.needs_conversion)
+        {
+            needs_conversion.push("one-offs".to_string());
+        }
+        if needs_conversion.is_empty() && self.converted.is_empty() {
+            return None;
+        }
+        Some(ConversionNotice {
+            explanation: self.explaining_conversion.then_some(CONVERSION_EXPLANATION),
+            needs_conversion,
+            converted: self.converted.clone(),
+        })
+    }
+
+    /// Hides the conversion explanation; it was already remembered as shown.
+    pub fn dismiss_conversion_notice(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.explaining_conversion {
+            self.explaining_conversion = false;
+            cx.notify();
+        }
+    }
+
+    /// Shows the conversion explanation the first time there is an old-format project to
+    /// explain, and remembers that it was shown, so later runs do not show it again.
+    fn note_conversion_notice(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.conversion_notice_seen || self.conversion_notice().is_none() {
+            return;
+        }
+        self.conversion_notice_seen = true;
+        self.explaining_conversion = true;
+        let db = KeyValueStore::global(cx);
+        db::write_and_log(cx, move || async move {
+            db.scoped(crate::KVP_NAMESPACE)
+                .write(CONVERSION_NOTICE_KEY.to_string(), "true".to_string())
+                .await
+        });
     }
 
     /// Recomputes the overview when the repositories or the default root differ from what it was
@@ -359,27 +531,65 @@ impl WorkStore {
             .map(|session| &mut session.ref_watches)
     }
 
-    /// Queues `command` on the serial writer. The returned task resolves once the change is
-    /// written and the snapshot includes it, or with why it was not.
+    /// Queues `command` on the serial writer. The returned task resolves once the snapshot
+    /// includes the change: written (for a new-format project, applied to its state when the
+    /// change is state only) or shown as pending (`Task::pending`) when it waits to land. Or it
+    /// resolves with why it was not. A landing's later outcome is not in this result; see
+    /// [`Self::write_outcome`].
+    ///
+    /// The context's attestation is moved out before the command runs, so retries never see it;
+    /// a definition writer that owns the change receives it.
     pub fn write(
         &mut self,
         ctx: Context,
         command: impl Fn(&WorkTree, &Context) -> Outcome + Send + 'static,
         cx: &mut gpui::Context<Self>,
     ) -> Task<Result<Change, WriteError>> {
+        let outcome = self.write_outcome(ctx, command, cx);
+        cx.background_spawn(async move { outcome.await.map(WriteOutcome::into_change) })
+    }
+
+    /// [`Self::write`], resolving with whether the change was applied or waits to land.
+    pub fn write_outcome(
+        &mut self,
+        mut ctx: Context,
+        command: impl Fn(&WorkTree, &Context) -> Outcome + Send + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) -> Task<Result<WriteOutcome, WriteError>> {
+        let attestation = ctx.take_attestation();
         let Some(session) = &self.session else {
             return Task::ready(Err(WriteError::Off));
         };
         let (reply, response) = oneshot::channel();
         let request = WriteRequest {
             ctx,
+            attestation,
             command: Box::new(command),
             reply,
         };
-        if session.requests.unbounded_send(request).is_err() {
+        if session
+            .requests
+            .unbounded_send(Request::Write(request))
+            .is_err()
+        {
             return Task::ready(Err(WriteError::Off));
         }
         cx.background_spawn(async move { response.await.unwrap_or(Err(WriteError::Off)) })
+    }
+
+    /// Reads the tree again, with the projects every source has now. Sources call it when what
+    /// they report changed.
+    pub fn refresh_sources(&mut self, _cx: &mut gpui::Context<Self>) {
+        if let Some(session) = &self.session {
+            session.requests.unbounded_send(Request::Refresh).ok();
+        }
+    }
+
+    fn sync_needs_conversion(&mut self, cx: &mut gpui::Context<Self>) {
+        let enabled = project_repositories_enabled(cx);
+        if self.needs_conversion.swap(enabled, Ordering::SeqCst) != enabled {
+            self.refresh_sources(cx);
+        }
     }
 
     fn sync_enabled(&mut self, cx: &mut gpui::Context<Self>) {
@@ -413,9 +623,15 @@ impl WorkStore {
         let root = self.dirs.root.clone();
         let lock = self.disk_lock.clone();
         let alive = Arc::new(AtomicBool::new(true));
+        let seams = Seams {
+            sources: ProjectSources::global(cx),
+            writers: DefinitionWriters::global(cx),
+            needs_conversion: self.needs_conversion.clone(),
+            locations: self.dirs.locations.clone(),
+        };
         let run = cx.spawn({
             let alive = alive.clone();
-            async move |this, cx| run(this, fs, root, lock, alive, receiver, cx).await
+            async move |this, cx| run(this, fs, root, lock, alive, seams, receiver, cx).await
         });
         self.session = Some(Session {
             requests,
@@ -429,6 +645,7 @@ impl WorkStore {
         match done.kind {
             DoneKind::Loaded => self.stats.loads += 1,
             DoneKind::Reloaded => self.stats.event_reloads += 1,
+            DoneKind::Refreshed => {}
             DoneKind::Ignored => self.stats.ignored_batches += 1,
             DoneKind::Wrote { retries } => {
                 self.stats.retries += retries;
@@ -441,6 +658,12 @@ impl WorkStore {
                 }
             }
         }
+        if let Some(converted) = done.converted
+            && converted != self.converted
+        {
+            self.converted = converted;
+            cx.notify();
+        }
         if let Some(tree) = done.tree
             && !self
                 .snapshot
@@ -452,6 +675,7 @@ impl WorkStore {
             cx.notify();
             self.refresh_rebase(cx);
             self.refresh_overview(cx);
+            self.note_conversion_notice(cx);
         }
         // After the snapshot, so a caller that awaits the write sees its change.
         if let Some(reply) = done.reply {
@@ -460,15 +684,32 @@ impl WorkStore {
     }
 }
 
+/// Whether project repositories are enabled (the `project_repository.enabled` setting), false
+/// when its settings are not registered.
+fn project_repositories_enabled(cx: &gpui::App) -> bool {
+    ProjectRepositorySettings::try_get(cx).is_some_and(|settings| settings.enabled)
+}
+
+/// What the session reads besides the disk: the registered seams, the conversion lock and the
+/// location record that says which old-format projects were converted.
+struct Seams {
+    sources: ProjectSources,
+    writers: DefinitionWriters,
+    needs_conversion: Arc<AtomicBool>,
+    locations: Option<PathBuf>,
+}
+
 /// The session: watch the root, load, then run one job at a time until the store or the session
 /// goes away.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     this: WeakEntity<WorkStore>,
     fs: Arc<dyn Fs>,
     root: PathBuf,
     lock: Arc<Mutex<()>>,
     alive: Arc<AtomicBool>,
-    mut requests: mpsc::UnboundedReceiver<WriteRequest>,
+    seams: Seams,
+    mut requests: mpsc::UnboundedReceiver<Request>,
     cx: &mut AsyncApp,
 ) {
     let background = cx.background_executor().clone();
@@ -489,7 +730,9 @@ async fn run(
         watcher,
         lock,
         alive,
+        seams,
         tree: None,
+        converted: Vec::new(),
         echoes: Echoes::default(),
         watched: BTreeSet::new(),
     };
@@ -507,7 +750,8 @@ async fn run(
         }
         job = select_biased! {
             request = requests.next() => match request {
-                Some(request) => Job::Write(request),
+                Some(Request::Write(request)) => Job::Write(request),
+                Some(Request::Refresh) => Job::Refresh,
                 None => return,
             },
             batch = events.next() => match batch {
@@ -525,11 +769,13 @@ enum Job {
     Load,
     Events(Vec<PathEvent>),
     Write(WriteRequest),
+    Refresh,
 }
 
 enum DoneKind {
     Loaded,
     Reloaded,
+    Refreshed,
     Ignored,
     Wrote { retries: usize },
 }
@@ -538,6 +784,8 @@ struct Done {
     kind: DoneKind,
     /// The tree after the job, when it read one.
     tree: Option<Arc<WorkTree>>,
+    /// The converted old-format projects the tree leaves out, when it read one.
+    converted: Option<Vec<ConvertedOld>>,
     reply: Option<Reply>,
 }
 
@@ -545,8 +793,8 @@ struct Done {
 /// session ended first (the store was disabled while the write ran), dropping it still sends the
 /// real result, so a write that landed never reports `Off`.
 struct Reply {
-    sender: Option<oneshot::Sender<Result<Change, WriteError>>>,
-    result: Option<Result<Change, WriteError>>,
+    sender: Option<oneshot::Sender<Result<WriteOutcome, WriteError>>>,
+    result: Option<Result<WriteOutcome, WriteError>>,
 }
 
 impl Reply {
@@ -573,7 +821,9 @@ struct Disk {
     watcher: Arc<dyn Watcher>,
     lock: Arc<Mutex<()>>,
     alive: Arc<AtomicBool>,
+    seams: Seams,
     tree: Option<Arc<WorkTree>>,
+    converted: Vec<ConvertedOld>,
     echoes: Echoes,
     /// The directories added to the watcher, apart from the root.
     watched: BTreeSet<PathBuf>,
@@ -589,6 +839,7 @@ impl Disk {
                 Done {
                     kind: DoneKind::Loaded,
                     tree: self.tree.clone(),
+                    converted: Some(self.converted.clone()),
                     reply: None,
                 }
             }
@@ -601,25 +852,38 @@ impl Disk {
                     Done {
                         kind: DoneKind::Reloaded,
                         tree: self.tree.clone(),
+                        converted: Some(self.converted.clone()),
                         reply: None,
                     }
                 } else {
                     Done {
                         kind: DoneKind::Ignored,
                         tree: None,
+                        converted: None,
                         reply: None,
                     }
                 }
             }
+            Job::Refresh => {
+                self.reload();
+                Done {
+                    kind: DoneKind::Refreshed,
+                    tree: self.tree.clone(),
+                    converted: Some(self.converted.clone()),
+                    reply: None,
+                }
+            }
             Job::Write(WriteRequest {
                 ctx,
+                mut attestation,
                 command,
                 reply,
             }) => {
-                let (result, retries) = self.write(&ctx, &command);
+                let (result, retries) = self.write(&ctx, &mut attestation, &command);
                 Done {
                     kind: DoneKind::Wrote { retries },
                     tree: self.tree.clone(),
+                    converted: Some(self.converted.clone()),
                     reply: Some(Reply {
                         sender: Some(reply),
                         result: Some(result),
@@ -641,11 +905,34 @@ impl Disk {
         }
     }
 
+    /// Reads the old-format tree from the root, and when project repositories are enabled
+    /// leaves out its converted projects and locks the rest; then adds the projects of the
+    /// sources.
     fn read_tree(&mut self) {
-        let tree = match &self.tree {
+        let mut tree = match &self.tree {
             Some(previous) => model_store::reload(&self.root, previous),
             None => model_store::load(&self.root),
         };
+        self.converted.clear();
+        if self.seams.needs_conversion.load(Ordering::SeqCst) {
+            let locations = self
+                .seams
+                .locations
+                .as_ref()
+                .and_then(|path| RepositoryLocations::load(path).log_err());
+            self.converted = hide_converted(&mut tree, locations.as_ref());
+            for project in &mut tree.projects {
+                project
+                    .task
+                    .walk_mut(&mut |task| task.needs_conversion = task.definition.is_none());
+            }
+            for activity in &mut tree.activities {
+                for oneoff in &mut activity.oneoffs {
+                    oneoff.walk_mut(&mut |task| task.needs_conversion = task.definition.is_none());
+                }
+            }
+        }
+        tree.projects.extend(self.seams.sources.projects());
         self.tree = Some(Arc::new(tree));
     }
 
@@ -701,8 +988,9 @@ impl Disk {
     fn write(
         &mut self,
         ctx: &Context,
+        attestation: &mut Option<PersonAtKeyboard>,
         command: &WorkCommand,
-    ) -> (Result<Change, WriteError>, usize) {
+    ) -> (Result<WriteOutcome, WriteError>, usize) {
         if self.tree.is_none() {
             self.reload();
         }
@@ -714,6 +1002,26 @@ impl Disk {
                 Ok(change) => change,
                 Err(refusal) => return (Err(WriteError::Refused(refusal)), attempt),
             };
+            if let Some(writer) = self.seams.writers.owner(&tree, &change) {
+                return (
+                    self.write_owned(&*writer, &tree, ctx, attestation, change),
+                    attempt,
+                );
+            }
+            if touches_new_format(&tree, &change) {
+                return (
+                    Err(WriteError::Refused(NO_DEFINITION_WRITER.to_string())),
+                    attempt,
+                );
+            }
+            // Whatever a command checked, nothing reaches the old-format files while project
+            // repositories are enabled: they are only ever read, by `project: convert`.
+            if self.seams.needs_conversion.load(Ordering::SeqCst) {
+                return (
+                    Err(WriteError::Refused(old_format_refusal(&change))),
+                    attempt,
+                );
+            }
             match unchanged_since_read(&tree, &change) {
                 Ok(true) => {
                     if !self.alive.load(Ordering::SeqCst) {
@@ -724,7 +1032,7 @@ impl Disk {
                     self.echoes.record(&self.root, &change);
                     self.reload();
                     let result = result
-                        .map(|()| change)
+                        .map(|()| WriteOutcome::Applied(change))
                         .map_err(|error| WriteError::Failed(error.to_string()));
                     return (result, attempt);
                 }
@@ -741,6 +1049,101 @@ impl Disk {
         }
         (Err(WriteError::Contended), MAX_RETRIES)
     }
+}
+
+impl Disk {
+    /// Hands `change` to the definition writer that owns it, then reads the tree again so the
+    /// snapshot shows what the writer did.
+    fn write_owned(
+        &mut self,
+        writer: &dyn DefinitionWriter,
+        tree: &WorkTree,
+        ctx: &Context,
+        attestation: &mut Option<PersonAtKeyboard>,
+        change: Change,
+    ) -> Result<WriteOutcome, WriteError> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err(WriteError::Off);
+        }
+        let result = writer.write(tree, ctx, attestation.take(), change);
+        self.reload();
+        result
+    }
+}
+
+/// The refusal of a change to the old-format files while project repositories are enabled.
+pub(crate) fn old_format_refusal(change: &Change) -> String {
+    format!("{}: {NEEDS_CONVERSION}", change.dir.display())
+}
+
+/// Leaves out of `tree` every old-format project, and the old one-offs, that `locations` names
+/// as converted. Returns what was left out.
+pub(crate) fn hide_converted(
+    tree: &mut WorkTree,
+    locations: Option<&RepositoryLocations>,
+) -> Vec<ConvertedOld> {
+    let Some(locations) = locations else {
+        return Vec::new();
+    };
+    let mut converted = Vec::new();
+    tree.projects.retain(|project| {
+        if project.task.definition.is_some() {
+            return true;
+        }
+        let Some(location) = locations.converted_from(&project.task.dir) else {
+            return true;
+        };
+        converted.push(ConvertedOld {
+            old_dir: project.task.dir.clone(),
+            name: project
+                .file
+                .as_ref()
+                .map(|file| file.title.clone())
+                .unwrap_or_else(|| project.slug.clone()),
+            folder: location.folder.clone(),
+        });
+        false
+    });
+    let oneoffs = layout::oneoffs_dir(&tree.root);
+    if !tree.activities.is_empty()
+        && let Some(location) = locations.converted_from(&oneoffs)
+    {
+        converted.push(ConvertedOld {
+            old_dir: oneoffs,
+            name: "one-offs".to_string(),
+            folder: location.folder.clone(),
+        });
+        tree.activities.clear();
+    }
+    converted
+}
+
+/// Whether `change` touches a new-format task of `tree` (one with a definition): writes its
+/// task file, or writes or moves anything under its files folder. The disk writer must never
+/// write such a change: the task's state is not in a `task.toml` on disk.
+fn touches_new_format(tree: &WorkTree, change: &Change) -> bool {
+    let tasks = tree.tasks();
+    let new_format: Vec<&Path> = tasks
+        .iter()
+        .filter(|task| task.definition.is_some())
+        .map(|task| task.dir.as_path())
+        .collect();
+    let under_new_format = |path: &Path| new_format.iter().any(|dir| path.starts_with(dir));
+    let writes = change.writes.iter().any(|write| {
+        let new_format_id = match write {
+            commands::Write::Task { file, .. } => tree
+                .task_by_id(&file.id)
+                .is_some_and(|task| task.definition.is_some()),
+            _ => false,
+        };
+        new_format_id || under_new_format(&write.path())
+    });
+    writes
+        || under_new_format(&change.dir)
+        || change
+            .moves
+            .iter()
+            .any(|moved| under_new_format(&moved.from) || under_new_format(&moved.to))
 }
 
 /// Whether every file `change` replaces is still as `tree` read it: same content, or still
@@ -797,7 +1200,11 @@ fn watch_dirs(root: &Path, tree: &WorkTree) -> BTreeSet<PathBuf> {
     for activity in &tree.activities {
         dirs.insert(activity.dir.clone());
     }
+    // Tasks of new-format projects live outside the root; their sources report changes.
     for task in tree.tasks() {
+        if task.definition.is_some() {
+            continue;
+        }
         dirs.insert(task.dir.clone());
         let children = layout::children_dir(&task.dir);
         if children.is_dir() {
@@ -945,8 +1352,8 @@ impl Echoes {
 
 #[cfg(test)]
 pub(crate) fn reply_for_test(
-    sender: oneshot::Sender<Result<Change, WriteError>>,
-    result: Result<Change, WriteError>,
+    sender: oneshot::Sender<Result<WriteOutcome, WriteError>>,
+    result: Result<WriteOutcome, WriteError>,
 ) -> impl Drop {
     Reply {
         sender: Some(sender),

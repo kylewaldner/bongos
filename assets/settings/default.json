@@ -2710,10 +2710,10 @@
     // data directory.
     "default_worktree_root": null,
   },
-  // Projects kept in a git repository, one folder per project. Off until the feature is
-  // finished; while it is off, projects keep the old format.
+  // Projects kept in a git repository, one folder per project. While it is off, projects
+  // keep the old format.
   "project_repository": {
-    "enabled": false,
+    "enabled": true,
     "projects_dir": null, // null: <data dir>/projects
     "layout": {
       "repository": "{folder}/repository",

@@ -1,0 +1,233 @@
+//! Where the project's host takes commands and state writes from other processes (feature 48's
+//! socket calls it once per request, with the [`PeerIdentity`] read when the connection was
+//! accepted). A command's [`PersonClaim`] becomes a person's approval only when the peer may
+//! attest a person: a window running this executable. Otherwise the command is applied with its
+//! author as a claimed person, which approves nothing, and the change waits for `project:
+//! approve` from a verified window.
+
+use anyhow::{Result, anyhow};
+use bongos_project_repo_model::{Author, AuthorKind};
+use chrono::{DateTime, Utc};
+
+use crate::approval::{NEEDS_A_WINDOW, PersonGrant};
+use crate::backup::SnapshotReason;
+use crate::create::ProjectRepo;
+use crate::landing::{LandMode, LandRequest};
+use crate::peer::PeerIdentity;
+use crate::sink::{PersonClaim, RepoCommand, RepoReply};
+use crate::state_ops::StateOp;
+
+/// Why a restore, or stopping work for one, from a peer that is not a verified window is
+/// refused.
+pub const RESTORE_NEEDS_A_WINDOW: &str =
+    "restoring needs a person at a bongos window; the request did not come from a verified window";
+
+/// The host side of one project's commands from other processes.
+pub struct HostBoundary {
+    repo: ProjectRepo,
+}
+
+/// `author` as it is after crossing a process boundary: a person becomes a claimed person, and
+/// the chat it claims to act in and the proposal it claims to write are dropped. An automatic
+/// approval rule (`own-subtree`) trusts the chat of an author, and a proposal's working copy is
+/// named for it and approved by `project: approve` of that proposal, so only this process binds
+/// either: an author built here, by the store's writer for a chat or proposal of this process. No
+/// peer is bound to a chat or a proposal by anything the host can verify, so a peer's agent change
+/// has neither and waits for a person.
+pub(crate) fn as_received(author: &Author) -> Result<Author> {
+    let mut received: Author = serde_json::from_value(serde_json::to_value(author)?)?;
+    received.chat = None;
+    received.proposal = None;
+    Ok(received)
+}
+
+/// The person's grant for `claim`, only from a peer that may attest a person.
+fn grant(claim: Option<PersonClaim>, peer: &PeerIdentity) -> Option<PersonGrant> {
+    let claim = claim?;
+    if !peer.may_attest_person() {
+        log::info!(
+            "not trusting the person claim of pid {} ({:?}, same executable: {})",
+            peer.pid(),
+            peer.client(),
+            peer.same_executable()
+        );
+        return None;
+    }
+    Some(PersonGrant::for_verified_peer(claim.name))
+}
+
+impl HostBoundary {
+    pub fn new(repo: ProjectRepo) -> Self {
+        Self { repo }
+    }
+
+    /// Runs `command` from `peer`, with the checks registered in the app.
+    pub fn accept(
+        &self,
+        command: RepoCommand,
+        peer: &PeerIdentity,
+        cx: &gpui::App,
+    ) -> gpui::Task<Result<RepoReply>> {
+        self.repo.use_registered_checks(cx);
+        let boundary = Self {
+            repo: self.repo.clone(),
+        };
+        let peer = peer.clone();
+        gpui::AppContext::background_spawn(cx, async move {
+            boundary.accept_now(command, &peer, Utc::now()).await
+        })
+    }
+
+    /// [`Self::accept`] without an app, at `now`.
+    pub async fn accept_now(
+        &self,
+        command: RepoCommand,
+        peer: &PeerIdentity,
+        now: DateTime<Utc>,
+    ) -> Result<RepoReply> {
+        match command {
+            RepoCommand::Approve { change_id, person } => {
+                let grant = grant(Some(person), peer).ok_or_else(|| {
+                    anyhow!("{NEEDS_A_WINDOW}; the request did not come from a verified window")
+                })?;
+                self.repo.approve_with(&change_id, grant, now).await?;
+                Ok(RepoReply::Done)
+            }
+            RepoCommand::Land {
+                change_id,
+                mut request,
+                person,
+            } => {
+                request.meta.author = as_received(&request.meta.author)?;
+                let grant = grant(person, peer);
+                self.repo
+                    .land_granted(&change_id, request, grant, now)
+                    .await?;
+                Ok(RepoReply::Done)
+            }
+            RepoCommand::QuickEdit { mut edit, person } => {
+                edit.meta.author = as_received(&edit.meta.author)?;
+                // As in-process: only a person's own edit is a person's edit. A claim sent with
+                // an agent's, a workflow's or an unattributed edit approves nothing.
+                let person = person.filter(|_| {
+                    matches!(
+                        edit.meta.author.kind(),
+                        AuthorKind::Person | AuthorKind::PersonClaimed
+                    )
+                });
+                let grant = grant(person, peer);
+                let started = self.repo.start_quick_edit(edit, grant, now).await?;
+                let repo = self.repo.clone();
+                let change_id = started.change_id.clone();
+                // The landing runs on; the caller hears of it through the landing events.
+                smol::spawn(async move {
+                    if let Err(error) = repo.land_quick_edit(&change_id, Utc::now()).await {
+                        log::error!("landing the quick edit {change_id}: {error:#}");
+                    }
+                })
+                .detach();
+                Ok(RepoReply::Started {
+                    change_id: started.change_id,
+                })
+            }
+            RepoCommand::Revert {
+                change_id,
+                author,
+                person,
+            } => {
+                let author = as_received(&author)?;
+                // As for a quick edit: only a person's own revert is a person's landing. A claim
+                // sent with an agent's, a workflow's or an unattributed revert approves nothing.
+                let person = person.filter(|_| {
+                    matches!(
+                        author.kind(),
+                        AuthorKind::Person | AuthorKind::PersonClaimed
+                    )
+                });
+                let grant = grant(person, peer);
+                // Everything that can fail runs before the revert makes its working copy, so a
+                // failure leaves none behind.
+                let request = LandRequest {
+                    meta: self.repo.revert_meta(&change_id, &author)?,
+                    mode: LandMode::Land,
+                };
+                let copy = self.repo.revert(&change_id, &author, now).await?;
+                let repo = self.repo.clone();
+                let revert_id = copy.change_id.clone();
+                // The landing runs on, as a quick edit's does.
+                smol::spawn(async move {
+                    if let Err(error) = repo
+                        .land_granted(&revert_id, request, grant, Utc::now())
+                        .await
+                    {
+                        log::error!("landing the revert {revert_id}: {error:#}");
+                    }
+                })
+                .detach();
+                Ok(RepoReply::Started {
+                    change_id: copy.change_id,
+                })
+            }
+            RepoCommand::ShowHistory { filter } => Ok(RepoReply::History {
+                entries: self.repo.change_history(&filter, now).await?,
+            }),
+            RepoCommand::SnapshotNow { reason } => {
+                // Skipping the gap is a person's call: from any other peer a manual snapshot
+                // waits for the gap like a job end's, so no peer can flood the state branch.
+                let reason = if reason == SnapshotReason::Manual && !peer.may_attest_person() {
+                    SnapshotReason::JobEnd
+                } else {
+                    reason
+                };
+                Ok(RepoReply::Snapshot {
+                    outcome: self.repo.snapshot_now(reason, now).await?,
+                })
+            }
+            RepoCommand::BackupNow => {
+                let outcome = if peer.may_attest_person() {
+                    self.repo.backup_now(now).await?
+                } else {
+                    // As above: the gap and the push's retry pause hold for other peers.
+                    let outcome = self.repo.snapshot_now(SnapshotReason::JobEnd, now).await?;
+                    self.repo.spawn_push(now, false);
+                    outcome
+                };
+                Ok(RepoReply::Snapshot { outcome })
+            }
+            RepoCommand::BackupStatus => Ok(RepoReply::BackupStatus {
+                status: Box::new(self.repo.backup_status(now).await?),
+            }),
+            RepoCommand::RestoreCandidates => Ok(RepoReply::RestoreCandidates {
+                candidates: self.repo.restore_candidates().await?,
+            }),
+            RepoCommand::RestorePreview { source } => Ok(RepoReply::RestorePreview {
+                preview: Box::new(self.repo.restore_preview(&source).await?),
+            }),
+            RepoCommand::Restore { source, person } => {
+                // Replacing every task's state is a person's call, as an approval is.
+                grant(Some(person), peer).ok_or_else(|| anyhow!(RESTORE_NEEDS_A_WINDOW))?;
+                Ok(RepoReply::Restore {
+                    outcome: self.repo.restore(&source, now).await?,
+                })
+            }
+            RepoCommand::StopAtJobBoundary { person } => {
+                grant(Some(person), peer).ok_or_else(|| anyhow!(RESTORE_NEEDS_A_WINDOW))?;
+                Ok(RepoReply::Stopping {
+                    problems: self.repo.stop_at_job_boundary(),
+                })
+            }
+        }
+    }
+
+    /// Applies state ops sent by `peer`. `origin` only labels history and is taken as received:
+    /// at most a claimed person. State ops need no approval.
+    pub fn apply(&self, ops: Vec<StateOp>, origin: Author, peer: &PeerIdentity) -> Result<()> {
+        let origin = as_received(&origin)?;
+        let writer = self.repo.writer_or_error()?;
+        let notes = writer.transact_with(&origin, &ops, |tx| tx.apply_ops(&ops))?;
+        for note in notes {
+            log::info!("{note} (from pid {})", peer.pid());
+        }
+        Ok(())
+    }
+}

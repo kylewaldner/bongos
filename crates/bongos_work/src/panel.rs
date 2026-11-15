@@ -559,6 +559,33 @@ impl WorkPanel {
         bar
     }
 
+    /// What the store says about old-format projects, above the list, with a button that hides
+    /// the explanation.
+    fn render_conversion_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let notice = WorkStore::global(cx)?.read(cx).conversion_notice()?;
+        let mut column = v_flex().w_full().gap_1().px_2().py_1();
+        for line in notice.lines() {
+            column = column.child(
+                Label::new(line)
+                    .size(LabelSize::Small)
+                    .color(Color::Warning),
+            );
+        }
+        if notice.explanation.is_some() {
+            column = column.child(
+                Button::new("work-conversion-notice-dismiss", "Dismiss")
+                    .label_size(LabelSize::Small)
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        if let Some(store) = WorkStore::global(cx) {
+                            store.update(cx, |store, cx| store.dismiss_conversion_notice(cx));
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        Some(column.into_any_element())
+    }
+
     fn message(&self, text: &'static str) -> AnyElement {
         div()
             .p_3()
@@ -602,6 +629,7 @@ impl Render for WorkPanel {
             .on_action(cx.listener(Self::confirm))
             .size_full()
             .child(self.render_breadcrumb(cx))
+            .children(self.render_conversion_notice(cx))
             .child(body)
     }
 }

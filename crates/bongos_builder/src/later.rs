@@ -32,13 +32,13 @@ use std::time::SystemTime;
 use bongos_builder_model::apply::{APPLIED_EVENT, Request, file_hash};
 use bongos_builder_model::{
     By, Choices, Diff, KeeperSource, LiveSet, Op, Parsed, Severity, applied_summary, diff,
-    fingerprint,
+    fingerprint, parse,
 };
 use bongos_chat::ChatStore;
 use bongos_work::model::commands::{Change, Context as WorkContext, Outcome, Write};
 use bongos_work::model::store::{Task, WorkTree};
-use bongos_work::model::{TodoRole, TodoState, now};
-use bongos_work::{NeedsYouRegistry, WorkStore, WorkStoreEvent};
+use bongos_work::model::{Author, TodoRole, TodoState, now};
+use bongos_work::{LandingVerdict, NeedsYouRegistry, WorkStore, WorkStoreEvent, WriteOutcome};
 use gpui::{App, AppContext as _, Global};
 use settings::{Settings as _, SettingsStore};
 use workspace::{MultiWorkspace, Workspace};
@@ -198,7 +198,7 @@ fn changed(cx: &mut App) {
 }
 
 /// The chats indexed under a task, by id.
-fn chats(cx: &App) -> Chats {
+pub(crate) fn chats(cx: &App) -> Chats {
     #[cfg(test)]
     if let Some(chats) = cx.try_global::<TestChats>() {
         return chats.0.clone();
@@ -397,7 +397,8 @@ pub(crate) fn wait_reason(
     };
     let inside = tree
         .task_by_id(&owner.task_id)
-        .is_some_and(|owner| root.dir.starts_with(&owner.dir));
+        .and_then(|owner| owner.id())
+        .is_some_and(|owner_id| tree.is_ancestor(owner_id, &diff.root));
     if !inside {
         return Some(format!(
             "{} is outside the subtree of chat {}",
@@ -442,6 +443,18 @@ pub(crate) fn wait_reason(
         }
         _ => None,
     })
+}
+
+/// The context of an auto-apply of the proposal `bytes`: the agent, in the chat the proposal says
+/// it is by.
+pub(crate) fn agent_context(bytes: &[u8]) -> WorkContext {
+    let mut author = Author::agent(AGENT);
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && let Some(By::Chat(id)) = parse(text).header.by.as_ref().map(|by| &by.value)
+    {
+        author = author.with_chat(id.clone());
+    }
+    WorkContext::new(AGENT, now()).with_author(author)
 }
 
 /// The history line and toast of an auto-apply: `agent applied proposal 2: added 1 task (chat
@@ -537,6 +550,19 @@ fn relabel(change: &mut Change, root: &str, summary: &str, line: &str) {
     }
 }
 
+/// Marks the proposal `number` of the task `root` as pending with `reason` (a failed check, a
+/// wait for a person), so the needs-you source reports it.
+pub(crate) fn hold(root: &str, number: u32, reason: String, cx: &mut App) {
+    if cx.has_global::<Later>() {
+        for entry in cx.global_mut::<Later>().entries.values_mut() {
+            if entry.task_id == root && entry.number == number {
+                entry.status = Status::Failed(reason.clone());
+            }
+        }
+    }
+    NeedsYouRegistry::changed(cx);
+}
+
 /// Takes the scan in: keeps the state of auto-applies running or failed on unchanged files,
 /// judges every new file content once, queues the ones that may apply on their own and tells
 /// the registry.
@@ -621,9 +647,12 @@ fn run_queue(cx: &mut App) {
                     let chats = chats(cx);
                     let switch = Switch::read(cx);
                     let holder = entry.task_id.clone();
-                    store.update(cx, |store, cx| {
-                        store.write(
-                            WorkContext::new(AGENT, now()),
+                    let mut ctx = agent_context(&bytes);
+                    ctx.author.proposal = Some((holder.clone(), number));
+                    let watch = bongos_work::watch_landings(cx);
+                    let write = store.update(cx, |store, cx| {
+                        store.write_outcome(
+                            ctx,
                             move |tree, ctx| {
                                 #[cfg(test)]
                                 if let Some(reason) = &injected {
@@ -643,12 +672,27 @@ fn run_queue(cx: &mut App) {
                             },
                             cx,
                         )
-                    })
+                    });
+                    (watch, write)
                 });
-                write
-                    .await
-                    .map(|change| change.entry.detail.unwrap_or_default())
-                    .map_err(|error| error.to_string())
+                let (watch, write) = write;
+                match write.await {
+                    Ok(WriteOutcome::Applied(change)) => {
+                        Ok(change.entry.detail.unwrap_or_default())
+                    }
+                    // A working copy waits to land: the approval hooks judge it. Inside the
+                    // chat's subtree it lands; otherwise it waits for a person, and a failed
+                    // check holds it, both reported as pending with the reason.
+                    Ok(WriteOutcome::Landing { change, change_id }) => {
+                        match watch.verdict(&change_id).await {
+                            LandingVerdict::Landed => Ok(change.entry.detail.unwrap_or_default()),
+                            LandingVerdict::Held(reason) | LandingVerdict::Ended(reason) => {
+                                Err(reason)
+                            }
+                        }
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
             }
         };
         cx.update(|cx| finish_apply(path, result, cx));

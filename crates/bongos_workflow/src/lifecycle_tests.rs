@@ -265,6 +265,9 @@ fn task(dir: PathBuf, file: TaskFile, children: Vec<Task>) -> Task {
         file: Some(file),
         artifacts: None,
         errors: Vec::new(),
+        definition: None,
+        pending: None,
+        needs_conversion: false,
         broken_edges: Vec::new(),
         files: BTreeMap::<PathBuf, SystemTime>::new(),
         hashes: BTreeMap::new(),
@@ -378,6 +381,7 @@ impl World {
             tree: &self.tree,
             active_run,
             checks: &self.checks,
+            definition_commit: None,
         };
         lifecycle.start(request, &self.dirs, &context)
     }
@@ -705,7 +709,9 @@ fn retry_after_one_of_three_branches_failed_reruns_only_that_node() {
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
     assert_eq!(started_nodes(&lifecycle), ["split", "a", "b", "c"]);
 
-    lifecycle.retry(&run, None, false, &world.dirs).unwrap();
+    lifecycle
+        .retry(&run, None, false, &world.dirs, None)
+        .unwrap();
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
@@ -730,14 +736,18 @@ fn retry_with_several_failed_steps_lists_them() {
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
 
-    let refusal = lifecycle.retry(&run, None, false, &world.dirs).unwrap_err();
+    let refusal = lifecycle
+        .retry(&run, None, false, &world.dirs, None)
+        .unwrap_err();
     assert_eq!(refusal.kind, RefusalKind::SeveralFailed);
     assert_eq!(
         refusal.to_string(),
         "Several steps failed: b[split=1]#1, c[split=2]#1. Pick the one to retry."
     );
     let c: NodeKey = "c[split=2]#1".parse().unwrap();
-    lifecycle.retry(&run, Some(c), false, &world.dirs).unwrap();
+    lifecycle
+        .retry(&run, Some(c), false, &world.dirs, None)
+        .unwrap();
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
@@ -755,7 +765,9 @@ fn retry_fresh_refuses_a_definition_that_drops_a_completed_node() {
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
 
     write_definition(world.profile(), "two", TWO_WITHOUT_PLAN);
-    let refusal = lifecycle.retry(&run, None, true, &world.dirs).unwrap_err();
+    let refusal = lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap_err();
     assert_eq!(refusal.kind, RefusalKind::FreshDefinition);
     assert_eq!(
         refusal.to_string(),
@@ -773,7 +785,9 @@ fn retry_fresh_refuses_a_definition_that_drops_a_completed_node() {
         "Do it better\n",
     )
     .unwrap();
-    lifecycle.retry(&run, None, true, &world.dirs).unwrap();
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
     assert_eq!(
         fs::read_to_string(definition_copy_dir(&attempt, 1).join("work.md")).unwrap(),
         "Do it better\n"
@@ -972,7 +986,7 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
         "two",
         SINGLE.replace("single", "two").as_str(),
     );
-    let restarted = lifecycle.restart(&run, &world.dirs).unwrap();
+    let restarted = lifecycle.restart(&run, &world.dirs, None).unwrap();
     assert_eq!(restarted, run, "a restart keeps the one run record");
     let second = lifecycle.worktree(&run).unwrap().clone();
     assert_ne!(second.path, first.path);
@@ -998,7 +1012,7 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
     settle(&mut lifecycle);
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
-    let refusal = lifecycle.restart(&run, &world.dirs).unwrap_err();
+    let refusal = lifecycle.restart(&run, &world.dirs, None).unwrap_err();
     assert_eq!(
         refusal.kind,
         RefusalKind::WrongState,
@@ -1020,7 +1034,7 @@ fn restart_of_a_cancelled_run_is_refused_while_another_run_holds_the_task() {
     let second = world
         .start(&mut lifecycle, with_workflow("single"))
         .unwrap();
-    let refusal = lifecycle.restart(&first, &world.dirs).unwrap_err();
+    let refusal = lifecycle.restart(&first, &world.dirs, None).unwrap_err();
     assert_eq!(refusal.kind, RefusalKind::ActiveRun);
     assert_eq!(
         refusal.offers,
@@ -1193,3 +1207,5 @@ fn the_app_engine_refuses_a_start_while_no_runner_is_connected(cx: &mut TestAppC
         todos_before
     );
 }
+#[path = "landing_tests.rs"]
+mod landing_tests;

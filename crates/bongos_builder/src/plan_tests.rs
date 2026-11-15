@@ -132,6 +132,7 @@ fn set_settings(cx: &mut TestAppContext, builder: Option<bool>) {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(true);
+                content.project_repository.get_or_insert_default().enabled = Some(false);
                 content.task_builder.get_or_insert_default().enabled = builder;
                 let chats = content.chats.get_or_insert_default();
                 chats.enabled = Some(true);
@@ -689,6 +690,9 @@ fn fixture_task(dir: &str) -> Task {
         file: None,
         artifacts: None,
         errors: Vec::new(),
+        definition: None,
+        pending: None,
+        needs_conversion: false,
         broken_edges: Vec::new(),
         files: BTreeMap::new(),
         hashes: BTreeMap::new(),

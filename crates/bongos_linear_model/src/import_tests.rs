@@ -402,6 +402,7 @@ fn import_seeds_nothing_from_the_applied_records_around_it() {
             state: bongos_work_model::ProposalState::Applied,
             at: timestamp("2026-11-09T10:00:00Z"),
             by: "kyle".to_string(),
+            by_kind: None,
             hash: "h".to_string(),
             extra: Default::default(),
         });

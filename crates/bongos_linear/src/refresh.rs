@@ -27,7 +27,7 @@ use bongos_linear_model::ident::parse_identifier;
 use bongos_linear_model::sync::{RefreshDiff, linked_identifier, refresh_change, refresh_diff};
 use bongos_linear_model::{ApiError, Issue, IssueRef};
 use bongos_work::{Focus, WorkStore, WorkStoreEvent, WriteError, observe_view_opened};
-use bongos_work_model::commands::{Change, Context as WorkContext};
+use bongos_work_model::commands::Change;
 use bongos_work_model::rules::Place;
 use bongos_work_model::store::{Task, WorkTree};
 use futures::future::BoxFuture;
@@ -608,7 +608,7 @@ pub(crate) fn apply_changes(
     }
     let store = WorkStore::global(cx)?;
     let tree = store.read(cx).snapshot()?;
-    let ctx = WorkContext::new("linear", bongos_work_model::now());
+    let ctx = crate::subtickets::sync_context();
     refresh_change(&tree, &ctx, &diff)?;
     Some(store.update(cx, |store, cx| {
         store.write(

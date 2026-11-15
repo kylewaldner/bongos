@@ -10,6 +10,7 @@ use bongos_chat::model::timestamp_utc;
 use bongos_chat::{
     ChatRuntime, ChatRuntimeEvent, ChatState, ChatStore, ChatStoreEvent, SendOptions,
 };
+use bongos_work::model::PersonAtKeyboard;
 use bongos_work::model::commands::{self as model, Context as WorkContext, NewTask, Placement};
 use bongos_work::model::layout::proposal_file;
 use bongos_work::model::{Todo, TodoRole, TodoState};
@@ -66,7 +67,7 @@ pub(crate) fn new_without_plan(
         "Goal of the new task, in one sentence",
         "",
         false,
-        Box::new(|goal, workspace, _, cx| {
+        Box::new(|goal, workspace, window, cx| {
             let Some(store) = WorkStore::global(cx) else {
                 show_toast(workspace, bongos_work::WriteError::Off.to_string(), cx);
                 return;
@@ -79,9 +80,10 @@ pub(crate) fn new_without_plan(
                 todos: None,
                 ..NewTask::default()
             };
+            let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
             let write = store.update(cx, |store, cx| {
                 store.write(
-                    WorkContext::kyle(),
+                    ctx,
                     move |tree, ctx| model::new_task(tree, ctx, placement.clone(), new.clone()),
                     cx,
                 )
