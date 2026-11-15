@@ -385,7 +385,7 @@ poll 10 "the worktree $FIRST_WT within ten seconds" test -d "$FIRST_WT"
 # A new worktree goes to the central directory under the data dir, never into the checkout.
 [ "$FIRST_WT" = "$CENTRAL_WT/backfill-usage-events" ] || fail "the first worktree is $FIRST_WT, not under $CENTRAL_WT"
 [ ! -e "$REPO/.bongos-worktrees" ] || fail "a .bongos-worktrees directory appeared in the checkout: $(ls -la "$REPO/.bongos-worktrees")"
-git -C "$REPO" worktree list --porcelain | grep -qxF "worktree $FIRST_WT" ||
+git -C "$REPO" worktree list --porcelain | grep -qxF "worktree $(realpath "$FIRST_WT")" ||
   fail "git worktree list does not show $FIRST_WT: $(git -C "$REPO" worktree list)"
 # The legacy line is still written, for worktrees older versions put under .bongos-worktrees.
 grep -qxF '/.bongos-worktrees/' "$REPO/.git/info/exclude" || fail "info/exclude lacks /.bongos-worktrees/: $(cat "$REPO/.git/info/exclude")"
