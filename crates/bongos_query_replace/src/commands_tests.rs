@@ -34,6 +34,15 @@ pub(crate) struct Scene {
 }
 
 pub(crate) async fn scene(text: &str, cx: &mut TestAppContext) -> Scene {
+    scene_with(text, |_| {}, cx).await
+}
+
+/// A scene whose app also runs `init` once the query replace feature is set up.
+pub(crate) async fn scene_with(
+    text: &str,
+    init: impl FnOnce(&mut gpui::App),
+    cx: &mut TestAppContext,
+) -> Scene {
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
         command_palette_hooks::init(cx);
@@ -41,6 +50,7 @@ pub(crate) async fn scene(text: &str, cx: &mut TestAppContext) -> Scene {
         bongos_minibuffer::init(cx);
         bongos_emacs::init(cx);
         crate::init(cx);
+        init(cx);
         cx.default_global::<MinibufferRouting>()
             .set_routes(vec![crate::prompts::HOST.to_string()]);
         let bindings =

@@ -178,6 +178,41 @@ pub fn prompt(
     );
 }
 
+/// Asks for the replacement of `from`, which is already chosen, and calls `on_done` with both. The
+/// FROM prompt is skipped; a prompt that is cancelled calls nothing.
+pub fn prompt_replacement(
+    workspace: &mut Workspace,
+    mode: Mode,
+    case: CaseMode,
+    from: &str,
+    on_done: impl FnOnce(Answer, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let state = Prompt {
+        stage: Stage::To {
+            from: to_input(from),
+            edit: false,
+        },
+        mode,
+        case,
+        input: String::new(),
+        last_from: None,
+        armed: false,
+        handle: None,
+        _intercept: None,
+    };
+    open_stage(
+        workspace,
+        state,
+        String::new(),
+        Box::new(on_done),
+        None,
+        window,
+        cx,
+    );
+}
+
 /// Asks for a new replacement, starting from `current`, for the `from` string (as typed in the
 /// prompt) of a session that is running, and calls `on_done` with it, or `on_cancel` when the
 /// prompt is cancelled. The `e` key of the decision view opens this.
