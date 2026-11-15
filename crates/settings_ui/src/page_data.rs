@@ -11461,14 +11461,18 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(paths.len(), 21, "{paths:?}");
+        assert_eq!(paths.len(), 26, "{paths:?}");
         assert_eq!(paths[0], "project_repository.enabled");
-        // Only the table and the list of patterns are left to settings.json.
+        // The layout table is shown as its four paths.
+        for leaf in ["repository", "working_copies", "state", "files"] {
+            let path = format!("project_repository.layout.{leaf}");
+            assert!(paths.contains(&path.as_str()), "{path}");
+        }
         let (content, _) = settings::parse_json::<SettingsContent>(&settings::default_settings());
         let default = serde_json::to_value(content.expect("default.json parses")).unwrap();
         for key in default["project_repository"].as_object().unwrap().keys() {
             let path = format!("project_repository.{key}");
-            let left_out = matches!(key.as_str(), "layout" | "secret_patterns");
+            let left_out = key == "layout";
             assert_eq!(paths.contains(&path.as_str()), !left_out, "{path}");
         }
         let keys: Vec<String> = page
