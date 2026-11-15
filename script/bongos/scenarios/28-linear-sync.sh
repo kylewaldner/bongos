@@ -403,6 +403,7 @@ write_settings() {
   cat >"$SETTINGS_FILE" <<JSON
 {
   "base_keymap": "Emacs",
+  "project_repository": { "enabled": false },
   "linear": { "enabled": $1 },
   "chats": {
     "enabled": true,

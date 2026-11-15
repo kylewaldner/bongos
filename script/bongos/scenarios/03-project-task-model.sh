@@ -318,6 +318,7 @@ git -C "$REPO" "${GIT_ID[@]}" commit -qm "first commit"
 MAIN_SHA=$(git -C "$REPO" rev-parse main)
 printf '%s\n' '{
   "base_keymap": "Emacs",
+  "project_repository": { "enabled": false },
   "task_builder": { "enabled": false },
   "work": {
     "repositories": [

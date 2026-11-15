@@ -200,10 +200,19 @@ pub(crate) async fn open_location(location: Location, cx: &mut AsyncApp) -> anyh
         return Ok(());
     }
     let backup = cx.update(|cx| ProjectRepositorySettings::get_global(cx).backup_options());
+    let id = location.id.clone();
     let loaded = cx
         .background_spawn(async move { load_location(location, backup).await })
         .await?;
-    cx.update(|cx| serve(loaded, cx));
+    // Another open of this location may have been served while this one loaded.
+    cx.update(|cx| {
+        let served = open_repos(cx)
+            .iter()
+            .any(|opened| opened.repo().location().id == id);
+        if !served {
+            serve(loaded, cx);
+        }
+    });
     Ok(())
 }
 

@@ -259,6 +259,33 @@ fn snapshotted(root: &TempDir) -> (ProjectRepo, String) {
 }
 
 #[test]
+fn a_history_entry_datetime_survives_export_and_restore() {
+    let root = TempDir::new().unwrap();
+    let repo = project(&root);
+    let entry: bongos_work_model::HistoryEntry = toml::from_str(
+        "at = 2026-02-01T09:00:00Z\nby = \"kyle\"\nevent = \"note\"\ndetail = \"started\"\n",
+    )
+    .unwrap();
+    let mut record = task_with_todos(&[("t1", TodoState::Open)]);
+    record.history.push(entry);
+    set_task(&repo, "dated", record.clone());
+
+    let exported = everything(&repo);
+    let text = &exported["tasks/dated.toml"];
+    assert!(text.contains("2026-02-01T09:00:00Z"), "{text}");
+    let commit = snapshot_at(&repo, start());
+
+    set_task(&repo, "dated", task_with_todos(&[]));
+    restore(
+        &repo,
+        &RestoreSource::Snapshot { commit },
+        start() + Duration::hours(1),
+    )
+    .unwrap();
+    assert_eq!(task(&repo, "dated"), Some(record));
+}
+
+#[test]
 fn restore_shows_what_it_replaces_then_rebuilds_the_snapshot_and_keeps_the_replaced_state() {
     let root = TempDir::new().unwrap();
     let (repo, commit) = snapshotted(&root);
