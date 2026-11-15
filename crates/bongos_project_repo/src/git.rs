@@ -127,6 +127,13 @@ impl Git {
         Ok(String::from_utf8_lossy(&output).trim().to_string())
     }
 
+    /// Runs git with `args` in `directory` and returns its raw standard output, untrimmed, for
+    /// `-z` listings whose paths may start or end with white space.
+    pub async fn run_raw(&self, directory: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
+        self.run_bytes(directory, args.iter().map(OsString::from).collect(), None)
+            .await
+    }
+
     /// Runs git with `args` in `directory`, feeding it `stdin`, and returns its raw output.
     async fn run_bytes(
         &self,
