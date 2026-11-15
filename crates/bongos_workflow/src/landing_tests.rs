@@ -831,3 +831,114 @@ fn a_definition_of_another_layer_records_no_commit() {
         .unwrap();
     assert_eq!(recorded(&lifecycle, &run), [None, None]);
 }
+
+/// Cancels every run at its first event, the way a run that ends the moment it starts reads.
+#[gpui::test]
+fn a_landing_run_that_ends_while_it_starts_still_gives_the_check_its_verdict(
+    cx: &mut TestAppContext,
+) {
+    let world = World::new();
+    let linked = linked(&world, FakeRunner::new(), cx);
+    let engine = &linked.engine;
+    cx.update(|cx| {
+        let engine = engine.clone();
+        WorkflowEngine::observe(cx, move |event, cx| {
+            let WorkflowEvent::Changed { run, state, .. } = event;
+            if *state == RunStatus::Queued {
+                engine.cancel(run, cx).unwrap();
+            }
+        });
+    });
+    let (reply, end) = oneshot::channel();
+    cx.update(|cx| {
+        engine.start_landing_run(
+            crate::engine::LandingRequest {
+                workflow: "single".to_string(),
+                task_id: LEAF.to_string(),
+                reply,
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(matches!(block_on(end).unwrap(), LandingRunEnd::Cancelled));
+}
+
+/// Takes the restore's hold on the project while the run's worktree is made, which is after
+/// the engine checked the hold and before the run is known to the project.
+struct HoldingWorktrees {
+    inner: DirWorktrees,
+    activity: Arc<StdMutex<Option<crate::project_sources::WorkflowActivity>>>,
+}
+
+impl RunWorktrees for HoldingWorktrees {
+    fn create(
+        &mut self,
+        task: &TaskCheckout,
+        run_id: &str,
+        attempt: u32,
+        settings: &WorkflowsSettings,
+    ) -> Result<RunWorktree, WorktreeError> {
+        if let Some(activity) = self.activity.lock().unwrap().as_ref() {
+            activity.hold_new_work("project-1");
+        }
+        self.inner.create(task, run_id, attempt, settings)
+    }
+}
+
+#[gpui::test]
+async fn a_restore_that_starts_while_a_run_starts_cancels_the_run(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut world = World::new();
+    let temp = TempDir::new().unwrap();
+    let repo = project(
+        &temp,
+        PROJECT_TOML,
+        &[
+            ("workflows/review/workflow.toml", review("review")),
+            ("workflows/review/work.md", "the prompt\n".to_string()),
+        ],
+    );
+    let leaf = &mut world.tree.projects[0].task.children[0];
+    leaf.dir = repo.location().files.join(LEAF);
+    leaf.definition = Some(PathBuf::from("tasks/login"));
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        WorkflowsSettings::register(cx);
+    });
+    let activity_slot = Arc::new(StdMutex::new(None));
+    let worktrees = HoldingWorktrees {
+        inner: DirWorktrees {
+            root: world.root.join("runs"),
+            error: world.worktree_error.clone(),
+        },
+        activity: activity_slot.clone(),
+    };
+    let lifecycle = Lifecycle::new(
+        Box::new(FakeRunner::new()) as EngineRunner,
+        Box::new(worktrees),
+        world.settings(),
+    );
+    let writes = super::task_link_tests::MemoryWrites::new(world.tree.clone());
+    let engine = WorkflowEngine::with_lifecycle(world.dirs.clone(), lifecycle)
+        .with_task_writes(writes.clone());
+    *activity_slot.lock().unwrap() = Some(engine.activity_source());
+    let _open = cx.update(|cx| {
+        ProjectRepositorySettings::register(cx);
+        landing::register(cx);
+        bongos_work::register_project_repo(LoadedProject::new(repo.clone()), cx)
+    });
+    cx.run_until_parked();
+
+    let tree = writes.tree.lock().unwrap().clone();
+    let refusal = cx
+        .update(|cx| engine.start_in(review_request(), &tree, cx))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Held);
+    assert!(
+        engine.active_runs().is_empty(),
+        "the refused run is not active"
+    );
+    assert!(engine.activity_source().activity("project-1").is_empty());
+}

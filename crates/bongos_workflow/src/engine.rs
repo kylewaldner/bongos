@@ -388,12 +388,41 @@ impl WorkflowEngine {
         self.start_in(request, &tree, cx)
     }
 
+    /// [`Self::start`] for a landing check's run: `reply` is registered as the run's waiter as
+    /// soon as the run exists, before any event of it is handed on, so a run that ends at once
+    /// still reaches the check. `reply` is left in place when the start is refused.
+    fn start_waited(
+        &self,
+        request: StartRequest,
+        reply: &mut Option<futures::channel::oneshot::Sender<LandingRunEnd>>,
+        cx: &mut App,
+    ) -> Result<RunId, Refusal> {
+        let tree = self.writes.tree(cx).ok_or_else(|| {
+            Refusal::new(
+                RefusalKind::UnknownTask,
+                "The task tree is not loaded yet.",
+                "Try again in a moment.",
+            )
+        })?;
+        self.start_with_waiter(request, &tree, reply, cx)
+    }
+
     /// Starts a run on the task of `request` in `tree`. A run another source reports on the task
     /// (`can_start_run`) refuses it, with the run's workflow, state and node.
     pub fn start_in(
         &self,
         request: StartRequest,
         tree: &WorkTree,
+        cx: &mut App,
+    ) -> Result<RunId, Refusal> {
+        self.start_with_waiter(request, tree, &mut None, cx)
+    }
+
+    fn start_with_waiter(
+        &self,
+        request: StartRequest,
+        tree: &WorkTree,
+        reply: &mut Option<futures::channel::oneshot::Sender<LandingRunEnd>>,
         cx: &mut App,
     ) -> Result<RunId, Refusal> {
         if !self.lifecycle().runtime().runner().is_connected() {
@@ -417,7 +446,7 @@ impl WorkflowEngine {
         if let Some(repo) = &task_dirs.repo {
             self.refuse_held(repo)?;
         }
-        let result = {
+        let mut result = {
             let mut lifecycle = self.lifecycle();
             lifecycle.set_settings(settings);
             let context = StartContext {
@@ -428,11 +457,33 @@ impl WorkflowEngine {
             };
             lifecycle.start(request, &task_dirs.dirs, &context)
         };
-        if let (Ok(run), Some(repo)) = (&result, task_dirs.repo.clone()) {
-            self.projects
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(run.clone(), repo);
+        if let Ok(run) = &result {
+            // Both registrations come before any event of the run is handed on.
+            if let Some(reply) = reply.take() {
+                self.landing_waiters
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(run.clone(), reply);
+            }
+            if let Some(repo) = task_dirs.repo.clone() {
+                self.projects
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(run.clone(), repo.clone());
+                // A restore may have taken its hold while the run was starting, after the
+                // check above: the run counts as work now, so it is cancelled and refused.
+                if let Err(refusal) = self.refuse_held(&repo) {
+                    let run = run.clone();
+                    let waiter = self
+                        .landing_waiters
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&run);
+                    *reply = waiter.or(reply.take());
+                    self.lifecycle().cancel(&run).ok();
+                    result = Err(refusal);
+                }
+            }
         }
         drop(task_dirs);
         if let Ok(run) = &result {
@@ -777,22 +828,16 @@ impl WorkflowEngine {
         set_landing_runs(Some(Arc::new(EngineLandingRuns { requests })));
     }
 
-    fn start_landing_run(&self, request: LandingRequest, cx: &mut App) {
+    pub(crate) fn start_landing_run(&self, request: LandingRequest, cx: &mut App) {
         let start = StartRequest {
             workflow: Some(request.workflow),
             started_by: StartedBy::Landing,
             ..StartRequest::new(request.task_id)
         };
-        match self.start(start, cx) {
-            Ok(run) => {
-                self.landing_waiters
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(run, request.reply);
-            }
-            Err(refusal) => {
-                request
-                    .reply
+        let mut reply = Some(request.reply);
+        if let Err(refusal) = self.start_waited(start, &mut reply, cx) {
+            if let Some(reply) = reply {
+                reply
                     .send(LandingRunEnd::NotStarted(refusal.to_string()))
                     .ok();
             }
@@ -822,10 +867,10 @@ impl WorkflowEngine {
 }
 
 /// A run a landing check asks for.
-struct LandingRequest {
-    workflow: String,
-    task_id: String,
-    reply: futures::channel::oneshot::Sender<LandingRunEnd>,
+pub(crate) struct LandingRequest {
+    pub(crate) workflow: String,
+    pub(crate) task_id: String,
+    pub(crate) reply: futures::channel::oneshot::Sender<LandingRunEnd>,
 }
 
 /// Hands the runs of landing checks to the engine's main-thread loop.
