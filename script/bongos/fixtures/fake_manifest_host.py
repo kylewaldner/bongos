@@ -2,8 +2,9 @@
 """Fake manifest host for smoke runs (standard library only): the Kotlin server manifest, its
 signature and the server archives, served as static files.
 
-Usage: fake_manifest_host.py <root dir> <port file> <log file>. The server listens on 127.0.0.1 on a
-free port and writes the port to <port file> once it is listening; the app is pointed at
+Usage: fake_manifest_host.py <root dir> <port file> <log file> [port]. The server listens on
+127.0.0.1 on <port> (default 0, a free port; a fixed port lets a stopped host come back at the same
+URLs) and writes the port to <port file> once it is listening; the app is pointed at
 http://127.0.0.1:<port>/<path under the root dir> through `kotlin.manifest_url`.
 
 GET and HEAD serve the file at the request path under the root dir (a path that leaves the root,
@@ -36,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.realpath(sys.argv[1])
 PORT_FILE = sys.argv[2]
 LOG_FILE = sys.argv[3]
+PORT = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 LIFETIME_SECONDS = 1800
 CHUNK = 16 * 1024
 
@@ -177,7 +179,7 @@ def watchdog():
 
 
 open(LOG_FILE, "a").close()
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
 server.daemon_threads = True
 threading.Thread(target=watchdog, daemon=True).start()
 with open(PORT_FILE + ".tmp", "w") as handle:
