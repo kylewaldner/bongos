@@ -34,7 +34,8 @@ impl LockClock for NoWait {
     }
 }
 
-/// Runs make-archives into `out` and returns the servers.toml it wrote.
+/// Runs make-archives into `out` and returns the servers.toml it wrote. A test thread may block.
+#[allow(clippy::disallowed_methods)]
 fn make_archives(out: &Path) -> PathBuf {
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../script/bongos/fixtures/kotlin-servers/make-archives");
