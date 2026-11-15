@@ -80,6 +80,7 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         ai_page(cx),
         network_page(),
         work_page(bongos_linear::sync::token_is_set(cx)),
+        project_repository_page(),
         chats_page(),
         developer_page(cx),
     ]
@@ -439,6 +440,456 @@ fn work_page(token_set: bool) -> SettingsPage {
         ],
     }
 }
+
+fn project_repository_page() -> SettingsPage {
+    fn settings_section() -> [SettingsPageItem; 22] {
+        [
+            SettingsPageItem::SectionHeader("Project repository"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Project Repositories",
+                description: "Whether projects live in a git repository, one folder per project. While it is off, projects keep the old format and every project repository command is hidden.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.enabled"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.enabled.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Projects Folder",
+                description: "The folder new project folders go in. Empty means the projects folder of the bongos data directory.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.projects_dir"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.projects_dir.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .projects_dir = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Branch Prefix",
+                description: "The prefix of the branch of each working copy.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.branch_prefix"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.branch_prefix.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .branch_prefix = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "State Branch",
+                description: "The branch the project state is backed up on.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.state_branch"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.state_branch.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .state_branch = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Squash",
+                description: "Whether a landing squashes a working copy into one commit.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.squash"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.squash.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .squash = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Keep Landed",
+                description: "Whether a landed working copy is kept instead of removed.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.keep_landed"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.keep_landed.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .keep_landed = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Stale After Days",
+                description: "Days without activity after which a working copy is shown as stale.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.stale_after_days"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.stale_after_days.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .stale_after_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Queue Limit",
+                description: "Seconds a landing may wait in the queue before it says why.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.queue_limit_seconds"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.queue_limit_seconds.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .queue_limit_seconds = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Text File Limit",
+                description: "The size in bytes above which a landing refuses a text file.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.text_file_limit_bytes"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.text_file_limit_bytes.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .text_file_limit_bytes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Image File Limit",
+                description: "The size in bytes above which a landing refuses an image.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.image_limit_bytes"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.image_limit_bytes.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .image_limit_bytes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Approval Survives Unrelated Changes",
+                description: "Whether an approval stays valid when the landing master moved only by changes that do not touch the approved files.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.judgment_survives_unrelated"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.judgment_survives_unrelated.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .judgment_survives_unrelated = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Minimum Snapshot Gap",
+                description: "The fewest seconds between two snapshots of a project.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.min_snapshot_gap_seconds"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.min_snapshot_gap_seconds.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .min_snapshot_gap_seconds = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Push Retry Minimum",
+                description: "Minutes before the first retry of a backup that could not be pushed.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.push_retry_min_minutes"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.push_retry_min_minutes.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .push_retry_min_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Push Retry Maximum",
+                description: "The most minutes between retries of a backup that could not be pushed.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.push_retry_max_minutes"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.push_retry_max_minutes.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .push_retry_max_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Thin Snapshots After Days",
+                description: "Days after which old snapshots are thinned out.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.thinning_after_days"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.thinning_after_days.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .thinning_after_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Keep Replaced Days",
+                description: "Days a replaced working copy is kept.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.replaced_keep_days"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.replaced_keep_days.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .replaced_keep_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Run Record Copy Folder",
+                description: "A folder run records are copied to. Empty means they are not copied.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.run_record_copy_dir"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.run_record_copy_dir.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .run_record_copy_dir = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Run Record Copy Interval",
+                description: "Minutes between copies of the run records.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.run_record_copy_interval_minutes"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.run_record_copy_interval_minutes.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .run_record_copy_interval_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "One-offs Project",
+                description: "The name of the project that holds one-off tasks.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.oneoffs_project"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.oneoffs_project.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .oneoffs_project = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Ask Work Kind",
+                description: "Whether a new task asks what kind of work it is.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.ask_work_kind"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.ask_work_kind.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .ask_work_kind = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Default Snapshot Interval",
+                description: "Minutes between snapshots of a project that sets no interval itself. A project changes its own by landing a change to its project file.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.default_snapshot_interval_minutes"),
+                    pick: |settings_content| {
+                        settings_content.project_repository.as_ref()?.default_snapshot_interval_minutes.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .default_snapshot_interval_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    /// The commands of the project repository, each with its key, as links that run the command.
+    fn keys_section() -> Vec<SettingsPageItem> {
+        let mut items = vec![SettingsPageItem::SectionHeader("Keys")];
+        items.extend(PROJECT_REPOSITORY_KEYS.iter().map(|(title, key, action)| {
+            SettingsPageItem::ActionLink(ActionLink {
+                title: (*title).into(),
+                description: Some((*key).into()),
+                button_text: "Run".into(),
+                on_click: Arc::new(|settings_window, window, cx| {
+                    run_in_original_window(settings_window, window, cx, action)
+                }),
+                files: USER,
+            })
+        }));
+        items
+    }
+
+    SettingsPage {
+        title: "Project repository",
+        items: concat_sections!(@vec, settings_section(), keys_section()).into(),
+    }
+}
+
+/// The commands of the project repository: the command name, its key and the action it runs. The
+/// settings UI runs them by name, so it does not depend on the crate that defines them.
+const PROJECT_REPOSITORY_KEYS: &[(&str, &str, &str)] = &[
+    ("project: open repository", "C-c w g o", "project::OpenRepository"),
+    ("project: add existing", "C-c w g a", "project::AddExisting"),
+    ("project: edit", "C-c w g e", "project::Edit"),
+    ("project: open working copy", "C-c w g w", "project::OpenWorkingCopy"),
+    ("project: land", "C-c w g l", "project::Land"),
+    ("project: check", "C-c w g c", "project::Check"),
+    ("project: show changes", "C-c w g v", "project::ShowChanges"),
+    ("project: approve", "C-c w g A", "project::Approve"),
+    ("project: abandon", "C-c w g k", "project::Abandon"),
+    ("project: show history", "C-c w g h", "project::ShowHistory"),
+    ("project: revert", "C-c w g r", "project::Revert"),
+    ("project: backup status", "C-c w g s", "project::BackupStatus"),
+    ("project: backup now", "C-c w g b", "project::BackupNow"),
+    ("project: restore", "C-c w g R", "project::Restore"),
+    ("project: convert", "C-c w g C", "project::Convert"),
+    ("task: move to project", "C-c w g m", "task::MoveToProject"),
+];
 
 fn chats_page() -> SettingsPage {
     fn chats_section() -> [SettingsPageItem; 6] {
@@ -10765,6 +11216,43 @@ mod tests {
             assert!(paths.contains(&path.as_str()), "no Work item for {path}");
         }
         assert_eq!(paths.len(), keys.len(), "{paths:?} against {keys:?}");
+    }
+
+    /// The page has an item for every scalar user value and lists every key.
+    #[test]
+    fn test_project_repository_page_lists_fields_and_keys() {
+        let page = project_repository_page();
+        assert_eq!(page.title, "Project repository");
+        let paths: Vec<&str> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths.len(), 21, "{paths:?}");
+        assert_eq!(paths[0], "project_repository.enabled");
+        // Only the table and the list of patterns are left to settings.json.
+        let (content, _) = settings::parse_json::<SettingsContent>(&settings::default_settings());
+        let default = serde_json::to_value(content.expect("default.json parses")).unwrap();
+        for key in default["project_repository"].as_object().unwrap().keys() {
+            let path = format!("project_repository.{key}");
+            let left_out = matches!(key.as_str(), "layout" | "secret_patterns");
+            assert_eq!(paths.contains(&path.as_str()), !left_out, "{path}");
+        }
+        let keys: Vec<String> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::ActionLink(link) => link.description.as_ref().map(|d| d.to_string()),
+                _ => None,
+            })
+            .collect();
+        for key in ["C-c w g o", "C-c w g a", "C-c w g l", "C-c w g R", "C-c w g C", "C-c w g m"] {
+            assert!(keys.iter().any(|listed| listed == key), "{key}");
+        }
+        assert_eq!(keys.len(), 16);
     }
 
     #[test]

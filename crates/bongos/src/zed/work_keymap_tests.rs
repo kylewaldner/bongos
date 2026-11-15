@@ -176,6 +176,10 @@ async fn emacs_leaves_the_other_work_commands_unbound(cx: &mut TestAppContext) {
         let (_, bindings) = load(&[default, emacs], cx);
         for binding in &bindings {
             let name = binding.action().name();
+            // Resolve split is bound only inside the landing view; the next test checks that.
+            if name == "project::ResolveSplit" {
+                continue;
+            }
             assert!(!UNBOUND.contains(&name), "{emacs}: {name} is bound");
         }
         for (_, action) in WORK_KEYS {
@@ -317,6 +321,71 @@ async fn other_base_keymaps_have_no_work_keys(cx: &mut TestAppContext) {
                     "{set:?}: {name}"
                 );
             }
+        }
+    }
+}
+
+/// The keys under `ctrl-c w g`, with the action each runs.
+const REPOSITORY_KEYS: &[(&str, &str)] = &[
+    ("o", "project::OpenRepository"),
+    ("a", "project::AddExisting"),
+    ("e", "project::Edit"),
+    ("w", "project::OpenWorkingCopy"),
+    ("l", "project::Land"),
+    ("c", "project::Check"),
+    ("v", "project::ShowChanges"),
+    ("A", "project::Approve"),
+    ("k", "project::Abandon"),
+    ("h", "project::ShowHistory"),
+    ("r", "project::Revert"),
+    ("s", "project::BackupStatus"),
+    ("b", "project::BackupNow"),
+    ("R", "project::Restore"),
+    ("C", "project::Convert"),
+    ("m", "task::MoveToProject"),
+];
+
+#[gpui::test]
+async fn repository_keys_sit_under_ctrl_c_w_g_and_the_graph_moved(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for (default, emacs) in [LINUX, MACOS] {
+        let (keymap, bindings) = load(&[default, emacs], cx);
+        let contexts = ["Workspace", "Pane"];
+        for (key, action) in REPOSITORY_KEYS {
+            let (names, pending) = resolve(&keymap, &format!("ctrl-c w g {key}"), &contexts);
+            assert_eq!(names.first(), Some(action), "{emacs}: {key}");
+            assert!(!pending, "{emacs}: {key}");
+        }
+        // The prefix only waits: nothing fires on `ctrl-c w g` alone, so nothing is shadowed.
+        let (names, pending) = resolve(&keymap, "ctrl-c w g", &contexts);
+        assert!(names.is_empty(), "{emacs}: {names:?}");
+        assert!(pending, "{emacs}");
+        let (names, pending) = resolve(&keymap, "ctrl-c w G", &contexts);
+        assert_eq!(names.first(), Some(&"work::Graph"), "{emacs}");
+        assert!(!pending, "{emacs}");
+        // Every other binding under `ctrl-c w g` is one of the table.
+        let under_prefix = bindings
+            .iter()
+            .filter(|binding| {
+                let keystrokes = binding.keystrokes();
+                keystrokes.len() == 4 && keystrokes[..3].iter().map(|k| k.unparse()).eq(["ctrl-c", "w", "g"])
+            })
+            .count();
+        assert_eq!(under_prefix, REPOSITORY_KEYS.len(), "{emacs}");
+    }
+}
+
+#[gpui::test]
+async fn resolve_split_is_bound_only_in_the_landing_view(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for (default, emacs) in [LINUX, MACOS] {
+        let (keymap, _) = load(&[default, emacs], cx);
+        let (names, pending) = resolve(&keymap, "r", &["Workspace", "LandingView"]);
+        assert_eq!(names.first(), Some(&"project::ResolveSplit"), "{emacs}");
+        assert!(!pending, "{emacs}");
+        for contexts in [&["Workspace", "Pane"][..], &["Workspace", "Pane", "Editor mode=full"][..]] {
+            let (names, _) = resolve(&keymap, "r", contexts);
+            assert!(!names.contains(&"project::ResolveSplit"), "{emacs}: {contexts:?}");
         }
     }
 }
