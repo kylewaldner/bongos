@@ -214,6 +214,7 @@ fn set_settings(cx: &mut TestAppContext, builder: bool) {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(true);
+                content.project_repository.get_or_insert_default().enabled = Some(false);
                 content.task_builder.get_or_insert_default().enabled = Some(builder);
             });
         });

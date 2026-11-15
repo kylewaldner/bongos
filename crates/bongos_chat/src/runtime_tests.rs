@@ -118,6 +118,7 @@ pub(super) fn set_chat_settings(cx: &mut TestAppContext, enabled: bool, idle_aft
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(true);
+                content.project_repository.get_or_insert_default().enabled = Some(false);
                 let chats = content.chats.get_or_insert_default();
                 chats.enabled = Some(enabled);
                 chats.idle_after_secs = Some(idle_after_secs);

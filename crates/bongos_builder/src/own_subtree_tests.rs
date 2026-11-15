@@ -58,6 +58,7 @@ async fn fixture(cx: &mut TestAppContext, chats: &[(&str, &str)]) -> Fixture {
         SettingsStore::update_global(cx, |settings, cx| {
             settings.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(true);
+                content.project_repository.get_or_insert_default().enabled = Some(false);
             });
         });
     });

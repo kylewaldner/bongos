@@ -197,6 +197,12 @@ async fn env_with(
         app_state
     });
     cx.update(|cx| {
+        // Before the store exists, so its first load is of the old format these tests seed.
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.project_repository.get_or_insert_default().enabled = Some(false);
+            });
+        });
         bongos_work::init(
             Arc::new(RealFs::new(None, cx.background_executor().clone())),
             WorkDirs::for_test(root),
