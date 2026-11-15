@@ -747,9 +747,16 @@ fn read_plan(
                     Err(error) => return Err(error),
                 };
                 withheld.extend(task_notes);
-                let record: TaskStateRecord = value.try_into().with_context(|| {
-                    format!("the snapshot's {path} is not a task state; it was cut short or edited")
-                })?;
+                // Through text, as the state store reads a record: reading a `toml::Value` into
+                // the record cannot take the datetimes of its history.
+                let record: TaskStateRecord = toml::to_string(&value)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|text| toml::from_str(&text).map_err(anyhow::Error::from))
+                    .with_context(|| {
+                        format!(
+                            "the snapshot's {path} is not a task state; it was cut short or edited"
+                        )
+                    })?;
                 tasks.insert(id.to_string(), record);
             }
             namespace => {

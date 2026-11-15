@@ -59,12 +59,15 @@ fn new_repository_project(title: String, cx: &mut Context<Workspace>) {
     let locations_path = locations_path(cx);
     let created = cx.background_spawn(async move {
         let mut locations = RepositoryLocations::load(locations_path)?;
-        ProjectRepo::create(request, &mut locations).await?;
-        anyhow::Ok(())
+        let repo = ProjectRepo::create(request, &mut locations).await?;
+        anyhow::Ok(repo.location().clone())
     });
     cx.spawn(async move |workspace, cx| {
         let message = match created.await {
-            Ok(()) => format!("Created project {title}"),
+            Ok(location) => match crate::oneoffs::open_location(location, cx).await {
+                Ok(()) => format!("Created project {title}"),
+                Err(error) => format!("Created project {title}, but opening it failed: {error:#}"),
+            },
             Err(error) => error.to_string(),
         };
         workspace

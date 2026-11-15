@@ -132,10 +132,15 @@ pub fn init(fs: Arc<dyn Fs>, dirs: WorkDirs, cx: &mut App) {
     bongos_project_repo::init(cx);
     clean_stale_conversions(cx);
     master_files::init(cx);
+    let locations = dirs.locations.clone();
     let store = cx.new(|cx| WorkStore::new(fs, dirs, cx));
     cx.set_global(GlobalWorkStore(store));
     focus::init(cx);
     rebase::observe_focus(cx);
+    if let Some(locations) = locations {
+        cx.spawn(async move |cx| oneoffs::open_known_projects(locations, cx).await)
+            .detach();
+    }
 }
 
 /// Removes, once at startup, what conversions killed halfway left in the projects folder. A
