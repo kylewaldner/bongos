@@ -164,6 +164,7 @@ recent_projects.workspace = true
 bongos_app.workspace = true
 bongos_builder.workspace = true
 bongos_chat.workspace = true
+bongos_checks.workspace = true
 bongos_emacs.workspace = true
 bongos_isearch.workspace = true
 bongos_kotlin.workspace = true
@@ -252,6 +253,7 @@ image.workspace = true
 image.workspace = true
 
 [dev-dependencies]
+command_palette_hooks.workspace = true
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["input-latency-histogram", "test-support"] }
 image_viewer = { workspace = true, features = ["test-support"] }

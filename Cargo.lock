@@ -2048,6 +2048,7 @@ dependencies = [
  "bongos_app",
  "bongos_builder",
  "bongos_chat",
+ "bongos_checks",
  "bongos_emacs",
  "bongos_isearch",
  "bongos_kotlin",
@@ -2068,6 +2069,7 @@ dependencies = [
  "codestral",
  "collections",
  "command_palette",
+ "command_palette_hooks",
  "component",
  "component_preview",
  "copilot",
@@ -2309,6 +2311,31 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "bongos_checks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_checks_model",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_work_model",
+ "chrono",
+ "command_palette_hooks",
+ "futures 0.3.32",
+ "gpui",
+ "paths",
+ "project",
+ "release_channel",
+ "semver",
+ "serde",
+ "settings",
+ "tempfile",
+ "toml 0.8.23",
+ "util",
+ "workspace",
 ]
 
 [[package]]
