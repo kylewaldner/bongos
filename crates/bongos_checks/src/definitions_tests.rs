@@ -93,6 +93,8 @@ fn an_invalid_task_check_set_is_refused_at_landing_with_file_and_line() {
     let repo = registered_repo(&root);
     let author = person();
     let copy = new_copy(&repo, "amber-otter-0001", &author);
+    // The script the bad check names exists, so `both run and command` is the only fault.
+    write_definition(&copy, "checks/a", "#!/bin/sh\nexit 0\n");
     write_definition(
         &copy,
         "tasks/backfill/task.toml",
@@ -198,16 +200,21 @@ fn init_registers_the_folder_and_the_landing_check(cx: &mut TestAppContext) {
     });
     let author = person();
     let copy = new_copy(&repo, "amber-otter-0001", &author);
+    write_definition(&copy, "checks/a", "#!/bin/sh\nexit 0\n");
+    write_definition(&copy, "checks/sets/rust.toml", BAD_SET);
+    let reasons = refusals(land(&repo, &copy, &author)).join("\n");
+    assert!(reasons.contains("checks/sets/rust.toml"), "{reasons}");
+
+    // With the set fixed, the landing check judges the task's own checks.
+    write_definition(&copy, "checks/sets/rust.toml", GOOD_SET);
     write_definition(
         &copy,
         "tasks/backfill/task.toml",
         &task_with(BAD_TASK_CHECKS),
     );
-    write_definition(&copy, "checks/sets/rust.toml", BAD_SET);
     let reasons = refusals(land(&repo, &copy, &author)).join("\n");
     assert!(
         reasons.contains("tasks/backfill/task.toml, line "),
         "{reasons}"
     );
-    assert!(reasons.contains("checks/sets/rust.toml"), "{reasons}");
 }
