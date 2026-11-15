@@ -17,9 +17,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 bongos_kotlin.workspace = true
 bongos_language_status.workspace = true
+collections.workspace = true
 futures.workspace = true
 gpui.workspace = true
-http_client.workspace = true
 language.workspace = true
 lsp.workspace = true
 serde_json.workspace = true
@@ -29,7 +29,6 @@ util.workspace = true
 [dev-dependencies]
 async_zip.workspace = true
 bongos_net.workspace = true
-collections.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }

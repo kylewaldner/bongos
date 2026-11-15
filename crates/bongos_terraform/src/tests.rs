@@ -392,3 +392,13 @@ fn test_terraform_the_checkpoint_variable_overrides_a_manifest_value() {
     let env = with_checkpoint_disabled(binary).env.unwrap();
     assert_eq!(env.get(CHECKPOINT_DISABLE), Some(&"1".to_string()));
 }
+
+#[test]
+fn test_terraform_forced_env_is_checkpoint_disabled_for_settings_layering() {
+    let adapter = TerraformLsAdapter::new(PathBuf::new(), Arc::new(Manifest::embedded()));
+    // lsp_store lays the user's `binary.env` down, then the forced env, on both binary paths.
+    let mut env: HashMap<String, String> = HashMap::default();
+    env.insert(CHECKPOINT_DISABLE.to_string(), "0".to_string());
+    env.extend(LspAdapter::forced_env(&adapter));
+    assert_eq!(env.get(CHECKPOINT_DISABLE), Some(&"1".to_string()));
+}

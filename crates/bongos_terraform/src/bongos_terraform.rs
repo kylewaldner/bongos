@@ -7,7 +7,9 @@
 //! syntax need no binary) and a notice says so; formatting then fails inside the server.
 //!
 //! Privacy: the server's environment always carries `CHECKPOINT_DISABLE=1`, which stops
-//! HashiCorp's version check (and so every `terraform` it runs). The only host bongos itself
+//! HashiCorp's version check (and so every `terraform` it runs). The guarantee holds against
+//! settings: `LspAdapter::forced_env` is applied after `lsp.terraform-ls.binary.env` and also
+//! when `lsp.terraform-ls.binary.path` replaces the installed binary. The only host bongos itself
 //! contacts is `releases.hashicorp.com`, for the pinned download. One request is not ours to
 //! stop: terraform-ls asks Algolia for module-source completion when the user completes a
 //! `source` or `version` in a `module` block. That is user-triggered and documented here; the
@@ -182,10 +184,16 @@ impl TerraformLsAdapter {
     }
 }
 
+fn forced_env() -> collections::HashMap<String, String> {
+    [(CHECKPOINT_DISABLE.to_string(), "1".to_string())]
+        .into_iter()
+        .collect()
+}
+
 /// `binary` with `CHECKPOINT_DISABLE=1` forced into its environment, whatever a user manifest says.
 fn with_checkpoint_disabled(mut binary: LanguageServerBinary) -> LanguageServerBinary {
     let mut env = binary.env.take().unwrap_or_default();
-    env.insert(CHECKPOINT_DISABLE.to_string(), "1".to_string());
+    env.extend(forced_env());
     binary.env = Some(env);
     binary
 }
@@ -228,6 +236,12 @@ pub fn initialization_options(binary: Option<&Path>) -> Value {
 impl LspAdapter for TerraformLsAdapter {
     fn name(&self) -> LanguageServerName {
         LanguageServerName::new_static(ADAPTER_NAME)
+    }
+
+    /// `CHECKPOINT_DISABLE=1`, applied after the user's `binary.env` and on the `binary.path`
+    /// path too, so no setting turns the version check back on.
+    fn forced_env(&self) -> collections::HashMap<String, String> {
+        forced_env()
     }
 
     /// The `terraform.path` option. Finding no binary posts the notice and sends no path; the

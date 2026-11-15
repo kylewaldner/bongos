@@ -763,6 +763,7 @@ impl LocalLspStore {
                 }
                 let mut env = delegate.shell_env().await;
                 env.extend(settings.env.unwrap_or_default());
+                env.extend(adapter.adapter.forced_env());
 
                 Ok(LanguageServerBinary {
                     path: delegate.resolve_relative_path(path),
@@ -875,6 +876,8 @@ impl LocalLspStore {
                     shell_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
             }
+
+            shell_env.extend(adapter.adapter.forced_env());
 
             binary.env = Some(shell_env);
             Ok(binary)
