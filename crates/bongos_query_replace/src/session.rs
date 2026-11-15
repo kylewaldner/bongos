@@ -60,6 +60,8 @@ pub const BATCH_KEY_CONTEXT: &str = "QueryReplaceBatch";
 /// Marks an editor whose batch is running, and holds the flag that stops it.
 struct Batch {
     cancel: Cancel,
+    /// Set when `C-g` stopped the batch, as opposed to closing its view or losing its editor.
+    quit: Cancel,
 }
 
 impl Addon for Batch {
@@ -98,10 +100,13 @@ pub(crate) fn init(cx: &mut App) {
                     editor
                         .read(cx)
                         .addon::<Batch>()
-                        .map(|batch| batch.cancel.clone())
+                        .map(|batch| (batch.cancel.clone(), batch.quit.clone()))
                 });
                 match cancel {
-                    Some(cancel) => cancel.cancel(),
+                    Some((cancel, quit)) => {
+                        quit.cancel();
+                        cancel.cancel();
+                    }
                     None => cx.propagate(),
                 }
             })
@@ -243,6 +248,8 @@ struct Scan {
     task: Task<ScanEnd>,
     /// The number of matches, once the scan has found them all.
     total: Arc<OnceLock<usize>>,
+    /// Set when `C-g` stopped the batch.
+    quit: Cancel,
 }
 
 /// Marks `editor` as running a batch (its key context gets [`BATCH_KEY_CONTEXT`], where `C-g`
@@ -262,8 +269,10 @@ fn start_scan(
         template,
         counter,
     } = request;
+    let quit = Cancel::new();
     editor.register_addon(Batch {
         cancel: cancel.clone(),
+        quit: quit.clone(),
     });
     cx.notify();
     let snapshot = editor.buffer().read(cx).snapshot(cx);
@@ -297,6 +306,7 @@ fn start_scan(
         }
     });
     Scan {
+        quit,
         chunks,
         task,
         total,
@@ -495,6 +505,8 @@ pub(crate) struct Interactive {
 /// A `!` batch of the interactive replace, while it runs.
 struct Running {
     cancel: Cancel,
+    /// Set when `C-g` stopped the batch.
+    quit: Cancel,
     /// The matches the scan found, once it found them all.
     scanned: Arc<OnceLock<usize>>,
     /// The matches decided before the batch.
@@ -951,6 +963,7 @@ fn run(state: &Shared, effects: Vec<Effect>, window: &mut Window, cx: &mut App) 
             }
             Effect::StopBatch => {
                 if let Some(batch) = &state.borrow().batch {
+                    batch.quit.cancel();
                     batch.cancel.cancel();
                 }
             }
@@ -990,6 +1003,7 @@ fn start_batch(state: &Shared, from: usize, window: &mut Window, cx: &mut App) {
     });
     state.borrow_mut().batch = Some(Running {
         cancel: cancel.clone(),
+        quit: scan.quit.clone(),
         scanned: scan.total.clone(),
         before,
     });
@@ -1038,10 +1052,9 @@ fn end_batch(
 ) {
     let effects = {
         let mut state = state.borrow_mut();
-        state.batch = None;
         // `C-g` stopped the batch: the keys typed during it are dropped, as a quit drops typed-ahead
-        // input in Emacs.
-        if outcome.as_ref().is_some_and(|outcome| outcome.interrupted) {
+        // input in Emacs. Closing the view stops it too, but its held keys still run.
+        if state.batch.take().is_some_and(|batch| batch.quit.is_canceled()) {
             state.held = None;
         }
         if state.done {

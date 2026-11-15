@@ -343,6 +343,53 @@ async fn ctrl_g_after_a_held_key_stops_the_batch_and_drops_the_key(cx: &mut Test
 }
 
 #[gpui::test]
+async fn closing_the_view_during_a_batch_still_runs_the_held_key(cx: &mut TestAppContext) {
+    let lines = 2 * SCAN_CHUNK + SCAN_CHUNK / 2;
+    let original = "foo\n".repeat(lines);
+    let mut scene = asking(&original, cx).await;
+    let (log, _subscription) = scene.record_actions();
+    scene
+        .cx
+        .update(|window, cx| window.dispatch_action(All.boxed_clone(), cx));
+    let mut ticks = 0;
+    while scene.text().matches("bar").count() < SCAN_CHUNK {
+        assert!(ticks < 1_000, "the first chunk never landed");
+        scene.cx.executor().tick();
+        ticks += 1;
+    }
+    let running = |scene: &mut Scene| {
+        scene
+            .editor
+            .read_with(&scene.cx, |editor, _| batch_running(editor))
+    };
+    assert!(running(&mut scene));
+
+    // `ctrl-f` is held; closing the view stops the batch, which is not a quit.
+    scene
+        .cx
+        .update(|window, cx| window.dispatch_keystroke(key("ctrl-f"), cx));
+    assert!(running(&mut scene));
+    let workspace = scene.workspace.clone();
+    scene.cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| workspace.hide_modal(window, cx));
+    });
+    scene.cx.run_until_parked();
+
+    assert!(!running(&mut scene));
+    assert!(!scene.view_open());
+    let expected = "bar\n".repeat(SCAN_CHUNK) + &"foo\n".repeat(lines - SCAN_CHUNK);
+    assert_eq!(scene.text(), expected);
+    assert_eq!(
+        scene.messages(),
+        vec![format!("Replaced {SCAN_CHUNK} occurrences (interrupted)")]
+    );
+    // The held `ctrl-f` runs once, from the end of the last replacement.
+    assert_eq!(scene.selections(), vec![4 * SCAN_CHUNK..4 * SCAN_CHUNK]);
+    assert_eq!(*log.borrow(), vec!["editor::MoveRight".to_string()]);
+    assert!(scene.editor_focused());
+}
+
+#[gpui::test]
 async fn an_exit_after_the_origin_pane_closed(cx: &mut TestAppContext) {
     let original = "foo foo foo\n";
     let mut scene = asking(original, cx).await;
