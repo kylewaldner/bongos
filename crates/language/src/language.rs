@@ -565,6 +565,12 @@ fn download_error_text(error: &anyhow::Error) -> String {
 pub trait LspAdapter: 'static + Send + Sync + DynLspInstaller {
     fn name(&self) -> LanguageServerName;
 
+    /// Environment variables the server always starts with. They apply after the user's
+    /// `binary.env` setting and also when `binary.path` replaces the adapter's binary.
+    fn forced_env(&self) -> HashMap<String, String> {
+        HashMap::default()
+    }
+
     fn process_diagnostics(&self, _: &mut lsp::PublishDiagnosticsParams, _: LanguageServerId) {}
 
     /// When processing new `lsp::PublishDiagnosticsParams` diagnostics, whether to retain previous one(s) or not.
