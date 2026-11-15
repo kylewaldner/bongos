@@ -86,9 +86,12 @@ impl ProjectRepo {
     }
 }
 
-/// Removes a tree whose folders [`set_folders`] made read-only.
+/// Removes a tree whose folders [`set_folders`] made read-only. When some folder cannot be made
+/// writable, the rest of the tree is still removed.
 fn remove_read_only_tree(path: &Path) -> Result<()> {
-    set_folders(path, FolderMode::Writable)?;
+    if let Err(error) = set_folders(path, FolderMode::Writable) {
+        log::warn!("making {} writable: {error:#}", path.display());
+    }
     std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))
 }
 

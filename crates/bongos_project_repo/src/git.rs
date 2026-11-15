@@ -251,9 +251,12 @@ impl Git {
                 command.env_remove(name);
             }
         }
+        // Replacement refs (`git replace`) would make an object read as another one, so what a
+        // commit holds could differ from what its id names.
         command
             .current_dir(directory)
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(args);
         if let Some(index) = index {
             command.env("GIT_INDEX_FILE", index);

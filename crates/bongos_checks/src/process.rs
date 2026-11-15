@@ -153,8 +153,9 @@ pub fn budget(decl: &CheckDecl, default_minutes: Option<u32>) -> Option<Duration
 }
 
 /// The environment of a check process: the base, without any inherited variable of this
-/// feature's own, plus `vars`, minus every name in `unset` (applied last, so nothing survives
-/// it).
+/// feature's own and minus every name in `unset`, plus `vars`. `unset` applies to the base
+/// only, so the variables this feature sets (its token, result and params files) are always
+/// present.
 pub fn part_env(
     base: &EnvBase,
     vars: &[(String, OsString)],
@@ -168,11 +169,11 @@ pub fn part_env(
         EnvBase::Own => std::env::vars_os().collect(),
     };
     env.retain(|name, _| !is_own_variable(name));
-    for (name, value) in vars {
-        env.insert(OsString::from(name), value.clone());
-    }
     for name in unset {
         env.remove(OsStr::new(name));
+    }
+    for (name, value) in vars {
+        env.insert(OsString::from(name), value.clone());
     }
     env
 }
@@ -390,18 +391,7 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
     );
     let mut process = match spawned {
         Ok(process) => process,
-        Err(error) => {
-            let not_found = error
-                .chain()
-                .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
-                .any(|error| error.kind() == std::io::ErrorKind::NotFound);
-            let reason = if not_found {
-                NoVerdictReason::ToolNotFound(argv[0].clone())
-            } else {
-                NoVerdictReason::StartFailed(format!("{error:#}"))
-            };
-            return refuse(reason, argv);
-        }
+        Err(error) => return refuse(spawn_failure(&error, &argv[0]), argv),
     };
     let record = process.record();
     let start = PartStart {
@@ -425,22 +415,32 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
     }
 
     let deadline = spec.budget.map(|budget| started + budget);
-    let ending = loop {
+    let stop = |process: &mut NodeProcess, reason| {
+        let began = Instant::now();
+        stop_part(process, &token, spec.kill_grace);
+        (
+            Ending::Stopped(reason),
+            Some(stop_deadline(began, spec.kill_grace)),
+        )
+    };
+    let (ending, stop_over) = loop {
         if process.has_exited() {
-            break Ending::Exited;
+            break (Ending::Exited, None);
         }
         if spec.stop.is_stopped() {
-            stop_part(&mut process, &token, spec.kill_grace);
-            break Ending::Stopped(NoVerdictReason::Cancelled);
+            break stop(&mut process, NoVerdictReason::Cancelled);
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            stop_part(&mut process, &token, spec.kill_grace);
-            break Ending::Stopped(NoVerdictReason::TimeBudgetReached);
+            break stop(&mut process, NoVerdictReason::TimeBudgetReached);
         }
         std::thread::sleep(POLL);
     };
     let exit = exit_of(&mut process);
-    if reader.is_ok() && done_receiver.recv_timeout(DRAIN).is_err() {
+    // On a stop the output gets only what is left of the grace.
+    let drain = stop_over.map_or(DRAIN, |over| {
+        DRAIN.min(over.saturating_duration_since(Instant::now()))
+    });
+    if reader.is_ok() && done_receiver.recv_timeout(drain).is_err() {
         log::info!(
             "checks: the output of {} is still open after it ended; reading stops",
             argv[0]
@@ -471,6 +471,22 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
         command: argv,
         output,
         duration: started.elapsed(),
+    }
+}
+
+/// Why the process could not start, from the program and the io error only: the spawn error's
+/// context prints the whole command with its environment, which may hold secrets.
+fn spawn_failure(error: &anyhow::Error, program: &str) -> NoVerdictReason {
+    let io = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .next();
+    match io {
+        Some(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            NoVerdictReason::ToolNotFound(program.to_string())
+        }
+        Some(io) => NoVerdictReason::StartFailed(format!("starting {program}: {io}")),
+        None => NoVerdictReason::StartFailed(format!("starting {program} failed")),
     }
 }
 
@@ -548,15 +564,33 @@ fn stop_part(process: &mut NodeProcess, token: &str, grace: Duration) {
         std::slice::from_mut(process),
         grace.saturating_sub(Duration::from_secs(1)),
     );
-    // Whatever started since is found by the token again.
+    // Whatever started since is found by the token again, and on every wait below, so a
+    // process forking while the others die is killed too.
     strays.extend(token_holders(token));
     for stray in &strays {
         signal_stray(*stray, Signal::Kill);
     }
-    let deadline = began + grace.max(Duration::from_secs(1));
-    while Instant::now() < deadline && strays.iter().any(|stray| stray_alive(*stray)) {
+    let deadline = stop_deadline(began, grace);
+    while Instant::now() < deadline {
+        let late = token_holders(token);
+        for stray in &late {
+            signal_stray(*stray, Signal::Kill);
+        }
+        for stray in &late {
+            if !strays.contains(stray) {
+                strays.push(*stray);
+            }
+        }
+        if late.is_empty() && !strays.iter().any(|stray| stray_alive(*stray)) {
+            break;
+        }
         std::thread::sleep(POLL);
     }
+}
+
+/// When a stop begun at `began` must be over.
+fn stop_deadline(began: Instant, grace: Duration) -> Instant {
+    began + grace.max(Duration::from_secs(1))
 }
 
 /// Every live process below `leader` by parent links.

@@ -336,6 +336,32 @@ fn a_missing_command_or_script_is_tool_not_found() {
 }
 
 #[test]
+fn a_script_that_cannot_start_names_no_environment_value() {
+    let fixture = fixture();
+    let repository = fixture.repo.location().repository.clone();
+    let script_path = repository.join("definitions/checks/not-executable");
+    std::fs::write(&script_path, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    commit_everything(&repository, "add a script without its executable bit");
+    let pin = Arc::new(block_on(Pin::materialize(&fixture.repo, "main")).unwrap());
+    let secret = "a-distinctive-fake-secret-4417";
+    let mut spec = fixture.spec(script("not-executable", "not-executable"));
+    spec.pin = pin;
+    spec.env = EnvBase::Lane(vec![
+        ("PATH".to_string(), std::env::var("PATH").unwrap()),
+        ("DEPLOY_TOKEN".to_string(), secret.to_string()),
+    ]);
+    let outcome = block_on(run_part(spec));
+    let Verdict::NoVerdict(NoVerdictReason::StartFailed(reason)) = &outcome.verdict else {
+        panic!("{:?}", outcome.verdict);
+    };
+    assert!(!reason.contains(secret), "{reason}");
+    assert!(!reason.contains("DEPLOY_TOKEN"), "{reason}");
+    assert!(!reason.contains("BONGOS_CHECK_TOKEN"), "{reason}");
+    assert!(reason.contains("not-executable"), "{reason}");
+}
+
+#[test]
 fn a_command_is_found_on_the_path_and_gets_its_arguments_unchanged() {
     let fixture = fixture();
     let outcome = fixture.run(CheckDecl {
@@ -387,33 +413,57 @@ fn an_unset_variable_is_absent_and_the_check_variables_are_set() {
         assert!(names.contains(&name.to_string()), "{name} in {names:?}");
     }
 
-    // On bongos's own environment too, and `unset` wins over the check's own variables.
+    // On bongos's own environment too; `unset` cannot remove the check's own variables.
     assert!(std::env::var_os("HOME").is_some());
     let mut spec = fixture.spec(CheckDecl {
-        unset: vec!["HOME".to_string(), "BONGOS_CHECK_TREE_KEY".to_string()],
+        unset: vec![
+            "HOME".to_string(),
+            "BONGOS_CHECK_TOKEN".to_string(),
+            "BONGOS_CHECK_RESULT".to_string(),
+            "BONGOS_CHECK_PARAMS".to_string(),
+        ],
         ..script("env", "write-env")
     });
     spec.env = EnvBase::Own;
     assert_eq!(block_on(run_part(spec)).verdict, Verdict::Pass);
     let names = fixture.env_names();
     assert!(!names.contains(&"HOME".to_string()), "{names:?}");
-    assert!(!names.contains(&"BONGOS_CHECK_TREE_KEY".to_string()));
-    assert!(names.contains(&"BONGOS_CHECK_NAME".to_string()));
+    for name in [
+        "BONGOS_CHECK_TOKEN",
+        "BONGOS_CHECK_RESULT",
+        "BONGOS_CHECK_PARAMS",
+        "BONGOS_CHECK_NAME",
+    ] {
+        assert!(names.contains(&name.to_string()), "{name} in {names:?}");
+    }
 }
 
 #[test]
-fn unset_is_applied_after_everything_else() {
+fn unset_removes_inherited_variables_but_never_the_check_variables() {
     let base = EnvBase::Lane(vec![
         ("A".to_string(), "1".to_string()),
+        ("B".to_string(), "2".to_string()),
         ("BONGOS_CHECK_ITEMS".to_string(), "/stale".to_string()),
         ("BONGOS_SCOPE_RESULT".to_string(), "/stale".to_string()),
     ]);
     let env = part_env(
         &base,
-        &[("BONGOS_CHECK_NAME".to_string(), OsString::from("tests"))],
-        &["A".to_string(), "BONGOS_CHECK_NAME".to_string()],
+        &[
+            ("BONGOS_CHECK_NAME".to_string(), OsString::from("tests")),
+            ("BONGOS_CHECK_TOKEN".to_string(), OsString::from("t")),
+        ],
+        &[
+            "A".to_string(),
+            "BONGOS_CHECK_NAME".to_string(),
+            "BONGOS_CHECK_TOKEN".to_string(),
+        ],
     );
-    assert!(env.is_empty(), "{env:?}");
+    let names: Vec<_> = env.keys().map(|name| name.to_string_lossy()).collect();
+    assert_eq!(
+        names,
+        ["B", "BONGOS_CHECK_NAME", "BONGOS_CHECK_TOKEN"],
+        "{env:?}"
+    );
 }
 
 struct FakeTrees {
