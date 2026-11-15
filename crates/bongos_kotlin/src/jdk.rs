@@ -1008,7 +1008,7 @@ mod tests {
         let mut inputs = tree.inputs();
         inputs.setting_name = "java.jdk_home";
         let chosen = jdk(tree.path(), "chosen", "17.0.9");
-        inputs.setting = Some(chosen.clone());
+        inputs.setting = Some(chosen);
         let detection = detect(&inputs);
         assert_eq!(found(&detection).reason, "java.jdk_home in settings");
 
