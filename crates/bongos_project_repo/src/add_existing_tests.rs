@@ -10,7 +10,7 @@ use crate::snapshot_tests::{change_state, project, start, writer};
 use crate::test_support::{git, main_commit, outside_commit, run_git, todo};
 use crate::{
     AddExistingRequest, AddExistingSource, AddedProject, LayoutTemplates, ProjectRepo,
-    ProjectValueOverrides, RepositoryLocations, RestoreOutcome, RestoreSource,
+    ProjectValueOverrides, RepositoryLocations, RestoreOutcome, RestoreSource, SnapshotOutcome,
 };
 
 /// A bare repository at `root/name`.
@@ -130,6 +130,97 @@ fn a_project_added_from_its_remote_is_verified_and_offers_restore() {
             .todos,
         vec![todo("t1", TodoState::Done)]
     );
+}
+
+#[test]
+fn the_timer_does_not_snapshot_an_added_project_over_the_snapshot_to_restore() {
+    let root = TempDir::new().unwrap();
+    let (_original, remote) = pushed(&root);
+    let mut known = locations(&root);
+    let added = add(
+        request(
+            AddExistingSource::Remote {
+                address: remote.to_string_lossy().into_owned(),
+                folder: root.path().join("new-machine").join("invoicing"),
+            },
+            None,
+        ),
+        &mut known,
+    )
+    .unwrap();
+    let repo = configured(&added);
+    // Opening the project writes to its state: the generation moved, the state is still empty.
+    writer(repo)
+        .transact(|tx| tx.set_meta("opened", "yes"))
+        .unwrap();
+    assert!(writer(repo).generation().unwrap() > 0);
+    assert!(repo.backups_held().unwrap());
+
+    let later = start() + chrono::Duration::hours(1);
+    assert_eq!(
+        block_on(repo.snapshot_now(SnapshotReason::Timer, later)).unwrap(),
+        SnapshotOutcome::NothingChanged
+    );
+    assert_eq!(repo.last_snapshot().unwrap(), None);
+    let status = block_on(repo.backup_status(later)).unwrap();
+    assert!(
+        status
+            .problems
+            .contains(&crate::BACKUPS_HELD_NOTE.to_string()),
+        "{status:?}"
+    );
+
+    // The newest snapshot is still the first machine's, and restoring it lifts the hold.
+    let outcome = block_on(repo.restore(&RestoreSource::Newest, later)).unwrap();
+    assert!(
+        matches!(outcome, RestoreOutcome::Restored { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        writer(repo)
+            .read(|read| read.task("l1"))
+            .unwrap()
+            .unwrap()
+            .todos,
+        vec![todo("t1", TodoState::Done)]
+    );
+    assert!(!repo.backups_held().unwrap());
+    // The timer snapshots again (the restored state may export the files of the newest one).
+    let after = later + chrono::Duration::hours(1);
+    let outcome = block_on(repo.snapshot_now(SnapshotReason::Timer, after)).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            SnapshotOutcome::Taken { .. } | SnapshotOutcome::Unchanged { .. }
+        ),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn a_deliberate_snapshot_of_an_added_project_lifts_the_hold() {
+    let root = TempDir::new().unwrap();
+    let (_original, remote) = pushed(&root);
+    let mut known = locations(&root);
+    let added = add(
+        request(
+            AddExistingSource::Remote {
+                address: remote.to_string_lossy().into_owned(),
+                folder: root.path().join("new-machine").join("invoicing"),
+            },
+            None,
+        ),
+        &mut known,
+    )
+    .unwrap();
+    let repo = configured(&added);
+    assert!(repo.backups_held().unwrap());
+    let later = start() + chrono::Duration::hours(1);
+    assert!(matches!(
+        block_on(repo.snapshot_now(SnapshotReason::JobEnd, later)).unwrap(),
+        SnapshotOutcome::Taken { .. }
+    ));
+    assert!(!repo.backups_held().unwrap());
 }
 
 #[test]

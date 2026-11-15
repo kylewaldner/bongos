@@ -1527,6 +1527,7 @@ impl ProjectRepo {
         let imported = writer.import_without_hooks(ImportReason::Restore, Some(&path), |tx| {
             let plan = self.plan_over(resolved, &tx.as_read(), exporters)?;
             apply_plan(tx, &plan, exporters)?;
+            tx.delete_meta(crate::backup::BACKUPS_HELD_KEY)?;
             Ok(plan)
         });
         drop(hold);

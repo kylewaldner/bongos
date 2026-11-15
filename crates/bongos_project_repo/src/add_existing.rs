@@ -352,6 +352,12 @@ impl ProjectRepo {
             || state_branch::tip(git, &location.repository, REMOTE_STATE_REF)
                 .await
                 .is_some();
+        if has_snapshot {
+            // The live state is empty: the timer must not snapshot it over the one to restore.
+            writer.transact(|tx| {
+                tx.set_meta_quiet(crate::backup::BACKUPS_HELD_KEY, crate::backup::BACKUPS_HELD)
+            })?;
+        }
         locations.record(location)?;
         Ok(AddedProject {
             repo,

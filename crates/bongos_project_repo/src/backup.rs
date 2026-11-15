@@ -51,6 +51,15 @@ pub const RUN_RECORDS_LOCAL_SENTENCE: &str = "Run records stay on this machine o
 
 /// The `meta` key of the last snapshot: its commit, time and generation.
 pub const LAST_SNAPSHOT_KEY: &str = "last_snapshot";
+/// The `meta` key that holds the timer's snapshots of a project added with a snapshot to restore
+/// ([`BACKUPS_HELD`] while held): until a restore, a job's end or `project: backup now`, the
+/// live state is only what opening the project wrote, and a snapshot of it would become the
+/// newest one, the one `project: restore` restores.
+pub(crate) const BACKUPS_HELD_KEY: &str = "backups_held";
+pub(crate) const BACKUPS_HELD: &str = "held";
+/// What `project: backup status` says while the timer's snapshots are held.
+pub const BACKUPS_HELD_NOTE: &str = "timer snapshots wait for project: restore, the end of a job \
+     or project: backup now, so an untouched state is not snapshotted over the one to restore";
 /// The `meta` key of the rest of the backup's record.
 const BACKUP_KEY: &str = "backup";
 /// Where run records are, under each folder of `files/`.
@@ -443,6 +452,17 @@ impl ProjectRepo {
         self.engine.backup.stopped.load(Ordering::SeqCst)
     }
 
+    /// Whether the timer's snapshots are held after `project: add existing` (see
+    /// [`BACKUPS_HELD_KEY`]).
+    pub fn backups_held(&self) -> Result<bool> {
+        let held = self
+            .state
+            .as_ref()
+            .context("the project's state store is not open")?
+            .read(|read| read.meta(BACKUPS_HELD_KEY))?;
+        Ok(held.as_deref() == Some(BACKUPS_HELD))
+    }
+
     /// Asks `sources` about running work instead of those registered in the app.
     pub fn use_activity_sources(&self, sources: Vec<Arc<dyn ActivitySource>>) {
         *self.engine.backup.activity.lock() = Some(sources);
@@ -535,6 +555,9 @@ impl ProjectRepo {
         let _branch = self.engine.backup.branch_lock.lock().await;
         let writer = self.writer_or_error()?;
         let options = self.backup_options();
+        if reason == SnapshotReason::Timer && self.backups_held()? {
+            return Ok(SnapshotOutcome::NothingChanged);
+        }
         if reason != SnapshotReason::Manual {
             let last = self.last_snapshot()?;
             let generation = writer.generation()?;
@@ -557,7 +580,14 @@ impl ProjectRepo {
         }
         let result = self.take_snapshot(&writer, &options, reason, now).await;
         match &result {
-            Ok(_) => {}
+            Ok(_) => {
+                // A job's end or `backup now` is a deliberate snapshot: the timer may follow.
+                if self.backups_held().unwrap_or(false) {
+                    writer
+                        .transact(|tx| tx.set_meta_quiet(BACKUPS_HELD_KEY, "released"))
+                        .ok();
+                }
+            }
             Err(error) => {
                 // The error may quote a value of the state or the remote's URL.
                 let message = format!("{error:#}");
@@ -918,6 +948,10 @@ impl ProjectRepo {
         let copy_interval = self
             .project_value(RUN_RECORD_COPY_INTERVAL_KEY)
             .as_u32(options.run_record_copy_interval_minutes, 1);
+        let mut problems = record.problems;
+        if self.backups_held()? {
+            problems.push(BACKUPS_HELD_NOTE.to_string());
+        }
         Ok(BackupStatus {
             last_snapshot,
             snapshot_error: record.snapshot_error,
@@ -930,7 +964,7 @@ impl ProjectRepo {
             next_push_at: record.next_push_at,
             unpushed_snapshots: unpushed,
             withheld: record.withheld,
-            problems: record.problems,
+            problems,
             orphans,
             run_record_copy: RunRecordCopyStatus {
                 sentence: options

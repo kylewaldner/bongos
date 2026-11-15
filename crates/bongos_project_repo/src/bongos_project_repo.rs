@@ -48,7 +48,7 @@ pub use approval::{
     MOVE_ROLLBACK_NAMESPACE, NEEDS_A_WINDOW, OwnSubtreeHook,
 };
 pub use backup::{
-    BACKUP_TICK, BackupOptions, BackupStatus, CopyResult, DEFAULT_STATE_BRANCH,
+    BACKUP_TICK, BACKUPS_HELD_NOTE, BackupOptions, BackupStatus, CopyResult, DEFAULT_STATE_BRANCH,
     DRIVE_FAILURE_SENTENCE, LAST_SNAPSHOT_KEY, NOT_BACKED_UP_NO_REMOTE, PUSH_TIMEOUT, PushResult,
     PushTimeout, RUN_RECORDS_LOCAL_SENTENCE, RunRecordCopyStatus, SnapshotOutcome, SnapshotReason,
     SnapshotRecord, retry_delay,
