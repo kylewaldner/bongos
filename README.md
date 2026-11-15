@@ -575,6 +575,53 @@ the `minibuffer` settings are `max_rows` (candidate rows shown, 15), `show_count
 before the prompt, true), `message_timeout` (how long a message stays, 4000 ms) and
 `key_hint_delay` (how long a pending key sequence waits before its keys are shown, 500 ms).
 
+## Languages
+
+Each language below gets highlighting, a language server and formatting with no setup. A server
+is downloaded the first time a file of its language opens (see Privacy for the hosts), unless
+`lsp.<server>.binary.path` points at one you installed. The status line names a language whose
+server cannot be downloaded or started ("Java server unavailable: could not download jdtls"), or
+a tool it is missing, and shows download progress. Its menu has Show logs (`languages.log` in the
+logs directory, with the full cause), Retry, Cancel download and Dismiss; the same are in the
+palette as `languages: show logs`, `languages: retry server` and `languages: cancel download`.
+
+| Language | Server | Formatting | Tasks and tests |
+|---|---|---|---|
+| Rust | rust-analyzer, building into `<target>/rust-analyzer` so it never blocks your `cargo build` | rust-analyzer (rustfmt) | cargo tasks, gutter test runs |
+| Python | basedpyright and ruff | ruff | pytest and unittest; the project's venv, uv, poetry or conda environment is picked with no setting |
+| JavaScript, TypeScript, TSX | vtsls, ESLint, Tailwind | Prettier, or Biome | `package.json` scripts and test runners with the project's package manager |
+| Java | jdtls, or the IntelliJ server where `kotlin.server` runs it (one server for Kotlin and Java) | jdtls | `java: show jdk` reports the JDKs |
+| Terraform, OpenTofu (`.tf`, `.tofu`, `.tfvars`) | terraform-ls | `terraform fmt` through terraform-ls | |
+| HTML, XML (`pom.xml`), HCL, TOML | none (highlighting only) | | |
+
+Go, C, C++, CSS, JSON, YAML and Bash keep the servers bongos inherited.
+
+- JavaScript package manager: `packageManager` in `package.json`, else the nearest lockfile
+  (`bun.lock` or `bun.lockb`, `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`), else npm.
+  Tasks run that manager only: a Bun project's scripts run as `bun run <script>`, its tests with
+  `bun test` (or `bun x <runner>` for Jest and Vitest), and bongos never runs `npm`, `npx` or
+  `node` for them. The language servers themselves still run on Node.js.
+- Biome: with `biome.json` or `biome.jsonc` in the project, bongos runs the project's own
+  `node_modules/@biomejs/biome` (it never downloads Biome) and formats with it instead of
+  Prettier; ESLint stays off there unless the project also has an ESLint config.
+- Java: jdtls runs on a JDK of its own, chosen apart from the JDK that imports the project. The
+  server JDK is `java.server_jdk`, else the newest JDK 25 or newer found (`JAVA_HOME`, then the
+  usual install locations). The import JDK is `java.jdk_home`, else the Gradle toolchain, the
+  Maven `release` or `source` level, then `JAVA_HOME`. jdtls keeps its workspace in the data
+  directory, never in the project.
+- Terraform: the binary terraform-ls runs is `terraform.binary`, else `terraform` on the
+  project's `PATH`, else `tofu`. With none, the server still gives completion and syntax and the
+  status line says formatting and validation need one.
+
+Tools bongos uses but does not install:
+
+- A JDK 25 or newer for jdtls (and the JDK your project builds with).
+- `terraform` or `tofu` for Terraform formatting and validation.
+- Node.js 22 or later for the Node-based servers and Prettier; without one, bongos downloads
+  Node.js from `nodejs.org`.
+- `bun` for Bun projects, `uv` or `poetry` for those projects' environments (bongos finds the
+  environments they made; it does not create them), and the project's own Biome.
+
 ## Privacy
 
 bongos's own code, and the telemetry and update checks of the language servers it runs, contact
@@ -613,13 +660,21 @@ your `PATH` is used without a download. Each one comes from:
 - Go's module proxy, as Go's configuration names it (`proxy.golang.org` by default): gopls and
   Delve, built with your `go install`. The latest gopls version is read from `api.github.com`.
 
-The YAML server is started with `redhat.telemetry.enabled` set to `false`. Java and Terraform
-servers list their hosts when they are added.
+- `download.eclipse.org`: jdtls, the Java server (pinned build, checked against its SHA-256).
+- `releases.hashicorp.com`: terraform-ls, the Terraform server (pinned build, checked against its
+  SHA-256).
+
+The YAML server is started with `redhat.telemetry.enabled` set to `false`. terraform-ls, and every
+`terraform` it runs, get `CHECKPOINT_DISABLE=1`, which turns off HashiCorp's version check; no
+setting turns it back on. jdtls and terraform-ls are installed once and then start from the cache
+with no request, also offline.
 
 A running server may still fetch what your files ask for: the YAML server reads its schema
 catalog from `www.schemastore.org` (turn it off with `yaml.schemaStore.enable: false` in the
 server's settings), the JSON and YAML servers fetch the schemas a file names, and the TypeScript
-servers may fetch type packages from the npm registry.
+servers may fetch type packages from the npm registry. When you complete a `source` or `version`
+in a Terraform `module` block, terraform-ls asks its module search service (Algolia) for
+suggestions.
 
 ### Kotlin server manifest file
 
