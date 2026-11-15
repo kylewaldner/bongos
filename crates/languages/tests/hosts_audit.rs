@@ -64,9 +64,11 @@ const NODEJS: &[&str] = &["nodejs.org"];
 const NONE: &[&str] = &[];
 
 /// Each language server's download hosts.
-const LANGUAGE_SERVER_HOSTS: [(&str, &[&str]); 19] = [
+const LANGUAGE_SERVER_HOSTS: [(&str, &[&str]); 20] = [
     ("basedpyright", NPM),
     ("bash-language-server", NPM),
+    // The project's own node_modules binary; never downloaded.
+    ("biome", NONE),
     ("clangd", GITHUB),
     // The pinned vscode-eslint source archive; its dependencies then come from npm.
     ("eslint", GITHUB_DOWNLOAD),
