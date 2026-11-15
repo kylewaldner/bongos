@@ -26,7 +26,7 @@ use super::*;
 use crate::engine::EditTarget;
 use crate::landing::{
     self, LandingRunEnd, LandingRuns, WORKFLOW_KIND, WorkflowValid, parse_workflow,
-    set_landing_runs,
+    set_landing_runs, set_resolver_dirs, workflow_resolver,
 };
 
 const PROJECT_TOML: &str = "schema = 1\nid = \"project-1\"\ntitle = \"Repo project\"\n";
@@ -237,6 +237,27 @@ async fn a_workflow_landing_check_starts_its_run_as_a_landing_run(cx: &mut TestA
         &CheckOutcome::no_verdict("workflow single was cancelled")
     );
     set_landing_runs(None);
+}
+
+#[test]
+fn the_landing_resolver_finds_a_user_workflow_and_refuses_a_missing_one() {
+    let _turn = take_turn();
+    let temp = TempDir::new().unwrap();
+    let profile = temp.path().join("profile");
+    fs::create_dir_all(profile.join("review")).unwrap();
+    fs::write(profile.join("review/workflow.toml"), review("review")).unwrap();
+    let resolver = workflow_resolver();
+    assert!(resolver("ghost"), "with no folders set every name resolves");
+    set_resolver_dirs(Some(LayerDirs {
+        shipped: None,
+        profile: Some(profile),
+        project: None,
+    }));
+    let found = resolver("review");
+    let missing = resolver("ghost");
+    set_resolver_dirs(None);
+    assert!(found);
+    assert!(!missing);
 }
 
 #[test]

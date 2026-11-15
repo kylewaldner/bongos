@@ -6,12 +6,13 @@
 use std::path::{Component, Path};
 use std::sync::{Arc, RwLock};
 
-use bongos_project_repo::LandingChecks;
+use bongos_project_repo::{LandingChecks, WorkflowResolver};
 use bongos_project_repo::{CheckInput, CheckKinds, CheckOutcome, CheckPhase, LandingCheck};
 use bongos_project_repo_model::ChangeSummary;
 use bongos_project_repo_model::layout::{DEFINITIONS_DIR, WORKFLOWS_DIR};
 use bongos_workflow_model::layers::DEFINITION_FILE;
-use bongos_workflow_model::{Layer, Resolved, Severity, parse};
+use bongos_workflow_model::{Layer, LayerDirs, Resolved, Severity, parse};
+use bongos_workflow_model::layers::resolve;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use gpui::App;
@@ -30,6 +31,34 @@ const MAX_WORKFLOW_NAME: usize = 80;
 pub fn register(cx: &mut App) {
     LandingChecks::register(Arc::new(WorkflowValid), cx);
     CheckKinds::register(WORKFLOW_KIND, parse_workflow, cx);
+    LandingChecks::register_workflow_resolver(workflow_resolver(), cx);
+}
+
+static RESOLVER_DIRS: RwLock<Option<LayerDirs>> = RwLock::new(None);
+
+/// Sets the shipped and user workflow folders the landing resolver reads (the engine does this
+/// when it starts); `None` makes the resolver accept every name again.
+pub fn set_resolver_dirs(dirs: Option<LayerDirs>) {
+    *RESOLVER_DIRS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = dirs;
+}
+
+/// Resolves a workflow name in the user's and the shipped workflows for check 4. The project's
+/// own workflows are looked up by the check itself in the change. With no folders set, every
+/// name resolves, since nothing can be said.
+pub fn workflow_resolver() -> WorkflowResolver {
+    Arc::new(|name: &str| {
+        let dirs = RESOLVER_DIRS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(mut dirs) = dirs else {
+            return true;
+        };
+        dirs.project = None;
+        resolve(&dirs).get(name).is_some()
+    })
 }
 
 /// Check 5, `workflow-valid` (`InQueue`): every workflow folder the change touches, which covers

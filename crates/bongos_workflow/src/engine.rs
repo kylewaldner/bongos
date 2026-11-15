@@ -826,6 +826,7 @@ impl WorkflowEngine {
         })
         .detach();
         set_landing_runs(Some(Arc::new(EngineLandingRuns { requests })));
+        crate::landing::set_resolver_dirs(Some(self.dirs.clone()));
     }
 
     pub(crate) fn start_landing_run(&self, request: LandingRequest, cx: &mut App) {
