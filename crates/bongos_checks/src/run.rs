@@ -138,6 +138,9 @@ pub struct CheckRun {
     /// Pool waits, the wait limit and the pause before a rerun read this clock.
     pub clock: Rc<dyn CheckClock>,
     pub on_live: Option<OnLive>,
+    /// Makes the write at the end of this part fail.
+    #[cfg(test)]
+    pub fail_part_end: Option<u32>,
 }
 
 /// How a part's wait for its pools ended.
@@ -293,6 +296,9 @@ impl CheckRun {
     }
 
     /// Runs every part not kept, in order, writing each into the record as it starts and ends.
+    /// A failed write ends the run with its error only after the run is stopped and every
+    /// running part has ended. Callers must stop the run before dropping it: dropping the
+    /// future frees the leases while the parts' processes still run.
     /// A part waits in line for its pools only while no part of this run runs; a parallel
     /// check adds parts on slots free now, up to `parallel_parts_max` running together.
     async fn run_parts(
@@ -310,6 +316,7 @@ impl CheckRun {
             1
         };
         let mut running = FuturesUnordered::new();
+        let mut first_error = None;
         // False once the run must start no further part; the running ones still end.
         let mut starting = true;
         loop {
@@ -321,6 +328,8 @@ impl CheckRun {
                 && let Some(n) = pending.pop_front()
             {
                 match self.wait_for_pools(n, total).await {
+                    // A stop seen with the grant: the lease drops and no process starts.
+                    Waited::Granted(_) if self.stop.is_stopped() => starting = false,
                     Waited::Granted(lease) => {
                         running.push(Box::pin(self.run_one(n, total, lease, &shared, part_scope)));
                     }
@@ -346,9 +355,20 @@ impl CheckRun {
             let Some(ended) = running.next().await else {
                 break;
             };
-            if ended? {
-                starting = false;
+            match ended {
+                Ok(true) => starting = false,
+                Ok(false) => {}
+                Err(error) => {
+                    // The other parts' processes run on threads of their own and would outlive
+                    // their leases if the futures were dropped: stop them and let each end.
+                    starting = false;
+                    self.stop.stop();
+                    first_error.get_or_insert(error);
+                }
             }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         let record = lock(&shared).clone();
         Ok(record)
@@ -513,6 +533,10 @@ impl CheckRun {
             record.cut = record.cut.saturating_add(outcome.output.cut_bytes);
             record.clone()
         };
+        #[cfg(test)]
+        if self.fail_part_end == Some(n) {
+            anyhow::bail!("injected store failure at the end of part {n}");
+        }
         self.writer.transact(|tx| store_record(tx, &snapshot))?;
         Ok(cancelled)
     }

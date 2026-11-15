@@ -153,6 +153,7 @@ impl Fixture {
             pools: None,
             clock: FakeClock::automatic(),
             on_live: None,
+            fail_part_end: None,
         }
     }
 
@@ -621,7 +622,7 @@ fn check_run_waiting_on_a_one_slot_pool_shows_pool_place_and_time_and_spends_not
         [LiveState::Waiting {
             part: 1,
             parts: 1,
-            status: status.clone()
+            status: status
         }]
     );
     // Waiting starts no process and records no part.
@@ -637,7 +638,8 @@ fn check_run_waiting_on_a_one_slot_pool_shows_pool_place_and_time_and_spends_not
     assert!(!spawned.is_done());
     assert!(!fixture.exists("runs"));
     assert_eq!(pool.queued(), 1);
-    assert_eq!(clock.now() - status.since, Duration::from_secs(3 * 3600));
+    // The live state is the one written when the wait began; nothing wrote another.
+    assert_eq!(live.borrow().len(), 1);
 
     // The slot comes free: the part runs and its process holds the slot.
     drop(other);
@@ -728,6 +730,64 @@ fn check_run_parallel_parts_take_only_slots_free_now() {
         assert_eq!(bound, sorted(part_pids(&record)));
     }
     drop(other);
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_run_a_failed_part_write_stops_and_drains_the_other_parts() {
+    let fixture = fixture();
+    fixture.write("block-at", "2\n3\n");
+    let pool = FakePool::new(POOL, 3, FakeClock::automatic());
+    let mut run = fixture.check_run(pooled_check(3, true));
+    run.pools = Some(Rc::new(pool.clone()));
+    run.fail_part_end = Some(1);
+    let stop = run.stop.clone();
+
+    let result = block_on(run.run());
+    assert!(result.is_err(), "{result:?}");
+    assert!(stop.is_stopped());
+    // The other parts' processes were stopped and ended, and each slot was released once.
+    let records = fixture.records();
+    assert_eq!(records.len(), 1);
+    let ended: Vec<(u32, Verdict)> = records[0]
+        .parts
+        .iter()
+        .filter(|part| part.n != 1)
+        .map(|part| (part.n, part.verdict.clone()))
+        .collect();
+    assert_eq!(
+        ended,
+        [
+            (2, Verdict::NoVerdict(NoVerdictReason::Cancelled)),
+            (3, Verdict::NoVerdict(NoVerdictReason::Cancelled))
+        ]
+    );
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_run_a_grant_seen_with_a_stop_starts_no_process() {
+    let fixture = fixture();
+    let clock = FakeClock::manual();
+    let pool = FakePool::new(POOL, 1, clock.clone());
+    let other = pool.hold("other run", 1);
+    let mut run = fixture.check_run(pooled_check(1, false));
+    run.pools = Some(Rc::new(pool.clone()));
+    run.clock = clock;
+    let stop = run.stop.clone();
+
+    let mut spawned = Spawned::new(run);
+    assert!(!spawned.is_done());
+    // The slot comes free and the stop comes in the same poll: the grant wins the race.
+    stop.stop();
+    drop(other);
+    spawned.step();
+    let record = spawned.finish();
+    assert_eq!(
+        record.verdict,
+        Verdict::NoVerdict(NoVerdictReason::Cancelled)
+    );
+    assert!(!fixture.exists("runs"));
     pool.assert_all_released();
 }
 
