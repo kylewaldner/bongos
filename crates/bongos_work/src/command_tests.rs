@@ -13,7 +13,9 @@ use bongos_work_model::store::{Task as WorkTask, WorkTree};
 use bongos_work_model::{Kind, Status, TaskFile, TodoState, serialize_task};
 use command_palette_hooks::CommandPaletteFilter;
 use fs::RealFs;
-use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{
+    AppContext as _, Entity, Focusable as _, TestAppContext, UpdateGlobal as _, VisualTestContext,
+};
 use project::Project;
 use settings::Settings as _;
 use tempfile::TempDir;
@@ -22,7 +24,7 @@ use workspace::{AppState, MultiWorkspace, Workspace};
 
 use crate::commands::{WorkToast, action_types, init_palette, register};
 use crate::modals::{ChoicePicker, TextPrompt};
-use crate::store_tests::{canonical, project_toml, set_enabled, write};
+use crate::store_tests::{canonical, project_toml, set_enabled, set_repositories_enabled, write};
 use crate::{GlobalWorkStore, WorkDirs, WorkSettings, WorkStore};
 
 pub(crate) fn leaf_toml(id: &str, goal: &str, kind: Kind) -> String {
@@ -640,7 +642,7 @@ async fn a_refused_todo_command_reaches_a_toast(cx: &mut TestAppContext) {
 
 /// Every action these commands register, but the debug-only `work::DumpSessionContext` and
 /// `work::DumpView` and `work::DumpRepositories`.
-const NAMES: [&str; 59] = [
+const NAMES: [&str; 77] = [
     "task::New",
     "task::NewChild",
     "task::Advance",
@@ -682,6 +684,24 @@ const NAMES: [&str; 59] = [
     "project::Unarchive",
     "project::OpenFolder",
     "project::Focus",
+    "project::Edit",
+    "project::OpenWorkingCopy",
+    "project::Abandon",
+    "project::OpenRepository",
+    "project::Land",
+    "project::Check",
+    "project::Approve",
+    "project::ShowChanges",
+    "project::ShowHistory",
+    "project::Revert",
+    "project::ResolveSplit",
+    "project::BackupStatus",
+    "project::BackupNow",
+    "project::AddExisting",
+    "project::Restore",
+    "project::RestoreFrom",
+    "project::Convert",
+    "project::ConvertAll",
     "work::AddRepository",
     "work::EditWorktreeRoot",
     "task::SetDefaultVisibility",
@@ -746,7 +766,40 @@ async fn while_disabled_the_actions_are_hidden_and_refuse(cx: &mut TestAppContex
     assert!(!harness.task_dir(&["gamma"]).exists());
 
     set_enabled(cx, true);
+    set_repositories_enabled(cx, true);
     assert!(hidden(cx).iter().all(|hidden| !*hidden), "shown while on");
     set_enabled(cx, false);
     assert!(hidden(cx).iter().all(|hidden| *hidden), "hidden again");
+}
+
+#[gpui::test]
+async fn repository_actions_stay_hidden_while_project_repositories_are_off(
+    cx: &mut TestAppContext,
+) {
+    let (_harness, cx) = harness(cx, true, true).await;
+    let hidden = |cx: &mut VisualTestContext, name: &str| -> bool {
+        cx.update(|_, cx| {
+            CommandPaletteFilter::try_global(cx)
+                .unwrap()
+                .is_hidden(&*cx.build_action(name, None).unwrap())
+        })
+    };
+    let set_repositories = |cx: &mut VisualTestContext, enabled: bool| {
+        cx.update(|_, cx| {
+            bongos_project_repo::ProjectRepositorySettings::register(cx);
+            settings::SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.project_repository.get_or_insert_default().enabled = Some(enabled);
+                });
+            });
+        });
+        cx.run_until_parked();
+    };
+    set_repositories(cx, false);
+    assert!(hidden(cx, "project::Land"));
+    assert!(hidden(cx, "project::BackupNow"));
+    assert!(!hidden(cx, "task::New"), "the rest of Work stays shown");
+    set_repositories(cx, true);
+    assert!(!hidden(cx, "project::Land"));
+    assert!(!hidden(cx, "project::BackupNow"));
 }

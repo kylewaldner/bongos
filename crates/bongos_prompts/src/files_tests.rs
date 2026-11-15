@@ -394,6 +394,7 @@ async fn real_link<'a>(
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(true);
+                content.project_repository.get_or_insert_default().enabled = Some(false);
                 content.chats.get_or_insert_default().enabled = Some(false);
             });
         });

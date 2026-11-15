@@ -403,6 +403,10 @@ impl<D: PickerDelegate> Picker<D> {
             .child(div().flex_1().min_w_0().child(editor));
 
         let list = self.render_minibuffer_list(max_rows, line_height, window, cx);
+        let detail = match self.minibuffer.menu {
+            Some(_) => None,
+            None => self.delegate.render_detail(window, cx),
+        };
         let list_bounds = self.minibuffer.list_bounds.clone();
         let list_box = match list {
             Some(list) => Some(deferred(
@@ -427,7 +431,8 @@ impl<D: PickerDelegate> Picker<D> {
                         .top_0()
                         .left_0(),
                     )
-                    .child(list),
+                    .child(list)
+                    .children(detail),
             )),
             None => {
                 list_bounds.set(None);

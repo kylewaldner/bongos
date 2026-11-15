@@ -718,6 +718,7 @@ fn run_toml() -> RunToml {
                 n: 1,
                 created: "2026-11-11T10:00:00Z".to_string(),
                 definition_hash: "h1".to_string(),
+                definition_commit: Some(COMMIT.to_string()),
                 worktree: "/w/1".to_string(),
                 branch: "run/1".to_string(),
             },
@@ -725,12 +726,15 @@ fn run_toml() -> RunToml {
                 n: 2,
                 created: "2026-11-11T11:00:00Z".to_string(),
                 definition_hash: "h2".to_string(),
+                definition_commit: None,
                 worktree: "/w/2".to_string(),
                 branch: "run/2".to_string(),
             },
         ],
     }
 }
+
+const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
 #[test]
 fn run_toml_round_trips() {
@@ -786,4 +790,55 @@ fn uuid_v7_shape() {
     assert!(!is_uuid_v7("01928c4e-7b3a-7c2d-1e4f-0123456789ab"));
     assert!(!is_uuid_v7("01928c4e7b3a-7c2d-9e4f-0123456789abc"));
     assert!(!is_uuid_v7("01928c4e-7b3a-7c2d-9e4f-0123456789a"));
+}
+
+#[test]
+fn a_landing_run_writes_started_by_landing() {
+    let mut run = run_toml();
+    run.started_by = StartedBy::Landing;
+    let text = run.to_toml();
+    assert!(text.contains("started_by = \"landing\""), "{text}");
+    assert_eq!(
+        RunToml::parse(&text).unwrap().started_by,
+        StartedBy::Landing
+    );
+}
+
+#[test]
+fn the_definition_commit_is_written_only_when_there_is_one() {
+    let text = run_toml().to_toml();
+    assert_eq!(text.matches("definition_commit").count(), 1, "{text}");
+    assert!(
+        text.contains(&format!("definition_commit = \"{COMMIT}\"")),
+        "{text}"
+    );
+    // A record from before the field reads with none.
+    let old = text.replace(&format!("definition_commit = \"{COMMIT}\"\n"), "");
+    let parsed = RunToml::parse(&old).unwrap();
+    assert!(
+        parsed
+            .attempts
+            .iter()
+            .all(|a| a.definition_commit.is_none())
+    );
+}
+
+#[test]
+fn run_toml_refuses_a_definition_commit_that_is_not_a_commit_id() {
+    for bad in [
+        "--output=/etc/passwd",
+        "main",
+        "0123",
+        "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+        "",
+    ] {
+        let mut run = run_toml();
+        run.attempts[1].definition_commit = Some(bad.to_string());
+        assert!(
+            matches!(RunToml::parse(&run.to_toml()), Err(RunTomlError::Commit(2))),
+            "{bad}"
+        );
+    }
+    assert!(is_commit_id(COMMIT));
+    assert!(is_commit_id(&"a".repeat(64)));
 }

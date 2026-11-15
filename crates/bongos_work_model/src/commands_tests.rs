@@ -227,6 +227,36 @@ fn close_drop_and_reopen() {
 }
 
 #[test]
+fn edit_and_new_set_and_clear_the_work_kind_label() {
+    let a = pr_ship("a");
+    let mut t = tree(vec![a]);
+    let a = id_of(&t, "a");
+    let label = |text: Option<&str>| TaskEdit {
+        work_kind: Some(text.map(str::to_string)),
+        ..TaskEdit::default()
+    };
+    let change = accept(&mut t, |t| edit(t, &ctx(), &a, label(Some("  design "))));
+    assert_eq!(change.file().unwrap().work_kind.as_deref(), Some("design"));
+    assert_eq!(
+        refusal(edit(&t, &ctx(), &a, label(Some("design")))),
+        "a already has those values"
+    );
+    let change = accept(&mut t, |t| edit(t, &ctx(), &a, label(Some(" "))));
+    assert_eq!(change.file().unwrap().work_kind, None);
+
+    let new = NewTask {
+        work_kind: Some("release".to_string()),
+        ..goal("fresh")
+    };
+    let change = new_task(&t, &ctx(), Placement::Under(a), new).unwrap();
+    let written = change.writes.iter().find_map(|write| match write {
+        Write::Task { file, .. } if file.goal == "fresh" => Some(file.work_kind.clone()),
+        _ => None,
+    });
+    assert_eq!(written, Some(Some("release".to_string())));
+}
+
+#[test]
 fn edit_refuses_a_goal_that_comes_from_linear() {
     let mut a = pr_ship("a");
     file_mut(&mut a).linear = Some("SEQ-121".to_string());
@@ -251,6 +281,7 @@ fn edit_refuses_a_goal_that_comes_from_linear() {
             goal: Some("a".to_string()),
             kind: Some(Kind::PrMerge),
             repository: Some(Some("billing".to_string())),
+            work_kind: None,
         },
     )
     .unwrap();
@@ -279,6 +310,7 @@ fn edit_changes_fields_and_keeps_the_slug() {
             goal: Some("A better goal".to_string()),
             kind: Some(Kind::PrMerge),
             repository: Some(Some("billing".to_string())),
+            work_kind: None,
         },
     )
     .unwrap();

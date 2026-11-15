@@ -1,4 +1,4 @@
-//! The lifecycle of runs (feature 20, D13): start with its refusals in order, pause, halt,
+//! The lifecycle of runs (feature 20): start with its refusals in order, pause, halt,
 //! resume, retry step (fresh or not), restart, cancel, approve and revise, and the resume command
 //! of a node's session.
 //!
@@ -28,7 +28,7 @@ use bongos_workflow_model::record::{
     Attempt, EndState, RUN_SCHEMA, RecordedInput, StartedBy, TodoRef,
 };
 use bongos_workflow_model::{
-    Definition, InputValue, LayerDirs, NodeKey, RunState, RunToml, check_fresh_retry, parse,
+    Definition, InputValue, Layer, LayerDirs, NodeKey, RunState, RunToml, check_fresh_retry, parse,
     retry_set, schema,
 };
 use serde_json::Value;
@@ -104,6 +104,8 @@ pub enum RefusalKind {
     NoGate,
     InvalidEdit,
     NoSession,
+    /// A restore holds new work in the project back.
+    Held,
     Io,
 }
 
@@ -228,7 +230,7 @@ impl RunStatus {
         }
     }
 
-    /// Whether the run holds its task: every status but succeeded and cancelled (D15). A failed
+    /// Whether the run holds its task: every status but succeeded and cancelled. A failed
     /// run stays active until a retry or a cancel closes it out.
     pub fn is_active(self) -> bool {
         !matches!(self, Self::Succeeded | Self::Cancelled)
@@ -318,6 +320,9 @@ pub struct StartContext<'a> {
     /// The run a live-modes source reports on the task (`can_start_run`), if any.
     pub active_run: Option<ActiveRun>,
     pub checks: &'a dyn StartChecks,
+    /// The commit of the project repository the project layer of the dirs was read from, which
+    /// the first attempt records; `None` when the layer is not a repository's.
+    pub definition_commit: Option<String>,
 }
 
 /// Where a halted run can be edited: its worktree and its fan-out branch worktrees.
@@ -634,7 +639,11 @@ impl<R: Runner> Lifecycle<R> {
             worktree,
             rev: 0,
         };
-        self.begin_attempt(&mut entry, 1, &resolved.dir, definition, created)?;
+        let commit = context
+            .definition_commit
+            .clone()
+            .filter(|_| resolved.layer == Layer::Project);
+        self.begin_attempt(&mut entry, 1, &resolved.dir, definition, created, commit)?;
         self.runs.push(entry);
         self.note(&id);
         Ok(id)
@@ -719,13 +728,16 @@ impl<R: Runner> Lifecycle<R> {
     /// Reruns the failed key of a failed run, reusing every other result. `node` picks one when
     /// several failed; with none and several failed it is refused, listing them. With
     /// `fresh_definition` the latest definition is first copied to a new `definition/<rev>/` and
-    /// the run continues on it, refused when it would lose a completed result.
+    /// the run continues on it, refused when it would lose a completed result. `commit` is the
+    /// commit the project layer of `dirs` was read from; a fresh retry records it on the
+    /// attempt, a retry without it keeps the attempt's own.
     pub fn retry(
         &mut self,
         run: &str,
         node: Option<NodeKey>,
         fresh_definition: bool,
         dirs: &LayerDirs,
+        commit: Option<String>,
     ) -> Result<(), Refusal> {
         let state = self.entry(run).and_then(|_| self.state_of(run))?;
         let status = RunStatus::of(&state);
@@ -766,7 +778,7 @@ impl<R: Runner> Lifecycle<R> {
             },
         };
         if fresh_definition {
-            self.reload_definition(run, &definition, &state, dirs)?;
+            self.reload_definition(run, &definition, &state, dirs, commit)?;
         }
         self.runtime.rerun(run, key).map_err(Refusal::runtime)?;
         self.note(run);
@@ -776,7 +788,14 @@ impl<R: Runner> Lifecycle<R> {
     /// Starts `run` over as a new attempt: the latest definition, a fresh run worktree and
     /// branch, the same todo and inputs, and no earlier results. An attempt still active is
     /// cancelled first; earlier attempts stay on disk. The run keeps its id and its one record.
-    pub fn restart(&mut self, run: &str, dirs: &LayerDirs) -> Result<RunId, Refusal> {
+    /// `commit` is the commit the project layer of `dirs` was read from; the new attempt records
+    /// it when the definition comes from that layer.
+    pub fn restart(
+        &mut self,
+        run: &str,
+        dirs: &LayerDirs,
+        commit: Option<String>,
+    ) -> Result<RunId, Refusal> {
         let index = self.index(run)?;
         let status = self.status_of(run)?;
         if status == RunStatus::Succeeded {
@@ -806,12 +825,14 @@ impl<R: Runner> Lifecycle<R> {
             (entry.record.clone(), entry.worktree.clone(), entry.rev);
         entry.worktree = worktree;
         entry.record.layer = resolved.layer.label().to_string();
+        let commit = commit.filter(|_| resolved.layer == Layer::Project);
         let result = self.begin_attempt(
             &mut entry,
             attempt,
             &resolved.dir,
             definition,
             now().to_string(),
+            commit,
         );
         if result.is_err() {
             // Put the old attempt back so the run does not drop out.
@@ -995,6 +1016,7 @@ impl<R: Runner> Lifecycle<R> {
         source: &Path,
         definition: Definition,
         created: String,
+        definition_commit: Option<String>,
     ) -> Result<(), Refusal> {
         let attempt_dir = attempt_dir(&entry.dir, n);
         let copy = definition_copy_dir(&attempt_dir, 0);
@@ -1003,6 +1025,7 @@ impl<R: Runner> Lifecycle<R> {
             n,
             created,
             definition_hash: hash_dir(&copy),
+            definition_commit,
             worktree: entry.worktree.path.to_string_lossy().into_owned(),
             branch: entry.worktree.branch.clone(),
         });
@@ -1025,6 +1048,7 @@ impl<R: Runner> Lifecycle<R> {
         current: &Definition,
         state: &RunState,
         dirs: &LayerDirs,
+        commit: Option<String>,
     ) -> Result<(), Refusal> {
         let index = self.index(run)?;
         let name = self.runs[index].record.workflow.clone();
@@ -1055,6 +1079,21 @@ impl<R: Runner> Lifecycle<R> {
             .reload_definition(run, fresh, rev)
             .map_err(Refusal::runtime)?;
         self.runs[index].rev = rev;
+        // The attempt now reads the definition of the commit it was just copied from; a layer
+        // that is not a repository's leaves the attempt's own commit as it was.
+        let entry = &mut self.runs[index];
+        if let Some(commit) = commit.filter(|_| resolved.layer == Layer::Project) {
+            let number = entry.attempt();
+            if let Some(attempt) = entry
+                .record
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.n == number)
+            {
+                attempt.definition_commit = Some(commit);
+                write_record(&entry.dir, &entry.record).map_err(Refusal::io)?;
+            }
+        }
         Ok(())
     }
 

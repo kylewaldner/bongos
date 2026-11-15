@@ -213,7 +213,7 @@ fn accept(
                 let summary = suggestion.clone();
                 // The write re-decides on the tree the writer hands it: a leaf made since the
                 // read still matches, and a ticket linked since the read still refuses.
-                let Some(write) = queue(workspace, cx, move |tree, ctx| {
+                let Some(write) = queue(workspace, window, cx, move |tree, ctx| {
                     let leaf = model::matching_leaf(tree, &group, &summary)
                         .and_then(|leaf| leaf.id().map(str::to_string));
                     match leaf {
@@ -253,7 +253,7 @@ fn ask_dismiss(
                 let identifier = suggestion.identifier.clone();
                 let target = group_id.clone();
                 let ticket = identifier.clone();
-                let Some(write) = queue(workspace, cx, move |tree, ctx| {
+                let Some(write) = queue(workspace, window, cx, move |tree, ctx| {
                     model::dismiss(tree, ctx, &target, &ticket)
                 }) else {
                     return;

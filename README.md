@@ -54,8 +54,8 @@ Any other file in a task directory is an artifact, described and made visible or
   again on the fresh state. An agent that moves or renames task files should do the same: reread
   `task.toml` first, and never write from a stale copy.
 - **Keys (Emacs keymap only).** `C-c w w` toggles the panel, `C-c w n` makes a task, `C-c w s`
-  starts one, `C-c w a` advances, `C-c w c` closes, `C-c w g` opens the graph, and the `C-c w d ...`,
-  `C-c w p ...` and artifact keys cover todos, projects and artifacts; the rest are in the command
+  starts one, `C-c w a` advances, `C-c w c` closes, `C-c w G` opens the graph, and the `C-c w d ...`,
+  `C-c w p ...`, `C-c w g ...` and artifact keys cover todos, projects, repositories and artifacts; the rest are in the command
   palette (`assets/keymaps/linux/emacs.json`). In the panel, `tab` expands a row inline and `^`
   goes up one level.
 
@@ -99,6 +99,28 @@ Any other file in a task directory is an artifact, described and made visible or
   timer. On a file system that delivers no change notifications (network mounts, most FUSE mounts)
   the refs cannot be watched, so the check runs every 5 minutes instead. Starting bongos with
   `ZED_FILE_WATCHER_MODE=poll` does the same for every repository.
+
+## Project repositories
+
+A project is a folder with four parts: `repository` (a git repository holding the definitions of
+its tasks, which only a landing changes), `working-copies` (where changes are made before they
+land), `state` (what stays on this machine: status, todos done, runs, history) and `files`.
+Every change to the definitions, from a command or a working copy, goes through checks and lands
+as one commit on `main` with trailers saying who made it; state changes never make a commit.
+
+- **Keys (Emacs keymap).** `C-c w p n` makes a project in `<data dir>/projects/<name>`. `C-c w g e`
+  makes a working copy and opens it, `C-c w g l` lands it, `C-c w g c` only checks it, `C-c w g
+  v` shows the changes and `C-c w g h` the history. `C-c w G` shows the tasks of a group as a graph.
+- **Setting.** `project_repository.enabled` turns this on (it is on by default); while it is off,
+  projects keep the old format. The same page of the settings window has the folder, the limits
+  and the backup intervals.
+- **Backup and restore.** The state is snapshotted to a branch (`bongos/state`) of the repository
+  and pushed to the project's backup remote when it has one. `C-c w g b` takes and pushes a
+  snapshot now, `C-c w g s` shows the backup. On a new machine, `C-c w g a` (`project: add
+  existing`) adds a project from a folder or a remote address and `C-c w g R` (`project: restore`)
+  rebuilds its state from the newest snapshot; the state it replaces is kept in `state/replaced/`.
+- **Old projects.** `C-c w g C` (`project: convert`) copies an old-format project into a project
+  repository after showing what it will make. The old folder is only read.
 
 ## Chat sessions
 
@@ -435,6 +457,10 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 |---|---|
 | C-d, M-d, M-DEL | delete a character, kill word, kill word backward |
 | C-k, C-w, M-w, C-y | kill line, kill region or line, copy, yank |
+| M-y | yank-pop: right after a yank, replace the yanked text with the previous entry of the kill ring |
+| M-Y | browse-kill-ring: pick an entry from the kill ring in the minibuffer strip |
+| C-M-k | kill-whole-line |
+| C-M-w | append-next-kill: the next kill is added to the last entry |
 | C-/, C-_, C-x u | undo |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
@@ -465,6 +491,25 @@ bar.
 
 ```json
 { "base_keymap": "VSCode", "emacs": { "cursor_style": "auto" } }
+```
+
+### Kill ring
+
+Every kill and copy goes into one kill ring, shared by all editors, and C-y yanks the newest
+entry. Kills made one after another (C-k, C-M-k, M-d and the like) join into a single entry, so
+three C-M-k in a row followed by C-y brings all three lines back; C-M-w makes the next kill join
+the last entry even after other commands. M-y, right after a yank, swaps the yanked text for the
+next older entry, and again for the one before it. M-Y opens the ring in the minibuffer strip,
+newest first, narrowed as you type, with the highlighted entry previewed under the list; Enter
+inserts it. A C-u prefix will change how many lines these commands take once the prefix-argument
+feature lands.
+
+Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` is `true`
+(default `false`); then a copy in a terminal goes into the ring and a paste there reads it.
+`emacs.save_kill_ring` (default `true`) keeps the ring across restarts; see Privacy.
+
+```json
+{ "emacs": { "save_kill_ring": true, "terminal_uses_kill_ring": true } }
 ```
 
 ### Mark and region
@@ -563,7 +608,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
@@ -632,6 +677,12 @@ plugins.gradle.org, Maven repositories and Artifact Registry.
 Linear (`api.linear.app`) is contacted only when `linear.enabled` is on (the default) and a token
 is set, for a linked task or a Linear command. The token is stored in the credential store and
 never written to a log or a file.
+
+The kill ring is saved in the app database so it survives a restart. Text marked secret on Linux
+and the contents of masked fields (passwords) are never saved, nor is an entry over 1 MiB. Setting
+`emacs.save_kill_ring` to `false` turns saving off and deletes the saved ring.
+The secret hint is advisory: text from a password manager that sets no hint, from any macOS
+manager, or typed by hand is saved like any other kill. `emacs.save_kill_ring: false` turns saving off.
 
 bongos never contacts bongos.rocks. The list of kotlin-lsp builds is compiled in.
 

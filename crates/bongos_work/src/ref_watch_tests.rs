@@ -125,6 +125,7 @@ fn set_enabled(cx: &mut VisualTestContext, enabled: bool) {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(enabled);
+                content.project_repository.get_or_insert_default().enabled = Some(false);
             });
         });
     });

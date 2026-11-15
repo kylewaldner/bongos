@@ -12,11 +12,13 @@ mod commands;
 pub mod definitions;
 mod engine;
 pub mod gates;
+pub mod landing;
 pub mod lifecycle;
 pub mod mcp;
 pub mod outcomes;
 pub mod picker;
 pub mod process;
+pub mod project_sources;
 pub mod run_view;
 pub mod runner_claude;
 pub mod runner_codex;
@@ -45,6 +47,7 @@ pub use status_item::WorkflowStatus;
 /// [`WorkflowEngine`]; while it is false nothing is read or written. Call before [`init_palette`].
 pub fn init(cx: &mut App) {
     WorkflowsSettings::register(cx);
+    landing::register(cx);
     engine::init(cx);
 }
 

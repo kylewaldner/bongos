@@ -28,6 +28,8 @@ enum Behavior {
     WriteKv,
     Fail,
     WriteTask,
+    /// Writes a move rollback, as only the engine may.
+    WriteRollback,
 }
 
 struct FakeHook {
@@ -80,6 +82,9 @@ impl StateApplyHook for FakeHook {
             }
             Behavior::Fail => Err(anyhow!("no evidence")),
             Behavior::WriteTask => tx.set_task("other", TaskStateRecord::default()),
+            Behavior::WriteRollback => tx
+                .move_rollbacks()
+                .put("amber-otter-0001", toml::Value::Boolean(true)),
         }
     }
 }
@@ -252,6 +257,67 @@ fn a_hook_that_writes_a_task_row_fails() {
 }
 
 #[test]
+fn only_the_engine_writes_the_move_rollbacks_and_never_from_a_hook() {
+    let root = TempDir::new().unwrap();
+    let hook = FakeHook::new("rogue", Behavior::WriteRollback);
+    let hooked = writer(&location(&root), &hooks_with(&[&hook]));
+
+    let through_kv = hooked
+        .transact(|tx| {
+            tx.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+                .put("amber-otter-0001", toml::Value::Boolean(true))
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(
+        through_kv.contains("written only by the engine"),
+        "{through_kv}"
+    );
+    let delete = hooked
+        .transact(|tx| {
+            tx.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+                .delete("amber-otter-0001")
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(delete.contains("written only by the engine"), "{delete}");
+
+    let from_hook = hooked
+        .transact(|tx| tx.set_task("a", TaskStateRecord::default()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        from_hook.starts_with("state hook rogue failed: "),
+        "{from_hook}"
+    );
+    assert!(from_hook.contains("the engine's"), "{from_hook}");
+
+    let stored = hooked
+        .read(|read| {
+            read.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+                .get("amber-otter-0001")
+        })
+        .unwrap();
+    assert_eq!(stored, None);
+
+    let other = TempDir::new().unwrap();
+    let plain = writer(&location(&other), &StateApplyHooks::new());
+    plain
+        .transact(|tx| {
+            tx.move_rollbacks()
+                .put("amber-otter-0001", toml::Value::Boolean(true))
+        })
+        .unwrap();
+    let stored = plain
+        .read(|read| {
+            read.kv(crate::MOVE_ROLLBACK_NAMESPACE)
+                .get("amber-otter-0001")
+        })
+        .unwrap();
+    assert_eq!(stored, Some(toml::Value::Boolean(true)));
+}
+
+#[test]
 fn no_hook_runs_when_no_task_row_is_touched() {
     let root = TempDir::new().unwrap();
     let hook = FakeHook::new("checks", Behavior::WriteKv);
@@ -288,4 +354,103 @@ fn hooks_run_in_registration_order() {
         .transact(|tx| tx.set_task("a", TaskStateRecord::default()))
         .unwrap();
     assert_eq!(*order.lock(), ["first", "second", "third"]);
+}
+
+/// Records the goals and definitions a hook saw for each touched task.
+struct DefinitionHook {
+    seen: Mutex<Vec<(String, Option<String>, Option<String>, bool)>>,
+}
+
+impl StateApplyHook for DefinitionHook {
+    fn name(&self) -> &str {
+        "definitions"
+    }
+
+    fn apply(&self, _tx: &mut StateTx, change: &StateApplyChange) -> Result<()> {
+        let mut seen = self.seen.lock();
+        for touch in change.touched {
+            seen.push((
+                touch.id.clone(),
+                touch
+                    .definition_before
+                    .map(|definition| definition.goal.clone()),
+                touch
+                    .definition_after
+                    .map(|definition| definition.goal.clone()),
+                change.old_definitions.is_some(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn definitions_with(goals: &[(&str, &str)]) -> Arc<bongos_project_repo_model::DefinitionTree> {
+    use bongos_project_repo_model::{DefinitionTree, RelPath};
+    let mut files = vec![
+        (
+            RelPath::new("project.toml").unwrap(),
+            b"schema = 1\ntitle = \"P\"\n".to_vec(),
+        ),
+        (
+            RelPath::new("task.toml").unwrap(),
+            crate::test_support::definition_toml("g1", "Top", "other", &[]).into_bytes(),
+        ),
+    ];
+    for (id, goal) in goals {
+        files.push((
+            RelPath::new(format!("tasks/{id}/task.toml")).unwrap(),
+            crate::test_support::definition_toml(id, goal, "other", &[]).into_bytes(),
+        ));
+    }
+    Arc::new(DefinitionTree::parse_files(files).unwrap())
+}
+
+#[test]
+fn hooks_see_the_definitions_and_a_verified_commit_change() {
+    let root = TempDir::new().unwrap();
+    let hook = Arc::new(DefinitionHook {
+        seen: Mutex::new(Vec::new()),
+    });
+    let hooks = StateApplyHooks::new();
+    hooks.register(hook.clone());
+    let writer = writer(&location(&root), &hooks);
+    writer.set_definitions(definitions_with(&[("a", "Alpha"), ("b", "Beta")]));
+
+    // A state write sees the current definitions, unchanged.
+    writer
+        .transact(|tx| tx.set_task("a", TaskStateRecord::default()))
+        .unwrap();
+    assert_eq!(
+        std::mem::take(&mut *hook.seen.lock()),
+        [(
+            "a".to_string(),
+            Some("Alpha".to_string()),
+            Some("Alpha".to_string()),
+            false
+        )]
+    );
+
+    // A new verified commit: every task whose definition differs is touched, with no state
+    // write needed.
+    let next = definitions_with(&[("a", "Alpha"), ("b", "Beta renamed"), ("c", "Gamma")]);
+    writer
+        .transact(|tx| tx.set_verified_commit("abc123", next.clone()))
+        .unwrap();
+    assert_eq!(
+        std::mem::take(&mut *hook.seen.lock()),
+        [
+            (
+                "b".to_string(),
+                Some("Beta".to_string()),
+                Some("Beta renamed".to_string()),
+                true
+            ),
+            ("c".to_string(), None, Some("Gamma".to_string()), true),
+        ]
+    );
+    assert_eq!(writer.definitions(), next);
+    assert_eq!(
+        writer.read(|read| read.verified_commit()).unwrap(),
+        Some("abc123".to_string())
+    );
 }

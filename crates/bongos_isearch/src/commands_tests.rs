@@ -111,6 +111,23 @@ async fn isearch_c_y_appends_the_clipboard_or_the_installed_kill_source(cx: &mut
     assert_eq!(input(&workspace, cx), "xx");
     assert_eq!(cursor(&editor, cx), 9);
     keys("ctrl-g ctrl-g", cx);
+
+    // The kill ring's own source: the newest kill while the clipboard holds only that kill's
+    // text, and a newer clipboard text from outside once there is one.
+    cx.update(|_, cx| {
+        editor::kill_ring::push_plain_text("zz".to_string(), cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("zz".to_string()));
+        set_kill_source(std::rc::Rc::new(editor::kill_ring::yank_text), cx)
+    });
+    start(Forward, &workspace, cx);
+    keys("ctrl-y", cx);
+    assert_eq!(input(&workspace, cx), "zz");
+    keys("ctrl-g ctrl-g", cx);
+    cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("other".to_string())));
+    start(Forward, &workspace, cx);
+    keys("ctrl-y", cx);
+    assert_eq!(input(&workspace, cx), "other");
+    keys("ctrl-g ctrl-g", cx);
 }
 
 #[gpui::test]

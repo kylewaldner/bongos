@@ -205,6 +205,7 @@ impl<D: PickerDelegate> Picker<D> {
                     )
                 })
             })
+            .children(self.delegate.render_detail(window, cx))
             .children(self.render_footer(window, cx))
             .children(match &self.head {
                 Head::Editor(editor) => {

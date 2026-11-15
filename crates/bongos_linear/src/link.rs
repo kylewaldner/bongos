@@ -17,6 +17,7 @@ use bongos_linear_model::ident::{parse_identifier, parse_issue_ref};
 use bongos_linear_model::sync::{self as model, linked_identifier, nearest_linked_ancestor};
 use bongos_linear_model::{ApiError, Issue, IssueRef, IssueSummary};
 use bongos_work::{WorkStore, WriteError};
+use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{Change, Context as WorkContext, Outcome};
 use bongos_work_model::derive::{self, Shape};
 use bongos_work_model::rules::Place;
@@ -98,8 +99,13 @@ pub(crate) fn confirm_prompt(goal: &str, issue: &Issue) -> String {
 /// Whether `issue` can be linked to `task_id` on `tree`, as the write would decide it: `Err` is
 /// the reason to show. Checked before the question, so a ticket linked elsewhere is refused
 /// without asking.
-pub(crate) fn check(tree: &WorkTree, task_id: &str, issue: &Issue) -> Result<(), String> {
-    model::link(tree, &WorkContext::kyle(), task_id, issue).map(|_| ())
+pub(crate) fn check(
+    tree: &WorkTree,
+    task_id: &str,
+    issue: &Issue,
+    ctx: &WorkContext,
+) -> Result<(), String> {
+    model::link(tree, ctx, task_id, issue).map(|_| ())
 }
 
 /// The ticket reference typed or pasted: an identifier, a UUID or a Linear URL.
@@ -370,7 +376,8 @@ fn confirm(
     let Some(tree) = bongos_work::ready(workspace, cx) else {
         return;
     };
-    if let Err(reason) = check(&tree, &task_id, &issue) {
+    let preview = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    if let Err(reason) = check(&tree, &task_id, &issue, &preview) {
         show_toast(workspace, reason, cx);
         return;
     }
@@ -384,12 +391,12 @@ fn confirm(
         bongos_work::MINIBUFFER_NAME,
         prompt,
         false,
-        move |yes, _, cx| {
+        move |yes, window, cx| {
             if !yes {
                 return;
             }
             weak.update(cx, |workspace, cx| {
-                finish_link(workspace, task_id, issue, cx)
+                finish_link(workspace, task_id, issue, window, cx)
             })
             .ok();
         },
@@ -404,10 +411,11 @@ pub(crate) fn finish_link(
     workspace: &mut Workspace,
     task_id: String,
     issue: Issue,
+    window: &Window,
     cx: &mut Context<Workspace>,
 ) {
     let identifier = issue.identifier.clone();
-    let Some(write) = queue(workspace, cx, move |tree, ctx| {
+    let Some(write) = queue(workspace, window, cx, move |tree, ctx| {
         model::link(tree, ctx, &task_id, &issue)
     }) else {
         return;
@@ -431,6 +439,7 @@ pub(crate) fn finish_link(
 /// Queues `command` on the store's writer; `None`, after a toast, when there is no store.
 pub(crate) fn queue(
     workspace: &mut Workspace,
+    window: &Window,
     cx: &mut Context<Workspace>,
     command: impl Fn(&WorkTree, &WorkContext) -> Outcome + Send + 'static,
 ) -> Option<Task<Result<Change, WriteError>>> {
@@ -438,9 +447,8 @@ pub(crate) fn queue(
         show_toast(workspace, WriteError::Off.to_string(), cx);
         return None;
     };
-    Some(store.update(cx, |store, cx| {
-        store.write(WorkContext::kyle(), command, cx)
-    }))
+    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    Some(store.update(cx, |store, cx| store.write(ctx, command, cx)))
 }
 
 /// `task: unlink from linear`: removes `linear` and `linear_state` and keeps the goal. No request.
@@ -460,7 +468,7 @@ pub(crate) fn unlink_from_linear(
         .and_then(|task| task.file.as_ref())
         .and_then(|file| linked_identifier(file))
         .map(str::to_string);
-    let Some(write) = queue(workspace, cx, move |tree, ctx| {
+    let Some(write) = queue(workspace, window, cx, move |tree, ctx| {
         model::unlink(tree, ctx, &task_id)
     }) else {
         return;

@@ -45,7 +45,21 @@ fn create_makes_the_folder_layout_and_the_first_commit() {
     for part in ["repository", "working-copies", "state", "files"] {
         assert!(folder.join(part).is_dir(), "{part}");
     }
-    assert_eq!(std::fs::read_dir(folder.join("state")).unwrap().count(), 0);
+    // The state store holds only the commit that created the project.
+    let first = block_on(
+        isolated_git()
+            .unwrap()
+            .rev_parse(&folder.join("repository"), "main"),
+    )
+    .unwrap();
+    let reader = crate::StateStore::open_reader(repo.location()).unwrap();
+    assert_eq!(
+        reader
+            .read(|read| read.meta(crate::create::CREATION_COMMIT_KEY))
+            .unwrap(),
+        Some(first)
+    );
+    assert_eq!(reader.read(|read| read.verified_commit()).unwrap(), None);
     assert_eq!(
         std::fs::read_dir(folder.join("working-copies"))
             .unwrap()

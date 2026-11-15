@@ -56,9 +56,11 @@ pub mod task {
             /// Picks a task and a task to move it under. Asks first.
             Move,
             /// Picks a task and a project and moves it to the top level of that project. Asks
-            /// first.
+            /// first. A task of a project repository moves with every task under it to another
+            /// project repository, under a task picked there, after a preview of the move.
             MoveToProject,
-            /// Picks a task and an activity and files it as a one-off. Asks first.
+            /// Picks a task and an activity and files it as a one-off. Asks first. A task of a
+            /// project repository moves like `task: move to project`, to the one-offs project.
             MakeOneOff,
             /// Picks an open leaf (pr-ship, pr-merge, spike or babysit) and creates its branch and
             /// worktree in its repository, then runs the repository's setup command there. A
@@ -137,6 +139,62 @@ pub mod project {
             OpenFolder,
             /// Picks a project and focuses its top group, like `task: focus`.
             Focus,
+            /// Asks for a name, makes a working copy of the project repository from the
+            /// verified commit and opens it in a new window.
+            Edit,
+            /// Picks an open working copy and opens it in a new window.
+            OpenWorkingCopy,
+            /// Picks an open working copy and, after asking, deletes it and its branch.
+            Abandon,
+            /// Opens the project repository's definitions, master, in a new window.
+            OpenRepository,
+            /// Lands the working copy of the current buffer, or one picked: commits what is
+            /// uncommitted, rebases on master, checks, queues and fast-forwards master.
+            Land,
+            /// Runs the landing checks on the working copy of the current buffer, or one
+            /// picked, without landing it.
+            Check,
+            /// Approves a change waiting for a person (the working copy of the current buffer,
+            /// or one picked), or the outside commit on master once its checks passed.
+            Approve,
+            /// Shows the project repository's changes in sections (waiting, landed,
+            /// abandoned), with a key for each thing to do to the one selected: `d` its diff
+            /// in terms of tasks, `D` its git diff, `o` check it out, `r` resolve a split
+            /// master, `a` approve, `k` abandon, `l` land, `R` revert a landed change.
+            ShowChanges,
+            /// Shows the changes that landed or were abandoned, newest first, through a
+            /// filter: by task, by kind of author, by date, landed or abandoned.
+            ShowHistory,
+            /// Picks a landed change and makes a new change that undoes it. The revert goes
+            /// through the checks and lands like any change; history is never rewritten.
+            Revert,
+            /// Resolves a split master (master was changed outside bongos while a change was
+            /// landing), keeping bongos' state.
+            ResolveSplit,
+            /// Shows the backup of the project's state in a read-only buffer: the last
+            /// snapshot, the last push, the interval, the remote, unpushed snapshots, withheld
+            /// values, orphan state and the run record copy.
+            BackupStatus,
+            /// Takes a snapshot of the project's state at once and pushes it to the remote.
+            BackupNow,
+            /// Adds a project repository that already exists: a project or repository folder
+            /// on this machine, or a remote address cloned into a new project folder. Checks
+            /// master, sets its verified commit, and says when a snapshot is there to restore.
+            AddExisting,
+            /// Rebuilds the project's live state from the newer of this machine's and the
+            /// remote's snapshot, after showing what it replaces and asking. Refuses while work
+            /// runs, and keeps the replaced state so a wrong restore can be undone.
+            Restore,
+            /// Like `project: restore`, from a snapshot or replaced state picked from a list:
+            /// this machine's, the remote's, and the states earlier restores kept.
+            RestoreFrom,
+            /// Copies an old-format project, picked from a list, into a new project repository:
+            /// shows what it will make and asks first. The old folder is only read; afterwards
+            /// it is hidden from the Work view. Never runs by itself.
+            Convert,
+            /// Like `project: convert`, for every old-format project not converted yet (the old
+            /// one-offs among them), after one preview and one question.
+            ConvertAll,
         ]
     );
 }

@@ -1,5 +1,5 @@
 //! The chip `3 need tickets` and the needs-you reason of a linked group whose tasks an agent or
-//! a workflow added (an applied proposal with `by` other than `kyle`) and that have no ticket yet.
+//! a workflow added (an applied proposal by an author that is not a person) and that have no ticket yet.
 //! Both last until `task: create missing subtickets` runs on the group and is answered. What they
 //! show is computed from the work tree by `subtickets` on every store change; nothing here is
 //! written, and nothing here sends a request.

@@ -41,6 +41,9 @@ mod activity_tests;
 mod artifacts_tests;
 
 #[cfg(test)]
+mod author_context_tests;
+
+#[cfg(test)]
 mod author_tests;
 
 #[cfg(test)]

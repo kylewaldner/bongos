@@ -79,6 +79,9 @@ not (
 # 2 retries) wins over the default profile's 3 retries. The JUnit report, with the output of passing
 # tests, is target/nextest/perf/junit.xml under the repository root (nextest keeps it there even when
 # CARGO_TARGET_DIR points elsewhere).
+# The perf set is meant to be built with the `perf-test` cargo profile (release optimizations, debug
+# assertions off), so budgets guarded by `cfg!(not(debug_assertions))` are enforced:
+#   BONGOS_CARGO_PROFILE=perf-test BONGOS_NEXTEST_PROFILE=perf script/bongos/test-all
 [profile.perf]
 default-filter = '''
 (package(=bongos_minibuffer_model) & test(perf_tests::))

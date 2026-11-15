@@ -240,8 +240,11 @@ pub struct Unoffered {
     pub root_id: TaskId,
     pub number: u32,
     pub hash: String,
-    /// Who applied it: `kyle` opens the offer at once, `agent` or a workflow gets a chip.
+    /// The name of who applied it.
     pub by: String,
+    /// Whether a person applied it (see `ProposalRecord::by_person`): a person's apply opens the
+    /// offer at once, an agent's or a workflow's gets a chip.
+    pub by_person: bool,
 }
 
 /// Every applied `[[proposals]]` record whose root is a linked group, or has a linked group above
@@ -282,6 +285,7 @@ fn visit<'a>(tree: &WorkTree, task: &'a Task, nearest: Option<&'a Task>, out: &m
                     number: record.number,
                     hash: record.hash.clone(),
                     by: record.by.clone(),
+                    by_person: record.by_person(),
                 });
             }
         }
