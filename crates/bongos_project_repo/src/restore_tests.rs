@@ -106,6 +106,10 @@ impl ActivitySource for FakeActivity {
         self.running.lock().clear();
         Ok(())
     }
+
+    fn hold_new_work(&self, _project_id: &str) {}
+
+    fn release_new_work(&self, _project_id: &str) {}
 }
 
 fn project_with(root: &TempDir, hooks: &StateApplyHooks) -> ProjectRepo {
@@ -377,6 +381,8 @@ fn a_source_that_cannot_be_stopped_says_so() {
         fn activity(&self, _project_id: &str) -> Vec<String> {
             vec!["run 7".to_string()]
         }
+        fn hold_new_work(&self, _project_id: &str) {}
+        fn release_new_work(&self, _project_id: &str) {}
     }
     let root = TempDir::new().unwrap();
     let repo = project(&root);

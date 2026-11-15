@@ -16,14 +16,20 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bongos_chat::model::Agent;
 use bongos_chat::{ChatHealth, HealthState};
-use bongos_work::{ActiveRun, LiveModesRegistry, NeedsYouRegistry, WorkStore};
+use bongos_project_repo::{ActivitySources, LiveSources, ProjectRepo, SnapshotReason};
+use bongos_work::{ActiveRun, LiveModesRegistry, NeedsYouRegistry};
 use bongos_work_model::commands::Context as WorkContext;
+use bongos_work_model::layout::WORKFLOWS_DIR;
 use bongos_work_model::now;
 use bongos_work_model::store::{Task, WorkTree};
 use bongos_workflow_model::definition::{AgentKind, Outcome};
-use bongos_workflow_model::record::TodoRef;
+use bongos_workflow_model::layers::DEFINITION_FILE;
+use bongos_workflow_model::record::{StartedBy, TodoRef};
 use bongos_workflow_model::scheduler::Branch;
-use bongos_workflow_model::{Definition, Failure, FailureReason, LayerDirs, NodeKey, RunState};
+use bongos_workflow_model::{
+    Definition, Failure, FailureReason, Layer, LayerDirs, NodeKey, RunState,
+};
+use futures::StreamExt as _;
 use gpui::{App, AppContext as _, AsyncApp, Global};
 use serde_json::Value;
 use settings::Settings as _;
@@ -31,15 +37,17 @@ use settings::Settings as _;
 use crate::WorkflowsSettings;
 use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged};
 use crate::definitions::{
-    self, DefinitionError, NewDefinition, Report, SHIPPED_FILES, materialize, profile_dir,
-    shipped_dir,
+    self, DefinitionError, NewDefinition, ProjectLayer, Report, SHIPPED_FILES, materialize,
+    profile_dir, project_layer_in, shipped_dir,
 };
+use crate::landing::{LandingRunEnd, LandingRuns, set_landing_runs};
 use crate::lifecycle::{
     GitWorktrees, HaltWorktrees, Lifecycle, Refusal, RefusalKind, RunId, RunStatus, StartChecks,
     StartContext, StartRequest, WorkflowEvent,
 };
 use crate::outcomes::{self, Delivered, Reported, RunOutcome};
 use crate::process::ProcessRecord;
+use crate::project_sources::{self, RunProjects, WorkHolds, WorkflowActivity, WorkflowLiveSource};
 use crate::runner_program::Interpreter;
 use crate::runtime::{Finish, Runner, Settlement};
 use crate::shipped::Template;
@@ -56,6 +64,27 @@ pub type SharedLifecycle = Arc<Mutex<Lifecycle<EngineRunner>>>;
 /// node): the shipped merge with `git` in the app; tests script it. The task branch's new head.
 pub type Merger = Arc<dyn Fn(&MergeRequest) -> Result<String, MergeRefusal> + Send + Sync>;
 
+/// What `workflow: edit definition` opens.
+pub enum EditTarget {
+    /// The `workflow.toml` of a definition of the profile or old-format project layer.
+    File(PathBuf),
+    /// A definition of a project repository: its folder under `definitions/` (`workflows/<dir>`),
+    /// opened in a new working copy of the repository.
+    WorkingCopy { repo: ProjectRepo, folder: PathBuf },
+}
+
+/// The layers one command reads, with the commit its project layer came from and the guard
+/// that keeps that layer on disk.
+pub struct TaskDirs {
+    pub dirs: LayerDirs,
+    /// The commit of the project repository the project layer was read from; `None` when the
+    /// project layer is not a repository's.
+    pub commit: Option<String>,
+    /// The project repository of the task, for a task of a new-format project.
+    pub repo: Option<ProjectRepo>,
+    _layer: Option<ProjectLayer>,
+}
+
 /// The layers of definitions, resolved fresh by every command, and the live runs. Cheap to clone
 /// (the runs are shared), so a command takes a copy to its background task.
 #[derive(Clone)]
@@ -65,7 +94,15 @@ pub struct WorkflowEngine {
     /// Where the runs' task changes are written (03's work store in the app).
     writes: Arc<dyn TaskWrites>,
     merger: Merger,
+    /// The project repository of each run started in a new-format project.
+    projects: RunProjects,
+    /// The projects a restore holds new work back in.
+    holds: WorkHolds,
+    /// The runs a landing check started and waits for.
+    landing_waiters: LandingWaiters,
 }
+
+type LandingWaiters = Arc<Mutex<BTreeMap<RunId, futures::channel::oneshot::Sender<LandingRunEnd>>>>;
 
 fn git_merger() -> Merger {
     Arc::new(|request| {
@@ -158,6 +195,9 @@ impl WorkflowEngine {
             runs: Arc::new(Mutex::new(lifecycle)),
             writes: Arc::new(StoreWrites),
             merger: git_merger(),
+            projects: Arc::default(),
+            holds: WorkHolds::default(),
+            landing_waiters: Arc::default(),
         }
     }
 
@@ -175,7 +215,8 @@ impl WorkflowEngine {
 
     /// The engine of the running app: the shipped directory of this version (written when
     /// missing, empty set for now), the profile directory under the home directory. The project
-    /// layer is not wired yet; see [`WorkflowEngine::with_project`].
+    /// layer of a new-format task is read per command ([`WorkflowEngine::dirs_for`]); the one set
+    /// with [`WorkflowEngine::with_project`] is that of an old-format project.
     fn open(cx: &App) -> Self {
         let version = release_channel::AppVersion::global(cx);
         let version = format!("{}.{}.{}", version.major, version.minor, version.patch);
@@ -208,6 +249,8 @@ impl WorkflowEngine {
         let engine = Self::open(cx);
         cx.set_global(engine.clone());
         crate::sources::register(&engine, cx);
+        engine.register_project_sources(cx);
+        engine.install_landing_runs(cx);
         crate::gates::register(&engine, cx);
         crate::run_view::observe_focus(&engine, cx);
         Some(engine)
@@ -215,6 +258,44 @@ impl WorkflowEngine {
 
     pub fn dirs(&self) -> &LayerDirs {
         &self.dirs
+    }
+
+    /// The layers a command on `task` reads: the engine's own, with the project layer of a
+    /// new-format task read from its project's verified commit. The layer stays materialized
+    /// until the result is dropped. An old-format task, or none, gets the engine's layers as
+    /// they are.
+    pub fn dirs_for(&self, task: Option<&Task>, cx: &App) -> Result<TaskDirs, Refusal> {
+        let mut dirs = self.dirs.clone();
+        let repo = task.and_then(|task| bongos_work::project_repo_of(task, cx));
+        let layer = match repo
+            .as_ref()
+            .map(|repo| project_layer_in(repo, None))
+            .transpose()
+        {
+            Ok(layer) => layer,
+            Err(error) => {
+                return Err(Refusal::new(
+                    RefusalKind::Io,
+                    format!("Could not read the project's workflows: {error:#}."),
+                    "Check the project repository, then try again.",
+                ));
+            }
+        };
+        if let Some(layer) = &layer {
+            dirs.project = Some(layer.dir.clone());
+        }
+        Ok(TaskDirs {
+            commit: layer.as_ref().map(|layer| layer.commit.0.clone()),
+            dirs,
+            repo,
+            _layer: layer,
+        })
+    }
+
+    /// [`Self::dirs_for`] the task `task_id` of the loaded work tree.
+    fn dirs_for_id(&self, task_id: &str, cx: &App) -> Result<TaskDirs, Refusal> {
+        let tree = self.writes.tree(cx);
+        self.dirs_for(tree.as_ref().and_then(|tree| tree.task_by_id(task_id)), cx)
     }
 
     /// The live runs. Never held across a call into the live-modes registry, whose `workflows`
@@ -226,6 +307,15 @@ impl WorkflowEngine {
     /// Checks the definition `name`, or every definition with no name.
     pub fn validate(&self, name: Option<&str>) -> Result<Report, DefinitionError> {
         definitions::validate_definitions(&self.dirs, name)
+    }
+
+    /// [`Self::validate`] over `dirs`, such as the layers [`Self::dirs_for`] built.
+    pub fn validate_in(
+        &self,
+        dirs: &LayerDirs,
+        name: Option<&str>,
+    ) -> Result<Report, DefinitionError> {
+        definitions::validate_definitions(dirs, name)
     }
 
     /// Creates a definition in the profile layer from the minimal template, or with `template`
@@ -242,6 +332,33 @@ impl WorkflowEngine {
     /// the picker of step 17).
     pub fn definition_path(&self, name: Option<&str>) -> Result<PathBuf, DefinitionError> {
         definitions::definition_path(&self.dirs, name)
+    }
+
+    /// What `workflow: edit definition` opens for the definition `name` (the first by name with
+    /// none): its `workflow.toml`, or for a definition of a project repository's layer the
+    /// repository and the definition's folder inside `definitions/`, to open in a working copy
+    /// (master is never edited in place).
+    pub fn edit_target(
+        &self,
+        name: Option<&str>,
+        task: Option<&Task>,
+        cx: &App,
+    ) -> Result<EditTarget, String> {
+        let task_dirs = self
+            .dirs_for(task, cx)
+            .map_err(|refusal| refusal.to_string())?;
+        let resolved = definitions::find_definition(&task_dirs.dirs, name)
+            .map_err(|error| error.to_string())?;
+        let folder = resolved.dir.file_name().map(PathBuf::from);
+        match (resolved.layer, task_dirs.repo, folder) {
+            (Layer::Project, Some(repo), Some(folder)) if task_dirs.commit.is_some() => {
+                Ok(EditTarget::WorkingCopy {
+                    repo,
+                    folder: PathBuf::from(WORKFLOWS_DIR).join(folder),
+                })
+            }
+            _ => Ok(EditTarget::File(resolved.dir.join(DEFINITION_FILE))),
+        }
     }
 
     /// Calls `f` with every event of the engine, for the life of the app.
@@ -261,15 +378,13 @@ impl WorkflowEngine {
 
     /// Starts a run on the task of `request` in the loaded work tree ([`Self::start_in`]).
     pub fn start(&self, request: StartRequest, cx: &mut App) -> Result<RunId, Refusal> {
-        let tree = WorkStore::global(cx)
-            .and_then(|store| store.read(cx).snapshot())
-            .ok_or_else(|| {
-                Refusal::new(
-                    RefusalKind::UnknownTask,
-                    "The task tree is not loaded yet.",
-                    "Try again in a moment.",
-                )
-            })?;
+        let tree = self.writes.tree(cx).ok_or_else(|| {
+            Refusal::new(
+                RefusalKind::UnknownTask,
+                "The task tree is not loaded yet.",
+                "Try again in a moment.",
+            )
+        })?;
         self.start_in(request, &tree, cx)
     }
 
@@ -296,6 +411,12 @@ impl WorkflowEngine {
         };
         let checks = AppChecks::read(cx);
         let settings = WorkflowsSettings::get_global(cx).clone();
+        // The project layer is read from the verified commit and stays materialized until the
+        // run's definition has been copied into its first attempt.
+        let task_dirs = self.dirs_for(tree.task_by_id(&request.task_id), cx)?;
+        if let Some(repo) = &task_dirs.repo {
+            self.refuse_held(repo)?;
+        }
         let result = {
             let mut lifecycle = self.lifecycle();
             lifecycle.set_settings(settings);
@@ -303,9 +424,17 @@ impl WorkflowEngine {
                 tree,
                 active_run,
                 checks: &checks,
+                definition_commit: task_dirs.commit.clone(),
             };
-            lifecycle.start(request, &self.dirs, &context)
+            lifecycle.start(request, &task_dirs.dirs, &context)
         };
+        if let (Ok(run), Some(repo)) = (&result, task_dirs.repo.clone()) {
+            self.projects
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(run.clone(), repo);
+        }
+        drop(task_dirs);
         if let Ok(run) = &result {
             self.link_start(run, cx);
         }
@@ -380,6 +509,7 @@ impl WorkflowEngine {
     }
 
     pub fn resume(&self, run: &RunId, cx: &mut App) -> Result<(), Refusal> {
+        self.refuse_held_run(run)?;
         self.act(cx, |lifecycle, _| lifecycle.resume(run))
     }
 
@@ -395,13 +525,66 @@ impl WorkflowEngine {
         fresh_definition: bool,
         cx: &mut App,
     ) -> Result<(), Refusal> {
-        self.act(cx, |lifecycle, dirs| {
-            lifecycle.retry(run, node, fresh_definition, dirs)
+        self.refuse_held_run(run)?;
+        // A retry that reads the definition again, and a restart, read the project's verified
+        // commit now; any other retry reads nothing and keeps its attempt's commit.
+        let task_dirs = if fresh_definition {
+            self.run_dirs(run, cx)?
+        } else {
+            None
+        };
+        let (dirs, commit) = match &task_dirs {
+            Some(task_dirs) => (&task_dirs.dirs, task_dirs.commit.clone()),
+            None => (&self.dirs, None),
+        };
+        self.act(cx, |lifecycle, _| {
+            lifecycle.retry(run, node, fresh_definition, dirs, commit)
         })
     }
 
     pub fn restart(&self, run: &RunId, cx: &mut App) -> Result<RunId, Refusal> {
-        self.act(cx, |lifecycle, dirs| lifecycle.restart(run, dirs))
+        self.refuse_held_run(run)?;
+        let task_dirs = self.run_dirs(run, cx)?;
+        let (dirs, commit) = match &task_dirs {
+            Some(task_dirs) => (&task_dirs.dirs, task_dirs.commit.clone()),
+            None => (&self.dirs, None),
+        };
+        self.act(cx, |lifecycle, _| lifecycle.restart(run, dirs, commit))
+    }
+
+    /// Refuses work in a project a restore holds new work back in.
+    fn refuse_held(&self, repo: &ProjectRepo) -> Result<(), Refusal> {
+        if self.holds.is_held(&repo.location().id) {
+            return Err(Refusal::new(
+                RefusalKind::Held,
+                "This project is being restored, so no workflow work starts in it.",
+                "Try again when the restore is over.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// [`Self::refuse_held`] for the project of `run`, when it has one.
+    fn refuse_held_run(&self, run: &str) -> Result<(), Refusal> {
+        let repo = self
+            .projects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(run)
+            .cloned();
+        match repo {
+            Some(repo) => self.refuse_held(&repo),
+            None => Ok(()),
+        }
+    }
+
+    /// The layers `run`'s task reads now, `None` when the run is not loaded (the lifecycle then
+    /// refuses the command by name).
+    fn run_dirs(&self, run: &str, cx: &App) -> Result<Option<TaskDirs>, Refusal> {
+        let Some((task_id, _, _)) = self.run_task(run) else {
+            return Ok(None);
+        };
+        self.dirs_for_id(&task_id, cx).map(Some)
     }
 
     pub fn approve(
@@ -479,6 +662,8 @@ impl WorkflowEngine {
                 task_id,
                 state,
             } = event;
+            self.export_run(run, *state, cx);
+            self.end_landing_wait(run, *state);
             let failure = match state {
                 RunStatus::Failed => self
                     .lifecycle()
@@ -511,6 +696,165 @@ impl WorkflowEngine {
                 observer(event, cx);
             }
         }
+    }
+}
+
+impl WorkflowEngine {
+    /// Records the state of `run` in the project's state (the `runs.toml` of its snapshots), and
+    /// takes a snapshot when the run ended (D14: a job end).
+    fn export_run(&self, run: &str, state: RunStatus, cx: &mut App) {
+        let Some(repo) = self
+            .projects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(run)
+            .cloned()
+        else {
+            return;
+        };
+        let Some((task_id, _, workflow)) = self.run_task(run) else {
+            return;
+        };
+        let row = project_sources::run_row(&task_id, &workflow, state);
+        if let Err(error) = project_sources::export_run(&repo, run, row) {
+            log::warn!("workflows: {error:#}");
+        }
+        if matches!(
+            state,
+            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+        ) {
+            cx.background_spawn(async move {
+                if let Err(error) = repo
+                    .snapshot_now(SnapshotReason::JobEnd, chrono::Utc::now())
+                    .await
+                {
+                    log::warn!("workflows: snapshot at the end of run: {error:#}");
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Tells the landing check waiting on `run` how it ended.
+    fn end_landing_wait(&self, run: &str, state: RunStatus) {
+        let end = match state {
+            RunStatus::Succeeded => LandingRunEnd::Succeeded,
+            RunStatus::Cancelled => LandingRunEnd::Cancelled,
+            RunStatus::Failed => {
+                let detail = self
+                    .lifecycle()
+                    .state(run)
+                    .and_then(|state| state.ended)
+                    .and_then(|(_, failure)| failure)
+                    .map(|failure| failure.detail)
+                    .unwrap_or_default();
+                LandingRunEnd::Failed(detail)
+            }
+            _ => return,
+        };
+        let waiter = self
+            .landing_waiters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(run);
+        if let Some(waiter) = waiter {
+            waiter.send(end).ok();
+        }
+    }
+
+    /// Makes the engine start the runs of `workflow` landing checks ([`crate::landing`]): each
+    /// request is started on the main thread with `StartedBy::Landing`, and the check hears how
+    /// the run ends.
+    pub(crate) fn install_landing_runs(&self, cx: &mut App) {
+        let (requests, mut incoming) = futures::channel::mpsc::unbounded::<LandingRequest>();
+        let engine = self.clone();
+        cx.spawn(async move |cx| {
+            while let Some(request) = incoming.next().await {
+                cx.update(|cx| engine.start_landing_run(request, cx));
+            }
+        })
+        .detach();
+        set_landing_runs(Some(Arc::new(EngineLandingRuns { requests })));
+    }
+
+    fn start_landing_run(&self, request: LandingRequest, cx: &mut App) {
+        let start = StartRequest {
+            workflow: Some(request.workflow),
+            started_by: StartedBy::Landing,
+            ..StartRequest::new(request.task_id)
+        };
+        match self.start(start, cx) {
+            Ok(run) => {
+                self.landing_waiters
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(run, request.reply);
+            }
+            Err(refusal) => {
+                request
+                    .reply
+                    .send(LandingRunEnd::NotStarted(refusal.to_string()))
+                    .ok();
+            }
+        }
+    }
+
+    /// Registers what runs tell a project repository: the live source of active runs and the
+    /// activity source a restore waits on.
+    pub(crate) fn register_project_sources(&self, cx: &mut App) {
+        LiveSources::register(Arc::new(self.live_source()), cx);
+        ActivitySources::global().register(Arc::new(self.activity_source()));
+    }
+
+    pub(crate) fn live_source(&self) -> WorkflowLiveSource {
+        WorkflowLiveSource {
+            runs: self.runs.clone(),
+        }
+    }
+
+    pub(crate) fn activity_source(&self) -> WorkflowActivity {
+        WorkflowActivity {
+            runs: self.runs.clone(),
+            projects: self.projects.clone(),
+            holds: self.holds.clone(),
+        }
+    }
+}
+
+/// A run a landing check asks for.
+struct LandingRequest {
+    workflow: String,
+    task_id: String,
+    reply: futures::channel::oneshot::Sender<LandingRunEnd>,
+}
+
+/// Hands the runs of landing checks to the engine's main-thread loop.
+struct EngineLandingRuns {
+    requests: futures::channel::mpsc::UnboundedSender<LandingRequest>,
+}
+
+impl LandingRuns for EngineLandingRuns {
+    fn run(
+        &self,
+        workflow: &str,
+        task_id: &str,
+    ) -> futures::future::BoxFuture<'static, LandingRunEnd> {
+        let (reply, end) = futures::channel::oneshot::channel();
+        let request = LandingRequest {
+            workflow: workflow.to_string(),
+            task_id: task_id.to_string(),
+            reply,
+        };
+        if self.requests.unbounded_send(request).is_err() {
+            return Box::pin(std::future::ready(LandingRunEnd::NotStarted(
+                "the workflow engine stopped".to_string(),
+            )));
+        }
+        Box::pin(async move {
+            end.await.unwrap_or_else(|_| {
+                LandingRunEnd::NotStarted("the workflow engine stopped".to_string())
+            })
+        })
     }
 }
 

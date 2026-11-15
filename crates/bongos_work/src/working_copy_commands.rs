@@ -129,43 +129,85 @@ pub(crate) fn open_in_new_workspace(
 
 fn edit(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     with_repo(workspace, window, cx, |repo, workspace, window, cx| {
-        modals::ask(
-            workspace,
-            "Name of the working copy",
-            &fresh_name(),
-            false,
-            Box::new(move |name, _, window, cx| {
-                let prefix = ProjectRepositorySettings::get_global(cx)
-                    .branch_prefix
-                    .clone();
-                let author = keyboard_author(window, cx);
-                let created = cx.background_spawn(async move {
-                    let name = clean_name(&name)?;
-                    repo.create_working_copy(&name, &prefix, &author, now())
-                        .await
-                });
-                cx.spawn_in(window, async move |workspace, cx| match created.await {
-                    Ok(copy) => {
-                        workspace
-                            .update_in(cx, |_, window, cx| {
-                                open_in_new_workspace(copy.path.join(DEFINITIONS_DIR), window, cx)
-                            })
-                            .log_err();
-                    }
-                    Err(error) => {
-                        workspace
-                            .update(cx, |workspace, cx| {
-                                show_toast(workspace, format!("{error:#}"), cx)
-                            })
-                            .log_err();
-                    }
-                })
-                .detach();
-            }),
-            window,
-            cx,
-        );
+        edit_in_working_copy(repo, None, workspace, window, cx)
     });
+}
+
+/// Where a working copy at `copy` is opened: its `definitions/` folder, or `folder` inside it
+/// (relative to `definitions/`, such as a workflow's folder). A `folder` that is not a plain
+/// relative path opens `definitions/`.
+pub fn working_copy_open_path(copy: &Path, folder: Option<&Path>) -> PathBuf {
+    let definitions = copy.join(DEFINITIONS_DIR);
+    match folder {
+        Some(folder)
+            if folder
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))) =>
+        {
+            definitions.join(folder)
+        }
+        _ => definitions,
+    }
+}
+
+/// Makes the working copy `name` of `repo` (branch prefix `prefix`) for `author` and resolves
+/// with the path to open in it: its `definitions/` folder, or `folder` inside that.
+pub fn working_copy_to_edit(
+    repo: ProjectRepo,
+    name: String,
+    folder: Option<PathBuf>,
+    author: bongos_work_model::Author,
+    prefix: String,
+    cx: &gpui::App,
+) -> gpui::Task<anyhow::Result<PathBuf>> {
+    cx.background_spawn(async move {
+        let name = clean_name(&name)?;
+        let copy = repo
+            .create_working_copy(&name, &prefix, &author, now())
+            .await?;
+        Ok(working_copy_open_path(&copy.path, folder.as_deref()))
+    })
+}
+
+/// `project: edit` on `repo`: asks for the name of a new working copy and opens it in a new
+/// workspace, with `folder` (relative to `definitions/`) opened when given.
+pub fn edit_in_working_copy(
+    repo: ProjectRepo,
+    folder: Option<PathBuf>,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    modals::ask(
+        workspace,
+        "Name of the working copy",
+        &fresh_name(),
+        false,
+        Box::new(move |name, _, window, cx| {
+            let prefix = ProjectRepositorySettings::get_global(cx)
+                .branch_prefix
+                .clone();
+            let author = keyboard_author(window, cx);
+            let created = working_copy_to_edit(repo, name, folder, author, prefix, cx);
+            cx.spawn_in(window, async move |workspace, cx| match created.await {
+                Ok(path) => {
+                    workspace
+                        .update_in(cx, |_, window, cx| open_in_new_workspace(path, window, cx))
+                        .log_err();
+                }
+                Err(error) => {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            show_toast(workspace, format!("{error:#}"), cx)
+                        })
+                        .log_err();
+                }
+            })
+            .detach();
+        }),
+        window,
+        cx,
+    );
 }
 
 /// Picks one of the open working copies of the project and runs `then` on it.

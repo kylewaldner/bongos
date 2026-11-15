@@ -58,7 +58,7 @@ pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root
 pub use panel::{WorkPanel, init_panel, task_at_point};
 pub use project_repos::{
     LandingVerdict, LandingWatch, abandon_proposal, approve_and_watch, approve_proposal,
-    register_project_repo, watch_landings,
+    project_repo_of, register_project_repo, watch_landings,
 };
 pub use rebase::RebaseState;
 pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};
@@ -76,6 +76,9 @@ pub use store::{
     CONVERSION_EXPLANATION, CONVERSION_NOTICE_KEY, ConversionNotice, ConvertedOld, ECHO_TTL,
     MAX_RETRIES, OLD_WORKTREE_NOTICE_KEY, Stats, WATCH_LATENCY, WorkCommand, WorkStore,
     WorkStoreEvent, WriteError,
+};
+pub use working_copy_commands::{
+    edit_in_working_copy, working_copy_open_path, working_copy_to_edit,
 };
 pub use worktrees::expand_home;
 

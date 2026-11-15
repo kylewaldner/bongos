@@ -16,7 +16,7 @@ use workspace::{MultiWorkspace, OpenMode, OpenOptions, OpenVisible, Workspace};
 use crate::WorkflowsSettings;
 use crate::actions::{OFF_MESSAGE, show_toast, workflow};
 use crate::definitions::DefinitionError;
-use crate::engine::WorkflowEngine;
+use crate::engine::{EditTarget, WorkflowEngine};
 use crate::lifecycle::{Refusal, RunId};
 use crate::shipped::TEMPLATES;
 use settings::Settings as _;
@@ -29,11 +29,27 @@ pub const VALIDATE_TITLE: &str = "Workflow diagnostics";
 pub(crate) fn register(workspace: &mut Workspace) {
     workspace
         .register_action(|workspace, _: &workflow::Validate, window, cx| {
+            if !WorkflowsSettings::get_global(cx).enabled {
+                show_toast(workspace, OFF_MESSAGE.to_string(), cx);
+                return;
+            }
+            let Some(engine) = WorkflowEngine::ensure(cx) else {
+                return;
+            };
+            // The project layer of the task at point is read from its verified commit.
+            let task = task_at_point(workspace, window, cx);
+            let task_dirs = match engine.dirs_for(task.as_ref(), cx) {
+                Ok(task_dirs) => task_dirs,
+                Err(refusal) => {
+                    show_toast(workspace, refusal.to_string(), cx);
+                    return;
+                }
+            };
             run(
                 workspace,
                 window,
                 cx,
-                |engine| engine.validate(None),
+                move |engine| engine.validate_in(&task_dirs.dirs, None),
                 |report, workspace, window, cx| {
                     open_report(
                         VALIDATE_TITLE.to_string(),
@@ -84,16 +100,48 @@ pub(crate) fn register(workspace: &mut Workspace) {
             );
         })
         .register_action(|workspace, _: &workflow::EditDefinition, window, cx| {
-            // The first definition by name until the picker of step 17.
-            run(
-                workspace,
-                window,
-                cx,
-                |engine| engine.definition_path(None),
-                |path, workspace, window, cx| open_file(path, workspace, window, cx),
-            )
+            if !WorkflowsSettings::get_global(cx).enabled {
+                show_toast(workspace, OFF_MESSAGE.to_string(), cx);
+                return;
+            }
+            let Some(engine) = WorkflowEngine::ensure(cx) else {
+                return;
+            };
+            // The task at point says which project's workflows come first; the first
+            // definition by name until the picker of step 17.
+            let task = task_at_point(workspace, window, cx);
+            edit_definition(&engine, task.as_ref(), workspace, window, cx);
         });
     register_run_commands(workspace);
+}
+
+/// The task at point, for the commands that read a project's workflows.
+fn task_at_point(
+    workspace: &Workspace,
+    window: &Window,
+    cx: &gpui::App,
+) -> Option<bongos_work_model::store::Task> {
+    let id = bongos_work::task_at_point(workspace, window, cx)?;
+    let tree = bongos_work::WorkStore::global(cx)?.read(cx).snapshot()?;
+    tree.task_by_id(&id).cloned()
+}
+
+/// `workflow: edit definition` for the first definition by name of the layers `task` reads: a
+/// definition of a project repository opens in a new working copy, any other in an editor.
+pub(crate) fn edit_definition(
+    engine: &WorkflowEngine,
+    task: Option<&bongos_work_model::store::Task>,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    match engine.edit_target(None, task, cx) {
+        Ok(EditTarget::File(path)) => open_file(path, workspace, window, cx),
+        Ok(EditTarget::WorkingCopy { repo, folder }) => {
+            bongos_work::edit_in_working_copy(repo, Some(folder), workspace, window, cx)
+        }
+        Err(message) => show_toast(workspace, message, cx),
+    }
 }
 
 /// The toast when a run command finds no run to act on.

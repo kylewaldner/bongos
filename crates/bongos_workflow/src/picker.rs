@@ -281,8 +281,15 @@ pub(crate) fn run_picker(
         );
         return;
     };
+    let task_dirs = match engine.dirs_for(tree.task_by_id(&task_id), cx) {
+        Ok(task_dirs) => task_dirs,
+        Err(refusal) => {
+            show_toast(workspace, refusal.to_string(), cx);
+            return;
+        }
+    };
     let picker = Picker::new(
-        candidates(engine.dirs()),
+        candidates(&task_dirs.dirs),
         todo_workflow(&tree, &task_id).as_deref(),
     );
     if picker.candidates.is_empty() {
@@ -370,8 +377,15 @@ fn review_step(
         return;
     };
     let programs = WorkflowsSettings::get_global(cx).programs.clone();
+    let task_dirs = match engine.dirs_for(tree.task_by_id(&review.task_id), cx) {
+        Ok(task_dirs) => task_dirs,
+        Err(refusal) => {
+            show_toast(workspace, refusal.to_string(), cx);
+            return;
+        }
+    };
     let summary = match review.summary(
-        engine.dirs(),
+        &task_dirs.dirs,
         &tree,
         &sandbox,
         &AgentDefaults::default(),
