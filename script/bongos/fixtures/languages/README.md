@@ -13,7 +13,7 @@ dependencies or build output; tests fake environments in a temp copy.
 - node-pnpm: package.json and pnpm-lock.yaml. pnpm detection.
 - node-yarn: package.json and yarn.lock. Yarn detection.
 - bun: package.json and bun.lock. Bun detection and test runner.
-- react-vite: vite.config.ts and a tsx component. Vite React project detection.
+- react-vite: vite.config.ts, index.html and a tsx component. Vite React project detection; the smoke scenario opens index.html for HTML highlighting.
 - react-next: next.config.js and app/page.tsx. Next.js detection.
 - react-router: react-router.config.ts and app/routes.tsx. React Router framework detection.
 - biome: biome.json and a ts file. Biome formatter and linter detection.
