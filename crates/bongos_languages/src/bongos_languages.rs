@@ -17,6 +17,11 @@
 //! (github.com/sweetppro/zed-xml, MIT, see `LICENSE-XML-EXTENSION`). The XML config, brackets, overrides and
 //! injections files are written for bongos. The grammar is tree-sitter-xml (MIT) from crates.io.
 //!
+//! The HCL, Terraform and Terraform Vars configs and queries in `src/hcl/`, `src/terraform/` and
+//! `src/terraform-vars/` come from the Zed Terraform extension (github.com/zed-extensions/terraform,
+//! Apache-2.0, see `LICENSE-TERRAFORM-EXTENSION`). All three use the tree-sitter-hcl grammar (Apache-2.0)
+//! from crates.io.
+//!
 //! Everything here is compiled into the binary: the grammars are linked in and the queries are embedded,
 //! so nothing is fetched at runtime.
 
@@ -29,6 +34,9 @@ const JAVA_CONFIG: &str = include_str!("java/config.toml");
 const TOML_CONFIG: &str = include_str!("toml/config.toml");
 const HTML_CONFIG: &str = include_str!("html/config.toml");
 const XML_CONFIG: &str = include_str!("xml/config.toml");
+const HCL_CONFIG: &str = include_str!("hcl/config.toml");
+const TERRAFORM_CONFIG: &str = include_str!("terraform/config.toml");
+const TERRAFORM_VARS_CONFIG: &str = include_str!("terraform-vars/config.toml");
 
 /// Registers the built-in languages and their grammars with the registry.
 ///
@@ -41,6 +49,7 @@ pub fn init(languages: &LanguageRegistry) {
         ("toml", tree_sitter_toml_ng::LANGUAGE),
         ("html", tree_sitter_html::LANGUAGE),
         ("xml", tree_sitter_xml::LANGUAGE_XML),
+        ("hcl", tree_sitter_hcl::LANGUAGE),
     ]);
 
     register(languages, KOTLIN_CONFIG, kotlin_queries);
@@ -48,6 +57,9 @@ pub fn init(languages: &LanguageRegistry) {
     register(languages, TOML_CONFIG, toml_queries);
     register(languages, HTML_CONFIG, html_queries);
     register(languages, XML_CONFIG, xml_queries);
+    register(languages, HCL_CONFIG, hcl_queries);
+    register(languages, TERRAFORM_CONFIG, terraform_queries);
+    register(languages, TERRAFORM_VARS_CONFIG, terraform_vars_queries);
 }
 
 fn register(
@@ -134,6 +146,38 @@ fn xml_queries() -> LanguageQueries {
         outline: Some(include_str!("xml/outline.scm").into()),
         injections: Some(include_str!("xml/injections.scm").into()),
         overrides: Some(include_str!("xml/overrides.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn hcl_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("hcl/highlights.scm").into()),
+        brackets: Some(include_str!("hcl/brackets.scm").into()),
+        indents: Some(include_str!("hcl/indents.scm").into()),
+        outline: Some(include_str!("hcl/outline.scm").into()),
+        injections: Some(include_str!("hcl/injections.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn terraform_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("terraform/highlights.scm").into()),
+        brackets: Some(include_str!("terraform/brackets.scm").into()),
+        indents: Some(include_str!("terraform/indents.scm").into()),
+        outline: Some(include_str!("terraform/outline.scm").into()),
+        injections: Some(include_str!("terraform/injections.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn terraform_vars_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("terraform-vars/highlights.scm").into()),
+        brackets: Some(include_str!("terraform-vars/brackets.scm").into()),
+        indents: Some(include_str!("terraform-vars/indents.scm").into()),
+        injections: Some(include_str!("terraform-vars/injections.scm").into()),
         ..Default::default()
     }
 }
@@ -405,5 +449,88 @@ mod tests {
                 ("comment", "<!-- d -->"),
             ],
         );
+    }
+
+    #[gpui::test]
+    async fn hcl_and_terraform_selected_by_path(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        for (path, name) in [
+            ("main.tf", "Terraform"),
+            ("a/b/main.tofu", "Terraform"),
+            ("prod.tfvars", "Terraform Vars"),
+            ("a/b/prod.tfvars", "Terraform Vars"),
+            ("config.hcl", "HCL"),
+            ("a/b/config.hcl", "HCL"),
+        ] {
+            let available = registry
+                .language_for_file_path(Path::new(path))
+                .unwrap_or_else(|| panic!("no language for {path}"));
+            assert_eq!(available.name().as_ref(), name, "{path}");
+        }
+        for name in ["HCL", "Terraform", "Terraform Vars"] {
+            let language = registry.language_for_name(name).await.unwrap();
+            assert!(language.grammar().is_some(), "{name} loads with a grammar");
+        }
+    }
+
+    #[gpui::test]
+    async fn registering_twice_keeps_one_hcl_and_terraform_entry(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        init(&registry);
+        for wanted in ["HCL", "Terraform", "Terraform Vars"] {
+            let count = registry
+                .language_names()
+                .into_iter()
+                .filter(|name| name.as_ref() == wanted)
+                .count();
+            assert_eq!(count, 1, "{wanted}");
+        }
+    }
+
+    #[test]
+    fn terraform_highlight_query_captures_a_snippet() {
+        const TF_SNIPPET: &str = "# note\nvariable \"region\" {\n  default = \"us\"\n}\nresource \"aws_s3_bucket\" \"b\" {\n  count = 1\n}\n";
+        let captured = captures(
+            tree_sitter_hcl::LANGUAGE,
+            parse_config(TERRAFORM_CONFIG),
+            terraform_queries(),
+            include_str!("terraform/highlights.scm"),
+            TF_SNIPPET,
+        );
+        assert_captured(
+            &captured,
+            &[
+                ("comment", "# note"),
+                ("keyword", "variable"),
+                ("keyword", "resource"),
+                ("number", "1"),
+            ],
+        );
+    }
+
+    #[test]
+    fn hcl_and_terraform_vars_highlight_queries_compile() {
+        const SNIPPET: &str = "region = \"us\"\n// c\n";
+        for (config, queries, highlights) in [
+            (
+                HCL_CONFIG,
+                hcl_queries(),
+                include_str!("hcl/highlights.scm"),
+            ),
+            (
+                TERRAFORM_VARS_CONFIG,
+                terraform_vars_queries(),
+                include_str!("terraform-vars/highlights.scm"),
+            ),
+        ] {
+            let captured = captures(
+                tree_sitter_hcl::LANGUAGE,
+                parse_config(config),
+                queries,
+                highlights,
+                SNIPPET,
+            );
+            assert_captured(&captured, &[("comment", "// c")]);
+        }
     }
 }
