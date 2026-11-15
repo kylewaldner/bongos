@@ -237,6 +237,34 @@ pub(crate) fn register_missing_chips(cx: &mut App) {
     RowChipsRegistry::add_source(MISSING_SOURCE, Rc::new(MissingChips), cx);
 }
 
+/// The name of the source of the master warnings of open project repositories.
+pub(crate) const MASTER_SOURCE: &str = "master";
+
+/// Shows the warning of a project repository whose master was changed outside landing (an
+/// outside commit waiting for approval, a split master) on the row of its project.
+struct MasterChips;
+
+impl RowChipsSource for MasterChips {
+    fn chips(&self, task_id: &str, cx: &App) -> Vec<SharedString> {
+        let Some(snapshot) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot())
+        else {
+            return Vec::new();
+        };
+        snapshot
+            .projects
+            .iter()
+            .filter(|project| project.task.id() == Some(task_id))
+            .filter_map(|project| crate::project_repos::master_warning_of(&project.task, cx))
+            .map(SharedString::from)
+            .collect()
+    }
+}
+
+/// Registers the master warning chips; a change of a warning redraws them.
+pub(crate) fn register_master_chips(cx: &mut App) {
+    RowChipsRegistry::add_source(MASTER_SOURCE, Rc::new(MasterChips), cx);
+}
+
 #[derive(Default)]
 struct ViewOpenedObservers(Vec<Rc<dyn Fn(&mut App)>>);
 

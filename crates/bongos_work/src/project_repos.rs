@@ -51,6 +51,39 @@ pub fn project_repo_of(task: &WorkTask, cx: &App) -> Option<ProjectRepo> {
         .find(|repo| task.dir.starts_with(&repo.location().files))
 }
 
+/// The warning of each open project repository whose master was changed outside landing (an
+/// outside commit waiting for approval, a split master), by repository id. The project's row in
+/// the Work view shows it as a chip.
+#[derive(Default)]
+struct MasterWarnings(std::collections::HashMap<String, String>);
+
+impl gpui::Global for MasterWarnings {}
+
+/// Records the master warning of the repository `repo_id` (`None` once master is clean again)
+/// and redraws the row chips when it changed.
+pub(crate) fn note_master_warning(repo_id: &str, warning: Option<String>, cx: &mut App) {
+    let warnings = &mut cx.default_global::<MasterWarnings>().0;
+    let changed = match warning {
+        Some(warning) => {
+            warnings.insert(repo_id.to_string(), warning.clone()).as_ref() != Some(&warning)
+        }
+        None => warnings.remove(repo_id).is_some(),
+    };
+    if changed {
+        crate::registry::RowChipsRegistry::changed(cx);
+    }
+}
+
+/// The master warning of the open repository `task` belongs to, if it has one.
+pub(crate) fn master_warning_of(task: &WorkTask, cx: &App) -> Option<String> {
+    let warnings = cx.try_global::<MasterWarnings>()?;
+    if warnings.0.is_empty() {
+        return None;
+    }
+    let repo = project_repo_of(task, cx)?;
+    warnings.0.get(&repo.location().id).cloned()
+}
+
 /// Makes `loaded` known to the commands on working copies and to the handling of master files.
 pub(crate) fn note_open_repo(loaded: &Arc<LoadedProject>, cx: &mut App) {
     let repos = cx.default_global::<OpenRepos>();
@@ -390,6 +423,7 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
     );
     crate::registry::register_pending_chips(cx);
     crate::registry::register_missing_chips(cx);
+    crate::registry::register_master_chips(cx);
     let source = Arc::new(RepoSource {
         name,
         loaded: loaded.clone(),
@@ -501,7 +535,7 @@ async fn watch_master(repo: ProjectRepo, fs: Arc<dyn Fs>, cx: &AsyncApp) {
             }
         })
         .await;
-    check_master(&repo, &background).await;
+    check_master(&repo, cx).await;
     while let Some(batch) = batches.next().await {
         let (matters, returned) = background
             .spawn(async move {
@@ -511,21 +545,27 @@ async fn watch_master(repo: ProjectRepo, fs: Arc<dyn Fs>, cx: &AsyncApp) {
             .await;
         dirs = returned;
         if matters {
-            check_master(&repo, &background).await;
+            check_master(&repo, cx).await;
         }
     }
 }
 
-async fn check_master(repo: &ProjectRepo, background: &gpui::BackgroundExecutor) {
-    let repo = repo.clone();
-    let status = background
-        .spawn(async move { repo.check_master().await })
+/// Compares master with the verified commit; a warning (an outside commit, a split master) is
+/// logged and shown on the project's row until master is clean again.
+async fn check_master(repo: &ProjectRepo, cx: &AsyncApp) {
+    let checking = repo.clone();
+    let status = cx
+        .background_executor()
+        .spawn(async move { checking.check_master().await })
         .await;
     match status {
         Ok(status) => {
-            if let Some(warning) = status.warning() {
+            let warning = status.warning();
+            if let Some(warning) = &warning {
                 log::warn!("{warning}");
             }
+            let id = repo.location().id.clone();
+            cx.update(|cx| note_master_warning(&id, warning, cx));
         }
         Err(error) => log::error!("comparing master with the verified commit: {error:#}"),
     }

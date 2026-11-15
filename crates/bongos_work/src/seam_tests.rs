@@ -496,3 +496,48 @@ async fn a_project_repository_serves_its_tasks_and_applies_state_only_writes(
     let row = repo.change(&change_id).unwrap().unwrap();
     assert!(refs().contains(&format!("refs/heads/{}", row.branch)));
 }
+
+#[gpui::test]
+async fn a_master_changed_outside_landing_shows_a_warning_on_its_project_row(
+    cx: &mut TestAppContext,
+) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp).join("work");
+    let store = new_store(cx, &root);
+    let repo = project_repo(&canonical(&temp).join("project"));
+    // A commit straight on master: an outside commit waiting for approval.
+    write(
+        &repo.location().repository.join("notes.txt"),
+        "written outside\n",
+    );
+    futures::executor::block_on(repo.git().commit_all(
+        &repo.location().repository,
+        "outside",
+        &Identity::default(),
+    ))
+    .unwrap();
+    let loaded = LoadedProject::new(repo.clone());
+    let _registration = cx.update(|cx| crate::register_project_repo(loaded, cx));
+    wait_until(cx, &store, "the repository's project", |tree| {
+        tree.task_by_id("g1").is_some()
+    })
+    .await;
+    let is_warning = |chip: &gpui::SharedString| chip.contains("master was changed outside");
+    let mut chips = Vec::new();
+    for _ in 0..200 {
+        chips = cx.update(|cx| crate::RowChipsRegistry::chips("g1", cx));
+        if chips.iter().any(is_warning) {
+            break;
+        }
+        cx.executor().timer(Duration::from_millis(50)).await;
+    }
+    assert!(chips.iter().any(is_warning), "{chips:?}");
+    // Only the project's own row carries it.
+    let leaf = cx.update(|cx| crate::RowChipsRegistry::chips("r1", cx));
+    assert!(!leaf.iter().any(is_warning), "{leaf:?}");
+
+    // Once master is clean again the chip goes.
+    cx.update(|cx| crate::project_repos::note_master_warning("project-1", None, cx));
+    let chips = cx.update(|cx| crate::RowChipsRegistry::chips("g1", cx));
+    assert!(!chips.iter().any(is_warning), "{chips:?}");
+}
