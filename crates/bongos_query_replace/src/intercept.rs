@@ -8,7 +8,8 @@
 //!   session as an exit: the edits become one undo step, focus goes back to the origin editor, and
 //!   the keys run there once.
 //! - While a `!` batch runs only `C-g` goes on; any other key is held and runs in the origin editor
-//!   once the batch is over, so nothing acts on the buffer while it changes.
+//!   once the batch is over, so nothing acts on the buffer while it changes. A `C-g` that stops
+//!   the batch drops the held keys, as Emacs drops typed-ahead input on quit.
 //!
 //! The interceptor lives as long as the session, which holds its subscription.
 
@@ -62,11 +63,12 @@ pub(crate) fn install(
             .pending_input_keystrokes()
             .map(<[Keystroke]>::to_vec)
             .unwrap_or_default();
-        if holds_keys(&state) {
+        let batch = in_batch(&state);
+        if holds_keys(&state) && !batch {
             // The session is already ending on an earlier key: this one runs after it.
             keys.push(event.keystroke.clone());
         } else {
-            let batch = in_batch(&state);
+            // In a batch `C-g` still goes on when keys are held, so it can stop the batch.
             let decision = decide_with(
                 &cx.key_bindings().borrow(),
                 &keys,

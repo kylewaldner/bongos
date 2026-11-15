@@ -817,7 +817,7 @@ pub(crate) fn in_batch(state: &Shared) -> bool {
 }
 
 /// Whether the session is ending on a key that is not its own, or holds the keys typed during a
-/// batch: every later key is held to run after it.
+/// batch: every later key is held to run after it (in a batch, but `C-g`).
 pub(crate) fn holds_keys(state: &Shared) -> bool {
     state.borrow().held.is_some()
 }
@@ -1039,6 +1039,11 @@ fn end_batch(
     let effects = {
         let mut state = state.borrow_mut();
         state.batch = None;
+        // `C-g` stopped the batch: the keys typed during it are dropped, as a quit drops typed-ahead
+        // input in Emacs.
+        if outcome.as_ref().is_some_and(|outcome| outcome.interrupted) {
+            state.held = None;
+        }
         if state.done {
             // Ended some other way meanwhile: the edits still become one undo step.
             let editor = state.editor.upgrade();
