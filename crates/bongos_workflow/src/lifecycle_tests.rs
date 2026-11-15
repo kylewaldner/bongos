@@ -1154,6 +1154,40 @@ fn a_second_start_is_refused_through_can_start_run(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| LiveModesRegistry::can_start_run(LEAF, cx).allowed));
 }
 
+#[gpui::test]
+fn the_engine_reports_the_worktree_of_the_active_run(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        WorkflowsSettings::register(cx);
+    });
+    let world = World::new();
+    let worktrees = DirWorktrees {
+        root: world.root.join("runs"),
+        error: world.worktree_error.clone(),
+    };
+    let lifecycle = Lifecycle::new(
+        Box::new(FakeRunner::new()) as EngineRunner,
+        Box::new(worktrees),
+        world.settings(),
+    );
+    let engine = WorkflowEngine::with_lifecycle(world.dirs.clone(), lifecycle);
+    assert_eq!(engine.active_run_worktree(LEAF), None);
+
+    let run = cx
+        .update(|cx| engine.start_in(StartRequest::new(LEAF), &world.tree, cx))
+        .unwrap();
+    engine.lifecycle().tick();
+
+    let path = engine.lifecycle().worktree(&run).unwrap().path.clone();
+    assert!(path.exists());
+    assert_eq!(engine.active_run_worktree(LEAF), Some((run.clone(), path)));
+    assert_eq!(engine.active_run_worktree(GROUP), None);
+
+    cx.update(|cx| engine.cancel(&run, cx)).unwrap();
+    assert_eq!(engine.active_run_worktree(LEAF), None);
+}
+
 #[path = "enable_tests.rs"]
 mod enable_tests;
 #[path = "gates_tests.rs"]

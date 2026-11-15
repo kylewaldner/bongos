@@ -376,6 +376,14 @@ impl WorkflowEngine {
         self.lifecycle().active_run_id(task_id)
     }
 
+    /// The id and the worktree path of the active run of `task_id`.
+    pub fn active_run_worktree(&self, task_id: &str) -> Option<(RunId, PathBuf)> {
+        let lifecycle = self.lifecycle();
+        let run = lifecycle.active_run_id(task_id)?;
+        let path = lifecycle.worktree(&run)?.path.clone();
+        Some((run, path))
+    }
+
     /// Starts a run on the task of `request` in the loaded work tree ([`Self::start_in`]).
     pub fn start(&self, request: StartRequest, cx: &mut App) -> Result<RunId, Refusal> {
         let tree = self.writes.tree(cx).ok_or_else(|| {
