@@ -427,6 +427,7 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-g | goto-line (a prompt in the minibuffer, with a preview) |
 | C-l, M-r | recenter, reposition |
 | C-s, C-r | isearch |
+| M-%, C-M-% | query-replace, query-replace-regexp |
 | C-x h | mark the whole buffer |
 | C-SPC, C-x C-SPC, C-x C-x | set the mark, pop the mark ring, exchange point and mark |
 | C-g | keyboard-quit (cancels a prompt, a mark or a search) |
@@ -577,6 +578,60 @@ The match count runs apart from it, in 1 MB windows on every core. While it is s
 counter is blank, or shows an ellipsis while a search is pending, and it stops at 10,000 matches
 and reads `3/10000+`.
 
+## Query replace
+
+M-% replaces a string, asking about each match, as in Emacs. The prompts and the questions show in
+the minibuffer strip. Under the Emacs base keymap (the default) these keys start it in an editor:
+
+| Key | Command |
+|---|---|
+| M-% | query-replace: ask for a string, then its replacement, then ask at each match |
+| C-M-% | query-replace-regexp: the same, with a regexp; `\1` to `\9` in the replacement name its groups, `\&` the whole match and `\#` the count |
+| M-% in a search | end the incremental search and replace its string and settings from the match on, asking only for the replacement (C-M-% does the same with a regexp) |
+
+`replace-string` and `replace-regexp` have no key. Run them from the command palette (M-x): they
+ask for the strings, then replace every match without asking. All four refuse a read-only buffer.
+
+The first prompt starts from the region, else the symbol at the cursor, else the last string; the
+second starts from the last replacement when the string is the last one. M-p and M-n walk the
+history. C-q makes the next key literal, so `C-q C-j` puts a newline in the string. At the
+second prompt RET asks at each match; with no match the message reads `Nothing to replace`.
+
+At each match the strip asks `Query replacing X with Y:` and these keys answer (`?` lists them):
+
+| Key | Answer |
+|---|---|
+| y, SPC | replace this match and go on |
+| n, DEL | skip it and go on |
+| ! | replace this and every remaining match without asking; C-g stops it and keeps what was replaced |
+| . | replace this match and end |
+| , | replace this match and wait, showing the result; the next key goes on |
+| ^ | go back to the previous replaced match and show it, one older each time |
+| u | undo the last replacement and ask about that match again |
+| e | edit the replacement; RET resumes with the new text |
+| q, RET | end; the cursor stays at the current match |
+| C-g | end like q; the replacements made stay |
+| C-l | recenter the match (middle, top, bottom) |
+| ? | show this list of keys |
+
+Any other key ends the replace and then runs as it does in the editor.
+
+Case is smart. A string with an uppercase letter is matched case-sensitively and any other
+case-insensitively; M-c at a prompt switches it. When the match ignores case and the string has no
+uppercase letter, the replacement takes the case of each match: `foo` to `bar` turns `Foo` into
+`Bar` and `FOO` into `BAR`.
+
+With a region, only the region is searched. Without one the search runs from the cursor to the end
+of the buffer (in a multibuffer, to the end of the excerpt at the cursor). The mark is pushed where
+the command started, so C-x C-SPC goes back, and the cursor ends after the last replacement.
+
+The whole replace is one undo step: after it, undo (C-/) puts back every replacement of the batch,
+the answered ones, the `!` ones and the ones of `replace-string` alike. The echo area says what
+happened, such as `Replaced 12 occurrences` or `Replaced 12, skipped 3`.
+
+`minibuffer.enabled_for` names `query_replace` by default, so the prompts and the questions are in
+the strip. Remove it from that list to get them as a centered modal; the keys are the same.
+
 ## Minibuffer
 
 As in Emacs, prompts open in a one-line strip at the bottom of the window, below the status bar,
@@ -586,7 +641,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json

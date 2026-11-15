@@ -100,6 +100,8 @@
       "alt-s alt->": "isearch::LastMatch",
       "ctrl-l": "isearch::Recenter",
       "ctrl-c ctrl-o": "isearch::Occur",
+      "alt-%": "isearch::QueryReplace",
+      "ctrl-alt-%": "isearch::QueryReplaceRegexp",
     },
   },
   // The kill ring browser (the `KillRing` context of its prompt). M-n and M-p move the

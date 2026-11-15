@@ -3,7 +3,8 @@
 //! the Emacs capitalize-word binding; in an editor running a batch, `ctrl-g` stops it; in the
 //! decision view the answer keys resolve to the `query_replace::` actions, `ctrl-g` beats the
 //! strip's cancel and `ctrl-h` beats the Emacs help prefix. Outside those contexts the keys keep
-//! their meaning.
+//! their meaning. The starters `alt-%` and `ctrl-alt-%` are bound in an editor by the Emacs base
+//! keymap, and the same chords hand an isearch session over.
 
 use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
 use settings::{KeybindSource, KeymapFile};
@@ -266,5 +267,92 @@ async fn the_in_session_actions_are_the_decision_view_rows(cx: &mut TestAppConte
         let mut in_session = bongos_query_replace::actions::IN_SESSION.to_vec();
         in_session.sort_unstable();
         assert_eq!(bound, in_session, "{}", platform.overrides);
+    }
+}
+
+const SESSION: [&str; 3] = ["Workspace", "Isearch", "Editor mode=full"];
+
+/// The chords as the platforms report them: Linux drops the shift of a symbol and keeps the
+/// character; macOS also carries the character Option produced.
+const CHORDS: [(&str, &str); 4] = [
+    ("alt-%", "query_replace::QueryReplace"),
+    ("ctrl-alt-%", "query_replace::QueryReplaceRegexp"),
+    ("alt-%->\u{2030}", "query_replace::QueryReplace"),
+    ("ctrl-alt-%->\u{2030}", "query_replace::QueryReplaceRegexp"),
+];
+
+#[gpui::test]
+async fn the_starters_resolve_in_an_editor_under_the_emacs_base(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        let keymap = Keymap::new(load_all(&platform, true, cx));
+        for (input, action) in CHORDS {
+            let (names, pending) = resolve(&keymap, input, &EDITOR);
+            assert_eq!(names.first(), Some(&action), "{}: {input}", platform.emacs);
+            assert!(!pending, "{}: {input}", platform.emacs);
+        }
+    }
+}
+
+#[gpui::test]
+async fn the_starters_are_unbound_without_the_emacs_base(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        let keymap = Keymap::new(load_all(&platform, false, cx));
+        for (input, _) in CHORDS {
+            let (names, pending) = resolve(&keymap, input, &EDITOR);
+            assert!(
+                names.is_empty() && !pending,
+                "{}: {input}: {names:?}",
+                platform.default
+            );
+        }
+    }
+}
+
+#[gpui::test]
+async fn the_chords_in_an_isearch_session_hand_over(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        for emacs in [true, false] {
+            let keymap = Keymap::new(load_all(&platform, emacs, cx));
+            for (input, starter) in CHORDS {
+                let action = starter.replace("query_replace::", "isearch::");
+                let (names, pending) = resolve(&keymap, input, &SESSION);
+                assert_eq!(
+                    names.first(),
+                    Some(&action.as_str()),
+                    "{}: {input} (emacs {emacs})",
+                    platform.overrides
+                );
+                assert!(!pending, "{}: {input}", platform.overrides);
+            }
+        }
+    }
+}
+
+/// No binding of the app uses the chords except the four rows, and each row sits in its own
+/// context: the starters in the Emacs base's editor block, the hand-offs in a session block.
+#[gpui::test]
+async fn the_chords_shadow_no_other_binding(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        for binding in load_all(&platform, true, cx) {
+            let keys = binding.keystrokes();
+            if !keys
+                .iter()
+                .any(|key| key.inner().key == "%" && key.inner().modifiers.alt)
+            {
+                continue;
+            }
+            let name = binding.action().name();
+            assert!(
+                name.starts_with("query_replace::QueryReplace")
+                    || name.starts_with("isearch::QueryReplace"),
+                "{}: {name} is bound to a query replace chord",
+                platform.emacs
+            );
+            assert_eq!(keys.len(), 1, "{}: {name}", platform.emacs);
+        }
     }
 }
