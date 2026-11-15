@@ -326,6 +326,7 @@ fn edit_with_file_move(loaded: &LoadedProject, from: &str, to: &str) -> QuickEdi
             goal: Some("Backfill events".to_string()),
             kind: None,
             repository: None,
+            work_kind: None,
         },
     )
     .unwrap();

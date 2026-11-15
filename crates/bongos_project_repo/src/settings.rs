@@ -49,6 +49,8 @@ pub struct ProjectRepositorySettings {
     /// The title of the project one-offs go in: made by the first `task: new one-off`, or by
     /// converting the old one-offs.
     pub oneoffs_project: String,
+    /// Whether `task: new` and `task: edit` ask for the task's work kind label.
+    pub ask_work_kind: bool,
 }
 
 impl ProjectRepositorySettings {
@@ -132,6 +134,7 @@ impl Settings for ProjectRepositorySettings {
             run_record_copy_interval_minutes: settings
                 .run_record_copy_interval_minutes
                 .unwrap_or(crate::backup::DEFAULT_RUN_RECORD_COPY_INTERVAL_MINUTES),
+            ask_work_kind: settings.ask_work_kind.unwrap_or(false),
             oneoffs_project: settings
                 .oneoffs_project
                 .map(|title| title.trim().to_string())

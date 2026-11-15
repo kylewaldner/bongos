@@ -549,6 +549,48 @@ pub(crate) fn new_task_with_default_kind(placement: &Placement, goal: String, cx
     new
 }
 
+/// Whether `project_repository.ask_work_kind` makes `task: new` and `task: edit` ask for the work
+/// kind label.
+fn asks_work_kind(cx: &App) -> bool {
+    ProjectRepositorySettings::try_get(cx).is_some_and(|settings| settings.ask_work_kind)
+}
+
+/// Asks for the work kind label of a new task when the setting is on, then makes `new`; an empty
+/// answer leaves the task without a label.
+fn finish_new(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    new: NewTask,
+    submit_new: impl Fn(&WorkTree, &WorkContext, NewTask) -> model::Outcome + Send + 'static,
+) {
+    if !asks_work_kind(cx) {
+        submit(workspace, window, cx, move |tree, ctx| {
+            submit_new(tree, ctx, new.clone())
+        });
+        return;
+    }
+    modals::ask(
+        workspace,
+        WORK_KIND_PROMPT,
+        "",
+        true,
+        Box::new(move |label, workspace, window, cx| {
+            let new = NewTask {
+                work_kind: Some(label),
+                ..new
+            };
+            submit(workspace, window, cx, move |tree, ctx| {
+                submit_new(tree, ctx, new.clone())
+            })
+        }),
+        window,
+        cx,
+    );
+}
+
+const WORK_KIND_PROMPT: &str = "Work kind, free text (empty for none)";
+
 fn new_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if ready(workspace, cx).is_none() {
         return;
@@ -563,8 +605,8 @@ fn new_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                 activity: DEFAULT_ACTIVITY.to_string(),
             };
             let new = new_task_with_default_kind(&placement, goal, cx);
-            submit(workspace, window, cx, move |tree, ctx| {
-                model::new_task(tree, ctx, placement.clone(), new.clone())
+            finish_new(workspace, window, cx, new, move |tree, ctx, new| {
+                model::new_task(tree, ctx, placement.clone(), new)
             })
         }),
         window,
@@ -589,8 +631,8 @@ fn new_child(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                 Box::new(move |goal, workspace, window, cx| {
                     let new =
                         new_task_with_default_kind(&Placement::Under(parent.clone()), goal, cx);
-                    submit(workspace, window, cx, move |tree, ctx| {
-                        model::new_child(tree, ctx, &parent, new.clone())
+                    finish_new(workspace, window, cx, new, move |tree, ctx, new| {
+                        model::new_child(tree, ctx, &parent, new)
                     })
                 }),
                 window,
@@ -766,17 +808,18 @@ fn edit(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspa
             };
             // A goal that comes from Linear is not asked for: the edit goes straight to the kind.
             if rules::goal_locked(&file).is_some() {
-                edit_kind(workspace, window, cx, id, file.kind, None);
+                edit_kind(workspace, window, cx, id, file.kind, file.work_kind, None);
                 return;
             }
             let current = file.kind;
+            let work_kind = file.work_kind.clone();
             modals::ask(
                 workspace,
                 "Goal, in one sentence",
                 &file.goal,
                 false,
                 Box::new(move |goal, workspace, window, cx| {
-                    edit_kind(workspace, window, cx, id, current, Some(goal))
+                    edit_kind(workspace, window, cx, id, current, work_kind, Some(goal))
                 }),
                 window,
                 cx,
@@ -793,6 +836,7 @@ fn edit_kind(
     cx: &mut Context<Workspace>,
     id: String,
     current: Kind,
+    work_kind: Option<String>,
     goal: Option<String>,
 ) {
     let labels = KINDS
@@ -813,22 +857,51 @@ fn edit_kind(
         selected,
         Box::new(move |choice, workspace, window, cx| {
             let kind = KINDS[choice];
-            submit(workspace, window, cx, move |tree, ctx| {
-                model::edit(
-                    tree,
-                    ctx,
-                    &id,
-                    TaskEdit {
-                        goal: goal.clone(),
-                        kind: Some(kind),
-                        repository: None,
-                    },
-                )
-            })
+            if !asks_work_kind(cx) {
+                submit_edit(workspace, window, cx, id, goal, kind, None);
+                return;
+            }
+            modals::ask(
+                workspace,
+                WORK_KIND_PROMPT,
+                work_kind.as_deref().unwrap_or(""),
+                true,
+                Box::new(move |label, workspace, window, cx| {
+                    submit_edit(workspace, window, cx, id, goal, kind, Some(label))
+                }),
+                window,
+                cx,
+            )
         }),
         window,
         cx,
     )
+}
+
+/// Edits the task `id`; `work_kind` is `None` to leave the label alone, else the answer (an empty
+/// one clears it).
+fn submit_edit(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    id: String,
+    goal: Option<String>,
+    kind: Kind,
+    work_kind: Option<String>,
+) {
+    submit(workspace, window, cx, move |tree, ctx| {
+        model::edit(
+            tree,
+            ctx,
+            &id,
+            TaskEdit {
+                goal: goal.clone(),
+                kind: Some(kind),
+                repository: None,
+                work_kind: work_kind.clone().map(Some),
+            },
+        )
+    })
 }
 
 // Todos.

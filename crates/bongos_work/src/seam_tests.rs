@@ -464,6 +464,7 @@ async fn a_project_repository_serves_its_tasks_and_applies_state_only_writes(
                             goal: Some("Renamed leaf".to_string()),
                             kind: None,
                             repository: None,
+                            work_kind: None,
                         },
                     )
                 },

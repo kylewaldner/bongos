@@ -267,6 +267,7 @@ fn a_new_task_is_a_definition_write_in_its_parent_folder_with_prompts() {
         kind: Some(Kind::Other),
         repository: None,
         todos: None,
+        work_kind: None,
     };
     let change = commands::new_child(&tree, &ctx(), "l1", new).unwrap();
     let Routed::Definition {

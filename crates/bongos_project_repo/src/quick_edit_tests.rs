@@ -52,6 +52,7 @@ fn rename(id: &'static str, goal: &'static str) -> impl Fn(&WorkTree, &Context) 
                 goal: Some(goal.to_string()),
                 kind: None,
                 repository: None,
+                work_kind: None,
             },
         )
     }
@@ -433,6 +434,7 @@ fn paths_that_leave_definitions_or_files_are_refused() {
             kind: Some(Kind::Other),
             repository: None,
             todos: None,
+            work_kind: None,
         },
     )
     .unwrap();
@@ -501,6 +503,7 @@ fn two_hundred_new_tasks_are_one_quick_edit_and_one_commit() {
             kind: Some(Kind::Other),
             repository: None,
             todos: None,
+            work_kind: None,
         },
     )
     .unwrap();
