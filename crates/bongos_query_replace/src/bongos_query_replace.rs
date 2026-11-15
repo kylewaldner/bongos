@@ -42,16 +42,14 @@ mod prompts_tests;
 #[cfg(test)]
 mod view_tests;
 
-use command_palette_hooks::CommandPaletteFilter;
 use gpui::App;
 
 /// The action namespace of the query replace commands.
 pub const NAMESPACE: &str = "query_replace";
 
-/// Hides the query replace actions from the command palette and registers the starters and
-/// the commands of a running replace.
+/// Registers the starters and the commands of a running replace. The actions stay visible in the
+/// command palette, so `M-x replace-string` and the other starters work.
 pub fn init(cx: &mut App) {
-    CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_namespace(NAMESPACE));
     prompts::init(cx);
     starters::init(cx);
     isearch::init(cx);

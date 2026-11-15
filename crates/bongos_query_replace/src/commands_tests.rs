@@ -336,3 +336,15 @@ async fn a_whole_batch_is_one_undo_step(cx: &mut TestAppContext) {
     assert_eq!(scene.text(), original);
     assert_eq!(scene.selections(), vec![0..0]);
 }
+
+#[gpui::test]
+async fn starters_are_visible_in_the_command_palette(cx: &mut TestAppContext) {
+    let scene = scene("", cx).await;
+    scene.cx.update(|cx| {
+        let filter = command_palette_hooks::CommandPaletteFilter::try_global(cx)
+            .expect("the command palette filter is set");
+        assert!(!filter.is_hidden(&ReplaceString));
+        assert!(!filter.is_hidden(&ReplaceRegexp));
+        assert!(!filter.is_hidden(&QueryReplace));
+    });
+}
