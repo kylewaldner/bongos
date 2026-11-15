@@ -17,16 +17,24 @@ anyhow.workspace = true
 bongos_checks_model.workspace = true
 bongos_project_repo.workspace = true
 bongos_project_repo_model.workspace = true
+bongos_workflow.workspace = true
 command_palette_hooks.workspace = true
 futures.workspace = true
 gpui.workspace = true
+libc.workspace = true
+log.workspace = true
 paths.workspace = true
+regex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 settings.workspace = true
 sha2.workspace = true
+sysinfo.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 util.workspace = true
+uuid.workspace = true
+which.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Prints a summary line, copies result.json from the tree to the result file when the tree has
+# one, then exits with the code written in the tree's exit-code file ("kill" ends by SIGKILL).
+echo "running part $BONGOS_CHECK_PART of $BONGOS_CHECK_PARTS"
+echo "test result: ok"
+if [ -f result.json ]; then
+    cp result.json "$BONGOS_CHECK_RESULT"
+fi
+code=$(cat exit-code)
+if [ "$code" = kill ]; then
+    kill -KILL $$
+fi
+exit "$code"

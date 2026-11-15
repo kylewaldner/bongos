@@ -1,15 +1,19 @@
 //! Task checks: scripts and commands that must pass before a task counts as done. This holds
 //! the settings, the commands (hidden while `task_checks.enabled` is false), the evidence store
 //! over the project's state store, the exporter of that state, and the validation of check
-//! declarations in a project's definitions.
+//! declarations in a project's definitions, and the running of one check process.
 
 mod actions;
 mod changed_files;
 mod definitions;
 mod evidence_store;
 mod exporter;
+mod output;
+mod pin;
+pub mod process;
 mod settings;
 mod tree_key;
+mod trees;
 mod work_tree;
 
 pub use actions::{ChecksToast, action_types, init_palette, register, task};
@@ -22,8 +26,12 @@ pub use evidence_store::{
     put_done, record_key, scan_records, scan_records_in, store_record, task_prefix,
 };
 pub use exporter::{ChecksExporter, EXPORT_NAMESPACE};
+pub use output::{OutputSummary, cut_marker};
+pub use pin::{Pin, PinPathError, master_definitions};
+pub use process::{PartOutcome, PartScope, PartSpec, PartStart, StopHandle, run_part};
 pub use settings::TaskChecksSettings;
 pub use tree_key::{TreeError, TreeKey, combine_trees, key_inputs_digest, tree_key};
+pub use trees::{EnvBase, SecondTree, SecondTreeLease, TaskTrees};
 
 /// Registers the settings, the `checks` state exporter, the `checks` definition folder and the
 /// `checks-valid` landing check.
@@ -44,6 +52,8 @@ mod definitions_tests;
 mod evidence_store_tests;
 #[cfg(test)]
 mod exporter_tests;
+#[cfg(test)]
+mod process_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

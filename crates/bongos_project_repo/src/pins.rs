@@ -1,7 +1,8 @@
 //! Materialized trees: a read-only copy of a tree's files under `state/pins/`, written from the
 //! objects (never from a checkout), for the checks and runs that read files. A [`PinGuard`]
 //! removes its copy when dropped; the landing engine keeps it until every check reading it has
-//! completed. Copies a crash left behind are removed when the project opens.
+//! completed. Copies a crash left behind are removed when the project opens. On Unix the folders
+//! are read-only too, so a script reading the copy cannot add, remove or replace a file in it.
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +26,7 @@ impl PinGuard {
 
 impl Drop for PinGuard {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+        if let Err(error) = remove_read_only_tree(&self.path) {
             log::error!("removing the pinned tree {}: {error}", self.path.display());
         }
     }
@@ -70,6 +71,7 @@ impl ProjectRepo {
             std::fs::write(&file, bytes).with_context(|| format!("writing {}", file.display()))?;
             set_read_only(&file, entry.mode == "100755")?;
         }
+        set_folders(&guard.path, FolderMode::ReadOnly)?;
         Ok(guard)
     }
 
@@ -77,11 +79,61 @@ impl ProjectRepo {
     pub(crate) fn sweep_pins(&self) {
         let pins = self.location.state.join(PINS_DIR);
         if pins.exists()
-            && let Err(error) = std::fs::remove_dir_all(&pins)
+            && let Err(error) = remove_read_only_tree(&pins)
         {
             log::error!("removing {}: {error}", pins.display());
         }
     }
+}
+
+/// Removes a tree whose folders [`set_folders`] made read-only.
+fn remove_read_only_tree(path: &Path) -> Result<()> {
+    set_folders(path, FolderMode::Writable)?;
+    std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FolderMode {
+    ReadOnly,
+    Writable,
+}
+
+/// Sets the mode of every folder under `root` (itself included). Symbolic links are not
+/// followed. A writable folder is made so before its contents are visited, a read-only one after.
+#[cfg(unix)]
+fn set_folders(root: &Path, mode: FolderMode) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bits = match mode {
+        FolderMode::ReadOnly => 0o555,
+        FolderMode::Writable => 0o755,
+    };
+    let set = |path: &Path| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))
+            .with_context(|| format!("setting the mode of {}", path.display()))
+    };
+    let metadata =
+        std::fs::symlink_metadata(root).with_context(|| format!("reading {}", root.display()))?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    if mode == FolderMode::Writable {
+        set(root)?;
+    }
+    for entry in std::fs::read_dir(root).with_context(|| format!("reading {}", root.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", root.display()))?;
+        if entry.file_type()?.is_dir() {
+            set_folders(&entry.path(), mode)?;
+        }
+    }
+    if mode == FolderMode::ReadOnly {
+        set(root)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_folders(_root: &Path, _mode: FolderMode) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
