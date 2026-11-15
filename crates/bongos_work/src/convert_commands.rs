@@ -355,7 +355,19 @@ fn preview_and_ask(
             });
             cx.spawn(async move |workspace, cx| {
                 let message = match converting.await {
-                    Ok(results) => conversion_message(&results),
+                    Ok(results) => {
+                        let converted: Vec<_> = results
+                            .iter()
+                            .filter_map(|(_, result)| Some(result.as_ref().ok()?.location.clone()))
+                            .collect();
+                        let mut message = conversion_message(&results);
+                        for location in converted {
+                            if let Err(error) = crate::oneoffs::open_location(location, cx).await {
+                                message.push_str(&format!("; opening a project failed: {error:#}"));
+                            }
+                        }
+                        message
+                    }
                     Err(error) => format!("Convert: {error:#}"),
                 };
                 workspace

@@ -9,6 +9,7 @@
 use std::any::TypeId;
 use std::sync::Arc;
 
+use bongos_project_repo::ProjectRepositorySettings;
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::{
     self as model, Context as WorkContext, NewTask, NewTodo, Placement, TaskEdit,
@@ -134,20 +135,52 @@ pub fn action_types() -> Vec<TypeId> {
 }
 
 /// Hides the actions from the command palette while `work.enabled` is false and shows them
-/// while it is true. Call after `command_palette_hooks::init`.
+/// while it is true; the repository actions also stay hidden while
+/// `project_repository.enabled` is false. Call after `command_palette_hooks::init`.
 pub fn init_palette(cx: &mut App) {
     sync_palette(cx);
     cx.observe_global::<SettingsStore>(sync_palette).detach();
 }
 
+/// The actions that only make sense while projects live in a repository.
+pub fn repository_action_types() -> Vec<TypeId> {
+    vec![
+        TypeId::of::<project::Edit>(),
+        TypeId::of::<project::OpenWorkingCopy>(),
+        TypeId::of::<project::Abandon>(),
+        TypeId::of::<project::OpenRepository>(),
+        TypeId::of::<project::Land>(),
+        TypeId::of::<project::Check>(),
+        TypeId::of::<project::Approve>(),
+        TypeId::of::<project::ShowChanges>(),
+        TypeId::of::<project::ShowHistory>(),
+        TypeId::of::<project::Revert>(),
+        TypeId::of::<project::ResolveSplit>(),
+        TypeId::of::<project::BackupStatus>(),
+        TypeId::of::<project::BackupNow>(),
+        TypeId::of::<project::AddExisting>(),
+        TypeId::of::<project::Restore>(),
+        TypeId::of::<project::RestoreFrom>(),
+        TypeId::of::<project::Convert>(),
+        TypeId::of::<project::ConvertAll>(),
+    ]
+}
+
 fn sync_palette(cx: &mut App) {
     let enabled = WorkSettings::get_global(cx).enabled;
+    // Without the setting registered nothing gates the repository actions.
+    let repositories =
+        enabled && ProjectRepositorySettings::try_get(cx).is_none_or(|settings| settings.enabled);
     let types = action_types();
+    let repository_types = repository_action_types();
     CommandPaletteFilter::update_global(cx, |filter, _| {
         if enabled {
             filter.show_action_types(&types);
         } else {
             filter.hide_action_types(&types);
+        }
+        if !repositories {
+            filter.hide_action_types(&repository_types);
         }
     });
 }

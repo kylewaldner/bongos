@@ -248,6 +248,7 @@ write_settings() {
   cat >"$SETTINGS_FILE" <<JSON
 {
   "base_keymap": "Emacs",
+  "project_repository": { "enabled": false },
   "task_builder": { "enabled": false },
   "work": {
     "repositories": [

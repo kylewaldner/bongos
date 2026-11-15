@@ -56,11 +56,24 @@ fn seed(root: &Path) -> PathBuf {
     backfill
 }
 
+/// Turns Work on or off. These tests start with project repositories off, as the old format
+/// they exercise; the ones that need them turn them on themselves.
 pub(crate) fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
     cx.update(|cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
                 content.work.get_or_insert_default().enabled = Some(enabled);
+                content.project_repository.get_or_insert_default().enabled = Some(false);
+            });
+        });
+    });
+}
+
+pub(crate) fn set_repositories_enabled(cx: &mut TestAppContext, enabled: bool) {
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.project_repository.get_or_insert_default().enabled = Some(enabled);
             });
         });
     });

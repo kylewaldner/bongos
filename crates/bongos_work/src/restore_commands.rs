@@ -125,11 +125,16 @@ fn add_existing(workspace: &mut Workspace, window: &mut Window, cx: &mut Context
                 let mut locations = RepositoryLocations::load(RepositoryLocations::default_path())?;
                 let added = ProjectRepo::add_existing(request, &mut locations, Git::locate).await?;
                 // The project opens like any other; this process lets go of its state now.
-                anyhow::Ok(added_message(&added))
+                anyhow::Ok((added_message(&added), added.repo.location().clone()))
             });
             cx.spawn(async move |workspace, cx| {
                 let message = match added.await {
-                    Ok(message) => message,
+                    Ok((message, location)) => {
+                        match crate::oneoffs::open_location(location, cx).await {
+                            Ok(()) => message,
+                            Err(error) => format!("{message}; opening it failed: {error:#}"),
+                        }
+                    }
                     Err(error) => format!("Add existing: {error:#}"),
                 };
                 workspace

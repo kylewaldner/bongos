@@ -344,6 +344,7 @@ git -C "$REPO" "${GIT_ID[@]}" commit -qm "first commit"
 cat >"$SETTINGS_FILE" <<JSON
 {
   "base_keymap": "Emacs",
+  "project_repository": { "enabled": false },
   "chats": {
     "enabled": true,
     "agents": {

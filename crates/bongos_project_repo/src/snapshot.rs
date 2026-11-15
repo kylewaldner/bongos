@@ -374,12 +374,12 @@ fn export_tasks(read: &StateRead, secrets: &Secrets, snapshot: &mut Snapshot) ->
             }
         };
         let file = format!("{TASKS_DIR}/{name}.toml");
-        let table = match toml::Value::try_from(&record)
-            .with_context(|| format!("writing the state of task {}", secrets.clean(&id)))?
-        {
-            toml::Value::Table(table) => table,
-            _ => toml::Table::new(),
-        };
+        // Through text, as the state store itself reads a record: `Value::try_from` turns the
+        // datetimes of a history entry into tables with a private key, which a restore cannot read.
+        let table = toml::to_string(&record)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| text.parse::<toml::Table>().map_err(anyhow::Error::from))
+            .with_context(|| format!("writing the state of task {}", secrets.clean(&id)))?;
         let text = secrets.redacted_toml(table, &file, &mut snapshot.withheld)?;
         snapshot.files.insert(file, text);
     }

@@ -447,6 +447,12 @@
     },
   },
   {
+    "context": "LandingView",
+    "bindings": {
+      "r": "project::ResolveSplit",
+    },
+  },
+  {
     "context": "ProposalView",
     "bindings": {
       "enter": "proposal::Descend",

@@ -3,7 +3,7 @@
 //! child of its activity's group. The first one-off makes the project, through the same create
 //! path as `project: new`; later ones, and one-offs asked for at the same time, use that project.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::Context as _;
@@ -14,7 +14,7 @@ use bongos_project_repo::{
 use bongos_work_model::commands::{self as model, NewTask};
 use bongos_work_model::layout;
 use bongos_work_model::store::{Project, WorkTree};
-use gpui::{App, AppContext as _, Context, Global, Task, Window};
+use gpui::{App, AppContext as _, AsyncApp, Context, Global, Task, Window};
 use settings::Settings as _;
 use util::ResultExt as _;
 use workspace::Workspace;
@@ -138,16 +138,7 @@ pub(crate) fn new_oneoff(
         if !open {
             let backup = settings.backup_options();
             let loaded = cx
-                .background_spawn(async move {
-                    let git = Git::locate()?;
-                    let writer = StateStore::open_writer(&location)?;
-                    let repo = ProjectRepo::new(location, git)
-                        .with_state(StateHandle::Writer(Arc::new(writer)));
-                    repo.set_backup_options(backup);
-                    let loaded = LoadedProject::new(repo);
-                    loaded.load().await?;
-                    anyhow::Ok(loaded)
-                })
+                .background_spawn(async move { load_location(location, backup).await })
                 .await;
             let loaded = match loaded {
                 Ok(loaded) => loaded,
@@ -180,6 +171,64 @@ pub(crate) fn new_oneoff(
             .log_err();
     })
     .detach();
+}
+
+/// Opens the project repository at `location` for this process: its state writer, its definitions.
+async fn load_location(
+    location: Location,
+    backup: bongos_project_repo::BackupOptions,
+) -> anyhow::Result<Arc<LoadedProject>> {
+    let git = Git::locate()?;
+    let writer = StateStore::open_writer(&location)?;
+    let repo = ProjectRepo::new(location, git).with_state(StateHandle::Writer(Arc::new(writer)));
+    repo.set_backup_options(backup);
+    let loaded = LoadedProject::new(repo);
+    loaded.load().await?;
+    anyhow::Ok(loaded)
+}
+
+/// Opens the project repository at `location` and serves it in the Work view, unless this
+/// process already has it open. A project made, added or converted while the app runs, and every
+/// project of the record at startup, goes through here.
+pub(crate) async fn open_location(location: Location, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let open = cx.update(|cx| {
+        open_repos(cx)
+            .iter()
+            .any(|loaded| loaded.repo().location().id == location.id)
+    });
+    if open {
+        return Ok(());
+    }
+    let backup = cx.update(|cx| ProjectRepositorySettings::get_global(cx).backup_options());
+    let id = location.id.clone();
+    let loaded = cx
+        .background_spawn(async move { load_location(location, backup).await })
+        .await?;
+    // Another open of this location may have been served while this one loaded.
+    cx.update(|cx| {
+        let served = open_repos(cx)
+            .iter()
+            .any(|opened| opened.repo().location().id == id);
+        if !served {
+            serve(loaded, cx);
+        }
+    });
+    Ok(())
+}
+
+/// Opens every project repository of the record at `locations_path`, once at startup while
+/// project repositories are on. One that cannot be opened is logged and left out.
+pub(crate) async fn open_known_projects(locations_path: PathBuf, cx: &mut AsyncApp) {
+    if !cx.update(|cx| ProjectRepositorySettings::get_global(cx).enabled) {
+        return;
+    }
+    let locations = cx
+        .background_spawn(async move { RepositoryLocations::load(locations_path) })
+        .await
+        .log_err();
+    for location in locations.iter().flat_map(|locations| locations.locations()) {
+        open_location(location.clone(), cx).await.log_err();
+    }
 }
 
 /// Serves `loaded` in the Work view at once and keeps it registered.
