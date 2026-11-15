@@ -13,6 +13,10 @@ use bongos_work_model::Kind;
 
 use crate::decl::{self, CheckDecl, ChecksTable, Finding, Inherit};
 
+mod loosening;
+
+pub use loosening::{Loosening, LooseningKind, loosening};
+
 const TASK_FILE: &str = "task.toml";
 
 /// Where a declaration is written. The line is only there when the text was parsed with
