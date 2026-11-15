@@ -28,6 +28,8 @@ actions!(
         Yes,
         /// Skips this match and goes on to the next.
         No,
+        /// Replaces this match and every one after it without asking.
+        All,
         /// Replaces this match and ends the replace.
         ThisAndExit,
         /// Replaces this match and waits, showing the result; the next key goes on.

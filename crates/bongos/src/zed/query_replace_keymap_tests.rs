@@ -178,6 +178,7 @@ async fn decision_view_keys_resolve_to_the_query_replace_actions(cx: &mut TestAp
                     ("space", "query_replace::Yes"),
                     ("n", "query_replace::No"),
                     ("backspace", "query_replace::No"),
+                    ("!", "query_replace::All"),
                     (".", "query_replace::ThisAndExit"),
                     (",", "query_replace::ThisAndWait"),
                     ("^", "query_replace::Previous"),

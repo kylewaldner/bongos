@@ -145,6 +145,7 @@
       "space": "query_replace::Yes",
       "n": "query_replace::No",
       "backspace": "query_replace::No",
+      "!": "query_replace::All",
       ".": "query_replace::ThisAndExit",
       ",": "query_replace::ThisAndWait",
       "^": "query_replace::Previous",
