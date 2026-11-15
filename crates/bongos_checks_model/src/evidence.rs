@@ -74,6 +74,15 @@ pub struct PartRecord {
     pub pid_start_time: Option<u64>,
     #[serde(default)]
     pub token: Option<String>,
+    /// How long the part's process ran; empty while it runs.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// The part's result file summary, when it wrote a valid one.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// The failing items of the part's result file, so a resumed run can still name them.
+    #[serde(default)]
+    pub failing: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

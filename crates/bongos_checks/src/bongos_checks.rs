@@ -1,7 +1,8 @@
 //! Task checks: scripts and commands that must pass before a task counts as done. This holds
 //! the settings, the commands (hidden while `task_checks.enabled` is false), the evidence store
 //! over the project's state store, the exporter of that state, and the validation of check
-//! declarations in a project's definitions, and the running of one check process.
+//! declarations in a project's definitions, the running of one check process, and a check run
+//! with its scope, parts and checkpoints.
 
 mod actions;
 mod changed_files;
@@ -11,6 +12,7 @@ mod exporter;
 mod output;
 mod pin;
 pub mod process;
+pub mod run;
 mod settings;
 mod tree_key;
 mod trees;
@@ -28,7 +30,8 @@ pub use evidence_store::{
 pub use exporter::{ChecksExporter, EXPORT_NAMESPACE};
 pub use output::{OutputSummary, cut_marker};
 pub use pin::{Pin, PinPathError, master_definitions};
-pub use process::{PartOutcome, PartScope, PartSpec, PartStart, StopHandle, run_part};
+pub use process::{PartOutcome, PartScope, PartSpec, PartStart, ProcessRole, StopHandle, run_part};
+pub use run::CheckRun;
 pub use settings::TaskChecksSettings;
 pub use tree_key::{TreeError, TreeKey, combine_trees, key_inputs_digest, tree_key};
 pub use trees::{EnvBase, SecondTree, SecondTreeLease, TaskTrees};
@@ -54,6 +57,8 @@ mod evidence_store_tests;
 mod exporter_tests;
 #[cfg(test)]
 mod process_tests;
+#[cfg(test)]
+mod run_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

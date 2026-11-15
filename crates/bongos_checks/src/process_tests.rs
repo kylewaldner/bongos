@@ -91,6 +91,8 @@ impl Fixture {
             part: 1,
             parts: 1,
             scope: PartScope::Unscoped,
+            role: crate::process::ProcessRole::Part,
+            stderr: None,
             env: EnvBase::Own,
             evidence: None,
             output_limit: Some(1024 * 1024),
@@ -683,6 +685,9 @@ fn orphan_parts_are_stopped_by_their_record() {
         pid: Some(start.pid),
         pid_start_time: Some(start.pid_start_time),
         token: Some(start.token),
+        duration_ms: None,
+        summary: None,
+        failing: Vec::new(),
     };
     let finished = PartRecord {
         n: 2,

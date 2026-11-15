@@ -1,0 +1,18 @@
+#!/bin/sh
+# One part: appends its number to runs in the tree and writes its scope and part count to
+# scope-<K> and its items to items-<K>. Blocks until stopped when its number is in block-at, and
+# fails when its number is in fail-at.
+part="$BONGOS_CHECK_PART"
+echo "$part" >> runs
+echo "${BONGOS_CHECK_SCOPE-unset} $BONGOS_CHECK_PARTS" > "scope-$part"
+if [ -n "${BONGOS_CHECK_ITEMS-}" ]; then
+    cp "$BONGOS_CHECK_ITEMS" "items-$part"
+fi
+if [ -f block-at ] && grep -qx "$part" block-at; then
+    touch "blocked-$part"
+    sleep 60
+fi
+if [ -f fail-at ] && grep -qx "$part" fail-at; then
+    exit 1
+fi
+exit 0
