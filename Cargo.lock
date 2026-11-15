@@ -2318,11 +2318,13 @@ name = "bongos_checks"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-task",
  "bongos_checks_model",
  "bongos_project_repo",
  "bongos_project_repo_model",
  "bongos_work_model",
  "bongos_workflow",
+ "bongos_workflow_model",
  "chrono",
  "command_palette_hooks",
  "futures 0.3.32",

@@ -1,8 +1,8 @@
 //! Task checks: scripts and commands that must pass before a task counts as done. This holds
 //! the settings, the commands (hidden while `task_checks.enabled` is false), the evidence store
 //! over the project's state store, the exporter of that state, and the validation of check
-//! declarations in a project's definitions, the running of one check process, and a check run
-//! with its scope, parts and checkpoints.
+//! declarations in a project's definitions, the running of one check process, a check run
+//! with its scope, parts, checkpoints, pool waits and no-verdict reruns, and the pool seam.
 
 mod actions;
 mod changed_files;
@@ -11,6 +11,7 @@ mod evidence_store;
 mod exporter;
 mod output;
 mod pin;
+pub mod pools;
 pub mod process;
 pub mod run;
 mod settings;
@@ -30,8 +31,12 @@ pub use evidence_store::{
 pub use exporter::{ChecksExporter, EXPORT_NAMESPACE};
 pub use output::{OutputSummary, cut_marker};
 pub use pin::{Pin, PinPathError, master_definitions};
+pub use pools::{
+    CheckClock, CheckPools, CheckPoolsRegistry, ExecutorClock, Holder, PoolLease, PoolLeaseHandle,
+    PoolRequest, PoolWait, WaitStatus,
+};
 pub use process::{PartOutcome, PartScope, PartSpec, PartStart, ProcessRole, StopHandle, run_part};
-pub use run::CheckRun;
+pub use run::{CheckRun, LiveState};
 pub use settings::TaskChecksSettings;
 pub use tree_key::{TreeError, TreeKey, combine_trees, key_inputs_digest, tree_key};
 pub use trees::{EnvBase, SecondTree, SecondTreeLease, TaskTrees};
@@ -55,6 +60,8 @@ mod definitions_tests;
 mod evidence_store_tests;
 #[cfg(test)]
 mod exporter_tests;
+#[cfg(test)]
+mod pools_tests;
 #[cfg(test)]
 mod process_tests;
 #[cfg(test)]

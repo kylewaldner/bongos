@@ -1,20 +1,26 @@
+use std::cell::RefCell;
+use std::future::Future as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bongos_checks_model::decl::{self, CheckDecl};
+use bongos_checks_model::decl::{self, CheckDecl, NeedEntry};
 use bongos_checks_model::evidence::{EvidenceRecord, Scope, StartedBy, TreeKind};
 use bongos_checks_model::verdict::{NoVerdictReason, Verdict};
 use bongos_project_repo::{Git, ProjectRepo, StateWriter};
-use futures::executor::block_on;
+use futures::executor::{LocalPool, block_on};
+use futures::task::LocalSpawnExt as _;
 use tempfile::TempDir;
 
 use crate::evidence_store::{record_key, scan_records, store_record, task_prefix};
 use crate::pin::Pin;
+use crate::pools::{CheckClock as _, WaitStatus};
+use crate::pools_tests::{FakeClock, FakePool};
 use crate::process::StopHandle;
-use crate::run::{CheckRun, NO_BASE_BRANCH, SUPERSEDED, items_digest};
+use crate::run::{CheckRun, LiveState, NO_BASE_BRANCH, SUPERSEDED, items_digest};
 use crate::settings::TaskChecksSettings;
 use crate::test_support::{commit_everything, fixture_project, init_git_repo, write_file};
 use crate::trees::EnvBase;
@@ -142,6 +148,11 @@ impl Fixture {
                 )
             }),
             on_changed: None,
+            project_id: "project-1".to_string(),
+            node: None,
+            pools: None,
+            clock: FakeClock::automatic(),
+            on_live: None,
         }
     }
 
@@ -176,6 +187,20 @@ impl Fixture {
         std::fs::remove_file(self.tree.join("runs")).ok();
     }
 
+    /// Stops `run` once its part `n` blocks (`block-at` holds `n`), from a thread of its own.
+    fn stop_when_blocked(&self, run: &CheckRun, n: u32) -> std::thread::JoinHandle<()> {
+        let stop = run.stop.clone();
+        let blocked = self.tree.join(format!("blocked-{n}"));
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !blocked.exists() {
+                assert!(Instant::now() < deadline, "part {n} never started");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            stop.stop();
+        })
+    }
+
     fn records(&self) -> Vec<EvidenceRecord> {
         self.writer
             .read(|read| scan_records(read, &task_prefix(TASK)))
@@ -189,15 +214,9 @@ impl Fixture {
         self.write("plan-count", "8\n");
         self.write("block-at", "5\n");
         let run = self.check_run(planned_check());
-        let stop = run.stop.clone();
-        let running = std::thread::spawn(move || block_on(run.run()).unwrap());
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !self.exists("blocked-5") {
-            assert!(Instant::now() < deadline, "part 5 never started");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        stop.stop();
-        let record = running.join().unwrap();
+        let watcher = self.stop_when_blocked(&run, 5);
+        let record = block_on(run.run()).unwrap();
+        watcher.join().unwrap();
         assert_eq!(self.runs(), [1, 2, 3, 4, 5]);
         assert_eq!(
             record.verdict,
@@ -504,4 +523,468 @@ fn check_run_all_parts_run_after_a_failure_unless_it_stops_at_the_first() {
     let numbers: Vec<u32> = record.parts.iter().map(|part| part.n).collect();
     assert_eq!(numbers, [1, 2]);
     assert_eq!(record.variant.parts, 4);
+}
+
+const POOL: &str = "test-slots";
+
+/// The check `tests` in `parts` parts with no scope, needing one slot of [`POOL`].
+fn pooled_check(parts: i64, parallel: bool) -> CheckDecl {
+    CheckDecl {
+        name: "tests".to_string(),
+        run: Some("checks/part-log".to_string()),
+        needs: vec![NeedEntry::Pool(POOL.to_string())],
+        parts: Some(decl::Parts::Count(parts)),
+        parallel: Some(parallel),
+        ..CheckDecl::default()
+    }
+}
+
+/// Collects what `run` reports for the live rows.
+fn watch_live(run: &mut CheckRun) -> Rc<RefCell<Vec<LiveState>>> {
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    run.on_live = Some(Rc::new(move |state: &LiveState| {
+        sink.borrow_mut().push(state.clone())
+    }));
+    seen
+}
+
+/// A run spawned on a local pool, so a test can look at it between steps.
+struct Spawned {
+    pool: LocalPool,
+    result: Rc<RefCell<Option<EvidenceRecord>>>,
+}
+
+impl Spawned {
+    fn new(run: CheckRun) -> Self {
+        let pool = LocalPool::new();
+        let result = Rc::new(RefCell::new(None));
+        let slot = result.clone();
+        pool.spawner()
+            .spawn_local(async move {
+                *slot.borrow_mut() = Some(run.run().await.unwrap());
+            })
+            .unwrap();
+        let mut spawned = Self { pool, result };
+        spawned.pool.run_until_stalled();
+        spawned
+    }
+
+    fn step(&mut self) {
+        self.pool.run_until_stalled();
+    }
+
+    fn is_done(&self) -> bool {
+        self.result.borrow().is_some()
+    }
+
+    /// Runs to the end, waiting for part processes, and returns the record.
+    fn finish(mut self) -> EvidenceRecord {
+        self.pool.run();
+        self.result.borrow_mut().take().expect("the run ended")
+    }
+}
+
+/// The pids of the parts of `record` that started, in part order.
+fn part_pids(record: &EvidenceRecord) -> Vec<u32> {
+    record.parts.iter().filter_map(|part| part.pid).collect()
+}
+
+fn sorted(mut numbers: Vec<u32>) -> Vec<u32> {
+    numbers.sort_unstable();
+    numbers
+}
+
+#[test]
+fn check_run_waiting_on_a_one_slot_pool_shows_pool_place_and_time_and_spends_nothing() {
+    let fixture = fixture();
+    let clock = FakeClock::manual();
+    let pool = FakePool::new(POOL, 1, clock.clone());
+    let other = pool.hold("other run", 1);
+    let mut run = fixture.check_run(pooled_check(1, false));
+    run.pools = Some(Rc::new(pool.clone()));
+    run.clock = clock.clone();
+    let live = watch_live(&mut run);
+    let waited_from = clock.now();
+
+    let mut spawned = Spawned::new(run);
+    assert!(!spawned.is_done());
+    let status = WaitStatus {
+        pool: POOL.to_string(),
+        position: 1,
+        since: waited_from,
+        holders: vec!["other run".to_string()],
+        blocked: Some("all 1 slots held".to_string()),
+    };
+    assert_eq!(
+        *live.borrow(),
+        [LiveState::Waiting {
+            part: 1,
+            parts: 1,
+            status: status.clone()
+        }]
+    );
+    // Waiting starts no process and records no part.
+    assert!(!fixture.exists("runs"));
+    let records = fixture.records();
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].is_finished());
+    assert!(records[0].parts.is_empty());
+
+    // Three hours later it still waits, in the same place, since the same time.
+    clock.advance(Duration::from_secs(3 * 3600));
+    spawned.step();
+    assert!(!spawned.is_done());
+    assert!(!fixture.exists("runs"));
+    assert_eq!(pool.queued(), 1);
+    assert_eq!(clock.now() - status.since, Duration::from_secs(3 * 3600));
+
+    // The slot comes free: the part runs and its process holds the slot.
+    drop(other);
+    let record = spawned.finish();
+    assert_whole_pass(&record, 1);
+    assert_eq!(fixture.runs(), [1]);
+    assert_eq!(
+        *live.borrow().last().unwrap(),
+        LiveState::Running { part: 1, parts: 1 }
+    );
+    let state = pool.state();
+    assert_eq!(state.granted, ["other run", "l1/tests part 1"]);
+    let bound: Vec<u32> = state.binds.iter().map(|(_, pid, _)| *pid).collect();
+    assert_eq!(bound, part_pids(&record));
+    drop(state);
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_run_past_the_pool_wait_limit_is_no_verdict() {
+    let fixture = fixture();
+    let clock = FakeClock::manual();
+    let pool = FakePool::new(POOL, 1, clock.clone());
+    let other = pool.hold("other run", 1);
+    let mut run = fixture.check_run(pooled_check(2, false));
+    run.pools = Some(Rc::new(pool.clone()));
+    run.clock = clock.clone();
+    run.settings.no_verdict_reruns = 0;
+    let limit = Duration::from_secs(u64::from(run.settings.pool_wait_limit_hours) * 3600);
+
+    let mut spawned = Spawned::new(run);
+    clock.advance(limit - Duration::from_secs(1));
+    spawned.step();
+    assert!(!spawned.is_done());
+    clock.advance(Duration::from_secs(1));
+    spawned.step();
+    assert!(spawned.is_done());
+    let record = spawned.finish();
+
+    let reason = NoVerdictReason::PoolWaitLimit {
+        pool: POOL.to_string(),
+    };
+    assert!(record.is_finished());
+    assert_eq!(record.verdict, Verdict::NoVerdict(reason.clone()));
+    assert_eq!(
+        record.reason.as_deref(),
+        Some("resource never became available (pool test-slots)")
+    );
+    // Part 1 ended without running; part 2 never waited.
+    assert_eq!(record.parts.len(), 1);
+    assert_eq!(record.parts[0].verdict, Verdict::NoVerdict(reason));
+    assert_eq!(record.parts[0].pid, None);
+    assert!(!fixture.exists("runs"));
+    // The wait left the line: the freed slot goes to nobody.
+    assert_eq!(pool.queued(), 0);
+    drop(other);
+    assert!(pool.holders().is_empty());
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_run_parallel_parts_take_only_slots_free_now() {
+    let fixture = fixture();
+    let pool = FakePool::new(POOL, 3, FakeClock::automatic());
+    let other = pool.hold("other run", 1);
+    let mut run = fixture.check_run(pooled_check(4, true));
+    run.pools = Some(Rc::new(pool.clone()));
+    let record = fixture.run(run);
+
+    assert_whole_pass(&record, 4);
+    assert_eq!(sorted(fixture.runs()), [1, 2, 3, 4]);
+    {
+        let state = pool.state();
+        // Part 1 waited in line; part 2 took the last free slot at once, part 3 found none.
+        assert_eq!(state.max_used, 3);
+        assert!(state.granted_now >= 1, "{:?}", state.log);
+        assert!(state.refused_now >= 1, "{:?}", state.log);
+        assert_eq!(
+            state.log[1..4],
+            [
+                "grant l1/tests part 1",
+                "grant l1/tests part 2",
+                "refused now l1/tests part 3"
+            ]
+        );
+        let mut bound: Vec<u32> = state.binds.iter().map(|(_, pid, _)| *pid).collect();
+        bound.sort_unstable();
+        assert_eq!(bound, sorted(part_pids(&record)));
+    }
+    drop(other);
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_run_parallel_parts_never_jump_ahead_of_a_waiter() {
+    let fixture = fixture();
+    let pool = FakePool::new(POOL, 4, FakeClock::automatic());
+    // Once part 1 has its slot, another run asks for all four and waits in line.
+    pool.state().queue_after_first_grant = Some(4);
+    let mut run = fixture.check_run(pooled_check(4, true));
+    run.pools = Some(Rc::new(pool.clone()));
+    let record = fixture.run(run);
+
+    assert_whole_pass(&record, 4);
+    let state = pool.state();
+    let at = |entry: &str| {
+        state
+            .log
+            .iter()
+            .position(|logged| logged == entry)
+            .unwrap_or_else(|| panic!("{entry} missing from {:?}", state.log))
+    };
+    // Three slots were free, but the waiter came first: part 2 starts only after it was served.
+    assert_eq!(at("grant l1/tests part 1"), 0);
+    assert_eq!(at("refused now l1/tests part 2"), 1);
+    assert!(at("served other run") < at("grant l1/tests part 2"));
+    drop(state);
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_run_with_no_pool_implementation_runs_at_once() {
+    let fixture = fixture();
+    let clock = FakeClock::manual();
+    let mut run = fixture.check_run(pooled_check(3, true));
+    run.clock = clock.clone();
+    let live = watch_live(&mut run);
+    let record = fixture.run(run);
+
+    assert_whole_pass(&record, 3);
+    assert_eq!(sorted(fixture.runs()), [1, 2, 3]);
+    assert!(
+        !live
+            .borrow()
+            .iter()
+            .any(|state| matches!(state, LiveState::Waiting { .. })),
+        "{:?}",
+        live.borrow()
+    );
+    assert!(clock.sleeps().is_empty(), "nothing waited");
+}
+
+#[test]
+fn check_run_a_no_verdict_check_reruns_twice_keeping_its_parts_then_reports() {
+    let fixture = fixture();
+    fixture.write("no-verdict-at", "2\n");
+    let clock = FakeClock::automatic();
+    let notified = Arc::new(AtomicU64::new(0));
+    let seen = notified.clone();
+    let mut run = fixture.check_run(CheckDecl {
+        needs: Vec::new(),
+        ..pooled_check(3, false)
+    });
+    run.clock = clock.clone();
+    run.on_changed = Some(Arc::new(move |_: &str| {
+        seen.fetch_add(1, Ordering::SeqCst);
+    }));
+    let live = watch_live(&mut run);
+    let record = fixture.run(run);
+
+    let reason = NoVerdictReason::UndeclaredExit { code: 7 };
+    assert_eq!(record.verdict, Verdict::NoVerdict(reason.clone()));
+    // Parts 1 and 3 passed once and were kept; part 2 ran three times.
+    assert_eq!(fixture.runs(), [1, 2, 3, 2, 2]);
+    let pause = Duration::from_secs(5 * 60);
+    assert_eq!(clock.sleeps(), [pause, pause]);
+    let reruns: Vec<(u32, u32)> = live
+        .borrow()
+        .iter()
+        .filter_map(|state| match state {
+            LiveState::Rerun {
+                reason: why,
+                rerun,
+                reruns,
+                ..
+            } => {
+                assert_eq!(*why, reason);
+                Some((*rerun, *reruns))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reruns, [(1, 2), (2, 2)]);
+    assert_eq!(notified.load(Ordering::SeqCst), 3);
+    let mut records = fixture.records();
+    records.sort_by(|a, b| a.id.cmp(&b.id));
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[2], record);
+    for kept in [0, 2] {
+        assert_eq!(record.parts[kept].token, records[0].parts[kept].token);
+    }
+    assert_ne!(record.parts[1].token, records[1].parts[1].token);
+}
+
+#[test]
+fn check_run_dropped_while_waiting_leaves_the_line() {
+    let fixture = fixture();
+    let clock = FakeClock::manual();
+    let pool = FakePool::new(POOL, 1, clock.clone());
+    let other = pool.hold("other run", 1);
+    let mut run = fixture.check_run(pooled_check(1, false));
+    run.pools = Some(Rc::new(pool.clone()));
+    run.clock = clock;
+
+    let mut future = Box::pin(run.run());
+    let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert_eq!(pool.queued(), 1);
+    drop(future);
+    assert_eq!(pool.queued(), 0);
+    drop(other);
+    assert!(pool.holders().is_empty());
+    pool.assert_all_released();
+    assert!(!fixture.exists("runs"));
+}
+
+#[test]
+fn check_run_stopped_while_waiting_ends_cancelled_without_a_slot() {
+    let fixture = fixture();
+    let clock = FakeClock::manual();
+    let pool = FakePool::new(POOL, 1, clock.clone());
+    let other = pool.hold("other run", 1);
+    let mut run = fixture.check_run(pooled_check(2, false));
+    run.pools = Some(Rc::new(pool.clone()));
+    run.clock = clock.clone();
+    let stop = run.stop.clone();
+
+    let mut spawned = Spawned::new(run);
+    assert!(!spawned.is_done());
+    stop.stop();
+    spawned.step();
+    assert!(spawned.is_done());
+    let record = spawned.finish();
+    assert_eq!(
+        record.verdict,
+        Verdict::NoVerdict(NoVerdictReason::Cancelled)
+    );
+    assert!(record.parts.is_empty());
+    // A cancel is never rerun.
+    assert_eq!(
+        clock.sleeps().len(),
+        1,
+        "only the wait limit: {:?}",
+        clock.sleeps()
+    );
+    assert_eq!(pool.queued(), 0);
+    drop(other);
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_run_stopped_while_a_part_runs_releases_its_slot() {
+    let fixture = fixture();
+    fixture.write("block-at", "2\n");
+    let pool = FakePool::new(POOL, 2, FakeClock::automatic());
+    let mut run = fixture.check_run(pooled_check(3, false));
+    run.pools = Some(Rc::new(pool.clone()));
+    let watcher = fixture.stop_when_blocked(&run, 2);
+    let record = fixture.run(run);
+    watcher.join().unwrap();
+
+    assert_eq!(
+        record.verdict,
+        Verdict::NoVerdict(NoVerdictReason::Cancelled)
+    );
+    assert_eq!(fixture.runs(), [1, 2]);
+    let state = pool.state();
+    assert_eq!(state.granted, ["l1/tests part 1", "l1/tests part 2"]);
+    let bound: Vec<u32> = state.binds.iter().map(|(_, pid, _)| *pid).collect();
+    assert_eq!(bound, part_pids(&record));
+    drop(state);
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_run_releases_its_slot_when_a_part_cannot_start_or_the_pool_refuses() {
+    let fixture = fixture();
+    let pool = FakePool::new(POOL, 1, FakeClock::automatic());
+    let mut run = fixture.check_run(CheckDecl {
+        run: None,
+        command: Some(vec!["no-such-check-tool-for-pools".to_string()]),
+        ..pooled_check(1, false)
+    });
+    run.pools = Some(Rc::new(pool.clone()));
+    run.settings.no_verdict_reruns = 0;
+    let record = fixture.run(run);
+    assert!(
+        matches!(
+            record.verdict,
+            Verdict::NoVerdict(NoVerdictReason::ToolNotFound(_))
+        ),
+        "{record:?}"
+    );
+    assert_eq!(pool.state().granted, ["l1/tests part 1"]);
+    assert!(pool.state().binds.is_empty(), "no process started");
+    pool.assert_all_released();
+
+    // A pool the implementation does not know ends the part with its reason; nothing is held.
+    let mut run = fixture.check_run(CheckDecl {
+        needs: vec![NeedEntry::Pool("no-such-pool".to_string())],
+        ..pooled_check(1, false)
+    });
+    run.digest = "digest-2".to_string();
+    run.pools = Some(Rc::new(pool.clone()));
+    run.settings.no_verdict_reruns = 0;
+    let record = fixture.run(run);
+    assert_eq!(
+        record.verdict,
+        Verdict::NoVerdict(NoVerdictReason::StartFailed(
+            "pool request refused: unknown pool no-such-pool".to_string()
+        ))
+    );
+    assert!(!fixture.exists("runs"));
+    assert_eq!(pool.state().granted.len(), 1);
+    pool.assert_all_released();
+}
+
+#[test]
+fn check_runs_racing_for_two_slots_never_hold_more() {
+    let fixture = fixture();
+    // A manual clock: the runs wait for each other, never for the wait limit.
+    let clock = FakeClock::manual();
+    let pool = FakePool::new(POOL, 2, clock.clone());
+    let runs: Vec<CheckRun> = ["tests-a", "tests-b", "tests-c"]
+        .into_iter()
+        .map(|name| {
+            let mut run = fixture.check_run(CheckDecl {
+                name: name.to_string(),
+                ..pooled_check(3, true)
+            });
+            run.pools = Some(Rc::new(pool.clone()));
+            run.clock = clock.clone();
+            run
+        })
+        .collect();
+    let records = block_on(futures::future::join_all(
+        runs.into_iter().map(CheckRun::run),
+    ));
+
+    for record in records {
+        assert_whole_pass(&record.unwrap(), 3);
+    }
+    assert_eq!(fixture.runs().len(), 9);
+    let state = pool.state();
+    assert_eq!(state.max_used, 2);
+    assert_eq!(state.granted.len(), 9);
+    assert_eq!(state.binds.len(), 9);
+    drop(state);
+    pool.assert_all_released();
 }

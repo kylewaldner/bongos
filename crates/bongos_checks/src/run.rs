@@ -11,12 +11,26 @@
 //! Each part's start (its pid, start time and token) and its end are written into the
 //! unfinished record in a transaction of their own, so a crash leaves a record the next run
 //! resumes; the record's end is written in one transaction when the parts are done.
+//!
+//! Before a part starts it waits in line for the pools its check `needs`; the wait starts no
+//! process and spends none of the check's time budget, and past `pool_wait_limit_hours` the part
+//! ends as no verdict. A `parallel` check starts further parts, up to `parallel_parts_max` at a
+//! time, only on slots that are free at that moment, never waiting in line for them. A run whose
+//! check ends with no verdict (other than a cancel) runs again after `no_verdict_rerun_minutes`,
+//! at most `no_verdict_reruns` times, keeping the parts that passed or failed, then reports.
+//! Every lease is dropped when its part ends, and with the run's future on any other exit.
 
+use std::collections::VecDeque;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use bongos_checks_model::decl::NeedEntry;
 use bongos_checks_model::decl::{self, CheckDecl};
 use bongos_checks_model::evidence::{
     EvidenceRecord, Output, Params, PartRecord, Scope, StartedBy, TreeKind, Variant,
@@ -26,11 +40,17 @@ use bongos_checks_model::verdict::{
     parse_scope_answer, union_failing,
 };
 use bongos_project_repo::{Git, StateTx, StateWriter};
+use bongos_workflow::RunId;
+use bongos_workflow_model::NodeKey;
+use futures::StreamExt as _;
+use futures::channel::oneshot;
+use futures::stream::FuturesUnordered;
 use serde_json::json;
 
 use crate::changed_files::{ChangedFiles, changed_files};
 use crate::evidence_store::{evidence_prefix, scan_records_in, store_record, task_prefix};
 use crate::pin::Pin;
+use crate::pools::{CheckClock, CheckPools, Holder, PoolLease, PoolRequest, WaitStatus};
 use crate::process::{
     self, PartOutcome, PartScope, PartSpec, PartStart, ProcessRole, StopHandle, kill_orphan_parts,
     run_part,
@@ -43,6 +63,29 @@ pub type Now = Arc<dyn Fn() -> String + Send + Sync>;
 
 /// Told the task id each time a run wrote a record's end.
 pub type OnChanged = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Told each change of what the run is doing, for the live rows.
+pub type OnLive = Rc<dyn Fn(&LiveState)>;
+
+/// What a run is doing now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveState {
+    /// Part `part` of `parts` waits in line for a pool; no process runs for it.
+    Waiting {
+        part: u32,
+        parts: u32,
+        status: WaitStatus,
+    },
+    /// Part `part` of `parts` has its slots and starts.
+    Running { part: u32, parts: u32 },
+    /// The check ended with no verdict for `reason`; rerun `rerun` of `reruns` starts at `at`.
+    Rerun {
+        reason: NoVerdictReason,
+        rerun: u32,
+        reruns: u32,
+        at: Instant,
+    },
+}
 
 /// The scope answer when the task has no base branch, so no changed files can be listed.
 pub const NO_BASE_BRANCH: &str = "no base branch";
@@ -86,6 +129,24 @@ pub struct CheckRun {
     pub stop: StopHandle,
     pub now: Now,
     pub on_changed: Option<OnChanged>,
+    /// The project, named in every pool request.
+    pub project_id: String,
+    /// The workflow node the check runs for, if any.
+    pub node: Option<(RunId, NodeKey)>,
+    /// The project's pools; `None` (no implementation registered) runs every part at once.
+    pub pools: Option<Rc<dyn CheckPools>>,
+    /// Pool waits, the wait limit and the pause before a rerun read this clock.
+    pub clock: Rc<dyn CheckClock>,
+    pub on_live: Option<OnLive>,
+}
+
+/// How a part's wait for its pools ended.
+enum Waited {
+    /// Its slots, or `None` when it needs no pool or no pools are registered.
+    Granted(Option<PoolLease>),
+    /// The part ends with this no verdict without running.
+    Ended(NoVerdictReason),
+    Stopped,
 }
 
 /// What the scope settled on.
@@ -97,10 +158,60 @@ struct Scoped {
 }
 
 impl CheckRun {
-    /// Runs the check to its end (or its stop) and returns the record as written. An error is
-    /// an error of the state store or the output folder; everything about the check itself
-    /// ends in a record.
-    pub async fn run(self) -> Result<EvidenceRecord> {
+    /// Runs the check to its end (or its stop), with its no-verdict reruns, and returns the
+    /// last record as written. An error is an error of the state store or the output folder;
+    /// everything about the check itself ends in a record.
+    pub async fn run(mut self) -> Result<EvidenceRecord> {
+        let reruns = self.settings.no_verdict_reruns;
+        let pause = Duration::from_secs(u64::from(self.settings.no_verdict_rerun_minutes) * 60);
+        let mut rerun = 0;
+        loop {
+            let record = self.run_once().await?;
+            let Verdict::NoVerdict(reason) = &record.verdict else {
+                return Ok(record);
+            };
+            if *reason == NoVerdictReason::Cancelled || rerun >= reruns || self.stop.is_stopped() {
+                return Ok(record);
+            }
+            rerun += 1;
+            self.live(LiveState::Rerun {
+                reason: reason.clone(),
+                rerun,
+                reruns,
+                at: self.clock.now() + pause,
+            });
+            if !self.pause(pause).await {
+                return Ok(record);
+            }
+            // A rerun keeps the parts the clean run made.
+            self.clean = false;
+        }
+    }
+
+    /// Sleeps `duration` on the run's clock; false when the run was stopped first.
+    async fn pause(&self, duration: Duration) -> bool {
+        let mut sleep = self.clock.sleep(duration);
+        let mut stopped = pin!(self.stop.stopped());
+        std::future::poll_fn(|cx| {
+            if stopped.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(false);
+            }
+            if sleep.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(true);
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    fn live(&self, state: LiveState) {
+        if let Some(on_live) = &self.on_live {
+            on_live(&state);
+        }
+    }
+
+    /// One run of the check, from its scope to its record's end.
+    async fn run_once(&self) -> Result<EvidenceRecord> {
         let staging_id = new_id();
         let staging = self.output_dir.join(&staging_id);
         std::fs::create_dir_all(&staging)
@@ -182,6 +293,8 @@ impl CheckRun {
     }
 
     /// Runs every part not kept, in order, writing each into the record as it starts and ends.
+    /// A part waits in line for its pools only while no part of this run runs; a parallel
+    /// check adds parts on slots free now, up to `parallel_parts_max` running together.
     async fn run_parts(
         &self,
         record: EvidenceRecord,
@@ -190,50 +303,228 @@ impl CheckRun {
         let total = record.variant.parts;
         let stops_early = self.decl.stops_at_first_failure();
         let shared = Arc::new(Mutex::new(record));
-        let to_run = parts_to_run(&lock(&shared), total, stops_early);
-        for n in to_run {
-            if self.stop.is_stopped() {
-                break;
+        let mut pending: VecDeque<u32> = parts_to_run(&lock(&shared), total, stops_early).into();
+        let cap = if self.decl.parallel == Some(true) {
+            usize::try_from(self.settings.parallel_parts_max.max(1)).unwrap_or(1)
+        } else {
+            1
+        };
+        let mut running = FuturesUnordered::new();
+        // False once the run must start no further part; the running ones still end.
+        let mut starting = true;
+        loop {
+            if self.stop.is_stopped() || (stops_early && has_fail(&lock(&shared))) {
+                starting = false;
             }
-            if stops_early && has_fail(&lock(&shared)) {
-                break;
-            }
-            let started = (self.now)();
-            let record_id = lock(&shared).id.clone();
-            let mut spec = self.spec(
-                &process::part_output_path(&self.output_dir, &record_id, n),
-                ProcessRole::Part,
-                part_scope.clone(),
-                (n, total),
-            );
-            spec.on_start = Some(self.on_start(shared.clone(), n, started.clone()));
-            let outcome = run_part(spec).await;
-            let part = finished_part(n, started, (self.now)(), &outcome);
-            let cancelled = part.verdict == Verdict::NoVerdict(NoVerdictReason::Cancelled);
-            let snapshot = {
-                let mut record = lock(&shared);
-                put_part(&mut record, part);
-                if record.command.is_empty() {
-                    record.command = outcome.command.clone();
+            if starting
+                && running.is_empty()
+                && let Some(n) = pending.pop_front()
+            {
+                match self.wait_for_pools(n, total).await {
+                    Waited::Granted(lease) => {
+                        running.push(Box::pin(self.run_one(n, total, lease, &shared, part_scope)));
+                    }
+                    Waited::Ended(reason) => {
+                        self.store_unrun(&shared, n, reason)?;
+                        starting = false;
+                    }
+                    Waited::Stopped => starting = false,
                 }
-                record.cut = record.cut.saturating_add(outcome.output.cut_bytes);
-                record.clone()
-            };
-            self.writer.transact(|tx| store_record(tx, &snapshot))?;
-            if cancelled {
+            }
+            if starting && !running.is_empty() {
+                while running.len() < cap {
+                    let Some(&n) = pending.front() else {
+                        break;
+                    };
+                    let Some(lease) = self.lease_now(n) else {
+                        break;
+                    };
+                    pending.pop_front();
+                    running.push(Box::pin(self.run_one(n, total, lease, &shared, part_scope)));
+                }
+            }
+            let Some(ended) = running.next().await else {
                 break;
+            };
+            if ended? {
+                starting = false;
             }
         }
         let record = lock(&shared).clone();
         Ok(record)
     }
 
-    /// Writes the part's start into the record before its output is read.
+    /// The pool request of part `n`; `None` when the check needs no pool or no pools are
+    /// registered.
+    fn pool_request(&self, n: u32) -> Option<(&Rc<dyn CheckPools>, PoolRequest)> {
+        let pools = self.pools.as_ref()?;
+        if self.decl.needs.is_empty() {
+            return None;
+        }
+        Some((
+            pools,
+            PoolRequest {
+                project_id: self.project_id.clone(),
+                needs: self.decl.needs.iter().map(need_value).collect(),
+                holder: Holder {
+                    task_id: self.task_id.clone(),
+                    check: self.decl.name.clone(),
+                    part: n,
+                    run: self.node.clone(),
+                    host_pid: std::process::id(),
+                },
+            },
+        ))
+    }
+
+    /// Waits in line for part `n`'s pools, up to the wait limit or the run's stop.
+    async fn wait_for_pools(&self, n: u32, total: u32) -> Waited {
+        let Some((pools, request)) = self.pool_request(n) else {
+            return Waited::Granted(None);
+        };
+        let mut wait = pools.acquire(request);
+        if !wait.ready().is_ready() {
+            self.live(LiveState::Waiting {
+                part: n,
+                parts: total,
+                status: wait.status(),
+            });
+        }
+        let limit = Duration::from_secs(u64::from(self.settings.pool_wait_limit_hours) * 3600);
+        let mut limit_reached = self.clock.sleep(limit);
+        let mut stopped = pin!(self.stop.stopped());
+        enum End {
+            Ready(Result<PoolLease, String>),
+            Limit,
+            Stopped,
+        }
+        let end = std::future::poll_fn(|cx| {
+            // A grant wins over a limit or a stop seen in the same poll; the lease is then
+            // dropped by the caller when the run stops.
+            if let Poll::Ready(result) = std::pin::Pin::new(&mut *wait.ready()).poll(cx) {
+                return Poll::Ready(End::Ready(result));
+            }
+            if stopped.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(End::Stopped);
+            }
+            if limit_reached.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(End::Limit);
+            }
+            Poll::Pending
+        })
+        .await;
+        match end {
+            End::Ready(Ok(lease)) => Waited::Granted(Some(lease)),
+            End::Ready(Err(why)) => Waited::Ended(NoVerdictReason::StartFailed(format!(
+                "pool request refused: {why}"
+            ))),
+            // Dropping the wait leaves the line.
+            End::Limit => Waited::Ended(NoVerdictReason::PoolWaitLimit {
+                pool: wait.status().pool,
+            }),
+            End::Stopped => Waited::Stopped,
+        }
+    }
+
+    /// Slots for an extra part `n`, only when they are free now: `Some(None)` when it needs
+    /// none, `None` when they are not free.
+    fn lease_now(&self, n: u32) -> Option<Option<PoolLease>> {
+        match self.pool_request(n) {
+            None => Some(None),
+            Some((pools, request)) => pools.try_acquire_now(request).map(Some),
+        }
+    }
+
+    /// Writes part `n` into the record as ended with `reason`, never having run.
+    fn store_unrun(
+        &self,
+        shared: &Arc<Mutex<EvidenceRecord>>,
+        n: u32,
+        reason: NoVerdictReason,
+    ) -> Result<()> {
+        let now = (self.now)();
+        let snapshot = {
+            let mut record = lock(shared);
+            put_part(
+                &mut record,
+                PartRecord {
+                    n,
+                    reason: Some(reason.text()),
+                    verdict: Verdict::NoVerdict(reason),
+                    exit: None,
+                    started: now.clone(),
+                    ended: Some(now),
+                    pid: None,
+                    pid_start_time: None,
+                    token: None,
+                    duration_ms: Some(0),
+                    summary: None,
+                    failing: Vec::new(),
+                },
+            );
+            record.clone()
+        };
+        self.writer.transact(|tx| store_record(tx, &snapshot))?;
+        Ok(())
+    }
+
+    /// Runs part `n` holding `lease`, which is bound to the part's process once it starts and
+    /// dropped when the part ends. True when the part was cancelled.
+    async fn run_one(
+        &self,
+        n: u32,
+        total: u32,
+        lease: Option<PoolLease>,
+        shared: &Arc<Mutex<EvidenceRecord>>,
+        part_scope: &PartScope,
+    ) -> Result<bool> {
+        self.live(LiveState::Running {
+            part: n,
+            parts: total,
+        });
+        let started = (self.now)();
+        let record_id = lock(shared).id.clone();
+        let mut spec = self.spec(
+            &process::part_output_path(&self.output_dir, &record_id, n),
+            ProcessRole::Part,
+            part_scope.clone(),
+            (n, total),
+        );
+        let (started_tx, started_rx) = oneshot::channel();
+        spec.on_start = Some(self.on_start(shared.clone(), n, started.clone(), started_tx));
+        let bind = async {
+            // Canceled when the process never started.
+            if let Ok((pid, start_time)) = started_rx.await
+                && let Some(lease) = &lease
+            {
+                lease.bind_process(pid, start_time);
+            }
+        };
+        let ((), outcome) = futures::join!(bind, run_part(spec));
+        drop(lease);
+        let part = finished_part(n, started, (self.now)(), &outcome);
+        let cancelled = part.verdict == Verdict::NoVerdict(NoVerdictReason::Cancelled);
+        let snapshot = {
+            let mut record = lock(shared);
+            put_part(&mut record, part);
+            if record.command.is_empty() {
+                record.command = outcome.command.clone();
+            }
+            record.cut = record.cut.saturating_add(outcome.output.cut_bytes);
+            record.clone()
+        };
+        self.writer.transact(|tx| store_record(tx, &snapshot))?;
+        Ok(cancelled)
+    }
+
+    /// Writes the part's start into the record before its output is read, and sends its pid
+    /// and start time to `started`.
     fn on_start(
         &self,
         shared: Arc<Mutex<EvidenceRecord>>,
         n: u32,
         started: String,
+        started_tx: oneshot::Sender<(u32, u64)>,
     ) -> Box<dyn FnOnce(&PartStart) + Send> {
         let writer = self.writer.clone();
         Box::new(move |start: &PartStart| {
@@ -261,6 +552,7 @@ impl CheckRun {
             if let Err(error) = writer.transact(|tx| store_record(tx, &snapshot)) {
                 log::error!("checks: recording the start of part {n}: {error:#}");
             }
+            started_tx.send((start.pid, start.pid_start_time)).ok();
         })
     }
 
@@ -280,7 +572,7 @@ impl CheckRun {
             .filter(|part| part.verdict.is_pass())
             .count();
         let mut verdict = combine(&verdicts);
-        if verdict.is_pass() && passed < total as usize {
+        if (verdict.is_pass() || verdicts.is_empty()) && passed < total as usize {
             let reason = if self.stop.is_stopped() {
                 NoVerdictReason::Cancelled
             } else {
@@ -666,6 +958,19 @@ impl CheckRun {
             ..CheckDecl::default()
         };
         spec
+    }
+}
+
+/// A `needs` entry as the pool implementation reads it.
+fn need_value(entry: &NeedEntry) -> toml::Value {
+    match entry {
+        NeedEntry::Pool(pool) => toml::Value::String(pool.clone()),
+        NeedEntry::Request { pool, rest } => {
+            let mut table = rest.clone();
+            table.insert("pool".to_string(), toml::Value::String(pool.clone()));
+            toml::Value::Table(table)
+        }
+        NeedEntry::Invalid(value) => value.clone(),
     }
 }
 

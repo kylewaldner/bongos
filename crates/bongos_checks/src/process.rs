@@ -49,15 +49,55 @@ const READ_BUFFER: usize = 64 * 1024;
 
 /// A switch the owner of a running part flips to stop it (cancel, halt, quit).
 #[derive(Clone, Debug, Default)]
-pub struct StopHandle(Arc<AtomicBool>);
+pub struct StopHandle(Arc<StopState>);
+
+#[derive(Debug, Default)]
+struct StopState {
+    stopped: AtomicBool,
+    /// Woken by the stop: everyone awaiting [`StopHandle::stopped`].
+    wakers: Mutex<Vec<std::task::Waker>>,
+}
 
 impl StopHandle {
     pub fn stop(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.stopped.store(true, Ordering::SeqCst);
+        let wakers = std::mem::take(
+            &mut *self
+                .0
+                .wakers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once the handle is stopped (at once when it already is).
+    pub fn stopped(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let state = self.0.clone();
+        std::future::poll_fn(move |cx| {
+            if state.stopped.load(Ordering::SeqCst) {
+                return std::task::Poll::Ready(());
+            }
+            let mut wakers = state
+                .wakers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Checked again under the lock: a stop between the two reads takes the wakers
+            // after this one is in.
+            if state.stopped.load(Ordering::SeqCst) {
+                return std::task::Poll::Ready(());
+            }
+            if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
+            std::task::Poll::Pending
+        })
     }
 }
 
