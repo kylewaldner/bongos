@@ -204,14 +204,49 @@ cargo_limited() {
   fi
 }
 
-# start_fixture_http <dir>: serve a directory on 127.0.0.1 on a free port. Sets FIXTURE_HTTP_PORT and
-# FIXTURE_HTTP_PID; requests are logged to $RUN/fixture-http.log. The caller's cleanup trap kills it.
+# start_fixture_http <dir> [port]: serve a directory on 127.0.0.1 with fixtures/fake_manifest_host.py,
+# on a free port, or on <port> to bring a stopped server back at the same URLs. Sets
+# FIXTURE_HTTP_PORT, FIXTURE_HTTP_PID and FIXTURE_HTTP_LOG ($RUN/fixture-http.log: one line
+# `<method> <path> <status>` per request, `# aborted ...` when a client left early). A file can be
+# held part way (fixture_http_hold) so a download stalls until fixture_http_release. The app reaches
+# it only with NO_PROXY=127.0.0.1. stop_fixture_http stops it; the caller's exit trap must too.
 start_fixture_http() {
-  local dir=$1 log="${RUN:-$TMPDIR}/fixture-http.log"
-  python3 -I -u -m http.server --bind 127.0.0.1 0 --directory "$dir" >"$log" 2>&1 &
+  local dir=$1 port=${2:-0} port_file="${RUN:-$TMPDIR}/fixture-http.port"
+  FIXTURE_HTTP_LOG="${RUN:-$TMPDIR}/fixture-http.log"
+  rm -f "$port_file"
+  python3 -I -u "$BONGOS_ROOT/script/bongos/fixtures/fake_manifest_host.py" "$dir" "$port_file" \
+    "$FIXTURE_HTTP_LOG" "$port" >>"${RUN:-$TMPDIR}/fixture-http.out" 2>&1 &
   FIXTURE_HTTP_PID=$!
-  poll 15 "fixture http server" grep -q 'Serving HTTP' "$log"
-  FIXTURE_HTTP_PORT=$(sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' "$log" | head -n1)
+  poll 15 "the fixture http server" test -s "$port_file"
+  FIXTURE_HTTP_PORT=$(cat "$port_file")
+}
+
+stop_fixture_http() {
+  [ -n "${FIXTURE_HTTP_PID:-}" ] || return 0
+  kill "$FIXTURE_HTTP_PID" 2>/dev/null || true
+  wait "$FIXTURE_HTTP_PID" 2>/dev/null || true
+  FIXTURE_HTTP_PID=""
+}
+
+# fixture_http_control <json>: a control request (see fake_manifest_host.py); prints the answer.
+fixture_http_control() {
+  curl -s -f --noproxy '*' -X POST --data "$1" "http://127.0.0.1:$FIXTURE_HTTP_PORT/control"
+}
+
+# fixture_http_hold <path> <bytes>: send at most <bytes> of the file at <path>, then stall.
+fixture_http_hold() {
+  fixture_http_control "{\"op\": \"hold\", \"path\": \"$1\", \"bytes\": $2}" >/dev/null
+}
+
+fixture_http_release() {
+  fixture_http_control "{\"op\": \"hold\", \"path\": \"$1\", \"bytes\": null}" >/dev/null
+}
+
+# fixture_http_sent_at_least <path> <bytes>: the newest response of <path> sent that much.
+fixture_http_sent_at_least() {
+  local sent
+  sent=$(fixture_http_control "{\"op\": \"sent\", \"path\": \"$1\"}" | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["sent"])') || return 1
+  [ "$sent" -ge "$2" ]
 }
 
 # Print the software (lavapipe) Vulkan driver file. Names differ by distro: lvp_icd.x86_64.json on
