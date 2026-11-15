@@ -1,8 +1,8 @@
 //! A replace running in an editor: the interactive one of `query-replace`, driven from the
-//! decision view (see the end of this file), and the batch of `replace-string` and
-//! `replace-regexp`: every match of the scope is found on the background executor and replaced
-//! on the main thread in chunks of [`crate::engine::SCAN_CHUNK`], one undo entry each, yielding
-//! between chunks so the window keeps drawing. At the end the entries are merged into one undo
+//! decision view (see the end of this file), and the batch of `replace-string`, `replace-regexp`
+//! and `!` in the decision view: every match of the scope is found on the background executor
+//! and replaced on the main thread in chunks of [`crate::engine::SCAN_CHUNK`], one undo entry
+//! each, yielding between chunks so the window keeps drawing. At the end the entries are merged into one undo
 //! step, the cursor goes to the end of the last replacement and the count goes to the echo area.
 //!
 //! While a batch runs, its editor has the [`BATCH_KEY_CONTEXT`] key context (through an editor
@@ -15,8 +15,9 @@ use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use bongos_emacs::recenter::scroll_row_to;
 use bongos_emacs_model::recenter::Cycle;
@@ -28,23 +29,24 @@ use bongos_query_replace_model::template::{self, Template};
 use bongos_query_replace_model::text::{
     SHOWN_PROMPT, WALKING_PROMPT, counter, decision_prompt, end_message, help, notice,
 };
-use editor::{Addon, Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
+use editor::{Addon, Editor, EditorEvent, HighlightKey, SelectionEffects, scroll::Autoscroll};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{
-    Action, App, AppContext as _, Entity, EntityId, Global, KeyContext, Subscription, WeakEntity,
-    Window,
+    Action, App, AppContext as _, AsyncWindowContext, Context, Entity, EntityId, Global,
+    KeyContext, Subscription, Task, WeakEntity, Window,
 };
 use multi_buffer::{Anchor, MultiBufferOffset, ToOffset as _};
 use project::search::SearchQuery;
 use workspace::Workspace;
 
 use crate::actions::{
-    Abort, EditReplacement, Exit, Help, No, Previous, Recenter, ThisAndExit, ThisAndWait, Undo, Yes,
+    Abort, All, EditReplacement, Exit, Help, No, Previous, Recenter, ThisAndExit, ThisAndWait,
+    Undo, Yes,
 };
 use crate::display::{self, Shown};
-use crate::edits::{Edits, NO_TRANSACTION, READ_ONLY, Replace, match_anchors};
-use crate::engine::{self, Replacer, ScanEnd};
+use crate::edits::{Edits, NO_TRANSACTION, READ_ONLY, ReadOnly, Replace, match_anchors};
+use crate::engine::{self, Hit, Replacer, ScanEnd};
 use crate::prompts::{self, Mode};
 use crate::view::QueryReplaceView;
 
@@ -72,6 +74,7 @@ pub(crate) fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         register_key::<Yes>(workspace, Input::Key(Key::Yes));
         register_key::<No>(workspace, Input::Key(Key::No));
+        register_key::<All>(workspace, Input::Key(Key::All));
         register_key::<ThisAndExit>(workspace, Input::Key(Key::ThisAndExit));
         register_key::<ThisAndWait>(workspace, Input::Key(Key::ThisAndWait));
         register_key::<Previous>(workspace, Input::Key(Key::Previous));
@@ -140,85 +143,45 @@ pub(crate) fn run_batch(
     };
 
     let cancel = Cancel::new();
-    let (mut edits, snapshot) = editor.update(cx, |editor, cx| {
-        editor.register_addon(Batch {
-            cancel: cancel.clone(),
-        });
-        cx.notify();
-        (
-            Edits::start(editor, cx),
-            editor.buffer().read(cx).snapshot(cx),
-        )
-    });
-
-    let (sender, mut chunks) = mpsc::unbounded();
-    let scan = cx.background_spawn({
-        let cancel = cancel.clone();
-        async move {
-            // The model session that computes the replacements, a twin of the one that counts.
-            let session = Session::new(preserve_case, template);
-            let replacer = Replacer {
-                session: &session,
+    let (mut edits, scan) = editor.update(cx, |editor, cx| {
+        let edits = Edits::start(editor, cx);
+        let scan = start_scan(
+            editor,
+            &cancel,
+            ScanRequest {
+                query,
+                scope,
+                from,
+                preserve_case,
+                template,
                 counter: 0,
-            };
-            engine::scan(
-                &snapshot,
-                &query,
-                MultiBufferOffset(from),
-                &scope,
-                &cancel,
-                Some(replacer),
-                |chunk| {
-                    sender.unbounded_send(chunk).ok();
-                },
-            )
-        }
+            },
+            cx,
+        );
+        (edits, scan)
     });
 
     let editor = editor.downgrade();
     window
         .spawn(cx, async move |cx| {
-            let mut replaced = 0;
-            let mut end = None;
-            let mut stopped = false;
-            let mut read_only = None;
-            while let Some(chunk) = chunks.next().await {
-                if cancel.is_canceled() {
-                    stopped = true;
-                    break;
-                }
-                let applied = editor.update_in(cx, |editor, window, cx| {
-                    edits.apply_chunk(editor, chunk, window, cx)
-                });
-                match applied {
-                    Ok(Ok(applied)) => {
-                        replaced += applied.replaced;
-                        end = applied.end.or(end);
-                        model.on_batch_progress(replaced);
-                    }
-                    Ok(Err(error)) => {
-                        read_only = Some(error);
-                        break;
-                    }
-                    // The editor or its window is gone.
-                    Err(_) => {
-                        cancel.cancel();
-                        return;
-                    }
-                }
-                yield_now().await;
-            }
-            let interrupted = if stopped || read_only.is_some() {
-                cancel.cancel();
-                stopped
-            } else {
-                matches!(scan.await, ScanEnd::Canceled { .. })
+            let outcome = apply_scan(
+                &editor,
+                &mut edits,
+                scan,
+                &cancel,
+                |replaced, _, _| {
+                    model.on_batch_progress(replaced);
+                },
+                cx,
+            )
+            .await;
+            let Some(outcome) = outcome else {
+                return;
             };
-
             let finished = editor.update_in(cx, |editor, window, cx| {
-                editor.unregister_addon::<Batch>();
+                let started = Instant::now();
                 // The cursor goes to the end of the last replacement, which also ends the region.
-                if let Some(end) = end {
+                if let Some(end) = outcome.end {
                     editor.change_selections(
                         SelectionEffects::scroll(Autoscroll::fit()),
                         window,
@@ -228,14 +191,15 @@ pub(crate) fn run_batch(
                 }
                 edits.finish(editor, cx);
                 cx.notify();
+                record_slice(started.elapsed());
             });
             if finished.is_err() {
                 return;
             }
-            let message = match read_only {
+            let message = match outcome.read_only {
                 Some(error) => error.to_string(),
                 None => model
-                    .on_batch_end(interrupted)
+                    .on_batch_end(outcome.interrupted)
                     .iter()
                     .find_map(|effect| match effect {
                         Effect::Finish(end) => Some(end_message(end)),
@@ -247,6 +211,176 @@ pub(crate) fn run_batch(
                 .ok();
         })
         .detach();
+}
+
+/// What a batch scan looks for and how it makes the replacements: `counter` is the number of
+/// replacements made before the batch (the `\#` of its first match).
+struct ScanRequest {
+    query: Arc<SearchQuery>,
+    scope: Range<Anchor>,
+    from: usize,
+    preserve_case: bool,
+    template: Template,
+    counter: usize,
+}
+
+/// The scan of a running batch, on the background executor.
+struct Scan {
+    /// The matches with their replacements, [`engine::SCAN_CHUNK`] at a time.
+    chunks: mpsc::UnboundedReceiver<Vec<Hit>>,
+    task: Task<ScanEnd>,
+    /// The number of matches, once the scan has found them all.
+    total: Arc<OnceLock<usize>>,
+}
+
+/// Marks `editor` as running a batch (its key context gets [`BATCH_KEY_CONTEXT`], where `C-g`
+/// sets `cancel`) and starts the scan, on the text as it is now. The anchors of the matches are
+/// taken on that text, so a chunk applied later still finds them after edits made since.
+fn start_scan(
+    editor: &mut Editor,
+    cancel: &Cancel,
+    request: ScanRequest,
+    cx: &mut Context<Editor>,
+) -> Scan {
+    let ScanRequest {
+        query,
+        scope,
+        from,
+        preserve_case,
+        template,
+        counter,
+    } = request;
+    editor.register_addon(Batch {
+        cancel: cancel.clone(),
+    });
+    cx.notify();
+    let snapshot = editor.buffer().read(cx).snapshot(cx);
+    let (sender, chunks) = mpsc::unbounded();
+    let total = Arc::new(OnceLock::new());
+    let task = cx.background_spawn({
+        let cancel = cancel.clone();
+        let total = total.clone();
+        async move {
+            // The model session that computes the replacements, a twin of the one that counts.
+            let session = Session::new(preserve_case, template);
+            let replacer = Replacer {
+                session: &session,
+                counter,
+            };
+            let end = engine::scan(
+                &snapshot,
+                &query,
+                MultiBufferOffset(from),
+                &scope,
+                &cancel,
+                Some(replacer),
+                |chunk| {
+                    sender.unbounded_send(chunk).ok();
+                },
+            );
+            if let ScanEnd::Done { matches } = end {
+                total.set(matches).ok();
+            }
+            end
+        }
+    });
+    Scan {
+        chunks,
+        task,
+        total,
+    }
+}
+
+/// How a batch ended.
+struct BatchEnd {
+    /// The end of the last replacement made.
+    end: Option<Anchor>,
+    /// `C-g` stopped it before every match was replaced.
+    interrupted: bool,
+    /// The editor became read-only, which stopped it.
+    read_only: Option<ReadOnly>,
+}
+
+/// Applies the chunks of `scan` in order, each as one undo entry, yielding to the other tasks of
+/// the main thread between them; `progress` gets the number of replacements made after each.
+/// `cancel` stops it before the next chunk, so only whole chunks of whole replacements are ever
+/// made. At the end the editor no longer runs a batch. `None` when the editor or its window is
+/// gone.
+async fn apply_scan(
+    editor: &WeakEntity<Editor>,
+    edits: &mut Edits,
+    scan: Scan,
+    cancel: &Cancel,
+    mut progress: impl FnMut(usize, &mut Window, &mut App),
+    cx: &mut AsyncWindowContext,
+) -> Option<BatchEnd> {
+    let Scan {
+        mut chunks, task, ..
+    } = scan;
+    let mut replaced = 0;
+    let mut end = None;
+    let mut stopped = false;
+    let mut read_only = None;
+    while let Some(chunk) = chunks.next().await {
+        // Checked on the main thread right before the edit, so a C-g handled before this point
+        // always stops the batch here.
+        if cancel.is_canceled() {
+            stopped = true;
+            break;
+        }
+        let started = Instant::now();
+        let applied = editor.update_in(cx, |editor, window, cx| {
+            let applied = edits.apply_chunk(editor, chunk, window, cx);
+            if let Ok(applied) = &applied {
+                replaced += applied.replaced;
+                end = applied.end.or(end);
+                progress(replaced, window, cx);
+            }
+            applied
+        });
+        match applied {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                read_only = Some(error);
+                break;
+            }
+            // The editor or its window is gone.
+            Err(_) => {
+                cancel.cancel();
+                return None;
+            }
+        }
+        record_slice(started.elapsed());
+        yield_now().await;
+    }
+    let interrupted = if stopped || read_only.is_some() {
+        cancel.cancel();
+        stopped
+    } else {
+        matches!(task.await, ScanEnd::Canceled { .. })
+    };
+    editor
+        .update(cx, |editor, cx| {
+            editor.unregister_addon::<Batch>();
+            cx.notify();
+        })
+        .ok()?;
+    Some(BatchEnd {
+        end,
+        interrupted,
+        read_only,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The time each step of a batch took on the main thread, for the perf tests.
+    pub(crate) static SLICES: RefCell<Vec<Duration>> = const { RefCell::new(Vec::new()) };
+}
+
+fn record_slice(_elapsed: Duration) {
+    #[cfg(test)]
+    SLICES.with(|slices| slices.borrow_mut().push(_elapsed));
 }
 
 /// Lets the other tasks of the main thread run (and the window draw) before going on.
@@ -304,6 +438,9 @@ struct Interactive {
     model: Session,
     query: Arc<SearchQuery>,
     scope: Range<Anchor>,
+    /// What the model makes the replacements with, for the scan of a `!` batch.
+    preserve_case: bool,
+    template: Template,
     from: String,
     /// The replacement string, as typed, which `e` starts from.
     to: String,
@@ -332,7 +469,30 @@ struct Interactive {
     /// The number of matches and whether the count stopped at the cap, once known.
     total: Option<(usize, bool)>,
     count: Cancel,
+    /// The `!` batch running, which holds the edits meanwhile.
+    batch: Option<Running>,
     done: bool,
+}
+
+/// A `!` batch of the interactive replace, while it runs.
+struct Running {
+    cancel: Cancel,
+    /// The matches the scan found, once it found them all.
+    scanned: Arc<OnceLock<usize>>,
+    /// The matches decided before the batch.
+    before: usize,
+}
+
+/// The prompt while a `!` batch runs.
+pub const BATCH_PROMPT: &str = "Replacing all; C-g to stop";
+
+/// The status while a `!` batch runs: `Replacing… 12000/50000`, the matches decided so far over
+/// all of them, with no total while it is unknown.
+pub fn batch_status(decided: usize, total: Option<usize>) -> String {
+    match total {
+        Some(total) => format!("Replacing… {decided}/{total}"),
+        None => format!("Replacing… {decided}"),
+    }
 }
 
 type Shared = Rc<RefCell<Interactive>>;
@@ -391,7 +551,7 @@ pub(crate) fn open(
         regexp,
         region,
     } = request;
-    let mut model = Session::new(preserve_case, template);
+    let mut model = Session::new(preserve_case, template.clone());
     model.on_match(Some(first.clone()));
     let edits = editor.update(cx, |editor, cx| Edits::start(editor, cx));
     let workspace_id = workspace.entity_id();
@@ -402,6 +562,8 @@ pub(crate) fn open(
         model,
         query,
         scope,
+        preserve_case,
+        template,
         from,
         to,
         regexp,
@@ -418,6 +580,7 @@ pub(crate) fn open(
         find: None,
         total: None,
         count: Cancel::new(),
+        batch: None,
         done: false,
     }));
     if !show_view(&state, window, cx) {
@@ -464,6 +627,11 @@ fn dismiss_handler(state: &Shared) -> Box<dyn FnOnce(&mut Window, &mut App)> {
         let counts = {
             let mut state = state.borrow_mut();
             if state.editing {
+                return;
+            }
+            // The batch stops before its next chunk and ends the session when it does.
+            if let Some(batch) = &state.batch {
+                batch.cancel.cancel();
                 return;
             }
             // Out of `^` shown on a replacement, the cursor stays on it.
@@ -553,7 +721,15 @@ fn start_count(state: &Shared, from: usize, window: &mut Window, cx: &mut App) {
 fn refresh_status(state: &Shared, _: &mut Window, cx: &mut App) {
     let (view, status) = {
         let state = state.borrow();
-        let status = if state.find.is_some() {
+        let status = if let Some(batch) = &state.batch {
+            let counts = state.model.counts();
+            let total = match (batch.scanned.get(), state.total) {
+                (Some(scanned), _) => Some(batch.before + scanned),
+                (None, Some((total, false))) => Some(total),
+                (None, _) => None,
+            };
+            batch_status(counts.replaced + counts.skipped, total)
+        } else if state.find.is_some() {
             "…".to_string()
         } else {
             let counts = state.model.counts();
@@ -578,7 +754,7 @@ fn press(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
             state.view.clone(),
         )
     };
-    if done {
+    if done || ignored_in_batch(state, input) {
         return;
     }
     // Any key but `?` itself takes the list of keys away.
@@ -597,7 +773,15 @@ fn press(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
     apply(state, input, window, cx);
 }
 
+/// Whether `input` does nothing because a `!` batch is running: only `C-g` acts then.
+fn ignored_in_batch(state: &Shared, input: Input) -> bool {
+    state.borrow().batch.is_some() && !matches!(input, Input::Key(Key::Abort))
+}
+
 fn apply(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
+    if ignored_in_batch(state, input) {
+        return;
+    }
     if !matches!(input, Input::Recenter) {
         state.borrow_mut().recenter = None;
     }
@@ -675,9 +859,127 @@ fn run(state: &Shared, effects: Vec<Effect>, window: &mut Window, cx: &mut App) 
                 view.update(cx, |view, cx| view.set_status(notice(notice_of), cx))
                     .ok();
             }
-            // The key that makes these is not bound yet.
-            Effect::StartBatch { .. } | Effect::StopBatch => {}
+            Effect::StartBatch { from } => {
+                start_batch(state, from.start, window, cx);
+                return;
+            }
+            Effect::StopBatch => {
+                if let Some(batch) = &state.borrow().batch {
+                    batch.cancel.cancel();
+                }
+            }
         }
+    }
+}
+
+/// `!`: replaces every match from `from` on without asking, chunk by chunk, while the view shows
+/// the progress. Only `C-g` acts meanwhile. When it ends the session ends.
+fn start_batch(state: &Shared, from: usize, window: &mut Window, cx: &mut App) {
+    let (editor, edits, request, before) = {
+        let mut state = state.borrow_mut();
+        let Some(editor) = state.editor.upgrade() else {
+            return;
+        };
+        let Some(edits) = state.edits.take() else {
+            return;
+        };
+        // The match asked about is the first one of the batch.
+        state.current = None;
+        state.replacement = None;
+        let counts = state.model.counts();
+        let request = ScanRequest {
+            query: state.query.clone(),
+            scope: state.scope.clone(),
+            from,
+            preserve_case: state.preserve_case,
+            template: state.template.clone(),
+            counter: counts.replaced,
+        };
+        (editor, edits, request, counts.replaced + counts.skipped)
+    };
+    let cancel = Cancel::new();
+    let scan = editor.update(cx, |editor, cx| {
+        editor.clear_background_highlights(HighlightKey::QueryReplace, cx);
+        start_scan(editor, &cancel, request, cx)
+    });
+    state.borrow_mut().batch = Some(Running {
+        cancel: cancel.clone(),
+        scanned: scan.total.clone(),
+        before,
+    });
+    show_prompt(state, cx);
+    refresh_status(state, window, cx);
+
+    let state = state.clone();
+    let editor = editor.downgrade();
+    let mut edits = edits;
+    window
+        .spawn(cx, async move |cx| {
+            let outcome = apply_scan(
+                &editor,
+                &mut edits,
+                scan,
+                &cancel,
+                |replaced, window, cx| {
+                    state.borrow_mut().model.on_batch_progress(replaced);
+                    refresh_status(&state, window, cx);
+                },
+                cx,
+            )
+            .await;
+            let ended = cx.update(|window, cx| {
+                let started = Instant::now();
+                end_batch(&state, edits, outcome, window, cx);
+                record_slice(started.elapsed());
+            });
+            // The window is gone: nothing can show the end, but the session is over.
+            if ended.is_err() {
+                state.borrow_mut().done = true;
+            }
+        })
+        .detach();
+}
+
+/// The `!` batch ended (`outcome` is `None` when its editor is gone): the edits come back to the
+/// session, which ends with the cursor at the end of the last replacement and its edits as one undo
+/// step.
+fn end_batch(
+    state: &Shared,
+    edits: Edits,
+    outcome: Option<BatchEnd>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let effects = {
+        let mut state = state.borrow_mut();
+        state.batch = None;
+        if state.done {
+            // Ended some other way meanwhile: the edits still become one undo step.
+            let editor = state.editor.upgrade();
+            drop(state);
+            if let Some(editor) = editor {
+                editor.update(cx, |editor, cx| edits.finish(editor, cx));
+            }
+            return;
+        }
+        state.edits = Some(edits);
+        if let Some(end) = outcome.as_ref().and_then(|outcome| outcome.end) {
+            state.rest = Some(end);
+        }
+        match &outcome {
+            Some(BatchEnd {
+                read_only: Some(_), ..
+            }) => None,
+            outcome => Some(
+                state
+                    .model
+                    .on_batch_end(outcome.as_ref().is_none_or(|outcome| outcome.interrupted)),
+            ),
+        }
+    };
+    match effects {
+        Some(effects) => run(state, effects, window, cx),
+        None => abort(state, READ_ONLY.to_string(), window, cx),
     }
 }
 
@@ -787,12 +1089,16 @@ fn landed(state: &Shared, found: Option<Found>, window: &mut Window, cx: &mut Ap
     } else if let (true, Some(found)) = (asking, found) {
         land(state, found, window, cx);
     }
-    // Keys pressed while the find ran, one at a time: a key that starts another find leaves the
-    // rest queued for it.
+    run_queued(state, window, cx);
+}
+
+/// Runs the keys pressed while a find ran, one at a time: a key that starts another find leaves
+/// the rest queued for it, and `e` leaves them for when the decision view comes back.
+fn run_queued(state: &Shared, window: &mut Window, cx: &mut App) {
     loop {
         let input = {
             let mut state = state.borrow_mut();
-            if state.done || state.find.is_some() {
+            if state.done || state.editing || state.find.is_some() {
                 return;
             }
             state.queued.pop_front()
@@ -866,6 +1172,7 @@ fn show_prompt(state: &Shared, cx: &mut App) {
             }),
             Phase::Shown => Some(SHOWN_PROMPT.to_string()),
             Phase::Walking { .. } => Some(WALKING_PROMPT.to_string()),
+            Phase::Batch => Some(BATCH_PROMPT.to_string()),
             _ => None,
         };
         (state.view.clone(), prompt)
@@ -989,7 +1296,8 @@ fn edit(state: &Shared, window: &mut Window, cx: &mut App) {
         move |to: String, window: &mut Window, cx: &mut App| {
             if let Ok(template) = template::parse(&to, regexp) {
                 let mut state = state.borrow_mut();
-                state.model.set_template(template);
+                state.model.set_template(template.clone());
+                state.template = template;
                 state.to = to;
             }
             resume(&state, window, cx);
@@ -1042,6 +1350,7 @@ fn resume(state: &Shared, window: &mut Window, cx: &mut App) {
     show_prompt(state, cx);
     refresh_status(state, window, cx);
     refresh_highlights(state, cx);
+    run_queued(state, window, cx);
 }
 
 /// Highlights the matches near the visible text, from the current match (or the last replacement)
@@ -1049,7 +1358,8 @@ fn resume(state: &Shared, window: &mut Window, cx: &mut App) {
 fn refresh_highlights(state: &Shared, cx: &mut App) {
     let (editor, query, scope, from, current, replacement) = {
         let state = state.borrow();
-        if state.done {
+        // A batch shows no matches: they change with every chunk.
+        if state.done || state.batch.is_some() {
             return;
         }
         let Some(editor) = state.editor.upgrade() else {

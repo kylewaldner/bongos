@@ -981,6 +981,10 @@ aho-corasick = { opt-level = 3 }
 regex-automata = { opt-level = 3 }
 fancy-regex = { opt-level = 3 }
 rope = { opt-level = 3 }
+# The query replace perf gate (bongos_query_replace perf_tests, 50,000 edits) needs these optimized.
+text = { opt-level = 3 }
+sum_tree = { opt-level = 3 }
+multi_buffer = { opt-level = 3 }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 activity_indicator = { codegen-units = 1 }
 assets = { codegen-units = 1 }
