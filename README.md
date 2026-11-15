@@ -697,7 +697,8 @@ for an update, never while you edit. It sends no telemetry to these hosts, and a
 your `PATH` is used without a download. Each one comes from:
 
 - GitHub (`api.github.com` for the latest release, `github.com` for the download, which redirects
-  to GitHub's release CDN, `objects.githubusercontent.com` or `release-assets.githubusercontent.com`):
+  to GitHub's release CDN, `objects.githubusercontent.com` or `release-assets.githubusercontent.com`,
+  or for the ESLint source archive, `codeload.github.com`):
   rust-analyzer, ruff, ty, clangd, package-version-server, the ESLint server's source (pinned
   version), CodeLLDB, js-debug and delve-shim-dap (Delve's adapter shim).
 - The npm registry that npm's own configuration names (`registry.npmjs.org` unless you set
@@ -723,9 +724,12 @@ with no request, also offline.
 A running server may still fetch what your files ask for: the YAML server reads its schema
 catalog from `www.schemastore.org` (turn it off with `yaml.schemaStore.enable: false` in the
 server's settings), the JSON and YAML servers fetch the schemas a file names, and the TypeScript
-servers may fetch type packages from the npm registry. When you complete a `source` or `version`
-in a Terraform `module` block, terraform-ls asks its module search service (Algolia) for
-suggestions.
+servers may fetch type packages from the npm registry. terraform-ls itself
+always asks `registry.terraform.io` about every Terraform module with a registry source; no setting
+turns that off. When you complete a `source` or `version` in a Terraform `module` block,
+terraform-ls asks its module search service (Algolia) for suggestions. When jdtls imports a Maven
+or Gradle project it downloads what the build asks for, from Maven Central and the project's other
+repositories, and Buildship from the Gradle distribution host.
 
 ### Kotlin server manifest file
 

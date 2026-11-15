@@ -10,9 +10,11 @@
 //! HashiCorp's version check (and so every `terraform` it runs). The guarantee holds against
 //! settings: `LspAdapter::forced_env` is applied after `lsp.terraform-ls.binary.env` and also
 //! when `lsp.terraform-ls.binary.path` replaces the installed binary. The only host bongos itself
-//! contacts is `releases.hashicorp.com`, for the pinned download. One request is not ours to
-//! stop: terraform-ls asks Algolia for module-source completion when the user completes a
-//! `source` or `version` in a `module` block. That is user-triggered and documented here; the
+//! contacts is `releases.hashicorp.com`, for the pinned download. Two kinds of request are not
+//! ours to stop. terraform-ls always asks `registry.terraform.io` about every module with a registry
+//! source; no setting turns that off and no user action triggers it. It also asks Algolia for
+//! module-source completion when the user completes a `source` or `version` in a `module` block.
+//! That one is user-triggered. Both are documented here; the
 //! adapter does not filter those completion items.
 
 use std::{
