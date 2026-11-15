@@ -1883,6 +1883,21 @@ mod tests {
             .0;
         let servers = |name: &str| languages[name].language_servers.clone().unwrap();
         assert_eq!(servers("Java"), ["jdtls", "kotlin", "..."]);
+        // Java formatting is jdtls's: no Prettier plugin for it.
+        assert_eq!(
+            languages["Java"].formatter,
+            Some(settings_content::FormatterList::Single(
+                settings_content::Formatter::LanguageServer(
+                    settings_content::LanguageServerFormatterSpecifier::Current
+                )
+            ))
+        );
+        assert!(
+            languages["Java"]
+                .prettier
+                .as_ref()
+                .is_none_or(|prettier| prettier.allowed != Some(true) && prettier.plugins.is_none())
+        );
         assert_eq!(servers("Terraform"), ["terraform-ls", "..."]);
         assert_eq!(servers("Terraform Vars"), ["terraform-ls", "..."]);
         for name in ["Terraform", "Terraform Vars"] {

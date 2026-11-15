@@ -4,8 +4,8 @@
 //! Detection takes every input explicitly (setting, project root, `JAVA_HOME`, candidate locations),
 //! so tests run on a temp tree and never see the real machine. Order: the `kotlin.jdk_home` setting;
 //! a JDK that matches the project's Gradle toolchain; `JAVA_HOME`; then the highest version found
-//! under the candidate locations. A toolchain no detected JDK satisfies is a failure; with no
-//! toolchain and no JDK the server's bundled runtime does the import. A project without a Gradle
+//! under the candidate locations. A Gradle toolchain no detected JDK satisfies is a failure (a Maven
+//! level never is); with no toolchain and no JDK the server's bundled runtime does the import. A project without a Gradle
 //! toolchain can declare its Java version in the root `pom.xml` instead. [`server_jdk`] separately
 //! picks the JDK that runs the Java language server.
 
@@ -1680,6 +1680,24 @@ mod tests {
         assert_eq!(found(&detection).reason, "Maven Java version 8 in pom.xml");
         assert_eq!(detection.failure_reason(), None);
         assert!(detection.menu_entry().is_none());
+    }
+
+    #[test]
+    fn test_maven_level_prefers_java_home_over_a_candidate_of_equal_major() {
+        let tree = Tree::new();
+        let mut inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>17</maven.compiler.release>", ""),
+        );
+        // The candidate sorts first, so only the JAVA_HOME rule can make the other one win.
+        jdk(tree.path(), "usr/lib/jvm/a-java-17", "17.0.9");
+        let home = jdk(tree.path(), "elsewhere/java-17", "17.0.1");
+        inputs.java_home = Some(home.clone().into_os_string());
+
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).home, home);
     }
 
     #[test]
