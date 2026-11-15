@@ -11,6 +11,7 @@ mod log;
 mod manager;
 mod manifest;
 mod manifest_cache;
+pub mod pinned;
 mod remote_manifest;
 mod resolve;
 mod status;

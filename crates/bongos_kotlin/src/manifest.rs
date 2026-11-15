@@ -237,8 +237,9 @@ impl Manifest {
             ensure!(
                 [KotlinServerKind::KotlinLsp, KotlinServerKind::Intellij]
                     .into_iter()
-                    .any(|server| server_name(server) == name),
-                "{name} is not a Kotlin server bongos knows"
+                    .any(|server| server_name(server) == name)
+                    || crate::pinned::PinnedServer::by_name(&name).is_some(),
+                "{name} is not a server bongos knows"
             );
             for (platform, platform_pin) in &pin.platform {
                 if let Some(problem) = user_url_problem(&platform_pin.url) {
@@ -271,7 +272,11 @@ impl Manifest {
 
     /// The pin of `server` for `platform` (`current_platform()` in the app).
     pub fn entry(&self, server: KotlinServerKind, platform: &str) -> Result<ManifestEntry> {
-        let name = server_name(server);
+        self.named_entry(server_name(server), platform)
+    }
+
+    /// The pin of the server table `name` for `platform`.
+    pub fn named_entry(&self, name: &str, platform: &str) -> Result<ManifestEntry> {
         let pin = self
             .servers
             .get(name)
