@@ -32,9 +32,6 @@ pub const SET_JDK_HOME_LABEL: &str = "Set kotlin.jdk_home";
 /// The start of the `Failed` text for an unmet toolchain.
 pub const NO_JDK_REASON: &str = "no JDK for Gradle import";
 
-/// The start of the `Failed` text for a Maven Java version no JDK satisfies.
-pub const NO_MAVEN_JDK_REASON: &str = "no JDK for Maven import";
-
 /// Locations that hold one JDK per directory. A `*` matches any run of characters inside one path
 /// component. The macOS entries are patterns only on that platform; elsewhere they match nothing.
 pub fn default_candidate_patterns(home: Option<&Path>) -> Vec<String> {
@@ -140,7 +137,7 @@ impl Toolchain {
 pub enum JdkChoice {
     /// The import runs with this JDK, passed to the server as `JAVA_HOME`.
     Found(Jdk),
-    /// The project declares a toolchain and no detected JDK satisfies it.
+    /// The project declares a Gradle toolchain and no detected JDK satisfies it.
     Unmet(Toolchain),
     /// No toolchain and no JDK: the server's own bundled runtime imports.
     Bundled,
@@ -159,10 +156,6 @@ impl Detection {
     /// The `Failed` status text for an unmet toolchain.
     pub fn failure_reason(&self) -> Option<String> {
         match &self.choice {
-            JdkChoice::Unmet(toolchain) if toolchain.is_maven() => Some(format!(
-                "{NO_MAVEN_JDK_REASON} (Java version {})",
-                toolchain.version
-            )),
             JdkChoice::Unmet(toolchain) => {
                 Some(format!("{NO_JDK_REASON} (toolchain {})", toolchain.version))
             }
@@ -209,7 +202,7 @@ pub fn detect(inputs: &JdkInputs) -> Detection {
 
     let (java_home, candidates) = discover(inputs);
 
-    if let Some(toolchain) = &toolchain {
+    if let Some(toolchain) = toolchain.as_ref().filter(|toolchain| !toolchain.is_maven()) {
         let reason = toolchain.reason();
         let matching = java_home
             .iter()
@@ -223,6 +216,30 @@ pub fn detect(inputs: &JdkInputs) -> Detection {
             },
             notes,
         );
+    }
+
+    // A Maven source or release is a language level, not a pin: an equal major wins (JAVA_HOME
+    // first), else the lowest JDK above it; with none, the choice falls through to the default.
+    if let Some(toolchain) = &toolchain {
+        let reason = toolchain.reason();
+        let jdks: Vec<Jdk> = java_home
+            .iter()
+            .chain(candidates.iter())
+            .map(|path| describe(path.clone(), reason.clone()))
+            .collect();
+        let equal = jdks
+            .iter()
+            .find(|jdk| jdk.major == Some(toolchain.version));
+        let lowest_above = jdks
+            .iter()
+            .filter(|jdk| jdk.major.is_some_and(|major| major > toolchain.version))
+            .fold(None::<&Jdk>, |best, jdk| match best {
+                Some(best) if best.major <= jdk.major => Some(best),
+                _ => Some(jdk),
+            });
+        if let Some(jdk) = equal.or(lowest_above) {
+            return done(JdkChoice::Found(jdk.clone()), notes);
+        }
     }
 
     if let Some(path) = java_home {
@@ -645,7 +662,10 @@ pub fn server_jdk(inputs: &JdkInputs, setting: Option<&Path>, min_major: u32) ->
         if path.is_dir() && is_jdk_dir(&path) {
             let origin = settings_origin(inputs, "server_jdk");
             let jdk = describe(path, format!("java.server_jdk in {origin}"));
-            let choice = if jdk.major.is_some_and(|major| major >= min_major) {
+            // Like `kotlin.jdk_home`, a directory with a `java` binary and no `release` file is
+            // taken as the user's word, with an unknown version.
+            let unversioned = jdk.version.is_none() && jdk.home.join("bin").join("java").is_file();
+            let choice = if unversioned || jdk.major.is_some_and(|major| major >= min_major) {
                 ServerJdkChoice::Found(jdk)
             } else {
                 server_jdk_too_old(min_major, jdk.major, true)
@@ -840,9 +860,18 @@ pub fn import_section(detection: &Detection) -> String {
             "Import JDK: none\nReason: {}\n{declared}Fix: {SET_JDK_HOME_LABEL}\n",
             detection.failure_reason().unwrap_or_default()
         ),
-        JdkChoice::Bundled => format!(
-            "Import JDK: the bundled runtime of the server\nReason: no Gradle toolchain is declared and no JDK was found\n{declared}"
-        ),
+        JdkChoice::Bundled => {
+            let reason = match &detection.toolchain {
+                Some(toolchain) => format!(
+                    "no JDK was found for Maven Java version {}",
+                    toolchain.version
+                ),
+                None => "no Gradle toolchain is declared and no JDK was found".to_string(),
+            };
+            format!(
+                "Import JDK: the bundled runtime of the server\nReason: {reason}\n{declared}"
+            )
+        }
     }
 }
 
@@ -1495,6 +1524,22 @@ mod tests {
     }
 
     #[test]
+    fn test_server_jdk_setting_without_a_release_file_is_accepted_with_a_java_binary() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        jdk(tree.path(), "usr/lib/jvm/java-25", "25.0.1");
+        let bare = tree.path().join("bare");
+        fs::create_dir_all(bare.join("bin")).unwrap();
+        fs::write(bare.join("bin").join("java"), "").unwrap();
+
+        let server = server_jdk(&inputs, Some(&bare), 21);
+        let found = server.jdk().expect("accepted");
+        assert_eq!(found.home, bare);
+        assert_eq!(found.major, None);
+        assert!(server.notes.is_empty(), "{:?}", server.notes);
+    }
+
+    #[test]
     fn test_server_jdk_none_high_enough() {
         let tree = Tree::new();
         let mut inputs = tree.inputs();
@@ -1599,7 +1644,7 @@ mod tests {
     }
 
     #[test]
-    fn test_maven_version_matches_a_jdk_or_is_unmet() {
+    fn test_maven_version_matches_a_jdk() {
         let tree = Tree::new();
         let inputs = tree.inputs();
         write(
@@ -1620,23 +1665,91 @@ mod tests {
             "{section}"
         );
         assert!(!section.contains("Gradle"), "{section}");
+    }
 
+    #[test]
+    fn test_maven_old_source_level_runs_on_a_newer_jdk() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.source>1.8</maven.compiler.source>", ""),
+        );
+        let twenty_one = jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.2");
+
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).home, twenty_one);
+        assert_eq!(found(&detection).major, Some(21));
+        assert_eq!(found(&detection).reason, "Maven Java version 8 in pom.xml");
+        assert_eq!(detection.failure_reason(), None);
+        assert!(detection.menu_entry().is_none());
+    }
+
+    #[test]
+    fn test_maven_level_picks_the_lowest_jdk_above_it() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
         write(
             &inputs.root,
             "pom.xml",
             &pom("<maven.compiler.release>11</maven.compiler.release>", ""),
         );
+        jdk(tree.path(), "usr/lib/jvm/java-25", "25.0.1");
+        let seventeen = jdk(tree.path(), "usr/lib/jvm/java-17", "17.0.9");
+        jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.2");
+
         let detection = detect(&inputs);
-        assert!(
-            matches!(detection.choice, JdkChoice::Unmet(_)),
-            "{detection:?}"
+        assert_eq!(found(&detection).home, seventeen);
+        assert_eq!(found(&detection).reason, "Maven Java version 11 in pom.xml");
+    }
+
+    #[test]
+    fn test_maven_level_above_every_jdk_falls_back_to_the_default() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>21</maven.compiler.release>", ""),
         );
-        assert_eq!(
-            detection.failure_reason().as_deref(),
-            Some("no JDK for Maven import (Java version 11)")
-        );
+        let seventeen = jdk(tree.path(), "usr/lib/jvm/java-17", "17.0.9");
+
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).home, seventeen);
+        assert_eq!(detection.failure_reason(), None);
         let section = import_section(&detection);
-        assert!(section.contains("Fix: Set kotlin.jdk_home"), "{section}");
+        assert!(
+            section.contains("Maven Java version: 21 in pom.xml"),
+            "{section}"
+        );
+        assert!(!section.contains("Import JDK: none"), "{section}");
+
+        // With JAVA_HOME set, it is the fallback.
+        let mut inputs = tree.inputs();
+        let home = jdk(tree.path(), "opt/jdk-11", "11.0.2");
+        inputs.java_home = Some(home.clone().into());
+        assert_eq!(found(&detect(&inputs)).home, home);
+    }
+
+    #[test]
+    fn test_maven_level_with_no_jdk_uses_the_bundled_runtime() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>17</maven.compiler.release>", ""),
+        );
+        let detection = detect(&inputs);
+        assert_eq!(detection.choice, JdkChoice::Bundled);
+        assert_eq!(detection.failure_reason(), None);
+        let section = import_section(&detection);
+        assert!(
+            section.contains("Maven Java version: 17 in pom.xml"),
+            "{section}"
+        );
+        assert!(!section.contains("Gradle"), "{section}");
     }
 
     #[test]
