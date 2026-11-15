@@ -37,10 +37,9 @@ pub use intellij::{
     bundle_eula_hash, eula_accepted, eula_argument, eula_hash, license_check,
 };
 pub use jdk::{
-    Detection, Jdk, JdkChoice, JdkInputs, JdkQuery, MenuEntry, POM_SOURCE,
-    SET_JDK_HOME_LABEL, ServerJdk, ServerJdkChoice, Toolchain, default_candidate_patterns, detect,
-    find_declared_java, find_maven_java, find_toolchain, java_report, server_jdk, server_section,
-    set_jdk_home_entry,
+    Detection, Jdk, JdkChoice, JdkInputs, JdkQuery, MenuEntry, POM_SOURCE, SET_JDK_HOME_LABEL,
+    ServerJdk, ServerJdkChoice, Toolchain, default_candidate_patterns, detect, find_declared_java,
+    find_maven_java, find_toolchain, java_report, server_jdk, server_section, set_jdk_home_entry,
 };
 use language::{LanguageName, LanguageRegistry};
 pub use license::{

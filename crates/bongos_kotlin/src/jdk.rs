@@ -227,9 +227,7 @@ pub fn detect(inputs: &JdkInputs) -> Detection {
             .chain(candidates.iter())
             .map(|path| describe(path.clone(), reason.clone()))
             .collect();
-        let equal = jdks
-            .iter()
-            .find(|jdk| jdk.major == Some(toolchain.version));
+        let equal = jdks.iter().find(|jdk| jdk.major == Some(toolchain.version));
         let lowest_above = jdks
             .iter()
             .filter(|jdk| jdk.major.is_some_and(|major| major > toolchain.version))
@@ -868,9 +866,7 @@ pub fn import_section(detection: &Detection) -> String {
                 ),
                 None => "no Gradle toolchain is declared and no JDK was found".to_string(),
             };
-            format!(
-                "Import JDK: the bundled runtime of the server\nReason: {reason}\n{declared}"
-            )
+            format!("Import JDK: the bundled runtime of the server\nReason: {reason}\n{declared}")
         }
     }
 }
