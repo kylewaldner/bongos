@@ -48,3 +48,20 @@ actions!(
         Help,
     ]
 );
+
+/// The actions of the decision view, by name: a key bound to one of them in the view's context is
+/// the session's, and any other key ends the session and runs again in the editor.
+pub const IN_SESSION: &[&str] = &[
+    "query_replace::Yes",
+    "query_replace::No",
+    "query_replace::All",
+    "query_replace::ThisAndExit",
+    "query_replace::ThisAndWait",
+    "query_replace::Previous",
+    "query_replace::Undo",
+    "query_replace::EditReplacement",
+    "query_replace::Exit",
+    "query_replace::Abort",
+    "query_replace::Recenter",
+    "query_replace::Help",
+];

@@ -163,12 +163,12 @@ async fn question_mark_shows_the_help_until_the_next_key(cx: &mut TestAppContext
     assert!(scene.help_lines().is_empty());
     assert_eq!(scene.selections(), vec![7..7]);
     assert_eq!(scene.text(), "foo foo foo\n");
-    // A key that nothing is bound to takes it away too, and changes nothing.
+    // A key that is not the session's takes it away too, as it ends the session.
     scene.keys("?");
+    assert_eq!(scene.help_lines(), help());
     scene.keys("x");
-    assert!(scene.help_lines().is_empty());
-    assert_eq!(scene.selections(), vec![7..7]);
-    assert!(scene.view_open());
+    assert!(!scene.view_open());
+    assert_eq!(scene.text(), "foo foox foo\n");
 }
 
 #[gpui::test]

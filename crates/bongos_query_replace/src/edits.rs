@@ -13,9 +13,9 @@ use crate::engine::{self, Hit};
 use bongos_isearch::engine::Cancel;
 use bongos_query_replace_model::session::Found;
 use editor::Editor;
-use gpui::{Context, Window};
+use gpui::{App, Context, Entity, Window};
 use language::{Selection, TransactionId};
-use multi_buffer::{Anchor, MultiBufferOffset, MultiBufferSnapshot, ToOffset as _};
+use multi_buffer::{Anchor, MultiBuffer, MultiBufferOffset, MultiBufferSnapshot, ToOffset as _};
 use project::search::SearchQuery;
 use std::fmt;
 use std::ops::Range;
@@ -91,6 +91,9 @@ pub fn match_anchors(snapshot: &MultiBufferSnapshot, range: &Range<usize>) -> Ra
 
 /// The buffer side of one session, from its start to [`Edits::finish`].
 pub struct Edits {
+    /// The editor's buffer, kept so the session's edits can still be merged when the editor is
+    /// closed before the session ends.
+    buffer: Entity<MultiBuffer>,
     start_selections: Arc<[Selection<Anchor>]>,
     // The session's live transactions, oldest first.
     transactions: Vec<TransactionId>,
@@ -112,6 +115,7 @@ impl Edits {
     ) -> Self {
         editor.finalize_last_transaction(cx);
         Self {
+            buffer: editor.buffer().clone(),
             start_selections: editor.selections.disjoint_anchors_arc(),
             transactions: Vec::new(),
             now,
@@ -275,6 +279,19 @@ impl Edits {
         editor.modify_transaction_selection_history(destination, |(start, end)| {
             *start = start_selections;
             *end = Some(end_selections);
+        });
+        Some(destination)
+    }
+
+    /// Ends the session of an editor that is gone: the live transactions are merged into the
+    /// oldest of them in the buffer, so the session is still one undo step there. The selections
+    /// went with the editor.
+    pub fn finish_detached(self, cx: &mut App) -> Option<TransactionId> {
+        let (&destination, newer) = self.transactions.split_first()?;
+        self.buffer.update(cx, |buffer, cx| {
+            for &transaction in newer.iter().rev() {
+                buffer.merge_transactions(transaction, destination, cx);
+            }
         });
         Some(destination)
     }

@@ -71,8 +71,8 @@ impl QueryReplaceView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // A key no row binds does nothing here and does not reach the editor behind. Keys with
-        // modifiers go on.
+        // The session's interceptor ends the session on a key no row binds, before it gets here;
+        // a key that does get here never reaches the editor behind.
         let modifiers = event.keystroke.modifiers;
         if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
             return;
