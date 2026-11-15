@@ -207,6 +207,7 @@ members = [
     "crates/bongos_builder_model",
     "crates/bongos_chat",
     "crates/bongos_chat_model",
+    "crates/bongos_checks_model",
     "crates/bongos_kotlin",
     "crates/bongos_languages",
     "crates/bongos_linear",
@@ -471,6 +472,7 @@ bongos_builder = { path = "crates/bongos_builder" }
 bongos_builder_model = { path = "crates/bongos_builder_model" }
 bongos_chat = { path = "crates/bongos_chat" }
 bongos_chat_model = { path = "crates/bongos_chat_model" }
+bongos_checks_model = { path = "crates/bongos_checks_model" }
 bongos_kotlin = { path = "crates/bongos_kotlin" }
 bongos_linear = { path = "crates/bongos_linear" }
 bongos_linear_model = { path = "crates/bongos_linear_model" }
