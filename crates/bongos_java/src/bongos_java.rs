@@ -37,8 +37,11 @@ use settings::{RegisterSetting, Settings, SettingsContent, SettingsLocation};
 use sha2::{Digest as _, Sha256};
 use util::rel_path::RelPath;
 
+mod show_jdk;
 #[cfg(test)]
 mod tests;
+
+pub use show_jdk::{SHOW_JDK_TITLE, ShowJdk, ShowJdkRequest};
 
 /// The adapter's language server name.
 pub const ADAPTER_NAME: &str = "jdtls";
@@ -127,6 +130,7 @@ impl JdtlsAdapter {
     fn jdk_inputs(&self, root: &Path, jdk_home: Option<PathBuf>) -> JdkInputs {
         JdkInputs {
             setting: jdk_home,
+            setting_name: "java.jdk_home",
             project_settings: Some(root.join(".bongos").join("settings.json")),
             root: root.to_path_buf(),
             java_home: self.env.java_home.clone(),
@@ -195,9 +199,7 @@ impl JdtlsAdapter {
         let install = if pinned::check_installed(JDTLS, &entry, &self.languages_dir).is_some() {
             JDTLS.version_dir(&self.languages_dir, &entry.version)
         } else {
-            self.download(delegate, &entry, cx)
-                .await
-                .map_err(|message| fail(message))?
+            self.download(delegate, &entry, cx).await.map_err(fail)?
         };
 
         let workspace = workspace_dir(&self.languages_dir, &root);

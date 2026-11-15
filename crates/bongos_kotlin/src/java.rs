@@ -143,6 +143,17 @@ mod policy_tests {
     use super::*;
 
     #[test]
+    fn test_default_language_ids_match_the_kotlin_adapter_ids() {
+        // The Kotlin adapter does not override `language_ids`: the default id of a language is its
+        // lowercase name, which is what the server expects for both languages.
+        assert_eq!(
+            LanguageName::new_static(JAVA_LANGUAGE).lsp_id(),
+            JAVA_LANGUAGE_ID
+        );
+        assert_eq!(LanguageName::new_static(KOTLIN_LANGUAGE).lsp_id(), "kotlin");
+    }
+
+    #[test]
     fn test_java_never_allows_both_servers() {
         for server in [JavaServer::Kotlin, JavaServer::Jdtls] {
             for switching in [0, 1, 2] {
