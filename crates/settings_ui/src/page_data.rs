@@ -442,7 +442,7 @@ fn work_page(token_set: bool) -> SettingsPage {
 }
 
 fn project_repository_page() -> SettingsPage {
-    fn settings_section() -> [SettingsPageItem; 22] {
+    fn settings_section() -> [SettingsPageItem; 27] {
         [
             SettingsPageItem::SectionHeader("Project repository"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -792,7 +792,7 @@ fn project_repository_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Keep Replaced Days",
-                description: "Days a replaced working copy is kept.",
+                description: "Days a restore keeps the state it replaced, so a wrong restore can be undone.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("project_repository.replaced_keep_days"),
@@ -907,7 +907,7 @@ fn project_repository_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Default Snapshot Interval",
-                description: "Minutes between snapshots of a project that sets no interval itself. A project changes its own by landing a change to its project file.",
+                description: "Minutes between snapshots of a project that sets no interval itself. A project changes its own by landing a change to its project file. If this drive fails, you lose up to this much run state and everything not pushed.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("project_repository.default_snapshot_interval_minutes"),
@@ -925,6 +925,140 @@ fn project_repository_page() -> SettingsPage {
                             .default_snapshot_interval_minutes = value;
                     },
                 }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Repository Path",
+                description: "Where a project's repository goes. Default: {folder}/repository. Resolved once, when a project is created; {folder} is the project folder.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.layout.repository"),
+                    pick: |settings_content| {
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .layout
+                            .as_ref()?
+                            .repository
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .layout
+                            .get_or_insert_default()
+                            .repository = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Working Copies Path",
+                description: "Where a project's working copies go. Default: {folder}/working-copies. Resolved once, when a project is created; {folder} is the project folder.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.layout.working_copies"),
+                    pick: |settings_content| {
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .layout
+                            .as_ref()?
+                            .working_copies
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .layout
+                            .get_or_insert_default()
+                            .working_copies = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "State Path",
+                description: "Where a project's run state goes. Default: {folder}/state. Resolved once, when a project is created; {folder} is the project folder.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.layout.state"),
+                    pick: |settings_content| {
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .layout
+                            .as_ref()?
+                            .state
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .layout
+                            .get_or_insert_default()
+                            .state = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Files Path",
+                description: "Where a project's files go. Default: {folder}/files. Resolved once, when a project is created; {folder} is the project folder.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("project_repository.layout.files"),
+                    pick: |settings_content| {
+                        settings_content
+                            .project_repository
+                            .as_ref()?
+                            .layout
+                            .as_ref()?
+                            .files
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .project_repository
+                            .get_or_insert_default()
+                            .layout
+                            .get_or_insert_default()
+                            .files = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Secret Patterns",
+                description: "Regular expressions a landing refuses to let through, and a snapshot withholds. Edit in settings.json.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("project_repository.secret_patterns"),
+                        pick: |settings_content| {
+                            settings_content
+                                .project_repository
+                                .as_ref()?
+                                .secret_patterns
+                                .as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content
+                                .project_repository
+                                .get_or_insert_default()
+                                .secret_patterns = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
                 metadata: None,
                 files: USER,
             }),
