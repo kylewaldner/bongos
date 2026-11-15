@@ -4,12 +4,16 @@
 //! declarations in a project's definitions.
 
 mod actions;
+mod changed_files;
 mod definitions;
 mod evidence_store;
 mod exporter;
 mod settings;
+mod tree_key;
+mod work_tree;
 
 pub use actions::{ChecksToast, action_types, init_palette, register, task};
+pub use changed_files::{ChangedFiles, ChangedFilesError, ChangedSet, changed_files};
 pub use definitions::{CHECKS_FOLDER, CHECKS_VALID, ChecksValid, validate_folder};
 pub use evidence_store::{
     DONE_NAMESPACE, DoneRecord, EVIDENCE_NAMESPACE, LANDING_PREFIX, LAST_NAMESPACE, LIVE_NAMESPACE,
@@ -19,6 +23,7 @@ pub use evidence_store::{
 };
 pub use exporter::{ChecksExporter, EXPORT_NAMESPACE};
 pub use settings::TaskChecksSettings;
+pub use tree_key::{TreeError, TreeKey, combine_trees, key_inputs_digest, tree_key};
 
 /// Registers the settings, the `checks` state exporter, the `checks` definition folder and the
 /// `checks-valid` landing check.
@@ -32,6 +37,8 @@ pub fn init(cx: &mut gpui::App) {
 #[cfg(test)]
 mod actions_tests;
 #[cfg(test)]
+mod changed_files_tests;
+#[cfg(test)]
 mod definitions_tests;
 #[cfg(test)]
 mod evidence_store_tests;
@@ -39,3 +46,5 @@ mod evidence_store_tests;
 mod exporter_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod tree_key_tests;

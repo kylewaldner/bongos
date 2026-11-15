@@ -169,3 +169,80 @@ pub(crate) fn record(task_id: &str, tree_key: &str, check: &str, id: &str) -> Ev
         cut: 0,
     }
 }
+
+/// Runs the system `git` in `directory` with no global or system configuration and a pinned
+/// author, committer and date, so commits never depend on the machine or the clock. Returns its
+/// trimmed standard output and panics when git fails.
+pub(crate) fn git_in(directory: &std::path::Path, args: &[&str]) -> String {
+    let mut command = util::command::new_command("git");
+    command
+        .current_dir(directory)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test Author")
+        .env("GIT_AUTHOR_EMAIL", "author@example.com")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T10:00:00Z")
+        .env("GIT_COMMITTER_NAME", "Test Committer")
+        .env("GIT_COMMITTER_EMAIL", "committer@example.com")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T10:00:00Z");
+    let output = block_on(command.output()).unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// A new repository on branch `main` in `directory`.
+pub(crate) fn init_git_repo(directory: &std::path::Path) {
+    git_in(directory, &["init", "-q", "-b", "main"]);
+}
+
+/// Writes `contents` to `name` inside `directory`, creating parent folders.
+pub(crate) fn write_file(directory: &std::path::Path, name: &str, contents: &str) {
+    let path = directory.join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+/// Stages everything and commits it as `message`.
+pub(crate) fn commit_everything(directory: &std::path::Path, message: &str) {
+    git_in(directory, &["add", "-A"]);
+    git_in(directory, &["commit", "-q", "-m", message]);
+}
+
+/// Set in the child process of [`rerun_with_hostile_git_env`].
+pub(crate) const HOSTILE_CHILD: &str = "BONGOS_TEST_HOSTILE_GIT_ENV_CHILD";
+
+/// Runs the test `module::name` again in a child process whose environment points git at
+/// `decoy` (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`) and carries `extra`, and panics unless
+/// the child passes. The process-wide environment of the running test is never changed, so
+/// other tests running in threads are not affected. The test calls this when `HOSTILE_CHILD` is
+/// unset and does its checks, with the values `extra` carries, when it is set.
+pub(crate) fn rerun_with_hostile_git_env(
+    module: &str,
+    name: &str,
+    decoy: &std::path::Path,
+    extra: &[(&str, String)],
+) {
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let output = block_on(
+        util::command::new_command(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::{name}"), "--nocapture"])
+            .env(HOSTILE_CHILD, "1")
+            .env("GIT_DIR", decoy.join(".git"))
+            .env("GIT_WORK_TREE", decoy)
+            .env("GIT_INDEX_FILE", decoy.join(".git/index"))
+            .envs(extra.iter().map(|(key, value)| (*key, value.as_str())))
+            .output(),
+    )
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "the child run failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
