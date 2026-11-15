@@ -7,8 +7,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{
-    Action as _, Focusable as _, KeyBinding, KeyContext, Keymap, Keystroke, Subscription, TestAppContext,
-    actions,
+    Action as _, Focusable as _, KeyBinding, KeyContext, Keymap, Keystroke, Subscription,
+    TestAppContext, actions,
 };
 use settings::KeymapFile;
 
