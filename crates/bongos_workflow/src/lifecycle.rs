@@ -1,4 +1,4 @@
-//! The lifecycle of runs (feature 20, D13): start with its refusals in order, pause, halt,
+//! The lifecycle of runs (feature 20): start with its refusals in order, pause, halt,
 //! resume, retry step (fresh or not), restart, cancel, approve and revise, and the resume command
 //! of a node's session.
 //!
@@ -230,7 +230,7 @@ impl RunStatus {
         }
     }
 
-    /// Whether the run holds its task: every status but succeeded and cancelled (D15). A failed
+    /// Whether the run holds its task: every status but succeeded and cancelled. A failed
     /// run stays active until a retry or a cancel closes it out.
     pub fn is_active(self) -> bool {
         !matches!(self, Self::Succeeded | Self::Cancelled)

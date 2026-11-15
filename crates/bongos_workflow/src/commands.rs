@@ -108,7 +108,7 @@ pub(crate) fn register(workspace: &mut Workspace) {
                 return;
             };
             // The task at point says which project's workflows come first; the first
-            // definition by name until the picker of step 17.
+            // definition by name until the run picker exists.
             let task = task_at_point(workspace, window, cx);
             edit_definition(&engine, task.as_ref(), workspace, window, cx);
         });
@@ -190,7 +190,7 @@ fn register_run_commands(workspace: &mut Workspace) {
         report(workspace, resumed.map(|()| "Workflow run resumed"), cx);
     });
     on_run::<workflow::RetryStep>(workspace, |engine, run, workspace, _, cx| {
-        // An explicit node comes with the picker of step 17; several failed steps are refused.
+        // An explicit node comes with the run picker; several failed steps are refused.
         let retried = engine.retry(&run, None, false, cx);
         report(workspace, retried.map(|()| "Retrying the failed step"), cx);
     });
@@ -311,7 +311,7 @@ fn report(workspace: &mut Workspace, result: Result<&str, Refusal>, cx: &mut Con
     show_toast(workspace, message, cx);
 }
 
-/// Opens `path` as a workspace of this window and activates it (03 D21's way of focusing).
+/// Opens `path` as a workspace of this window and activates it.
 pub(crate) fn open_worktree(path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
         return;

@@ -1,4 +1,4 @@
-//! The picker and review behind `workflow: run` (feature 20, step 17). The logic is plain data so
+//! The picker and review behind `workflow: run` (feature 20). The logic is plain data so
 //! it can be tested without a window: the candidate definitions with their layers, the one the
 //! todo names preselected, the review of a pick (the [`Summary`], the rows of the review list,
 //! one input overridden at a time) and what Enter does: start with the overrides, or refuse while

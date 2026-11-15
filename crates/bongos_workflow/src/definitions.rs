@@ -1,4 +1,4 @@
-//! Workflow definitions on disk (D2): where the three layers live, materializing the shipped set,
+//! Workflow definitions on disk: where the three layers live, materializing the shipped set,
 //! checking definitions and creating a new one from the built-in minimal template.
 //!
 //! Everything here is synchronous and takes its directories as parameters, so tests run over a

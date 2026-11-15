@@ -3,7 +3,7 @@
 //! `workflows.enabled` is already true, and a command creates it on first use. While
 //! `workflows.enabled` is false nothing creates it, so nothing is read, written or materialized.
 //!
-//! The run commands (D13) are methods here that features 27, 19 and 31 can call too. Each reads
+//! The run commands are methods here that features 27, 19 and 31 can call too. Each reads
 //! what the app knows first (the work tree, the live-modes registry, the agent health), then locks
 //! the [`Lifecycle`], then hands the status changes on: the live-modes registry is told and every
 //! observer gets a [`WorkflowEvent::Changed`].
@@ -329,7 +329,7 @@ impl WorkflowEngine {
     }
 
     /// The `workflow.toml` of the definition `name`, or of the first by name with no name (until
-    /// the picker of step 17).
+    /// the run picker exists).
     pub fn definition_path(&self, name: Option<&str>) -> Result<PathBuf, DefinitionError> {
         definitions::definition_path(&self.dirs, name)
     }
@@ -480,7 +480,7 @@ impl WorkflowEngine {
         .detach();
     }
 
-    /// Records an outcome feature 21 reports for `run` from `key` (D16): the same records as an
+    /// Records an outcome feature 21 reports for `run` from `key`: the same records as an
     /// outcome field, delivered now. Resolves to what it left on the task.
     pub fn report_outcome(
         &self,
@@ -701,7 +701,7 @@ impl WorkflowEngine {
 
 impl WorkflowEngine {
     /// Records the state of `run` in the project's state (the `runs.toml` of its snapshots), and
-    /// takes a snapshot when the run ended (D14: a job end).
+    /// takes a snapshot when the run ended (a job end).
     fn export_run(&self, run: &str, state: RunStatus, cx: &mut App) {
         let Some(repo) = self
             .projects
@@ -1067,7 +1067,7 @@ impl WorkflowEngine {
         None
     }
 
-    /// Delivers one outcome (D16).
+    /// Delivers one outcome.
     async fn deliver(
         &self,
         context: &SettleContext,

@@ -1,4 +1,4 @@
-//! What workflow runs tell a project repository (D14, D17): the live source that makes a task
+//! What workflow runs tell a project repository: the live source that makes a task
 //! with an active run started for the landing checks, the activity source a restore waits on, and
 //! the rows of the `runs` namespace of the state store that a snapshot writes as `runs.toml`.
 
