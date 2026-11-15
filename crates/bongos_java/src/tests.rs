@@ -9,7 +9,7 @@ use std::{
 };
 
 use collections::HashMap;
-use gpui::TestAppContext;
+use gpui::{BorrowAppContext as _, TestAppContext};
 use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response};
 use language::LanguageServerName;
 use settings::{SettingsStore, WorktreeId};
@@ -506,16 +506,16 @@ async fn test_java_no_jdk_at_the_minimum_is_a_failure_with_a_notice(cx: &mut Tes
             error: "jdtls needs JDK 25 or newer (found 17)".into()
         })
     );
-    let notices = notices(cx);
-    assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].language, "Java");
-    assert_eq!(notices[0].worktree_id, worktree());
+    let posted = notices(cx);
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].language, "Java");
+    assert_eq!(posted[0].worktree_id, worktree());
     assert!(
-        notices[0]
+        posted[0]
             .text
             .starts_with("jdtls needs JDK 25 or newer (found 17)"),
         "{}",
-        notices[0].text
+        posted[0].text
     );
 
     // Installing a JDK 25 clears the notice at the next start.
