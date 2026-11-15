@@ -1054,7 +1054,11 @@ fn end_batch(
         let mut state = state.borrow_mut();
         // `C-g` stopped the batch: the keys typed during it are dropped, as a quit drops typed-ahead
         // input in Emacs. Closing the view stops it too, but its held keys still run.
-        if state.batch.take().is_some_and(|batch| batch.quit.is_canceled()) {
+        if state
+            .batch
+            .take()
+            .is_some_and(|batch| batch.quit.is_canceled())
+        {
             state.held = None;
         }
         if state.done {
