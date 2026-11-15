@@ -8,6 +8,10 @@
 //! While a batch runs, its editor has the [`BATCH_KEY_CONTEXT`] key context (through an editor
 //! addon), where `C-g` is [`Abort`]: the batch stops before its next chunk and the replacements
 //! already made stay.
+//!
+//! A key that is not the decision view's ends the interactive replace (see `intercept`): the
+//! session ends as an exit, and the key runs again in the origin editor once its edits are one
+//! undo step and focus is back there.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -33,8 +37,8 @@ use editor::{Addon, Editor, EditorEvent, HighlightKey, SelectionEffects, scroll:
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{
-    Action, App, AppContext as _, AsyncWindowContext, Context, Entity, EntityId, Global,
-    KeyContext, Subscription, Task, WeakEntity, Window,
+    Action, App, AppContext as _, AsyncWindowContext, Context, Entity, EntityId, Focusable as _,
+    Global, KeyContext, Keystroke, Subscription, Task, WeakEntity, Window,
 };
 use multi_buffer::{Anchor, MultiBufferOffset, ToOffset as _};
 use project::search::SearchQuery;
@@ -176,8 +180,11 @@ pub(crate) fn run_batch(
             )
             .await;
             let Some(outcome) = outcome else {
+                // The editor is gone: its edits are still one undo step in the buffer.
+                cx.update(|_, cx| edits.finish_detached(cx)).ok();
                 return;
             };
+            let mut edits = Some(edits);
             let finished = editor.update_in(cx, |editor, window, cx| {
                 let started = Instant::now();
                 // The cursor goes to the end of the last replacement, which also ends the region.
@@ -189,11 +196,16 @@ pub(crate) fn run_batch(
                         |s| s.select_anchor_ranges([end..end]),
                     );
                 }
-                edits.finish(editor, cx);
+                if let Some(edits) = edits.take() {
+                    edits.finish(editor, cx);
+                }
                 cx.notify();
                 record_slice(started.elapsed());
             });
             if finished.is_err() {
+                if let Some(edits) = edits {
+                    cx.update(|_, cx| edits.finish_detached(cx)).ok();
+                }
                 return;
             }
             let message = match outcome.read_only {
@@ -428,10 +440,13 @@ enum Input {
     Edit,
     /// `C-l`: recenter.
     Recenter,
+    /// A key that is not the session's: the session ends as `Exit` and the held keys run again
+    /// in the origin editor.
+    Implicit,
 }
 
 /// The open interactive replace of a workspace.
-struct Interactive {
+pub(crate) struct Interactive {
     editor: WeakEntity<Editor>,
     workspace: WeakEntity<Workspace>,
     view: WeakEntity<QueryReplaceView>,
@@ -471,6 +486,9 @@ struct Interactive {
     count: Cancel,
     /// The `!` batch running, which holds the edits meanwhile.
     batch: Option<Running>,
+    /// The keys that end the session, held to run in the origin editor after it.
+    held: Option<Vec<Keystroke>>,
+    _intercept: Option<Subscription>,
     done: bool,
 }
 
@@ -581,6 +599,8 @@ pub(crate) fn open(
         total: None,
         count: Cancel::new(),
         batch: None,
+        held: None,
+        _intercept: None,
         done: false,
     }));
     if !show_view(&state, window, cx) {
@@ -606,6 +626,8 @@ pub(crate) fn open(
         }
     });
     state.borrow_mut()._editor_events = Some(events);
+    let intercept = crate::intercept::install(Rc::downgrade(&state), window.window_handle(), cx);
+    state.borrow_mut()._intercept = Some(intercept);
     if region {
         let scope = state.borrow().scope.clone();
         editor.update(cx, |editor, cx| {
@@ -778,6 +800,55 @@ fn ignored_in_batch(state: &Shared, input: Input) -> bool {
     state.borrow().batch.is_some() && !matches!(input, Input::Key(Key::Abort))
 }
 
+/// Whether focus is in the decision view of the session.
+pub(crate) fn view_focused(state: &Shared, window: &Window, cx: &App) -> bool {
+    let state = state.borrow();
+    !state.done
+        && !state.editing
+        && state
+            .view
+            .upgrade()
+            .is_some_and(|view| view.focus_handle(cx).contains_focused(window, cx))
+}
+
+/// Whether a `!` batch is running in the session.
+pub(crate) fn in_batch(state: &Shared) -> bool {
+    state.borrow().batch.is_some()
+}
+
+/// Whether the session is ending on a key that is not its own, or holds the keys typed during a
+/// batch: every later key is held to run after it.
+pub(crate) fn holds_keys(state: &Shared) -> bool {
+    state.borrow().held.is_some()
+}
+
+/// A key that is not the session's (see `intercept`): the session ends as `Exit` and `keys` run
+/// again in the origin editor. The exit waits for a find that is running and the keys pressed
+/// before it; a running batch holds the keys until it is over, and then the session ends as the
+/// batch ends it.
+pub(crate) fn exit_implicitly(
+    state: &Shared,
+    keys: Vec<Keystroke>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    {
+        let mut state = state.borrow_mut();
+        if state.done {
+            return;
+        }
+        if let Some(held) = &mut state.held {
+            held.extend(keys);
+            return;
+        }
+        state.held = Some(keys);
+        if state.batch.is_some() {
+            return;
+        }
+    }
+    press(state, Input::Implicit, window, cx);
+}
+
 fn apply(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
     if ignored_in_batch(state, input) {
         return;
@@ -792,6 +863,21 @@ fn apply(state: &Shared, input: Input, window: &mut Window, cx: &mut App) {
         }
         Input::Edit => edit(state, window, cx),
         Input::Recenter => recenter(state, window, cx),
+        Input::Implicit => {
+            let counts = {
+                let mut state = state.borrow_mut();
+                // Out of `^` shown on a replacement, the cursor stays on it.
+                if matches!(state.model.phase(), Phase::Walking { .. }) {
+                    state.rest = None;
+                }
+                state.model.counts()
+            };
+            let end = End {
+                reason: Reason::Exit,
+                counts,
+            };
+            finish(state, end, true, window, cx);
+        }
         Input::Key(key) => {
             let (effects, returned) = {
                 let mut state = state.borrow_mut();
@@ -957,8 +1043,13 @@ fn end_batch(
             // Ended some other way meanwhile: the edits still become one undo step.
             let editor = state.editor.upgrade();
             drop(state);
-            if let Some(editor) = editor {
-                editor.update(cx, |editor, cx| edits.finish(editor, cx));
+            match editor {
+                Some(editor) => {
+                    editor.update(cx, |editor, cx| edits.finish(editor, cx));
+                }
+                None => {
+                    edits.finish_detached(cx);
+                }
             }
             return;
         }
@@ -1402,11 +1493,12 @@ fn finish_with(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (editor, workspace, view, edits, current, rest, mut folds) = {
+    let (editor, workspace, view, edits, current, rest, mut folds, held) = {
         let mut state = state.borrow_mut();
         if std::mem::replace(&mut state.done, true) {
             return;
         }
+        state._intercept = None;
         if let Some(find) = state.find.take() {
             find.cancel();
         }
@@ -1419,11 +1511,20 @@ fn finish_with(
             state.current.take(),
             state.rest,
             std::mem::take(&mut state.folds),
+            state.held.take(),
         )
     };
     state.borrow_mut()._editor_events = None;
+    let origin = editor.as_ref().map(Entity::downgrade);
     if let Some(workspace) = workspace.upgrade() {
         forget(state, workspace.entity_id(), cx);
+    }
+    let mut edits = edits;
+    if editor.is_none()
+        && let Some(edits) = edits.take()
+    {
+        // The editor is gone: its edits are still one undo step in the buffer.
+        edits.finish_detached(cx);
     }
     if let Some(editor) = editor {
         // On a match, the cursor is at its end already (`q`, RET, Escape, C-g); otherwise it goes
@@ -1467,5 +1568,47 @@ fn finish_with(
                 .ok();
         }
         bongos_minibuffer::message(window, cx, message);
+        if let Some(keys) = held {
+            replay(keys, origin, window, cx);
+        }
     });
+}
+
+/// Runs `keys` again where focus is, in the origin editor when it is still open.
+fn replay(
+    keys: Vec<Keystroke>,
+    origin: Option<WeakEntity<Editor>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let origin = origin.and_then(|origin| origin.upgrade());
+    if let Some(editor) = &origin {
+        window.focus(&editor.focus_handle(cx), cx);
+    }
+    for key in keys {
+        if window.dispatch_keystroke(key.clone(), cx) {
+            continue;
+        }
+        // The editor has not drawn since focus came back, so the window has no text input for it
+        // yet: a printable key goes to it as typed text.
+        let Some(text) = typed_text(&key) else {
+            continue;
+        };
+        if let Some(editor) = &origin
+            && editor.focus_handle(cx).is_focused(window)
+        {
+            editor.update(cx, |editor, cx| editor.handle_input(&text, window, cx));
+        }
+    }
+}
+
+/// The text a key types: a printable character with no command modifier (Shift is fine).
+fn typed_text(key: &Keystroke) -> Option<String> {
+    let modifiers = &key.modifiers;
+    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+        return None;
+    }
+    key.key_char
+        .clone()
+        .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
 }

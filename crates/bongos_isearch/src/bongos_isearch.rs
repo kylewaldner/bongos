@@ -11,7 +11,7 @@ pub mod actions;
 mod commands;
 pub mod display;
 pub mod engine;
-mod intercept;
+pub mod intercept;
 mod occur;
 pub mod seams;
 pub mod session;

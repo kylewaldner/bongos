@@ -235,3 +235,36 @@ async fn ctrl_h_in_the_decision_view_beats_the_pending_help_prefix(cx: &mut Test
         assert!(!pending, "{}", platform.emacs);
     }
 }
+
+/// The decision actions the session's interceptor lets through are exactly the actions the
+/// decision view's rows bind, on both platforms.
+#[gpui::test]
+async fn the_in_session_actions_are_the_decision_view_rows(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    let contexts: Vec<KeyContext> = VIEW
+        .iter()
+        .map(|context| KeyContext::parse(context).unwrap())
+        .collect();
+    for platform in [LINUX, MACOS] {
+        let overrides = cx
+            .update(|cx| {
+                KeymapFile::load_asset(platform.overrides, Some(KeybindSource::Default), cx)
+            })
+            .unwrap();
+        let mut bound: Vec<&str> = overrides
+            .iter()
+            .filter(|binding| binding.action().name().starts_with("query_replace::"))
+            .filter(|binding| {
+                binding
+                    .predicate()
+                    .is_some_and(|predicate| predicate.depth_of(&contexts).is_some())
+            })
+            .map(|binding| binding.action().name())
+            .collect();
+        bound.sort_unstable();
+        bound.dedup();
+        let mut in_session = bongos_query_replace::actions::IN_SESSION.to_vec();
+        in_session.sort_unstable();
+        assert_eq!(bound, in_session, "{}", platform.overrides);
+    }
+}

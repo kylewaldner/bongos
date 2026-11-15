@@ -2,7 +2,8 @@
 //! region, the rest of the buffer, or the excerpt at point) on a multibuffer snapshot, with their
 //! capture groups, one at a time for the questions or in chunks for a `!` batch, which replaces on
 //! the main thread one chunk at a time and keeps the window drawing between chunks. The edits make
-//! every buffer change of a session and turn them into one undo step. The starters ask for the
+//! every buffer change of a session and turn them into one undo step. A key that is not the
+//! decision view's ends the session and runs in the editor. The starters ask for the
 //! strings and begin a replace; a batch replaces without asking. The session state machine,
 //! the replacement templates and the case transfer live in `bongos_query_replace_model`.
 
@@ -10,6 +11,7 @@ pub mod actions;
 pub mod display;
 pub mod edits;
 pub mod engine;
+mod intercept;
 pub mod prompts;
 pub mod session;
 pub mod starters;
@@ -27,6 +29,8 @@ mod edits_tests;
 mod engine_tests;
 #[cfg(test)]
 mod history_tests;
+#[cfg(test)]
+mod intercept_tests;
 #[cfg(test)]
 mod perf_tests;
 #[cfg(test)]
