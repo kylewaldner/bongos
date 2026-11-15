@@ -35,9 +35,7 @@ struct Net {
 }
 
 impl Net {
-    fn new(
-        respond: impl Fn() -> Result<Response<AsyncBody>> + Send + Sync + 'static,
-    ) -> Self {
+    fn new(respond: impl Fn() -> Result<Response<AsyncBody>> + Send + Sync + 'static) -> Self {
         let requests = Arc::new(AtomicUsize::new(0));
         let hosts = Arc::new(Mutex::new(Vec::new()));
         let client = FakeHttpClient::create({
@@ -216,7 +214,11 @@ launcher = "bin/jdtls"
 
 fn write_jdk(path: &Path, version: &str) -> PathBuf {
     fs::create_dir_all(path.join("bin")).unwrap();
-    fs::write(path.join("release"), format!("JAVA_VERSION=\"{version}\"\n")).unwrap();
+    fs::write(
+        path.join("release"),
+        format!("JAVA_VERSION=\"{version}\"\n"),
+    )
+    .unwrap();
     fs::write(path.join("bin/java"), "#!/bin/sh\n").unwrap();
     path.to_path_buf()
 }
@@ -285,9 +287,7 @@ fn options(
 ) -> gpui::Task<Result<Option<Value>>> {
     let adapter = fixture.adapter.clone();
     let delegate: Arc<dyn LspAdapterDelegate> = delegate.clone();
-    cx.update(|cx| {
-        cx.spawn(async move |cx| adapter.initialization_options(&delegate, cx).await)
-    })
+    cx.update(|cx| cx.spawn(async move |cx| adapter.initialization_options(&delegate, cx).await))
 }
 
 fn notices(cx: &mut TestAppContext) -> Vec<bongos_language_status::Notice> {
@@ -333,7 +333,9 @@ async fn test_java_a_first_start_installs_and_a_second_makes_no_request(cx: &mut
 }
 
 #[gpui::test]
-async fn test_java_the_command_uses_the_server_jdk_and_the_pinned_arguments(cx: &mut TestAppContext) {
+async fn test_java_the_command_uses_the_server_jdk_and_the_pinned_arguments(
+    cx: &mut TestAppContext,
+) {
     let fixture = setup(cx, None);
     write_jdk(&fixture.jdks().join("jdk-21"), "21.0.2");
     let newest = write_jdk(&fixture.jdks().join("jdk-26"), "26.0.1");
@@ -379,7 +381,10 @@ async fn test_java_the_command_uses_the_server_jdk_and_the_pinned_arguments(cx: 
             .join("java/workspaces")
             .join(&digest[..16])
     );
-    assert!(!data.starts_with(&root), "the workspace is outside the project");
+    assert!(
+        !data.starts_with(&root),
+        "the workspace is outside the project"
+    );
     // The last argument is the data directory: nothing follows it, and no pinned extras exist.
     assert_eq!(args.last().unwrap(), data.to_str().unwrap());
 }
@@ -401,10 +406,7 @@ async fn test_java_a_user_server_jdk_wins_over_the_detected_one(cx: &mut TestApp
     cx.update(|cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store
-                .set_user_settings(
-                    &json!({ "java": { "server_jdk": mine } }).to_string(),
-                    cx,
-                )
+                .set_user_settings(&json!({ "java": { "server_jdk": mine } }).to_string(), cx)
                 .unwrap();
         });
     });
@@ -431,7 +433,10 @@ async fn test_java_runtimes_carry_the_import_jdk_on_the_gradle_fixture(cx: &mut 
         json!([{ "name": "JavaSE-21", "path": import, "default": true }])
     );
     assert_eq!(java["import"]["gradle"]["java"]["home"], json!(import));
-    assert_eq!(java["import"]["generatesMetadataFilesAtProjectRoot"], json!(false));
+    assert_eq!(
+        java["import"]["generatesMetadataFilesAtProjectRoot"],
+        json!(false)
+    );
 }
 
 #[gpui::test]
@@ -453,7 +458,9 @@ async fn test_java_runtimes_carry_the_import_jdk_on_the_maven_fixture(cx: &mut T
 }
 
 #[gpui::test]
-async fn test_java_an_import_jdk_nothing_satisfies_does_not_fail_the_start(cx: &mut TestAppContext) {
+async fn test_java_an_import_jdk_nothing_satisfies_does_not_fail_the_start(
+    cx: &mut TestAppContext,
+) {
     let fixture = setup(cx, None);
     write_jdk(&fixture.jdks().join("jdk-25"), "25.0.1");
     let project = fixture.temp.path().join("project");
@@ -469,7 +476,11 @@ async fn test_java_an_import_jdk_nothing_satisfies_does_not_fail_the_start(cx: &
     // The toolchain is unmet: no runtime is sent, the server still starts.
     let options = options(cx, &fixture, &delegate).await.unwrap().unwrap();
     assert!(options["settings"]["java"].get("configuration").is_none());
-    assert!(options["settings"]["java"]["import"].get("gradle").is_none());
+    assert!(
+        options["settings"]["java"]["import"]
+            .get("gradle")
+            .is_none()
+    );
     start(cx, &fixture, &delegate).await.unwrap();
     assert!(
         !delegate
@@ -545,7 +556,12 @@ async fn test_java_a_download_failure_names_jdtls_and_only_the_eclipse_host_is_a
     let hosts = net.hosts.lock().unwrap().clone();
     assert_eq!(hosts, ["download.eclipse.org"]);
     for host in &hosts {
-        for forbidden in ["zed.dev", "zed.industries", "bongos.rocks", "agentclientprotocol.com"] {
+        for forbidden in [
+            "zed.dev",
+            "zed.industries",
+            "bongos.rocks",
+            "agentclientprotocol.com",
+        ] {
             assert!(!host.ends_with(forbidden), "{host}");
         }
     }

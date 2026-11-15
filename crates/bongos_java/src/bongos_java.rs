@@ -169,7 +169,9 @@ impl JdtlsAdapter {
         let server = server_jdk(&inputs, java.server_jdk.as_deref(), MIN_SERVER_JDK);
         let jdk = match server.choice {
             ServerJdkChoice::Found(jdk) => {
-                cx.update(|cx| LanguageNotices::clear(worktree_id, LANGUAGE, NO_JDK_NOTICE_KEY, cx));
+                cx.update(|cx| {
+                    LanguageNotices::clear(worktree_id, LANGUAGE, NO_JDK_NOTICE_KEY, cx)
+                });
                 jdk
             }
             ServerJdkChoice::Unavailable(cause) => {
@@ -199,7 +201,8 @@ impl JdtlsAdapter {
         };
 
         let workspace = workspace_dir(&self.languages_dir, &root);
-        jdtls_command(&jdk.home, &install, &entry, platform, &workspace).map_err(|error| fail(format!("{error:#}")))
+        jdtls_command(&jdk.home, &install, &entry, platform, &workspace)
+            .map_err(|error| fail(format!("{error:#}")))
     }
 
     /// Installs the pin, reporting progress to the delegate. The error is the status text.
@@ -350,7 +353,11 @@ pub fn config_dir_name(platform: &str) -> Result<&'static str> {
 pub fn workspace_dir(languages_dir: &Path, worktree_root: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(worktree_root).unwrap_or_else(|_| worktree_root.into());
     let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
-    let hex: String = digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     languages_dir.join("java").join("workspaces").join(hex)
 }
 
