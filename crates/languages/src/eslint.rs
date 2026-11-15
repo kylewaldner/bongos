@@ -61,7 +61,7 @@ impl EsLintLspAdapter {
     const FLAT_CONFIG_FILE_NAMES_V8_21: &'static [&'static str] = &["eslint.config.js"];
     const FLAT_CONFIG_FILE_NAMES_V8_57: &'static [&'static str] =
         &["eslint.config.js", "eslint.config.mjs", "eslint.config.cjs"];
-    const FLAT_CONFIG_FILE_NAMES_V10: &'static [&'static str] = &[
+    pub(crate) const FLAT_CONFIG_FILE_NAMES_V10: &'static [&'static str] = &[
         "eslint.config.js",
         "eslint.config.mjs",
         "eslint.config.cjs",
@@ -69,7 +69,7 @@ impl EsLintLspAdapter {
         "eslint.config.cts",
         "eslint.config.mts",
     ];
-    const LEGACY_CONFIG_FILE_NAMES: &'static [&'static str] = &[
+    pub(crate) const LEGACY_CONFIG_FILE_NAMES: &'static [&'static str] = &[
         ".eslintrc",
         ".eslintrc.js",
         ".eslintrc.cjs",

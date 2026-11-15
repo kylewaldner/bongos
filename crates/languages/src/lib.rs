@@ -16,6 +16,7 @@ use crate::{
 };
 
 mod bash;
+mod biome;
 mod c;
 mod cpp;
 mod css;
@@ -57,6 +58,7 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
     #[cfg(feature = "load-grammars")]
     languages.register_native_grammars(grammars::native_grammars());
 
+    let biome_adapter = Arc::new(biome::BiomeLspAdapter::new(node.clone(), fs.clone()));
     let bash_lsp_adapter = Arc::new(bash::BashLspAdapter::new(node.clone()));
     let c_lsp_adapter = Arc::new(c::CLspAdapter);
     let css_lsp_adapter = Arc::new(css::CssLspAdapter::new(node.clone()));
@@ -286,6 +288,13 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
     for language in tailwind_languages {
         languages.register_lsp_adapter(language.into(), tailwind_adapter.clone());
     }
+
+    languages
+        .register_available_lsp_adapter(LanguageServerName("biome".into()), biome_adapter.clone());
+    for language in biome::BIOME_LANGUAGES {
+        languages.register_lsp_adapter(language.into(), biome_adapter.clone());
+    }
+    project::register_language_server_policy(Arc::new(biome::BiomePolicy), cx);
 
     let eslint_languages = ["TSX", "TypeScript", "JavaScript", "Vue.js", "Svelte"];
     for language in eslint_languages {
