@@ -24,7 +24,7 @@
 #      jdtls", `languages: show logs` opens languages.log with the cause; the host back on the same
 #      port, `languages: retry server`, jdtls installs and starts.
 #   5. Offline: the host stopped and no proxy at all (the sandbox has no route), both servers
-#      cached: Java and Terraform start within 30 seconds of the window, with no download and no
+#      cached: Java and Terraform both start within 30 seconds of the window, with no download and no
 #      failure.
 #   6. Bun: the bun fixture's `package.json > test` task runs `bun run test` (fake bun, npm, npx
 #      and node on PATH record their calls; only bun is called).
@@ -133,7 +133,7 @@ launch_without_terraform() {
   for binary in /usr/bin/terraform /usr/bin/tofu /usr/local/bin/terraform /usr/local/bin/tofu; do
     [ -e "$binary" ] && masks+=(--ro-bind "$RUN/not-a-binary" "$binary")
   done
-  bwrap --dev-bind / / "${masks[@]}" -- "$BONGOS_BIN" "$@" >>"$RUN/app.out" 2>&1 &
+  bwrap --dev-bind / / --die-with-parent "${masks[@]}" -- "$BONGOS_BIN" "$@" >>"$RUN/app.out" 2>&1 &
   APP_PID=$!
 }
 
@@ -173,7 +173,7 @@ pythonpath_for() {
 pythonpath_under() { case "$(pythonpath_for "$1")" in "$2"/*) return 0 ;; *) return 1 ;; esac; }
 
 # Fails when the proxy got a request since the scenario began other than the two kinds every launch
-# makes (the ACP registry and localhost, as in scenarios 02 and 39).
+# makes (the ACP registry and localhost, as in scenarios 04 and 28).
 assert_proxy_strays_none() {
   local registry_host strays
   registry_host=$(sed -nE 's|^const REGISTRY_URL: &str = "https://([^/"]+)/.*|\1|p' \
@@ -276,6 +276,7 @@ PATH="$FAKE_TF_BIN:$SAVED_PATH" launch_without_terraform \
   "$LANGS/rust" "$LANGS/python-venv" "$LANGS/react-vite" "$LANGS/java-maven" "$LANGS/java-gradle" "$LANGS/terraform"
 window_ready
 shots=()
+# Highlighting itself is verified by reading the shots; frame_has_ui only proves a UI rendered.
 open_highlighted() {
   open_file "$1" "$2"
   wait_for_settled
@@ -321,10 +322,11 @@ grep -qxF -- "$LANG_DIR/java/jdtls/0.0.2/$JDTLS_LAUNCHER_JAR" <<<"$argv" || fail
 grep -qxF -- "$LANG_DIR/java/jdtls/0.0.2/config_linux" <<<"$argv" || fail "jdtls was not given config_linux: $argv"
 data_dir=$(awk 'prev == "-data" {print; exit} {prev = $0}' <<<"$argv")
 case "$data_dir" in
-  "$LANG_DIR/java/workspaces/"????????????????) ;;
+  "$LANG_DIR/java/workspaces/"[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
   *) fail "the jdtls -data directory is not <languages>/java/workspaces/<16 hex>: $data_dir" ;;
 esac
 case "$data_dir" in "$LANGS"/*) fail "the jdtls -data directory is inside the project: $data_dir" ;; esac
+# The fake server writes none, so this proves only that the app itself writes no jdtls metadata there.
 [ -z "$(cd "$LANGS/java-gradle" && find . -name '.project' -o -name '.classpath' -o -name '.settings')" ] ||
   fail "jdtls metadata appeared inside java-gradle"
 [ "$(grep -c '^GET /jdtls.tar.gz 200$' "$FIXTURE_HTTP_LOG")" = 1 ] || fail "the jdtls archive was not fetched once: $(cat "$FIXTURE_HTTP_LOG")"
@@ -382,7 +384,7 @@ shot java-unavailable
 frame_has_ui java-unavailable
 # The cause follows the failure line: the full error chain, one log line each.
 cause=$(log_since_mark | awk '/Java: jdtls failed: could not download jdtls/ {on = 1; next} on {print; exit}')
-grep -qiE 'connect|refused|error' <<<"$cause" || fail "languages.log has no cause after the failure line: $(log_since_mark)"
+grep -qiE 'refused|127\.0\.0\.1|localhost' <<<"$cause" || fail "languages.log has no cause after the failure line: $(log_since_mark)"
 # The start reports the failure twice (the adapter, then the language server store, with a status
 # of None between them that logs "jdtls: available again"); the line shown is the last state, so
 # the last jdtls event must be the failure.
@@ -419,8 +421,11 @@ launch "$LANGS/java-gradle" "$LANGS/terraform" \
 export ALL_PROXY=${saved_proxy[0]} HTTPS_PROXY=${saved_proxy[1]} HTTP_PROXY=${saved_proxy[2]}
 wait_for_window
 offline_t0=$SECONDS
-poll 30 "jdtls to start offline" record_count_above "$JDTLS_RECORD" initialized "$jdtls_starts"
-poll 30 "terraform-ls to start offline" record_count_above "$TFLS_RECORD" initialized "$tfls_starts"
+offline_both_started() {
+  record_count_above "$JDTLS_RECORD" initialized "$jdtls_starts" &&
+    record_count_above "$TFLS_RECORD" initialized "$tfls_starts"
+}
+poll 30 "jdtls and terraform-ls to start offline" offline_both_started
 offline_secs=$((SECONDS - offline_t0))
 poll 60 "a rendered frame" ui_rendered
 wait_for_settled
@@ -533,8 +538,12 @@ assert_proxy_strays_none
 assert_no_zed_hosts
 strays=$(grep -E ': downloading |: installing ' "$LANGUAGES_LOG" | grep -vE 'Java: downloading jdtls|Terraform( Vars)?: downloading terraform-ls' || true)
 [ -z "$strays" ] || fail "a language server other than jdtls and terraform-ls was downloaded: $strays"
-host_paths=$(grep -v '^#' "$FIXTURE_HTTP_LOG" | awk '{print $2}' | sort -u | xargs)
-[ "$host_paths" = "/jdtls.tar.gz /terraform-ls.zip" ] || fail "the loopback host served other paths: $host_paths"
+host_log=$(grep -v '^#' "$FIXTURE_HTTP_LOG" | sort | uniq -c | sed -E 's/^ +//')
+host_paths=$(printf '%s\n' "$host_log" | tr '\n' ';')
+# Step 4 legitimately downloads jdtls again (once after the failure), so jdtls is served twice.
+[ "$(grep -c '^GET /terraform-ls.zip 200$' "$FIXTURE_HTTP_LOG")" = 1 ] || fail "terraform-ls was not served exactly once: $host_paths"
+[ "$(grep -c '^GET /jdtls.tar.gz 200$' "$FIXTURE_HTTP_LOG")" = 2 ] || fail "jdtls was not served exactly twice: $host_paths"
+[ "$(grep -vc '^#' "$FIXTURE_HTTP_LOG")" = 3 ] || fail "the loopback host served other requests (HEAD or more): $host_paths"
 say "smoke: the proxy got only the requests of every launch; the loopback host served $host_paths"
 
 trap - EXIT

@@ -230,7 +230,7 @@ stop_fixture_http() {
 
 # fixture_http_control <json>: a control request (see fake_manifest_host.py); prints the answer.
 fixture_http_control() {
-  curl -s -f --noproxy '*' -X POST --data "$1" "http://127.0.0.1:$FIXTURE_HTTP_PORT/control"
+  curl -s -f --max-time 5 --noproxy '*' -X POST --data "$1" "http://127.0.0.1:$FIXTURE_HTTP_PORT/control"
 }
 
 # fixture_http_hold <path> <bytes>: send at most <bytes> of the file at <path>, then stall.
