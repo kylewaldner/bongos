@@ -315,8 +315,11 @@ async fn an_exit_after_the_origin_pane_closed(cx: &mut TestAppContext) {
 
     let pane = workspace.read_with(&cx, |workspace, _| workspace.active_pane().clone());
     pane.update_in(&mut cx, |pane, window, cx| {
-        pane.close_active_item(&Default::default(), window, cx)
-            .detach()
+        let close = workspace::CloseActiveItem {
+            save_intent: Some(workspace::SaveIntent::Skip),
+            close_pinned: false,
+        };
+        pane.close_active_item(&close, window, cx).detach()
     });
     cx.run_until_parked();
     assert!(pane.read_with(&cx, |pane, _| pane.items_len() == 0));
