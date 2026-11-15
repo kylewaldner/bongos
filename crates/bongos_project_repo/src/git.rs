@@ -80,10 +80,10 @@ pub struct TreeEntry {
     pub path: String,
 }
 
-/// The environment variables that make git work on another repository, index, object store or
-/// configuration than the one in the directory it runs in. They are removed from the inherited
-/// environment of every command.
-const REDIRECTING_VARIABLES: [&str; 10] = [
+/// The environment variables that make git work on another repository, index, object store,
+/// configuration, history or attributes than the one in the directory it runs in, or read
+/// pathspecs differently. They are removed from the inherited environment of every command.
+const REDIRECTING_VARIABLES: [&str; 19] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_COMMON_DIR",
@@ -94,6 +94,15 @@ const REDIRECTING_VARIABLES: [&str; 10] = [
     "GIT_CONFIG_COUNT",
     "GIT_NAMESPACE",
     "GIT_PREFIX",
+    "GIT_ATTR_SOURCE",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
 ];
 
 /// A located git binary.
@@ -242,9 +251,12 @@ impl Git {
                 command.env_remove(name);
             }
         }
+        // Replacement refs (`git replace`) would make an object read as another one, so what a
+        // commit holds could differ from what its id names.
         command
             .current_dir(directory)
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(args);
         if let Some(index) = index {
             command.env("GIT_INDEX_FILE", index);

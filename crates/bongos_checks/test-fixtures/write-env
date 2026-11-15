@@ -1,0 +1,4 @@
+#!/bin/sh
+# Writes the names of the variables it got, one per line, to env-names in the tree.
+env | sed 's/=.*//' > env-names
+exit 0

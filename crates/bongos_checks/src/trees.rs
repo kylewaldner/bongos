@@ -1,0 +1,65 @@
+//! The trees a check runs in and their environments, as a feature that binds trees to lanes
+//! provides them. This crate defines the traits; that feature implements them. With no
+//! implementation a check runs in the task's own tree with bongos's own environment.
+
+use std::path::{Path, PathBuf};
+
+/// Where a task's trees are, and the environment a process in each gets.
+pub trait TaskTrees: 'static {
+    /// The tree of `task_id` in repository `repo` that a lane serves, if any.
+    fn tip(&self, task_id: &str, repo: &str) -> Option<PathBuf>;
+    /// A second tree of the lane that owns the task, lent exclusively while the lease lives.
+    fn second_tree(&self, task_id: &str, repo: &str) -> SecondTree;
+    /// The complete environment of the tip tree of `task_id` in `repo`: bongos's own with the
+    /// lane's edits applied (a variable the lane removes is absent). Empty when no lane serves
+    /// the task.
+    fn env(&self, task_id: &str, repo: &str) -> Vec<(String, String)>;
+}
+
+/// The answer to [`TaskTrees::second_tree`].
+pub enum SecondTree {
+    /// A tree lent to the caller now.
+    Lease(Box<dyn SecondTreeLease>),
+    /// A lane could lend one, but it is leased now.
+    Busy,
+    /// No lane can lend a tree for this task.
+    Unavailable,
+}
+
+/// A second tree lent to a check run; released when dropped.
+pub trait SecondTreeLease {
+    fn path(&self) -> &Path;
+    /// The complete environment of the leased tree, like [`TaskTrees::env`].
+    fn env(&self) -> Vec<(String, String)>;
+}
+
+/// The environment a check process starts from, before the check's own variables are added and
+/// its `unset` names removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnvBase {
+    /// A lane's complete environment: only these variables.
+    Lane(Vec<(String, String)>),
+    /// Bongos's own environment.
+    Own,
+}
+
+impl EnvBase {
+    /// A lane's environment when it is non-empty, else bongos's own.
+    pub fn from_lane(env: Vec<(String, String)>) -> Self {
+        if env.is_empty() {
+            Self::Own
+        } else {
+            Self::Lane(env)
+        }
+    }
+
+    /// The base for the tip tree of `task_id` in `repo`; bongos's own with no implementation.
+    pub fn for_tip(trees: Option<&dyn TaskTrees>, task_id: &str, repo: &str) -> Self {
+        trees.map_or(Self::Own, |trees| Self::from_lane(trees.env(task_id, repo)))
+    }
+
+    /// The base for a leased second tree.
+    pub fn for_lease(lease: &dyn SecondTreeLease) -> Self {
+        Self::from_lane(lease.env())
+    }
+}

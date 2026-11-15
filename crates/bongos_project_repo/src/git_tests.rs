@@ -142,3 +142,27 @@ fn inherited_git_variables_do_not_redirect_a_command() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn a_replacement_ref_does_not_change_what_an_object_reads_as() {
+    let dir = TempDir::new().unwrap();
+    let git = git();
+    block_on(async {
+        git.init_repo(dir.path(), "main").await.unwrap();
+        commit_files(
+            &git,
+            dir.path(),
+            &[("a.txt", "the real a\n"), ("b.txt", "an impostor\n")],
+        )
+        .await;
+        let a = git.rev_parse(dir.path(), "main:a.txt").await.unwrap();
+        let b = git.rev_parse(dir.path(), "main:b.txt").await.unwrap();
+        git.run(dir.path(), &["replace", &a, &b]).await.unwrap();
+        assert_eq!(
+            git.run(dir.path(), &["cat-file", "-p", "main:a.txt"])
+                .await
+                .unwrap(),
+            "the real a"
+        );
+    });
+}

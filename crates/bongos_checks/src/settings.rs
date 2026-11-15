@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use settings::{RegisterSetting, Settings, SettingsContent};
 
@@ -28,6 +28,20 @@ pub struct TaskChecksSettings {
 }
 
 impl TaskChecksSettings {
+    /// The folder output files of `task_id` go in: `output_dir` when set, else the task's
+    /// folder in the project's `files` folder.
+    pub fn output_folder(&self, files: &Path, task_id: &str) -> PathBuf {
+        match &self.output_dir {
+            Some(dir) => dir.join(task_id),
+            None => files.join(task_id).join("checks"),
+        }
+    }
+
+    /// `output_limit_mb` in bytes.
+    pub fn output_limit_bytes(&self) -> u64 {
+        self.output_limit_mb.saturating_mul(1024 * 1024)
+    }
+
     /// The folder scratch trees go in.
     pub fn scratch_folder(&self) -> PathBuf {
         self.scratch_dir
