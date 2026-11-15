@@ -1,7 +1,8 @@
 #!/bin/sh
 # One part: appends its number to runs in the tree and writes its scope and part count to
 # scope-<K> and its items to items-<K>. Blocks until stopped when its number is in block-at, and
-# fails when its number is in fail-at.
+# fails when its number is in fail-at, and exits 7 (a code no check declares) when its number is
+# in no-verdict-at.
 part="$BONGOS_CHECK_PART"
 echo "$part" >> runs
 echo "${BONGOS_CHECK_SCOPE-unset} $BONGOS_CHECK_PARTS" > "scope-$part"
@@ -14,5 +15,8 @@ if [ -f block-at ] && grep -qx "$part" block-at; then
 fi
 if [ -f fail-at ] && grep -qx "$part" fail-at; then
     exit 1
+fi
+if [ -f no-verdict-at ] && grep -qx "$part" no-verdict-at; then
+    exit 7
 fi
 exit 0
