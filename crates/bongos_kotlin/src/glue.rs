@@ -13,7 +13,7 @@ use workspace::{
 };
 
 use crate::{
-    KotlinDirs, KotlinUpdates, KotlinUpdatesEvent,
+    KotlinDirs, KotlinUpdates, KotlinUpdatesEvent, ManifestNoticePending,
     manager::{ADAPTER_NAME, KotlinEvent, KotlinHost, KotlinProjectManager, KotlinRegistry},
 };
 
@@ -142,6 +142,9 @@ pub fn trial_notice_id(worktree_id: WorktreeId) -> NotificationId {
     NotificationId::composite::<TrialNotice>(worktree_id.to_usize())
 }
 
+/// The id of the toast about a malformed user manifest.
+struct ManifestNotice;
+
 /// The id of the download notification: one per window, replaced rather than stacked.
 struct DownloadNotice;
 
@@ -172,6 +175,14 @@ pub fn show_download_notice(workspace: &mut Workspace, version: &str, cx: &mut C
 /// Call after `attach_managers`, before any workspace is created.
 pub fn attach_notices(cx: &mut App) {
     cx.observe_new::<Workspace>(|workspace, _window, cx| {
+        // A bad user manifest is reported once: the first workspace takes the pending message.
+        if let Some(pending) = cx.try_global::<ManifestNoticePending>().cloned() {
+            cx.remove_global::<ManifestNoticePending>();
+            workspace.show_toast(
+                Toast::new(NotificationId::unique::<ManifestNotice>(), pending.0),
+                cx,
+            );
+        }
         if let Some(updates) = KotlinUpdates::global(cx) {
             cx.subscribe(
                 &updates,
@@ -256,6 +267,26 @@ mod notice_tests {
         second
             .update(cx, |workspace, _, _| {
                 assert_eq!(workspace.notification_ids().len(), 1);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    async fn test_a_bad_user_manifest_is_toasted_once(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(ManifestNoticePending("manifest ignored".to_string()));
+            attach_notices(cx);
+        });
+        let first = window(cx).await;
+        let second = window(cx).await;
+        first
+            .update(cx, |workspace, _, _| {
+                assert_eq!(workspace.notification_ids().len(), 1);
+            })
+            .unwrap();
+        second
+            .update(cx, |workspace, _, _| {
+                assert!(workspace.notification_ids().is_empty());
             })
             .unwrap();
     }

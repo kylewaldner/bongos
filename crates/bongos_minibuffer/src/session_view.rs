@@ -241,6 +241,12 @@ impl SessionDelegate {
             .collect()
     }
 
+    /// The text of the detail panel for the selected candidate.
+    pub(crate) fn detail_text(&self, cx: &App) -> Option<SharedString> {
+        let detail = self.core.detail.as_ref()?;
+        detail(&self.candidate(self.selected)?.value, cx)
+    }
+
     pub(crate) fn selected_value(&self) -> Option<Value> {
         self.candidate(self.selected)
             .map(|candidate| candidate.value.clone())
@@ -535,6 +541,25 @@ impl PickerDelegate for SessionDelegate {
 
     /// The view ends the session when the picker says it was dismissed.
     fn dismissed(&mut self, _: &mut Window, _: &mut Context<Picker<Self>>) {}
+
+    fn render_detail(&self, _: &mut Window, cx: &mut Context<Picker<Self>>) -> Option<AnyElement> {
+        let text = self.detail_text(cx)?;
+        Some(
+            v_flex()
+                .id("minibuffer-detail")
+                .debug_selector(|| "minibuffer-detail".to_string())
+                .w_full()
+                .px_2()
+                .py_1()
+                .children(text.lines().map(|line| {
+                    Label::new(if line.is_empty() { " " } else { line }.to_string())
+                        .buffer_font(cx)
+                        .color(Color::Muted)
+                        .single_line()
+                }))
+                .into_any_element(),
+        )
+    }
 
     fn render_match(
         &self,

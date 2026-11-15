@@ -455,7 +455,7 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 48] = [
+const EMACS_ACTIONS: [(&str, &str); 49] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -503,6 +503,7 @@ const EMACS_ACTIONS: [(&str, &str); 48] = [
     ("emacs::AppendNextKill", "emacs: append next kill"),
     ("emacs::Yank", "emacs: yank"),
     ("emacs::YankPop", "emacs: yank pop"),
+    ("emacs::BrowseKillRing", "emacs: browse kill ring"),
     ("emacs::Recenter", "emacs: recenter"),
     ("emacs::Reposition", "emacs: reposition"),
     ("emacs::GotoLine", "emacs: goto line"),
@@ -768,6 +769,25 @@ async fn emacs_yank_and_yank_pop_run_on_an_editor_by_name(cx: &mut TestAppContex
     run_emacs("emacs::ForwardWord", serde_json::json!({}), cx);
     run_emacs("emacs::YankPop", serde_json::json!({}), cx);
     assert_eq!(text(cx), "one\ntwo");
+}
+
+/// Isearch `C-y` reads the kill ring through the installed source: the newest kill, or text
+/// another app put on the clipboard since.
+#[gpui::test]
+async fn isearch_yank_reads_the_kill_ring(cx: &mut TestAppContext) {
+    let (editor, cx) = emacs_editor("one two", cx).await;
+    cx.update(|_, cx| super::install_isearch_kill_source(cx));
+
+    select_offsets(&editor, &[0..0], cx);
+    run_emacs("emacs::KillWord", serde_json::json!({}), cx);
+    select_offsets(&editor, &[1..1], cx);
+    run_emacs("emacs::KillWord", serde_json::json!({}), cx);
+    let yanked =
+        |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| bongos_isearch::seams::kill_text(cx));
+    assert_eq!(yanked(cx).as_deref(), Some("two"));
+
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("outside".into())));
+    assert_eq!(yanked(cx).as_deref(), Some("outside"));
 }
 
 /// The zap commands run on an editor when dispatched by name with their count and character

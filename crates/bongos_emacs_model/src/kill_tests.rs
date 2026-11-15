@@ -306,7 +306,7 @@ fn kill_region_or_line_multibyte() {
 #[test]
 fn copy_region_or_line_changes_nothing() {
     let (out, plan) = run("a «b» c", None, cr);
-    assert_eq!(out, "a «b» c");
+    assert_eq!(out, "a bˇ c");
     assert!(plan.edits.is_empty());
     assert_eq!(killed(&plan), ["b"]);
     let (out, plan) = run("foo\nbˇar\nbaz", None, cr);

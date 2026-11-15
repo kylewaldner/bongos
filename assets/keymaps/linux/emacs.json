@@ -85,7 +85,11 @@
       "ctrl-k": "emacs::KillLine", // kill-line
       "ctrl-w": "emacs::KillRegionOrLine", // kill-region-or-line
       "alt-w": "emacs::CopyRegionOrLine", // copy-region-or-line
-      "ctrl-y": "editor::Paste", // yank
+      "ctrl-alt-k": "emacs::KillWholeLine", // kill-whole-line
+      "ctrl-alt-w": "emacs::AppendNextKill", // append-next-kill
+      "ctrl-y": "emacs::Yank", // yank
+      "alt-y": "emacs::YankPop", // yank-pop
+      "alt-shift-y": "emacs::BrowseKillRing", // browse-kill-ring
       "ctrl-_": "editor::Undo", // undo
       "ctrl-/": "editor::Undo", // undo
       "ctrl-x u": "editor::Undo", // undo
@@ -111,6 +115,15 @@
       "ctrl-alt-r": "isearch::BackwardRegexp", // isearch-backward-regexp
       "alt-^": "editor::JoinLines", // join-line
       "alt-q": "editor::Rewrap", // fill-paragraph
+    },
+  },
+  {
+    // The agent's message editor keeps its thinking-mode and keep-all keys over the Emacs ones. Keep this
+    // block after the `Editor` block above.
+    "context": "AcpThread > Editor",
+    "bindings": {
+      "ctrl-alt-k": "agent::ToggleThinkingMode",
+      "alt-shift-y": "agent::KeepAll",
     },
   },
   {

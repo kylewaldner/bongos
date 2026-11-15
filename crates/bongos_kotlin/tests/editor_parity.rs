@@ -122,6 +122,7 @@ fn init(cx: &mut TestAppContext, with_manager: bool) {
                 state_dir: dir.join("state"),
                 logs_dir: dir.join("logs"),
                 install_root: dir.join("languages"),
+                config_dir: dir.join("config"),
             };
             attach_managers(dirs, cx);
         }

@@ -1720,6 +1720,7 @@ mod tests {
             state_dir: temp.path().join("state"),
             logs_dir: temp.path().join("logs"),
             install_root: temp.path().join("languages"),
+            config_dir: temp.path().join("config"),
         };
         let host = FakeHost(Rc::new(FakeInner {
             events: RefCell::default(),

@@ -214,7 +214,15 @@ fn action_for(command: &Command, cx: &App) -> Option<Box<dyn Action>> {
 
 fn build_menu(snapshot: &Snapshot, window: &mut Window, cx: &mut App) -> Entity<ContextMenu> {
     let items = status::menu_items(snapshot);
+    let manifest_error = cx
+        .try_global::<KotlinSetup>()
+        .and_then(|setup| setup.manifest_error.clone());
     ContextMenu::build(window, cx, move |mut menu, _, cx| {
+        if let Some(error) = &manifest_error {
+            menu = menu
+                .label(format!("Server manifest ignored: {error}"))
+                .separator();
+        }
         for item in &items {
             menu = match item {
                 MenuItem::Separator => menu.separator(),

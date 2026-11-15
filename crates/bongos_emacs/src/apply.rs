@@ -195,7 +195,7 @@ pub fn run(
             });
             editor.finalize_last_transaction(cx);
         }
-        if edits {
+        if edits || command.kind == CommandKind::Copy {
             editor.set_selection_mark_mode(false, cx);
         }
         if killed {

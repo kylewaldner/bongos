@@ -522,6 +522,7 @@ fn main() {
                 state_dir: paths::state_dir().clone(),
                 logs_dir: paths::logs_dir().clone(),
                 install_root: paths::languages_dir().join("kotlin"),
+                config_dir: paths::config_dir().clone(),
             },
             cx,
         );
@@ -738,6 +739,7 @@ fn main() {
         bongos_minibuffer::init(cx);
         bongos_emacs::init(cx);
         bongos_isearch::init(cx);
+        zed::install_isearch_kill_source(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);
 

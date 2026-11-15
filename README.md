@@ -457,6 +457,10 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 |---|---|
 | C-d, M-d, M-DEL | delete a character, kill word, kill word backward |
 | C-k, C-w, M-w, C-y | kill line, kill region or line, copy, yank |
+| M-y | yank-pop: right after a yank, replace the yanked text with the previous entry of the kill ring |
+| M-Y | browse-kill-ring: pick an entry from the kill ring in the minibuffer strip |
+| C-M-k | kill-whole-line |
+| C-M-w | append-next-kill: the next kill is added to the last entry |
 | C-/, C-_, C-x u | undo |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
@@ -487,6 +491,25 @@ bar.
 
 ```json
 { "base_keymap": "VSCode", "emacs": { "cursor_style": "auto" } }
+```
+
+### Kill ring
+
+Every kill and copy goes into one kill ring, shared by all editors, and C-y yanks the newest
+entry. Kills made one after another (C-k, C-M-k, M-d and the like) join into a single entry, so
+three C-M-k in a row followed by C-y brings all three lines back; C-M-w makes the next kill join
+the last entry even after other commands. M-y, right after a yank, swaps the yanked text for the
+next older entry, and again for the one before it. M-Y opens the ring in the minibuffer strip,
+newest first, narrowed as you type, with the highlighted entry previewed under the list; Enter
+inserts it. A C-u prefix will change how many lines these commands take once the prefix-argument
+feature lands.
+
+Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` is `true`
+(default `false`); then a copy in a terminal goes into the ring and a paste there reads it.
+`emacs.save_kill_ring` (default `true`) keeps the ring across restarts; see Privacy.
+
+```json
+{ "emacs": { "save_kill_ring": true, "terminal_uses_kill_ring": true } }
 ```
 
 ### Mark and region
@@ -585,7 +608,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
@@ -608,11 +631,79 @@ Linear (`api.linear.app`) is contacted only when `linear.enabled` is on (the def
 is set, for a linked task or a Linear command. The token is stored in the credential store and
 never written to a log or a file.
 
+The kill ring is saved in the app database so it survives a restart. Text marked secret on Linux
+and the contents of masked fields (passwords) are never saved, nor is an entry over 1 MiB. Setting
+`emacs.save_kill_ring` to `false` turns saving off and deletes the saved ring.
+The secret hint is advisory: text from a password manager that sets no hint, from any macOS
+manager, or typed by hand is saved like any other kill. `emacs.save_kill_ring: false` turns saving off.
+
 bongos never contacts bongos.rocks. The list of kotlin-lsp builds is compiled in.
 
 kotlin-lsp builds are early access and expire about 29 days after build, so bongos pins one
 build per release and releases roughly monthly. A new Kotlin build needs a new bongos release. If
 the pinned build has expired, update bongos.
+
+### Kotlin server manifest file
+
+To run a Kotlin server build other than the one pinned in your bongos release (a newer kotlin-lsp
+build, say), put a file named `kotlin-server-manifest.toml` in the config directory, next to
+`settings.json` (`~/.config/bongos/` on Linux). It is optional; bongos reads it at start.
+
+The schema is that of `crates/bongos_kotlin/servers.toml`. There is one table per server,
+`kotlin-lsp` or `intellij`:
+
+- `version`: the build's version.
+- `built` (optional) and `expires`: dates, `YYYY-MM-DD`; `expires` is the last day a kotlin-lsp
+  build runs.
+- `args`: the start arguments (a list of strings).
+- `[<server>.env]`: environment variables for the server.
+- `[<server>.platform.<key>]`, one per platform (`linux-x64`, `linux-arm64`, `macos-arm64`,
+  `macos-x64`): `url`, `sha256`, `archive` (`tar.gz` or `zip`), `strip_components`, `launcher`
+  (the executable inside the archive) and, optionally, `runtime` (a bundled Java, relative to the
+  archive root).
+
+`sha256` is required for every platform, and the download is checked against it before it is
+extracted. An example with two servers:
+
+```toml
+[kotlin-lsp]
+version = "263.9999.0"
+expires = "2026-12-20"
+
+[kotlin-lsp.platform.linux-x64]
+url = "https://download.jetbrains.com/language-server/kotlin-server/263.9999.0/kotlin-server-263.9999.0.tar.gz"
+sha256 = "<64 hex digits>"
+archive = "tar.gz"
+strip_components = 1
+launcher = "bin/intellij-server"
+runtime = "jbr/bin/java"
+
+[intellij]
+version = "2026.1"
+
+[intellij.platform.linux-x64]
+url = "https://example.com/intellij-server-2026.1.tar.gz"
+sha256 = "<64 hex digits>"
+archive = "tar.gz"
+strip_components = 1
+launcher = "bin/intellij-server"
+```
+
+Get a `sha256` by downloading the archive yourself and running `sha256sum kotlin-server.tar.gz`
+(`shasum -a 256` on macOS).
+
+Rules:
+
+- A server table in the file replaces the built-in one whole; omitted `args` and `[<server>.env]`
+  keep the built-in values. A server you leave out keeps its built-in table.
+- A `url` must be `https` (a debug build also accepts loopback `http`), carry no user name or
+  password, and never name `bongos.rocks` or a subdomain of it.
+- In a debug build, `BONGOS_KOTLIN_SERVERS` still wins over this file.
+- A malformed or unreadable file is ignored and the built-in table is used. You see one toast, one
+  line in the Kotlin status menu ("Server manifest ignored: <path>: <error>") and one line in
+  `kotlin.log`.
+
+bongos never contacts bongos.rocks, and it reads nothing from the network to find this file.
 
 ## JetBrains servers and their terms
 
