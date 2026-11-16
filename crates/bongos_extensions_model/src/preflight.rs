@@ -5,6 +5,8 @@
 use std::fmt;
 use std::ops::RangeInclusive;
 
+use crate::source::SourceUrl;
+
 /// Message when Rust is needed and cargo or rustc cannot be found.
 pub const NO_RUST_MESSAGE: &str = "Building this extension needs Rust: install rustup from https://rustup.rs, then run `rustup target add wasm32-wasip2`. If Rust is installed, start bongos from a shell or add `~/.cargo/bin` to the desktop session's PATH.";
 /// Message when the wasm target is missing and rustup is available.
@@ -26,6 +28,8 @@ const TIMED_OUT_TEMPLATE: &str =
     "{tool} did not respond. Check that it works from a shell, then install again.";
 const BLOCKED_HOST_TEMPLATE: &str =
     "The repository host {host} is not allowed; use a repository on a different host.";
+const BAD_GRAMMAR_URL_TEMPLATE: &str =
+    "The grammar repository URL {url} is not valid; fix it in extension.toml, then install again.";
 const SCHEMA_TEMPLATE: &str = "This extension uses manifest schema version {found}; this bongos supports versions {min} to {max}.";
 const SUPPRESSED_TEMPLATE: &str =
     "The extension {id} is not allowed to be installed; remove it from your install list.";
@@ -126,10 +130,32 @@ impl ApiVersion {
 
     /// The lowest version a cargo requirement string allows, such as `^0.7`, `~0.7.1` or
     /// `>=0.7, <0.9`.
+    ///
+    /// Takes the highest lower bound among the comma-separated parts (`>=`, `>`, `=`, `^`, `~`
+    /// and bare versions). `<` and `<=` parts give no lower bound; with no lower bound at all
+    /// the answer is `0.0.0`. `>X.Y.Z` bumps the last component given, so `>0.7.0` is `0.7.1`.
+    /// Returns `None` when a part cannot be read.
     pub fn lowest_allowed(requirement: &str) -> Option<Self> {
-        let first = requirement.split(',').next()?;
-        let first = first.trim_start_matches(|c: char| c.is_whitespace() || "^~=<>".contains(c));
-        Self::parse(first)
+        let mut lowest = Self::new(0, 0, 0);
+        for part in requirement.split(',') {
+            let part = part.trim();
+            if part.starts_with('<') {
+                continue;
+            }
+            let exclusive = part.starts_with('>') && !part.starts_with(">=");
+            let text = part.trim_start_matches(|c: char| c.is_whitespace() || "^~=<>".contains(c));
+            let mut bound = Self::parse(text)?;
+            if exclusive {
+                let given = text.split(['-', '+']).next()?.split('.').count();
+                match given {
+                    1 => bound.major += 1,
+                    2 => bound.minor += 1,
+                    _ => bound.patch += 1,
+                }
+            }
+            lowest = lowest.max(bound);
+        }
+        Some(lowest)
     }
 }
 
@@ -146,7 +172,10 @@ pub struct ManifestFacts {
     pub has_extension_json: bool,
     pub schema_version: u32,
     pub id: String,
-    pub has_cargo_toml: bool,
+    /// Text of the extension's `Cargo.toml`; `None` when it has none. The toolchain is checked
+    /// only when this is `Some`: grammar-only extensions need just git. The API requirement is
+    /// read from the `zed_extension_api` dependency here, so a renamed or target-specific
+    /// dependency is not seen; the post-build API check is the backstop for those.
     pub cargo_toml: Option<String>,
     /// Text of the workspace manifest, for `{ workspace = true }` dependencies.
     pub workspace_toml: Option<String>,
@@ -160,6 +189,8 @@ pub enum Refusal {
     /// A probed tool did not answer in time; treated as missing.
     ToolTimedOut(Tool),
     BlockedHost(String),
+    /// A grammar repository URL that cannot be parsed.
+    BadGrammarUrl(String),
     ManifestMissing,
     OldManifest,
     SchemaVersion {
@@ -184,6 +215,7 @@ impl Refusal {
             Refusal::GitMissing => GIT_MISSING_MESSAGE.to_string(),
             Refusal::ToolTimedOut(tool) => TIMED_OUT_TEMPLATE.replace("{tool}", tool.name()),
             Refusal::BlockedHost(host) => BLOCKED_HOST_TEMPLATE.replace("{host}", host),
+            Refusal::BadGrammarUrl(url) => BAD_GRAMMAR_URL_TEMPLATE.replace("{url}", url),
             Refusal::ManifestMissing => MANIFEST_MISSING_MESSAGE.to_string(),
             Refusal::OldManifest => OLD_MANIFEST_MESSAGE.to_string(),
             Refusal::SchemaVersion { found, supported } => SCHEMA_TEMPLATE
@@ -223,23 +255,26 @@ fn check_git(git: Probe) -> Result<(), Refusal> {
 /// Checks run before cloning: git first, then the repository host.
 pub fn check_before_clone(
     probe: &ToolProbe,
-    url_host: &str,
+    url: &SourceUrl,
     is_blocked_host: impl Fn(&str) -> bool,
 ) -> Result<(), Refusal> {
     check_git(probe.git)?;
-    if is_blocked_host(url_host) {
-        return Err(Refusal::BlockedHost(url_host.to_string()));
+    check_host(url, &is_blocked_host)
+}
+
+fn check_host(url: &SourceUrl, is_blocked_host: &impl Fn(&str) -> bool) -> Result<(), Refusal> {
+    if let Some(host) = url.host() {
+        let host = host.trim_end_matches('.');
+        if is_blocked_host(host) {
+            return Err(Refusal::BlockedHost(host.to_string()));
+        }
     }
     Ok(())
 }
 
-/// Extracts the host from a repository URL (`https://host/path`, `ssh://git@host:22/path` or
-/// `git@host:path`).
-pub fn repository_host(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    authority.split(':').next().unwrap_or(authority)
+/// Parses a repository URL, refusing one that does not parse. The host is lowercase.
+pub fn repository_host(url: &str) -> Result<SourceUrl, Refusal> {
+    SourceUrl::parse(url).map_err(|_| Refusal::BadGrammarUrl(url.to_string()))
 }
 
 /// Checks run after cloning, in order: git, manifest, schema version, suppression, other
@@ -274,19 +309,14 @@ pub fn check_after_clone(
         return Err(Refusal::InstalledElsewhere(facts.id.clone()));
     }
     for url in &facts.grammar_repositories {
-        let host = repository_host(url);
-        if is_blocked_host(host) {
-            return Err(Refusal::BlockedHost(host.to_string()));
-        }
+        check_host(&repository_host(url)?, &is_blocked_host)?;
     }
-    if facts.has_cargo_toml {
+    // Only a Cargo.toml needs the Rust toolchain; grammars need only git, checked first.
+    if let Some(cargo_toml) = &facts.cargo_toml {
         check_toolchain(probe)?;
-    }
-    // Grammars need only git, which was checked first.
-    if let Some(cargo_toml) = &facts.cargo_toml
-        && let Some(needed) = api_requirement(cargo_toml, facts.workspace_toml.as_deref())
-    {
-        check_built_api(needed, api_max)?;
+        if let Some(needed) = api_requirement(cargo_toml, facts.workspace_toml.as_deref()) {
+            check_built_api(needed, api_max)?;
+        }
     }
     Ok(())
 }
@@ -305,6 +335,9 @@ fn check_toolchain(probe: &ToolProbe) -> Result<(), Refusal> {
     match probe.wasm_target {
         Probe::Found => Ok(()),
         Probe::TimedOut => Err(Refusal::ToolTimedOut(Tool::WasmTarget)),
+        Probe::Missing if probe.rustup == Probe::TimedOut => {
+            Err(Refusal::ToolTimedOut(Tool::Rustup))
+        }
         Probe::Missing if probe.rustup.is_found() => Err(Refusal::TargetMissingWithRustup),
         Probe::Missing => Err(Refusal::TargetMissingWithoutRustup),
     }

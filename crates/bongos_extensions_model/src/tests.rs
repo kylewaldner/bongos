@@ -637,7 +637,6 @@ mod preflight_tests {
             has_extension_toml: true,
             schema_version: 1,
             id: "demo".into(),
-            has_cargo_toml: true,
             cargo_toml: Some("[dependencies]\nzed_extension_api = \"0.7.0\"\n".into()),
             ..Default::default()
         }
@@ -655,6 +654,10 @@ mod preflight_tests {
         )
     }
 
+    fn url(text: &str) -> SourceUrl {
+        SourceUrl::parse(text).unwrap()
+    }
+
     fn message(result: Result<(), Refusal>) -> String {
         result.unwrap_err().to_string()
     }
@@ -662,7 +665,10 @@ mod preflight_tests {
     #[test]
     fn preflight_passes_when_everything_is_fine() {
         assert_eq!(run(&GOOD, &facts()), Ok(()));
-        assert_eq!(check_before_clone(&GOOD, "github.com", |_| false), Ok(()));
+        assert_eq!(
+            check_before_clone(&GOOD, &url("https://github.com/a/b"), |_| false),
+            Ok(())
+        );
         assert_eq!(ApiVersion::new(0, 7, 0).to_string(), "0.7.0");
         assert_eq!(ApiVersion::parse("0.7"), Some(ApiVersion::new(0, 7, 0)));
     }
@@ -692,8 +698,12 @@ mod preflight_tests {
         probe.git = Probe::TimedOut;
         assert!(message(run(&probe, &facts())).starts_with("git did not respond"));
         assert!(
-            message(check_before_clone(&probe, "github.com", |_| false))
-                .contains("git did not respond")
+            message(check_before_clone(
+                &probe,
+                &url("https://github.com/a/b"),
+                |_| false
+            ))
+            .contains("git did not respond")
         );
         let mut probe = GOOD;
         probe.rustc_sysroot = Probe::TimedOut;
@@ -733,7 +743,6 @@ mod preflight_tests {
     #[test]
     fn preflight_no_cargo_toml_needs_no_rust() {
         let mut f = facts();
-        f.has_cargo_toml = false;
         f.cargo_toml = None;
         let mut probe = ToolProbe::ALL_MISSING;
         probe.git = Probe::Found;
@@ -744,15 +753,89 @@ mod preflight_tests {
 
     #[test]
     fn preflight_blocked_hosts_refused() {
+        let blocked = |h: &str| h == "blocked.example";
         assert_eq!(
-            message(check_before_clone(&GOOD, "blocked.example", |h| h == "blocked.example")),
+            message(check_before_clone(
+                &GOOD,
+                &url("https://blocked.example/a/b"),
+                blocked
+            )),
             "The repository host blocked.example is not allowed; use a repository on a different host."
         );
+        for text in [
+            "https://BLOCKED.example/x/y",
+            "https://blocked.example./x/y",
+            "git@Blocked.Example:x/y",
+        ] {
+            assert!(
+                message(check_before_clone(&GOOD, &url(text), blocked)).contains("blocked.example"),
+                "{text}"
+            );
+            let mut f = facts();
+            f.grammar_repositories = vec![text.into()];
+            assert!(
+                message(run(&GOOD, &f)).contains("blocked.example"),
+                "{text}"
+            );
+        }
+        for text in ["http://github.com/a/b", "git://github.com/a/b", "https://"] {
+            let mut f = facts();
+            f.grammar_repositories = vec![text.into()];
+            let refusal = run(&GOOD, &f).unwrap_err();
+            assert_eq!(refusal, Refusal::BadGrammarUrl(text.into()));
+            assert!(refusal.to_string().contains(text));
+        }
+    }
+
+    #[test]
+    fn preflight_git_is_checked_before_the_blocked_host() {
+        let mut probe = GOOD;
+        probe.git = Probe::TimedOut;
+        let result = check_before_clone(&probe, &url("https://blocked.example/a"), |h| {
+            h == "blocked.example"
+        });
+        assert_eq!(result, Err(Refusal::ToolTimedOut(Tool::Git)));
+    }
+
+    #[test]
+    fn preflight_suppressed_wins_over_blocked_grammar_host() {
         let mut f = facts();
-        f.grammar_repositories = vec!["https://blocked.example/x/y".into()];
-        assert!(message(run(&GOOD, &f)).contains("blocked.example"));
-        assert_eq!(repository_host("git@host.io:a/b"), "host.io");
-        assert_eq!(repository_host("ssh://git@host.io:22/a"), "host.io");
+        f.id = "banned".into();
+        f.grammar_repositories = vec!["https://blocked.example/x".into()];
+        assert_eq!(run(&GOOD, &f), Err(Refusal::Suppressed("banned".into())));
+    }
+
+    #[test]
+    fn preflight_timed_out_rustup_names_rustup() {
+        let mut probe = GOOD;
+        probe.wasm_target = Probe::Missing;
+        probe.rustup = Probe::TimedOut;
+        assert_eq!(
+            run(&probe, &facts()),
+            Err(Refusal::ToolTimedOut(Tool::Rustup))
+        );
+        assert!(message(run(&probe, &facts())).starts_with("rustup did not respond"));
+    }
+
+    #[test]
+    fn preflight_lowest_allowed_handles_requirement_lists() {
+        for (text, want) in [
+            ("<0.8", (0, 0, 0)),
+            ("<=0.8", (0, 0, 0)),
+            (">0.7.0", (0, 7, 1)),
+            ("<0.9, >=0.8", (0, 8, 0)),
+            (">=0.6, <0.8", (0, 6, 0)),
+            ("^0.7", (0, 7, 0)),
+            ("~0.7.1", (0, 7, 1)),
+            ("=0.7.2", (0, 7, 2)),
+            ("0.7", (0, 7, 0)),
+        ] {
+            assert_eq!(
+                ApiVersion::lowest_allowed(text),
+                Some(ApiVersion::new(want.0, want.1, want.2)),
+                "{text}"
+            );
+        }
     }
 
     #[test]
