@@ -1,0 +1,7 @@
+id = "quokka"
+name = "Quokka"
+description = "Quokka language support (smoke fixture)."
+version = "0.0.1"
+schema_version = 1
+authors = ["bongos smoke"]
+languages = ["languages/quokka"]
