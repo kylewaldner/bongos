@@ -1,5 +1,6 @@
 //! The trees a base run uses: a second tree a lane lends, checked out at the base commit, or a
-//! temporary tree added under the scratch folder and removed when the run ends.
+//! temporary tree added under the scratch folder and removed when the run ends. A group's
+//! closing checks use a lent tree too, with a recorded tree object written out in it.
 //!
 //! Nothing here ever runs `git checkout --force`, `git clean` or a removal in the task's own
 //! tree. A lent tree is used only when it is apart from every protected tree (not the same
@@ -380,6 +381,50 @@ pub(crate) async fn check_out_lent_tree(
     git.run(&canonical, &["clean", "-f", "-d"])
         .await
         .map_err(|error| failed(format!("cleaning the lent tree: {error}")))?;
+    Ok(())
+}
+
+/// Writes the files of the tree object `tree` out in the lent tree at `path`: the tree is read
+/// into the lent tree's own index and every file of it checked out over what is there, then the
+/// untracked files that are not ignored are removed (build output stays). `HEAD` does not move.
+/// Refused when `path` is not apart from `protected`, not the top of a working tree, or its
+/// repository does not hold the tree. Every git command runs in the canonical `path` with its
+/// arguments passed as they are; nothing outside the lent tree is written.
+pub(crate) async fn check_out_tree_in_lent_tree(
+    git: &Git,
+    path: &Path,
+    tree: &str,
+    protected: &[&Path],
+) -> Result<(), String> {
+    ensure_commit(tree).map_err(|_| format!("{tree:?} is not a tree id"))?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("the lent tree {} is not usable: {error}", path.display()))?;
+    ensure_apart(&canonical, protected)?;
+    ensure_top_level(git, &canonical).await.map_err(|_| {
+        format!(
+            "the lent tree {} is not the top of a working tree",
+            path.display()
+        )
+    })?;
+    let kind = git
+        .run(&canonical, &["cat-file", "-t", tree])
+        .await
+        .map_err(|error| format!("the lent tree's repository lacks the tree {tree}: {error}"))?;
+    if kind != "tree" {
+        return Err(format!(
+            "{tree} is not a tree in the lent tree's repository"
+        ));
+    }
+    git.run(&canonical, &["read-tree", tree])
+        .await
+        .map_err(|error| format!("reading the tree into the lent tree: {error}"))?;
+    git.run(&canonical, &["checkout-index", "--force", "--all"])
+        .await
+        .map_err(|error| format!("writing out the tree in the lent tree: {error}"))?;
+    git.run(&canonical, &["clean", "-f", "-d"])
+        .await
+        .map_err(|error| format!("cleaning the lent tree: {error}"))?;
     Ok(())
 }
 

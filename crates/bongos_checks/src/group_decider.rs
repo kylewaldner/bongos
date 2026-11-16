@@ -17,7 +17,10 @@
 //! itself, started by "group decision", at most once per (group, check, digest, tree key): after
 //! that run a fail or no verdict on the key waits for a person's run or a new key, and
 //! re-decisions start nothing. The run is on the recorded tree, not a live worktree: each
-//! repository's tree object is written out under the scratch folder and removed after the run.
+//! repository's tree object is checked out in the second tree the lane of the last child lends
+//! (with that tree's environment, the lease released after the run), waiting for a busy one up
+//! to the pool wait limit; with none it is written out cold under the scratch folder, with
+//! bongos's own environment, and removed after the run.
 //!
 //! Every task under a group with closing checks whose done record or `checks.last` key the
 //! decider writes gets a ref keeping its tree ([`crate::retained`]); refs no record backs any
@@ -25,8 +28,9 @@
 //! after each change of the verified commit.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bongos_checks_model::evidence::{Current, StartedBy, satisfied};
@@ -38,7 +42,7 @@ use futures::channel::oneshot;
 use gpui::{AsyncApp, Context, WeakEntity};
 use settings::Settings as _;
 
-use crate::base_tree::TempTree;
+use crate::base_tree::{TempTree, check_out_tree_in_lent_tree};
 use crate::decider::{
     Decision, Judgment, Pinned, TreeKeys, evidence_of, find_chain, leaf_set, missing_reason,
     still_deciding, write_done_if,
@@ -56,7 +60,7 @@ use crate::owed::{LastChild, LastRow, OwedMarker, last_row_in, put_last, uses_un
 use crate::retained::{KeptTree, delete_ref, has_tree, keep_trees, kept_tree, list_refs};
 use crate::settings::TaskChecksSettings;
 use crate::task_source::{TREE_KEYS_FOLDER, TaskChecks};
-use crate::trees::TaskTreesRegistry;
+use crate::trees::{EnvBase, SecondTree, SecondTreeLease, TaskTreesRegistry};
 
 /// "not done: the tree of <child> is gone; reopen it".
 pub fn tree_gone(child: &str) -> String {
@@ -421,6 +425,7 @@ async fn recorded_trees(
             repository: directory.clone(),
             tree,
             path: PathBuf::new(),
+            env: EnvBase::Own,
         });
     }
     let combined = recorded_key(
@@ -731,22 +736,83 @@ pub(crate) async fn decide_group(
     };
     write_hold(this, row, cx)?;
     if !to_run.is_empty() && !running && still_deciding(this, cx)? {
+        let leaf = found.leaf.clone();
         this.update(cx, |engine, cx| {
-            engine.start_group_run(project, group_task, recorded, to_run, cx)
+            engine.start_group_run(project, group_task, &leaf, recorded, to_run, cx)
         })?;
     }
     Ok(())
 }
 
+/// How often a closing run waiting for a busy second tree asks for it again.
+pub(crate) const SECOND_TREE_RETRY: Duration = Duration::from_secs(15);
+
+/// The second tree each repository of `repos` lends for `leaf` now, in order: `None` runs that
+/// repository cold. While any repository answers busy, every lease taken is given back and the
+/// question is asked again every [`SECOND_TREE_RETRY`] on the engine's clock, so a lease is
+/// taken only once the lane has released it; past `task_checks.pool_wait_limit_hours` a busy
+/// repository runs cold. With no tree provider, every repository runs cold at once. `Err` when
+/// the engine is drained or gone while waiting: nothing runs.
+async fn second_trees(
+    this: &WeakEntity<ChecksEngine>,
+    leaf: &str,
+    repos: &[String],
+    cx: &mut AsyncApp,
+) -> Result<Vec<Option<Box<dyn SecondTreeLease>>>> {
+    let mut deadline: Option<Instant> = None;
+    loop {
+        let (trees, clock, limit) = this.update(cx, |engine, cx| {
+            if engine.drained {
+                return Err(anyhow::anyhow!("the engine is drained"));
+            }
+            let hours = TaskChecksSettings::get_global(cx).pool_wait_limit_hours;
+            Ok((
+                TaskTreesRegistry::get(cx),
+                engine.clock.clone(),
+                Duration::from_secs(u64::from(hours) * 3600),
+            ))
+        })??;
+        let Some(trees) = trees else {
+            return Ok(repos.iter().map(|_| None).collect());
+        };
+        let now = clock.now();
+        let deadline = *deadline.get_or_insert(now + limit);
+        let mut busy = false;
+        let mut answers = Vec::with_capacity(repos.len());
+        for repo in repos {
+            answers.push(match trees.second_tree(leaf, repo) {
+                SecondTree::Lease(lease) => Some(lease),
+                SecondTree::Busy => {
+                    busy = true;
+                    None
+                }
+                SecondTree::Unavailable => None,
+            });
+        }
+        if !busy || now >= deadline {
+            return Ok(answers);
+        }
+        // Given back before the wait, so no lane tree is held while another is awaited.
+        drop(answers);
+        clock
+            .sleep(SECOND_TREE_RETRY.min(deadline.saturating_duration_since(now)))
+            .await;
+    }
+}
+
 impl ChecksEngine {
-    /// Starts `checks` (name, digest, tree key) of the group `group` on `recorded`, its last
-    /// child's tree, as a run started by "group decision": each tree is written out under the
-    /// scratch folder, the checks run there, and the folders are removed when the run ends,
-    /// however it ends. Each (group, check, digest, key) is started at most once here.
+    /// Starts `checks` (name, digest, tree key) of the group `group` on `recorded`, the tree of
+    /// its last child `leaf`, as a run started by "group decision". Each repository's tree is
+    /// checked out in the second tree a lane lends for `leaf` (run with that tree's
+    /// environment, waiting for a busy one up to the pool wait limit), else written out cold
+    /// under the scratch folder (run with bongos's own environment). When the run ends, however
+    /// it ends, every lease is released and every scratch folder removed. Each (group, check,
+    /// digest, key) is started at most once here.
     pub(crate) fn start_group_run(
         &mut self,
         project: &str,
         group: TaskChecks,
+        leaf: &str,
         recorded: RecordedTrees,
         checks: Vec<(String, String, String)>,
         cx: &mut Context<Self>,
@@ -763,6 +829,21 @@ impl ChecksEngine {
         let index_dir = scratch.join(TREE_KEYS_FOLDER);
         let git = group.project.git().clone();
         let project = project.to_string();
+        let leaf = leaf.to_string();
+        // A lent tree is used only apart from every tree a person or a lane works in: the
+        // trees of the group and of its last child, the project's repository and each code
+        // repository the recorded trees come from.
+        let mut protected: Vec<PathBuf> = vec![group.project.location().repository.clone()];
+        protected.extend(recorded.trees.iter().map(|tree| tree.repository.clone()));
+        if let Some(tree) = self.task_tree(&group, cx) {
+            protected.push(tree.path);
+        }
+        if let Some(tree) = self
+            .task(&leaf, cx)
+            .and_then(|task| self.task_tree(&task, cx))
+        {
+            protected.push(tree.path);
+        }
         let (ended, ended_receiver) = oneshot::channel::<()>();
         self.decider
             .group_runs
@@ -770,10 +851,44 @@ impl ChecksEngine {
         cx.spawn(async move |this, cx| {
             let mut recorded = recorded;
             let mut temps: Vec<TempTree> = Vec::new();
+            // Held until the run has ended, and dropped (released) on every path out.
+            let mut leases: Vec<Box<dyn SecondTreeLease>> = Vec::new();
             let mut failure = None;
-            // The one place a group's recorded trees are made ready: written out cold under the
-            // scratch folder. Trees a lane lends would be checked out here instead.
-            for tree in &mut recorded.trees {
+            let repos: Vec<String> = recorded.trees.iter().map(|tree| tree.repo.clone()).collect();
+            let lent = match second_trees(&this, &leaf, &repos, cx).await {
+                Ok(lent) => lent,
+                Err(error) => {
+                    log::info!("the closing checks of {id} did not start: {error:#}");
+                    this.update(cx, |engine, _| {
+                        engine.decider.group_runs.remove(&id);
+                    })
+                    .ok();
+                    drop(ended);
+                    return;
+                }
+            };
+            let protected: Vec<&Path> = protected.iter().map(PathBuf::as_path).collect();
+            // The one place a group's recorded trees are made ready: checked out in a lent
+            // tree, else written out cold under the scratch folder.
+            for (tree, lease) in recorded.trees.iter_mut().zip(lent) {
+                if let Some(lease) = lease {
+                    let path = lease.path().to_path_buf();
+                    match check_out_tree_in_lent_tree(&git, &path, &tree.tree, &protected).await {
+                        Ok(()) => {
+                            tree.path = path;
+                            tree.env = EnvBase::for_lease(lease.as_ref());
+                            leases.push(lease);
+                            continue;
+                        }
+                        Err(why) => {
+                            log::warn!(
+                                "the closing checks of {id} run cold: the lent tree is not usable ({why})"
+                            );
+                            drop(lease);
+                        }
+                    }
+                }
+                tree.env = EnvBase::Own;
                 match TempTree::materialize(
                     &git,
                     &tree.repository,
@@ -824,6 +939,7 @@ impl ChecksEngine {
                     }
                 }
             }
+            drop(leases);
             for temp in temps {
                 temp.remove().await;
             }

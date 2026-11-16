@@ -248,7 +248,8 @@ struct Plan {
 }
 
 /// Trees a run checks instead of a task's own: tree objects a tree key named, each written out
-/// under the scratch folder by whoever starts the run (and removed by it afterward). A check's
+/// in a tree a lane lends or under the scratch folder by whoever starts the run (who releases
+/// or removes it afterward). A check's
 /// tree key is derived from the tree ids, never from the folders, and its key inputs are read
 /// from the tree objects.
 #[derive(Clone, Debug)]
@@ -267,6 +268,8 @@ pub(crate) struct RecordedTree {
     pub(crate) tree: String,
     /// Where the tree is written out.
     pub(crate) path: PathBuf,
+    /// The environment a check starts from there: a lent tree's, else bongos's own.
+    pub(crate) env: EnvBase,
 }
 
 impl RecordedTrees {
@@ -1353,7 +1356,7 @@ async fn prepare(
             .map(|tree| RepoTree {
                 repo: tree.repo.clone(),
                 path: tree.path.clone(),
-                env: EnvBase::Own,
+                env: tree.env.clone(),
             })
             .collect();
         let state = CheckState::new(&key, &key_inputs, &digest);
