@@ -31,7 +31,7 @@ pub struct LanguageExtensionsSettingsContent {
     /// Whether installing language extensions from git is on. While false, the
     /// `extensions:` commands are hidden and only say that language extensions are off.
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
     /// Whether bongos offers to install a language extension when you open a file of a
     /// language it does not know.

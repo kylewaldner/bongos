@@ -291,9 +291,12 @@ async fn offer_false_hides_the_line(cx: &mut TestAppContext) {
     .await;
     offer.open("a.swift").await;
     assert_eq!(offer.text(), None);
-    // Off while `enabled` is false, which is the default.
-    offer.set_user_settings("{}");
+    // Off while `enabled` is false.
+    offer.set_user_settings(r#"{"language_extensions": {"enabled": false}}"#);
     assert_eq!(offer.text(), None);
+    // On with the defaults.
+    offer.set_user_settings("{}");
+    assert!(offer.text().is_some());
     offer.set_user_settings(ON);
     assert!(offer.text().is_some());
 }
