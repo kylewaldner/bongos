@@ -9,8 +9,7 @@ use bongos_minibuffer::minibuffer_for_window;
 use editor::Editor;
 use editor::actions::{Redo, Undo};
 use gpui::{
-    AppContext as _, Entity, KeyBinding, Keystroke, Subscription, TestAppContext,
-    VisualTestContext, actions,
+    Entity, KeyBinding, Keystroke, Subscription, TestAppContext, VisualTestContext, actions,
 };
 use language::{Buffer, BufferEvent};
 use workspace::Workspace;
