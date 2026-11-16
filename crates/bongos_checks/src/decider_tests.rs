@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bongos_checks_model::verdict::Verdict;
-use bongos_project_repo::{LandingResult, ProjectRepo, StateApplyHooks, StateHandle, StateWriter};
+use bongos_project_repo::{
+    Git, LandingResult, ProjectRepo, StateApplyHooks, StateHandle, StateWriter,
+};
 use bongos_project_repo_model::{DefinitionTree, TaskStateRecord};
 use bongos_work::{DoneHoldSource as _, NeedsYouRegistry, RowChipsRegistry};
 use bongos_work_model::Status;
@@ -21,8 +23,8 @@ use gpui::{BorrowAppContext as _, Entity, TestAppContext};
 use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
 
-use crate::decider::{CHECKING_TREE, Decision, NO_TREE, write_done};
-use crate::engine::{ChecksEngine, RunChecksRequest};
+use crate::decider::{CHECKING_TREE, Decision, NO_TREE, TreeKeys, write_done};
+use crate::engine::{ChecksEngine, RepoTree, RunChecksRequest};
 use crate::evidence_store::{DoneRecord, done_record, scan_records, task_prefix};
 use crate::holds::{ChecksChips, ChecksHoldSource, ChecksHolds};
 use crate::live::{HoldRow, hold_key};
@@ -36,6 +38,7 @@ use crate::test_support::{
     commit_everything, definition_toml, fixture_project_with_hooks, init_git_repo, land,
     main_commit, new_copy, person, write_definition, write_file,
 };
+use crate::trees::EnvBase;
 use crate::{LIVE_NAMESPACE, OWED_NAMESPACE, read_hold_rows};
 
 const TASK: &str = "l1";
@@ -540,4 +543,47 @@ async fn would_hold_asks_the_decider_through_checks_access(cx: &mut TestAppConte
     // Nothing was written: no marker, no done record.
     assert_eq!(world.marker(), None);
     assert_eq!(world.done(), None);
+}
+
+#[test]
+fn every_key_of_a_judgment_rests_on_the_first_key_of_each_tree() {
+    let root = TempDir::new().unwrap();
+    let make = |name: &str| {
+        let path = root.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        init_git_repo(&path);
+        write_file(&path, "src/lib.rs", "pub fn one() {}\n");
+        commit_everything(&path, "start");
+        path
+    };
+    let (app, lib) = (make("app"), make("lib"));
+    let indexes = root.path().join("indexes");
+    let git = Git::locate().unwrap().isolated();
+    let tree = |repo: &str, path: &PathBuf| RepoTree {
+        repo: repo.to_string(),
+        path: path.clone(),
+        env: EnvBase::for_tip(None, TASK, repo),
+    };
+    let both = || [tree("app", &app), tree("lib", &lib)];
+    let key = |keys: &mut TreeKeys, trees: &[RepoTree]| match futures::executor::block_on(
+        keys.key(&git, &indexes, trees),
+    ) {
+        Ok(key) => key,
+        Err(_) => panic!("the key is computed"),
+    };
+    let before = key(&mut TreeKeys::default(), &both());
+
+    // One check's key is taken, then an edit lands in its tree before the done record's key
+    // over both repositories is taken.
+    let mut keys = TreeKeys::default();
+    let app_key = key(&mut keys, &[tree("app", &app)]);
+    write_file(&app, "src/lib.rs", "pub fn two() {}\n");
+    let union = key(&mut keys, &both());
+
+    assert_eq!(
+        union, before,
+        "the union rests on the tree the check was keyed on"
+    );
+    assert_eq!(key(&mut keys, &[tree("app", &app)]), app_key);
+    assert_ne!(key(&mut TreeKeys::default(), &both()), before);
 }

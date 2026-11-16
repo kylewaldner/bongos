@@ -36,8 +36,9 @@ use anyhow::{Context as _, Result, anyhow};
 use bongos_checks_model::evidence::{
     CheckState, Current, EvidenceRecord, RowStatus, Satisfaction, row_status, satisfied,
 };
+use bongos_checks_model::verdict::NoVerdictReason;
 use bongos_checks_model::{Applicability, EffectiveSet, NamedSets, Row, effective_set};
-use bongos_project_repo::{ProjectRepo, StateEvent, StateHandle, StateRead, StateWriter};
+use bongos_project_repo::{Git, ProjectRepo, StateEvent, StateHandle, StateRead, StateWriter};
 use bongos_project_repo_model::{DefinitionNode, DefinitionTree};
 use futures::channel::mpsc;
 use futures::{FutureExt as _, StreamExt as _};
@@ -45,7 +46,7 @@ use gpui::{App, AsyncApp, Context, Task, WeakEntity};
 use settings::Settings as _;
 
 use crate::definitions::named_sets;
-use crate::engine::{ChecksEngine, check_digest, check_repos, key_of, repo_trees, tip_trees_of};
+use crate::engine::{ChecksEngine, check_digest, check_repos, repo_trees, tip_trees_of};
 use crate::evidence_store::{
     DONE_NAMESPACE, DoneRecord, LIVE_NAMESPACE, OWED_NAMESPACE, next_generation, put_done,
     scan_records, scan_records_in, task_prefix,
@@ -57,7 +58,7 @@ use crate::pin::Pin;
 use crate::settings::TaskChecksSettings;
 use crate::task_source::TaskChecks;
 use crate::task_tree::TaskTree;
-use crate::tree_key::key_inputs_digest;
+use crate::tree_key::{TreeKey, combine_trees, key_inputs_digest, tree_key};
 use crate::trees::{TaskTrees, TaskTreesRegistry};
 
 /// The reason of a held task while its tree key is computed for the first time.
@@ -765,7 +766,10 @@ pub(crate) async fn judge(
     let Ok(done_trees) = repo_trees(task, &tree.path, trees, required_repos) else {
         return Judgment::NoTree;
     };
-    let tree_key = match keys.key(task, &done_trees).await {
+    let tree_key = match keys
+        .key(task.project.git(), &task.index_dir, &done_trees)
+        .await
+    {
         Ok(key) => key,
         Err(judgment) => return judgment,
     };
@@ -786,31 +790,45 @@ pub(crate) async fn judge(
     }
 }
 
-/// The tree keys computed in one judgment, by the sorted repositories they cover.
+/// The key of each repository's tree, computed once per judgment. Every key of the judgment
+/// (each check's and the done record's over the union of the required repositories) is derived
+/// from these same per-repository keys, so an edit landing in one tree while the judgment runs
+/// cannot give the done record a key some check never passed on.
 #[derive(Default)]
-struct TreeKeys(BTreeMap<Vec<String>, String>);
+pub(crate) struct TreeKeys(BTreeMap<String, TreeKey>);
 
 impl TreeKeys {
-    async fn key(
+    /// The key of `trees` (as [`crate::tree_key::trees_key`] derives it), from the key each
+    /// repository's tree had the first time this judgment asked for it.
+    pub(crate) async fn key(
         &mut self,
-        task: &TaskChecks,
+        git: &Git,
+        index_dir: &Path,
         trees: &[crate::engine::RepoTree],
     ) -> Result<String, Judgment> {
-        let mut repos: Vec<String> = trees.iter().map(|tree| tree.repo.clone()).collect();
-        repos.sort();
-        if let Some(key) = self.0.get(&repos) {
-            return Ok(key.clone());
+        let mut keys: Vec<(&str, TreeKey)> = Vec::with_capacity(trees.len());
+        for tree in trees {
+            let key = match self.0.get(&tree.repo) {
+                Some(key) => key.clone(),
+                None => {
+                    let key = tree_key(git, &tree.path, index_dir)
+                        .await
+                        .map_err(|error| {
+                            Judgment::Failed(format!(
+                                "the tree key could not be computed ({})",
+                                NoVerdictReason::TreeUnavailable(error.to_string()).text()
+                            ))
+                        })?;
+                    self.0.insert(tree.repo.clone(), key.clone());
+                    key
+                }
+            };
+            keys.push((tree.repo.as_str(), key));
         }
-        let key = key_of(task.project.git(), trees, &task.index_dir)
-            .await
-            .map_err(|reason| {
-                Judgment::Failed(format!(
-                    "the tree key could not be computed ({})",
-                    reason.text()
-                ))
-            })?;
-        self.0.insert(repos, key.clone());
-        Ok(key)
+        Ok(match keys.as_slice() {
+            [(_, key)] => key.as_str().to_string(),
+            _ => combine_trees(&keys).as_str().to_string(),
+        })
     }
 }
 
@@ -833,7 +851,7 @@ async fn state_of(
         .iter()
         .map(|path| first.path.join(path))
         .collect();
-    let tree_key = keys.key(task, &tips).await?;
+    let tree_key = keys.key(task.project.git(), &task.index_dir, &tips).await?;
     let key_inputs = key_inputs_digest(&inputs).map_err(|error| {
         Judgment::Failed(format!(
             "the key inputs of {} could not be read ({error})",
