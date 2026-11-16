@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use bongos_project_repo::LoadedProject;
 use bongos_work_model::TodoState;
+use bongos_work_model::commands;
 use bongos_work_model::derive::{self, State};
 use futures::FutureExt as _;
 use futures::channel::oneshot;
 use gpui::{App, TestAppContext, VisualTestContext};
 use tempfile::TempDir;
 
-use crate::command_tests::{Harness, Input, harness, wait_until};
-use crate::commands::LastWorkToast;
+use crate::command_tests::{Harness, Input, dispatch, harness, wait_until};
+use crate::commands::{LastWorkToast, keyboard_context};
 use crate::store_tests::canonical;
 use crate::{DoneHoldSource, DoneHolds};
 
@@ -189,6 +190,68 @@ async fn two_advances_each_wait_for_the_source_before_writing(cx: &mut TestAppCo
     wait_until(cx, "the advance", |cx| harness.writes(cx) > writes).await;
     assert_eq!(todo_states(&harness, cx)[2], TodoState::Done);
     assert_eq!(harness.writes(cx), writes + 1);
+}
+
+#[gpui::test]
+async fn an_advance_that_finishes_the_task_only_on_the_writers_tree_is_refused(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = harness(cx, true, true).await;
+    harness
+        .run_and_wait(cx, "task::Advance", &[Input::Pick("backfill")])
+        .await;
+    assert_eq!(
+        todo_states(&harness, cx),
+        [TodoState::Done, TodoState::Open, TodoState::Open]
+    );
+    let source = register(cx);
+    *source.would.borrow_mut() = Some(HOLD.to_string());
+
+    // A second press picks the task while the snapshot still shows two open todos.
+    dispatch(cx, "task::Advance");
+    wait_until(cx, "a picker", |cx| harness.picker(cx).is_some()).await;
+    let picker = harness.picker(cx).unwrap();
+    picker.update_in(cx, |modal, window, cx| {
+        modal
+            .picker
+            .update(cx, |picker, cx| picker.set_query("backfill", window, cx))
+    });
+    cx.run_until_parked();
+
+    // An earlier press is still being written when this one is confirmed: it closes the
+    // second todo, so the confirmed advance would close the last one.
+    let store = harness.store.clone();
+    let earlier = cx.update(|window, cx| {
+        let ctx = keyboard_context(window, cx);
+        let earlier = store.update(cx, |store, cx| {
+            store.write(
+                ctx,
+                |tree, ctx| commands::advance(tree, ctx, "l1", false),
+                cx,
+            )
+        });
+        window.dispatch_action(Box::new(menu::Confirm), cx);
+        earlier
+    });
+    earlier.await.unwrap();
+    wait_until(cx, "the refusal", |cx| {
+        last_toast(cx).is_some_and(|toast| toast.contains("run task: advance again"))
+    })
+    .await;
+    assert_eq!(
+        todo_states(&harness, cx),
+        [TodoState::Done, TodoState::Done, TodoState::Open]
+    );
+    assert_eq!(source.asked.get(), 0);
+    assert_ne!(backfill_state(&harness, cx).1, State::Done);
+
+    // Pressed again, the advance now asks the source, which holds it.
+    harness
+        .run(cx, "task::Advance", &[Input::Pick("backfill")])
+        .await;
+    wait_until(cx, "the hold", |cx| last_toast(cx).as_deref() == Some(HOLD)).await;
+    assert_eq!(source.asked.get(), 1);
+    assert_eq!(todo_states(&harness, cx)[2], TodoState::Open);
 }
 
 #[gpui::test]

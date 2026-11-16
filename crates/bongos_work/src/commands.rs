@@ -684,9 +684,18 @@ fn advance(
             if refuse_active_run(&id, workspace, cx) {
                 return;
             }
-            if !DoneHolds::has_sources(cx) || !on_last_open_todo(&id, cx) {
+            if !DoneHolds::has_sources(cx) {
                 submit(workspace, window, cx, move |tree, ctx| {
                     model::advance(tree, ctx, &id, override_ship)
+                });
+                return;
+            }
+            if !on_last_open_todo(&id, cx) {
+                // The snapshot can lag writes still queued (an earlier press), so the writer
+                // checks again on its own tree and refuses an advance that would now finish the
+                // task without the hold sources having been asked.
+                submit(workspace, window, cx, move |tree, ctx| {
+                    advance_not_finishing(tree, ctx, &id, override_ship)
                 });
                 return;
             }
@@ -695,22 +704,40 @@ fn advance(
     );
 }
 
-/// Whether the task `id` has exactly one open todo, so advancing it finishes the task.
+/// The number of open todos of the task `id` in `tree`.
+fn open_todos(tree: &WorkTree, id: &str) -> Option<usize> {
+    let file = tree.task_by_id(id)?.file.as_ref()?;
+    Some(
+        file.todos
+            .iter()
+            .filter(|todo| todo.state == TodoState::Open)
+            .count(),
+    )
+}
+
+/// Whether the task `id` has exactly one open todo in the published snapshot, so advancing it
+/// finishes the task.
 fn on_last_open_todo(id: &str, cx: &App) -> bool {
     WorkStore::global(cx)
         .and_then(|store| store.read(cx).snapshot())
-        .and_then(|tree| {
-            let task = tree.task_by_id(id)?;
-            let open = task
-                .file
-                .as_ref()?
-                .todos
-                .iter()
-                .filter(|todo| todo.state == TodoState::Open)
-                .count();
-            Some(open == 1)
-        })
-        .unwrap_or(false)
+        .is_some_and(|tree| open_todos(&tree, id) == Some(1))
+}
+
+/// [`model::advance`] for an advance whose press saw more than one open todo and so asked no
+/// hold source: refused when the writer's tree shows that it would close the last open todo.
+fn advance_not_finishing(
+    tree: &WorkTree,
+    ctx: &WorkContext,
+    id: &str,
+    override_ship: bool,
+) -> model::Outcome {
+    if open_todos(tree, id) == Some(1) {
+        let slug = tree.task_by_id(id).map_or(id, |task| task.slug.as_str());
+        return Err(format!(
+            "{slug} changed while this advance waited to be written; run task: advance again"
+        ));
+    }
+    model::advance(tree, ctx, id, override_ship)
 }
 
 /// Advances the last open todo of `id` unless a done hold source says the task would be held
@@ -735,6 +762,8 @@ fn advance_unless_held(
         let refusal = match hold.await {
             Some(hold) => Some(hold),
             None => {
+                // The hold may change between the sources answering and this write; the hold
+                // the store derives after the write is the authority on whether the task is Done.
                 let write = store.update(cx, |store, cx| {
                     store.write(
                         ctx,
