@@ -179,7 +179,7 @@ impl Render for TestModal {
     }
 }
 
-async fn workspace_window(
+pub(crate) async fn workspace_window(
     cx: &mut TestAppContext,
 ) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
     let app_state = cx.update(|cx| {

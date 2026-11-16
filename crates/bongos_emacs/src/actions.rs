@@ -3,6 +3,8 @@
 //! are dispatchable; later steps register the rest.
 
 use gpui::{Action, actions};
+
+use crate::prefix_arg::CountArg;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -32,6 +34,9 @@ actions!(
 
 macro_rules! count_action {
     ($(#[$meta:meta])* $name:ident) => {
+        count_action!($(#[$meta])* $name; false);
+    };
+    ($(#[$meta:meta])* $name:ident; $inserts:expr) => {
         $(#[$meta])*
         #[derive(PartialEq, Clone, Debug, Deserialize, Default, JsonSchema, Action)]
         #[action(namespace = emacs)]
@@ -40,6 +45,19 @@ macro_rules! count_action {
             /// The prefix argument; absent when none was given.
             #[serde(default)]
             pub count: Option<i32>,
+        }
+
+        impl CountArg for $name {
+            const READS: bool = true;
+            const INSERTS: bool = $inserts;
+
+            fn count(&self) -> Option<i32> {
+                self.count
+            }
+
+            fn with_count(&self, count: i32) -> Option<Self> {
+                Some(Self { count: Some(count) })
+            }
         }
     };
 }
@@ -58,6 +76,18 @@ macro_rules! motion_action {
             #[serde(default)]
             pub select: bool,
         }
+
+        impl CountArg for $name {
+            const READS: bool = true;
+
+            fn count(&self) -> Option<i32> {
+                self.count
+            }
+
+            fn with_count(&self, count: i32) -> Option<Self> {
+                Some(Self { count: Some(count), ..self.clone() })
+            }
+        }
     };
 }
 
@@ -75,8 +105,44 @@ macro_rules! zap_action {
             #[serde(default)]
             pub char: Option<char>,
         }
+
+        impl CountArg for $name {
+            const READS: bool = true;
+
+            fn count(&self) -> Option<i32> {
+                self.count
+            }
+
+            fn with_count(&self, count: i32) -> Option<Self> {
+                Some(Self { count: Some(count), ..self.clone() })
+            }
+        }
     };
 }
+
+/// Implements `CountArg` with the defaults for actions that take no count.
+macro_rules! no_count {
+    ($($name:ident),* $(,)?) => {
+        $(impl CountArg for $name {})*
+    };
+}
+
+no_count!(
+    KeyboardQuit,
+    DuplicateAndComment,
+    CommentDwim,
+    DeleteBlankLines,
+    Reposition,
+    AppendNextKill,
+    BrowseKillRing,
+    ExchangePointAndMark,
+    PopMark,
+    PopGlobalMark,
+    BeginningOfBuffer,
+    EndOfBuffer,
+    XrefFindDefinitions,
+    XrefFindImplementations,
+);
 
 motion_action!(
     /// Moves forward over N words.
@@ -144,7 +210,8 @@ count_action!(
 );
 count_action!(
     /// Duplicates the region, or the current line N times.
-    DuplicateLine
+    DuplicateLine;
+    true
 );
 count_action!(
     /// Copies N characters from the nearest non-blank line above.
@@ -156,7 +223,8 @@ count_action!(
 );
 count_action!(
     /// Leaves exactly N spaces around the cursor.
-    JustOneSpace
+    JustOneSpace;
+    true
 );
 zap_action!(
     /// Kills up to and including the Nth occurrence of a character.
