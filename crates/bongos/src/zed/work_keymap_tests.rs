@@ -100,6 +100,19 @@ fn load(paths: &[&str], cx: &TestAppContext) -> (Keymap, Vec<KeyBinding>) {
                 KeymapFile::load_asset(path, None, cx)
                     .unwrap_or_else(|error| panic!("{path}: {error}")),
             );
+            // The panel keys live in the specific overrides, which every profile loads after
+            // its base keymap.
+            let overrides = match *path {
+                "keymaps/linux/emacs.json" => Some("keymaps/specific-overrides.json"),
+                "keymaps/macos/emacs.json" => Some("keymaps/specific-overrides-macos.json"),
+                _ => None,
+            };
+            if let Some(overrides) = overrides {
+                all.extend(
+                    KeymapFile::load_asset(overrides, None, cx)
+                        .unwrap_or_else(|error| panic!("{overrides}: {error}")),
+                );
+            }
         }
         (Keymap::new(all.clone()), all)
     })
@@ -308,6 +321,10 @@ async fn vscode_binds_the_work_keys_only_under_its_leader(cx: &mut TestAppContex
             assert!(!pending, "macos={macos}: {derived}");
         }
         for binding in &bindings {
+            // The panel keys are in the overrides every profile loads.
+            if binding.action().name() == "project::ResolveSplit" {
+                continue;
+            }
             assert!(
                 !UNBOUND.contains(&binding.action().name()),
                 "macos={macos}: {}",
