@@ -265,6 +265,7 @@
       "ctrl-c w V": "task::EditProposal",
       "ctrl-c w A": "task::ApplyProposal",
       "ctrl-c w X": "task::RejectProposal",
+      "ctrl-c w i": "task::ShowDetails",
       "ctrl-c w g h": "project::ShowHistory",
       "ctrl-c w g r": "project::Revert",
       "ctrl-c w g v": "project::ShowChanges",
@@ -427,6 +428,13 @@
     "context": "LandingView",
     "bindings": {
       "r": "project::ResolveSplit",
+    },
+  },
+  {
+    "context": "TaskDetailView",
+    "bindings": {
+      "g": "task_detail::Refresh",
+      "s": "task_detail::ToggleSources",
     },
   },
   {

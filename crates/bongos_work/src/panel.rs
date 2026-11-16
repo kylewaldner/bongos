@@ -28,6 +28,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::work;
 use crate::commands::{ready, show_toast};
+use crate::detail::TaskSectionsRegistry;
 use crate::filters::{Filters, Saved, ViewMode};
 use crate::focus::focus_task;
 use crate::registry::{LiveModesRegistry, RowChipsRegistry};
@@ -132,6 +133,7 @@ impl WorkPanel {
                     let live = |id: &str| LiveModesRegistry::live_modes(id, app);
                     let changed = |id: &str| store.changed_files(id);
                     let chips = |id: &str| RowChipsRegistry::chips(id, app);
+                    let summaries = |id: &str| TaskSectionsRegistry::summaries(id, app);
                     Some(view::build(
                         &self.path,
                         &Inputs {
@@ -140,6 +142,7 @@ impl WorkPanel {
                             rebase: store.rebase_states(),
                             live_modes: &live,
                             row_chips: &chips,
+                            task_summaries: &summaries,
                             changed_files: &changed,
                             now,
                             expanded: &self.expanded,

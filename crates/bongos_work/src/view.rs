@@ -162,6 +162,8 @@ pub struct Inputs<'a> {
     pub live_modes: &'a dyn Fn(&str) -> LiveModes,
     /// The chips sources add after the Linear identifier.
     pub row_chips: &'a dyn Fn(&str) -> Vec<SharedString>,
+    /// One line each for the expanded row of a task, from the task section sources.
+    pub task_summaries: &'a dyn Fn(&str) -> Vec<String>,
     pub changed_files: &'a dyn Fn(&str) -> Option<usize>,
     pub now: DateTime<Utc>,
     pub expanded: &'a HashSet<Key>,
@@ -661,6 +663,7 @@ fn add_expansion(level: &mut Level, key: &Key, task: &Task, inputs: &Inputs) {
     }
     let artifacts = task_artifacts(task).artifacts;
     if artifacts.is_empty() {
+        add_summaries(level, key, task, inputs);
         return;
     }
     level
@@ -686,6 +689,20 @@ fn add_expansion(level: &mut Level, key: &Key, task: &Task, inputs: &Inputs) {
             text.push_str(&format!("  {}", artifact.description));
         }
         level.lines.push(extra(text));
+    }
+    add_summaries(level, key, task, inputs);
+}
+
+/// One line for each task section source that has something to say about the task, after the
+/// artifacts.
+fn add_summaries(level: &mut Level, key: &Key, task: &Task, inputs: &Inputs) {
+    let Some(id) = task.id() else {
+        return;
+    };
+    for summary in (inputs.task_summaries)(id) {
+        level
+            .lines
+            .push(Line::new(Some(key.clone()), LineKind::Extra, summary));
     }
 }
 

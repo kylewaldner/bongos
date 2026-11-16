@@ -55,6 +55,7 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w H", "artifact::HideAll"),
     ("ctrl-c w U", "artifact::ShareAll"),
     ("ctrl-c w l", "artifact::Link"),
+    ("ctrl-c w i", "task::ShowDetails"),
 ];
 
 /// Commands that stay in the palette with no key.
