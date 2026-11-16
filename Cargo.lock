@@ -2358,6 +2358,8 @@ dependencies = [
  "anyhow",
  "bongos_net",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.17",
  "toml 0.8.23",
 ]
