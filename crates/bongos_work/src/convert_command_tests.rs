@@ -478,6 +478,7 @@ fn new_format_task(id: &str, dir: PathBuf, definition: &str, children: Vec<Task>
         definition: Some(PathBuf::from(definition)),
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         file: Some(file),
         artifacts: None,
         errors: Vec::new(),

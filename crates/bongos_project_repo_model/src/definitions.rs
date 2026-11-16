@@ -486,6 +486,7 @@ fn load_node(
         definition: Some(PathBuf::from(&node.folder)),
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         file: Some(file),
         artifacts,
         errors: badges,

@@ -263,6 +263,7 @@ pub(crate) fn dump_text(rows: &[RepositoryRow], stats: &Stats) -> String {
         retries,
         rebase_probes,
         ref_events,
+        ..
     } = stats;
     writeln!(text, "stats").ok();
     for (name, value) in [

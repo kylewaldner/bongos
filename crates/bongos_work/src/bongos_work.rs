@@ -63,7 +63,7 @@ pub use project_repos::{
 pub use rebase::RebaseState;
 pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};
 pub use registry::{
-    ActiveRun, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
+    ActiveRun, DoneHoldSource, DoneHolds, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
     NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart, observe_view_opened,
 };
 pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
@@ -187,6 +187,8 @@ mod command_tests;
 mod command_tests_more;
 #[cfg(test)]
 mod convert_command_tests;
+#[cfg(test)]
+mod done_hold_tests;
 #[cfg(test)]
 mod focus_tests;
 #[cfg(test)]

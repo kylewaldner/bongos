@@ -28,6 +28,7 @@ fn task_with(slug: &str, goal: &str, kind: Kind, todos: Vec<Todo>) -> Task {
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         broken_edges: Vec::new(),
         files: Default::default(),
         hashes: Default::default(),
