@@ -60,9 +60,44 @@ pub fn git_env_for(has_var: impl Fn(&str) -> bool) -> GitEnv {
             "GIT_NAMESPACE",
             "GIT_CONFIG_PARAMETERS",
             "GIT_CONFIG_COUNT",
+            "GIT_ALLOW_PROTOCOL",
+            "GIT_SHALLOW_FILE",
+            "GIT_REPLACE_REF_BASE",
+            "GIT_CEILING_DIRECTORIES",
         ],
         remove_prefixes: vec!["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"],
     }
+}
+
+/// The ssh command for a network call when the caller set neither `GIT_SSH_COMMAND` nor `GIT_SSH`:
+/// the user's `core.sshCommand` (`configured`) in batch mode, or plain ssh in batch mode. Setting
+/// `GIT_SSH_COMMAND` overrides `core.sshCommand`, so the configured command has to be carried over.
+pub fn batch_ssh_command(configured: Option<&str>) -> String {
+    match configured
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+    {
+        Some(command) => format!("{command} -o BatchMode=yes"),
+        None => BATCH_SSH_COMMAND.to_string(),
+    }
+}
+
+/// The variables to remove from a `git` process given the names of the inherited variables: the
+/// policy's fixed list plus every inherited name starting with one of its prefixes.
+pub fn vars_to_remove(
+    policy: &GitEnv,
+    inherited: impl IntoIterator<Item = OsString>,
+) -> Vec<OsString> {
+    let mut remove: Vec<OsString> = policy.remove.iter().map(OsString::from).collect();
+    remove.extend(inherited.into_iter().filter(|key| {
+        key.to_str().is_some_and(|key| {
+            policy
+                .remove_prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        })
+    }));
+    remove
 }
 
 /// Options passed to every `git` invocation before the subcommand: only https, ssh and file
@@ -123,26 +158,53 @@ impl RealGit {
         Self { extra_env: env }
     }
 
-    /// Runs `git <args>` and returns its standard output. The error carries git's message.
-    async fn run(&self, cwd: Option<&Path>, args: &[&std::ffi::OsStr]) -> Result<String> {
+    /// Whether the caller's environment, including this runner's extra variables, has `key`.
+    fn has_var(&self, key: &str) -> bool {
+        self.extra_env.iter().any(|(k, _)| k == key) || std::env::var_os(key).is_some()
+    }
+
+    /// The environment policy for this runner.
+    pub fn env_policy(&self) -> GitEnv {
+        git_env_for(|key| self.has_var(key))
+    }
+
+    /// The ssh command a network call run in `cwd` uses, or `None` when the caller chose one
+    /// through `GIT_SSH_COMMAND` or `GIT_SSH`. Reads `core.sshCommand` with the same environment.
+    pub async fn ssh_command(&self, cwd: Option<&Path>) -> Option<String> {
+        if self.has_var("GIT_SSH_COMMAND") || self.has_var("GIT_SSH") {
+            return None;
+        }
+        let configured = self
+            .run(
+                cwd,
+                &[os("config"), os("--get"), os("core.sshCommand")],
+                None,
+            )
+            .await
+            .ok();
+        Some(batch_ssh_command(configured.as_deref()))
+    }
+
+    /// Runs `git <args>` and returns its standard output. The error carries git's message. `ssh`
+    /// replaces the policy's default ssh command.
+    async fn run(
+        &self,
+        cwd: Option<&Path>,
+        args: &[&std::ffi::OsStr],
+        ssh: Option<&str>,
+    ) -> Result<String> {
         let mut command = new_command("git");
-        let policy = git_env();
-        for key in policy.remove {
+        let policy = self.env_policy();
+        for key in vars_to_remove(&policy, std::env::vars_os().map(|(key, _)| key)) {
             command.env_remove(key);
         }
-        for (key, _) in std::env::vars_os() {
-            let matches = key.to_str().is_some_and(|key| {
-                policy
-                    .remove_prefixes
-                    .iter()
-                    .any(|prefix| key.starts_with(prefix))
-            });
-            if matches {
-                command.env_remove(key);
-            }
-        }
-        for (key, value) in policy.set {
+        for (key, value) in &policy.set {
             command.env(key, value);
+        }
+        if let Some(ssh) = ssh
+            && policy.set.iter().any(|(key, _)| *key == "GIT_SSH_COMMAND")
+        {
+            command.env("GIT_SSH_COMMAND", ssh);
         }
         for (key, value) in &self.extra_env {
             command.env(key, value);
@@ -200,10 +262,12 @@ fn check_commit(commit: &str) -> Result<()> {
 #[async_trait]
 impl GitRunner for RealGit {
     async fn ls_remote(&self, url: &SourceUrl) -> Result<Vec<RemoteRef>> {
+        let ssh = self.ssh_command(None).await;
         let output = self
             .run(
                 None,
                 &[os("ls-remote"), os("--symref"), os("--"), os(url.as_str())],
+                ssh.as_deref(),
             )
             .await?;
         Ok(parse_ls_remote(&output))
@@ -214,6 +278,7 @@ impl GitRunner for RealGit {
         self.run(
             None,
             &[os("init"), os("--quiet"), os("--"), dir.as_os_str()],
+            None,
         )
         .await?;
         self.run(
@@ -225,8 +290,10 @@ impl GitRunner for RealGit {
                 os("origin"),
                 os(url.as_str()),
             ],
+            None,
         )
         .await?;
+        let ssh = self.ssh_command(Some(dir)).await;
         let shallow = self
             .run(
                 Some(dir),
@@ -239,11 +306,12 @@ impl GitRunner for RealGit {
                     os("origin"),
                     os(commit),
                 ],
+                ssh.as_deref(),
             )
             .await;
         if let Err(shallow_err) = shallow {
             // The server refuses unadvertised commits: fetch everything and look for it.
-            self.run(Some(dir), &[os("fetch"), os("--quiet"), os("origin")])
+            self.run(Some(dir), &[os("fetch"), os("--quiet"), os("origin")], ssh.as_deref())
                 .await
                 .map_err(|full_err| {
                     anyhow!(
@@ -253,6 +321,7 @@ impl GitRunner for RealGit {
             self.run(
                 Some(dir),
                 &[os("checkout"), os("--quiet"), os("--detach"), os(commit)],
+                None,
             )
             .await?;
         } else {
@@ -264,6 +333,7 @@ impl GitRunner for RealGit {
                     os("--detach"),
                     os("FETCH_HEAD"),
                 ],
+                None,
             )
             .await?;
         }
@@ -280,6 +350,7 @@ impl GitRunner for RealGit {
                 src.as_os_str(),
                 dir.as_os_str(),
             ],
+            None,
         )
         .await?;
         Ok(())
@@ -287,7 +358,11 @@ impl GitRunner for RealGit {
 
     async fn remote_url(&self, dir: &Path) -> Result<String> {
         let output = self
-            .run(Some(dir), &[os("remote"), os("get-url"), os("origin")])
+            .run(
+                Some(dir),
+                &[os("remote"), os("get-url"), os("origin")],
+                None,
+            )
             .await?;
         Ok(output.trim().to_string())
     }
@@ -297,6 +372,7 @@ impl GitRunner for RealGit {
             .run(
                 Some(dir),
                 &[os("rev-parse"), os("--verify"), os("HEAD^{commit}")],
+                None,
             )
             .await?;
         Ok(output.trim().to_string())

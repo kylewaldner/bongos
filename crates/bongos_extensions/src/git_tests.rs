@@ -356,11 +356,88 @@ fn env_policy_scrubs_repository_selecting_variables() {
         "GIT_NAMESPACE",
         "GIT_CONFIG_PARAMETERS",
         "GIT_CONFIG_COUNT",
+        "GIT_ALLOW_PROTOCOL",
+        "GIT_SHALLOW_FILE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_CEILING_DIRECTORIES",
     ] {
         assert!(env.remove.contains(&key), "{key}");
     }
     assert!(env.remove_prefixes.contains(&"GIT_CONFIG_KEY_"));
     assert!(env.remove_prefixes.contains(&"GIT_CONFIG_VALUE_"));
+}
+
+#[test]
+fn scrub_drops_repository_selecting_and_injected_config_variables() {
+    let policy = git_env_for(|_| false);
+    let inherited = [
+        "GIT_DIR",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "PATH",
+        "HOME",
+    ]
+    .map(OsString::from);
+    let remove = vars_to_remove(&policy, inherited);
+    for key in [
+        "GIT_DIR",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_ALLOW_PROTOCOL",
+    ] {
+        assert!(remove.contains(&OsString::from(key)), "{key} is kept");
+    }
+    for key in ["PATH", "HOME"] {
+        assert!(!remove.contains(&OsString::from(key)), "{key} is removed");
+    }
+}
+
+#[test]
+fn batch_ssh_command_keeps_the_configured_command() {
+    assert_eq!(batch_ssh_command(None), BATCH_SSH_COMMAND);
+    assert_eq!(batch_ssh_command(Some("  \n")), BATCH_SSH_COMMAND);
+    assert_eq!(
+        batch_ssh_command(Some("ssh -i /keys/id\n")),
+        "ssh -i /keys/id -o BatchMode=yes"
+    );
+}
+
+#[test]
+fn real_ssh_command_reads_core_ssh_command_from_the_runner_env() {
+    smol::block_on(async {
+        if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+            return;
+        }
+        let sandbox = Sandbox::new();
+        assert_eq!(
+            sandbox.runner().ssh_command(None).await.as_deref(),
+            Some(BATCH_SSH_COMMAND)
+        );
+
+        let config = sandbox.temp.path().join("gitconfig");
+        std::fs::write(&config, "[core]\n\tsshCommand = ssh -i /keys/id\n").unwrap();
+        let mut env = sandbox.env.clone();
+        env.retain(|(key, _)| key != "GIT_CONFIG_GLOBAL");
+        env.push(("GIT_CONFIG_GLOBAL".into(), config.into_os_string()));
+        assert_eq!(
+            RealGit::with_env(env.clone())
+                .ssh_command(None)
+                .await
+                .as_deref(),
+            Some("ssh -i /keys/id -o BatchMode=yes")
+        );
+
+        env.push(("GIT_SSH".into(), "my-ssh".into()));
+        let runner = RealGit::with_env(env);
+        assert_eq!(runner.ssh_command(None).await, None);
+        assert!(
+            !runner
+                .env_policy()
+                .set
+                .iter()
+                .any(|(key, _)| *key == "GIT_SSH_COMMAND")
+        );
+    });
 }
 
 #[test]
