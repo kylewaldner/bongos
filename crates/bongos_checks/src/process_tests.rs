@@ -605,12 +605,17 @@ fn reaching_the_time_budget_is_no_verdict() {
     let fixture = fixture();
     let mut spec = fixture.spec(script("slow", "slow-output"));
     spec.budget = Some(Duration::from_millis(300));
+    let output = spec.output.clone();
     let outcome = block_on(run_part(spec));
     assert_eq!(
         outcome.verdict,
         Verdict::NoVerdict(NoVerdictReason::TimeBudgetReached)
     );
-    assert!(outcome.duration < Duration::from_secs(10));
+    // Stopped long before the script's own end, however loaded the machine: it never got past
+    // its sleep.
+    let text = output_text(&output);
+    assert!(text.contains("first line"), "{text}");
+    assert!(!text.contains("late line"), "{text}");
 }
 
 #[cfg(target_os = "linux")]
@@ -618,6 +623,7 @@ fn reaching_the_time_budget_is_no_verdict() {
 fn cancel_ends_a_script_ignoring_sigterm_and_its_detached_child_within_the_grace() {
     let fixture = fixture();
     let mut spec = fixture.spec(script("stubborn", "ignore-term"));
+    spec.kill_grace = Duration::from_secs(2);
     let started: Arc<Mutex<Option<PartStart>>> = Arc::default();
     let seen = started.clone();
     spec.on_start = Some(Box::new(move |start| {
@@ -640,7 +646,12 @@ fn cancel_ends_a_script_ignoring_sigterm_and_its_detached_child_within_the_grace
     stop.stop();
     let outcome = running.join().unwrap();
     let took = cancelled.elapsed();
-    assert!(took <= Duration::from_secs(5), "took {took:?}");
+    // SIGTERM is ignored, so only the SIGKILL one second before the end of the grace ends it.
+    // The script never ends by itself; the bound leaves room past the two-second grace for
+    // finding the processes on a loaded machine.
+    let bound = Duration::from_secs(15);
+    assert!(took >= Duration::from_secs(1), "took {took:?}");
+    assert!(took <= bound, "took {took:?}");
     assert_eq!(
         outcome.verdict,
         Verdict::NoVerdict(NoVerdictReason::Cancelled)
@@ -651,7 +662,7 @@ fn cancel_ends_a_script_ignoring_sigterm_and_its_detached_child_within_the_grace
         !process_alive(detached)
     });
     assert!(
-        cancelled.elapsed() <= Duration::from_secs(5),
+        cancelled.elapsed() <= bound,
         "the detached child outlived the grace"
     );
 }

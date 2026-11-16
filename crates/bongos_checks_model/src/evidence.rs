@@ -102,6 +102,11 @@ pub struct EvidenceRecord {
     pub digest: String,
     pub tree_key: String,
     pub tree: TreeKind,
+    /// The commit a base run checked out: the merge-base of the task branch's `HEAD` and its
+    /// base branch at the run's start. With several repositories, `<repository>=<commit>`
+    /// pairs in the check's order, separated by spaces. Empty for a run on the tip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     /// The combined digest of the key input files.
     pub key_inputs: String,
     pub variant: Variant,

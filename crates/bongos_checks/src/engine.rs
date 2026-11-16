@@ -17,18 +17,30 @@
 //!
 //! [`ChecksEngine::drain`] stops everything when the state writer moves to another process, and
 //! [`ChecksEngine::undrain`] takes runs again when that move is abandoned.
+//!
+//! A run with parameters (items, a repeat, or the base tree) records evidence that satisfies
+//! nothing. A base run checks out the merge-base of the task branch and its base branch in a
+//! second tree a lane lends ([`TaskTrees::second_tree`]), whose lease the engine holds until
+//! the check ends, or, when none is lent now, in a temporary tree under
+//! `task_checks.scratch_dir` that is removed when the check ends, however it ends. The task's
+//! own tree is never touched. Every check gets `BONGOS_CHECK_EVIDENCE`: the records of the task
+//! on its tree and on its base tree, and those of the same workflow run.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bongos_checks_model::decl;
-use bongos_checks_model::evidence::{CheckState, Current, EvidenceRecord, StartedBy, TreeKind};
+use bongos_checks_model::decl::{self, CheckDecl};
+use bongos_checks_model::evidence::{
+    CheckState, Current, EvidenceRecord, Params, StartedBy, TreeKind,
+};
 use bongos_checks_model::section::{Live, TaskSection, TreeState, section};
 use bongos_checks_model::verdict::{NoVerdictReason, Verdict};
 use bongos_checks_model::{Applicability, Row};
-use bongos_project_repo::{MAIN_BRANCH, StateWriter};
+use bongos_project_repo::{Git, MAIN_BRANCH, StateWriter};
 use bongos_workflow::RunId;
 use bongos_workflow_model::NodeKey;
 use futures::StreamExt as _;
@@ -39,18 +51,20 @@ use gpui::{
 };
 use settings::Settings as _;
 
+use crate::base_tree::{LentTreeError, TempTree, check_out_lent_tree, sweep_scratch};
+use crate::changed_files::merge_base;
 use crate::command_logic::dump_text;
 use crate::evidence_store::{scan_records, task_prefix};
 use crate::live::{Flush, LiveRow, LiveRows};
 use crate::pin::{Pin, master_definitions};
 use crate::pools::{CheckClock, CheckPoolsRegistry, ExecutorClock};
 use crate::process::StopHandle;
-use crate::run::{CheckRun, LiveState, Now};
+use crate::run::{CheckRun, LiveState, Now, RunTree};
 use crate::settings::TaskChecksSettings;
-use crate::task_source::{TaskChecks, TaskSource, WorkTaskSource};
+use crate::task_source::{TREE_KEYS_FOLDER, TaskChecks, TaskSource, WorkTaskSource};
 use crate::task_tree::{RunWorktrees, TaskTree, WorkflowRunWorktrees, resolve_task_tree};
-use crate::tree_key::{key_inputs_digest, tree_key};
-use crate::trees::{EnvBase, TaskTreesRegistry};
+use crate::tree_key::{key_inputs_digest, trees_key};
+use crate::trees::{EnvBase, SecondTree, SecondTreeLease, TaskTreesRegistry};
 
 /// What a run of checks is asked for.
 #[derive(Clone, Debug)]
@@ -63,6 +77,9 @@ pub struct RunChecksRequest {
     pub started_by: StartedBy,
     /// The workflow node (a `use = "checks"` node) the run is for; `None` for a manual run.
     pub node: Option<(RunId, NodeKey)>,
+    /// `Some` for a parameterized run (items, a repeat, or the base tree), whose records
+    /// satisfy nothing.
+    pub params: Option<Params>,
 }
 
 impl RunChecksRequest {
@@ -74,7 +91,16 @@ impl RunChecksRequest {
             clean: false,
             started_by: StartedBy::Person,
             node: None,
+            params: None,
         }
+    }
+
+    /// The tree the run's checks run on: the base tree when its parameters say so.
+    pub fn tree_kind(&self) -> TreeKind {
+        self.params
+            .as_ref()
+            .and_then(|params| params.tree)
+            .unwrap_or(TreeKind::Tip)
     }
 }
 
@@ -192,11 +218,15 @@ pub struct ChecksStatus {
     pub running: bool,
 }
 
+/// The second trees a run holds now; dropping one releases it.
+type Leases = Rc<RefCell<Vec<Box<dyn SecondTreeLease>>>>;
+
 struct ActiveRun {
     stop: StopHandle,
     live: BTreeMap<String, Live>,
     writer: Arc<StateWriter>,
     node: Option<(RunId, NodeKey)>,
+    leases: Leases,
 }
 
 /// Everything a run needs, gathered before it starts.
@@ -212,6 +242,7 @@ struct Plan {
     trees: Option<Rc<dyn crate::trees::TaskTrees>>,
     clock: Rc<dyn CheckClock>,
     now: Now,
+    leases: Leases,
 }
 
 /// What a check run tells the engine while it runs.
@@ -483,6 +514,7 @@ impl ChecksEngine {
                 live: BTreeMap::new(),
                 writer: plan.writer.clone(),
                 node: plan.request.node.clone(),
+                leases: plan.leases.clone(),
             },
         );
         cx.emit(ChecksEvent::Changed {
@@ -528,19 +560,22 @@ impl ChecksEngine {
     /// starts and new runs are refused until [`Self::undrain`]; every running part is stopped as
     /// at quit (SIGTERM, then SIGKILL within `task_checks.kill_grace_seconds`), the parts that
     /// finished staying in each unfinished record so a later run on the same key resumes from
-    /// them; every pool lease is dropped with its part; and `checks.live` is cleared at once,
-    /// with every pending or scheduled live write forgotten.
+    /// them; every pool lease is dropped with its part; every second tree a base run holds is
+    /// released when its check ends, and at the latest when the drain resolves; and
+    /// `checks.live` is cleared at once, with every pending or scheduled live write forgotten.
     ///
     /// Resolves once every run has ended, or once the grace has passed on the engine's clock,
     /// whichever comes first, with the workflow nodes whose runs it stopped (none for manual
-    /// runs). The engine leases no second tree and answers no landing job yet, so there is
-    /// nothing more to let go.
+    /// runs). The engine answers no landing job yet, so there is nothing more to let go.
     ///
     /// Guaranteed at resolution: every run was told to stop, no run or part starts while
-    /// drained, and `checks.live` is empty and stays so while drained (no live row is written).
-    /// Not guaranteed when the grace wins: a run that has not ended yet is still active
-    /// ([`Self::is_running`]), its process may still be exiting, its pool lease may still be
-    /// held and its record may not yet hold the stopped part; those settle when the run ends.
+    /// drained, every second tree lease is released (but one whose tree git is checking out
+    /// right then, which goes as soon as that git command ends, with no other after it), and
+    /// `checks.live` is empty and stays so while drained (no live row is written). Not
+    /// guaranteed when the grace wins: a run that
+    /// has not ended yet is still active ([`Self::is_running`]), its process may still be
+    /// exiting, its pool lease may still be held, its temporary tree may not be removed yet and
+    /// its record may not yet hold the stopped part; those settle when the run ends.
     pub fn drain(&mut self, cx: &mut Context<Self>) -> Task<Vec<(RunId, NodeKey)>> {
         self.drained = true;
         self.live_epoch += 1;
@@ -548,7 +583,9 @@ impl ChecksEngine {
         // left scheduled for a dropped timer.
         self.live_rows.clear_all();
         let mut stopped = Vec::new();
+        let mut leases = Vec::new();
         for run in self.active.values() {
+            leases.push(run.leases.clone());
             run.stop.stop();
             if let Some(node) = &run.node {
                 stopped.push(node.clone());
@@ -574,7 +611,20 @@ impl ChecksEngine {
                     _ = bound => {},
                 }
             }
+            for leases in leases {
+                leases.borrow_mut().clear();
+            }
             stopped
+        })
+    }
+
+    /// Removes the temporary base trees a crash left in the scratch folder: every one whose
+    /// owner process is gone. Resolves with the trees removed. `git` runs the removals.
+    pub fn sweep_scratch(&self, git: Git, cx: &mut Context<Self>) -> Task<Vec<PathBuf>> {
+        let scratch = TaskChecksSettings::get_global(cx).scratch_folder();
+        cx.background_spawn(async move {
+            let index_dir = scratch.join(TREE_KEYS_FOLDER);
+            sweep_scratch(&git, &scratch, &index_dir).await
         })
     }
 
@@ -675,6 +725,7 @@ impl ChecksEngine {
             trees: TaskTreesRegistry::get(cx),
             clock: self.clock.clone(),
             now: self.now.clone(),
+            leases: Rc::default(),
         })
     }
 
@@ -827,7 +878,8 @@ async fn execute(plan: Plan, this: &WeakEntity<ChecksEngine>, cx: &mut AsyncApp)
         }
         let name = row.decl.name.clone();
         let (sender, mut messages) = mpsc::unbounded();
-        let prepared = prepare(&plan, row, &pin, sender).await;
+        let mut leftovers = Leftovers::default();
+        let prepared = prepare(&plan, row, &pin, sender, &mut leftovers).await;
         let (verdict, record_id, state) = match prepared {
             Err(reason) => (Verdict::NoVerdict(reason), None, None),
             Ok((check_run, state)) => {
@@ -850,15 +902,17 @@ async fn execute(plan: Plan, this: &WeakEntity<ChecksEngine>, cx: &mut AsyncApp)
                         .ok();
                 }
                 match result {
-                    Ok(record) => (record.verdict.clone(), Some(record.id), Some(state)),
+                    Ok(record) => (record.verdict.clone(), Some(record.id), state),
                     Err(error) => (
                         Verdict::NoVerdict(start_failed("the check run", format!("{error:#}"))),
                         None,
-                        Some(state),
+                        state,
                     ),
                 }
             }
         };
+        leftovers.clear().await;
+        plan.leases.borrow_mut().clear();
         this.update(cx, |engine, cx| {
             engine.finished(&task_id, &name, state, &verdict, cx)
         })
@@ -877,14 +931,239 @@ async fn execute(plan: Plan, this: &WeakEntity<ChecksEngine>, cx: &mut AsyncApp)
     RunOutcome::Ran { results, cancelled }
 }
 
-/// The run of one check: its digest, the key of the tree, its environment and its hooks. A
-/// reason when it cannot start.
+/// What a check's run leaves to undo when it ends: its temporary trees and its evidence file.
+/// A temporary tree dropped without [`Leftovers::clear`] is still removed, on a thread.
+#[derive(Default)]
+struct Leftovers {
+    temps: Vec<TempTree>,
+    evidence: Option<PathBuf>,
+}
+
+impl Leftovers {
+    async fn clear(&mut self) {
+        for temp in self.temps.drain(..) {
+            temp.remove().await;
+        }
+        if let Some(evidence) = self.evidence.take() {
+            std::fs::remove_file(evidence).ok();
+        }
+    }
+}
+
+/// One repository's tree a check runs in.
+struct RepoTree {
+    repo: String,
+    path: PathBuf,
+    env: EnvBase,
+}
+
+/// The tip tree of each repository the check runs in, in its order: the task's own tree for the
+/// task's own repository (and for a check that names none), else the tree a lane serves.
+fn tip_trees(plan: &Plan, decl: &CheckDecl) -> Result<Vec<RepoTree>, NoVerdictReason> {
+    let task = &plan.task;
+    let own = task.repo.clone().unwrap_or_default();
+    let repos = decl
+        .repos
+        .clone()
+        .filter(|repos| !repos.is_empty())
+        .unwrap_or_else(|| vec![own.clone()]);
+    repos
+        .into_iter()
+        .map(|repo| {
+            let path = if repo == own {
+                Some(plan.tree.path.clone())
+            } else {
+                plan.trees
+                    .as_ref()
+                    .and_then(|trees| trees.tip(&task.task_id, &repo))
+            };
+            let path = path.ok_or_else(|| {
+                NoVerdictReason::TreeUnavailable(format!("{} has no tree in {repo}", task.name))
+            })?;
+            let env = EnvBase::for_tip(plan.trees.as_deref(), &task.task_id, &repo);
+            Ok(RepoTree { repo, path, env })
+        })
+        .collect()
+}
+
+/// The key of `trees`: one tree's own key, or the digest of the sorted (repository, key) pairs.
+async fn key_of(
+    git: &Git,
+    trees: &[RepoTree],
+    index_dir: &Path,
+) -> Result<String, NoVerdictReason> {
+    let pairs: Vec<(&str, &Path)> = trees
+        .iter()
+        .map(|tree| (tree.repo.as_str(), tree.path.as_path()))
+        .collect();
+    trees_key(git, &pairs, index_dir)
+        .await
+        .map(|key| key.as_str().to_string())
+        .map_err(|error| NoVerdictReason::TreeUnavailable(error.to_string()))
+}
+
+/// The merge-base of each tip's `HEAD` and the task's base branch, resolved now.
+async fn base_commits(
+    git: &Git,
+    tips: &[RepoTree],
+    branch: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let branch = branch.ok_or_else(|| "the task has no base branch".to_string())?;
+    let mut commits = Vec::with_capacity(tips.len());
+    for tip in tips {
+        let commit = merge_base(git, &tip.path, branch)
+            .await
+            .map_err(|error| format!("finding the base commit: {error}"))?;
+        commits.push(commit);
+    }
+    Ok(commits)
+}
+
+/// The base commits as a record keeps them: the commit for one repository, else
+/// `<repository>=<commit>` pairs separated by spaces.
+fn base_text(tips: &[RepoTree], commits: &[String]) -> String {
+    match commits {
+        [commit] => commit.clone(),
+        _ => tips
+            .iter()
+            .zip(commits)
+            .map(|(tip, commit)| format!("{}={commit}", tip.repo))
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// The base tree of each repository at its commit: the second tree a lane lends now, checked
+/// out at the commit (its lease held in `plan.leases`), else a temporary tree, kept in
+/// `leftovers` for removal. Never waits for a lease.
+async fn base_trees(
+    plan: &Plan,
+    tips: &[RepoTree],
+    commits: &[String],
+    leftovers: &mut Leftovers,
+) -> Result<Vec<RepoTree>, NoVerdictReason> {
+    let task = &plan.task;
+    let git = task.project.git();
+    let mut protected: Vec<&Path> = tips.iter().map(|tip| tip.path.as_path()).collect();
+    protected.push(plan.tree.path.as_path());
+    protected.push(task.project.location().repository.as_path());
+    let mut trees = Vec::with_capacity(tips.len());
+    for (tip, commit) in tips.iter().zip(commits) {
+        if plan.stop.is_stopped() {
+            return Err(NoVerdictReason::Cancelled);
+        }
+        let answer = plan
+            .trees
+            .as_ref()
+            .map_or(SecondTree::Unavailable, |trees| {
+                trees.second_tree(&task.task_id, &tip.repo)
+            });
+        match answer {
+            SecondTree::Lease(lease) => {
+                let path = lease.path().to_path_buf();
+                let env = EnvBase::for_lease(lease.as_ref());
+                // Held here, out of a drain's reach, while git changes the tree: a lease is
+                // let go only once no git command runs in it. Dropped on an error.
+                check_out_lent_tree(git, &path, commit, &protected, &plan.stop)
+                    .await
+                    .map_err(|error| match error {
+                        LentTreeError::Stopped => NoVerdictReason::Cancelled,
+                        LentTreeError::Failed(why) => NoVerdictReason::StartFailed(why),
+                    })?;
+                plan.leases.borrow_mut().push(lease);
+                if plan.stop.is_stopped() {
+                    return Err(NoVerdictReason::Cancelled);
+                }
+                trees.push(RepoTree {
+                    repo: tip.repo.clone(),
+                    path,
+                    env,
+                });
+            }
+            SecondTree::Busy | SecondTree::Unavailable => {
+                let temp = TempTree::create(
+                    git,
+                    &tip.path,
+                    &plan.settings.scratch_folder(),
+                    commit,
+                    &task.index_dir,
+                    &protected,
+                )
+                .await
+                .map_err(NoVerdictReason::StartFailed)?;
+                trees.push(RepoTree {
+                    repo: tip.repo.clone(),
+                    path: temp.path().to_path_buf(),
+                    env: EnvBase::Own,
+                });
+                leftovers.temps.push(temp);
+            }
+        }
+    }
+    Ok(trees)
+}
+
+/// Writes the read-only `BONGOS_CHECK_EVIDENCE` file: every record of the task on `tip_key`, on
+/// the base tree at `base`, and of the same workflow run, oldest first.
+fn write_evidence(
+    plan: &Plan,
+    tip_key: &str,
+    base: Option<&str>,
+) -> Result<PathBuf, NoVerdictReason> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let task = &plan.task;
+    let records = plan
+        .writer
+        .read(|read| scan_records(read, &task_prefix(&task.task_id)))
+        .map_err(|error| start_failed("reading the evidence", format!("{error:#}")))?;
+    let run_id = match &plan.request.started_by {
+        StartedBy::Run { run_id, .. } => Some(run_id.clone()),
+        _ => plan.request.node.as_ref().map(|(run, _)| run.clone()),
+    };
+    let mut listed: Vec<&EvidenceRecord> = records
+        .iter()
+        .filter(|record| {
+            record.task_id == task.task_id
+                && (record.tree_key == tip_key
+                    || (record.tree == TreeKind::Base
+                        && base.is_some()
+                        && record.base.as_deref() == base)
+                    || run_id.as_ref().is_some_and(|id| {
+                        matches!(&record.started_by, StartedBy::Run { run_id, .. } if run_id == id)
+                    }))
+        })
+        .collect();
+    listed.sort_by(|a, b| a.id.cmp(&b.id));
+    let json = serde_json::json!({
+        "task_id": task.task_id,
+        "tree_key": tip_key,
+        "base": base,
+        "run_id": run_id,
+        "records": listed,
+    });
+    std::fs::create_dir_all(&task.output_dir)
+        .map_err(|error| start_failed("creating the output folder", error))?;
+    let path = task
+        .output_dir
+        .join(format!("evidence-{}.json", uuid::Uuid::now_v7()));
+    std::fs::write(&path, json.to_string())
+        .map_err(|error| start_failed("writing the evidence file", error))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+        .map_err(|error| start_failed("writing the evidence file", error))?;
+    Ok(path)
+}
+
+/// The run of one check: its digest, its trees and their key, its environment and its hooks,
+/// and the check's current state on the tip (none for a base run). A reason when it cannot
+/// start. What must be undone when the check ends goes into `leftovers`.
 async fn prepare(
     plan: &Plan,
     row: &Row,
     pin: &Arc<Pin>,
     sender: mpsc::UnboundedSender<Message>,
-) -> Result<(CheckRun, CheckState), NoVerdictReason> {
+    leftovers: &mut Leftovers,
+) -> Result<(CheckRun, Option<CheckState>), NoVerdictReason> {
     let task = &plan.task;
     let decl = row.decl.clone();
     let mut files = BTreeMap::new();
@@ -899,17 +1178,45 @@ async fn prepare(
     let digest =
         decl::digest(&decl, &files).map_err(|error| start_failed("digesting the check", error))?;
     let git = task.project.git().clone();
-    let key = tree_key(&git, &plan.tree.path, &task.index_dir)
-        .await
-        .map_err(|error| NoVerdictReason::TreeUnavailable(error.to_string()))?;
+    let tips = tip_trees(plan, &decl)?;
+    let tip_key = key_of(&git, &tips, &task.index_dir).await?;
+    let kind = plan.request.tree_kind();
+    let commits = base_commits(&git, &tips, task.base_branch.as_deref()).await;
+    let base = commits
+        .as_ref()
+        .ok()
+        .map(|commits| base_text(&tips, commits));
+    let (trees, key) = match kind {
+        TreeKind::Tip => (tips, tip_key.clone()),
+        TreeKind::Base => {
+            let commits = commits.map_err(NoVerdictReason::StartFailed)?;
+            let trees = base_trees(plan, &tips, &commits, leftovers).await?;
+            let key = key_of(&git, &trees, &task.index_dir).await?;
+            (trees, key)
+        }
+    };
     let inputs: Vec<_> = decl
         .key_inputs
         .iter()
-        .map(|path| plan.tree.path.join(path))
+        .map(|path| trees[0].path.join(path))
         .collect();
     let key_inputs = key_inputs_digest(&inputs)
         .map_err(|error| start_failed("reading the key inputs", error))?;
-    let state = CheckState::new(key.as_str(), &key_inputs, &digest);
+    let state = (kind == TreeKind::Tip).then(|| CheckState::new(&key, &key_inputs, &digest));
+    leftovers.evidence = Some(write_evidence(plan, &tip_key, base.as_deref())?);
+    let mut trees = trees.into_iter();
+    let Some(first) = trees.next() else {
+        return Err(NoVerdictReason::TreeUnavailable(format!(
+            "{} has no tree to check",
+            task.name
+        )));
+    };
+    let other_trees = trees
+        .map(|tree| RunTree {
+            path: tree.path,
+            env: tree.env,
+        })
+        .collect();
     let changed = sender.clone();
     let check_run = CheckRun {
         task_id: task.task_id.clone(),
@@ -917,20 +1224,18 @@ async fn prepare(
         digest: digest.to_string(),
         pin: pin.clone(),
         master: master_definitions(&task.project),
-        tree: plan.tree.path.clone(),
-        tree_kind: TreeKind::Tip,
-        tree_key: key.as_str().to_string(),
+        tree: first.path,
+        other_trees,
+        tree_kind: kind,
+        base: (kind == TreeKind::Base).then_some(base).flatten(),
+        tree_key: key,
         key_inputs,
         git,
         base_branch: task.base_branch.clone(),
-        env: EnvBase::for_tip(
-            plan.trees.as_deref(),
-            &task.task_id,
-            task.repo.as_deref().unwrap_or_default(),
-        ),
+        env: first.env,
         output_dir: task.output_dir.clone(),
-        evidence: None,
-        params: None,
+        evidence: leftovers.evidence.clone(),
+        params: plan.request.params.clone(),
         started_by: plan.request.started_by.clone(),
         clean: plan.request.clean,
         settings: plan.settings.clone(),

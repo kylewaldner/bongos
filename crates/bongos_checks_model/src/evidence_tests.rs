@@ -40,6 +40,7 @@ pub(crate) fn record(check: &str, id: &str, scope: Scope) -> EvidenceRecord {
         digest: "d1".to_string(),
         tree_key: "tree1".to_string(),
         tree: TreeKind::Tip,
+        base: None,
         key_inputs: "k1".to_string(),
         variant: Variant {
             scope,

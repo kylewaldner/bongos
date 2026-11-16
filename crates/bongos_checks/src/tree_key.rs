@@ -99,9 +99,7 @@ pub async fn tree_key(git: &Git, tree: &Path, index_dir: &Path) -> Result<TreeKe
         .map_err(|error| TreeError::io(format!("creating {}", index_dir.display()), error))?;
     let index_dir = std::path::absolute(index_dir)
         .map_err(|error| TreeError::io(format!("resolving {}", index_dir.display()), error))?;
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_os_str().as_encoded_bytes());
-    let index = index_dir.join(format!("{:x}", hasher.finalize()));
+    let index = private_index(&canonical, &index_dir);
 
     git.run_on_index(
         &canonical,
@@ -142,6 +140,30 @@ fn with_fixed_settings<'a>(args: &[&'a str]) -> Vec<&'a str> {
     }
     all.extend_from_slice(args);
     all
+}
+
+/// The private index [`tree_key`] keeps for the tree at `canonical` (its canonical path).
+pub(crate) fn private_index(canonical: &Path, index_dir: &Path) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_os_str().as_encoded_bytes());
+    index_dir.join(format!("{:x}", hasher.finalize()))
+}
+
+/// The key of a check's trees, one per repository: the tree's own key for one, else
+/// [`combine_trees`] over the `(repository, tree key)` pairs.
+pub(crate) async fn trees_key(
+    git: &Git,
+    trees: &[(&str, &Path)],
+    index_dir: &Path,
+) -> Result<TreeKey, TreeError> {
+    let mut keys = Vec::with_capacity(trees.len());
+    for (repository, tree) in trees {
+        keys.push((*repository, tree_key(git, tree, index_dir).await?));
+    }
+    match keys.as_slice() {
+        [(_, key)] => Ok(key.clone()),
+        _ => Ok(combine_trees(&keys)),
+    }
 }
 
 /// One key for a check that spans several repositories: the SHA-256 hex of the

@@ -642,10 +642,13 @@ struct Stray {
 /// token or descending from it, SIGKILL to all of them one second before the grace ends.
 fn stop_part(process: &mut NodeProcess, token: &str, grace: Duration) {
     let began = Instant::now();
-    let leader = process.record().pid;
+    let record = process.record();
+    let leader = record.pid;
+    // Every holder of the token started after the leader, which carried it first.
+    let since = Some(record.start_time).filter(|start| *start != 0);
     // Parent links break once the leader dies, so they are read first.
     let mut strays = descendants(leader);
-    strays.extend(token_holders(token));
+    strays.extend(token_holders(token, since));
     for stray in &strays {
         signal_stray(*stray, Signal::Term);
     }
@@ -655,13 +658,13 @@ fn stop_part(process: &mut NodeProcess, token: &str, grace: Duration) {
     );
     // Whatever started since is found by the token again, and on every wait below, so a
     // process forking while the others die is killed too.
-    strays.extend(token_holders(token));
+    strays.extend(token_holders(token, since));
     for stray in &strays {
         signal_stray(*stray, Signal::Kill);
     }
     let deadline = stop_deadline(began, grace);
     while Instant::now() < deadline {
-        let late = token_holders(token);
+        let late = token_holders(token, since);
         for stray in &late {
             signal_stray(*stray, Signal::Kill);
         }
@@ -713,10 +716,15 @@ fn descendants(leader: u32) -> Vec<Stray> {
     found
 }
 
-/// Every process of this user whose environment holds `BONGOS_CHECK_TOKEN=<token>`. Linux only;
-/// elsewhere the environment of another process cannot be read.
+/// Every process of this user whose environment holds `BONGOS_CHECK_TOKEN=<token>`, among those
+/// started at or after `since` (a start time in clock ticks) when given. Linux only; elsewhere
+/// the environment of another process cannot be read.
+///
+/// Reading a process's environment waits on its memory map lock, which a busy process (a
+/// compiler, a linker) can hold for long on a loaded machine, so the start time, which needs no
+/// such lock, rules out the older processes first.
 #[cfg(target_os = "linux")]
-fn token_holders(token: &str) -> Vec<Stray> {
+fn token_holders(token: &str, since: Option<u64>) -> Vec<Stray> {
     use std::os::unix::fs::MetadataExt as _;
     let needle = format!("{TOKEN_VAR}={token}");
     let needle = needle.as_bytes();
@@ -735,20 +743,26 @@ fn token_holders(token: &str) -> Vec<Stray> {
             if entry.metadata().ok()?.uid() != uid {
                 return None;
             }
+            let started = start_time(pid);
+            if let (Some(since), Some(started)) = (since, started)
+                && started < since
+            {
+                return None;
+            }
             let environ = std::fs::read(entry.path().join("environ")).ok()?;
             environ
                 .split(|byte| *byte == 0)
                 .any(|variable| variable == needle)
-                .then(|| Stray {
+                .then_some(Stray {
                     pid,
-                    start_time: start_time(pid),
+                    start_time: started,
                 })
         })
         .collect()
 }
 
 #[cfg(not(target_os = "linux"))]
-fn token_holders(_token: &str) -> Vec<Stray> {
+fn token_holders(_token: &str, _since: Option<u64>) -> Vec<Stray> {
     Vec::new()
 }
 
@@ -839,7 +853,8 @@ pub fn kill_orphan_parts(parts: &[PartRecord]) -> Vec<OrphanOutcome> {
     let mut strays = Vec::new();
     for part in &open {
         if let Some(token) = part.token.as_deref().filter(|token| !token.is_empty()) {
-            strays.extend(token_holders(token));
+            let since = part.pid_start_time.filter(|start| *start != 0);
+            strays.extend(token_holders(token, since));
         }
     }
     for stray in &strays {

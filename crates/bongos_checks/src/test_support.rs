@@ -142,6 +142,7 @@ pub(crate) fn record(task_id: &str, tree_key: &str, check: &str, id: &str) -> Ev
         digest: "d1".to_string(),
         tree_key: tree_key.to_string(),
         tree: TreeKind::Tip,
+        base: None,
         key_inputs: "k1".to_string(),
         variant: Variant {
             scope: bongos_checks_model::evidence::Scope::Items {
@@ -245,4 +246,145 @@ pub(crate) fn rerun_with_hostile_git_env(
         "the child run failed:\n{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// What [`FakeTrees::second_tree`] answers for one repository.
+#[derive(Clone, Debug)]
+pub(crate) enum FakeSecond {
+    /// Lends the tree at `path` with `env`; `Busy` while that lease lives.
+    Lease {
+        path: std::path::PathBuf,
+        env: Vec<(String, String)>,
+    },
+    Busy,
+    Unavailable,
+}
+
+/// The state of a [`FakeTrees`], set and read by the test.
+#[derive(Default)]
+pub(crate) struct FakeTreesState {
+    pub tips: std::collections::BTreeMap<String, std::path::PathBuf>,
+    pub envs: std::collections::BTreeMap<String, Vec<(String, String)>>,
+    /// A repository with no entry is `Unavailable`.
+    pub second: std::collections::BTreeMap<String, FakeSecond>,
+    /// Every repository `second_tree` was asked for, in order.
+    pub asked: Vec<String>,
+    /// Every repository a lease was handed out for, in order.
+    pub leased: Vec<String>,
+    /// Every repository whose lease was dropped, in order, once per lease.
+    pub released: Vec<String>,
+    /// The repositories leased now.
+    pub held: std::collections::BTreeSet<String>,
+}
+
+/// A [`crate::trees::TaskTrees`] over the repositories the test names; a lease records its
+/// release when it is dropped.
+#[derive(Clone, Default)]
+pub(crate) struct FakeTrees(pub std::rc::Rc<std::cell::RefCell<FakeTreesState>>);
+
+impl FakeTrees {
+    pub(crate) fn state(&self) -> std::cell::RefMut<'_, FakeTreesState> {
+        self.0.borrow_mut()
+    }
+}
+
+impl crate::trees::TaskTrees for FakeTrees {
+    fn tip(&self, _: &str, repo: &str) -> Option<std::path::PathBuf> {
+        self.0.borrow().tips.get(repo).cloned()
+    }
+
+    fn second_tree(&self, _: &str, repo: &str) -> crate::trees::SecondTree {
+        let mut state = self.0.borrow_mut();
+        state.asked.push(repo.to_string());
+        if state.held.contains(repo) {
+            return crate::trees::SecondTree::Busy;
+        }
+        match state.second.get(repo).cloned() {
+            Some(FakeSecond::Lease { path, env }) => {
+                state.held.insert(repo.to_string());
+                state.leased.push(repo.to_string());
+                crate::trees::SecondTree::Lease(Box::new(FakeLease {
+                    repo: repo.to_string(),
+                    path,
+                    env,
+                    state: self.0.clone(),
+                }))
+            }
+            Some(FakeSecond::Busy) => crate::trees::SecondTree::Busy,
+            Some(FakeSecond::Unavailable) | None => crate::trees::SecondTree::Unavailable,
+        }
+    }
+
+    fn env(&self, _: &str, repo: &str) -> Vec<(String, String)> {
+        self.0.borrow().envs.get(repo).cloned().unwrap_or_default()
+    }
+}
+
+struct FakeLease {
+    repo: String,
+    path: std::path::PathBuf,
+    env: Vec<(String, String)>,
+    state: std::rc::Rc<std::cell::RefCell<FakeTreesState>>,
+}
+
+impl crate::trees::SecondTreeLease for FakeLease {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn env(&self) -> Vec<(String, String)> {
+        self.env.clone()
+    }
+}
+
+impl Drop for FakeLease {
+    fn drop(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.held.remove(&self.repo);
+        state.released.push(self.repo.clone());
+    }
+}
+
+/// Every file of the working tree at `tree` with its bytes, outside `.git`, plus `.git/HEAD`,
+/// `.git/index` and the commit `HEAD` names, so two snapshots are equal only when the tree's
+/// files and `HEAD` are byte-identical.
+pub(crate) fn tree_snapshot(
+    tree: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
+                    walk(root, &path, out);
+                }
+            } else {
+                let bytes = if kind.is_symlink() {
+                    std::fs::read_link(&path)
+                        .unwrap()
+                        .into_os_string()
+                        .into_encoded_bytes()
+                } else {
+                    std::fs::read(&path).unwrap()
+                };
+                out.insert(path.strip_prefix(root).unwrap().to_path_buf(), bytes);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(tree, tree, &mut out);
+    for name in [".git/HEAD", ".git/index"] {
+        out.insert(name.into(), std::fs::read(tree.join(name)).unwrap());
+    }
+    out.insert(
+        "HEAD commit".into(),
+        git_in(tree, &["rev-parse", "HEAD"]).into_bytes(),
+    );
+    out
 }
