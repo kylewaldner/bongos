@@ -1293,6 +1293,38 @@ fn a_group_with_inherited_checks_and_no_closing_checks_gets_no_marker_and_is_don
 }
 
 #[test]
+fn turning_the_setting_on_holds_no_task_finished_before_it_was_on() {
+    // Tasks that inherit checks from their group, and one with no checks at all, all finished
+    // while the setting was off: none has a marker, so none is held when it comes on.
+    let tree = group_tree(TESTS, &[("c1", ""), ("c2", "")], &[]);
+    let mut fixture = Fixture::with(false, tree);
+    fixture.set("c1", last_open()).unwrap();
+    fixture.set("c1", closed()).unwrap();
+    fixture.set("c2", closed()).unwrap();
+    assert_eq!(fixture.rows("c1"), (false, false));
+    assert_eq!(fixture.rows("c2"), (false, false));
+
+    fixture.hook.set_enabled(true);
+    fixture.restart();
+    assert!(fixture.holds().is_empty(), "{:?}", fixture.holds());
+    // Writes to the finished tasks after it came on change nothing either.
+    fixture.set("c1", completed()).unwrap();
+    assert_eq!(fixture.rows("c1"), (false, false));
+    assert!(fixture.holds().is_empty());
+
+    let fixture = Fixture::new(false);
+    fixture.set("bare", last_open()).unwrap();
+    fixture.set("bare", closed()).unwrap();
+    fixture.hook.set_enabled(true);
+    assert!(fixture.holds().is_empty());
+    // With the setting on, a task without checks is still never held.
+    fixture.set("bare", last_open()).unwrap();
+    fixture.set("bare", closed()).unwrap();
+    assert_eq!(fixture.rows("bare"), (false, false));
+    assert!(fixture.holds().is_empty());
+}
+
+#[test]
 fn a_child_owing_nothing_or_finishing_while_off_is_still_recorded() {
     let tree = group_tree(CLOSING, &[("c1", ""), ("c2", TESTS), ("c3", TESTS)], &[]);
     let fixture = Fixture::with(true, tree);
@@ -1422,6 +1454,11 @@ mod registered_in_init {
             crate::init(cx);
         });
         let hook = crate::owed::global_hook().expect("init registers the hook");
+        // On by default.
+        assert!(hook.is_enabled());
+        cx.update(|cx| assert!(DoneHolds::has_sources(cx)));
+
+        set_enabled(cx, false);
         assert!(!hook.is_enabled());
         cx.update(|cx| assert!(!DoneHolds::has_sources(cx)));
 
