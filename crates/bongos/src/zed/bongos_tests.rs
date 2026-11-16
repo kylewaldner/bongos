@@ -591,6 +591,7 @@ const EMACS_ACTIONS: [(&str, &str); 52] = [
     ("emacs::UniversalArgument", "emacs: universal argument"),
     ("emacs::DigitArgument", "emacs: digit argument"),
     ("emacs::NegativeArgument", "emacs: negative argument"),
+    ("emacs::OpenLine", "emacs: open line"),
 ];
 
 #[gpui::test]
