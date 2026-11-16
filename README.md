@@ -599,7 +599,7 @@ Commands that have no use for a count (C-x C-x, C-s, C-r, C-M-s, C-M-r, M-%, C-M
 clear it and run once; C-u C-x C-x swaps point and mark once, not four times.
 
 Any other command is repeated: C-u 3 on a command with no count of its own runs it three times
-(a negative count means nothing to it, and 0 runs nothing). The whole repeat is one undo step, so
+(a negative count runs it |N| times (the sign means nothing to it), and 0 runs nothing). The whole repeat is one undo step, so
 one C-/ takes it all back. It runs in slices so the window keeps drawing, and C-g ends it early.
 
 Where C-u is not the prefix, such as a picker's query editor, a command that takes an argument has

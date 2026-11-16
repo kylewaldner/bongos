@@ -462,3 +462,189 @@ async fn the_starters_of_a_search_run_once_with_an_argument_pending(cx: &mut Tes
     cx.run_until_parked();
     assert!(!argument_pending(&mut cx));
 }
+
+#[gpui::test]
+async fn a_counted_motion_between_two_kills_keeps_them_apart(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "ˇab\ncd\nef").await;
+    cx.simulate_keystrokes("ctrl-k ctrl-u 2 ctrl-f ctrl-k");
+    assert_eq!(
+        ring_texts(&mut cx),
+        vec!["d".to_string(), "ab".to_string()]
+    );
+}
+
+#[gpui::test]
+async fn a_counted_key_ends_a_yank_chain(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "ˇa b").await;
+    cx.simulate_keystrokes("alt-d ctrl-f alt-d");
+    assert_eq!(ring_texts(&mut cx), vec!["b".to_string(), "a".to_string()]);
+    cx.set_state("ˇ");
+    cx.simulate_keystrokes("ctrl-y");
+    cx.assert_editor_state("bˇ");
+    // A counted typed character is not a yank, so M-y no longer pops.
+    cx.simulate_keystrokes("ctrl-u 3 x alt-y");
+    cx.assert_editor_state("bxxxˇ");
+}
+
+#[gpui::test]
+async fn the_case_previous_word_keys_take_a_count_and_a_negative_count(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "one two threeˇ four").await;
+    cx.simulate_keystrokes("alt-2 alt-shift-u");
+    cx.assert_editor_state("one TWO THREEˇ four");
+
+    cx.set_state("ONE TWO THREEˇ FOUR");
+    cx.simulate_keystrokes("alt-3 alt-shift-l");
+    cx.assert_editor_state("one two threeˇ FOUR");
+
+    cx.set_state("hELLO wORLDˇ");
+    cx.simulate_keystrokes("alt-1 alt-shift-c");
+    cx.assert_editor_state("hELLO Worldˇ");
+
+    // Negative reverses: the words after point.
+    cx.set_state("one ˇtwo three four");
+    cx.simulate_keystrokes("alt-- 2 alt-shift-u");
+    cx.assert_editor_state("one ˇTWO THREE four");
+}
+
+#[gpui::test]
+async fn transpose_words_reverse_takes_a_count_and_a_negative_count(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "one two three fourˇ").await;
+    cx.simulate_keystrokes("alt-2 alt-shift-t");
+    cx.assert_editor_state("one fourˇ two three");
+
+    cx.set_state("one twoˇ three four");
+    cx.simulate_keystrokes("alt-- alt-shift-t");
+    cx.assert_editor_state("one three twoˇ four");
+}
+
+#[gpui::test]
+async fn zap_back_to_char_with_a_count_reaches_the_nth_occurrence(cx: &mut TestAppContext) {
+    let (editor, mut cx) = workspace_editor("a,b,c,d", 7, cx).await;
+    cx.simulate_keystrokes("alt-2 ctrl-alt-z");
+    cx.run_until_parked();
+    cx.simulate_keystrokes(",");
+    cx.run_until_parked();
+    assert_eq!(text_of(&editor, &mut cx), "a,b");
+}
+
+#[gpui::test]
+async fn zap_back_up_to_char_with_a_count_stops_after_the_nth_occurrence(
+    cx: &mut TestAppContext,
+) {
+    let (editor, mut cx) = workspace_editor("a,b,c,d", 7, cx).await;
+    cx.simulate_keystrokes("alt-2 ctrl-alt-shift-z");
+    cx.run_until_parked();
+    cx.simulate_keystrokes(",");
+    cx.run_until_parked();
+    assert_eq!(text_of(&editor, &mut cx), "a,b,");
+}
+
+/// Runs `keys` alone and then after C-u, from `marked`, and asserts the argument changed nothing
+/// and none is left pending.
+async fn assert_ignores_the_argument(cx: &mut TestAppContext, marked: &str, keys: &str) {
+    let mut cx = editor_with(cx, marked).await;
+    cx.simulate_keystrokes(keys);
+    let plain = cx.editor_state();
+    cx.set_state(marked);
+    cx.simulate_keystrokes(&format!("ctrl-u {keys}"));
+    assert_eq!(cx.editor_state(), plain, "{keys}");
+    assert!(!argument_pending(&mut cx), "{keys}");
+}
+
+#[gpui::test]
+async fn duplicate_and_comment_ignores_the_argument(cx: &mut TestAppContext) {
+    assert_ignores_the_argument(cx, "aˇb\nc", "ctrl-c c").await;
+}
+
+#[gpui::test]
+async fn comment_dwim_ignores_the_argument(cx: &mut TestAppContext) {
+    assert_ignores_the_argument(cx, "aˇb\nc", "ctrl-c ;").await;
+}
+
+#[gpui::test]
+async fn delete_blank_lines_ignores_the_argument(cx: &mut TestAppContext) {
+    assert_ignores_the_argument(cx, "a\n\nˇ\n\nb", "ctrl-x ctrl-o").await;
+}
+
+#[gpui::test]
+async fn reposition_ignores_the_argument(cx: &mut TestAppContext) {
+    assert_ignores_the_argument(cx, &numbered(100, 50), "alt-r").await;
+}
+
+#[gpui::test]
+async fn pop_global_mark_ignores_the_argument(cx: &mut TestAppContext) {
+    assert_ignores_the_argument(cx, "aˇb\nc", "ctrl-x ctrl-.").await;
+}
+
+#[gpui::test]
+async fn delete_char_and_delete_backward_char_take_a_count(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "ˇabcdef").await;
+    cx.simulate_keystrokes("alt-3 ctrl-d");
+    cx.assert_editor_state("ˇdef");
+
+    cx.set_state("abcˇdef");
+    cx.simulate_keystrokes("alt-3 backspace");
+    cx.assert_editor_state("ˇdef");
+}
+
+#[gpui::test]
+async fn newline_inserts_that_many_newlines(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "ˇa").await;
+    cx.simulate_keystrokes("alt-3 enter");
+    cx.assert_editor_state("\n\n\nˇa");
+}
+
+#[gpui::test]
+async fn open_line_inserts_that_many_newlines_and_leaves_point_before_them(
+    cx: &mut TestAppContext,
+) {
+    let mut cx = editor_with(cx, "fooˇbar").await;
+    cx.simulate_keystrokes("alt-2 ctrl-o");
+    cx.assert_editor_state("fooˇ\n\nbar");
+}
+
+#[gpui::test]
+async fn kill_line_with_a_zero_or_negative_argument_kills_backward(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "abˇcd\nef").await;
+    cx.simulate_keystrokes("alt-0 ctrl-k");
+    cx.assert_editor_state("ˇcd\nef");
+    assert_eq!(ring_texts(&mut cx), vec!["ab".to_string()]);
+
+    cx.set_state("aa\nbˇb\ncc");
+    cx.simulate_keystrokes("alt-- ctrl-k");
+    cx.assert_editor_state("ˇb\ncc");
+}
+
+#[gpui::test]
+async fn kill_whole_line_with_a_negative_argument_kills_the_lines_above(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "aa\nbb\ncˇc\ndd").await;
+    cx.simulate_keystrokes("alt-- 2 ctrl-alt-k");
+    cx.assert_editor_state("aa\nˇdd");
+    assert_eq!(ring_texts(&mut cx), vec!["bb\ncc\n".to_string()]);
+}
+
+#[gpui::test]
+async fn the_transposes_take_a_negative_argument(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, "abˇcd").await;
+    cx.simulate_keystrokes("alt-- ctrl-t");
+    cx.assert_editor_state("bˇacd");
+
+    cx.set_state("one\ntwo\nthreeˇ\nfour");
+    cx.simulate_keystrokes("alt-- ctrl-x ctrl-t");
+    cx.assert_editor_state("twoˇ\none\nthree\nfour");
+
+    cx.set_state("one two threeˇ");
+    cx.simulate_keystrokes("alt-- alt-t");
+    cx.assert_editor_state("one threeˇ two");
+}
+
+#[gpui::test]
+async fn a_counted_motion_after_a_recenter_starts_the_cycle_again(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, &numbered(100, 50)).await;
+    cx.update_editor(|editor, _window, cx| editor.set_vertical_scroll_margin(2, cx));
+    cx.simulate_keystrokes("ctrl-l");
+    let middle = rows(&mut cx).1;
+    cx.simulate_keystrokes("ctrl-u 5 ctrl-n ctrl-l");
+    // The counted motion was a command in between, so this recenter starts over in the middle.
+    assert_eq!(rows(&mut cx).1, middle);
+}

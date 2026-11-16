@@ -28,6 +28,7 @@ use gpui::{
 };
 
 use crate::actions::{DigitArgument, KeyboardQuit, NegativeArgument, UniversalArgument};
+use crate::last_command;
 use crate::prefix_arg::{self, MAX_INSERT, Meaning};
 use crate::repeat;
 
@@ -208,6 +209,18 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
             in_origin,
             |name| prefix_arg::meaning(cx, name),
         );
+        // The action the key is bound to, for the last-command tracker: the keystroke observers
+        // never see a key this interceptor stops.
+        let key_action = {
+            let mut input = pending.clone();
+            input.push(event.keystroke.clone());
+            keymap
+                .borrow()
+                .bindings_for_input(&input, &event.context_stack)
+                .0
+                .first()
+                .map(|binding| binding.action().name())
+        };
         let Some(origin) = origin.filter(|_| in_origin) else {
             prefix_arg::cancel(window, cx);
             return;
@@ -217,6 +230,14 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
         let route = match route_action(&route) {
             Some(action) if !available(action, window, cx) => Route::Cancel,
             _ => route,
+        };
+        // What the stopped key leaves as the last command; the keys that only build the argument
+        // leave it alone.
+        let recorded = match &route {
+            Route::Adapter(_) | Route::CountField(..) | Route::Repeat(_) => Some(key_action),
+            Route::Redirect(target, _) => Some(Some(*target)),
+            Route::Type(_) => Some(None),
+            _ => None,
         };
         match route {
             Route::Through => return,
@@ -269,6 +290,9 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
             }
             Route::Repeat(action) => repeat::start(window, cx, action.as_ref(), arg, Some(&origin)),
             Route::Type(text) => type_text(&text, arg, &origin, window, cx),
+        }
+        if let Some(command) = recorded {
+            last_command::record(window, command, cx);
         }
         // The key is consumed here, so the chord it completed is no longer pending. Dispatching
         // an action lets events propagate again, so the key is stopped last.

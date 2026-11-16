@@ -13,7 +13,7 @@ use editor::{Editor, SelectionEffects, movement};
 use gpui::{Action, App, Entity, Window};
 use text::{Bias, SelectionGoal};
 
-use crate::prefix_arg::{MAX_INSERT, Meaning, declare};
+use crate::prefix_arg::{self, MAX_INSERT, Meaning, declare};
 
 /// The most undo steps one count takes: beyond this the history has long run out.
 const MAX_UNDO: u32 = 10_000;
@@ -274,6 +274,9 @@ fn newlines(arg: PrefixArg, editor: &Entity<Editor>, window: &mut Window, cx: &m
     let times = arg.value().min(MAX_INSERT);
     if times <= 0 {
         return;
+    }
+    if arg.value() > MAX_INSERT {
+        prefix_arg::show_limited(window, cx);
     }
     editor.update(cx, |editor, cx| {
         if editor.read_only(cx) {
