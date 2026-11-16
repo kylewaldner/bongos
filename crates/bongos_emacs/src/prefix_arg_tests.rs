@@ -15,6 +15,13 @@ fn hand_off(cx: &mut EditorTestContext) {
     cx.update(|window, cx| prefix_arg::hand_off(window, cx));
 }
 
+/// Dispatches synchronously on the focused editor, as a key's binding is, so a deferred handoff
+/// drop has not run yet.
+fn dispatch(cx: &mut EditorTestContext, action: impl gpui::Action) {
+    let editor = cx.editor.clone();
+    cx.update(|window, cx| editor.focus_handle(cx).dispatch_action(&action, window, cx));
+}
+
 fn pending(cx: &mut EditorTestContext) -> Option<PrefixArg> {
     cx.update(|window, cx| prefix_arg::pending(window, cx))
 }
@@ -37,7 +44,7 @@ async fn handed_off_argument_becomes_the_count_and_is_gone(cx: &mut TestAppConte
     assert_eq!(pending(&mut cx), Some(digit(3)));
     hand_off(&mut cx);
     assert_eq!(pending(&mut cx), None);
-    cx.dispatch_action(KillWord { count: None });
+    dispatch(&mut cx, KillWord { count: None });
     cx.assert_editor_state("ˇ four five");
     assert!(handoff_is_gone(&mut cx));
 }
@@ -49,7 +56,7 @@ async fn explicit_count_wins_and_the_handoff_is_cleared(cx: &mut TestAppContext)
     cx.set_state("ˇone two three four five");
     start(&mut cx, digit(3));
     hand_off(&mut cx);
-    cx.dispatch_action(KillWord { count: Some(1) });
+    dispatch(&mut cx, KillWord { count: Some(1) });
     cx.assert_editor_state("ˇ two three four five");
     assert!(handoff_is_gone(&mut cx));
 }
@@ -67,7 +74,7 @@ async fn ignored_action_runs_once_and_clears_the_handoff(cx: &mut TestAppContext
     });
     start(&mut cx, digit(5));
     hand_off(&mut cx);
-    cx.dispatch_action(KeyboardQuit);
+    dispatch(&mut cx, KeyboardQuit);
     assert!(handoff_is_gone(&mut cx));
     assert_eq!(pending(&mut cx), None);
 }
@@ -98,8 +105,7 @@ async fn blur_of_the_origin_editor_clears_the_argument(cx: &mut TestAppContext) 
     start(&mut cx, digit(3));
     assert_eq!(pending(&mut cx), Some(digit(3)));
     cx.update(|window, cx| {
-        let other = cx.focus_handle();
-        window.focus(&other, cx);
+        window.blur();
     });
     cx.run_until_parked();
     assert_eq!(pending(&mut cx), None);
