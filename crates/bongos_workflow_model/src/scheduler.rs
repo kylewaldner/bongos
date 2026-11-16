@@ -38,16 +38,20 @@
 //!   [`Limits::max_parallel_branches`]. Gates, sleeping polls and keys waiting their turn hold no
 //!   slot. Runs at once ([`Limits::max_concurrent_runs`]) are the engine's queue; [`Limits`]
 //!   offers the arithmetic.
-//! - A run that is halted, interrupted (an `Interrupted` key not started again), ended or
+//! - A run that is halted, interrupted (an `Interrupted` key not started again), held, ended or
 //!   cancelled gets no commands: it waits for Kyle ([`resume_set`], [`retry_set`]). A paused run
 //!   starts nothing, but still cancels, and ends once nothing is left to do.
+//! - Checks nodes: a `no_verdict` result with no route for it holds the run on that key
+//!   (`check had no verdict`) instead of failing it, and a resume reruns just that key. A routed
+//!   `no_verdict` routes like any result; `fail` is an ordinary result, never a failure.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use serde_json::Value;
 
 use crate::definition::{
-    Definition, EndKind, FanOut, FieldType, GateWhen, JoinWait, Node, Outcome, Route, Target,
+    Definition, EndKind, FanOut, FieldType, GateWhen, JoinWait, NO_VERDICT, Node, Outcome, Route,
+    Target,
 };
 use crate::failure::{Failure, FailureReason};
 use crate::record::{EndState, NodeKey, RunState};
@@ -125,6 +129,9 @@ pub enum Command {
     /// Stop every running key of the branch: a join `any` took another branch. Whatever the
     /// stopped tries record is ignored, since the branch no longer counts.
     CancelBranch { join: String, branch: Branch },
+    /// Hold the run on `key` (`Held`): a checks node gave no verdict and nothing routes it. The
+    /// run then waits for a resume, which reruns the key.
+    Hold { key: NodeKey, failure: Failure },
     /// Append `Ended`. A failure end of the definition ends with a `failure end reached` failure
     /// at the key that routed to it ([`Failed::failure`]).
     End {
@@ -201,6 +208,9 @@ pub struct Plan {
     pub sleeping: Vec<NodeKey>,
     /// Keys interrupted and not started again: the run waits for a resume.
     pub interrupted: Vec<NodeKey>,
+    /// Checks keys whose unrouted `no_verdict` holds the run, with why: the run waits for a
+    /// resume.
+    pub held: Vec<(NodeKey, Failure)>,
     /// Branches to merge before their join runs, as `(join node, branch, the join's key)`.
     pub merges: Vec<(String, Branch, NodeKey)>,
     /// Cancelled branches that still have running keys, as `(join node, branch)`.
@@ -231,6 +241,7 @@ impl Plan {
             && self.open_gates.is_empty()
             && self.sleeping.is_empty()
             && self.interrupted.is_empty()
+            && self.held.is_empty()
             && self.merges.is_empty()
             && self.cancelling.is_empty()
     }
@@ -270,7 +281,7 @@ pub fn step(
     limits: &Limits,
     free: usize,
 ) -> Vec<Command> {
-    if state.cancelled || state.ended.is_some() || state.halted {
+    if state.cancelled || state.ended.is_some() || state.halted || !state.held.is_empty() {
         return Vec::new();
     }
     let plan = plan(definition, state, limits);
@@ -293,6 +304,13 @@ pub fn step(
                 failure: failed.failure(),
             });
         }
+        return commands;
+    }
+    if !plan.held.is_empty() {
+        commands.extend(plan.held.iter().map(|(key, failure)| Command::Hold {
+            key: key.clone(),
+            failure: failure.clone(),
+        }));
         return commands;
     }
     if !state.paused {
@@ -385,13 +403,14 @@ pub fn plan(definition: &Definition, state: &RunState, limits: &Limits) -> Plan 
 }
 
 /// The keys a resume reruns, each as a new try that does not count against `retries`: every key
-/// interrupted or still recorded running (a halt). Completed keys are never in it, and a key
-/// waiting on an open gate stays a gate.
+/// interrupted, still recorded running (a halt) or held. Other completed keys are never in it,
+/// and a key waiting on an open gate stays a gate.
 pub fn resume_set(state: &RunState) -> Vec<NodeKey> {
     let keys: BTreeSet<&NodeKey> = state
         .running
         .keys()
         .chain(state.interrupted.keys())
+        .chain(state.held.keys())
         .filter(|key| !state.open_gates.contains_key(*key))
         .collect();
     keys.into_iter().cloned().collect()
@@ -563,6 +582,7 @@ enum Item {
     Gated(NodeKey),
     Sleeping(NodeKey),
     Interrupted(NodeKey),
+    Held(NodeKey, Failure),
     Merge(String, Branch, NodeKey),
     Failed(usize, Failed),
     End(ReachedEnd),
@@ -846,6 +866,17 @@ impl<'a> Walk<'a> {
         time: usize,
     ) -> Option<Chain> {
         let Some(route) = choose_route(node, typed) else {
+            if node.is_checks()
+                && typed.get("verdict").and_then(TypedValue::as_str) == Some(NO_VERDICT)
+            {
+                let failure = Failure::new(
+                    FailureReason::CheckNoVerdict,
+                    Some(chain.key.clone()),
+                    describe_no_verdict(node, typed),
+                );
+                self.push(&chain.scope, Item::Held(chain.key.clone(), failure));
+                return None;
+            }
             let failure = Failure::new(
                 FailureReason::NoRouteForResult,
                 Some(chain.key.clone()),
@@ -1199,6 +1230,7 @@ impl<'a> Walk<'a> {
                 Item::Gated(key) => plan.open_gates.push(key),
                 Item::Sleeping(key) => plan.sleeping.push(key),
                 Item::Interrupted(key) => plan.interrupted.push(key),
+                Item::Held(key, failure) => plan.held.push((key, failure)),
                 Item::Merge(join, branch, key) => plan.merges.push((join, branch, key)),
                 Item::Failed(time, failure) => failed.push((time, failure)),
                 Item::End(end) => plan.ends.push(end),
@@ -1241,6 +1273,27 @@ fn choose_route<'n>(node: &'n Node, typed: &TypedResult) -> Option<&'n Route> {
                 })
         })
         .or_else(|| node.routes.iter().find(|route| route.default))
+}
+
+/// "<check>: <reason>" for a checks node's unrouted `no_verdict`: the checks it names as failing
+/// (else the node), then its summary (else "no verdict").
+fn describe_no_verdict(node: &Node, typed: &TypedResult) -> String {
+    let failing: Vec<&str> = match typed.get("failing") {
+        Some(TypedValue::List(items)) => items.iter().filter_map(TypedValue::as_str).collect(),
+        _ => Vec::new(),
+    };
+    let check = if failing.is_empty() {
+        node.name.clone()
+    } else {
+        failing.join(", ")
+    };
+    let reason = typed
+        .get("summary")
+        .and_then(TypedValue::as_str)
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or("no verdict");
+    format!("{check}: {reason}")
 }
 
 /// "no route for mode = 'planned'", naming the routed fields' values.

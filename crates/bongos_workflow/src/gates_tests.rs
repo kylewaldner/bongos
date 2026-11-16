@@ -192,6 +192,22 @@ fn a_failed_run_needs_you_on_the_leaf_and_every_ancestor() {
     assert_eq!(rollup(group, &world.tree, &needing).needs_you, 1);
 }
 
+#[test]
+fn a_run_held_on_a_check_without_a_verdict_needs_you() {
+    let world = world();
+    let mut lifecycle = world.lifecycle();
+    let run = held_on_the_check(&world, &mut lifecycle);
+    let state = lifecycle.state(&run).unwrap();
+    assert_eq!(
+        gates::reasons(&state),
+        ["check had no verdict: lint: the runner crashed"]
+    );
+    assert_eq!(
+        gates::needs_you(&lifecycle),
+        [leaf_needs("check had no verdict: lint: the runner crashed")]
+    );
+}
+
 fn gated_spec(root: &std::path::Path) -> RunSpec {
     RunSpec {
         id: "01890a5d-ac96-774b-bcce-b30200000001".to_string(),

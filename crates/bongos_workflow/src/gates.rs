@@ -1,6 +1,7 @@
 //! Gates and what they tell the app (D14, D15): the `workflows` [`NeedsYouSource`] (a leaf with a
-//! branch at a gate, a failed run or an interrupted run needs Kyle, and feature 03 rolls that up
-//! through every ancestor), and one toast with an "Open run" action per gate or failure.
+//! branch at a gate, a failed run, an interrupted run or a run held on a check without a verdict
+//! needs Kyle, and feature 03 rolls that up through every ancestor), and one toast with an
+//! "Open run" action per gate or failure.
 //!
 //! A gate itself is two events in the run log: the runtime appends `GateOpened` the moment the
 //! scheduler offers it, which sets that branch waiting on Kyle (the other branches of a fan-out
@@ -50,6 +51,12 @@ pub fn reasons(state: &RunState) -> Vec<String> {
     if !state.interrupted.is_empty() {
         found.push("run interrupted".to_string());
     }
+    found.extend(
+        state
+            .held
+            .values()
+            .map(|failure| format!("check had no verdict: {}", failure.detail.trim())),
+    );
     found
 }
 
