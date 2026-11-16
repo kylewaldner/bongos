@@ -27,7 +27,9 @@ impl RenderOnce for ExtensionCard {
             v_flex()
                 .mt_4()
                 .w_full()
-                .h(rems_from_px(110.))
+                // Tall enough for the fourth row, the source line of a git-installed extension.
+                // Every card has this height, as the list measures one item for all of them.
+                .h(rems_from_px(130.))
                 .p_3()
                 .gap_2()
                 .bg(cx.theme().colors().elevated_surface_background.opacity(0.5))
