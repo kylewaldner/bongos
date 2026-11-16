@@ -35,6 +35,7 @@ mod settings;
 mod status;
 mod store;
 mod structure;
+mod text_views;
 mod view;
 mod working_copy_commands;
 mod worktrees;
@@ -55,6 +56,7 @@ pub use commands::{ready, set_new_task_todos, show_toast, with_task};
 pub use detail::{
     DetailLine, LineKind, SectionFocus, SectionRow, SectionTone, TaskDetailView, TaskSection,
     TaskSectionSource, TaskSectionsRegistry, lines as detail_lines, show_details,
+    show_details_with_sources,
 };
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, focus_task, is_project_top, target};
 pub use master_files::{MASTER_SUFFIX, MasterFile, master_file, master_file_at};
@@ -83,6 +85,7 @@ pub use store::{
     MAX_RETRIES, OLD_WORKTREE_NOTICE_KEY, Stats, WATCH_LATENCY, WorkCommand, WorkStore,
     WorkStoreEvent, WriteError,
 };
+pub use text_views::{open_file_at_line, open_following_text};
 pub use working_copy_commands::{
     edit_in_working_copy, working_copy_open_path, working_copy_to_edit,
 };

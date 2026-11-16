@@ -570,17 +570,50 @@ pub fn show_details(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    open_details(task_id, focus, false, workspace, window, cx)
+}
+
+/// Like [`show_details`], with the sources of every section shown, as `task_detail: toggle
+/// sources` shows them.
+pub fn show_details_with_sources(
+    task_id: &str,
+    focus: Option<SectionFocus>,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    open_details(task_id, focus, true, workspace, window, cx)
+}
+
+fn open_details(
+    task_id: &str,
+    focus: Option<SectionFocus>,
+    sources: bool,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let existing = workspace
         .items_of_type::<TaskDetailView>(cx)
         .find(|view| view.read(cx).task_id == task_id);
     let view: Entity<TaskDetailView> = match existing {
         Some(view) => {
-            view.update(cx, |view, cx| view.rebuild(cx));
+            view.update(cx, |view, cx| {
+                view.show_sources |= sources;
+                view.rebuild(cx)
+            });
             workspace.activate_item(&view, true, true, window, cx);
             view
         }
         None => {
-            let view = cx.new(|cx| TaskDetailView::new(task_id.to_string(), cx));
+            let view = cx.new(|cx| {
+                let mut view = TaskDetailView::new(task_id.to_string(), cx);
+                if sources {
+                    view.show_sources = true;
+                    view.rebuild(cx);
+                }
+                view
+            });
             workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
             view
         }

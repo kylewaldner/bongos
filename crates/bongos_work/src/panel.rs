@@ -695,10 +695,19 @@ impl Panel for WorkPanel {
     }
 }
 
-/// The task id a command acts on without asking: the selected row of the Work panel while the
-/// panel has focus and the row is a task, else the focused task when it names a task in the tree.
+/// The task id a command acts on without asking: the task of the details tab while it has
+/// focus, else the selected row of the Work panel while the panel has focus and the row is a
+/// task, else the focused task when it names a task in the tree.
 pub fn task_at_point(workspace: &Workspace, window: &Window, cx: &App) -> Option<String> {
     let tree = WorkStore::global(cx)?.read(cx).snapshot()?;
+    let in_details = workspace
+        .active_item_as::<crate::TaskDetailView>(cx)
+        .filter(|view| view.focus_handle(cx).contains_focused(window, cx))
+        .map(|view| view.read(cx).task_id().to_string())
+        .filter(|id| tree.task_by_id(id).is_some());
+    if in_details.is_some() {
+        return in_details;
+    }
     let selected = workspace
         .panel::<WorkPanel>(cx)
         .filter(|panel| panel.focus_handle(cx).contains_focused(window, cx))
