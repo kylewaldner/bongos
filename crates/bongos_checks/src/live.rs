@@ -36,6 +36,18 @@ pub fn part_key(task_id: &str, check: &str) -> String {
     format!("{PART_PREFIX}/{task_id}/{check}")
 }
 
+/// The key of the hold reason of task `task_id`.
+pub fn hold_key(task_id: &str) -> String {
+    format!("{HOLD_PREFIX}/{task_id}")
+}
+
+/// The reason the done rule holds a task, as its `hold/` row holds it ("not done: 2 checks
+/// missing").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoldRow {
+    pub reason: String,
+}
+
 /// What a check's run does now, as its live row holds it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]

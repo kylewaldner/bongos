@@ -5,7 +5,8 @@
 //! with its scope, parts, checkpoints, pool waits and no-verdict reruns, the pool seam, and the
 //! engine that runs a task's checks and the commands that drive it, its live rows in the state
 //! store, and the `checks` host command that reaches the engine from a process without the
-//! state writer, and the base trees of parameterized runs.
+//! state writer, the base trees of parameterized runs, the owed markers of finished tasks and
+//! the done hold they cause.
 
 mod actions;
 mod base_tree;
@@ -15,9 +16,11 @@ mod definitions;
 pub mod engine;
 mod evidence_store;
 mod exporter;
+pub mod holds;
 pub mod host;
 pub mod live;
 mod output;
+pub mod owed;
 mod pin;
 pub mod pools;
 pub mod process;
@@ -43,12 +46,14 @@ pub use evidence_store::{
     put_done, record_key, scan_records, scan_records_in, store_record, task_prefix,
 };
 pub use exporter::{ChecksExporter, EXPORT_NAMESPACE};
+pub use holds::{CHECKING, CHECKS_HOLD_SOURCE, ChecksHoldSource, ChecksHolds, read_holds};
 pub use host::{
     CHECKS_NAMESPACE, ChecksAccess, ChecksCommand, ChecksForwarder, ChecksForwarderRegistry,
     ChecksReply, checks_access,
 };
-pub use live::{LiveRow, clear_live, live_rows, part_key};
+pub use live::{HoldRow, LiveRow, clear_live, hold_key, live_rows, part_key};
 pub use output::{OutputSummary, cut_marker};
+pub use owed::{CHECKS_OWED_HOOK, ChecksOwedHook, OwedMarker, marker_in, put_marker};
 pub use pin::{Pin, PinPathError, master_definitions};
 pub use pools::{
     CheckClock, CheckPools, CheckPoolsRegistry, ExecutorClock, Holder, PoolLease, PoolLeaseHandle,
@@ -62,11 +67,15 @@ pub use task_tree::{RunWorktrees, TaskTree, WorkflowRunWorktrees};
 pub use tree_key::{TreeError, TreeKey, combine_trees, key_inputs_digest, tree_key};
 pub use trees::{EnvBase, SecondTree, SecondTreeLease, TaskTrees, TaskTreesRegistry};
 
-/// Registers the settings, the `checks` state exporter, the `checks` definition folder, the
-/// `checks-valid` landing check and the global [`ChecksEngine`].
+/// Registers the settings, the `checks-owed` state hook, the `checks` done hold source, the
+/// `checks` state exporter, the `checks` definition folder, the `checks-valid` landing check and
+/// the global [`ChecksEngine`]. Runs before any project opens: the first state writer seals the
+/// registry of state hooks.
 pub fn init(cx: &mut gpui::App) {
     use ::settings::Settings as _;
     TaskChecksSettings::register(cx);
+    owed::register_hook(cx);
+    holds::init(cx);
     exporter::ChecksExporter::register();
     definitions::register(cx);
     let engine = ChecksEngine::install(ChecksEngine::for_app(cx), cx);
@@ -96,6 +105,8 @@ mod exporter_tests;
 mod host_tests;
 #[cfg(test)]
 mod live_tests;
+#[cfg(test)]
+mod owed_tests;
 #[cfg(test)]
 mod pools_tests;
 #[cfg(test)]

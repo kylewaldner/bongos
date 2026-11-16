@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use bongos_work_model::rollup::{self, Rollup};
 use gpui::{App, Context, Global, SharedString};
@@ -192,6 +193,43 @@ pub trait DoneHoldSource: 'static {
     fn would_hold(&self, task_id: &str, cx: &mut App) -> gpui::Task<Option<String>>;
 }
 
+/// Brings what a done hold source knows up to date from the place it reads (run state, say). The
+/// store calls every registered refresher on its background executor each time it reads its
+/// tree, right after it read the projects, so the holds it asks the sources for next are at least
+/// as new as that tree: a hold that commits together with the write that finishes a task is
+/// never missing from the snapshot that shows the task finished.
+pub trait DoneHoldRefresher: Send + Sync + 'static {
+    fn refresh(&self);
+}
+
+/// The registered refreshers. Cloning shares the registry, so the store's session sees a
+/// refresher added after it started.
+#[derive(Clone, Default)]
+pub(crate) struct DoneHoldRefreshers(
+    Arc<parking_lot::Mutex<Vec<(String, Arc<dyn DoneHoldRefresher>)>>>,
+);
+
+impl Global for DoneHoldRefreshers {}
+
+impl DoneHoldRefreshers {
+    pub(crate) fn global(cx: &mut App) -> Self {
+        cx.default_global::<Self>().clone()
+    }
+
+    /// Calls every refresher, in the order they were added.
+    pub(crate) fn refresh(&self) {
+        let refreshers: Vec<_> = self
+            .0
+            .lock()
+            .iter()
+            .map(|(_, refresher)| refresher.clone())
+            .collect();
+        for refresher in refreshers {
+            refresher.refresh();
+        }
+    }
+}
+
 #[derive(Default)]
 struct DoneHoldSources(Vec<(String, Rc<dyn DoneHoldSource>)>);
 
@@ -217,6 +255,23 @@ impl DoneHolds {
             .0
             .retain(|(existing, _)| existing != name);
         Self::changed(cx);
+    }
+
+    /// Adds the refresher `name`, replacing one of the same name. It runs from the store's next
+    /// tree read on.
+    pub fn add_refresher(name: &str, refresher: Arc<dyn DoneHoldRefresher>, cx: &mut App) {
+        let refreshers = DoneHoldRefreshers::global(cx);
+        let mut list = refreshers.0.lock();
+        list.retain(|(existing, _)| existing != name);
+        list.push((name.to_string(), refresher));
+    }
+
+    /// Removes the refresher `name`.
+    pub fn remove_refresher(name: &str, cx: &mut App) {
+        DoneHoldRefreshers::global(cx)
+            .0
+            .lock()
+            .retain(|(existing, _)| existing != name);
     }
 
     /// Tells the store that what a source holds changed, so it fills the holds of its tree again.
