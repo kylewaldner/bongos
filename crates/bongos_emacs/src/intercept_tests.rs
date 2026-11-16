@@ -128,7 +128,17 @@ fn test_meaning(name: &str) -> Option<Meaning> {
 }
 
 fn route(pending: &str, typed: &str, arg: PrefixArg, in_origin: bool) -> Route {
-    let mut rows = bindings();
+    route_in(bindings(), pending, typed, arg, in_origin)
+}
+
+/// `route`, over the keymap `rows` instead of the test keys.
+fn route_in(
+    mut rows: Vec<KeyBinding>,
+    pending: &str,
+    typed: &str,
+    arg: PrefixArg,
+    in_origin: bool,
+) -> Route {
     rows.push(KeyBinding::new("ctrl-g", KeyboardQuit, Some("Editor")));
     let keymap = Keymap::new(rows);
     let stack = [
@@ -248,6 +258,70 @@ fn decide_routes_every_rule() {
     }
 }
 
+/// The test keys with ctrl-x also bound alone, to an action that declares no meaning, as the
+/// default keymap binds it to Cut while ctrl-x ctrl-x stays a chord. The lone binding is loaded
+/// first, as the default keymap is loaded before the Emacs keys: gpui waits for a chord only when
+/// it was loaded after the lone binding.
+fn bindings_with_lone_prefix() -> Vec<KeyBinding> {
+    let mut rows = bindings();
+    rows.insert(0, KeyBinding::new("ctrl-x", Plain, Some("Editor")));
+    rows
+}
+
+#[test]
+fn a_prefix_also_bound_alone_waits_for_the_chord() {
+    let universal = PrefixArg::universal();
+    // The lone binding would be repeated; the argument waits for the chord instead.
+    assert!(matches!(
+        route_in(bindings_with_lone_prefix(), "", "ctrl-x", universal, true),
+        Route::Wait
+    ));
+    // The chord it completes is routed by its own meaning.
+    assert!(matches!(
+        route_in(
+            bindings_with_lone_prefix(),
+            "ctrl-x",
+            "ctrl-x",
+            universal,
+            true
+        ),
+        Route::Cancel
+    ));
+    // A lone binding that prefixes nothing is still repeated.
+    assert!(matches!(
+        route_in(bindings_with_lone_prefix(), "", "ctrl-p", universal, true),
+        Route::Repeat(action) if action.name() == Plain::name_for_type()
+    ));
+}
+
+#[gpui::test]
+async fn a_chord_whose_prefix_is_bound_alone_runs_the_chord_once(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) =
+        window_with_keys(cx, "one two", bindings_with_lone_prefix()).await;
+    let lone = count_runs::<Plain>(&editor, &mut cx);
+    let names = Rc::new(RefCell::new(Vec::new()));
+    let log = names.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.observe_keystrokes(move |event, _, _| {
+            if let Some(action) = &event.action {
+                log.borrow_mut().push(action.name().to_string());
+            }
+        })
+    });
+    cx.simulate_keystrokes("ctrl-u ctrl-x");
+    assert!(pending(&mut cx).is_some());
+    assert_eq!(lone.get(), 0);
+    cx.simulate_keystrokes("ctrl-x");
+    assert_eq!(lone.get(), 0);
+    let runs = names
+        .borrow()
+        .iter()
+        .filter(|name| name.as_str() == ExchangePointAndMark::name_for_type())
+        .count();
+    assert_eq!(runs, 1);
+    assert_eq!(pending(&mut cx), None);
+}
+
 /// `count` words, `w0 w1 ...`.
 fn words(count: usize) -> String {
     (0..count)
@@ -262,9 +336,18 @@ async fn window_with(
     cx: &mut TestAppContext,
     text: &str,
 ) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
+    window_with_keys(cx, text, bindings()).await
+}
+
+/// `window_with`, with the keys `rows` bound instead of the test keys.
+async fn window_with_keys(
+    cx: &mut TestAppContext,
+    text: &str,
+    rows: Vec<KeyBinding>,
+) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
     let (workspace, editor, mut cx) = workspace_window_with(cx, |cx| {
         route_echo(cx);
-        cx.bind_keys(bindings());
+        cx.bind_keys(rows);
         declare_test_meanings(cx);
     })
     .await;

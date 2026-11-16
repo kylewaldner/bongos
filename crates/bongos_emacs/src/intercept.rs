@@ -8,9 +8,8 @@
 //!    untouched; those commands handle the argument themselves.
 //! 3. A digit (or a `-` before any digit) typed with no modifier but Shift, while the argument
 //!    accepts it, extends the argument; the key is stopped.
-//! 4. The keys are a pending prefix of a longer binding (and resolve to nothing, or to a command
-//!    that reads the argument): the key goes on and the argument waits for the binding to
-//!    complete. When gpui gives up on the longer binding and replays the keys without the
+//! 4. The keys are a pending prefix of a longer binding, whether or not they are also bound
+//!    alone: the key goes on and the argument waits for the binding to complete. When gpui gives up on the longer binding and replays the keys without the
 //!    interceptor, the argument is handed to whatever they run, so it never outlives them.
 //! 5. A binding resolved: its action's `Meaning` routes it. An action nothing on the focus path
 //!    handles clears the argument and the key goes on, as with no argument.
@@ -93,11 +92,10 @@ pub(crate) fn decide(
     }
     // A digit or `-` the argument no longer accepts (after C-u ended the number) leaves the
     // argument as it was and is an ordinary key: typed, it inserts its character as many times
-    // as the argument says, as in Emacs. A binding that reads the argument and is also the
-    // prefix of a longer one only runs when gpui gives up waiting, so the argument waits too.
-    if has_pending
-        && first.is_none_or(|action| matches!(meaning(action.name()), Some(Meaning::Reads)))
-    {
+    // as the argument says, as in Emacs. A key that is the prefix of a longer binding makes gpui
+    // wait for it, even when the key is also bound alone (C-x as Cut, the prefix of C-x C-x):
+    // the lone binding only runs when gpui gives up waiting, so the argument waits too.
+    if has_pending {
         return Route::Wait;
     }
     if let (Some(binding), Some(action)) = (binding, first) {
