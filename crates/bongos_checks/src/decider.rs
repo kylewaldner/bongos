@@ -148,6 +148,7 @@ pub(crate) struct GroupRunHold {
 /// One project whose writer the decider follows.
 struct Followed {
     writer: Weak<StateWriter>,
+    _retention: Task<()>,
     poke: mpsc::UnboundedSender<()>,
     /// Told when a decision that began after they were added has ended.
     waiters: Vec<oneshot::Sender<()>>,
@@ -365,9 +366,11 @@ impl ChecksEngine {
             })
             .ok();
         });
+        let retention = self.start_retention(&writer, repo.location().files.clone(), cx);
         self.decider.projects.insert(
             project,
             Followed {
+                _retention: retention,
                 writer: Arc::downgrade(&writer),
                 poke,
                 waiters: Vec::new(),
