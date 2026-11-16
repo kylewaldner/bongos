@@ -65,17 +65,20 @@ pub fn write_atomic(path: &Path, record: &InstallRecord, nonce: &str) -> std::io
     Ok(())
 }
 
-/// Reads the record. A file that cannot be read, parsed, or has a newer version is moved aside
-/// to `record.json.bad`. Temp files are never read.
-pub fn read(path: &Path) -> ReadOutcome {
+/// Reads the record. A file that cannot be parsed, or has a newer version, is moved aside to
+/// `record.json.bad`. Other I/O errors are returned and leave the file in place. Temp files are
+/// never read.
+pub fn read(path: &Path) -> std::io::Result<ReadOutcome> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return ReadOutcome::Missing,
-        Err(_) => return move_aside(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ReadOutcome::Missing);
+        }
+        Err(error) => return Err(error),
     };
     match serde_json::from_slice::<InstallRecord>(&bytes) {
-        Ok(record) if record.version <= 1 => ReadOutcome::Ok(record),
-        _ => move_aside(path),
+        Ok(record) if record.version <= 1 => Ok(ReadOutcome::Ok(record)),
+        _ => Ok(move_aside(path)),
     }
 }
 

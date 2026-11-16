@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::InstallRecord;
 use crate::RecordState;
+use crate::validate_id;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordSnapshot {
@@ -94,29 +95,40 @@ impl Fix {
 }
 
 /// Decides what to repair. Does no filesystem access; output is sorted by id, then fix kind.
+///
+/// Extension and symlink ids that fail `validate_id` (including reserved names in any ASCII case)
+/// are skipped. Staging folders are not scoped to an id, so no `DeleteStaging` is emitted while
+/// any extension holds its lock: an install in another process may be using staging.
 pub fn plan(snapshot: &Snapshot) -> Vec<Fix> {
     if !snapshot.git_dir_exists {
         return Vec::new();
     }
-    let mut fixes: Vec<Fix> = snapshot
-        .staging
-        .iter()
-        .map(|nonce| Fix::DeleteStaging {
+    let mut fixes: Vec<Fix> = Vec::new();
+    if !snapshot.extensions.iter().any(|e| e.lock_held) {
+        fixes.extend(snapshot.staging.iter().map(|nonce| Fix::DeleteStaging {
             nonce: nonce.clone(),
-        })
-        .collect();
+        }));
+    }
 
-    // Symlinks that point into git/<id>/ belong to that id, if it is the link's own id.
+    // Symlinks that point into git/<id>/ belong to that id, if it is the link's own id. A link
+    // aimed at another id's checkout gets no fix, but protects that checkout from deletion.
     let mut links: BTreeMap<&str, (&str, Option<&str>)> = BTreeMap::new();
+    let mut protected: BTreeSet<(&str, &str)> = BTreeSet::new();
     for link in &snapshot.symlinks {
         if let SymlinkTarget::Checkout {
             id,
             commit,
             origin_url,
         } = &link.target
-            && *id == link.id
         {
-            links.insert(id, (commit, origin_url.as_deref()));
+            if validate_id(&link.id).is_err() || validate_id(id).is_err() {
+                continue;
+            }
+            if *id == link.id {
+                links.insert(id, (commit, origin_url.as_deref()));
+            } else {
+                protected.insert((id, commit));
+            }
         }
     }
     let known: BTreeSet<&str> = snapshot.extensions.iter().map(|e| e.id.as_str()).collect();
@@ -132,12 +144,13 @@ pub fn plan(snapshot: &Snapshot) -> Vec<Fix> {
         .collect();
 
     for extension in snapshot.extensions.iter().chain(&orphan_links) {
-        if extension.lock_held {
+        if extension.lock_held || validate_id(&extension.id).is_err() {
             continue;
         }
         plan_extension(
             extension,
             links.get(extension.id.as_str()).copied(),
+            &protected,
             &mut fixes,
         );
     }
@@ -145,28 +158,51 @@ pub fn plan(snapshot: &Snapshot) -> Vec<Fix> {
     fixes
 }
 
+/// Adopts the symlink's commit into the record, or marks the build missing when the checkout it
+/// points at does not exist.
+fn adopt_link(
+    extension: &ExtensionSnapshot,
+    commit: &str,
+    origin_url: Option<&str>,
+    fixes: &mut Vec<Fix>,
+) {
+    let id = extension.id.clone();
+    if extension.checkouts.iter().any(|c| c.folder == commit) {
+        fixes.push(Fix::WriteRecordFromSymlink {
+            id,
+            commit: commit.to_string(),
+            origin_url: origin_url.map(str::to_string),
+        });
+    } else {
+        fixes.push(Fix::MarkBuildMissing { id });
+    }
+}
+
 fn plan_extension(
     extension: &ExtensionSnapshot,
     link: Option<(&str, Option<&str>)>,
+    protected: &BTreeSet<(&str, &str)>,
     fixes: &mut Vec<Fix>,
 ) {
     let id = &extension.id;
     let mut keep: BTreeSet<&str> = BTreeSet::new();
     let mut delete_others = true;
     match &extension.record {
+        RecordSnapshot::Some(record) if record.id != *id => {
+            // A record that belongs to another id cannot be trusted: touch nothing.
+            return;
+        }
         RecordSnapshot::Some(record) if record.state == RecordState::Removing => {
-            fixes.push(Fix::FinishRemoval { id: id.clone() });
+            if !protected.iter().any(|(protected_id, _)| protected_id == id) {
+                fixes.push(Fix::FinishRemoval { id: id.clone() });
+            }
             return;
         }
         RecordSnapshot::Some(record) => match link {
             Some((commit, origin_url)) => {
                 keep.insert(commit);
                 if commit != record.commit {
-                    fixes.push(Fix::WriteRecordFromSymlink {
-                        id: id.clone(),
-                        commit: commit.to_string(),
-                        origin_url: origin_url.map(str::to_string),
-                    });
+                    adopt_link(extension, commit, origin_url, fixes);
                 }
             }
             None => {
@@ -185,29 +221,20 @@ fn plan_extension(
                 });
             }
         },
-        RecordSnapshot::None => {
-            if let Some((commit, origin_url)) = link {
+        RecordSnapshot::None | RecordSnapshot::Unreadable => match link {
+            Some((commit, origin_url)) => {
                 keep.insert(commit);
-                fixes.push(Fix::WriteRecordFromSymlink {
-                    id: id.clone(),
-                    commit: commit.to_string(),
-                    origin_url: origin_url.map(str::to_string),
-                });
+                adopt_link(extension, commit, origin_url, fixes);
             }
-        }
-        RecordSnapshot::Unreadable => {
             // The source is unknown: leave the record alone and delete nothing without a link.
-            match link {
-                Some((commit, _)) => {
-                    keep.insert(commit);
-                }
-                None => delete_others = false,
-            }
-        }
+            None => delete_others = extension.record == RecordSnapshot::None,
+        },
     }
     if delete_others {
         for checkout in &extension.checkouts {
-            if !keep.contains(checkout.folder.as_str()) {
+            if !keep.contains(checkout.folder.as_str())
+                && !protected.contains(&(id.as_str(), checkout.folder.as_str()))
+            {
                 fixes.push(Fix::DeleteCheckout {
                     id: id.clone(),
                     folder: checkout.folder.clone(),

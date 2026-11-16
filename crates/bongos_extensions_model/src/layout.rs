@@ -19,7 +19,7 @@ pub enum IdError {
 
 /// Names under `git/` that hold bookkeeping instead of an extension.
 pub fn is_reserved_id(id: &str) -> bool {
-    RESERVED_IDS.contains(&id)
+    RESERVED_IDS.iter().any(|r| r.eq_ignore_ascii_case(id))
 }
 
 /// Checks that `id` is safe to use as a directory name under the extensions directory.

@@ -218,12 +218,12 @@ mod install_state {
         let path = dir.path().join("kotlin").join("record.json");
         let record = sample_record();
         write_atomic(&path, &record, "n1").unwrap();
-        assert_eq!(read(&path), ReadOutcome::Ok(record));
+        assert_eq!(read(&path).unwrap(), ReadOutcome::Ok(record));
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         value["future_field"] = serde_json::json!({"a": [1, 2]});
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        let ReadOutcome::Ok(read_back) = read(&path) else {
+        let ReadOutcome::Ok(read_back) = read(&path).unwrap() else {
             panic!("record should be readable");
         };
         assert!(read_back.extra.contains_key("future_field"));
@@ -238,9 +238,9 @@ mod install_state {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("record.json");
         fs::write(dir.path().join("record.json.tmp-x"), b"{\"version\":").unwrap();
-        assert_eq!(read(&path), ReadOutcome::Missing);
+        assert_eq!(read(&path).unwrap(), ReadOutcome::Missing);
         write_atomic(&path, &sample_record(), "y").unwrap();
-        assert!(matches!(read(&path), ReadOutcome::Ok(_)));
+        assert!(matches!(read(&path).unwrap(), ReadOutcome::Ok(_)));
         remove_torn_temp_files(dir.path()).unwrap();
         assert!(!dir.path().join("record.json.tmp-x").exists());
         assert!(path.exists());
@@ -253,13 +253,13 @@ mod install_state {
         let bad = dir.path().join("record.json.bad");
         fs::write(&bad, b"old").unwrap();
         fs::write(&path, b"not json").unwrap();
-        assert_eq!(read(&path), ReadOutcome::Unreadable);
+        assert_eq!(read(&path).unwrap(), ReadOutcome::Unreadable);
         assert!(!path.exists());
         assert_eq!(fs::read(&bad).unwrap(), b"not json");
         let mut newer = sample_record();
         newer.version = 2;
         fs::write(&path, serde_json::to_vec(&newer).unwrap()).unwrap();
-        assert_eq!(read(&path), ReadOutcome::Unreadable);
+        assert_eq!(read(&path).unwrap(), ReadOutcome::Unreadable);
     }
 
     #[test]
@@ -276,7 +276,7 @@ mod install_state {
         assert_eq!(key, layout.source_key(&same));
         assert!(key.starts_with("source-") && key.len() == 15);
         assert!(validate_id("kotlin-2_x").is_ok());
-        for bad in ["", "staging", "logs", "locks", ".", "..", "a/b"] {
+        for bad in ["", "staging", "Logs", "LOCKS", ".", "..", "a/b"] {
             assert!(validate_id(bad).is_err(), "{bad}");
         }
     }
@@ -398,12 +398,12 @@ mod install_state {
             vec![link("k", "c1")],
         );
         assert_eq!(plan(&s), vec![del("k", "c0"), wr("k", "c1")]);
-        // An unreadable record is left alone and the linked checkout is kept.
+        // An unreadable record is rewritten from the link and the linked checkout is kept.
         let s = snap(
             vec![ext("k", &[("c1", true)], RecordSnapshot::Unreadable, false)],
             vec![link("k", "c1")],
         );
-        assert!(plan(&s).is_empty());
+        assert_eq!(plan(&s), vec![wr("k", "c1")]);
     }
 
     #[test]
@@ -465,9 +465,92 @@ mod install_state {
             vec![],
         );
         s.staging = vec!["n".into()];
+        assert_eq!(plan(&s), vec![del("m", "c9")]);
+        s.extensions[0].lock_held = false;
         assert_eq!(
             plan(&s),
-            vec![Fix::DeleteStaging { nonce: "n".into() }, del("m", "c9")]
+            vec![
+                Fix::DeleteStaging { nonce: "n".into() },
+                del("k", "c0"),
+                del("m", "c9")
+            ]
         );
+    }
+
+    #[test]
+    fn plan_skips_reserved_and_invalid_ids() {
+        let s = snap(
+            vec![
+                ext("logs", &[("c", true)], RecordSnapshot::None, false),
+                ext("LOCKS", &[("c", true)], RecordSnapshot::None, false),
+                ext("a/b", &[("c", true)], RecordSnapshot::None, false),
+            ],
+            vec![link("Staging", "c"), link("logs", "c")],
+        );
+        assert!(plan(&s).is_empty());
+    }
+
+    #[test]
+    fn plan_link_to_another_ids_checkout() {
+        let mut foreign = link("foo", "c");
+        foreign.target = SymlinkTarget::Checkout {
+            id: "bar".into(),
+            commit: "c".into(),
+            origin_url: None,
+        };
+        let s = snap(
+            vec![ext(
+                "bar",
+                &[("c", true), ("d", true)],
+                RecordSnapshot::None,
+                false,
+            )],
+            vec![foreign],
+        );
+        assert_eq!(plan(&s), vec![del("bar", "d")]);
+    }
+
+    #[test]
+    fn plan_orphan_link_marks_build_missing() {
+        let s = snap(vec![], vec![link("k", "c1")]);
+        assert_eq!(plan(&s), vec![Fix::MarkBuildMissing { id: "k".into() }]);
+    }
+
+    #[test]
+    fn plan_unreadable_record_with_link_writes_record() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true), ("c1", true)],
+                RecordSnapshot::Unreadable,
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(plan(&s), vec![del("k", "c0"), wr("k", "c1")]);
+    }
+
+    #[test]
+    fn plan_record_id_mismatch_is_left_alone() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true)],
+                rec("other", "c0", RecordState::Installed),
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert!(plan(&s).is_empty());
+    }
+
+    #[test]
+    fn unreadable_io_error_keeps_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.json");
+        fs::create_dir(&path).unwrap();
+        assert!(read(&path).is_err());
+        assert!(path.exists());
+        assert!(!dir.path().join("record.json.bad").exists());
     }
 }
