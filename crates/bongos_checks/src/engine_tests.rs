@@ -24,7 +24,8 @@ use crate::command_logic::{
 use crate::engine::{
     ChecksEngine, ChecksEvent, Refusal, RunChecksRequest, RunOutcome, RunReport, plan_rows,
 };
-use crate::evidence_store::{scan_records, task_prefix};
+use crate::evidence_store::{LIVE_NAMESPACE, scan_records, task_prefix};
+use crate::live::{LiveRow, live_rows};
 use crate::pin::master_definitions;
 use crate::pools::CheckPoolsRegistry;
 use crate::pools_tests::{FakeClock, FakePool};
@@ -64,7 +65,7 @@ needs = [\"gpu\"]
 ";
 
 #[derive(Default)]
-struct FakeSource {
+pub(crate) struct FakeSource {
     tasks: RefCell<std::collections::BTreeMap<String, TaskChecks>>,
 }
 
@@ -110,24 +111,24 @@ impl TaskTrees for FakeTips {
 }
 
 /// Fields drop in order: the engine and the project go before the folder holding them.
-struct World {
+pub(crate) struct World {
     source: Rc<FakeSource>,
     runs: Rc<FakeRuns>,
-    events: Rc<RefCell<Vec<ChecksEvent>>>,
-    engine: Entity<ChecksEngine>,
+    pub(crate) events: Rc<RefCell<Vec<ChecksEvent>>>,
+    pub(crate) engine: Entity<ChecksEngine>,
     repo: ProjectRepo,
-    tree: PathBuf,
+    pub(crate) tree: PathBuf,
     output: PathBuf,
     index: PathBuf,
     _root: TempDir,
 }
 
 /// A project whose master holds the fixture scripts and the checks of task `l1`.
-fn project(root: &TempDir) -> ProjectRepo {
+fn project(root: &TempDir, checks: &str) -> ProjectRepo {
     let repo = fixture_project(root);
     let repository = repo.location().repository.clone();
     let task_file = repository.join("definitions/tasks/backfill/task.toml");
-    std::fs::write(&task_file, definition_toml(TASK, TASK_NAME, CHECKS)).unwrap();
+    std::fs::write(&task_file, definition_toml(TASK, TASK_NAME, checks)).unwrap();
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures");
     let checks = repository.join("definitions/checks");
     std::fs::create_dir_all(&checks).unwrap();
@@ -158,13 +159,23 @@ fn work_tree(root: &TempDir) -> PathBuf {
 impl World {
     /// A world with the project, the task `l1` (with `worktree` as its file's worktree when
     /// `with_tree`) and the group `g1`, which has no checks.
-    fn new(cx: &mut TestAppContext, with_tree: bool) -> Self {
+    pub(crate) fn new(cx: &mut TestAppContext, with_tree: bool) -> Self {
         Self::with_clock(cx, with_tree, FakeClock::automatic())
     }
 
     fn with_clock(cx: &mut TestAppContext, with_tree: bool, clock: Rc<FakeClock>) -> Self {
+        Self::with_checks(cx, with_tree, clock, CHECKS)
+    }
+
+    /// A world whose task `l1` declares `checks`.
+    fn with_checks(
+        cx: &mut TestAppContext,
+        with_tree: bool,
+        clock: Rc<FakeClock>,
+        checks: &str,
+    ) -> Self {
         let root = TempDir::new().unwrap();
-        let repo = project(&root);
+        let repo = project(&root, checks);
         let tree = work_tree(&root);
         let output = root.path().join("output");
         let index = root.path().join("index");
@@ -240,23 +251,27 @@ impl World {
         }
     }
 
-    fn run(&self, cx: &mut TestAppContext, request: RunChecksRequest) -> Task<RunReport> {
+    pub(crate) fn run(
+        &self,
+        cx: &mut TestAppContext,
+        request: RunChecksRequest,
+    ) -> Task<RunReport> {
         self.engine.update(cx, |engine, cx| engine.run(request, cx))
     }
 
-    fn only(&self, checks: &[&str]) -> RunChecksRequest {
+    pub(crate) fn only(&self, checks: &[&str]) -> RunChecksRequest {
         RunChecksRequest {
             checks: Some(checks.iter().map(|check| check.to_string()).collect()),
             ..RunChecksRequest::person(TASK)
         }
     }
 
-    fn writer(&self) -> Arc<StateWriter> {
+    pub(crate) fn writer(&self) -> Arc<StateWriter> {
         self.repo.state().unwrap().writer().unwrap().clone()
     }
 
     /// The records of `check`, oldest first.
-    fn records(&self, check: &str) -> Vec<EvidenceRecord> {
+    pub(crate) fn records(&self, check: &str) -> Vec<EvidenceRecord> {
         let mut records: Vec<EvidenceRecord> = self
             .writer()
             .read(|read| scan_records(read, &task_prefix(TASK)))
@@ -268,11 +283,11 @@ impl World {
         records
     }
 
-    fn write(&self, name: &str, text: &str) {
+    pub(crate) fn write(&self, name: &str, text: &str) {
         std::fs::write(self.tree.join(name), text).unwrap();
     }
 
-    fn lines(&self, name: &str) -> Vec<String> {
+    pub(crate) fn lines(&self, name: &str) -> Vec<String> {
         std::fs::read_to_string(self.tree.join(name))
             .unwrap_or_default()
             .lines()
@@ -280,7 +295,7 @@ impl World {
             .collect()
     }
 
-    fn forget(&self, name: &str) {
+    pub(crate) fn forget(&self, name: &str) {
         std::fs::remove_file(self.tree.join(name)).ok();
     }
 
@@ -822,4 +837,217 @@ fn commands_say_how_a_run_ended_or_why_it_was_refused() {
         report_message(TASK_NAME, &ran(Vec::new(), true)),
         "Checks of Backfill stopped"
     );
+}
+
+/// `suite` runs in four parts, one after another, each holding a slot of the pool `gpu`.
+const DRAIN_CHECKS: &str = "
+[[checks.check]]
+name = \"suite\"
+run = \"checks/part-log\"
+parts = 4
+needs = [\"gpu\"]
+
+[[checks.check]]
+name = \"docs\"
+run = \"checks/check-log\"
+";
+
+/// The rows of `checks.live` in the world's store.
+fn stored_live(world: &World) -> std::collections::BTreeMap<String, LiveRow> {
+    world.writer().read(|read| live_rows(read)).unwrap()
+}
+
+/// Every key of `checks.live`, `part/` rows or not.
+fn live_keys(world: &World) -> Vec<String> {
+    world
+        .writer()
+        .read(|read| read.kv(LIVE_NAMESPACE).scan(""))
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// A receiver that resolves once part `part` of the tree's blocking script has started.
+fn when_blocked(world: &World, part: u32) -> oneshot::Receiver<()> {
+    let blocked = world.tree.join(format!("blocked-{part}"));
+    let (reached, reaching) = oneshot::channel();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !blocked.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the part never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        reached.send(()).ok();
+    });
+    reaching
+}
+
+fn set_kill_grace(cx: &mut TestAppContext, seconds: u32) {
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content
+                    .task_checks
+                    .get_or_insert_default()
+                    .kill_grace_seconds = Some(seconds);
+            });
+        });
+    });
+}
+
+/// Starts `suite`, waits until its third part blocks (parts 1 and 2 passed), drains, and returns
+/// the run's report, what the drain returned and how long the drain took.
+async fn drain_during_part_three(
+    world: &World,
+    cx: &mut TestAppContext,
+) -> (
+    RunReport,
+    Vec<(bongos_workflow::RunId, bongos_workflow_model::NodeKey)>,
+    std::time::Duration,
+) {
+    world.write("block-at", "3\n");
+    let blocked = when_blocked(world, 3);
+    let run = world.run(cx, world.only(&["suite"]));
+    blocked.await.unwrap();
+    cx.run_until_parked();
+    assert!(
+        !live_keys(world).is_empty(),
+        "the running suite has a live row"
+    );
+
+    // Real time only measures the drain against the grace; no outcome depends on the calendar.
+    let began = std::time::Instant::now();
+    let drained = world.engine.update(cx, |engine, cx| engine.drain(cx)).await;
+    let took = began.elapsed();
+    (run.await, drained, took)
+}
+
+#[gpui::test]
+async fn engine_live_rows_show_part_states_at_most_once_per_task_per_interval(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let world = World::new(cx, true);
+    // A row left from before the store was opened by this process: gone at the engine's first
+    // use of the store.
+    world
+        .writer()
+        .transact(|tx| {
+            tx.kv(LIVE_NAMESPACE)
+                .put("part/l1/stale", toml::Value::String("old".to_string()))
+        })
+        .unwrap();
+
+    let report = world.run(cx, world.only(&["tests"])).await;
+    cx.run_until_parked();
+    assert_eq!(report.results()[0].verdict, Verdict::Pass);
+
+    let writes = world.engine.read_with(cx, |engine, _| engine.live_writes());
+    assert!(writes.len() >= 2, "{writes:?}");
+    // Part 1 of 3 running was written, with when it began and never how long it ran.
+    assert!(writes.iter().any(|write| matches!(
+        write.rows.get("tests"),
+        Some(LiveRow::Running { part: 1, of: 3, kept: 0, since }) if !since.is_empty()
+    )));
+    // At most one write per task per `live_write_ms` (1000) on the engine's clock.
+    for pair in writes.windows(2) {
+        assert!(
+            pair[1].at.duration_since(pair[0].at) >= std::time::Duration::from_millis(1000),
+            "{writes:?}"
+        );
+    }
+    // The last state won: the check ended with its verdict.
+    let rows = stored_live(&world);
+    assert_eq!(rows.keys().collect::<Vec<_>>(), ["part/l1/tests"]);
+    assert!(matches!(
+        &rows["part/l1/tests"],
+        LiveRow::Ended {
+            verdict: Verdict::Pass,
+            ..
+        }
+    ));
+    assert!(!live_keys(&world).contains(&"part/l1/stale".to_string()));
+}
+
+#[gpui::test]
+async fn engine_drain_stops_a_four_part_check_releases_its_pool_and_clears_live_rows(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let world = World::with_checks(cx, true, clock.clone(), DRAIN_CHECKS);
+    set_kill_grace(cx, 3);
+    let pool = FakePool::new("gpu", 1, clock);
+    cx.update(|cx| CheckPoolsRegistry::set(Rc::new(pool.clone()), cx));
+
+    let (report, drained, took) = drain_during_part_three(&world, cx).await;
+
+    // Within the grace, and no workflow node: the run was a manual one.
+    assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+    assert!(drained.is_empty());
+    assert!(report.cancelled());
+    assert_eq!(
+        report.results()[0].verdict,
+        Verdict::NoVerdict(NoVerdictReason::Cancelled)
+    );
+    // Parts 1 and 2 finished and stay in the unfinished record; part 3 was stopped.
+    let records = world.records("suite");
+    assert_eq!(records.len(), 1);
+    let parts: Vec<(u32, bool)> = records[0]
+        .parts
+        .iter()
+        .map(|part| (part.n, part.verdict.is_pass()))
+        .collect();
+    assert_eq!(parts, [(1, true), (2, true), (3, false)]);
+    assert_eq!(world.lines("runs"), ["1", "2", "3"], "part 4 never started");
+    // Every lease went back to the pool.
+    pool.assert_all_released();
+    assert_eq!(pool.state().released.len(), 3);
+    // No live row survives the drain.
+    cx.run_until_parked();
+    assert!(live_keys(&world).is_empty(), "{:?}", live_keys(&world));
+    // While drained nothing starts.
+    assert!(world.engine.read_with(cx, |engine, _| engine.is_drained()));
+    let refused = world.run(cx, world.only(&["docs"])).await;
+    assert_eq!(
+        refused.refusal(),
+        Some(&Refusal::Draining {
+            task: TASK_NAME.to_string()
+        })
+    );
+    assert!(world.lines("order").is_empty());
+}
+
+#[gpui::test]
+async fn engine_after_undrain_runs_start_again_and_resume_from_the_kept_parts(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let world = World::with_checks(cx, true, FakeClock::manual(), DRAIN_CHECKS);
+    set_kill_grace(cx, 3);
+    let (report, _, _) = drain_during_part_three(&world, cx).await;
+    assert!(report.cancelled());
+
+    world.engine.update(cx, |engine, _| engine.undrain());
+
+    // A new run starts normally.
+    let docs = world.run(cx, world.only(&["docs"])).await;
+    assert_eq!(docs.results()[0].verdict, Verdict::Pass);
+    assert_eq!(world.lines("order"), ["docs"]);
+
+    // The next manual run of the same key resumes after the two parts that finished.
+    world.forget("block-at");
+    world.forget("runs");
+    let resumed = world.run(cx, world.only(&["suite"])).await;
+    assert_eq!(resumed.results()[0].verdict, Verdict::Pass);
+    assert_eq!(world.lines("runs"), ["3", "4"], "parts 1 and 2 were kept");
+    let records = world.records("suite");
+    assert_eq!(records.len(), 2);
+    let parts: Vec<u32> = records[1].parts.iter().map(|part| part.n).collect();
+    assert_eq!(parts, [1, 2, 3, 4]);
+    assert_eq!(records[1].parts[0].started, records[0].parts[0].started);
 }
