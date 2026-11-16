@@ -96,7 +96,7 @@ pub fn init(cx: &mut App) {
     quit::init(cx);
     cursor::init(cx);
     global_mark::init(cx);
-    cx.observe_new(|editor: &mut Editor, window, cx| {
+    cx.observe_new(|editor: &mut Editor, mut window, cx| {
         let weak = cx.entity().downgrade();
         register(editor, &weak, cx, motion::forward_word);
         register(editor, &weak, cx, motion::backward_word);
