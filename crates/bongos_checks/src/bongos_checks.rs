@@ -7,7 +7,7 @@
 //! store, and the `checks` host command that reaches the engine from a process without the
 //! state writer, the base trees of parameterized runs, the owed markers of finished tasks, the
 //! done hold they cause, and the decider that writes the done record of a leaf whose checks
-//! pass on its tree.
+//! pass on its tree, and of a group whose closing checks pass on its last child's tree.
 
 mod actions;
 mod base_tree;
@@ -18,6 +18,7 @@ mod definitions;
 pub mod engine;
 mod evidence_store;
 mod exporter;
+pub mod group_decider;
 pub mod holds;
 pub mod host;
 pub mod live;
@@ -26,6 +27,7 @@ pub mod owed;
 mod pin;
 pub mod pools;
 pub mod process;
+mod retained;
 pub mod run;
 mod settings;
 mod task_source;
@@ -113,6 +115,8 @@ mod engine_tests;
 mod evidence_store_tests;
 #[cfg(test)]
 mod exporter_tests;
+#[cfg(test)]
+mod group_decider_tests;
 #[cfg(test)]
 mod host_tests;
 #[cfg(test)]

@@ -106,6 +106,11 @@ pub struct LastRow {
     /// The tree key of the child's tree, filled in by the decider; empty until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree_key: Option<String>,
+    /// When the decider computed `tree_key` on the tree as it found it, later than the child's
+    /// finish (after a crash, or while the setting was off): the time it did. Empty when the key
+    /// was computed right after the child was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub found_at: Option<String>,
 }
 
 /// Writes the `checks.last` row of `group_id`.
@@ -360,6 +365,7 @@ impl StateApplyHook for ChecksOwedHook {
                     id: child,
                     generation,
                     tree_key: None,
+                    found_at: None,
                 },
             )?;
         }

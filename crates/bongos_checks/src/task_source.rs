@@ -59,6 +59,13 @@ pub trait TaskSource: 'static {
         let _ = cx;
         HashSet::new()
     }
+
+    /// The primary checkout of the code repository `name` (as `work.repositories` names it),
+    /// whose object store holds the trees of the tasks in it. None by default.
+    fn code_repository(&self, name: &str, cx: &App) -> Option<PathBuf> {
+        let _ = (name, cx);
+        None
+    }
 }
 
 /// [`TaskSource`] over the Work tree and the open project repositories.
@@ -104,6 +111,12 @@ impl TaskSource for WorkTaskSource {
             .filter(|task| matches!(derive::state(task, &tree), State::Done | State::Cancelled))
             .filter_map(|task| task.id().map(str::to_string))
             .collect()
+    }
+
+    fn code_repository(&self, name: &str, cx: &App) -> Option<PathBuf> {
+        let repositories = &WorkSettings::get_global(cx).repositories;
+        let repository = bongos_work::find_repository(repositories, name)?;
+        Some(bongos_work::expand_home(&repository.path))
     }
 }
 

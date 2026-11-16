@@ -243,6 +243,81 @@ struct Plan {
     clock: Rc<dyn CheckClock>,
     now: Now,
     leases: Leases,
+    /// The trees the checks run on instead of the task's own, when they are recorded ones.
+    recorded: Option<RecordedTrees>,
+}
+
+/// Trees a run checks instead of a task's own: tree objects a tree key named, each written out
+/// under the scratch folder by whoever starts the run (and removed by it afterward). A check's
+/// tree key is derived from the tree ids, never from the folders, and its key inputs are read
+/// from the tree objects.
+#[derive(Clone, Debug)]
+pub(crate) struct RecordedTrees {
+    /// The repository a check that names none runs in.
+    pub(crate) own: String,
+    pub(crate) trees: Vec<RecordedTree>,
+}
+
+/// One repository's recorded tree.
+#[derive(Clone, Debug)]
+pub(crate) struct RecordedTree {
+    pub(crate) repo: String,
+    /// A directory of the repository whose object store holds the tree.
+    pub(crate) repository: PathBuf,
+    pub(crate) tree: String,
+    /// Where the tree is written out.
+    pub(crate) path: PathBuf,
+}
+
+impl RecordedTrees {
+    /// The trees of `repos` (the repository a check names, in its order), their key and the
+    /// digest of `key_inputs` read from the first tree.
+    pub(crate) async fn state(
+        &self,
+        git: &Git,
+        repos: &[String],
+        key_inputs: &[String],
+    ) -> Result<(Vec<&RecordedTree>, String, String), NoVerdictReason> {
+        let mut trees = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let repo = if repo.is_empty() { &self.own } else { repo };
+            let tree = self
+                .trees
+                .iter()
+                .find(|tree| &tree.repo == repo)
+                .ok_or_else(|| {
+                    NoVerdictReason::TreeUnavailable(format!("the recorded tree has no {repo}"))
+                })?;
+            trees.push(tree);
+        }
+        let Some(first) = trees.first() else {
+            return Err(NoVerdictReason::TreeUnavailable(
+                "the recorded tree is empty".to_string(),
+            ));
+        };
+        let key = recorded_key(
+            trees
+                .iter()
+                .map(|tree| (tree.repo.as_str(), tree.tree.as_str())),
+        );
+        let inputs =
+            crate::tree_key::key_inputs_in_tree(git, &first.repository, &first.tree, key_inputs)
+                .await
+                .map_err(|error| start_failed("reading the key inputs", error))?;
+        Ok((trees, key, inputs))
+    }
+}
+
+/// The key of recorded trees: one tree's id, or [`crate::tree_key::combine_trees`] over the
+/// `(repository, tree id)` pairs.
+pub(crate) fn recorded_key<'a>(trees: impl Iterator<Item = (&'a str, &'a str)>) -> String {
+    let pairs: Vec<(&str, crate::tree_key::TreeKey)> = trees
+        .map(|(repo, tree)| (repo, crate::tree_key::TreeKey(tree.to_string())))
+        .collect();
+    match pairs.as_slice() {
+        [(_, key)] => key.as_str().to_string(),
+        _ => crate::tree_key::combine_trees(&pairs).as_str().to_string(),
+    }
 }
 
 /// What a check run tells the engine while it runs.
@@ -507,8 +582,61 @@ impl ChecksEngine {
         request: RunChecksRequest,
         cx: &mut Context<Self>,
     ) -> Result<Task<RunReport>, Refusal> {
-        let task_id = request.task_id.clone();
         let plan = self.plan(request, cx)?;
+        Ok(self.launch(plan, cx))
+    }
+
+    /// Starts the checks of the request on `recorded` trees instead of `task`'s own (whose
+    /// repository is overridden by them): the closing checks of a group on its last child's
+    /// tree. Refused like any run when the task has a live run or the engine is drained.
+    pub(crate) fn start_recorded(
+        &mut self,
+        request: RunChecksRequest,
+        task: TaskChecks,
+        recorded: RecordedTrees,
+        cx: &mut Context<Self>,
+    ) -> Result<Task<RunReport>, Refusal> {
+        let rows = plan_rows(&task, request.checks.as_deref())?;
+        let writer = task.writer().ok_or_else(|| Refusal::NoState {
+            task: task.name.clone(),
+        })?;
+        let Some(first) = recorded.trees.first() else {
+            return Err(Refusal::NoTree { task: task.name });
+        };
+        if self.drained {
+            return Err(Refusal::Draining { task: task.name });
+        }
+        if self.active.contains_key(&request.task_id) {
+            return Err(Refusal::Running { task: task.name });
+        }
+        let tree = TaskTree {
+            path: first.path.clone(),
+            run: None,
+        };
+        let plan = Plan {
+            request,
+            task: TaskChecks {
+                repo: Some(recorded.own.clone()),
+                base_branch: None,
+                ..task
+            },
+            rows,
+            tree,
+            writer,
+            stop: StopHandle::default(),
+            settings: TaskChecksSettings::get_global(cx).clone(),
+            pools: CheckPoolsRegistry::get(cx),
+            trees: None,
+            clock: self.clock.clone(),
+            now: self.now.clone(),
+            leases: Rc::default(),
+            recorded: Some(recorded),
+        };
+        Ok(self.launch(plan, cx))
+    }
+
+    fn launch(&mut self, plan: Plan, cx: &mut Context<Self>) -> Task<RunReport> {
+        let task_id = plan.request.task_id.clone();
         self.live_rows.adopt(&plan.writer);
         self.active.insert(
             task_id.clone(),
@@ -548,7 +676,7 @@ impl ChecksEngine {
                 .ok();
         })
         .detach();
-        Ok(cx.background_spawn(async move {
+        cx.background_spawn(async move {
             report.await.unwrap_or(RunReport {
                 task_id,
                 outcome: RunOutcome::Ran {
@@ -556,7 +684,7 @@ impl ChecksEngine {
                     cancelled: true,
                 },
             })
-        }))
+        })
     }
 
     /// Stops everything before the state writer moves to another process: no part or check
@@ -737,6 +865,7 @@ impl ChecksEngine {
             clock: self.clock.clone(),
             now: self.now.clone(),
             leases: Rc::default(),
+            recorded: None,
         })
     }
 
@@ -1215,6 +1344,27 @@ async fn prepare(
     let decl = row.decl.clone();
     let digest = check_digest(&decl, pin)?;
     let git = task.project.git().clone();
+    if let Some(recorded) = &plan.recorded {
+        let (trees, key, key_inputs) = recorded
+            .state(&git, &check_repos(task, &decl), &decl.key_inputs)
+            .await?;
+        let trees: Vec<RepoTree> = trees
+            .into_iter()
+            .map(|tree| RepoTree {
+                repo: tree.repo.clone(),
+                path: tree.path.clone(),
+                env: EnvBase::Own,
+            })
+            .collect();
+        let state = CheckState::new(&key, &key_inputs, &digest);
+        leftovers.evidence = Some(write_evidence(plan, &key, None)?);
+        return Ok((
+            check_run(
+                plan, decl, digest, pin, trees, key, key_inputs, None, sender, leftovers,
+            )?,
+            Some(state),
+        ));
+    }
     let tips = tip_trees(plan, &decl)?;
     let tip_key = key_of(&git, &tips, &task.index_dir).await?;
     let kind = plan.request.tree_kind();
@@ -1241,6 +1391,31 @@ async fn prepare(
         .map_err(|error| start_failed("reading the key inputs", error))?;
     let state = (kind == TreeKind::Tip).then(|| CheckState::new(&key, &key_inputs, &digest));
     leftovers.evidence = Some(write_evidence(plan, &tip_key, base.as_deref())?);
+    let base = (kind == TreeKind::Base).then_some(base).flatten();
+    Ok((
+        check_run(
+            plan, decl, digest, pin, trees, key, key_inputs, base, sender, leftovers,
+        )?,
+        state,
+    ))
+}
+
+/// The run of one check on `trees` (the first is where it runs), keyed `key`.
+#[allow(clippy::too_many_arguments)]
+fn check_run(
+    plan: &Plan,
+    decl: CheckDecl,
+    digest: decl::Digest,
+    pin: &Arc<Pin>,
+    trees: Vec<RepoTree>,
+    key: String,
+    key_inputs: String,
+    base: Option<String>,
+    sender: mpsc::UnboundedSender<Message>,
+    leftovers: &Leftovers,
+) -> Result<CheckRun, NoVerdictReason> {
+    let task = &plan.task;
+    let kind = plan.request.tree_kind();
     let mut trees = trees.into_iter();
     let Some(first) = trees.next() else {
         return Err(NoVerdictReason::TreeUnavailable(format!(
@@ -1264,10 +1439,10 @@ async fn prepare(
         tree: first.path,
         other_trees,
         tree_kind: kind,
-        base: (kind == TreeKind::Base).then_some(base).flatten(),
+        base,
         tree_key: key,
         key_inputs,
-        git,
+        git: task.project.git().clone(),
         base_branch: task.base_branch.clone(),
         env: first.env,
         output_dir: task.output_dir.clone(),
@@ -1292,5 +1467,5 @@ async fn prepare(
         #[cfg(test)]
         fail_part_end: None,
     };
-    Ok((check_run, state))
+    Ok(check_run)
 }
