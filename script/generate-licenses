@@ -34,6 +34,14 @@ echo -n "" >"$OUTPUT_FILE"
     echo -e "\nThe TOML queries in crates/bongos_languages/src/toml are from zed-extensions/toml (Zed Industries, Inc.), licensed Apache-2.0.\n"
     cat crates/bongos_languages/LICENSE-TOML-EXTENSION
 
+    echo -e "\n# ###### HTML, XML AND TERRAFORM QUERY LICENSES ######\n"
+    echo -e "The HTML queries in crates/bongos_languages/src/html are from zed-industries/zed's html extension (Zed Industries, Inc.), licensed Apache-2.0.\n"
+    cat crates/bongos_languages/LICENSE-HTML-EXTENSION
+    echo -e "\nThe XML queries in crates/bongos_languages/src/xml are from sweetppro/zed-xml (SweetPPro), licensed MIT.\n"
+    cat crates/bongos_languages/LICENSE-XML-EXTENSION
+    echo -e "\nThe HCL, Terraform and Terraform Vars queries in crates/bongos_languages/src/hcl, terraform and terraform-vars are from zed-extensions/terraform (Zed Industries, Inc.), licensed Apache-2.0.\n"
+    cat crates/bongos_languages/LICENSE-TERRAFORM-EXTENSION
+
     echo -e "\n# ###### CODE LICENSES ######\n"
 } >>"$OUTPUT_FILE"
 

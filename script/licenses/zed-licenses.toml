@@ -39,3 +39,10 @@ license = "BSD-3-Clause"
 [[fuchsia-cprng.clarify.files]]
 path = 'LICENSE'
 checksum = '03b114f53e6587a398931762ee11e2395bfdba252a329940e2c8c9e81813845b'
+
+# tree-sitter-xml 0.7.0 ships no license file in its crate; the license is read from its git repository.
+[tree-sitter-xml.clarify]
+license = "MIT"
+[[tree-sitter-xml.clarify.git]]
+path = 'LICENSE'
+checksum = '3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6'

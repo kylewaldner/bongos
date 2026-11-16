@@ -4,8 +4,10 @@
 //! Detection takes every input explicitly (setting, project root, `JAVA_HOME`, candidate locations),
 //! so tests run on a temp tree and never see the real machine. Order: the `kotlin.jdk_home` setting;
 //! a JDK that matches the project's Gradle toolchain; `JAVA_HOME`; then the highest version found
-//! under the candidate locations. A toolchain no detected JDK satisfies is a failure; with no
-//! toolchain and no JDK the server's bundled runtime does the import.
+//! under the candidate locations. A Gradle toolchain no detected JDK satisfies is a failure (a
+//! Maven level never is); with no toolchain and no JDK the server's bundled runtime does the
+//! import. A project without a Gradle toolchain can declare its Java version in the root
+//! `pom.xml` instead. [`server_jdk`] separately picks the JDK that runs the Java language server.
 
 use std::{
     ffi::OsString,
@@ -23,6 +25,9 @@ use crate::{
     manifest::{Manifest, current_platform},
     resolve::resolve,
 };
+
+/// The name of the Kotlin import JDK setting.
+pub const KOTLIN_JDK_HOME: &str = "kotlin.jdk_home";
 
 /// The label of the status menu entry that opens the settings file when no JDK fits.
 pub const SET_JDK_HOME_LABEL: &str = "Set kotlin.jdk_home";
@@ -66,8 +71,10 @@ pub fn set_jdk_home_entry() -> MenuEntry {
 /// in tests.
 #[derive(Clone, Debug)]
 pub struct JdkInputs {
-    /// The `kotlin.jdk_home` setting. A relative path resolves against `root`.
+    /// The import JDK setting. A relative path resolves against `root`.
     pub setting: Option<PathBuf>,
+    /// The name of that setting, `kotlin.jdk_home` or `java.jdk_home`, for reasons and notes.
+    pub setting_name: &'static str,
     /// The worktree's `.bongos/settings.json`, read only to say where the setting came from.
     pub project_settings: Option<PathBuf>,
     /// The worktree root.
@@ -83,6 +90,7 @@ impl JdkInputs {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         Self {
             setting,
+            setting_name: KOTLIN_JDK_HOME,
             project_settings: Some(root.join(".bongos").join("settings.json")),
             root: root.to_path_buf(),
             java_home: std::env::var_os("JAVA_HOME"),
@@ -103,7 +111,11 @@ pub struct Jdk {
     pub reason: String,
 }
 
-/// The Gradle toolchain a project declares.
+/// The `source` of a Java version declared by a Maven `pom.xml` at the worktree root.
+pub const POM_SOURCE: &str = "pom.xml";
+
+/// The Java version a project declares: a Gradle toolchain, or with no Gradle one the Maven
+/// compiler level of the root `pom.xml`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toolchain {
     pub version: u32,
@@ -111,11 +123,27 @@ pub struct Toolchain {
     pub source: String,
 }
 
+impl Toolchain {
+    /// Whether a Maven `pom.xml` declared the version (otherwise Gradle did).
+    pub fn is_maven(&self) -> bool {
+        self.source == POM_SOURCE
+    }
+
+    /// Why a JDK of this version is chosen.
+    fn reason(&self) -> String {
+        if self.is_maven() {
+            format!("Maven Java version {} in {}", self.version, self.source)
+        } else {
+            format!("toolchain {} in {}", self.version, self.source)
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JdkChoice {
     /// The import runs with this JDK, passed to the server as `JAVA_HOME`.
     Found(Jdk),
-    /// The project declares a toolchain and no detected JDK satisfies it.
+    /// The project declares a Gradle toolchain and no detected JDK satisfies it.
     Unmet(Toolchain),
     /// No toolchain and no JDK: the server's own bundled runtime imports.
     Bundled,
@@ -155,7 +183,7 @@ impl Detection {
 }
 
 pub fn detect(inputs: &JdkInputs) -> Detection {
-    let toolchain = find_toolchain(&inputs.root);
+    let toolchain = find_declared_java(&inputs.root);
     let mut notes = Vec::new();
     let done = |choice, notes| Detection {
         choice,
@@ -164,45 +192,28 @@ pub fn detect(inputs: &JdkInputs) -> Detection {
     };
 
     if let Some(setting) = &inputs.setting {
-        let path = if setting.is_absolute() {
-            setting.clone()
-        } else {
-            inputs.root.join(setting)
-        };
+        let path = resolve_setting(inputs, setting);
         if path.is_dir() {
-            let origin = if project_sets_jdk_home(inputs.project_settings.as_deref()) {
-                "project settings"
-            } else {
-                "settings"
-            };
+            let origin = settings_origin(inputs, "jdk_home");
             return done(
-                JdkChoice::Found(describe(path, format!("kotlin.jdk_home in {origin}"))),
+                JdkChoice::Found(describe(
+                    path,
+                    format!("{} in {origin}", inputs.setting_name),
+                )),
                 notes,
             );
         }
         notes.push(format!(
-            "kotlin.jdk_home {} is not a directory, so it is ignored",
+            "{} {} is not a directory, so it is ignored",
+            inputs.setting_name,
             path.display()
         ));
     }
 
-    let java_home = inputs
-        .java_home
-        .as_ref()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    let java_home = java_home.filter(|path| is_jdk_dir(path));
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for pattern in &inputs.candidates {
-        candidates.extend(
-            expand_pattern(pattern)
-                .into_iter()
-                .filter(|p| is_jdk_dir(p)),
-        );
-    }
+    let (java_home, candidates) = discover(inputs);
 
-    if let Some(toolchain) = &toolchain {
-        let reason = format!("toolchain {} in {}", toolchain.version, toolchain.source);
+    if let Some(toolchain) = toolchain.as_ref().filter(|toolchain| !toolchain.is_maven()) {
+        let reason = toolchain.reason();
         let matching = java_home
             .iter()
             .chain(candidates.iter())
@@ -215,6 +226,28 @@ pub fn detect(inputs: &JdkInputs) -> Detection {
             },
             notes,
         );
+    }
+
+    // A Maven source or release is a language level, not a pin: an equal major wins (JAVA_HOME
+    // first), else the lowest JDK above it; with none, the choice falls through to the default.
+    if let Some(toolchain) = &toolchain {
+        let reason = toolchain.reason();
+        let jdks: Vec<Jdk> = java_home
+            .iter()
+            .chain(candidates.iter())
+            .map(|path| describe(path.clone(), reason.clone()))
+            .collect();
+        let equal = jdks.iter().find(|jdk| jdk.major == Some(toolchain.version));
+        let lowest_above = jdks
+            .iter()
+            .filter(|jdk| jdk.major.is_some_and(|major| major > toolchain.version))
+            .fold(None::<&Jdk>, |best, jdk| match best {
+                Some(best) if best.major <= jdk.major => Some(best),
+                _ => Some(jdk),
+            });
+        if let Some(jdk) = equal.or(lowest_above) {
+            return done(JdkChoice::Found(jdk.clone()), notes);
+        }
     }
 
     if let Some(path) = java_home {
@@ -249,13 +282,50 @@ fn path_parent_for_reason(path: &Path) -> String {
     parent.unwrap_or(path).display().to_string()
 }
 
-fn project_sets_jdk_home(settings_file: Option<&Path>) -> bool {
+/// A setting path as an absolute path: a relative one resolves against the worktree root.
+fn resolve_setting(inputs: &JdkInputs, setting: &Path) -> PathBuf {
+    if setting.is_absolute() {
+        setting.to_path_buf()
+    } else {
+        inputs.root.join(setting)
+    }
+}
+
+/// Where a setting came from, for a reason text.
+fn settings_origin(inputs: &JdkInputs, key: &str) -> &'static str {
+    if project_sets_key(inputs.project_settings.as_deref(), key) {
+        "project settings"
+    } else {
+        "settings"
+    }
+}
+
+/// `JAVA_HOME` when it is a JDK, and the JDK directories the candidate patterns match, in order.
+fn discover(inputs: &JdkInputs) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let java_home = inputs
+        .java_home
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| is_jdk_dir(path));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for pattern in &inputs.candidates {
+        candidates.extend(
+            expand_pattern(pattern)
+                .into_iter()
+                .filter(|p| is_jdk_dir(p)),
+        );
+    }
+    (java_home, candidates)
+}
+
+fn project_sets_key(settings_file: Option<&Path>, key: &str) -> bool {
     let Some(text) = settings_file.and_then(|path| fs::read_to_string(path).ok()) else {
         return false;
     };
     // The file is JSON with comments, so a search is more tolerant than a parse.
     text.lines()
-        .any(|line| !line.trim_start().starts_with("//") && line.contains("\"jdk_home\""))
+        .any(|line| !line.trim_start().starts_with("//") && line.contains(&format!("\"{key}\"")))
 }
 
 fn is_jdk_dir(path: &Path) -> bool {
@@ -465,6 +535,233 @@ fn toolchain_in_properties(text: &str) -> Option<u32> {
     })
 }
 
+/// The Java version a project declares: its Gradle toolchain, else the Maven compiler level of the
+/// root `pom.xml`. Gradle wins when a project has both.
+pub fn find_declared_java(root: &Path) -> Option<Toolchain> {
+    find_toolchain(root).or_else(|| find_maven_java(root))
+}
+
+/// The Java version of the root `pom.xml`: `maven.compiler.release`, then `<release>` in the
+/// maven-compiler-plugin configuration, then `maven.compiler.source`. A value is `17`, `1.8` or a
+/// `${property}` of the same file; one that does not resolve is skipped.
+pub fn find_maven_java(root: &Path) -> Option<Toolchain> {
+    let text = strip_xml_comments(&fs::read_to_string(root.join(POM_SOURCE)).ok()?);
+    let plugin = text
+        .find("<artifactId>maven-compiler-plugin</artifactId>")
+        .map(|start| {
+            let rest = &text[start..];
+            &rest[..rest.find("</plugin>").unwrap_or(rest.len())]
+        });
+    let version = [
+        xml_value(&text, "maven.compiler.release"),
+        plugin.and_then(|plugin| xml_value(plugin, "release")),
+        xml_value(&text, "maven.compiler.source"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|value| maven_version(&text, &value))?;
+    Some(Toolchain {
+        version,
+        source: POM_SOURCE.into(),
+    })
+}
+
+fn strip_xml_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("-->") {
+            Some(end) => rest = &rest[start + end + 3..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The trimmed text of the first non-empty `<tag>...</tag>`.
+fn xml_value(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let after = &rest[start + open.len()..];
+        let end = after.find(&close)?;
+        let value = after[..end].trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+        rest = &after[end..];
+    }
+    None
+}
+
+/// The major version of a pom value, following `${property}` references (a few levels deep).
+fn maven_version(pom: &str, value: &str) -> Option<u32> {
+    let mut value = value.trim().to_string();
+    for _ in 0..4 {
+        let Some(name) = value
+            .strip_prefix("${")
+            .and_then(|rest| rest.strip_suffix('}'))
+        else {
+            return major_version(&value)
+                .filter(|_| value.starts_with(|c: char| c.is_ascii_digit()));
+        };
+        value = xml_value(pom, name)?;
+    }
+    None
+}
+
+/// What the Java language server needs from a JDK: a major version of at least `min_major`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerJdkChoice {
+    /// The server runs with this JDK.
+    Found(Jdk),
+    /// No usable JDK: the message says what is missing.
+    Unavailable(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerJdk {
+    pub choice: ServerJdkChoice,
+    /// Things the user should know, such as a `java.server_jdk` that is not a directory.
+    pub notes: Vec<String>,
+}
+
+impl ServerJdk {
+    pub fn jdk(&self) -> Option<&Jdk> {
+        match &self.choice {
+            ServerJdkChoice::Found(jdk) => Some(jdk),
+            ServerJdkChoice::Unavailable(_) => None,
+        }
+    }
+
+    /// Why no JDK can run the server.
+    pub fn error(&self) -> Option<&str> {
+        match &self.choice {
+            ServerJdkChoice::Found(_) => None,
+            ServerJdkChoice::Unavailable(message) => Some(message),
+        }
+    }
+}
+
+/// `found` is the highest major version seen; `None` with `any` set means a JDK of unknown version.
+fn server_jdk_too_old(min_major: u32, found: Option<u32>, any: bool) -> ServerJdkChoice {
+    let found = match found {
+        Some(major) => major.to_string(),
+        None if any => "unknown".to_string(),
+        None => "none".to_string(),
+    };
+    ServerJdkChoice::Unavailable(format!(
+        "jdtls needs JDK {min_major} or newer (found {found})"
+    ))
+}
+
+/// The JDK that runs the Java language server. The `java.server_jdk` `setting` (a relative path
+/// resolves against the worktree root) wins when it is a JDK; one older than `min_major` is an
+/// error, not skipped. Otherwise the newest JDK of `JAVA_HOME` and the candidate locations that is
+/// `min_major` or newer; on a tie the first found wins, `JAVA_HOME` first. A JDK whose version is
+/// unknown never qualifies.
+pub fn server_jdk(inputs: &JdkInputs, setting: Option<&Path>, min_major: u32) -> ServerJdk {
+    let mut notes = Vec::new();
+    if let Some(setting) = setting {
+        let path = resolve_setting(inputs, setting);
+        if path.is_dir() && is_jdk_dir(&path) {
+            let origin = settings_origin(inputs, "server_jdk");
+            let jdk = describe(path, format!("java.server_jdk in {origin}"));
+            // Like `kotlin.jdk_home`, a directory with a `java` binary and no `release` file is
+            // taken as the user's word, with an unknown version.
+            let unversioned = jdk.version.is_none() && jdk.home.join("bin").join("java").is_file();
+            let choice = if unversioned || jdk.major.is_some_and(|major| major >= min_major) {
+                ServerJdkChoice::Found(jdk)
+            } else {
+                server_jdk_too_old(min_major, jdk.major, true)
+            };
+            return ServerJdk { choice, notes };
+        }
+        let problem = if path.is_dir() {
+            "is not a JDK"
+        } else {
+            "is not a directory"
+        };
+        notes.push(format!(
+            "java.server_jdk {} {problem}, so it is ignored",
+            path.display()
+        ));
+    }
+
+    let (java_home, candidates) = discover(inputs);
+    let from_java_home = java_home.is_some();
+    let all: Vec<Jdk> = java_home
+        .into_iter()
+        .chain(candidates)
+        .enumerate()
+        .map(|(index, path)| {
+            let reason = if from_java_home && index == 0 {
+                "JAVA_HOME".to_string()
+            } else {
+                format!(
+                    "newest JDK {min_major} or newer, found in {}",
+                    path_parent_for_reason(&path)
+                )
+            };
+            describe(path, reason)
+        })
+        .collect();
+    let any = !all.is_empty();
+    let highest = all.iter().filter_map(|jdk| jdk.major).max();
+    let best = all
+        .into_iter()
+        .filter(|jdk| jdk.major.is_some_and(|major| major >= min_major))
+        // The first of the highest version wins.
+        .fold(None::<Jdk>, |best, jdk| match best {
+            Some(best) if best.major >= jdk.major => Some(best),
+            _ => Some(jdk),
+        });
+    let choice = match best {
+        Some(jdk) => ServerJdkChoice::Found(jdk),
+        None => server_jdk_too_old(min_major, highest, any),
+    };
+    ServerJdk { choice, notes }
+}
+
+/// The text of the Java JDK report for one worktree: the import JDK, then the server JDK.
+pub fn java_report(inputs: &JdkInputs, server_setting: Option<&Path>, min_major: u32) -> String {
+    format!(
+        "{}\n{}",
+        inputs.root.display(),
+        java_sections(inputs, server_setting, min_major)
+    )
+}
+
+/// [`java_report`] without the worktree line: the import JDK, the server JDK and the notes.
+pub fn java_sections(inputs: &JdkInputs, server_setting: Option<&Path>, min_major: u32) -> String {
+    let detection = detect(inputs);
+    let server = server_jdk(inputs, server_setting, min_major);
+    let mut text = import_section(&detection);
+    text.push_str(&server_section(&server));
+    for note in detection.notes.iter().chain(&server.notes) {
+        text.push_str(&format!("Note: {note}\n"));
+    }
+    text
+}
+
+/// The server JDK lines: path, version and reason, or why there is none.
+pub fn server_section(server: &ServerJdk) -> String {
+    match &server.choice {
+        ServerJdkChoice::Found(jdk) => format!(
+            "Server JDK: {}\nVersion: {}\nReason: {}\n",
+            jdk.home.display(),
+            jdk.version.as_deref().unwrap_or("unknown"),
+            jdk.reason,
+        ),
+        ServerJdkChoice::Unavailable(message) => {
+            format!("Server JDK: none\nReason: {message}\n")
+        }
+    }
+}
+
 /// The server runtime line of `kotlin: show jdk`: the `runtime` entry of `servers.toml` inside the
 /// installed server, else `JAVA_HOME`.
 pub fn server_runtime(
@@ -560,10 +857,12 @@ pub fn import_section(detection: &Detection) -> String {
         .toolchain
         .as_ref()
         .map(|toolchain| {
-            format!(
-                "Gradle toolchain: {} in {}\n",
-                toolchain.version, toolchain.source
-            )
+            let label = if toolchain.is_maven() {
+                "Maven Java version"
+            } else {
+                "Gradle toolchain"
+            };
+            format!("{label}: {} in {}\n", toolchain.version, toolchain.source)
         })
         .unwrap_or_default();
     match &detection.choice {
@@ -577,9 +876,16 @@ pub fn import_section(detection: &Detection) -> String {
             "Import JDK: none\nReason: {}\n{declared}Fix: {SET_JDK_HOME_LABEL}\n",
             detection.failure_reason().unwrap_or_default()
         ),
-        JdkChoice::Bundled => format!(
-            "Import JDK: the bundled runtime of the server\nReason: no Gradle toolchain is declared and no JDK was found\n{declared}"
-        ),
+        JdkChoice::Bundled => {
+            let reason = match &detection.toolchain {
+                Some(toolchain) => format!(
+                    "no JDK was found for Maven Java version {}",
+                    toolchain.version
+                ),
+                None => "no Gradle toolchain is declared and no JDK was found".to_string(),
+            };
+            format!("Import JDK: the bundled runtime of the server\nReason: {reason}\n{declared}")
+        }
     }
 }
 
@@ -639,6 +945,7 @@ mod tests {
             let project = self.project();
             JdkInputs {
                 setting: None,
+                setting_name: KOTLIN_JDK_HOME,
                 project_settings: Some(project.join(".bongos/settings.json")),
                 root: project,
                 java_home: None,
@@ -693,6 +1000,25 @@ mod tests {
         assert_eq!(jdk.reason, "kotlin.jdk_home in settings");
         // The toolchain is still reported, even though the setting decided.
         assert_eq!(detection.toolchain.unwrap().version, 21);
+    }
+
+    #[test]
+    fn test_reason_and_note_name_the_setting_that_supplied_the_jdk() {
+        let tree = Tree::new();
+        let mut inputs = tree.inputs();
+        inputs.setting_name = "java.jdk_home";
+        let chosen = jdk(tree.path(), "chosen", "17.0.9");
+        inputs.setting = Some(chosen);
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).reason, "java.jdk_home in settings");
+
+        inputs.setting = Some(tree.path().join("missing"));
+        let detection = detect(&inputs);
+        assert!(
+            detection.notes[0].starts_with("java.jdk_home "),
+            "{:?}",
+            detection.notes
+        );
     }
 
     #[test]
@@ -1109,5 +1435,429 @@ mod tests {
         );
         assert!(text.contains("Server runtime (kotlin-lsp):"), "{text}");
         assert_eq!(report(&[], None), "No Kotlin project is open.\n");
+    }
+
+    fn pom(properties: &str, plugin_configuration: &str) -> String {
+        format!(
+            "<project>\n<!-- <maven.compiler.release>99</maven.compiler.release> -->\n<properties>{properties}</properties>\n<build><plugins><plugin>\n<groupId>org.apache.maven.plugins</groupId>\n<artifactId>maven-compiler-plugin</artifactId>\n<configuration>{plugin_configuration}</configuration>\n</plugin></plugins></build>\n</project>\n"
+        )
+    }
+
+    fn maven_version_of(pom_text: &str) -> Option<u32> {
+        let tree = Tree::new();
+        let root = tree.project();
+        write(&root, "pom.xml", pom_text);
+        find_maven_java(&root).map(|toolchain| toolchain.version)
+    }
+
+    #[test]
+    fn test_server_jdk_picks_the_newest_at_or_above_the_minimum() {
+        let tree = Tree::new();
+        let mut inputs = tree.inputs();
+        jdk(tree.path(), "usr/lib/jvm/jdk-8", "1.8.0_292");
+        let newest = jdk(tree.path(), "usr/lib/jvm/jdk-25", "25.0.1");
+        jdk(tree.path(), "usr/lib/jvm/jdk-21", "21.0.2");
+        jdk(tree.path(), "home/.sdkman/candidates/java/24-tem", "24.0.1");
+        inputs.java_home = Some(tree.path().join("usr/lib/jvm/jdk-21").into());
+
+        let server = server_jdk(&inputs, None, 21);
+        let chosen = server.jdk().unwrap();
+        assert_eq!(chosen.home, newest);
+        assert_eq!(chosen.major, Some(25));
+        assert_eq!(
+            chosen.reason,
+            format!(
+                "newest JDK 21 or newer, found in {}/usr/lib/jvm",
+                tree.path().display()
+            )
+        );
+        assert!(server.notes.is_empty());
+    }
+
+    #[test]
+    fn test_server_jdk_ties_go_to_java_home_then_the_first_found() {
+        let tree = Tree::new();
+        let mut inputs = tree.inputs();
+        let sdkman = jdk(tree.path(), "home/.sdkman/candidates/java/21-tem", "21.0.2");
+        let system = jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.9");
+        let server = server_jdk(&inputs, None, 21);
+        assert_eq!(server.jdk().unwrap().home, sdkman);
+
+        inputs.java_home = Some(system.clone().into());
+        let server = server_jdk(&inputs, None, 21);
+        let chosen = server.jdk().unwrap();
+        assert_eq!(chosen.home, system);
+        assert_eq!(chosen.reason, "JAVA_HOME");
+    }
+
+    #[test]
+    fn test_server_jdk_setting_wins_over_a_newer_jdk() {
+        let tree = Tree::new();
+        let mut inputs = tree.inputs();
+        jdk(tree.path(), "usr/lib/jvm/java-25", "25.0.1");
+        let chosen = jdk(tree.path(), "chosen", "21.0.2");
+
+        let server = server_jdk(&inputs, Some(&chosen), 21);
+        let found = server.jdk().unwrap();
+        assert_eq!(found.home, chosen);
+        assert_eq!(found.reason, "java.server_jdk in settings");
+
+        // A relative setting resolves against the root and names the project settings.
+        let relative = jdk(&inputs.root, "tools/jdk", "22.0.1");
+        write(
+            &inputs.root,
+            ".bongos/settings.json",
+            "{ \"java\": { \"server_jdk\": \"tools/jdk\" } }",
+        );
+        inputs.java_home = Some(chosen.into());
+        let server = server_jdk(&inputs, Some(Path::new("tools/jdk")), 21);
+        let found = server.jdk().unwrap();
+        assert_eq!(found.home, relative);
+        assert_eq!(found.reason, "java.server_jdk in project settings");
+    }
+
+    #[test]
+    fn test_server_jdk_setting_that_is_too_old_is_an_error() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        jdk(tree.path(), "usr/lib/jvm/java-25", "25.0.1");
+        let old = jdk(tree.path(), "old", "17.0.9");
+
+        let server = server_jdk(&inputs, Some(&old), 21);
+        assert_eq!(server.jdk(), None);
+        assert_eq!(
+            server.error(),
+            Some("jdtls needs JDK 21 or newer (found 17)")
+        );
+    }
+
+    #[test]
+    fn test_server_jdk_setting_that_is_not_a_directory_is_noted_and_skipped() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        let newest = jdk(tree.path(), "usr/lib/jvm/java-25", "25.0.1");
+        let missing = tree.path().join("missing");
+
+        let server = server_jdk(&inputs, Some(&missing), 21);
+        assert_eq!(server.jdk().unwrap().home, newest);
+        assert_eq!(server.notes.len(), 1);
+        assert!(
+            server.notes[0].contains("is not a directory"),
+            "{:?}",
+            server.notes
+        );
+
+        let plain = tree.path().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        let server = server_jdk(&inputs, Some(&plain), 21);
+        assert!(
+            server.notes[0].contains("is not a JDK"),
+            "{:?}",
+            server.notes
+        );
+    }
+
+    #[test]
+    fn test_server_jdk_setting_without_a_release_file_is_accepted_with_a_java_binary() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        jdk(tree.path(), "usr/lib/jvm/java-25", "25.0.1");
+        let bare = tree.path().join("bare");
+        fs::create_dir_all(bare.join("bin")).unwrap();
+        fs::write(bare.join("bin").join("java"), "").unwrap();
+
+        let server = server_jdk(&inputs, Some(&bare), 21);
+        let found = server.jdk().expect("accepted");
+        assert_eq!(found.home, bare);
+        assert_eq!(found.major, None);
+        assert!(server.notes.is_empty(), "{:?}", server.notes);
+    }
+
+    #[test]
+    fn test_server_jdk_none_high_enough() {
+        let tree = Tree::new();
+        let mut inputs = tree.inputs();
+        let server = server_jdk(&inputs, None, 25);
+        assert_eq!(
+            server.error(),
+            Some("jdtls needs JDK 25 or newer (found none)")
+        );
+
+        jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.2");
+        jdk(tree.path(), "usr/lib/jvm/java-17", "17.0.9");
+        inputs.java_home = Some(tree.path().join("usr/lib/jvm/java-17").into());
+        let server = server_jdk(&inputs, None, 25);
+        assert_eq!(
+            server.error(),
+            Some("jdtls needs JDK 25 or newer (found 21)")
+        );
+    }
+
+    #[test]
+    fn test_server_jdk_unknown_version_never_qualifies() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            tree.path(),
+            "usr/lib/jvm/mystery/release",
+            "IMPLEMENTOR=\"x\"\n",
+        );
+        let server = server_jdk(&inputs, None, 21);
+        assert_eq!(
+            server.error(),
+            Some("jdtls needs JDK 21 or newer (found unknown)")
+        );
+    }
+
+    #[test]
+    fn test_maven_release_property() {
+        assert_eq!(
+            maven_version_of(&pom(
+                "<maven.compiler.release>17</maven.compiler.release>\n<maven.compiler.source>11</maven.compiler.source>",
+                "<release>21</release>"
+            )),
+            Some(17)
+        );
+    }
+
+    #[test]
+    fn test_maven_plugin_release() {
+        assert_eq!(
+            maven_version_of(&pom(
+                "<maven.compiler.source>11</maven.compiler.source>",
+                "<release>21</release>"
+            )),
+            Some(21)
+        );
+    }
+
+    #[test]
+    fn test_maven_source_property_and_one_dot_eight() {
+        assert_eq!(
+            maven_version_of(&pom(
+                "<maven.compiler.source>1.8</maven.compiler.source>",
+                ""
+            )),
+            Some(8)
+        );
+        assert_eq!(
+            maven_version_of(&pom(
+                "<maven.compiler.source>11</maven.compiler.source>",
+                ""
+            )),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn test_maven_property_references() {
+        assert_eq!(
+            maven_version_of(&pom(
+                "<java.version>17</java.version>\n<maven.compiler.release>${java.version}</maven.compiler.release>",
+                ""
+            )),
+            Some(17)
+        );
+        // An unresolvable value is skipped for the next source in order.
+        assert_eq!(
+            maven_version_of(&pom(
+                "<maven.compiler.release>${nope}</maven.compiler.release>\n<maven.compiler.source>11</maven.compiler.source>",
+                "<release>${also.nope}</release>"
+            )),
+            Some(11)
+        );
+        assert_eq!(
+            maven_version_of(&pom(
+                "<maven.compiler.release>${nope}</maven.compiler.release>",
+                ""
+            )),
+            None
+        );
+        // A comment does not declare anything.
+        assert_eq!(maven_version_of(&pom("", "")), None);
+    }
+
+    #[test]
+    fn test_maven_version_matches_a_jdk() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>17</maven.compiler.release>", ""),
+        );
+        let seventeen = jdk(tree.path(), "usr/lib/jvm/java-17", "17.0.9");
+        jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.2");
+
+        let detection = detect(&inputs);
+        let found = found(&detection);
+        assert_eq!(found.home, seventeen);
+        assert_eq!(found.reason, "Maven Java version 17 in pom.xml");
+        let section = import_section(&detection);
+        assert!(
+            section.contains("Maven Java version: 17 in pom.xml"),
+            "{section}"
+        );
+        assert!(!section.contains("Gradle"), "{section}");
+    }
+
+    #[test]
+    fn test_maven_old_source_level_runs_on_a_newer_jdk() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.source>1.8</maven.compiler.source>", ""),
+        );
+        let twenty_one = jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.2");
+
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).home, twenty_one);
+        assert_eq!(found(&detection).major, Some(21));
+        assert_eq!(found(&detection).reason, "Maven Java version 8 in pom.xml");
+        assert_eq!(detection.failure_reason(), None);
+        assert!(detection.menu_entry().is_none());
+    }
+
+    #[test]
+    fn test_maven_level_prefers_java_home_over_a_candidate_of_equal_major() {
+        let tree = Tree::new();
+        let mut inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>17</maven.compiler.release>", ""),
+        );
+        // The candidate sorts first, so only the JAVA_HOME rule can make the other one win.
+        jdk(tree.path(), "usr/lib/jvm/a-java-17", "17.0.9");
+        let home = jdk(tree.path(), "elsewhere/java-17", "17.0.1");
+        inputs.java_home = Some(home.clone().into_os_string());
+
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).home, home);
+    }
+
+    #[test]
+    fn test_maven_level_picks_the_lowest_jdk_above_it() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>11</maven.compiler.release>", ""),
+        );
+        jdk(tree.path(), "usr/lib/jvm/java-25", "25.0.1");
+        let seventeen = jdk(tree.path(), "usr/lib/jvm/java-17", "17.0.9");
+        jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.2");
+
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).home, seventeen);
+        assert_eq!(found(&detection).reason, "Maven Java version 11 in pom.xml");
+    }
+
+    #[test]
+    fn test_maven_level_above_every_jdk_falls_back_to_the_default() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>21</maven.compiler.release>", ""),
+        );
+        let seventeen = jdk(tree.path(), "usr/lib/jvm/java-17", "17.0.9");
+
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).home, seventeen);
+        assert_eq!(detection.failure_reason(), None);
+        let section = import_section(&detection);
+        assert!(
+            section.contains("Maven Java version: 21 in pom.xml"),
+            "{section}"
+        );
+        assert!(!section.contains("Import JDK: none"), "{section}");
+
+        // With JAVA_HOME set, it is the fallback.
+        let mut inputs = tree.inputs();
+        let home = jdk(tree.path(), "opt/jdk-11", "11.0.2");
+        inputs.java_home = Some(home.clone().into());
+        assert_eq!(found(&detect(&inputs)).home, home);
+    }
+
+    #[test]
+    fn test_maven_level_with_no_jdk_uses_the_bundled_runtime() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>17</maven.compiler.release>", ""),
+        );
+        let detection = detect(&inputs);
+        assert_eq!(detection.choice, JdkChoice::Bundled);
+        assert_eq!(detection.failure_reason(), None);
+        let section = import_section(&detection);
+        assert!(
+            section.contains("Maven Java version: 17 in pom.xml"),
+            "{section}"
+        );
+        assert!(!section.contains("Gradle"), "{section}");
+    }
+
+    #[test]
+    fn test_gradle_toolchain_beats_the_pom() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>17</maven.compiler.release>", ""),
+        );
+        write(
+            &inputs.root,
+            "build.gradle.kts",
+            "kotlin { jvmToolchain(21) }",
+        );
+        jdk(tree.path(), "usr/lib/jvm/java-17", "17.0.9");
+        let twenty_one = jdk(tree.path(), "usr/lib/jvm/java-21", "21.0.2");
+
+        let detection = detect(&inputs);
+        assert_eq!(found(&detection).home, twenty_one);
+        assert_eq!(found(&detection).reason, "toolchain 21 in build.gradle.kts");
+        assert!(import_section(&detection).contains("Gradle toolchain: 21 in build.gradle.kts"));
+    }
+
+    #[test]
+    fn test_java_report_shows_both_roles() {
+        let tree = Tree::new();
+        let inputs = tree.inputs();
+        write(
+            &inputs.root,
+            "pom.xml",
+            &pom("<maven.compiler.release>17</maven.compiler.release>", ""),
+        );
+        jdk(tree.path(), "usr/lib/jvm/java-17", "17.0.9");
+        jdk(tree.path(), "usr/lib/jvm/java-25", "25.0.1");
+
+        let text = java_report(&inputs, None, 21);
+        assert!(text.contains("Import JDK: "), "{text}");
+        assert!(text.contains("Version: 17.0.9"), "{text}");
+        assert!(
+            text.contains("Reason: Maven Java version 17 in pom.xml"),
+            "{text}"
+        );
+        assert!(text.contains("Server JDK: "), "{text}");
+        assert!(text.contains("Version: 25.0.1"), "{text}");
+        assert!(
+            text.contains("Reason: newest JDK 21 or newer, found in "),
+            "{text}"
+        );
+
+        let text = java_report(&inputs, None, 30);
+        assert!(
+            text.contains("Server JDK: none\nReason: jdtls needs JDK 30 or newer (found 25)\n"),
+            "{text}"
+        );
+        assert!(text.contains("Import JDK: "), "{text}");
     }
 }

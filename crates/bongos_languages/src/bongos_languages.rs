@@ -9,6 +9,19 @@
 //! `LICENSE-JAVA-EXTENSION` and `LICENSE-TOML-EXTENSION`). The grammars are tree-sitter-java (MIT) and
 //! tree-sitter-toml-ng (MIT) from crates.io.
 //!
+//! The HTML config and queries in `src/html/` come from the Zed HTML extension
+//! (github.com/zed-industries/zed, `extensions/html`, Apache-2.0, see `LICENSE-HTML-EXTENSION`). The grammar is
+//! tree-sitter-html (MIT) from crates.io.
+//!
+//! The XML highlight, indent and outline queries in `src/xml/` come from the Zed XML extension
+//! (github.com/sweetppro/zed-xml, MIT, see `LICENSE-XML-EXTENSION`). The XML config, brackets, overrides and
+//! injections files are written for bongos. The grammar is tree-sitter-xml (MIT) from crates.io.
+//!
+//! The HCL, Terraform and Terraform Vars configs and queries in `src/hcl/`, `src/terraform/` and
+//! `src/terraform-vars/` come from the Zed Terraform extension (github.com/zed-extensions/terraform,
+//! Apache-2.0, see `LICENSE-TERRAFORM-EXTENSION`). All three use the tree-sitter-hcl grammar (Apache-2.0)
+//! from crates.io.
+//!
 //! Everything here is compiled into the binary: the grammars are linked in and the queries are embedded,
 //! so nothing is fetched at runtime.
 
@@ -19,6 +32,11 @@ use language::{LanguageConfig, LanguageQueries, LanguageRegistry, LoadedLanguage
 const KOTLIN_CONFIG: &str = include_str!("kotlin/config.toml");
 const JAVA_CONFIG: &str = include_str!("java/config.toml");
 const TOML_CONFIG: &str = include_str!("toml/config.toml");
+const HTML_CONFIG: &str = include_str!("html/config.toml");
+const XML_CONFIG: &str = include_str!("xml/config.toml");
+const HCL_CONFIG: &str = include_str!("hcl/config.toml");
+const TERRAFORM_CONFIG: &str = include_str!("terraform/config.toml");
+const TERRAFORM_VARS_CONFIG: &str = include_str!("terraform-vars/config.toml");
 
 /// Registers the built-in languages and their grammars with the registry.
 ///
@@ -29,11 +47,19 @@ pub fn init(languages: &LanguageRegistry) {
         ("kotlin", tree_sitter_kotlin::LANGUAGE),
         ("java", tree_sitter_java::LANGUAGE),
         ("toml", tree_sitter_toml_ng::LANGUAGE),
+        ("html", tree_sitter_html::LANGUAGE),
+        ("xml", tree_sitter_xml::LANGUAGE_XML),
+        ("hcl", tree_sitter_hcl::LANGUAGE),
     ]);
 
     register(languages, KOTLIN_CONFIG, kotlin_queries);
     register(languages, JAVA_CONFIG, java_queries);
     register(languages, TOML_CONFIG, toml_queries);
+    register(languages, HTML_CONFIG, html_queries);
+    register(languages, XML_CONFIG, xml_queries);
+    register(languages, HCL_CONFIG, hcl_queries);
+    register(languages, TERRAFORM_CONFIG, terraform_queries);
+    register(languages, TERRAFORM_VARS_CONFIG, terraform_vars_queries);
 }
 
 fn register(
@@ -96,6 +122,62 @@ fn toml_queries() -> LanguageQueries {
         outline: Some(include_str!("toml/outline.scm").into()),
         injections: Some(include_str!("toml/injections.scm").into()),
         overrides: Some(include_str!("toml/overrides.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn html_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("html/highlights.scm").into()),
+        brackets: Some(include_str!("html/brackets.scm").into()),
+        indents: Some(include_str!("html/indents.scm").into()),
+        outline: Some(include_str!("html/outline.scm").into()),
+        injections: Some(include_str!("html/injections.scm").into()),
+        overrides: Some(include_str!("html/overrides.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn xml_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("xml/highlights.scm").into()),
+        brackets: Some(include_str!("xml/brackets.scm").into()),
+        indents: Some(include_str!("xml/indents.scm").into()),
+        outline: Some(include_str!("xml/outline.scm").into()),
+        injections: Some(include_str!("xml/injections.scm").into()),
+        overrides: Some(include_str!("xml/overrides.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn hcl_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("hcl/highlights.scm").into()),
+        brackets: Some(include_str!("hcl/brackets.scm").into()),
+        indents: Some(include_str!("hcl/indents.scm").into()),
+        outline: Some(include_str!("hcl/outline.scm").into()),
+        injections: Some(include_str!("hcl/injections.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn terraform_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("terraform/highlights.scm").into()),
+        brackets: Some(include_str!("terraform/brackets.scm").into()),
+        indents: Some(include_str!("terraform/indents.scm").into()),
+        outline: Some(include_str!("terraform/outline.scm").into()),
+        injections: Some(include_str!("terraform/injections.scm").into()),
+        ..Default::default()
+    }
+}
+
+fn terraform_vars_queries() -> LanguageQueries {
+    LanguageQueries {
+        highlights: Some(include_str!("terraform-vars/highlights.scm").into()),
+        brackets: Some(include_str!("terraform-vars/brackets.scm").into()),
+        indents: Some(include_str!("terraform-vars/indents.scm").into()),
+        injections: Some(include_str!("terraform-vars/injections.scm").into()),
         ..Default::default()
     }
 }
@@ -285,5 +367,170 @@ mod tests {
             captured.iter().any(|(name, _)| name == "property"),
             "missing property capture in {captured:?}"
         );
+    }
+
+    #[gpui::test]
+    async fn html_and_xml_selected_by_path(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        for (path, name) in [
+            ("index.html", "HTML"),
+            ("a/b/page.htm", "HTML"),
+            ("pom.xml", "XML"),
+            ("a/b/pom.xml", "XML"),
+            ("schema.xsd", "XML"),
+            ("style.xsl", "XML"),
+            ("logo.svg", "XML"),
+            ("data.xml", "XML"),
+        ] {
+            let available = registry
+                .language_for_file_path(Path::new(path))
+                .unwrap_or_else(|| panic!("no language for {path}"));
+            assert_eq!(available.name().as_ref(), name, "{path}");
+        }
+        for name in ["HTML", "XML"] {
+            let language = registry.language_for_name(name).await.unwrap();
+            assert!(language.grammar().is_some(), "{name} loads with a grammar");
+        }
+    }
+
+    #[gpui::test]
+    async fn registering_twice_keeps_one_html_and_one_xml(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        init(&registry);
+        for wanted in ["HTML", "XML"] {
+            let count = registry
+                .language_names()
+                .into_iter()
+                .filter(|name| name.as_ref() == wanted)
+                .count();
+            assert_eq!(count, 1, "{wanted}");
+        }
+    }
+
+    #[test]
+    fn html_highlight_query_captures_a_snippet() {
+        const HTML_SNIPPET: &str = "<div class=\"a\"><!-- c --><p>hi</p></div>";
+        let captured = captures(
+            tree_sitter_html::LANGUAGE,
+            parse_config(HTML_CONFIG),
+            html_queries(),
+            include_str!("html/highlights.scm"),
+            HTML_SNIPPET,
+        );
+        assert_captured(
+            &captured,
+            &[
+                ("tag", "div"),
+                ("tag", "p"),
+                ("attribute", "class"),
+                ("string", "a"),
+                ("comment", "<!-- c -->"),
+            ],
+        );
+    }
+
+    #[test]
+    fn xml_highlight_query_captures_a_snippet() {
+        const XML_SNIPPET: &str = "<?xml version=\"1.0\"?><a b=\"c\"><!-- d --><e>f</e></a>";
+        let captured = captures(
+            tree_sitter_xml::LANGUAGE_XML,
+            parse_config(XML_CONFIG),
+            xml_queries(),
+            include_str!("xml/highlights.scm"),
+            XML_SNIPPET,
+        );
+        assert_captured(
+            &captured,
+            &[
+                ("tag", "a"),
+                ("tag", "e"),
+                ("property", "b"),
+                ("string", "\"c\""),
+                ("comment", "<!-- d -->"),
+            ],
+        );
+    }
+
+    #[gpui::test]
+    async fn hcl_and_terraform_selected_by_path(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        for (path, name) in [
+            ("main.tf", "Terraform"),
+            ("a/b/main.tofu", "Terraform"),
+            ("prod.tfvars", "Terraform Vars"),
+            ("a/b/prod.tfvars", "Terraform Vars"),
+            ("config.hcl", "HCL"),
+            ("a/b/config.hcl", "HCL"),
+        ] {
+            let available = registry
+                .language_for_file_path(Path::new(path))
+                .unwrap_or_else(|| panic!("no language for {path}"));
+            assert_eq!(available.name().as_ref(), name, "{path}");
+        }
+        for name in ["HCL", "Terraform", "Terraform Vars"] {
+            let language = registry.language_for_name(name).await.unwrap();
+            assert!(language.grammar().is_some(), "{name} loads with a grammar");
+        }
+    }
+
+    #[gpui::test]
+    async fn registering_twice_keeps_one_hcl_and_terraform_entry(cx: &mut TestAppContext) {
+        let registry = registry(cx);
+        init(&registry);
+        for wanted in ["HCL", "Terraform", "Terraform Vars"] {
+            let count = registry
+                .language_names()
+                .into_iter()
+                .filter(|name| name.as_ref() == wanted)
+                .count();
+            assert_eq!(count, 1, "{wanted}");
+        }
+    }
+
+    #[test]
+    fn terraform_highlight_query_captures_a_snippet() {
+        const TF_SNIPPET: &str = "# note\nvariable \"region\" {\n  default = \"us\"\n}\nresource \"aws_s3_bucket\" \"b\" {\n  count = 1\n}\n";
+        let captured = captures(
+            tree_sitter_hcl::LANGUAGE,
+            parse_config(TERRAFORM_CONFIG),
+            terraform_queries(),
+            include_str!("terraform/highlights.scm"),
+            TF_SNIPPET,
+        );
+        assert_captured(
+            &captured,
+            &[
+                ("comment", "# note"),
+                ("keyword", "variable"),
+                ("keyword", "resource"),
+                ("number", "1"),
+            ],
+        );
+    }
+
+    #[test]
+    fn hcl_and_terraform_vars_highlight_queries_compile() {
+        const SNIPPET: &str = "region = \"us\"\n// c\n";
+        for (config, queries, highlights) in [
+            (
+                HCL_CONFIG,
+                hcl_queries(),
+                include_str!("hcl/highlights.scm"),
+            ),
+            (
+                TERRAFORM_VARS_CONFIG,
+                terraform_vars_queries(),
+                include_str!("terraform-vars/highlights.scm"),
+            ),
+        ] {
+            let captured = captures(
+                tree_sitter_hcl::LANGUAGE,
+                parse_config(config),
+                queries,
+                highlights,
+                SNIPPET,
+            );
+            assert_captured(&captured, &[("comment", "// c")]);
+        }
     }
 }

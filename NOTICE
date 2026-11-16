@@ -25,3 +25,6 @@ Bundled third-party material:
 crates/bongos_languages/src/kotlin/*.scm: Kotlin highlight and outline queries from zed-extensions/kotlin, MIT, copyright 2024 Evren Sen; see crates/bongos_languages/LICENSE-KOTLIN-EXTENSION
 crates/bongos_languages/src/java/*.scm and config.toml: Java queries and config from zed-extensions/java, Apache-2.0, copyright Java Extension Contributors; see crates/bongos_languages/LICENSE-JAVA-EXTENSION
 crates/bongos_languages/src/toml/*.scm and config.toml: TOML queries and config from zed-extensions/toml, Apache-2.0, copyright 2022-2025 Zed Industries, Inc.; see crates/bongos_languages/LICENSE-TOML-EXTENSION
+crates/bongos_languages/src/html/*.scm and config.toml: HTML queries and config from the Zed HTML extension (zed-industries/zed, extensions/html), Apache-2.0, copyright 2022-2025 Zed Industries, Inc.; see crates/bongos_languages/LICENSE-HTML-EXTENSION
+crates/bongos_languages/src/xml/{highlights,indents,outline}.scm: XML queries from zed-xml (sweetppro/zed-xml), MIT, copyright 2025 SweetPPro; see crates/bongos_languages/LICENSE-XML-EXTENSION
+crates/bongos_languages/src/{hcl,terraform,terraform-vars}/*.scm and config.toml: HCL and Terraform queries and config from the Zed Terraform extension (zed-extensions/terraform), Apache-2.0, copyright 2022-2024 Zed Industries, Inc.; see crates/bongos_languages/LICENSE-TERRAFORM-EXTENSION

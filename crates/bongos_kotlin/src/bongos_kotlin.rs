@@ -4,6 +4,7 @@ mod glue;
 mod install;
 mod installed;
 mod intellij;
+mod java;
 mod jdk;
 mod license;
 mod locks;
@@ -11,6 +12,7 @@ mod log;
 mod manager;
 mod manifest;
 mod manifest_cache;
+pub mod pinned;
 mod remote_manifest;
 mod resolve;
 mod status;
@@ -35,9 +37,15 @@ pub use intellij::{
     EULA_FILE, LICENSE_TIMEOUT, LicenseOutcome, UNLICENSED_EXIT_CODE, accept_eula,
     bundle_eula_hash, eula_accepted, eula_argument, eula_hash, license_check,
 };
+pub use java::{
+    JAVA_LANGUAGE, JAVA_LANGUAGE_ID, JDTLS_ADAPTER, JavaRoutes, JavaServer, JavaServerPolicy,
+    MIXED_JVM_NOTICE, MIXED_JVM_NOTICE_KEY,
+};
 pub use jdk::{
-    Detection, Jdk, JdkChoice, JdkInputs, JdkQuery, MenuEntry, SET_JDK_HOME_LABEL, Toolchain,
-    default_candidate_patterns, detect, find_toolchain, set_jdk_home_entry,
+    Detection, Jdk, JdkChoice, JdkInputs, JdkQuery, KOTLIN_JDK_HOME, MenuEntry, POM_SOURCE,
+    SET_JDK_HOME_LABEL, ServerJdk, ServerJdkChoice, Toolchain, default_candidate_patterns, detect,
+    find_declared_java, find_maven_java, find_toolchain, java_report, java_sections, server_jdk,
+    server_section, set_jdk_home_entry,
 };
 use language::{LanguageName, LanguageRegistry};
 pub use license::{
@@ -261,10 +269,12 @@ pub fn init(languages: &LanguageRegistry, dirs: KotlinDirs, cx: &mut App) {
         manifest: manifest.clone(),
         manifest_error: loaded.error,
     });
-    languages.register_lsp_adapter(
-        LanguageName::new_static("Kotlin"),
-        Arc::new(KotlinAdapter::new(dirs.clone(), manifest.clone())),
-    );
+    // One adapter for both languages: on the IntelliJ server a Kotlin and a Java buffer of a
+    // worktree share one process. The policy decides where it may serve Java (D12).
+    let adapter = Arc::new(KotlinAdapter::new(dirs.clone(), manifest.clone()));
+    languages.register_lsp_adapter(LanguageName::new_static("Kotlin"), adapter.clone());
+    languages.register_lsp_adapter(LanguageName::new_static(JAVA_LANGUAGE), adapter);
+    project::register_language_server_policy(Arc::new(JavaServerPolicy), cx);
     KotlinUpdates::init(&dirs.install_root, &dirs.logs_dir, &manifest, cx);
     attach_managers(dirs, cx);
     attach_notices(cx);

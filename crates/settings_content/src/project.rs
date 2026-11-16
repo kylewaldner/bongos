@@ -88,6 +88,37 @@ pub struct ProjectSettingsContent {
 
     /// Settings for the Kotlin language server.
     pub kotlin: Option<KotlinSettingsContent>,
+
+    /// Settings for the Java language server.
+    pub java: Option<JavaSettingsContent>,
+
+    /// Settings for the Terraform language server.
+    pub terraform: Option<TerraformSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Debug, PartialEq, Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct JavaSettingsContent {
+    /// The JDK the Java language server (jdtls) itself runs on. A relative path resolves against
+    /// the worktree root.
+    ///
+    /// Default: null (detected)
+    pub server_jdk: Option<String>,
+
+    /// The JDK used for project import and builds. A relative path resolves against the worktree
+    /// root.
+    ///
+    /// Default: null
+    pub jdk_home: Option<String>,
+}
+
+#[with_fallible_options]
+#[derive(Debug, PartialEq, Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct TerraformSettingsContent {
+    /// The path or name of the terraform (or OpenTofu) binary passed to terraform-ls.
+    ///
+    /// Default: null (the `terraform` on the worktree's PATH, else `tofu`)
+    pub binary: Option<String>,
 }
 
 #[with_fallible_options]

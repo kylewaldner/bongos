@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # make-archives <out-dir> <fake-server-binary> <port>
 # Builds kotlin-lsp.tar.gz and intellij.tar.gz (each: a launcher that execs the fake server, and for
-# IntelliJ an EULA.txt), a tampered copy of each (one byte changed, so the pinned digest no longer
-# matches), and a servers.toml (the format of crates/bongos_kotlin/servers.toml) with the SHA-256 of
-# the genuine archives and http://127.0.0.1:<port>/ URLs.
+# IntelliJ an EULA.txt), jdtls.tar.gz (the launcher at bin/jdtls, the layout of the real jdtls
+# archive) and terraform-ls.zip (the launcher as `terraform-ls` at the archive root, like the real
+# release zip), a tampered copy of each (one byte changed, so the pinned digest no longer matches),
+# and a servers.toml (the format of crates/bongos_kotlin/servers.toml) with the SHA-256 of the
+# genuine archives and http://127.0.0.1:<port>/ URLs. jdtls and terraform-ls are pinned at 0.0.2
+# with no expiry, like their real pins.
 set -euo pipefail
 [ "$#" -eq 3 ] || { echo "usage: make-archives <out-dir> <fake-server-binary> <port>" >&2; exit 2; }
 out=$(mkdir -p "$1" && cd "$1" && pwd)
@@ -13,38 +16,81 @@ port=$3
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-build_archive() {
-  local name=$1 mode=$2 root="$work/$1"
-  mkdir -p "$root/bin"
-  cat >"$root/bin/launcher.sh" <<LAUNCHER
+# write_launcher <path> <mode>: a script that execs the fake server in the given mode.
+write_launcher() {
+  mkdir -p "$(dirname "$1")"
+  cat >"$1" <<LAUNCHER
 #!/bin/sh
-BONGOS_FAKE_LSP_MODE="\${BONGOS_FAKE_LSP_MODE:-$mode}"
+BONGOS_FAKE_LSP_MODE="\${BONGOS_FAKE_LSP_MODE:-$2}"
 export BONGOS_FAKE_LSP_MODE
 exec "$fake" "\$@"
 LAUNCHER
-  chmod +x "$root/bin/launcher.sh"
+  chmod +x "$1"
+}
+
+# tamper <archive> <tampered copy>: the copy has its last byte flipped.
+tamper() {
+  cp "$1" "$2"
+  printf '\377' | dd of="$2" bs=1 seek=$(( $(stat -c %s "$1") - 1 )) conv=notrunc 2>/dev/null
+}
+
+tar_gz() {
+  tar -C "$1" --owner=0 --group=0 --mtime=@0 --sort=name -cf - . | gzip -n >"$2"
+}
+
+build_archive() {
+  local name=$1 mode=$2 root="$work/$1"
+  write_launcher "$root/bin/launcher.sh" "$mode"
   if [ "$name" = intellij ]; then
     printf 'FAKE USER AGREEMENT\nVersion 1.0\n' >"$root/EULA.txt"
   fi
-  tar -C "$root" --owner=0 --group=0 --mtime=@0 --sort=name -cf - . | gzip -n >"$out/$name.tar.gz"
+  tar_gz "$root" "$out/$name.tar.gz"
   # Tampered copy: same name plus .tampered, last byte of the archive flipped.
-  cp "$out/$name.tar.gz" "$out/$name.tampered.tar.gz"
-  printf '\377' | dd of="$out/$name.tampered.tar.gz" bs=1 seek=$(( $(stat -c %s "$out/$name.tar.gz") - 1 )) conv=notrunc 2>/dev/null
+  tamper "$out/$name.tar.gz" "$out/$name.tampered.tar.gz"
 }
 
 build_archive kotlin-lsp progress,push
 build_archive intellij progress,push
 
+write_launcher "$work/jdtls/bin/jdtls" progress,push
+tar_gz "$work/jdtls" "$out/jdtls.tar.gz"
+tamper "$out/jdtls.tar.gz" "$out/jdtls.tampered.tar.gz"
+
+# A zip with fixed timestamps and the launcher's execute bit, written by Python so no zip tool is
+# needed.
+write_launcher "$work/terraform-ls/terraform-ls" progress,push
+python3 -I -c '
+import sys, zipfile
+source, target = sys.argv[1], sys.argv[2]
+info = zipfile.ZipInfo("terraform-ls", date_time=(1980, 1, 1, 0, 0, 0))
+info.external_attr = 0o100755 << 16
+info.compress_type = zipfile.ZIP_DEFLATED
+with open(source, "rb") as handle, zipfile.ZipFile(target, "w") as archive:
+    archive.writestr(info, handle.read())
+' "$work/terraform-ls/terraform-ls" "$out/terraform-ls.zip"
+tamper "$out/terraform-ls.zip" "$out/terraform-ls.tampered.zip"
+
 digest() { sha256sum "$1" | cut -d' ' -f1; }
+platforms="linux-x64 linux-arm64 macos-arm64 macos-x64"
 # Same format as crates/bongos_kotlin/servers.toml. The fixture archives have no top directory, so
 # strip_components is 0, and one build is pinned for every platform.
 {
   for name in kotlin-lsp intellij; do
     printf '[%s]\nversion = "0.0.1"\nargs = ["--stdio"]\n\n' "$name"
-    for platform in linux-x64 linux-arm64 macos-arm64 macos-x64; do
+    for platform in $platforms; do
       printf '[%s.platform.%s]\nurl = "http://127.0.0.1:%s/%s.tar.gz"\nsha256 = "%s"\narchive = "tar.gz"\nlauncher = "bin/launcher.sh"\n\n' \
         "$name" "$platform" "$port" "$name" "$(digest "$out/$name.tar.gz")"
     done
+  done
+  printf '[jdtls]\nversion = "0.0.2"\n\n'
+  for platform in $platforms; do
+    printf '[jdtls.platform.%s]\nurl = "http://127.0.0.1:%s/jdtls.tar.gz"\nsha256 = "%s"\narchive = "tar.gz"\nstrip_components = 0\nlauncher = "bin/jdtls"\n\n' \
+      "$platform" "$port" "$(digest "$out/jdtls.tar.gz")"
+  done
+  printf '[terraform-ls]\nversion = "0.0.2"\nargs = ["serve"]\n\n[terraform-ls.env]\nCHECKPOINT_DISABLE = "1"\n\n'
+  for platform in $platforms; do
+    printf '[terraform-ls.platform.%s]\nurl = "http://127.0.0.1:%s/terraform-ls.zip"\nsha256 = "%s"\narchive = "zip"\nstrip_components = 0\nlauncher = "terraform-ls"\n\n' \
+      "$platform" "$port" "$(digest "$out/terraform-ls.zip")"
   done
 } >"$out/servers.toml"
 echo "$out/servers.toml"

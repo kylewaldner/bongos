@@ -252,18 +252,47 @@ pub async fn ensure_installed_with(
     progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
     cancel: &AtomicBool,
 ) -> Result<InstalledServer> {
+    let final_dir = ensure_in(
+        mode,
+        locks,
+        server_name(server),
+        server == KotlinServerKind::Intellij,
+        entry,
+        dir,
+        http,
+        progress,
+        cancel,
+    )
+    .await?;
+    Ok(installed_server(server, entry, final_dir))
+}
+
+/// `ensure_installed_with` for any pinned server: `name` labels errors, `keep_one` deletes the
+/// other versions under `dir` after a fresh install. Returns `<dir>/<version>`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ensure_in(
+    mode: InstallMode,
+    locks: &LockRegistry,
+    name: &str,
+    keep_one: bool,
+    entry: &ManifestEntry,
+    dir: &Path,
+    http: &dyn HttpClient,
+    progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    cancel: &AtomicBool,
+) -> Result<PathBuf> {
     check_cancel(cancel)?;
     let final_dir = dir.join(&entry.version);
     if check_dir(&final_dir, entry).is_some() {
-        return Ok(installed_server(server, entry, final_dir));
+        return Ok(final_dir);
     }
     let _lock = lock_version(mode, locks, dir, &entry.version, cancel).await?;
     // Another install of this version, in this process or another, may have finished meanwhile.
     check_cancel(cancel)?;
     if check_dir(&final_dir, entry).is_some() {
-        return Ok(installed_server(server, entry, final_dir));
+        return Ok(final_dir);
     }
-    install_locked(mode, server, entry, dir, http, progress, cancel).await
+    install_locked(mode, name, keep_one, entry, dir, http, progress, cancel).await
 }
 
 /// Installs the pinned build `entry` of `server` under `dir`, replacing any copy already there.
@@ -278,16 +307,18 @@ pub async fn install(
 ) -> Result<InstalledServer> {
     check_cancel(cancel)?;
     let _lock = lock_version(InstallMode::Start, locks, dir, &entry.version, cancel).await?;
-    install_locked(
+    let final_dir = install_locked(
         InstallMode::Start,
-        server,
+        server_name(server),
+        server == KotlinServerKind::Intellij,
         entry,
         dir,
         http,
         progress,
         cancel,
     )
-    .await
+    .await?;
+    Ok(installed_server(server, entry, final_dir))
 }
 
 /// The version lock of `version` under `dir`: waited for (until `cancel`) by a start, tried once
@@ -332,16 +363,18 @@ fn installed_server(
     }
 }
 
-/// `install` for a caller that holds the version lock.
+/// `install` for a caller that holds the version lock. Returns `<dir>/<version>`.
+#[allow(clippy::too_many_arguments)]
 async fn install_locked(
     mode: InstallMode,
-    server: KotlinServerKind,
+    name: &str,
+    keep_one: bool,
     entry: &ManifestEntry,
     dir: &Path,
     http: &dyn HttpClient,
     progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
     cancel: &AtomicBool,
-) -> Result<InstalledServer> {
+) -> Result<PathBuf> {
     check_cancel(cancel)?;
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let _partial = PartialFiles::new(dir, &entry.version);
@@ -390,14 +423,13 @@ async fn install_locked(
     remove_path(&final_dir).with_context(|| format!("replacing {}", final_dir.display()))?;
     fs::rename(&root, &final_dir)
         .with_context(|| format!("moving the unpacked server to {}", final_dir.display()))?;
-    if server == KotlinServerKind::Intellij {
+    if keep_one {
         remove_other_versions(dir, &entry.version);
     }
 
     ensure!(
         check_dir(&final_dir, entry).is_some(),
-        "{} did not install correctly",
-        server_name(server)
+        "{name} did not install correctly"
     );
     if mode == InstallMode::Background {
         // Written while the version lock is held. A crash between the rename and this write leaves
@@ -406,7 +438,7 @@ async fn install_locked(
         fs::write(&pending, &entry.sha256)
             .with_context(|| format!("writing {}", pending.display()))?;
     }
-    Ok(installed_server(server, entry, final_dir))
+    Ok(final_dir)
 }
 
 async fn extract(
@@ -785,9 +817,9 @@ pub(crate) mod tests {
         }
     }
 
-    type Client = Arc<http_client::HttpClientWithUrl>;
+    pub(crate) type Client = Arc<http_client::HttpClientWithUrl>;
 
-    fn serving(bytes: Vec<u8>, cancel: Option<(usize, Arc<AtomicBool>)>) -> Client {
+    pub(crate) fn serving(bytes: Vec<u8>, cancel: Option<(usize, Arc<AtomicBool>)>) -> Client {
         let bytes = Arc::new(bytes);
         let cancel = Mutex::new(cancel);
         FakeHttpClient::create(move |_| {

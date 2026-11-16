@@ -21,16 +21,21 @@ use gpui::{
 use lsp::{IoKind, LanguageServerId, LanguageServerName};
 use project::{LspStore, LspStoreEvent, lsp_store::LanguageServerLogType};
 use rpc::proto;
-use settings::{KotlinServerKind, SettingsStore, WorktreeId};
+use settings::{KotlinServerKind, Settings as _, SettingsStore, WorktreeId};
 
 use crate::{
-    KotlinDirs,
+    KotlinDirs, KotlinSettings, KotlinSetup,
     install::prune,
-    installed::server_name,
+    installed::{check_installed, server_name},
     intellij::{EULA_NOT_ACCEPTED_REASON, LicenseOutcome},
+    java::{
+        JAVA_LANGUAGE, JDTLS_ADAPTER, JavaRoutes, JavaServer, MIXED_JVM_NOTICE,
+        MIXED_JVM_NOTICE_KEY,
+    },
     license::{is_license_lost_exit, is_license_lost_signal, restarts_after},
     locks::LockRegistry,
     log::{KotlinLog, StderrMirror},
+    manifest::current_platform,
     manifest_cache::{BuildId, KotlinLspBuilds, ManifestCache},
     resolve::{Resolved, clear_project_override, project_key, resolve, set_project_override},
     updates::{KotlinUpdates, KotlinUpdatesEvent},
@@ -262,6 +267,15 @@ pub trait KotlinHost: 'static {
     /// (`KotlinProjectManager::begin_start`), so the manager changes the effective server before
     /// calling this.
     fn restart(&self, worktree_id: WorktreeId, server_id: Option<LanguageServerId>, cx: &mut App);
+
+    /// The worktree's Java server changed and `JavaRoutes` holds the new answer with a switch
+    /// begun: stops every server the switch refuses (`reapply_server_policy`, stop first), then
+    /// ends the switch with `JavaRoutes::end_switch` and applies the policy again, which starts
+    /// the new servers. The manager calls this before the `restart` of the same change. Hosts
+    /// with no language servers end the switch at once.
+    fn reapply_policy(&self, worktree_id: WorktreeId, cx: &mut App) {
+        JavaRoutes::end_switch(worktree_id, cx);
+    }
 }
 
 pub struct KotlinWorktreeState {
@@ -294,6 +308,12 @@ pub struct KotlinWorktreeState {
     stale_start: bool,
     /// The trial build this worktree's current start launched, until it passes or fails.
     trial: Option<LaunchedTrial>,
+    /// The server that serves Java here, as last given to `JavaRoutes`.
+    pub java_server: JavaServer,
+    /// The running `jdtls` server of the worktree.
+    jdtls_server_id: Option<LanguageServerId>,
+    /// The mixed JVM notice was posted for this worktree in this session.
+    mixed_notice_posted: bool,
 }
 
 /// A server that runs because the one the user asked for could not. Sticky for the session
@@ -444,13 +464,18 @@ impl KotlinProjectManager {
                 crashes: Vec::new(),
                 stale_start: false,
                 trial: None,
+                java_server: JavaServer::default(),
+                jdtls_server_id: None,
+                mixed_notice_posted: false,
             },
         );
+        self.update_java_server(worktree_id, cx);
         cx.notify();
     }
 
     pub fn remove_worktree(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
         if let Some(state) = self.worktrees.remove(&worktree_id) {
+            JavaRoutes::remove(worktree_id, cx);
             let manager = cx.entity_id();
             cx.default_global::<KotlinRegistry>()
                 .unregister(&state.root, manager);
@@ -483,6 +508,7 @@ impl KotlinProjectManager {
             server_name(effective)
         ));
         self.set_status(worktree_id, Some(ServerStatus::Starting), cx);
+        self.update_java_server(worktree_id, cx);
         Some(effective)
     }
 
@@ -571,6 +597,8 @@ impl KotlinProjectManager {
             state.root.display(),
             reason.text()
         ));
+        // Java moves to jdtls before the caller restarts Kotlin.
+        self.update_java_server(worktree_id, cx);
         cx.emit(KotlinEvent::FellBack {
             worktree_id,
             message: fallback_message(reason),
@@ -788,6 +816,7 @@ impl KotlinProjectManager {
         state.trial = None;
         state.effective = target;
         self.log.line("restart requested");
+        self.update_java_server(worktree_id, cx);
         self.restart(worktree_id, cx);
     }
 
@@ -878,20 +907,139 @@ impl KotlinProjectManager {
         }
         let target = effective_server(resolved.server, state.fallback.as_ref());
         let previous = state.effective;
+        if target != previous {
+            state.effective = target;
+            self.log.line(&format!(
+                "switch {} {} -> {}",
+                state.root.display(),
+                server_name(previous),
+                server_name(target)
+            ));
+        }
+        let running = state.status.is_some();
+        // Also when only `kotlin.intellij.download` changed. Before the Kotlin restart, which
+        // must not start the new server while the old Java server runs.
+        self.update_java_server(worktree_id, cx);
         if target == previous {
             return;
         }
-        state.effective = target;
-        self.log.line(&format!(
-            "switch {} {} -> {}",
-            state.root.display(),
-            server_name(previous),
-            server_name(target)
-        ));
-        if state.status.is_some() {
+        if running {
             self.restart(worktree_id, cx);
         }
         cx.notify();
+    }
+
+    /// Whether the IntelliJ server can serve the worktree: installed, or allowed to be downloaded
+    /// (`kotlin.intellij.download`). Reads the install marker, so never call it from the policy.
+    fn intellij_available(&self, worktree_id: WorktreeId, cx: &App) -> bool {
+        let download = KotlinSettings::get(
+            Some(settings::SettingsLocation {
+                worktree_id,
+                path: util::rel_path::RelPath::empty(),
+            }),
+            cx,
+        )
+        .intellij_download;
+        download
+            || cx.try_global::<KotlinSetup>().is_some_and(|setup| {
+                current_platform()
+                    .and_then(|platform| {
+                        setup
+                            .manifest
+                            .entry(KotlinServerKind::Intellij, platform)
+                            .ok()
+                    })
+                    .is_some_and(|entry| {
+                        check_installed(&self.dirs.install_root, KotlinServerKind::Intellij, &entry)
+                            .is_some()
+                    })
+            })
+    }
+
+    /// The server that should serve Java in the worktree now (decision D12).
+    fn java_server_now(&self, worktree_id: WorktreeId, cx: &App) -> JavaServer {
+        let intellij = self
+            .worktree(worktree_id)
+            .is_some_and(|state| state.effective == KotlinServerKind::Intellij);
+        if intellij && self.intellij_available(worktree_id, cx) {
+            JavaServer::Kotlin
+        } else {
+            JavaServer::Jdtls
+        }
+    }
+
+    /// Recomputes which server serves Java in the worktree. A changed answer goes to `JavaRoutes`
+    /// first and then to the host's `reapply_policy`, which stops the old Java server before the
+    /// new one starts. Call before any Kotlin restart of the same change. Returns whether it
+    /// changed.
+    fn update_java_server(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) -> bool {
+        let server = self.java_server_now(worktree_id, cx);
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return false;
+        };
+        if state.java_server == server {
+            return false;
+        }
+        state.java_server = server;
+        let name = match server {
+            JavaServer::Kotlin => ADAPTER_NAME,
+            JavaServer::Jdtls => JDTLS_ADAPTER,
+        };
+        self.log
+            .line(&format!("java {} uses {name}", state.root.display()));
+        JavaRoutes::begin_switch(worktree_id, server, cx);
+        if server == JavaServer::Kotlin {
+            // The IntelliJ server serves both languages here: nothing is mixed any more.
+            bongos_language_status::LanguageNotices::clear(
+                worktree_id,
+                JAVA_LANGUAGE,
+                MIXED_JVM_NOTICE_KEY,
+                cx,
+            );
+        }
+        let host = self.host.clone();
+        host.reapply_policy(worktree_id, cx);
+        true
+    }
+
+    /// `jdtls` runs for the worktree.
+    pub fn jdtls_added(
+        &mut self,
+        server_id: LanguageServerId,
+        worktree_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return;
+        };
+        state.jdtls_server_id = Some(server_id);
+        self.post_mixed_notice(worktree_id, cx);
+    }
+
+    /// The mixed JVM notice (decision D13): the first time a Kotlin server and `jdtls` both run in
+    /// a worktree whose effective Kotlin server is kotlin-lsp. Once per worktree per session.
+    fn post_mixed_notice(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
+        let Some(state) = self.worktrees.get_mut(&worktree_id) else {
+            return;
+        };
+        let mixed = state.effective == KotlinServerKind::KotlinLsp
+            && state.server_id.is_some()
+            && state.jdtls_server_id.is_some();
+        if !mixed || state.mixed_notice_posted {
+            return;
+        }
+        state.mixed_notice_posted = true;
+        self.log.line(&format!(
+            "java {}: kotlin-lsp and jdtls both run",
+            state.root.display()
+        ));
+        bongos_language_status::LanguageNotices::report(
+            worktree_id,
+            JAVA_LANGUAGE,
+            MIXED_JVM_NOTICE_KEY,
+            MIXED_JVM_NOTICE,
+            cx,
+        );
     }
 
     fn restart(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
@@ -1116,9 +1264,15 @@ impl KotlinProjectManager {
                 trial._window = Some(window);
             }
         }
+        self.post_mixed_notice(worktree_id, cx);
     }
 
     pub fn server_removed(&mut self, server_id: LanguageServerId, cx: &mut Context<Self>) {
+        for state in self.worktrees.values_mut() {
+            if state.jdtls_server_id == Some(server_id) {
+                state.jdtls_server_id = None;
+            }
+        }
         let Some(worktree_id) = self.worktree_of_server(server_id) else {
             return;
         };
@@ -1406,6 +1560,11 @@ impl KotlinProjectManager {
                 }
                 self.server_added(*server_id, *worktree_id, cx);
                 self.attach(lsp_store, *server_id, *worktree_id, cx);
+            }
+            LspStoreEvent::LanguageServerAdded(server_id, name, Some(worktree_id))
+                if name.0.as_ref() == JDTLS_ADAPTER =>
+            {
+                self.jdtls_added(*server_id, *worktree_id, cx);
             }
             LspStoreEvent::LanguageServerRemoved(server_id) => self.server_removed(*server_id, cx),
             LspStoreEvent::LanguageServerStartupStderr {

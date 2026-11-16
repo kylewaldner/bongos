@@ -1,0 +1,4 @@
+name: fixture-conda
+dependencies:
+  - python=3.11
+  - pytest
