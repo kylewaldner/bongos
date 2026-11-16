@@ -178,3 +178,80 @@ fn focusing_a_task_shows_its_active_run_only(cx: &mut TestAppContext) {
     assert_eq!(crate::run_view::run_to_show(&engine, Some(LEAF)), Some(run));
     assert_eq!(crate::run_view::run_to_show(&engine, Some("other")), None);
 }
+
+const CHECKED: &str = r#"
+schema = 1
+name = "checked"
+start = "verify"
+
+[nodes.verify]
+kind = "program"
+use = "checks"
+routes = [
+  { when = { verdict = "pass" }, to = "done" },
+  { when = { verdict = "fail" }, to = "broken" },
+]
+
+[ends.done]
+kind = "success"
+
+[ends.broken]
+kind = "failure"
+"#;
+
+/// Answers one line for every key it is asked about, and remembers what it was asked.
+struct FixedStatus(std::rc::Rc<std::cell::RefCell<Vec<(String, NodeKey)>>>);
+
+impl crate::node_status::NodeStatusSource for FixedStatus {
+    fn status(
+        &self,
+        run_id: &str,
+        key: &NodeKey,
+        _: &gpui::App,
+    ) -> Option<crate::node_status::NodeStatus> {
+        self.0.borrow_mut().push((run_id.to_string(), key.clone()));
+        Some(crate::node_status::NodeStatus {
+            line: "tests: running part 2 of 3, 1 kept".to_string(),
+            detail: Some("tests: waited 4m for test-slots".to_string()),
+        })
+    }
+}
+
+#[gpui::test]
+fn a_running_node_shows_the_line_of_its_status_source(cx: &mut TestAppContext) {
+    let world = world();
+    write_definition(world.profile(), "checked", CHECKED);
+    let engine = engine_of(&world, cx);
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|cx| {
+        crate::node_status::NodeStatusSources::register(
+            "checks",
+            std::rc::Rc::new(FixedStatus(asked.clone())),
+            cx,
+        )
+    });
+    let run = start(&engine, &world, "checked", cx);
+    let view = view(&engine, &run, cx);
+    let text = cx.update(|cx| view.read(cx).text());
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("verify"))
+        .expect("the node's row");
+    assert_eq!(lines[at + 1], "    tests: running part 2 of 3, 1 kept", "{text}");
+    assert!(text.contains("  live: tests: waited 4m for test-slots"), "{text}");
+    // A checks node holds no session slot.
+    assert!(text.contains("sessions 0 of"), "{text}");
+    assert!(
+        asked
+            .borrow()
+            .iter()
+            .all(|(asked_run, key)| *asked_run == run && key.node == "verify")
+    );
+
+    // Once the node is no longer running, it shows no line.
+    engine.lifecycle().runtime_mut().cancel(&run).unwrap();
+    cx.update(|cx| view.update(cx, |view, cx| view.refresh(cx)));
+    let text = cx.update(|cx| view.read(cx).text());
+    assert!(!text.contains("running part 2 of 3"), "{text}");
+}
