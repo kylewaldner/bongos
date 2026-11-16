@@ -793,8 +793,8 @@ async fn switching_the_base_keymap_off_restores_zeds_keys_and_cursor(
     }
 }
 
-/// The VS Code base keymap's own rows and its leader rows (`ctrl-k b`, `cmd-k b` on macOS) are
-/// the only `Base`-source bindings.
+/// The VS Code base keymap's own rows, its leader rows (`ctrl-k b`, `cmd-k b` on macOS) and its
+/// tail rows are the only `Base`-source bindings.
 fn only_vscode_base_bindings(keymap: &[KeyBinding]) -> bool {
     let base = settings::KeybindSource::Base.meta();
     let leader: Vec<String> = if cfg!(target_os = "macos") {
@@ -820,7 +820,12 @@ fn only_vscode_base_bindings(keymap: &[KeyBinding]) -> bool {
             leader_row
                 || matches!(
                     binding.action().name(),
-                    "menu::Cancel" | "terminal::SendKeystroke" | "workspace::ActivatePane"
+                    "menu::Cancel"
+                        | "terminal::SendKeystroke"
+                        | "terminal::Clear"
+                        | "workspace::ActivatePane"
+                        | "recent_projects::ToggleActionsMenu"
+                        | "keymap_editor::OpenCreateKeybindingModal"
                 )
         })
 }

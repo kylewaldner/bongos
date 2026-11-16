@@ -169,27 +169,27 @@ pub fn profile_keymap_for_platform(
         }
         BaseKeymap::VSCode => {
             parts.push(default);
-            let (vscode, terminal) = if macos {
+            let (vscode, tail) = if macos {
                 (
                     "keymaps/macos/vscode.json",
-                    "keymaps/macos/vscode-terminal.json",
+                    "keymaps/macos/vscode-tail.json",
                 )
             } else {
                 (
                     "keymaps/linux/vscode.json",
-                    "keymaps/linux/vscode-terminal.json",
+                    "keymaps/linux/vscode-tail.json",
                 )
             };
             parts.push(KeymapPart::asset(vscode, KeybindSource::Base));
-            // The bongos commands under `ctrl-k b` (`cmd-k b` on macOS), before the terminal
-            // tail so a terminal still forwards `ctrl-k`.
+            // The bongos commands under `ctrl-k b` (`cmd-k b` on macOS), before the tail, which
+            // binds again every single `ctrl-k` (`cmd-k`) that must not wait for the chord.
             parts.push(KeymapPart::Leader {
                 emacs,
                 leader: Leader::VsCode,
                 macos,
                 source: KeybindSource::Base,
             });
-            parts.push(KeymapPart::asset(terminal, KeybindSource::Base));
+            parts.push(KeymapPart::asset(tail, KeybindSource::Base));
             if vim_enabled {
                 parts.push(vim);
             }
@@ -271,7 +271,7 @@ mod tests {
         ] {
             let emacs = format!("keymaps/{dir}/emacs.json");
             let vscode = format!("keymaps/{dir}/vscode.json");
-            let tail = format!("keymaps/{dir}/vscode-terminal.json");
+            let tail = format!("keymaps/{dir}/vscode-tail.json");
             let leader = format!("leader:{emacs}");
             for vim_enabled in [false, true] {
                 let vim_part: Vec<_> = vim_enabled

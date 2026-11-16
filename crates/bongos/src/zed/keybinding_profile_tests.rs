@@ -512,21 +512,90 @@ async fn no_default_binding_or_prefix_outranks_a_derived_chord(cx: &mut TestAppC
 #[gpui::test]
 async fn the_terminal_still_forwards_ctrl_k_with_the_leader_loaded(cx: &mut TestAppContext) {
     init_keymap_test(cx);
-    let bindings = load_profile(BaseKeymap::VSCode, false, false, cx);
-    assert!(
-        bindings
-            .iter()
-            .any(|binding| keys_of(binding).starts_with(&["ctrl-k".into(), "b".into()])),
-        "the leader block is loaded"
-    );
-    let keymap = Keymap::new(bindings);
-    for contexts in [&TERMINAL[..], &PANE_TERMINAL[..]] {
-        let (names, pending) = resolve(&keymap, "ctrl-k", contexts);
-        assert_eq!(
-            names.first(),
-            Some(&"terminal::SendKeystroke"),
-            "{contexts:?}"
+    // Linux forwards `ctrl-k` to the shell; macOS clears the terminal on `cmd-k`.
+    for (macos, action) in [
+        (false, "terminal::SendKeystroke"),
+        (true, "terminal::Clear"),
+    ] {
+        let leader = leader_keys(macos);
+        let bindings = load_profile(BaseKeymap::VSCode, false, macos, cx);
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| keys_of(binding).starts_with(&leader)),
+            "macos={macos}: the leader block is loaded"
         );
-        assert!(!pending, "{contexts:?}");
+        let keymap = Keymap::new(bindings);
+        let input = if macos { "cmd-k" } else { "ctrl-k" };
+        for contexts in [&TERMINAL[..], &PANE_TERMINAL[..]] {
+            let (names, pending) = resolve(&keymap, input, contexts);
+            assert_eq!(names.first(), Some(&action), "macos={macos}: {contexts:?}");
+            assert!(!pending, "macos={macos}: {contexts:?}");
+        }
+    }
+}
+
+/// Context stacks a default single-key binding is checked in; each binding is checked in every
+/// stack its context matches.
+const SINGLE_KEY_STACKS: [&[&str]; 5] = [
+    &TERMINAL,
+    &PANE_TERMINAL,
+    &["Workspace", "RecentProjects"],
+    &[
+        "Workspace",
+        "RecentProjects",
+        "Picker",
+        "Editor mode=single_line",
+    ],
+    &["Workspace", "Pane", "KeymapEditor"],
+];
+
+#[gpui::test]
+async fn every_default_single_leader_key_still_fires_under_vscode(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        let leader = leader_keys(macos);
+        let default_path = if macos {
+            "keymaps/default-macos.json"
+        } else {
+            "keymaps/default-linux.json"
+        };
+        let defaults: Vec<KeyBinding> = cx
+            .update(|cx| KeymapFile::load_asset(default_path, Some(KeybindSource::Default), cx))
+            .unwrap()
+            .into_iter()
+            .filter(|binding| {
+                keys_of(binding) == leader[..1] && !gpui::is_no_action(binding.action())
+            })
+            .collect();
+        assert!(
+            !defaults.is_empty(),
+            "macos={macos}: no single {}",
+            leader[0]
+        );
+        let keymap = Keymap::new(load_profile(BaseKeymap::VSCode, false, macos, cx));
+        let input = if macos { "cmd-k" } else { "ctrl-k" };
+        for binding in &defaults {
+            let predicate = binding.predicate();
+            let stacks: Vec<_> = SINGLE_KEY_STACKS
+                .iter()
+                .filter(|contexts| {
+                    predicate
+                        .as_ref()
+                        .is_none_or(|predicate| predicate.eval(&stack(contexts)))
+                })
+                .collect();
+            assert!(
+                !stacks.is_empty(),
+                "macos={macos}: add a context stack for `{}`",
+                context_of(binding)
+            );
+            for contexts in stacks {
+                let label = format!("macos={macos}: {input} in {contexts:?}");
+                let (names, pending) = resolve(&keymap, input, contexts);
+                assert_eq!(names.first(), Some(&binding.action().name()), "{label}");
+                assert!(!pending, "{label}");
+            }
+        }
     }
 }
