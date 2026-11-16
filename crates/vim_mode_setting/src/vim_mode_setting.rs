@@ -12,7 +12,10 @@ pub struct VimModeSetting(pub bool);
 
 impl Settings for VimModeSetting {
     fn from_settings(content: &SettingsContent) -> Self {
-        Self(content.vim_mode.unwrap())
+        Self(
+            content.vim_mode.unwrap()
+                || content.base_keymap == Some(settings::BaseKeymapContent::Vim),
+        )
     }
 }
 

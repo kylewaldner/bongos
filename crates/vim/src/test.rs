@@ -14,7 +14,7 @@ use editor::{
     test::editor_test_context::EditorTestContext,
 };
 use futures::StreamExt;
-use gpui::{KeyBinding, Modifiers, MouseButton, TestAppContext, px};
+use gpui::{KeyBinding, Modifiers, MouseButton, TestAppContext, UpdateGlobal as _, px};
 use itertools::Itertools;
 use language::{CursorShape, Language, LanguageConfig, Point};
 pub use neovim_backed_test_context::*;
@@ -54,6 +54,45 @@ async fn test_neovim(cx: &mut gpui::TestAppContext) {
         .await;
     cx.shared_state().await.assert_matches();
     cx.assert_editor_state("ˇtest");
+}
+
+#[gpui::test]
+async fn test_base_keymap_vim_switches_vim_on_and_off(cx: &mut gpui::TestAppContext) {
+    // Start with vim.json bound but `vim_mode` off, as when the keymap was loaded under Vim.
+    let mut cx = VimTestContext::new(cx, true).await;
+    cx.disable_vim();
+    let set = |cx: &mut VimTestContext, keymap: settings::BaseKeymapContent| {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |s| s.base_keymap = Some(keymap));
+            });
+        });
+    };
+
+    cx.simulate_keystrokes("h j k l");
+    cx.assert_editor_state("hjklˇ");
+
+    set(&mut cx, settings::BaseKeymapContent::Vim);
+    assert_eq!(cx.mode(), Mode::Normal);
+    cx.simulate_keystrokes("i");
+    assert_eq!(cx.mode(), Mode::Insert);
+
+    set(&mut cx, settings::BaseKeymapContent::Emacs);
+    cx.simulate_keystrokes("a b");
+    cx.assert_editor_state("hjklabˇ");
+
+    set(&mut cx, settings::BaseKeymapContent::VSCode);
+    cx.simulate_keystrokes("c");
+    cx.assert_editor_state("hjklabcˇ");
+
+    set(&mut cx, settings::BaseKeymapContent::Vim);
+    assert_eq!(cx.mode(), Mode::Normal);
+    cx.simulate_keystrokes("0 x");
+    cx.assert_editor_state("ˇjklabc");
+
+    set(&mut cx, settings::BaseKeymapContent::Emacs);
+    cx.simulate_keystrokes("z");
+    cx.assert_editor_state("zˇjklabc");
 }
 
 #[perf]

@@ -17,6 +17,7 @@ use settings::{RegisterSetting, Settings};
 )]
 pub enum BaseKeymap {
     VSCode,
+    Vim,
     #[default]
     Emacs,
     None,
@@ -26,6 +27,7 @@ impl From<BaseKeymapContent> for BaseKeymap {
     fn from(value: BaseKeymapContent) -> Self {
         match value {
             BaseKeymapContent::VSCode => Self::VSCode,
+            BaseKeymapContent::Vim => Self::Vim,
             BaseKeymapContent::Emacs => Self::Emacs,
             // Retired keymaps fall back to Emacs; the stored value is left alone.
             BaseKeymapContent::JetBrains
@@ -41,6 +43,7 @@ impl Into<BaseKeymapContent> for BaseKeymap {
     fn into(self) -> BaseKeymapContent {
         match self {
             BaseKeymap::VSCode => BaseKeymapContent::VSCode,
+            BaseKeymap::Vim => BaseKeymapContent::Vim,
             BaseKeymap::Emacs => BaseKeymapContent::Emacs,
             BaseKeymap::None => BaseKeymapContent::None,
         }
@@ -51,6 +54,7 @@ impl Display for BaseKeymap {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             BaseKeymap::VSCode => write!(f, "VS Code"),
+            BaseKeymap::Vim => write!(f, "Vim"),
             BaseKeymap::Emacs => write!(f, "Emacs"),
             BaseKeymap::None => write!(f, "None"),
         }
@@ -58,8 +62,11 @@ impl Display for BaseKeymap {
 }
 
 impl BaseKeymap {
-    pub const OPTIONS: [(&'static str, Self); 2] =
-        [("VS Code", Self::VSCode), ("Emacs (Default)", Self::Emacs)];
+    pub const OPTIONS: [(&'static str, Self); 3] = [
+        ("VS Code", Self::VSCode),
+        ("Vim", Self::Vim),
+        ("Emacs (Default)", Self::Emacs),
+    ];
 
     /// The Emacs keymap asset for this platform, if the base keymap has one.
     pub fn asset_path(&self) -> Option<&'static str> {
@@ -72,7 +79,7 @@ impl BaseKeymap {
                         _ => None,
                     })
             }
-            BaseKeymap::VSCode | BaseKeymap::None => None,
+            BaseKeymap::VSCode | BaseKeymap::Vim | BaseKeymap::None => None,
         }
     }
 
@@ -167,7 +174,7 @@ pub fn profile_keymap_for_platform(
                 parts.push(vim);
             }
         }
-        BaseKeymap::VSCode => {
+        BaseKeymap::VSCode | BaseKeymap::Vim => {
             parts.push(default);
             let (vscode, tail) = if macos {
                 (
@@ -189,9 +196,22 @@ pub fn profile_keymap_for_platform(
                 macos,
                 source: KeybindSource::Base,
             });
-            parts.push(KeymapPart::asset(tail, KeybindSource::Base));
-            if vim_enabled {
+            if base == BaseKeymap::Vim {
+                // vim.json, then the `space` chords after it so they outrank vim's own `space`,
+                // then the tail.
                 parts.push(vim);
+                parts.push(KeymapPart::Leader {
+                    emacs,
+                    leader: Leader::VimSpace,
+                    macos,
+                    source: KeybindSource::Base,
+                });
+                parts.push(KeymapPart::asset(tail, KeybindSource::Base));
+            } else {
+                parts.push(KeymapPart::asset(tail, KeybindSource::Base));
+                if vim_enabled {
+                    parts.push(vim);
+                }
             }
         }
     }
@@ -220,6 +240,7 @@ mod tests {
         }
         for kept in [
             BaseKeymapContent::Emacs,
+            BaseKeymapContent::Vim,
             BaseKeymapContent::VSCode,
             BaseKeymapContent::None,
         ] {
@@ -242,9 +263,12 @@ mod tests {
                         macos: part_macos,
                         source,
                     } => {
-                        assert_eq!(leader, Leader::VsCode);
                         assert_eq!(part_macos, macos);
-                        (format!("leader:{emacs}"), source)
+                        let kind = match leader {
+                            Leader::VsCode => "leader",
+                            Leader::VimSpace => "space-leader",
+                        };
+                        (format!("{kind}:{emacs}"), source)
                     }
                 })
                 .collect()
@@ -273,6 +297,7 @@ mod tests {
             let vscode = format!("keymaps/{dir}/vscode.json");
             let tail = format!("keymaps/{dir}/vscode-tail.json");
             let leader = format!("leader:{emacs}");
+            let space_leader = format!("space-leader:{emacs}");
             for vim_enabled in [false, true] {
                 let vim_part: Vec<_> = vim_enabled
                     .then_some(("keymaps/vim.json", Vim))
@@ -299,6 +324,20 @@ mod tests {
                     owned(expected)
                 );
 
+                // Under `Vim` vim.json always loads, whatever `vim_enabled` says.
+                assert_eq!(
+                    paths(BaseKeymap::Vim, vim_enabled, macos),
+                    owned(vec![
+                        (default, Default),
+                        (vscode.as_str(), Base),
+                        (leader.as_str(), Base),
+                        ("keymaps/vim.json", Vim),
+                        (space_leader.as_str(), Base),
+                        (tail.as_str(), Base),
+                        (overrides, Default),
+                    ])
+                );
+
                 assert_eq!(
                     paths(BaseKeymap::None, vim_enabled, macos),
                     owned(vec![(overrides, Default)])
@@ -317,6 +356,8 @@ mod tests {
             ("emacs", BaseKeymapContent::Emacs),
             ("vscode", BaseKeymapContent::VSCode),
             ("none", BaseKeymapContent::None),
+            ("vim", BaseKeymapContent::Vim),
+            ("Vim", BaseKeymapContent::Vim),
             ("Emacs", BaseKeymapContent::Emacs),
             ("VSCode", BaseKeymapContent::VSCode),
             ("None", BaseKeymapContent::None),

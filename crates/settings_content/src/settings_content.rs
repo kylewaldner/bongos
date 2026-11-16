@@ -465,6 +465,8 @@ pub struct ExtensionsSettingsContent {
 pub enum BaseKeymapContent {
     #[serde(alias = "vscode")]
     VSCode,
+    #[serde(alias = "vim")]
+    Vim,
     #[doc(hidden)]
     JetBrains,
     #[doc(hidden)]
@@ -493,11 +495,11 @@ impl BaseKeymapContent {
 }
 
 impl strum::VariantArray for BaseKeymapContent {
-    const VARIANTS: &'static [Self] = &[Self::Emacs, Self::VSCode, Self::None];
+    const VARIANTS: &'static [Self] = &[Self::Emacs, Self::Vim, Self::VSCode, Self::None];
 }
 
 impl strum::VariantNames for BaseKeymapContent {
-    const VARIANTS: &'static [&'static str] = &["Emacs", "VSCode", "None"];
+    const VARIANTS: &'static [&'static str] = &["Emacs", "Vim", "VSCode", "None"];
 }
 
 impl JsonSchema for BaseKeymapContent {
@@ -509,7 +511,7 @@ impl JsonSchema for BaseKeymapContent {
         schemars::json_schema!({
             "description": "Base key bindings scheme. Base keymaps can be overridden with user keymaps.\n\nDefault: Emacs",
             "type": "string",
-            "enum": ["Emacs", "VSCode", "None"]
+            "enum": ["Emacs", "Vim", "VSCode", "None"]
         })
     }
 }
