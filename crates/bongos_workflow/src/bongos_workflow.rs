@@ -9,6 +9,7 @@ mod actions;
 pub mod builtin_merge;
 pub mod builtin_wait;
 mod commands;
+pub mod completion;
 pub mod definitions;
 mod engine;
 pub mod gates;
@@ -37,6 +38,7 @@ use ::settings::Settings as _;
 use gpui::App;
 
 pub use actions::{WorkflowToast, action_types, init_palette, register, workflow};
+pub use completion::{CompletionHook, CompletionHooks};
 pub use engine::{EngineRunner, SharedLifecycle, WorkflowEngine};
 pub use lifecycle::{Refusal, RefusalKind, RunId, RunStatus, StartRequest, WorkflowEvent};
 pub use runs_panel::{RunsPanel, init_panel};

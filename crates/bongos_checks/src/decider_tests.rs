@@ -17,6 +17,7 @@ use bongos_project_repo::{
 use bongos_project_repo_model::{DefinitionTree, TaskStateRecord};
 use bongos_work::{DoneHoldSource as _, NeedsYouRegistry, RowChipsRegistry};
 use bongos_work_model::Status;
+use bongos_workflow::CompletionHooks;
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{BorrowAppContext as _, Entity, TestAppContext};
@@ -97,6 +98,16 @@ impl World {
     /// recorded, the owed hook on its writer, and the engine with the setting on. `l1`'s tree is
     /// as `tree` says.
     fn new(cx: &mut TestAppContext, checks: &str, tree: Tree) -> Self {
+        Self::with_runs(cx, checks, tree, Rc::new(NoRuns))
+    }
+
+    /// [`World::new`] with the workflow runs `runs`.
+    fn with_runs(
+        cx: &mut TestAppContext,
+        checks: &str,
+        tree: Tree,
+        runs: Rc<dyn RunWorktrees>,
+    ) -> Self {
         let root = TempDir::new().unwrap();
         let repository = root.path().join("project/repository");
         let hooks = StateApplyHooks::new();
@@ -135,7 +146,7 @@ impl World {
             ChecksEngine::install(
                 ChecksEngine::new(
                     source.clone(),
-                    Rc::new(NoRuns),
+                    runs,
                     FakeClock::automatic(),
                     Arc::new(move || {
                         let n = counter.fetch_add(1, Ordering::SeqCst);
@@ -632,5 +643,199 @@ async fn a_held_task_the_definitions_lack_gets_a_hold_row(cx: &mut TestAppContex
             .reason
             .starts_with("not done: the task is not in the definitions of "),
         "{ghost:?}"
+    );
+}
+
+/// A workflow engine with at most one active run, which a test sets and clears.
+#[derive(Default)]
+struct OneRun(RefCell<Option<(String, PathBuf)>>);
+
+impl RunWorktrees for OneRun {
+    fn active(&self, _: &str, _: &gpui::App) -> Option<(String, PathBuf)> {
+        self.0.borrow().clone()
+    }
+
+    fn last_ended(&self, _: &str, _: &gpui::App) -> Option<(String, PathBuf)> {
+        None
+    }
+}
+
+const RUN: &str = "run-1";
+
+impl World {
+    /// A world whose leaf names no worktree of its own: its tree is the run's.
+    fn with_run(cx: &mut TestAppContext, tree: Tree) -> (Self, Rc<OneRun>) {
+        let runs = Rc::new(OneRun::default());
+        let world = Self::with_runs(cx, TESTS, tree, runs.clone());
+        let task = world.task(None);
+        world
+            .source
+            .tasks
+            .borrow_mut()
+            .insert(TASK.to_string(), task);
+        (world, runs)
+    }
+
+    /// What a workflow run's end does after it completed the leaf's todo: every completion hook
+    /// on the run's worktree, awaited.
+    async fn complete(&self, cx: &mut TestAppContext) {
+        let worktree = self.tree.clone();
+        cx.update(|cx| {
+            if !cx.has_global::<CompletionHooks>() {
+                crate::completion::register(cx);
+            }
+            CompletionHooks::after_complete(TASK, &RUN.to_string(), &worktree, cx)
+        })
+        .await;
+    }
+
+    fn set_enabled(&self, cx: &mut TestAppContext, enabled: bool) {
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.task_checks.get_or_insert_default().enabled = Some(enabled);
+                });
+            });
+        });
+    }
+}
+
+#[gpui::test]
+async fn completion_hook_makes_the_task_done_when_its_checks_pass_on_the_run_worktree(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (world, runs) = World::with_run(cx, Tree::Git);
+    *runs.0.borrow_mut() = Some((RUN.to_string(), world.tree.clone()));
+    world.run_checks(cx).await;
+    // From here only the hook names the run's worktree.
+    *runs.0.borrow_mut() = None;
+    world.finish();
+    assert!(world.marker().is_some(), "the completion marks the task");
+    assert!(world.done().is_none());
+
+    world.complete(cx).await;
+
+    // The decision ended before the hook resolved, so before the run's end.
+    let done = world.done().expect("a done record");
+    assert_eq!(done.tree_key, world.records_tree_key());
+    assert_eq!(done.evidence, world.record_ids());
+    assert_eq!(world.hold(), None);
+    assert!(world.marker().is_some(), "the marker stays");
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.completing.is_empty()),
+        "the run's worktree is forgotten once decided"
+    );
+}
+
+#[gpui::test]
+async fn completion_hook_leaves_the_task_held_without_a_pass_on_the_run_worktree(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (world, runs) = World::with_run(cx, Tree::Git);
+    *runs.0.borrow_mut() = Some((RUN.to_string(), world.tree.clone()));
+    world.run_checks(cx).await;
+    *runs.0.borrow_mut() = None;
+    // The run changed its tree after the checks passed.
+    world.edit("pub fn two() {}\n");
+    world.finish();
+
+    world.complete(cx).await;
+
+    assert!(world.done().is_none());
+    assert!(world.marker().is_some());
+    assert_eq!(world.hold(), Some(missing(1)));
+}
+
+#[gpui::test]
+async fn completion_hook_that_cannot_decide_leaves_the_task_held(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (world, _runs) = World::with_run(cx, Tree::NotGit);
+    world.finish();
+
+    world.complete(cx).await;
+
+    assert!(world.done().is_none());
+    assert!(world.marker().is_some());
+    let hold = world.hold().expect("held");
+    assert!(hold.reason.starts_with("not done: "), "{hold:?}");
+}
+
+#[gpui::test]
+async fn completion_hook_does_nothing_while_task_checks_is_off(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (world, _runs) = World::with_run(cx, Tree::Git);
+    world.set_enabled(cx, false);
+    world.finish();
+
+    world.complete(cx).await;
+
+    assert!(world.done().is_none());
+    assert!(!world.hold_row_exists(), "no decision ran");
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.completing.is_empty()),
+        "nothing was kept"
+    );
+}
+
+#[gpui::test]
+async fn completion_pin_goes_when_the_run_end_drops_the_hook(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (world, _runs) = World::with_run(cx, Tree::Git);
+    world.finish();
+
+    let hook = world.engine.update(cx, |engine, cx| {
+        engine.decide_completed(TASK, &RUN.to_string(), world.tree.clone(), cx)
+    });
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.completing.contains_key(TASK)),
+        "the run's worktree is pinned while the decision runs"
+    );
+
+    // The run's end gave up on the hook before its decision ended.
+    drop(hook);
+    cx.run_until_parked();
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.completing.is_empty()),
+        "the pin went with the hook"
+    );
+}
+
+#[gpui::test]
+async fn completion_waiters_are_let_go_when_the_writer_is_gone(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let world = World::new(cx, TESTS, Tree::Git);
+    // A project of its own whose writer this test drops.
+    let root = TempDir::new().unwrap();
+    let repo = crate::test_support::fixture_project(&root);
+    world
+        .engine
+        .update(cx, |engine, cx| engine.follow_project(&repo, cx));
+    cx.run_until_parked();
+
+    let mut waiting = world
+        .engine
+        .update(cx, |engine, _| engine.decider.decide_and_wait(PROJECT))
+        .expect("the project is followed");
+    drop(repo);
+    cx.run_until_parked();
+
+    // The decisions stopped, and the waiter was let go rather than left waiting.
+    assert!(waiting.try_recv().is_err(), "the waiter was dropped");
+    assert!(
+        world
+            .engine
+            .update(cx, |engine, _| engine.decider.decide_and_wait(PROJECT))
+            .is_none(),
+        "no one waits on a project whose writer is gone"
     );
 }
