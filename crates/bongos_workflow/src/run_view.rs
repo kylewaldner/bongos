@@ -111,7 +111,12 @@ impl RunData {
     }
 
     /// [`Self::of`] with the live status of its keys in flight read from the registered sources.
-    pub fn read(engine: &WorkflowEngine, run: &str, session_limit: usize, cx: &App) -> Option<Self> {
+    pub fn read(
+        engine: &WorkflowEngine,
+        run: &str,
+        session_limit: usize,
+        cx: &App,
+    ) -> Option<Self> {
         let mut data = Self::of(engine, run, session_limit)?;
         let in_flight = engine.lifecycle().runtime().in_flight(run);
         data.node_status = NodeStatusSources::running(&data.definition, &data.run, &in_flight, cx);
@@ -779,11 +784,7 @@ impl RunView {
                             .child(Label::new(format_cost(row.cost_usd)).color(Color::Muted)),
                     )
                     .when_some(row.live.clone(), |row, live| {
-                        row.child(
-                            Label::new(live)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
+                        row.child(Label::new(live).size(LabelSize::Small).color(Color::Muted))
                     })
             }))
     }

@@ -32,7 +32,9 @@ impl Global for NodeStatusSources {}
 impl NodeStatusSources {
     /// Registers `source` for program nodes with `use = use_name`, for the life of the app.
     pub fn register(use_name: impl Into<String>, source: Rc<dyn NodeStatusSource>, cx: &mut App) {
-        cx.default_global::<Self>().0.insert(use_name.into(), source);
+        cx.default_global::<Self>()
+            .0
+            .insert(use_name.into(), source);
     }
 
     /// The status of `key` of run `run_id`, when its node has a source and the source answers.

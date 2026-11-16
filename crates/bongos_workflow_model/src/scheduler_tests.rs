@@ -1045,3 +1045,60 @@ fn a_no_verdict_from_any_other_node_still_has_no_route() {
     assert!(held_events(&run.events).is_empty());
     assert!(matches!(run.commands.last(), Some(Command::End { .. })));
 }
+
+#[test]
+fn a_checks_node_starts_with_no_session_free_and_an_agent_does_not() {
+    let text = r#"
+schema = 1
+name = "both"
+start = "split"
+
+[nodes.split]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = ["check", "work"] }]
+
+[nodes.check]
+kind = "program"
+use = "checks"
+routes = [{ when = { verdict = "pass" }, to = "done" }]
+
+[nodes.work]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+    let definition = definition(text);
+    let split = key("split", 1);
+    let events = vec![
+        Event::Created,
+        Event::NodeStarted {
+            key: split.clone(),
+            try_number: 1,
+            pid: 1,
+            pid_start_time: 1,
+        },
+        Event::NodeFinished {
+            key: split,
+            try_number: 1,
+            result: Some(json!({ "summary": "ok" })),
+            failure: None,
+            cost_usd: 0.0,
+            turns: None,
+            elapsed_ms: 0,
+            session_id: None,
+        },
+    ];
+    let commands = step(&definition, &replay(&events), &Limits::default(), 0);
+    let started: Vec<&str> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Start(key) => Some(key.node.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, ["check"]);
+}

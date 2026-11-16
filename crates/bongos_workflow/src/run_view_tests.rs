@@ -238,8 +238,15 @@ fn a_running_node_shows_the_line_of_its_status_source(cx: &mut TestAppContext) {
         .iter()
         .position(|line| line.trim_start().starts_with("verify"))
         .expect("the node's row");
-    assert_eq!(lines[at + 1], "    tests: running part 2 of 3, 1 kept", "{text}");
-    assert!(text.contains("  live: tests: waited 4m for test-slots"), "{text}");
+    assert_eq!(
+        lines[at + 1],
+        "    tests: running part 2 of 3, 1 kept",
+        "{text}"
+    );
+    assert!(
+        text.contains("  live: tests: waited 4m for test-slots"),
+        "{text}"
+    );
     // A checks node holds no session slot.
     assert!(text.contains("sessions 0 of"), "{text}");
     assert!(

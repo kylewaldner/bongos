@@ -135,7 +135,18 @@ impl FakeRunner {
     /// Applies one [`scheduler::step`]; whether it gave any command.
     pub fn apply_step(&mut self) -> bool {
         let state = self.state();
-        let running = state.running.len() + self.other_sessions;
+        // A checks node's key holds no session slot.
+        let sessions = state
+            .running
+            .keys()
+            .filter(|key| {
+                !self
+                    .definition
+                    .node(&key.node)
+                    .is_some_and(crate::definition::Node::is_checks)
+            })
+            .count();
+        let running = sessions + self.other_sessions;
         let free = self.limits.free_sessions(running);
         let commands = scheduler::step(&self.definition, &state, &self.limits, free);
         if commands.is_empty() {

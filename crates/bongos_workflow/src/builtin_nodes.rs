@@ -57,10 +57,7 @@ impl Global for BuiltinNodes {}
 
 impl std::fmt::Debug for BuiltinNodes {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_list()
-            .entries(self.lock().keys())
-            .finish()
+        formatter.debug_list().entries(self.lock().keys()).finish()
     }
 }
 
