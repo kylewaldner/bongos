@@ -2,6 +2,8 @@
 //! `language_extensions.enabled` is false the six actions are hidden from the command palette and
 //! each only says "language extensions are off" in the echo area.
 
+pub mod git;
+
 use std::any::TypeId;
 
 use bongos_minibuffer::message;
