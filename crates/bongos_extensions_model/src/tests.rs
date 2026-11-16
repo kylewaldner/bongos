@@ -620,3 +620,172 @@ mod install_state {
         assert!(!dir.path().join("record.json.bad").exists());
     }
 }
+
+mod preflight_tests {
+    use super::*;
+
+    const GOOD: ToolProbe = ToolProbe {
+        git: Probe::Found,
+        cargo: Probe::Found,
+        rustc_sysroot: Probe::Found,
+        wasm_target: Probe::Found,
+        rustup: Probe::Found,
+    };
+
+    fn facts() -> ManifestFacts {
+        ManifestFacts {
+            has_extension_toml: true,
+            schema_version: 1,
+            id: "demo".into(),
+            has_cargo_toml: true,
+            cargo_toml: Some("[dependencies]\nzed_extension_api = \"0.7.0\"\n".into()),
+            ..Default::default()
+        }
+    }
+
+    fn run(probe: &ToolProbe, facts: &ManifestFacts) -> Result<(), Refusal> {
+        check_after_clone(
+            probe,
+            facts,
+            |host| host == "blocked.example",
+            |id| id == "banned",
+            |id| id == "other",
+            1..=1,
+            ApiVersion::new(0, 7, 0),
+        )
+    }
+
+    fn message(result: Result<(), Refusal>) -> String {
+        result.unwrap_err().to_string()
+    }
+
+    #[test]
+    fn preflight_passes_when_everything_is_fine() {
+        assert_eq!(run(&GOOD, &facts()), Ok(()));
+        assert_eq!(check_before_clone(&GOOD, "github.com", |_| false), Ok(()));
+        assert_eq!(ApiVersion::new(0, 7, 0).to_string(), "0.7.0");
+        assert_eq!(ApiVersion::parse("0.7"), Some(ApiVersion::new(0, 7, 0)));
+    }
+
+    #[test]
+    fn preflight_toolchain_messages() {
+        let mut probe = GOOD;
+        probe.cargo = Probe::Missing;
+        assert_eq!(message(run(&probe, &facts())), NO_RUST_MESSAGE);
+
+        let mut probe = GOOD;
+        probe.wasm_target = Probe::Missing;
+        assert_eq!(
+            message(run(&probe, &facts())),
+            "Run `rustup target add wasm32-wasip2`, then install again."
+        );
+        probe.rustup = Probe::Missing;
+        assert_eq!(
+            message(run(&probe, &facts())),
+            "Add the wasm32-wasip2 target to your Rust toolchain."
+        );
+    }
+
+    #[test]
+    fn preflight_timed_out_probe_names_the_tool() {
+        let mut probe = GOOD;
+        probe.git = Probe::TimedOut;
+        assert!(message(run(&probe, &facts())).starts_with("git did not respond"));
+        assert!(
+            message(check_before_clone(&probe, "github.com", |_| false))
+                .contains("git did not respond")
+        );
+        let mut probe = GOOD;
+        probe.rustc_sysroot = Probe::TimedOut;
+        assert!(message(run(&probe, &facts())).starts_with("rustc did not respond"));
+    }
+
+    #[test]
+    fn preflight_api_refusal_names_both_versions() {
+        let expected =
+            "This extension needs extension API 0.8.0; this bongos supports up to 0.7.0.";
+        for cargo in [
+            "[dependencies]\nzed_extension_api = \"0.8.0\"\n",
+            "[dependencies]\nzed_extension_api = { version = \"^0.8\" }\n",
+        ] {
+            let mut f = facts();
+            f.cargo_toml = Some(cargo.into());
+            assert_eq!(message(run(&GOOD, &f)), expected);
+        }
+        let mut f = facts();
+        f.cargo_toml = Some("[dependencies]\nzed_extension_api = { workspace = true }\n".into());
+        f.workspace_toml =
+            Some("[workspace.dependencies]\nzed_extension_api = \"~0.8.0\"\n".into());
+        assert_eq!(message(run(&GOOD, &f)), expected);
+        assert_eq!(
+            check_built_api(ApiVersion::new(0, 8, 0), ApiVersion::new(0, 7, 0))
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert_eq!(api_requirement("[dependencies]\nfoo = \"1\"\n", None), None);
+        assert_eq!(
+            api_requirement("[dependencies]\nzed_extension_api = \">=0.6\"\n", None),
+            Some(ApiVersion::new(0, 6, 0))
+        );
+    }
+
+    #[test]
+    fn preflight_no_cargo_toml_needs_no_rust() {
+        let mut f = facts();
+        f.has_cargo_toml = false;
+        f.cargo_toml = None;
+        let mut probe = ToolProbe::ALL_MISSING;
+        probe.git = Probe::Found;
+        assert_eq!(run(&probe, &f), Ok(()));
+        f.grammar_repositories = vec!["https://github.com/a/b".into()];
+        assert_eq!(run(&probe, &f), Ok(()));
+    }
+
+    #[test]
+    fn preflight_blocked_hosts_refused() {
+        assert_eq!(
+            message(check_before_clone(&GOOD, "blocked.example", |h| h == "blocked.example")),
+            "The repository host blocked.example is not allowed; use a repository on a different host."
+        );
+        let mut f = facts();
+        f.grammar_repositories = vec!["https://blocked.example/x/y".into()];
+        assert!(message(run(&GOOD, &f)).contains("blocked.example"));
+        assert_eq!(repository_host("git@host.io:a/b"), "host.io");
+        assert_eq!(repository_host("ssh://git@host.io:22/a"), "host.io");
+    }
+
+    #[test]
+    fn preflight_old_manifest_refused() {
+        let mut f = facts();
+        f.has_extension_toml = false;
+        f.has_extension_json = true;
+        let text = message(run(&GOOD, &f));
+        assert!(text.contains("extension.json") && text.contains("extension.toml"));
+        f.has_extension_json = false;
+        assert_eq!(message(run(&GOOD, &f)), MANIFEST_MISSING_MESSAGE);
+    }
+
+    #[test]
+    fn preflight_suppressed_and_installed_elsewhere_refused() {
+        let mut f = facts();
+        f.id = "banned".into();
+        assert!(message(run(&GOOD, &f)).contains("banned"));
+        f.id = "other".into();
+        assert_eq!(
+            message(run(&GOOD, &f)),
+            "other is already installed from another source; remove other first."
+        );
+    }
+
+    #[test]
+    fn preflight_empty_path_gives_exact_no_rust_message() {
+        let mut probe = ToolProbe::ALL_MISSING;
+        probe.git = Probe::Found;
+        assert_eq!(message(run(&probe, &facts())), NO_RUST_MESSAGE);
+        assert_eq!(
+            NO_RUST_MESSAGE,
+            "Building this extension needs Rust: install rustup from https://rustup.rs, then run `rustup target add wasm32-wasip2`. If Rust is installed, start bongos from a shell or add `~/.cargo/bin` to the desktop session's PATH."
+        );
+    }
+}
