@@ -106,6 +106,8 @@ pub struct Header {
 pub struct TaskAttributes {
     pub id: Option<String>,
     pub kind: Option<Kind>,
+    /// The named check sets from `checks <set>[, <set>]`, in the order written.
+    pub checks: Option<Vec<String>>,
     pub keeps_work: bool,
     pub drop: bool,
     /// Printed for reading; never an instruction.

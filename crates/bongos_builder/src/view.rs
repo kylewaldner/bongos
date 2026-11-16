@@ -42,6 +42,7 @@ use workspace::{OpenOptions, OpenVisible, Workspace};
 
 use crate::actions::show_toast;
 use crate::choose::{self, Chosen};
+use crate::live::KnownNames;
 use crate::{TaskBuilderSettings, live};
 
 /// What a task line of the proposal does to the tree, as the row says.
@@ -104,11 +105,12 @@ pub(crate) fn analyze(
     tree: &WorkTree,
     live: &LiveSet,
     todo_warning: u32,
-    workflow_names: Option<Arc<BTreeSet<String>>>,
+    workflow_names: KnownNames,
 ) -> Analysis {
     let parsed = parse(text);
     let checks = Checks {
-        workflows: workflow_names.as_deref().cloned(),
+        workflows: workflow_names.workflows.as_deref().cloned(),
+        check_sets: workflow_names.check_sets.as_deref().cloned(),
         todo_warning: todo_warning as usize,
         file: Some(ProposalFile {
             number,
@@ -646,7 +648,7 @@ impl ProposalView {
                 tree,
                 &live::collect(tree, cx),
                 TaskBuilderSettings::get_global(cx).todo_warning,
-                live::workflow_names(cx),
+                live::known_names(cx),
             )),
             _ => None,
         };
