@@ -6056,6 +6056,8 @@ name = "extensions_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_extensions",
+ "bongos_extensions_model",
  "cloud_api_types",
  "command_palette_hooks",
  "editor",
