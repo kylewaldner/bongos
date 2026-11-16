@@ -56,7 +56,7 @@ macro_rules! count_action {
             }
 
             fn with_count(&self, count: i32) -> Option<Self> {
-                Some(Self { count: Some(count), ..self.clone() })
+                Some(Self { count: Some(count) })
             }
         }
     };
