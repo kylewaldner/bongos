@@ -3,6 +3,9 @@
 //! implementation a check runs in the task's own tree with bongos's own environment.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use gpui::{App, Global};
 
 /// Where a task's trees are, and the environment a process in each gets.
 pub trait TaskTrees: 'static {
@@ -61,5 +64,25 @@ impl EnvBase {
     /// The base for a leased second tree.
     pub fn for_lease(lease: &dyn SecondTreeLease) -> Self {
         Self::from_lane(lease.env())
+    }
+}
+
+/// The registered tree provider; none until a feature that binds trees to lanes sets one.
+#[derive(Default)]
+pub struct TaskTreesRegistry {
+    trees: Option<Rc<dyn TaskTrees>>,
+}
+
+impl Global for TaskTreesRegistry {}
+
+impl TaskTreesRegistry {
+    pub fn set(trees: Rc<dyn TaskTrees>, cx: &mut App) {
+        cx.default_global::<Self>().trees = Some(trees);
+    }
+
+    /// The registered implementation; `None` runs a check in the task's own tree.
+    pub fn get(cx: &App) -> Option<Rc<dyn TaskTrees>> {
+        cx.try_global::<Self>()
+            .and_then(|registry| registry.trees.clone())
     }
 }

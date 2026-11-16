@@ -121,7 +121,7 @@ fn exists_in(definitions: &Path, path: &str) -> bool {
 }
 
 /// The named sets of the tree at `definitions`, read from `checks/sets/*.toml`.
-fn named_sets(definitions: &Path) -> NamedSets {
+pub(crate) fn named_sets(definitions: &Path) -> NamedSets {
     let directory = definitions.join(CHECKS_FOLDER).join(SETS_FOLDER);
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&directory) {
