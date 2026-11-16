@@ -186,22 +186,24 @@ async fn every_emacs_action_is_declared(cx: &mut TestAppContext) {
     });
 }
 
+/// Routes the prefix echo to the strip of each window.
+pub(crate) fn route_echo(cx: &mut gpui::App) {
+    bongos_minibuffer::init(cx);
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store.update_user_settings(cx, |content| {
+            content.minibuffer.get_or_insert_default().enabled_for =
+                Some(vec![KEY_HINT.to_string()]);
+        });
+    });
+}
+
 /// A workspace window whose strip shows the prefix echo, with the editor focused.
 async fn echo_window(cx: &mut TestAppContext) -> (Entity<Editor>, VisualTestContext) {
-    let (_workspace, editor, cx) = workspace_window_with(cx, |cx| {
-        bongos_minibuffer::init(cx);
-        cx.update_global::<SettingsStore, _>(|store, cx| {
-            store.update_user_settings(cx, |content| {
-                content.minibuffer.get_or_insert_default().enabled_for =
-                    Some(vec![KEY_HINT.to_string()]);
-            });
-        });
-    })
-    .await;
+    let (_workspace, editor, cx) = workspace_window_with(cx, route_echo).await;
     (editor, cx)
 }
 
-fn echo(cx: &mut VisualTestContext) -> Option<String> {
+pub(crate) fn echo(cx: &mut VisualTestContext) -> Option<String> {
     cx.run_until_parked();
     let strip = cx
         .update(|window, cx| minibuffer_for_window(window.window_handle(), cx))

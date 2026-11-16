@@ -88,7 +88,8 @@ async fn a_prefix_between_yank_and_yank_pop_keeps_the_chain(cx: &mut TestAppCont
     cx.set_state("<ˇ>");
     cx.simulate_keystrokes("ctrl-y");
     cx.assert_editor_state("<newestˇ>");
-    cx.simulate_keystrokes("ctrl-u");
+    // The argument reaches the yank-pop as its count: `C-u 1` pops one entry, as a bare M-y.
+    cx.simulate_keystrokes("ctrl-u 1");
     cx.simulate_keystrokes("alt-y");
     cx.assert_editor_state("<oldestˇ>");
 }

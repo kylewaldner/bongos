@@ -10,6 +10,7 @@ mod count_adapters;
 mod cursor;
 mod global_mark;
 mod goto_line;
+mod intercept;
 mod jumps;
 mod kill;
 pub mod kill_ring_sink;
@@ -25,6 +26,7 @@ pub mod quit;
 pub mod recenter;
 pub mod region;
 mod region_commands;
+mod repeat;
 pub mod snapshot_text;
 mod space;
 mod transpose;
@@ -46,6 +48,8 @@ mod cursor_tests;
 mod global_mark_tests;
 #[cfg(test)]
 mod goto_line_tests;
+#[cfg(test)]
+mod intercept_tests;
 #[cfg(test)]
 mod jumps_tests;
 #[cfg(test)]
@@ -220,8 +224,7 @@ fn register<A: CountArg>(
                 None => handler(action, &editor, window, cx),
             }
             if clamped {
-                let text = format!("Count limited to {}", prefix_arg::MAX_INSERT);
-                bongos_minibuffer::set_prefix_echo(window, cx, Some(text));
+                prefix_arg::show_limited(window, cx);
             }
             last_command::record(window, Some(action.name()), cx);
         })
