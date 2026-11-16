@@ -114,11 +114,13 @@ pub fn handle(
     }
 }
 
-/// The reason the done rule would hold `task_id` if it were finished now. The done decider
-/// answers here once it exists; until then no task is held.
+/// The reason the done rule would hold `task_id` if it were finished now, as the done decider
+/// of this process (the one holding the writer) judges it; `None` when it would not be held.
 pub fn would_hold(task_id: &str, cx: &mut App) -> Task<Option<String>> {
-    let _ = (task_id, cx);
-    Task::ready(None)
+    match ChecksEngine::global(cx) {
+        Some(engine) => engine.update(cx, |engine, cx| engine.would_hold(task_id, cx)),
+        None => Task::ready(None),
+    }
 }
 
 /// Sends a command payload to the process that holds the writer and resolves with its reply.

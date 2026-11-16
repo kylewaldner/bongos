@@ -144,20 +144,54 @@ pub fn done_record_in(tx: &mut StateTx, task_id: &str) -> Result<Option<DoneReco
 
 /// Increments the generation counter and returns the new value. The counter orders events and
 /// is never a clock.
+///
+/// A counter row that is not a number is not left to abort every transaction that finishes a
+/// child of a group with closing checks: it is logged and the count goes on from the highest
+/// generation any `checks.last`, `checks.done` or `checks.owed` row holds, so the order of
+/// generations already given out is kept.
 pub fn next_generation(tx: &mut StateTx) -> Result<u64> {
-    let current = tx
-        .kv(SEQ_NAMESPACE)
-        .get(SEQ_KEY)?
-        .map(|value| {
-            value
-                .as_integer()
-                .and_then(|number| u64::try_from(number).ok())
-                .context("the generation counter is not a number")
-        })
-        .transpose()?
-        .unwrap_or(0);
+    let current = match tx.kv(SEQ_NAMESPACE).get(SEQ_KEY)? {
+        None => 0,
+        Some(value) => match value
+            .as_integer()
+            .and_then(|number| u64::try_from(number).ok())
+        {
+            Some(number) => number,
+            None => {
+                let highest = highest_generation_in_use(tx)?;
+                log::error!(
+                    "the checks generation counter is not a number ({value}); going on from {highest}"
+                );
+                highest
+            }
+        },
+    };
     let next = current + 1;
     tx.kv(SEQ_NAMESPACE)
         .put(SEQ_KEY, toml::Value::Integer(i64::try_from(next)?))?;
     Ok(next)
+}
+
+/// The highest generation a `checks.last` row, a done record or a group marker's last child
+/// holds; rows that do not read as numbers are skipped.
+fn highest_generation_in_use(tx: &mut StateTx) -> Result<u64> {
+    fn number(value: Option<&toml::Value>) -> u64 {
+        value
+            .and_then(toml::Value::as_integer)
+            .and_then(|number| u64::try_from(number).ok())
+            .unwrap_or(0)
+    }
+    let mut highest = 0;
+    for namespace in [LAST_NAMESPACE, DONE_NAMESPACE] {
+        for (_, value) in tx.kv(namespace).scan("")? {
+            highest = highest.max(number(value.get("generation")));
+        }
+    }
+    for (_, value) in tx.kv(OWED_NAMESPACE).scan("")? {
+        let last = value
+            .get("last_child")
+            .and_then(|last| last.get("generation"));
+        highest = highest.max(number(last));
+    }
+    Ok(highest)
 }

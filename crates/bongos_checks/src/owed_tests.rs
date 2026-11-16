@@ -485,10 +485,9 @@ fn closing_the_last_todo_commits_the_marker_in_the_same_transaction_and_writes_o
         .read(|read| read.kv(OWED_NAMESPACE).get("plain"))
         .unwrap()
         .unwrap();
-    assert_eq!(
-        marker.try_into::<OwedMarker>().unwrap(),
-        OwedMarker::default()
-    );
+    let marker: OwedMarker = marker.try_into().unwrap();
+    assert_eq!(marker.state_generation, generation + 1);
+    assert_eq!(without_generation(marker), OwedMarker::default());
     assert_eq!(
         fixture.holds().get("plain").map(String::as_str),
         Some(CHECKING)
@@ -873,9 +872,7 @@ fn a_reader_holds_the_task_at_once_and_follows_its_hold_row() {
         .transact(|tx| {
             tx.kv(LIVE_NAMESPACE).put(
                 &hold_key("plain"),
-                toml::Value::try_from(HoldRow {
-                    reason: reason.to_string(),
-                })?,
+                toml::Value::try_from(HoldRow::new(reason))?,
             )
         })
         .unwrap();
@@ -978,9 +975,7 @@ fn the_writer_s_events_are_followed_once() {
         .transact(|tx| {
             tx.kv(LIVE_NAMESPACE).put(
                 &hold_key("plain"),
-                toml::Value::try_from(HoldRow {
-                    reason: "checking the tree".to_string(),
-                })?,
+                toml::Value::try_from(HoldRow::new("checking the tree"))?,
             )
         })
         .unwrap();
@@ -1027,7 +1022,7 @@ impl Fixture {
                 Ok(read
                     .kv(OWED_NAMESPACE)
                     .get(id)?
-                    .map(|value| value.try_into().unwrap()))
+                    .map(|value| without_generation(value.try_into().unwrap())))
             })
             .unwrap()
     }
@@ -1067,10 +1062,19 @@ impl Fixture {
     }
 }
 
+/// `marker` without the generation it was put at, which every finish changes.
+fn without_generation(marker: OwedMarker) -> OwedMarker {
+    OwedMarker {
+        state_generation: 0,
+        ..marker
+    }
+}
+
 fn carries(closing_from: &[&str]) -> OwedMarker {
     OwedMarker {
         closing_from: closing_from.iter().map(|id| id.to_string()).collect(),
         last_child: None,
+        state_generation: 0,
     }
 }
 
@@ -1089,6 +1093,7 @@ fn group_marker(id: &str, generation: u64) -> OwedMarker {
             id: id.to_string(),
             generation,
         }),
+        state_generation: 0,
     }
 }
 
@@ -1173,6 +1178,59 @@ fn a_held_sibling_or_one_finishing_in_the_same_transaction_means_no_child_carrie
 }
 
 #[test]
+fn a_sibling_group_whose_descendant_still_owes_keeps_the_last_leaf_from_carrying() {
+    // grp (closing) > sub (a group with no closing checks) > s1 (tests); grp > c2 (tests).
+    let tree = group_tree(
+        CLOSING,
+        &[("c2", TESTS)],
+        &[
+            ("tasks/grp/tasks/sub", task_toml("sub", "other", &[], "")),
+            (
+                "tasks/grp/tasks/sub/tasks/s1",
+                task_toml("s1", "other", &["a", "b"], TESTS),
+            ),
+        ],
+    );
+    let fixture = Fixture::with(true, tree);
+    fixture.set("s1", closed()).unwrap();
+    assert_eq!(fixture.marker("s1"), Some(carries(&[])));
+    // sub looks Done but owes nothing itself, so it has no marker; s1 below it is held.
+    assert_eq!(fixture.marker("sub"), None);
+    fixture.set("c2", closed()).unwrap();
+    assert_eq!(fixture.marker("c2"), Some(carries(&[])));
+    assert_eq!(fixture.marker("grp"), Some(group_marker("c2", 2)));
+}
+
+#[test]
+fn an_inner_group_that_is_not_the_last_open_child_carries_nothing() {
+    // outer (closing) > inner > leaf; outer > other, still open when leaf finishes.
+    let tree = tree_of(&[
+        ("tasks/outer", task_toml("outer", "other", &[], CLOSING)),
+        (
+            "tasks/outer/tasks/inner",
+            task_toml("inner", "other", &[], ""),
+        ),
+        (
+            "tasks/outer/tasks/inner/tasks/leaf",
+            task_toml("leaf", "other", &["a", "b"], ""),
+        ),
+        (
+            "tasks/outer/tasks/other",
+            task_toml("other", "other", &["a", "b"], ""),
+        ),
+    ]);
+    let fixture = Fixture::with(true, tree);
+    fixture.set("leaf", closed()).unwrap();
+    assert_eq!(fixture.marker("leaf"), None);
+    assert_eq!(fixture.marker("inner"), None);
+    assert_eq!(fixture.last("outer"), Some(last_row("inner", 1)));
+    // other finishes last, with inner Done and owing nothing: it carries outer's checks.
+    fixture.set("other", closed()).unwrap();
+    assert_eq!(fixture.marker("other"), Some(carries(&["outer"])));
+    assert_eq!(fixture.marker("outer"), Some(group_marker("other", 2)));
+}
+
+#[test]
 fn closing_checks_of_a_group_above_pass_through_a_group_that_is_its_last_open_child() {
     // top: outer (closing) > inner (no closing of its own) > leaf.
     let tree = tree_of(&[
@@ -1198,6 +1256,7 @@ fn closing_checks_of_a_group_above_pass_through_a_group_that_is_its_last_open_ch
                 id: "leaf".to_string(),
                 generation: 1,
             }),
+            state_generation: 0,
         })
     );
     assert_eq!(fixture.last("inner"), Some(last_row("leaf", 1)));
