@@ -3,6 +3,8 @@
 //! are dispatchable; later steps register the rest.
 
 use gpui::{Action, actions};
+
+use crate::prefix_arg::CountArg;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -32,6 +34,9 @@ actions!(
 
 macro_rules! count_action {
     ($(#[$meta:meta])* $name:ident) => {
+        count_action!($(#[$meta])* $name; false);
+    };
+    ($(#[$meta:meta])* $name:ident; $inserts:expr) => {
         $(#[$meta])*
         #[derive(PartialEq, Clone, Debug, Deserialize, Default, JsonSchema, Action)]
         #[action(namespace = emacs)]
@@ -40,6 +45,19 @@ macro_rules! count_action {
             /// The prefix argument; absent when none was given.
             #[serde(default)]
             pub count: Option<i32>,
+        }
+
+        impl CountArg for $name {
+            const READS: bool = true;
+            const INSERTS: bool = $inserts;
+
+            fn count(&self) -> Option<i32> {
+                self.count
+            }
+
+            fn with_count(&self, count: i32) -> Option<Self> {
+                Some(Self { count: Some(count) })
+            }
         }
     };
 }
@@ -58,6 +76,18 @@ macro_rules! motion_action {
             #[serde(default)]
             pub select: bool,
         }
+
+        impl CountArg for $name {
+            const READS: bool = true;
+
+            fn count(&self) -> Option<i32> {
+                self.count
+            }
+
+            fn with_count(&self, count: i32) -> Option<Self> {
+                Some(Self { count: Some(count), ..self.clone() })
+            }
+        }
     };
 }
 
@@ -75,7 +105,77 @@ macro_rules! zap_action {
             #[serde(default)]
             pub char: Option<char>,
         }
+
+        impl CountArg for $name {
+            const READS: bool = true;
+
+            fn count(&self) -> Option<i32> {
+                self.count
+            }
+
+            fn with_count(&self, count: i32) -> Option<Self> {
+                Some(Self { count: Some(count), ..self.clone() })
+            }
+        }
     };
+}
+
+/// Implements `CountArg` with the defaults for actions that take no count.
+macro_rules! no_count {
+    ($($name:ident),* $(,)?) => {
+        $(impl CountArg for $name {})*
+    };
+}
+
+no_count!(
+    KeyboardQuit,
+    DuplicateAndComment,
+    CommentDwim,
+    DeleteBlankLines,
+    Reposition,
+    AppendNextKill,
+    BrowseKillRing,
+    ExchangePointAndMark,
+    PopMark,
+    PopGlobalMark,
+    BeginningOfBuffer,
+    EndOfBuffer,
+    XrefFindDefinitions,
+    XrefFindImplementations,
+);
+
+/// Starts or extends the prefix argument: C-u.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, JsonSchema, Action)]
+#[action(namespace = emacs)]
+#[serde(deny_unknown_fields)]
+pub struct UniversalArgument;
+
+/// Starts or extends the prefix argument with a digit: M-0 to M-9.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, JsonSchema, Action)]
+#[action(namespace = emacs)]
+#[serde(deny_unknown_fields)]
+pub struct DigitArgument {
+    /// The digit, 0 to 9.
+    #[serde(default)]
+    pub digit: u8,
+}
+
+/// Starts or extends the prefix argument as negative: M--.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, JsonSchema, Action)]
+#[action(namespace = emacs)]
+#[serde(deny_unknown_fields)]
+pub struct NegativeArgument;
+
+impl CountArg for UniversalArgument {
+    const BUILDS: bool = true;
+}
+
+impl CountArg for DigitArgument {
+    const BUILDS: bool = true;
+}
+
+impl CountArg for NegativeArgument {
+    const BUILDS: bool = true;
 }
 
 motion_action!(
@@ -144,7 +244,13 @@ count_action!(
 );
 count_action!(
     /// Duplicates the region, or the current line N times.
-    DuplicateLine
+    DuplicateLine;
+    true
+);
+count_action!(
+    /// Inserts N newlines after the cursor and leaves the cursor before them.
+    OpenLine;
+    true
 );
 count_action!(
     /// Copies N characters from the nearest non-blank line above.
@@ -156,7 +262,8 @@ count_action!(
 );
 count_action!(
     /// Leaves exactly N spaces around the cursor.
-    JustOneSpace
+    JustOneSpace;
+    true
 );
 zap_action!(
     /// Kills up to and including the Nth occurrence of a character.

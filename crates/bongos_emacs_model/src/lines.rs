@@ -94,6 +94,24 @@ pub fn duplicate_line<T: TextSource + ?Sized>(
     insert_plan(inserts, &others)
 }
 
+/// open-line: inserts N newlines (`None` is 1; a negative count is its magnitude) at every caret
+/// and leaves the caret before them, with no region. A count of 0 inserts nothing.
+pub fn open_line<T: TextSource + ?Sized>(_text: &T, carets: &[Caret], count: Option<i32>) -> Plan {
+    let n = count.unwrap_or(1).unsigned_abs() as usize;
+    if n == 0 {
+        return insert_plan(Vec::new(), carets);
+    }
+    let inserts = carets
+        .iter()
+        .map(|caret| Insert {
+            at: caret.head,
+            text: "\n".repeat(n),
+            caret: 0,
+        })
+        .collect();
+    insert_plan(inserts, &[])
+}
+
 fn is_blank<T: TextSource + ?Sized>(text: &T, line: &Range<usize>) -> bool {
     text.chars_at(line.start)
         .take_while(|&c| c != '\n')

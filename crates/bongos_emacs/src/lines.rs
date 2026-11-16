@@ -1,13 +1,14 @@
 //! Line commands: move-line-up and -down (Zed's own line mover, N times in one undo step),
-//! duplicate-line and copy-from-above (through `apply::run`). A single-line editor passes the
+//! duplicate-line, copy-from-above and open-line (through `apply::run`). A single-line editor passes the
 //! key on: it has no lines to move, copy or duplicate.
 
-use bongos_emacs_model::{Plan, copy_from_above, duplicate_line};
+use bongos_emacs_model::{Plan, copy_from_above, duplicate_line, open_line};
 use editor::Editor;
 use gpui::{Action as _, App, Entity, Window};
 
-use crate::actions::{CopyFromAbove, DuplicateLine, MoveLineDown, MoveLineUp};
+use crate::actions::{CopyFromAbove, DuplicateLine, MoveLineDown, MoveLineUp, OpenLine};
 use crate::apply::{self, Command};
+use crate::prefix_arg::MAX_INSERT;
 
 /// Whether the key was passed on to the next handler because the editor has one line.
 pub(crate) fn propagate_in_single_line(editor: &Entity<Editor>, cx: &mut App) -> bool {
@@ -110,5 +111,26 @@ pub(crate) fn copy_from_above_command(
         cx,
         Command::edit(action.name()),
         |text, carets| -> Plan { copy_from_above(text, carets, count) },
+    );
+}
+
+/// open-line: N newlines after each caret, the caret staying before them, as one undo step. The
+/// count is clamped to `MAX_INSERT`.
+pub(crate) fn open_line_command(
+    action: &OpenLine,
+    editor: &Entity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if propagate_in_single_line(editor, cx) {
+        return;
+    }
+    let count = action.count.map(|n| n.clamp(-MAX_INSERT, MAX_INSERT));
+    apply::run(
+        editor,
+        window,
+        cx,
+        Command::edit(action.name()),
+        |text, carets| -> Plan { open_line(text, carets, count) },
     );
 }
