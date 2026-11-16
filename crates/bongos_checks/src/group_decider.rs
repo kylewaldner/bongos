@@ -893,16 +893,17 @@ impl ChecksEngine {
                     return;
                 }
             };
-            // Each lease is held here, out of a drain's reach, while git changes its tree, and
-            // registered for the drain only once its checkout returned: a lease is let go only
-            // once no git command runs in it. One not registered is dropped on every path out.
-            let lent: Vec<Option<(Box<dyn SecondTreeLease>, PathBuf, EnvBase)>> = lent
+            // Every lease is registered at once (no await since they were taken), so a drain
+            // releases each. Only the one whose tree git is checking out is taken out of the
+            // drain's reach, and only while git runs in it: registered again once its checkout
+            // returned, dropped on every other path out.
+            let lent: Vec<Option<(PathBuf, EnvBase)>> = lent
                 .into_iter()
                 .map(|lease| {
                     lease.map(|lease| {
-                        let path = lease.path().to_path_buf();
-                        let env = EnvBase::for_lease(lease.as_ref());
-                        (lease, path, env)
+                        let found = (lease.path().to_path_buf(), EnvBase::for_lease(lease.as_ref()));
+                        leases.borrow_mut().push(lease);
+                        found
                     })
                 })
                 .collect();
@@ -914,17 +915,29 @@ impl ChecksEngine {
                     stopped = true;
                     break;
                 }
-                if let Some((lease, path, env)) = lent {
+                if let Some((path, env)) = lent {
+                    // Taken out with no await since the stop was asked: a drain that already
+                    // cleared it stopped the run too.
+                    let taken = {
+                        let mut held = leases.borrow_mut();
+                        held.iter()
+                            .position(|lease| lease.path() == path)
+                            .map(|index| held.remove(index))
+                    };
+                    let Some(lease) = taken else {
+                        stopped = true;
+                        break;
+                    };
                     match check_out_tree_in_lent_tree(&git, &path, &tree.tree, &protected, &stop)
                         .await
                     {
-                        Ok(()) => {
+                        Ok(()) if !stop.is_stopped() => {
                             leases.borrow_mut().push(lease);
                             tree.path = path;
                             tree.env = env;
                             continue;
                         }
-                        Err(LentTreeError::Stopped) => {
+                        Ok(()) | Err(LentTreeError::Stopped) => {
                             stopped = true;
                             break;
                         }
@@ -934,6 +947,10 @@ impl ChecksEngine {
                             );
                             drop(lease);
                         }
+                    }
+                    if stop.is_stopped() {
+                        stopped = true;
+                        break;
                     }
                 }
                 tree.env = EnvBase::Own;

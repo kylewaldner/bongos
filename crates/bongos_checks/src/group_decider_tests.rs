@@ -797,6 +797,95 @@ async fn a_drain_while_git_writes_the_lent_tree_releases_the_lease_only_after_gi
     assert!(world.done("grp").is_some());
 }
 
+/// A closing check over the repositories `app` and `lib`.
+const TWO_REPO_CLOSING: &str =
+    "\n[[checks.closing]]\nname = \"full\"\ncommand = [\"true\"]\nrepos = [\"app\", \"lib\"]\n";
+
+#[gpui::test]
+async fn a_drain_while_git_writes_one_lent_tree_releases_the_other_repositorys_lease_at_once(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let world = World::with_clock(cx, &group(TWO_REPO_CLOSING, ""), FakeClock::manual());
+    world.worktree("c1", "pub fn c1() {}\n");
+    world.worktree("c2", "pub fn c2() {}\n");
+    let lib = world.root.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    init_git_repo(&lib);
+    write_file(&lib, "src/lib.rs", "pub fn lib() {}\n");
+    commit_everything(&lib, "start");
+    world
+        .source
+        .repositories
+        .borrow_mut()
+        .insert("lib".to_string(), lib.clone());
+    let lib_second = world.root.path().join("second-lib");
+    git_in(
+        &lib,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            lib_second.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    {
+        let mut state = trees.state();
+        state.tips.insert("lib".to_string(), lib.clone());
+        state.second.insert(
+            "lib".to_string(),
+            FakeSecond::Lease {
+                path: lib_second.clone(),
+                env: lane_env("lent-lib"),
+            },
+        );
+    }
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    // Writing out a Rust file in app's lent tree waits until `go` exists.
+    let marks = world.root.path().join("filter");
+    std::fs::create_dir_all(&marks).unwrap();
+    let marks_arg = marks.to_str().unwrap();
+    git_in(
+        &world.app,
+        &[
+            "config",
+            "filter.slow.smudge",
+            &format!(
+                "touch {marks_arg}/writing; while [ ! -f {marks_arg}/go ]; do sleep 0.05; done; cat"
+            ),
+        ],
+    );
+    std::fs::write(world.app.join(".git/info/attributes"), "*.rs filter=slow\n").unwrap();
+    world.decide(cx).await;
+    reached(marks.join("writing")).await.unwrap();
+    assert_eq!(trees.state().leased, ["app", "lib"]);
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    drain.await;
+
+    // Git still writes in app's lent tree, which stays held; lib's, untouched, went at once.
+    assert_eq!(trees.state().released, ["lib"], "lib released by the drain");
+    std::fs::write(marks.join("go"), "").unwrap();
+    world.runs_ended(cx).await;
+    assert_eq!(
+        trees.state().released,
+        ["lib", "app"],
+        "app released once git ended, each once"
+    );
+    assert!(world.records("grp").is_empty(), "nothing ran");
+}
+
 #[gpui::test]
 async fn a_drain_while_waiting_for_a_busy_tree_starts_nothing_and_reruns_after_undrain(
     cx: &mut TestAppContext,
