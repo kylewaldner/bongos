@@ -3,6 +3,9 @@ mod content_into_gpui;
 mod editable_setting_control;
 mod editorconfig_store;
 mod keymap_file;
+mod keymap_profiles;
+#[cfg(test)]
+mod keymap_profiles_tests;
 mod settings_file;
 mod settings_store;
 mod vscode_import;
@@ -52,6 +55,7 @@ pub use settings_store::{
 pub use vscode_import::{VsCodeSettings, VsCodeSettingsSource};
 
 pub use keymap_file::ActionSequence;
+pub use keymap_profiles::{Leader, leader_bindings, load_leader_asset};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveSettingsProfileName(pub String);

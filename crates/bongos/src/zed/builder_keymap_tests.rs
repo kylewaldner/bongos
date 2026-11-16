@@ -178,7 +178,46 @@ async fn no_builder_chord_is_bound_twice(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn other_base_keymaps_have_no_builder_keys(cx: &mut TestAppContext) {
+async fn vscode_binds_the_builder_keys_only_under_its_leader(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for (macos, leader) in [(false, "ctrl-k b"), (true, "cmd-k b")] {
+        let bindings = cx.update(|cx| {
+            super::profile_key_bindings(settings::BaseKeymap::VSCode, false, macos, cx)
+        });
+        let keymap = Keymap::new(bindings.clone());
+        for (input, action) in BUILDER_KEYS {
+            let derived = format!("{leader}{}", input.strip_prefix("ctrl-c").unwrap());
+            let expected: Vec<String> = keys(&derived).iter().map(|key| key.unparse()).collect();
+            // The builder keys under VS Code are exactly the leader forms of the Emacs keys; the
+            // chat terminal's `ctrl-c w B` has no VS Code form.
+            let bound: Vec<Vec<String>> = bindings
+                .iter()
+                .filter(|binding| binding.action().name() == *action)
+                .map(|binding| {
+                    binding
+                        .keystrokes()
+                        .iter()
+                        .map(|key| key.inner().unparse())
+                        .collect()
+                })
+                .collect();
+            assert_eq!(bound, vec![expected], "macos={macos}: {action}");
+            let (names, pending) = resolve(&keymap, &derived, &["Workspace"]);
+            assert_eq!(names.first(), Some(action), "macos={macos}: {derived}");
+            assert!(!pending, "macos={macos}: {derived}");
+        }
+        for binding in &bindings {
+            let name = binding.action().name();
+            assert!(
+                !name.starts_with("proposal::") && !UNBOUND.contains(&name),
+                "macos={macos}: {name}"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+async fn the_default_keymap_has_no_builder_keys(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     let bases: &[(&str, &[&str])] = &[(LINUX.0, &[]), (MACOS.0, &[])];
     for (default, others) in bases {

@@ -1,8 +1,10 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    self as settings, KeybindSource, VIM_KEYMAP_PATH, settings_content::BaseKeymapContent,
+    self as settings, KeybindSource, KeymapFile, Leader, VIM_KEYMAP_PATH,
+    settings_content::BaseKeymapContent,
 };
+use gpui::{App, KeyBinding};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{RegisterSetting, Settings};
@@ -62,10 +64,14 @@ impl BaseKeymap {
     /// The Emacs keymap asset for this platform, if the base keymap has one.
     pub fn asset_path(&self) -> Option<&'static str> {
         match self {
-            BaseKeymap::Emacs => profile_keymap(*self, false)
-                .into_iter()
-                .map(|KeymapPart::Asset { path, .. }| path)
-                .find(|path| path.contains("emacs")),
+            BaseKeymap::Emacs => {
+                profile_keymap(*self, false)
+                    .into_iter()
+                    .find_map(|part| match part {
+                        KeymapPart::Asset { path, .. } if path.contains("emacs") => Some(path),
+                        _ => None,
+                    })
+            }
             BaseKeymap::VSCode | BaseKeymap::None => None,
         }
     }
@@ -91,11 +97,32 @@ pub enum KeymapPart {
         path: &'static str,
         source: KeybindSource,
     },
+    /// The leader rows derived from the bundled Emacs keymap at `emacs`, for the platform the
+    /// part was built for (macOS when `macos` is true), bound with the given source.
+    Leader {
+        emacs: &'static str,
+        leader: Leader,
+        macos: bool,
+        source: KeybindSource,
+    },
 }
 
 impl KeymapPart {
     const fn asset(path: &'static str, source: KeybindSource) -> Self {
         Self::Asset { path, source }
+    }
+
+    /// The key bindings of this part, with their source set.
+    pub fn load(&self, cx: &App) -> anyhow::Result<Vec<KeyBinding>> {
+        match *self {
+            KeymapPart::Asset { path, source } => KeymapFile::load_asset(path, Some(source), cx),
+            KeymapPart::Leader {
+                emacs,
+                leader,
+                macos,
+                source,
+            } => settings::load_leader_asset(emacs, leader, macos, source, cx),
+        }
     }
 }
 
@@ -124,20 +151,18 @@ pub fn profile_keymap_for_platform(
         "keymaps/default-linux.json"
     };
     let default = KeymapPart::asset(default_path, KeybindSource::Default);
+    let emacs = if macos {
+        "keymaps/macos/emacs.json"
+    } else {
+        "keymaps/linux/emacs.json"
+    };
 
     let mut parts = Vec::new();
     match base {
         BaseKeymap::None => {}
         BaseKeymap::Emacs => {
             parts.push(default);
-            parts.push(KeymapPart::asset(
-                if macos {
-                    "keymaps/macos/emacs.json"
-                } else {
-                    "keymaps/linux/emacs.json"
-                },
-                KeybindSource::Base,
-            ));
+            parts.push(KeymapPart::asset(emacs, KeybindSource::Base));
             if vim_enabled {
                 parts.push(vim);
             }
@@ -156,6 +181,14 @@ pub fn profile_keymap_for_platform(
                 )
             };
             parts.push(KeymapPart::asset(vscode, KeybindSource::Base));
+            // The bongos commands under `ctrl-k b` (`cmd-k b` on macOS), before the terminal
+            // tail so a terminal still forwards `ctrl-k`.
+            parts.push(KeymapPart::Leader {
+                emacs,
+                leader: Leader::VsCode,
+                macos,
+                source: KeybindSource::Base,
+            });
             parts.push(KeymapPart::asset(terminal, KeybindSource::Base));
             if vim_enabled {
                 parts.push(vim);
@@ -197,10 +230,29 @@ mod tests {
     #[test]
     fn profile_keymap_table() {
         use KeybindSource::{Base, Default, Vim};
-        let paths = |base, vim, macos| -> Vec<(&'static str, KeybindSource)> {
+        // A derived leader part is listed as `leader:<its Emacs asset>`.
+        let paths = |base, vim, macos: bool| -> Vec<(String, KeybindSource)> {
             profile_keymap_for_platform(base, vim, macos)
                 .into_iter()
-                .map(|KeymapPart::Asset { path, source }| (path, source))
+                .map(|part| match part {
+                    KeymapPart::Asset { path, source } => (path.to_string(), source),
+                    KeymapPart::Leader {
+                        emacs,
+                        leader,
+                        macos: part_macos,
+                        source,
+                    } => {
+                        assert_eq!(leader, Leader::VsCode);
+                        assert_eq!(part_macos, macos);
+                        (format!("leader:{emacs}"), source)
+                    }
+                })
+                .collect()
+        };
+        let owned = |parts: Vec<(&str, KeybindSource)>| -> Vec<(String, KeybindSource)> {
+            parts
+                .into_iter()
+                .map(|(path, source)| (path.to_string(), source))
                 .collect()
         };
         for (macos, dir, default, overrides) in [
@@ -220,6 +272,7 @@ mod tests {
             let emacs = format!("keymaps/{dir}/emacs.json");
             let vscode = format!("keymaps/{dir}/vscode.json");
             let tail = format!("keymaps/{dir}/vscode-terminal.json");
+            let leader = format!("leader:{emacs}");
             for vim_enabled in [false, true] {
                 let vim_part: Vec<_> = vim_enabled
                     .then_some(("keymaps/vim.json", Vim))
@@ -228,20 +281,27 @@ mod tests {
                 let mut expected = vec![(default, Default), (emacs.as_str(), Base)];
                 expected.extend(vim_part.clone());
                 expected.push((overrides, Default));
-                assert_eq!(paths(BaseKeymap::Emacs, vim_enabled, macos), expected);
+                assert_eq!(
+                    paths(BaseKeymap::Emacs, vim_enabled, macos),
+                    owned(expected)
+                );
 
                 let mut expected = vec![
                     (default, Default),
                     (vscode.as_str(), Base),
+                    (leader.as_str(), Base),
                     (tail.as_str(), Base),
                 ];
                 expected.extend(vim_part);
                 expected.push((overrides, Default));
-                assert_eq!(paths(BaseKeymap::VSCode, vim_enabled, macos), expected);
+                assert_eq!(
+                    paths(BaseKeymap::VSCode, vim_enabled, macos),
+                    owned(expected)
+                );
 
                 assert_eq!(
                     paths(BaseKeymap::None, vim_enabled, macos),
-                    vec![(overrides, Default)]
+                    owned(vec![(overrides, Default)])
                 );
             }
         }
