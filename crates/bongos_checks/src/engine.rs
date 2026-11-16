@@ -494,6 +494,7 @@ impl ChecksEngine {
             let outcome = execute(plan, &this, cx).await;
             this.update(cx, |engine, cx| {
                 engine.active.remove(&id);
+                engine.live_rows.release(&id);
                 if engine.active.is_empty() {
                     for idle in engine.idle.drain(..) {
                         idle.send(()).ok();
@@ -527,14 +528,25 @@ impl ChecksEngine {
     /// starts and new runs are refused until [`Self::undrain`]; every running part is stopped as
     /// at quit (SIGTERM, then SIGKILL within `task_checks.kill_grace_seconds`), the parts that
     /// finished staying in each unfinished record so a later run on the same key resumes from
-    /// them; every pool lease is dropped with its part; and `checks.live` is cleared.
+    /// them; every pool lease is dropped with its part; and `checks.live` is cleared at once,
+    /// with every pending or scheduled live write forgotten.
     ///
-    /// Resolves once every run has ended, and at the latest after the grace on the engine's
-    /// clock, with the workflow nodes whose runs it stopped (none for manual runs). The engine
-    /// leases no second tree and answers no landing job yet, so there is nothing more to let go.
+    /// Resolves once every run has ended, or once the grace has passed on the engine's clock,
+    /// whichever comes first, with the workflow nodes whose runs it stopped (none for manual
+    /// runs). The engine leases no second tree and answers no landing job yet, so there is
+    /// nothing more to let go.
+    ///
+    /// Guaranteed at resolution: every run was told to stop, no run or part starts while
+    /// drained, and `checks.live` is empty and stays so while drained (no live row is written).
+    /// Not guaranteed when the grace wins: a run that has not ended yet is still active
+    /// ([`Self::is_running`]), its process may still be exiting, its pool lease may still be
+    /// held and its record may not yet hold the stopped part; those settle when the run ends.
     pub fn drain(&mut self, cx: &mut Context<Self>) -> Task<Vec<(RunId, NodeKey)>> {
         self.drained = true;
         self.live_epoch += 1;
+        // At once, so an undrain before this resolves starts from no stale row and no write
+        // left scheduled for a dropped timer.
+        self.live_rows.clear_all();
         let mut stopped = Vec::new();
         for run in self.active.values() {
             run.stop.stop();
@@ -553,7 +565,7 @@ impl ChecksEngine {
             TaskChecksSettings::get_global(cx).kill_grace_seconds,
         ));
         let bound = self.clock.sleep(grace);
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_, _| {
             if let Some(ended) = ended {
                 let mut ended = ended.fuse();
                 let mut bound = bound.fuse();
@@ -562,13 +574,6 @@ impl ChecksEngine {
                     _ = bound => {},
                 }
             }
-            this.update(cx, |engine, _| {
-                // Still drained: an undrain in between keeps the rows of the runs since.
-                if engine.drained {
-                    engine.live_rows.clear_all();
-                }
-            })
-            .ok();
             stopped
         })
     }
@@ -628,6 +633,15 @@ impl ChecksEngine {
         if let Err(error) = self.live_rows.flush(task_id, self.clock.now()) {
             log::error!("writing the live rows of checks: {error:#}");
         }
+        if !self.active.contains_key(task_id) {
+            self.live_rows.release(task_id);
+        }
+    }
+
+    /// Whether the live rows keep anything of the task, for tests.
+    #[cfg(test)]
+    pub(crate) fn keeps_live_task(&self, task_id: &str) -> bool {
+        self.live_rows.has_task(task_id)
     }
 
     /// The live rows written so far, for tests.

@@ -125,7 +125,8 @@ pub(crate) enum Flush {
 }
 
 struct TaskLive {
-    writer: Arc<StateWriter>,
+    /// Weak, so a closed project's store (and its lock) is never held open by a row.
+    writer: Weak<StateWriter>,
     /// The rows as last updated, written or not.
     rows: BTreeMap<String, LiveRow>,
     /// The rows changed since the last write, by check.
@@ -199,13 +200,13 @@ impl LiveRows {
             .tasks
             .entry(task_id.to_string())
             .or_insert_with(|| TaskLive {
-                writer: writer.clone(),
+                writer: Arc::downgrade(writer),
                 rows: BTreeMap::new(),
                 pending: BTreeMap::new(),
                 last_write: None,
                 scheduled: false,
             });
-        task.writer = writer.clone();
+        task.writer = Arc::downgrade(writer);
         if task.rows.get(check) == Some(&row) {
             return Flush::Unchanged;
         }
@@ -233,6 +234,10 @@ impl LiveRows {
             return Ok(());
         }
         let pending = std::mem::take(&mut task.pending);
+        // The store is closed: nothing is left to write to.
+        let Some(writer) = task.writer.upgrade() else {
+            return Ok(());
+        };
         task.last_write = Some(now);
         #[cfg(test)]
         self.writes.push(LiveWrite {
@@ -240,7 +245,7 @@ impl LiveRows {
             at: now,
             rows: pending.clone(),
         });
-        task.writer.transact(|tx| {
+        writer.transact(|tx| {
             for (check, row) in &pending {
                 let value = toml::Value::try_from(row).context("serializing a live row")?;
                 tx.kv(LIVE_NAMESPACE)
@@ -250,7 +255,25 @@ impl LiveRows {
         })
     }
 
-    /// Forgets every pending row and deletes the namespace of every store seen.
+    /// Forgets the task once nothing of it waits to be written: called when its run has ended,
+    /// so a task is kept only while it runs or has rows still to write.
+    pub fn release(&mut self, task_id: &str) {
+        if self
+            .tasks
+            .get(task_id)
+            .is_some_and(|task| !task.scheduled && task.pending.is_empty())
+        {
+            self.tasks.remove(task_id);
+        }
+    }
+
+    /// Whether the task is still kept, for tests.
+    #[cfg(test)]
+    pub fn has_task(&self, task_id: &str) -> bool {
+        self.tasks.contains_key(task_id)
+    }
+
+    /// Forgets every pending row and every scheduled write, and deletes the namespace of every store seen.
     pub fn clear_all(&mut self) {
         self.tasks.clear();
         self.cleared.retain(|known| known.strong_count() > 0);

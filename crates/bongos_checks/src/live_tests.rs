@@ -181,3 +181,33 @@ fn a_live_row_keeps_when_its_state_began() {
     assert_eq!(rows.next_row("t1", "tests", later), first);
     assert_eq!(first.since(), "2026-03-01T10:00:01Z");
 }
+
+#[test]
+fn live_rows_hold_no_store_open_and_let_a_task_go_once_written() {
+    let root = TempDir::new().unwrap();
+    let writer = writer(&root);
+    let mut rows = LiveRows::default();
+    let start = Instant::now();
+
+    rows.update(&writer, "t1", "tests", running(1), start, SECOND);
+    rows.flush("t1", start).unwrap();
+    assert_eq!(
+        std::sync::Arc::strong_count(&writer),
+        1,
+        "only the test holds the store"
+    );
+
+    // A write still scheduled keeps the task.
+    let soon = start + Duration::from_millis(300);
+    rows.update(&writer, "t1", "tests", running(2), soon, SECOND);
+    rows.release("t1");
+    assert!(rows.has_task("t1"));
+    rows.flush("t1", start + SECOND).unwrap();
+    rows.release("t1");
+    assert!(!rows.has_task("t1"));
+
+    // A store closed while a write waits: the write is dropped and nothing fails.
+    rows.update(&writer, "t2", "tests", running(1), soon, SECOND);
+    drop(writer);
+    rows.flush("t2", soon).unwrap();
+}

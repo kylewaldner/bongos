@@ -149,7 +149,7 @@ fn work_tree(root: &TempDir) -> PathBuf {
     write_file(
         &tree,
         ".gitignore",
-        "runs\norder\nblock-at\nblocked-*\nscope-*\nitems-*\n",
+        "runs\norder\nblock-at\nignore-term\nblocked-*\nscope-*\nitems-*\n",
     );
     write_file(&tree, "src/lib.rs", "pub fn one() {}\n");
     commit_everything(&tree, "start");
@@ -899,25 +899,41 @@ fn set_kill_grace(cx: &mut TestAppContext, seconds: u32) {
     });
 }
 
-/// Starts `suite`, waits until its third part blocks (parts 1 and 2 passed), drains, and returns
-/// the run's report, what the drain returned and how long the drain took.
-async fn drain_during_part_three(
+type Stopped = Vec<(bongos_workflow::RunId, bongos_workflow_model::NodeKey)>;
+
+/// Starts `request` (of `suite`) and waits until its third part blocks (parts 1 and 2 passed).
+async fn start_blocked_at_part_three(
     world: &World,
     cx: &mut TestAppContext,
-) -> (
-    RunReport,
-    Vec<(bongos_workflow::RunId, bongos_workflow_model::NodeKey)>,
-    std::time::Duration,
-) {
+    request: RunChecksRequest,
+) -> Task<RunReport> {
     world.write("block-at", "3\n");
     let blocked = when_blocked(world, 3);
-    let run = world.run(cx, world.only(&["suite"]));
+    let run = world.run(cx, request);
     blocked.await.unwrap();
     cx.run_until_parked();
     assert!(
         !live_keys(world).is_empty(),
         "the running suite has a live row"
     );
+    run
+}
+
+/// Starts `suite`, waits until its third part blocks (parts 1 and 2 passed), drains, and returns
+/// the run's report, what the drain returned and how long the drain took.
+async fn drain_during_part_three(
+    world: &World,
+    cx: &mut TestAppContext,
+) -> (RunReport, Stopped, std::time::Duration) {
+    drain_request_during_part_three(world, cx, world.only(&["suite"])).await
+}
+
+async fn drain_request_during_part_three(
+    world: &World,
+    cx: &mut TestAppContext,
+    request: RunChecksRequest,
+) -> (RunReport, Stopped, std::time::Duration) {
+    let run = start_blocked_at_part_three(world, cx, request).await;
 
     // Real time only measures the drain against the grace; no outcome depends on the calendar.
     let began = std::time::Instant::now();
@@ -1050,4 +1066,121 @@ async fn engine_after_undrain_runs_start_again_and_resume_from_the_kept_parts(
     let parts: Vec<u32> = records[1].parts.iter().map(|part| part.n).collect();
     assert_eq!(parts, [1, 2, 3, 4]);
     assert_eq!(records[1].parts[0].started, records[0].parts[0].started);
+}
+
+#[gpui::test]
+async fn engine_drain_returns_the_workflow_node_of_each_run_it_stopped(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let world = World::with_checks(cx, true, FakeClock::manual(), DRAIN_CHECKS);
+    set_kill_grace(cx, 3);
+    let node = (
+        "run-1".to_string(),
+        bongos_workflow_model::NodeKey::new("checks", 1),
+    );
+    let request = RunChecksRequest {
+        node: Some(node.clone()),
+        ..world.only(&["suite"])
+    };
+
+    let (report, drained, _) = drain_request_during_part_three(&world, cx, request).await;
+
+    assert_eq!(drained, [node]);
+    assert!(report.cancelled());
+}
+
+#[gpui::test]
+async fn engine_drain_resolves_at_the_grace_on_its_clock_while_a_run_has_not_ended(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let world = World::with_checks(cx, true, clock.clone(), DRAIN_CHECKS);
+    // SIGKILL comes one second before the end of the grace, in real time: the part outlives
+    // SIGTERM for about two seconds, so only the engine's clock can end the drain first.
+    set_kill_grace(cx, 3);
+    let pool = FakePool::new("gpu", 1, clock.clone());
+    cx.update(|cx| CheckPoolsRegistry::set(Rc::new(pool.clone()), cx));
+    world.write("ignore-term", "");
+    let run = start_blocked_at_part_three(&world, cx, world.only(&["suite"])).await;
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    clock.advance(std::time::Duration::from_secs(3));
+    let drained = drain.await;
+
+    // The grace won: the run is still active, and no live row is left.
+    assert!(drained.is_empty());
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.is_running(TASK))
+    );
+    assert!(live_keys(&world).is_empty(), "{:?}", live_keys(&world));
+
+    // The run ends after the SIGKILL, still writing no live row while drained.
+    let report = run.await;
+    cx.run_until_parked();
+    assert!(report.cancelled());
+    assert!(
+        !world
+            .engine
+            .read_with(cx, |engine, _| engine.is_running(TASK))
+    );
+    pool.assert_all_released();
+    assert!(live_keys(&world).is_empty(), "{:?}", live_keys(&world));
+}
+
+#[gpui::test]
+async fn engine_an_undrain_before_the_drain_resolves_lets_new_runs_write_live_rows(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let world = World::with_checks(cx, true, clock.clone(), DRAIN_CHECKS);
+    let run = start_blocked_at_part_three(&world, cx, world.only(&["suite"])).await;
+    // The clock stands still, so a later part's row waits for a scheduled write.
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.keeps_live_task(TASK))
+    );
+
+    let drain = world.engine.update(cx, |engine, cx| {
+        let drain = engine.drain(cx);
+        engine.undrain();
+        drain
+    });
+    let report = run.await;
+    drain.await;
+    cx.run_until_parked();
+    assert!(report.cancelled());
+    // No row of the run from before the drain is left: the stopped suite shows how it ended.
+    let rows = stored_live(&world);
+    assert_eq!(rows.keys().collect::<Vec<_>>(), ["part/l1/suite"]);
+    assert!(
+        matches!(&rows["part/l1/suite"], LiveRow::Ended { verdict, .. } if !verdict.is_pass()),
+        "{rows:?}"
+    );
+
+    // A new run writes its rows again, the throttle's last write included.
+    let docs = world.run(cx, world.only(&["docs"])).await;
+    assert_eq!(docs.results()[0].verdict, Verdict::Pass);
+    clock.advance(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    let rows = stored_live(&world);
+    assert!(
+        matches!(
+            &rows.get("part/l1/docs"),
+            Some(LiveRow::Ended {
+                verdict: Verdict::Pass,
+                ..
+            })
+        ),
+        "{rows:?}"
+    );
+    // The task's live state is let go once its run ended and its rows were written.
+    assert!(
+        !world
+            .engine
+            .read_with(cx, |engine, _| engine.keeps_live_task(TASK))
+    );
 }
