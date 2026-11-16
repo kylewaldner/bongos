@@ -1,6 +1,8 @@
 use std::fmt::{Display, Formatter};
 
-use crate::{self as settings, settings_content::BaseKeymapContent};
+use crate::{
+    self as settings, KeybindSource, VIM_KEYMAP_PATH, settings_content::BaseKeymapContent,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{RegisterSetting, Settings};
@@ -86,6 +88,89 @@ impl BaseKeymap {
     }
 }
 
+/// One piece of the keymap a base keymap loads, in load order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeymapPart {
+    /// A bundled keymap asset, bound with the given source.
+    Asset {
+        path: &'static str,
+        source: KeybindSource,
+    },
+}
+
+impl KeymapPart {
+    const fn asset(path: &'static str, source: KeybindSource) -> Self {
+        Self::Asset { path, source }
+    }
+}
+
+/// The keymap parts to load for a base keymap, in load order. User keymaps load after all of
+/// them. `vim_enabled` is true when vim mode or helix mode is on.
+pub fn profile_keymap(base: BaseKeymap, vim_enabled: bool) -> Vec<KeymapPart> {
+    profile_keymap_for_platform(base, vim_enabled, cfg!(target_os = "macos"))
+}
+
+/// `profile_keymap` for an explicit platform: macOS when `macos` is true, Linux otherwise.
+pub fn profile_keymap_for_platform(
+    base: BaseKeymap,
+    vim_enabled: bool,
+    macos: bool,
+) -> Vec<KeymapPart> {
+    let overrides = if macos {
+        "keymaps/specific-overrides-macos.json"
+    } else {
+        "keymaps/specific-overrides.json"
+    };
+    let overrides = KeymapPart::asset(overrides, KeybindSource::Default);
+    let vim = KeymapPart::asset(VIM_KEYMAP_PATH, KeybindSource::Vim);
+    let default_path = if macos {
+        "keymaps/default-macos.json"
+    } else {
+        "keymaps/default-linux.json"
+    };
+    let default = KeymapPart::asset(default_path, KeybindSource::Default);
+
+    let mut parts = Vec::new();
+    match base {
+        BaseKeymap::None => {}
+        BaseKeymap::Emacs => {
+            parts.push(default);
+            parts.push(KeymapPart::asset(
+                if macos {
+                    "keymaps/macos/emacs.json"
+                } else {
+                    "keymaps/linux/emacs.json"
+                },
+                KeybindSource::Base,
+            ));
+            if vim_enabled {
+                parts.push(vim);
+            }
+        }
+        BaseKeymap::VSCode => {
+            parts.push(default);
+            let (vscode, terminal) = if macos {
+                (
+                    "keymaps/macos/vscode.json",
+                    "keymaps/macos/vscode-terminal.json",
+                )
+            } else {
+                (
+                    "keymaps/linux/vscode.json",
+                    "keymaps/linux/vscode-terminal.json",
+                )
+            };
+            parts.push(KeymapPart::asset(vscode, KeybindSource::Base));
+            parts.push(KeymapPart::asset(terminal, KeybindSource::Base));
+            if vim_enabled {
+                parts.push(vim);
+            }
+        }
+    }
+    parts.push(overrides);
+    parts
+}
+
 impl Settings for BaseKeymap {
     fn from_settings(s: &crate::settings_content::SettingsContent) -> Self {
         s.base_keymap.unwrap().into()
@@ -112,6 +197,82 @@ mod tests {
         ] {
             assert!(!kept.is_retired());
         }
+    }
+
+    #[test]
+    fn profile_keymap_table() {
+        use KeybindSource::{Base, Default, Vim};
+        let paths = |base, vim, macos| -> Vec<(&'static str, KeybindSource)> {
+            profile_keymap_for_platform(base, vim, macos)
+                .into_iter()
+                .map(|KeymapPart::Asset { path, source }| (path, source))
+                .collect()
+        };
+        for (macos, dir, default, overrides) in [
+            (
+                false,
+                "linux",
+                "keymaps/default-linux.json",
+                "keymaps/specific-overrides.json",
+            ),
+            (
+                true,
+                "macos",
+                "keymaps/default-macos.json",
+                "keymaps/specific-overrides-macos.json",
+            ),
+        ] {
+            let emacs = format!("keymaps/{dir}/emacs.json");
+            let vscode = format!("keymaps/{dir}/vscode.json");
+            let tail = format!("keymaps/{dir}/vscode-terminal.json");
+            for vim_enabled in [false, true] {
+                let vim_part: Vec<_> = vim_enabled
+                    .then_some(("keymaps/vim.json", Vim))
+                    .into_iter()
+                    .collect();
+                let mut expected = vec![(default, Default), (emacs.as_str(), Base)];
+                expected.extend(vim_part.clone());
+                expected.push((overrides, Default));
+                assert_eq!(paths(BaseKeymap::Emacs, vim_enabled, macos), expected);
+
+                let mut expected = vec![
+                    (default, Default),
+                    (vscode.as_str(), Base),
+                    (tail.as_str(), Base),
+                ];
+                expected.extend(vim_part);
+                expected.push((overrides, Default));
+                assert_eq!(paths(BaseKeymap::VSCode, vim_enabled, macos), expected);
+
+                assert_eq!(
+                    paths(BaseKeymap::None, vim_enabled, macos),
+                    vec![(overrides, Default)]
+                );
+            }
+        }
+        assert_eq!(
+            profile_keymap(BaseKeymap::Emacs, false),
+            profile_keymap_for_platform(BaseKeymap::Emacs, false, cfg!(target_os = "macos"))
+        );
+    }
+
+    #[test]
+    fn lowercase_aliases_parse() {
+        for (name, expected) in [
+            ("emacs", BaseKeymapContent::Emacs),
+            ("vscode", BaseKeymapContent::VSCode),
+            ("none", BaseKeymapContent::None),
+            ("Emacs", BaseKeymapContent::Emacs),
+            ("VSCode", BaseKeymapContent::VSCode),
+            ("None", BaseKeymapContent::None),
+        ] {
+            let content: BaseKeymapContent = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(content, expected, "{name}");
+        }
+        assert_eq!(
+            serde_json::to_string(&BaseKeymapContent::VSCode).unwrap(),
+            "\"VSCode\""
+        );
     }
 
     #[test]

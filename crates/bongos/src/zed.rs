@@ -11,6 +11,8 @@ mod emacs_keymap_tests;
 #[cfg(test)]
 mod isearch_keymap_tests;
 #[cfg(test)]
+mod keybinding_profile_tests;
+#[cfg(test)]
 mod kill_ring_keymap_tests;
 #[cfg(test)]
 mod linear_keymap_tests;
@@ -94,10 +96,10 @@ use release_channel::{AppCommitSha, ReleaseChannel};
 use rope::Rope;
 use search::project_search::ProjectSearchBar;
 use settings::{
-    BaseKeymap, DEFAULT_KEYMAP_PATH, DefaultOpenBehavior, InvalidSettingsError, KeybindSource,
-    KeymapFile, KeymapFileLoadResult, MigrationStatus, SPECIFIC_OVERRIDES_KEYMAP_PATH, Settings,
-    SettingsFile, SettingsStore, VIM_KEYMAP_PATH, initial_local_debug_tasks_content,
-    initial_project_settings_content, initial_tasks_content, update_settings_file,
+    BaseKeymap, DefaultOpenBehavior, InvalidSettingsError, KeybindSource, KeymapFile,
+    KeymapFileLoadResult, MigrationStatus, Settings, SettingsFile, SettingsStore,
+    initial_local_debug_tasks_content, initial_project_settings_content, initial_tasks_content,
+    update_settings_file,
 };
 use sidebar::Sidebar;
 #[cfg(debug_assertions)]
@@ -2487,32 +2489,16 @@ fn reload_keymaps(cx: &mut App, mut user_key_bindings: Vec<KeyBinding>) {
 
 pub fn load_default_keymap(cx: &mut App) {
     let base_keymap = *BaseKeymap::get_global(cx);
-    if base_keymap == BaseKeymap::None {
-        return;
+    let vim_enabled =
+        VimModeSetting::get_global(cx).0 || vim_mode_setting::HelixModeSetting::get_global(cx).0;
+
+    for part in settings::profile_keymap(base_keymap, vim_enabled) {
+        match part {
+            settings::KeymapPart::Asset { path, source } => {
+                cx.bind_keys(KeymapFile::load_asset(path, Some(source), cx).unwrap());
+            }
+        }
     }
-
-    cx.bind_keys(
-        KeymapFile::load_asset(DEFAULT_KEYMAP_PATH, Some(KeybindSource::Default), cx).unwrap(),
-    );
-
-    if let Some(asset_path) = base_keymap.asset_path() {
-        cx.bind_keys(KeymapFile::load_asset(asset_path, Some(KeybindSource::Base), cx).unwrap());
-    }
-
-    if VimModeSetting::get_global(cx).0 || vim_mode_setting::HelixModeSetting::get_global(cx).0 {
-        cx.bind_keys(
-            KeymapFile::load_asset(VIM_KEYMAP_PATH, Some(KeybindSource::Vim), cx).unwrap(),
-        );
-    }
-
-    cx.bind_keys(
-        KeymapFile::load_asset(
-            SPECIFIC_OVERRIDES_KEYMAP_PATH,
-            Some(KeybindSource::Default),
-            cx,
-        )
-        .unwrap(),
-    );
 }
 
 pub fn open_new_ssh_project_from_project(
@@ -5411,7 +5397,7 @@ mod tests {
         assert!(ctrl_g_cancels(cx));
 
         // Test modifying the base, while retaining the users keymap
-        for (base, emacs) in [("VSCode", false), ("None", false), ("Emacs", true)] {
+        for (base, emacs) in [("VSCode", true), ("None", false), ("Emacs", true)] {
             app_state
                 .fs
                 .save(

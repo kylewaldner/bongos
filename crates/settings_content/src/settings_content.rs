@@ -463,6 +463,7 @@ pub struct ExtensionsSettingsContent {
 /// Default: Emacs
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, MergeFrom, PartialEq, Eq, Default)]
 pub enum BaseKeymapContent {
+    #[serde(alias = "vscode")]
     VSCode,
     #[doc(hidden)]
     JetBrains,
@@ -473,9 +474,11 @@ pub enum BaseKeymapContent {
     #[doc(hidden)]
     TextMate,
     #[default]
+    #[serde(alias = "emacs")]
     Emacs,
     #[doc(hidden)]
     Cursor,
+    #[serde(alias = "none")]
     None,
 }
 
