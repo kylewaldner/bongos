@@ -33,8 +33,9 @@ pub trait HostApi: 'static {
     fn schema_version_range(&self) -> RangeInclusive<u32>;
     /// Whether the id must never be installed.
     fn is_suppressed(&self, id: &str) -> bool;
-    /// Whether the WASI SDK the builder needs for grammars is already downloaded.
-    fn wasi_sdk_present(&self, cx: &App) -> bool;
+    /// Whether the WASI SDK the builder needs for grammars is already downloaded. The future does
+    /// the file check and is meant for the background executor.
+    fn wasi_sdk_present(&self, cx: &App) -> BoxFuture<'static, bool>;
     /// Compiles the extension in `dir`. The future does the work and is meant for the background
     /// executor. It yields the extension API version of the built wasm, or `None` when the
     /// extension has no Rust part.
@@ -98,12 +99,13 @@ impl HostApi for ExtensionStoreHost {
         extension_host::is_suppressed_extension(id)
     }
 
-    fn wasi_sdk_present(&self, cx: &App) -> bool {
+    fn wasi_sdk_present(&self, cx: &App) -> BoxFuture<'static, bool> {
         let store = ExtensionStore::global(cx);
-        let Some(root) = store.read(cx).installed_dir.parent().map(Path::to_path_buf) else {
-            return false;
-        };
-        root.join("build").join("wasi-sdk").join("bin").is_dir()
+        let root = store.read(cx).installed_dir.parent().map(Path::to_path_buf);
+        async move {
+            root.is_some_and(|root| root.join("build").join("wasi-sdk").join("bin").is_dir())
+        }
+        .boxed()
     }
 
     fn compile(&self, dir: PathBuf, cx: &App) -> BoxFuture<'static, Result<Option<ApiVersion>>> {
@@ -200,7 +202,7 @@ mod fake {
             self.state.lock().builds.push(build);
         }
 
-        /// Makes linking `id` fail with `message`.
+        /// Makes the next link of `id` fail with `message`, after removing its current link.
         pub fn fail_link(&self, id: &str, message: &str) {
             self.state
                 .lock()
@@ -260,8 +262,8 @@ mod fake {
             id == "snippets"
         }
 
-        fn wasi_sdk_present(&self, _: &App) -> bool {
-            self.state.lock().wasi_sdk_present
+        fn wasi_sdk_present(&self, _: &App) -> BoxFuture<'static, bool> {
+            futures::future::ready(self.state.lock().wasi_sdk_present).boxed()
         }
 
         fn compile(&self, dir: PathBuf, _: &App) -> BoxFuture<'static, Result<Option<ApiVersion>>> {
@@ -294,10 +296,12 @@ mod fake {
 
         fn link(&self, id: &str, dir: PathBuf, _: &mut App) -> Task<Result<()>> {
             let mut state = self.state.lock();
-            if let Some(message) = state.link_failures.get(id) {
-                return Task::ready(Err(anyhow!(message.clone())));
-            }
             let link = self.layout.symlink_path(id);
+            if let Some(message) = state.link_failures.remove(id) {
+                // Like the real host, the old link is already gone when the new one fails.
+                std::fs::remove_file(&link).ok();
+                return Task::ready(Err(anyhow!(message)));
+            }
             let result = (|| {
                 std::fs::create_dir_all(self.layout.installed_dir())?;
                 if std::fs::symlink_metadata(&link).is_ok() {

@@ -357,6 +357,8 @@ impl Installer {
                 .filter(|r| !r.is_empty())
                 .map(String::from),
         };
+        // A joining caller shares the running install and its outcome; its own `trust` is not
+        // checked again, since the first request's trust was checked when that install started.
         if let Some(task) = self.in_flight.get(&key) {
             return task.clone();
         }
@@ -491,6 +493,21 @@ impl Work {
             self.log.line("removed the staging folder");
         }
         if let Some(checkout) = self.checkout.take() {
+            // Never delete what `installed/<id>` points at (a restore that failed, say).
+            let linked = checkout
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|id| id.to_str())
+                .and_then(|id| std::fs::read_link(self.layout.symlink_path(id)).ok())
+                .is_some_and(|target| target.starts_with(&checkout));
+            if linked {
+                self.log.line(format!(
+                    "kept the new checkout {}: it is linked",
+                    checkout.display()
+                ));
+                self.locks.clear();
+                return;
+            }
             match std::fs::remove_dir_all(&checkout) {
                 Ok(()) => self
                     .log
@@ -757,7 +774,7 @@ async fn install_steps(
     let id = facts.id.clone();
 
     // Preflight after the clone.
-    let (installed, api_max, schema_range, wasi_sdk_present) = cx.update(|cx| {
+    let (installed, api_max, schema_range, wasi_sdk_probe) = cx.update(|cx| {
         (
             steps.host.installed(cx),
             steps.host.api_max(cx),
@@ -765,6 +782,7 @@ async fn install_steps(
             steps.host.wasi_sdk_present(cx),
         )
     });
+    let wasi_sdk_present = cx.background_spawn(wasi_sdk_probe).await;
     let host = steps.host.clone();
     let is_suppressed = move |id: &str| host.is_suppressed(id);
     let (ours, previous_record) = {
@@ -796,8 +814,9 @@ async fn install_steps(
         let same_record = previous_record
             .as_ref()
             .is_some_and(|r| r.commit.eq_ignore_ascii_case(&commit));
+        let nonce = format!("{}-{op}", std::process::id());
         background!(cx, work, move |work| -> Result<(bool, PathBuf)> {
-            place_checkout(work, &id, &commit, same_record)
+            place_checkout(work, &id, &commit, same_record, &nonce)
         })?
     };
     if already {
@@ -867,7 +886,21 @@ async fn install_steps(
         })
     };
     let link = cx.update(|cx| steps.host.link(&id, root.clone(), cx));
-    link.await.context("could not load the extension")?;
+    if let Err(err) = link.await {
+        // The host removes the old link before making the new one, so a failed link can leave
+        // none: put back what was linked before.
+        let err = err.context("could not load the extension");
+        let current = {
+            let id = id.clone();
+            background!(cx, work, move |work| -> Option<PathBuf> {
+                std::fs::read_link(work.layout.symlink_path(&id)).ok()
+            })
+        };
+        if current == previous_target {
+            return Err(err);
+        }
+        return Err(restore_link(&steps, &id, previous_target.as_ref(), err, cx).await);
+    }
     {
         let id = id.clone();
         let root = root.clone();
@@ -909,16 +942,7 @@ async fn install_steps(
     };
     if let Err(err) = recorded {
         // Put back what was linked before, so a failed record leaves the old state.
-        let restore = cx.update(|cx| match &previous_target {
-            Some(previous) => steps.host.link(&id, previous.clone(), cx),
-            None => steps.host.unlink(&id, cx),
-        });
-        if let Err(restore_err) = restore.await {
-            return Err(err.context(format!(
-                "restoring the previous link also failed: {restore_err:#}"
-            )));
-        }
-        return Err(err);
+        return Err(restore_link(&steps, &id, previous_target.as_ref(), err, cx).await);
     }
 
     // Done: the new checkout stays, the old one goes.
@@ -926,10 +950,11 @@ async fn install_steps(
         let id = id.clone();
         let commit = commit.clone();
         background!(cx, work, move |work| {
-            work.checkout = None;
+            let new = work.checkout.take();
             if let Some(previous) = previous_target
                 && let Some(old) = checkout_of(&work.layout, &id, &previous)
-                && old != work.layout.checkout_dir(&id, &commit)
+                && new.as_ref() != Some(&old)
+                && !root.starts_with(&old)
             {
                 std::fs::remove_dir_all(&old).ok();
                 work.log
@@ -946,12 +971,47 @@ async fn install_steps(
     })
 }
 
+/// Points `installed/<id>` back at `previous` (or removes it when nothing was linked) after `err`,
+/// and returns the error to report.
+async fn restore_link(
+    steps: &Steps,
+    id: &str,
+    previous: Option<&PathBuf>,
+    err: anyhow::Error,
+    cx: &mut AsyncApp,
+) -> anyhow::Error {
+    let restore = cx.update(|cx| match previous {
+        Some(previous) => steps.host.link(id, previous.clone(), cx),
+        None => steps.host.unlink(id, cx),
+    });
+    match restore.await {
+        Ok(()) => err,
+        Err(restore_err) => err.context(format!(
+            "restoring the previous link also failed: {restore_err:#}"
+        )),
+    }
+}
+
 /// The checkout folder under `git/<id>/` that `target` lies in.
 fn checkout_of(layout: &Layout, id: &str, target: &Path) -> Option<PathBuf> {
     let base = layout.extension_dir(id);
     let rest = target.strip_prefix(&base).ok()?;
     let first = rest.components().next()?;
     Some(base.join(first))
+}
+
+/// Whether `checkout` (a folder under `git/<id>/`) holds `commit`: `<commit>` itself or a
+/// `<commit>.rebuild-<nonce>` built beside a live link.
+fn is_checkout_of_commit(checkout: &Path, commit: &str) -> bool {
+    checkout
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name == commit
+                || name
+                    .strip_prefix(commit)
+                    .is_some_and(|rest| rest.starts_with(".rebuild-"))
+        })
 }
 
 /// Whether an existing install of `id` is this source's (so installing replaces it), and its
@@ -990,6 +1050,7 @@ fn place_checkout(
     id: &str,
     commit: &str,
     same_record: bool,
+    nonce: &str,
 ) -> Result<(bool, PathBuf)> {
     let staged = work.staged.take().expect("staged before placing");
     let relative = staged
@@ -997,18 +1058,30 @@ fn place_checkout(
         .strip_prefix(staged.dir())
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    let checkout = work.layout.checkout_dir(id, commit);
-    let root = checkout.join(&relative);
     let linked = std::fs::read_link(work.layout.symlink_path(id)).ok();
-    if same_record && linked.as_deref() == Some(root.as_path()) {
+    let linked_checkout = linked
+        .as_deref()
+        .and_then(|target| checkout_of(&work.layout, id, target));
+    if same_record
+        && let (Some(target), Some(linked_checkout)) = (&linked, &linked_checkout)
+        && is_checkout_of_commit(linked_checkout, commit)
+        && *target == linked_checkout.join(&relative)
+    {
         drop(staged);
-        return Ok((true, root));
+        return Ok((true, target.clone()));
+    }
+    let mut checkout = work.layout.checkout_dir(id, commit);
+    if linked_checkout.as_ref() == Some(&checkout) {
+        // The live link points into this folder (its record is gone), so it must survive until
+        // the new build is linked: build beside it instead.
+        checkout = work.layout.rebuild_checkout_dir(id, commit, nonce);
     }
     if checkout.exists() {
         // Left behind by an earlier attempt; nothing links it.
         std::fs::remove_dir_all(&checkout)
             .with_context(|| format!("could not remove {}", checkout.display()))?;
     }
+    let root = checkout.join(&relative);
     std::fs::create_dir_all(work.layout.extension_dir(id)).with_context(|| {
         format!(
             "could not create {}",

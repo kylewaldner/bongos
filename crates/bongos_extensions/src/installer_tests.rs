@@ -393,6 +393,13 @@ async fn failure_at_each_phase_leaves_no_checkout_and_a_log(cx: &mut TestAppCont
             "{fail_at:?}: the old build stays linked"
         );
         assert!(old_checkout.is_dir(), "{fail_at:?}: the old checkout stays");
+        if let FailAt::Link = fail_at {
+            assert_eq!(
+                h.host.linked().last(),
+                Some(&("swift".to_string(), old_checkout.clone())),
+                "the old link was put back after the host removed it"
+            );
+        }
         assert_eq!(h.record("swift").map(|r| r.commit), Some(C2.to_string()));
 
         let failure = h
@@ -412,6 +419,48 @@ async fn failure_at_each_phase_leaves_no_checkout_and_a_log(cx: &mut TestAppCont
             assert_eq!(installer.operations().count(), 0, "{fail_at:?}");
         });
     }
+}
+
+#[gpui::test]
+async fn reinstalling_the_linked_commit_without_a_record_keeps_the_live_checkout(
+    cx: &mut TestAppContext,
+) {
+    let h = Harness::new(cx);
+    let first = h.install(URL, Some(C1), Trust::Listed, cx);
+    cx.run_until_parked();
+    first.await.expect("the first install succeeds");
+    let checkout = h.layout.checkout_dir("swift", C1);
+    std::fs::remove_file(h.layout.record_path("swift")).unwrap();
+
+    // A failed rebuild of the same commit leaves the live checkout linked and whole.
+    h.host
+        .push_build(FakeBuild::Fail("error[E0308]: mismatched types".into()));
+    let task = h.install(URL, Some(C1), Trust::Listed, cx);
+    cx.run_until_parked();
+    let err = task.await.expect_err("the rebuild fails");
+    assert!(format!("{err:#}").contains("the build failed"), "{err:#}");
+    assert_eq!(h.link_target("swift"), Some(checkout.clone()));
+    assert!(checkout.join("extension.toml").is_file());
+    let built = h.host.compiled().last().cloned().unwrap();
+    assert_ne!(built, checkout, "the rebuild ran beside the live checkout");
+    assert!(!built.exists(), "the failed rebuild is removed");
+    assert!(h.record("swift").is_none());
+
+    // A good rebuild replaces it, and the old folder goes.
+    let task = h.install(URL, Some(C1), Trust::Listed, cx);
+    cx.run_until_parked();
+    let installed = task.await.expect("the rebuild succeeds");
+    assert!(!installed.already_installed);
+    let built = h.host.compiled().last().cloned().unwrap();
+    assert_eq!(h.link_target("swift"), Some(built.clone()));
+    assert!(built.join("extension.toml").is_file());
+    assert!(!checkout.exists(), "the old checkout is removed");
+    assert_eq!(h.record("swift").map(|r| r.commit), Some(C1.to_string()));
+
+    // Installing it again is a no-op.
+    let again = h.install(URL, Some(C1), Trust::Listed, cx);
+    cx.run_until_parked();
+    assert!(again.await.unwrap().already_installed);
 }
 
 #[gpui::test]
