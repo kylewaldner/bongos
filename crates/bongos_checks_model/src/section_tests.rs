@@ -4,7 +4,7 @@ use crate::decl::Inherit;
 use crate::effective::{Applicability, Dropped, EffectiveSet, Row, Source};
 use crate::evidence::Scope;
 use crate::evidence_tests::{current, record, row, row_named};
-use crate::section::{Live, Tone, TreeState, section};
+use crate::section::{Live, Tone, TreeState, section, source_rows};
 use crate::verdict::{NoVerdictReason, Verdict};
 
 fn set(rows: Vec<Row>) -> EffectiveSet {
@@ -240,4 +240,94 @@ fn nothing_in_scope_and_narrow_pass_are_worded() {
     );
     let out = text_of(vec![row("scope = \"all\"\n")], &[narrow], &BTreeMap::new());
     assert!(out[0].0.contains("narrower scope"));
+}
+
+#[test]
+fn headers_count_every_kind_of_gap_and_no_checks_is_never_passing() {
+    let none = BTreeMap::new();
+    let avail = || TreeState::Available;
+    let two = set(vec![row_named("a", ""), row_named("b", "")]);
+    let mut fail = record("a", "1", Scope::Unscoped);
+    fail.verdict = Verdict::Fail;
+    let mut nv = record("b", "2", Scope::Unscoped);
+    nv.verdict = Verdict::NoVerdict(NoVerdictReason::Environment { code: 3 });
+    assert_eq!(
+        header(&two, avail(), &none, &[fail, nv.clone()]),
+        "not done: 1 check failing, 1 check with no verdict"
+    );
+    let mut stale = record("a", "3", Scope::Unscoped);
+    stale.tree_key = "oldtree99".into();
+    assert_eq!(
+        header(&two, avail(), &none, &[stale, nv]),
+        "not done: 1 check with no verdict, 1 check stale"
+    );
+    // Nothing to judge is never a pass, whatever the tree.
+    for applicability in [Applicability::NoChecks, Applicability::UnknownTask] {
+        let mut empty = set(Vec::new());
+        empty.applicability = applicability;
+        for tree in [TreeState::Available, TreeState::Unavailable] {
+            assert_eq!(header(&empty, tree, &none, &[]), "no checks");
+        }
+    }
+    // A group with no closing checks has nothing to judge either.
+    let mut group = set(vec![row("")]);
+    group.is_group = true;
+    assert_eq!(
+        header(
+            &group,
+            avail(),
+            &none,
+            &[record("tests", "1", Scope::Unscoped)]
+        ),
+        "no checks"
+    );
+}
+
+#[test]
+fn a_group_shows_its_closing_checks() {
+    let mut closing = row("");
+    closing.source = Source::Closing { group: "g".into() };
+    let mut group = set(vec![row_named("down", "")]);
+    group.is_group = true;
+    group.closing = vec![closing];
+    let cur = current(&["tests", "down"]);
+    let sec = section(&group, &[], &cur, &TreeState::Available, &BTreeMap::new());
+    assert_eq!(sec.header, "not done: 1 check missing");
+    assert_eq!(sec.rows.len(), 1);
+    assert!(
+        sec.rows[0].text.contains("closing check of g"),
+        "{}",
+        sec.rows[0].text
+    );
+}
+
+#[test]
+fn the_sources_rows_show_each_layer_use_and_drop() {
+    let mut inherited = row_named("lint", "");
+    inherited.source = Source::Inherited { from: "g".into() };
+    inherited.declared.file = "g/task.toml".into();
+    inherited.declared.line = Some(7);
+    let mut overriding = row("");
+    overriding.source = Source::Overrides {
+        from: Box::new(Source::Set { set: "rust".into() }),
+    };
+    let mut s = set(vec![overriding, inherited]);
+    s.dropped.push(Dropped {
+        by: "t1".into(),
+        row: row_named("slow", ""),
+    });
+    let rows = source_rows(&s);
+    let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "tests | uses: overrides set rust | declared in task.toml",
+            "lint | uses: inherited from g | declared in g/task.toml:7",
+            "slow | dropped by t1 | was own | declared in task.toml",
+        ]
+    );
+    assert!(rows.iter().all(|r| r.id.starts_with("source/")));
+    // A document task has no derivation to show.
+    s.applicability = Applicability::NoChecksApply;
+    assert!(source_rows(&s).is_empty());
 }

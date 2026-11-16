@@ -378,7 +378,7 @@ pub(crate) fn plan_rows(task: &TaskChecks, only: Option<&[String]>) -> Result<Ve
 }
 
 /// Every record of the task, oldest key first; none when its project has no state store.
-fn task_records(task: &TaskChecks) -> Vec<EvidenceRecord> {
+pub(crate) fn task_records(task: &TaskChecks) -> Vec<EvidenceRecord> {
     task.writer()
         .and_then(|writer| {
             writer
@@ -543,6 +543,13 @@ impl ChecksEngine {
             live,
             running: self.active.contains_key(task_id),
         })
+    }
+
+    /// Every record of the task, oldest first; none when the task is unknown.
+    pub fn records(&self, task_id: &str, cx: &App) -> Vec<EvidenceRecord> {
+        self.task(task_id, cx)
+            .map(|task| task_records(&task))
+            .unwrap_or_default()
     }
 
     /// The text `task: dump checks` writes; `None` when the task is unknown.

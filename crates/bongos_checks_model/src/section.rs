@@ -325,3 +325,56 @@ pub fn section(
         rows,
     }
 }
+
+fn declared_text(row: &Row) -> String {
+    match row.declared.line {
+        Some(line) => format!("{}:{line}", row.declared.file),
+        None => row.declared.file.clone(),
+    }
+}
+
+/// The rows `task_detail: toggle sources` adds under the Checks section: where each row of the
+/// effective set is declared and which layer it came from, then each row the task dropped and
+/// the task that dropped it. The ids start with `source/`, so they never name a check.
+pub fn source_rows(set: &EffectiveSet) -> Vec<SectionRow> {
+    let mut rows = Vec::new();
+    let used = |rows: &mut Vec<SectionRow>, layer: &str, list: &[Row]| {
+        for row in list {
+            rows.push(SectionRow {
+                id: format!("source/{layer}/{}", row.decl.name),
+                text: format!(
+                    "{} | uses: {} | declared in {}",
+                    row.decl.name,
+                    source_text(&row.source),
+                    declared_text(row)
+                ),
+                tone: Tone::Muted,
+                detail: Vec::new(),
+            });
+        }
+    };
+    if set.applicability == Applicability::NoChecksApply
+        || set.applicability == Applicability::UnknownTask
+    {
+        return rows;
+    }
+    used(&mut rows, "rows", &set.rows);
+    if set.is_group {
+        used(&mut rows, "closing", &set.closing);
+    }
+    for dropped in &set.dropped {
+        rows.push(SectionRow {
+            id: format!("source/dropped/{}", dropped.row.decl.name),
+            text: format!(
+                "{} | dropped by {} | was {} | declared in {}",
+                dropped.row.decl.name,
+                dropped.by,
+                source_text(&dropped.row.source),
+                declared_text(&dropped.row)
+            ),
+            tone: Tone::Muted,
+            detail: Vec::new(),
+        });
+    }
+    rows
+}

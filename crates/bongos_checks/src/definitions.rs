@@ -19,7 +19,7 @@ use gpui::App;
 /// The folder of `definitions/` that task checks own.
 pub const CHECKS_FOLDER: &str = "checks";
 /// The folder of the named sets, inside [`CHECKS_FOLDER`].
-const SETS_FOLDER: &str = "sets";
+pub(crate) const SETS_FOLDER: &str = "sets";
 /// The name of the landing check over the task definitions of a change.
 pub const CHECKS_VALID: &str = "checks-valid";
 

@@ -266,6 +266,9 @@
       "ctrl-c w A": "task::ApplyProposal",
       "ctrl-c w X": "task::RejectProposal",
       "ctrl-c w i": "task::ShowDetails",
+      "ctrl-c w x s": "task::ShowChecks",
+      "ctrl-c w x o": "task::ShowCheckOutput",
+      "ctrl-c w x e": "task::EditChecks",
       "ctrl-c w g h": "project::ShowHistory",
       "ctrl-c w g r": "project::Revert",
       "ctrl-c w g v": "project::ShowChanges",
@@ -435,6 +438,10 @@
     "bindings": {
       "g": "task_detail::Refresh",
       "s": "task_detail::ToggleSources",
+      "x": "task::RunChecks",
+      "r": "task::RunCheck",
+      "k": "task::CancelChecks",
+      "c": "task::Complete",
     },
   },
   {
