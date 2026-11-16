@@ -7,6 +7,7 @@
 
 mod actions;
 pub mod builtin_merge;
+pub mod builtin_nodes;
 pub mod builtin_wait;
 mod commands;
 pub mod completion;
@@ -16,6 +17,7 @@ pub mod gates;
 pub mod landing;
 pub mod lifecycle;
 pub mod mcp;
+pub mod node_status;
 pub mod outcomes;
 pub mod picker;
 pub mod process;
@@ -38,9 +40,11 @@ use ::settings::Settings as _;
 use gpui::App;
 
 pub use actions::{WorkflowToast, action_types, init_palette, register, workflow};
+pub use builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 pub use completion::{CompletionHook, CompletionHooks};
 pub use engine::{EngineRunner, SharedLifecycle, WorkflowEngine};
 pub use lifecycle::{Refusal, RefusalKind, RunId, RunStatus, StartRequest, WorkflowEvent};
+pub use node_status::{NodeStatus, NodeStatusSource, NodeStatusSources};
 pub use runs_panel::{RunsPanel, init_panel};
 pub use settings::WorkflowsSettings;
 pub use status_item::WorkflowStatus;

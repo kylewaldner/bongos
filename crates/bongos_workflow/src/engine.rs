@@ -36,6 +36,7 @@ use settings::Settings as _;
 
 use crate::WorkflowsSettings;
 use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged};
+use crate::builtin_nodes::BuiltinNodes;
 use crate::completion::CompletionHooks;
 use crate::definitions::{
     self, DefinitionError, NewDefinition, ProjectLayer, Report, SHIPPED_FILES, materialize,
@@ -248,6 +249,7 @@ impl WorkflowEngine {
             return Some(engine.clone());
         }
         let engine = Self::open(cx);
+        engine.use_builtins(cx);
         cx.set_global(engine.clone());
         crate::sources::register(&engine, cx);
         engine.register_project_sources(cx);
@@ -255,6 +257,13 @@ impl WorkflowEngine {
         crate::gates::register(&engine, cx);
         crate::run_view::observe_focus(&engine, cx);
         Some(engine)
+    }
+
+    /// Runs the program nodes of the built-ins registered in the app ([`BuiltinNodes`]),
+    /// including those registered later, through them.
+    pub fn use_builtins(&self, cx: &mut App) {
+        let builtins = BuiltinNodes::global(cx);
+        self.lifecycle().runtime_mut().set_builtins(builtins);
     }
 
     pub fn dirs(&self) -> &LayerDirs {

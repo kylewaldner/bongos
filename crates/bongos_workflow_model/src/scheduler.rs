@@ -35,8 +35,8 @@
 //!   `outcome promised but not delivered`.
 //! - Limits: starts never exceed `free` (free session slots across runs, which the engine counts),
 //!   and the branches of one run that have a running key never exceed
-//!   [`Limits::max_parallel_branches`]. Gates, sleeping polls and keys waiting their turn hold no
-//!   slot. Runs at once ([`Limits::max_concurrent_runs`]) are the engine's queue; [`Limits`]
+//!   [`Limits::max_parallel_branches`]. Gates, sleeping polls, keys waiting their turn and the
+//!   keys of checks nodes (which pools govern) hold no slot. Runs at once ([`Limits::max_concurrent_runs`]) are the engine's queue; [`Limits`]
 //!   offers the arithmetic.
 //! - A run that is halted, interrupted (an `Interrupted` key not started again), held, ended or
 //!   cancelled gets no commands: it waits for Kyle ([`resume_set`], [`retry_set`]). A paused run
@@ -324,7 +324,7 @@ pub fn step(
                 }),
         );
         commands.extend(plan.gates_to_open.iter().cloned().map(Command::OpenGate));
-        commands.extend(starts(&plan, limits, free));
+        commands.extend(starts(definition, &plan, limits, free));
     }
     if commands.is_empty() && plan.is_idle() && nothing_runs {
         commands.push(finish(&plan));
@@ -332,8 +332,9 @@ pub fn step(
     commands
 }
 
-/// The keys to start now, within `free` and the per-run branch limit.
-fn starts(plan: &Plan, limits: &Limits, free: usize) -> Vec<Command> {
+/// The keys to start now, within `free` and the per-run branch limit. A checks node's key takes
+/// no session slot (pools govern checks), so it starts whatever `free` is.
+fn starts(definition: &Definition, plan: &Plan, limits: &Limits, free: usize) -> Vec<Command> {
     let mut executing: BTreeSet<&Branch> = plan
         .running
         .iter()
@@ -342,15 +343,22 @@ fn starts(plan: &Plan, limits: &Limits, free: usize) -> Vec<Command> {
         .map(|key| &key.branch)
         .collect();
     let mut commands = Vec::new();
+    let mut sessions = 0;
     for key in &plan.ready {
-        if commands.len() >= free {
-            break;
+        let takes_session = !definition
+            .node(&key.node)
+            .is_some_and(crate::definition::Node::is_checks);
+        if takes_session && sessions >= free {
+            continue;
         }
         if !key.branch.is_empty() && !executing.contains(&key.branch) {
             if executing.len() >= limits.max_parallel_branches as usize {
                 continue;
             }
             executing.insert(&key.branch);
+        }
+        if takes_session {
+            sessions += 1;
         }
         commands.push(Command::Start(key.clone()));
     }

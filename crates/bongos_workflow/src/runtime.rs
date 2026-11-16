@@ -18,16 +18,24 @@
 //!   count is the `free` of [`scheduler::step`]. Gates, sleeping polls and Queued runs hold none.
 //! - Branches: the scheduler keeps a run's executing branches within `max_parallel_branches`.
 //!
+//! - Checks: a key of a `use = "checks"` program node holds no session slot (pools govern checks)
+//!   and gets no time or output cap.
+//!
+//! Built-ins: a key of a program node whose `use` is registered in [`BuiltinNodes`] is started,
+//! polled and stopped through that built-in instead of the [`Runner`]; it is recorded with pid 0.
+//!
 //! Halt and cancel stop the run's processes through [`Runner::stop`], within 5 s (D12). Quit stops
 //! every process and appends `Interrupted` with the keys in flight. [`Runtime::load`] never resumes
 //! a run by itself: it stops processes a crash left behind (only those whose pid and start time
-//! both match the record), marks a run with a started key and no finish interrupted, and gives an
-//! interrupted, halted, ended or cancelled run no command until Kyle acts.
+//! both match the record), marks a run with a started key and no finish interrupted, lets each
+//! built-in clean up after its interrupted keys ([`BuiltinNode::recover`]), and gives an
+//! interrupted, halted, ended, cancelled or held run no command until Kyle acts.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bongos_workflow_model::record::RunningNode;
 use bongos_workflow_model::scheduler::Branch;
@@ -38,6 +46,7 @@ use bongos_workflow_model::{
 use serde_json::Value;
 
 use crate::WorkflowsSettings;
+use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 use crate::process::{OrphanOutcome, ProcessRecord, kill_orphans};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError};
 
@@ -181,8 +190,10 @@ struct LiveRun {
     log: File,
     events: Vec<Event>,
     status: Status,
-    /// Tries this runtime started whose finish it has not seen: the sessions the run holds.
+    /// Tries this runtime started whose finish it has not seen.
     in_flight: BTreeSet<NodeKey>,
+    /// The keys of `in_flight` a built-in runs, with that built-in.
+    builtins: BTreeMap<NodeKey, Arc<dyn BuiltinNode>>,
 }
 
 impl LiveRun {
@@ -212,6 +223,14 @@ impl LiveRun {
             )
             .count() as u32
             + 1
+    }
+
+    /// The tries in flight that hold a session slot: every one but a checks node's.
+    fn sessions(&self) -> usize {
+        self.in_flight
+            .iter()
+            .filter(|key| holds_session(&self.definition, key))
+            .count()
     }
 
     /// Whether the run has started anything: a try or a gate.
@@ -279,6 +298,8 @@ pub struct Runtime<R: Runner> {
     hold_success: bool,
     /// Runs whose succeeded end waits for [`Runtime::settle`], oldest first, not yet taken.
     settling: Vec<String>,
+    /// The built-in program nodes, run instead of through `runner`.
+    builtins: BuiltinNodes,
 }
 
 /// The most rounds one [`Runtime::tick`] runs; a round that changes nothing ends it sooner.
@@ -294,7 +315,17 @@ impl<R: Runner> Runtime<R> {
             quitting: false,
             hold_success: false,
             settling: Vec::new(),
+            builtins: BuiltinNodes::default(),
         }
+    }
+
+    /// Runs the program nodes whose `use` is registered in `builtins` through them.
+    pub fn set_builtins(&mut self, builtins: BuiltinNodes) {
+        self.builtins = builtins;
+    }
+
+    pub fn builtins(&self) -> &BuiltinNodes {
+        &self.builtins
     }
 
     /// With `hold` on, a run the scheduler ends succeeded is not ended: it is held for the engine,
@@ -388,9 +419,10 @@ impl<R: Runner> Runtime<R> {
         self.queue.iter().any(|queued| queued == id)
     }
 
-    /// The processes executing across all runs.
+    /// The processes executing across all runs that hold a session slot (a checks node's key
+    /// holds none).
     pub fn sessions_in_flight(&self) -> usize {
-        self.runs.iter().map(|run| run.in_flight.len()).sum()
+        self.runs.iter().map(LiveRun::sessions).sum()
     }
 
     /// Starts a new run: creates its log with `Created` and queues it for a run slot; the next
@@ -465,6 +497,7 @@ impl<R: Runner> Runtime<R> {
                 run.append(Event::Interrupted { keys });
             }
             let state = run.state();
+            self.recover_builtins(&run, &state);
             if LiveRun::is_held(&state) {
                 run.status = Status::Held;
             } else {
@@ -530,14 +563,15 @@ impl<R: Runner> Runtime<R> {
         Ok(())
     }
 
-    /// Resumes run `id`: appends `Resumed` when it was paused or halted, then starts a new try of
-    /// every key a halt stopped or a quit interrupted ([`scheduler::resume_set`] less the keys
-    /// still in flight), in the same worktree. A resumed try does not count against `retries`,
-    /// and completed keys are not rerun. The run then waits for a run slot. The keys started.
+    /// Resumes run `id`: appends `Resumed` when it was paused, halted or held, then starts a new
+    /// try of every key a halt stopped, a quit interrupted or a hold named
+    /// ([`scheduler::resume_set`] less the keys still in flight), in the same worktree. A resumed
+    /// try does not count against `retries`, and completed keys are not rerun. The run then
+    /// waits for a run slot. The keys started.
     pub fn resume(&mut self, id: &str) -> Result<Vec<NodeKey>, RuntimeError> {
         let index = self.live(id)?;
         let state = self.runs[index].state();
-        if state.paused || state.halted {
+        if state.paused || state.halted || !state.held.is_empty() {
             self.runs[index].append(Event::Resumed);
         }
         let keys: Vec<NodeKey> = scheduler::resume_set(&state)
@@ -694,14 +728,66 @@ impl<R: Runner> Runtime<R> {
                 tries.push((run.id.clone(), key));
             }
         }
-        if !tries.is_empty() {
-            self.runner.stop(&tries);
+        self.stop_tries(tries);
+    }
+
+    /// Stops `tries` (already taken out of their runs' `in_flight`): each built-in's through it,
+    /// the rest with one [`Runner::stop`].
+    fn stop_tries(&mut self, tries: Vec<(String, NodeKey)>) {
+        let mut by_runner = Vec::new();
+        let mut by_builtin: Vec<(Arc<dyn BuiltinNode>, Vec<(String, NodeKey)>)> = Vec::new();
+        for (id, key) in tries {
+            let builtin = self
+                .find(&id)
+                .and_then(|index| self.runs[index].builtins.remove(&key));
+            match builtin {
+                Some(builtin) => {
+                    match by_builtin
+                        .iter_mut()
+                        .find(|(node, _)| Arc::ptr_eq(node, &builtin))
+                    {
+                        Some((_, tries)) => tries.push((id, key)),
+                        None => by_builtin.push((builtin, vec![(id, key)])),
+                    }
+                }
+                None => by_runner.push((id, key)),
+            }
+        }
+        for (builtin, tries) in by_builtin {
+            builtin.stop(&tries);
+        }
+        if !by_runner.is_empty() {
+            self.runner.stop(&by_runner);
+        }
+    }
+
+    /// Tells each built-in which of its keys of `run` a crash or a quit left interrupted.
+    fn recover_builtins(&self, run: &LiveRun, state: &RunState) {
+        let mut by_builtin: Vec<(Arc<dyn BuiltinNode>, Vec<NodeKey>)> = Vec::new();
+        for key in state.interrupted.keys() {
+            let Some(builtin) = self.builtins.for_key(&run.definition, key) else {
+                continue;
+            };
+            match by_builtin
+                .iter_mut()
+                .find(|(node, _)| Arc::ptr_eq(node, &builtin))
+            {
+                Some((_, keys)) => keys.push(key.clone()),
+                None => by_builtin.push((builtin, vec![key.clone()])),
+            }
+        }
+        for (builtin, keys) in by_builtin {
+            builtin.recover(&run.id, &keys);
         }
     }
 
     fn take_finishes(&mut self) -> bool {
         let mut changed = false;
-        for finish in self.runner.poll() {
+        let mut finishes = self.runner.poll();
+        for builtin in self.builtins.all() {
+            finishes.extend(builtin.poll());
+        }
+        for finish in finishes {
             let Some(index) = self.find(&finish.run) else {
                 log::warn!("workflows: a try of unknown run {} finished", finish.run);
                 continue;
@@ -711,6 +797,7 @@ impl<R: Runner> Runtime<R> {
                 // Stopped by a halt, a cancel or a join `any`: what it reports does not count.
                 continue;
             }
+            run.builtins.remove(&finish.key);
             let (result, failure) = match finish.outcome {
                 Ok(value) => (Some(value), None),
                 Err(failure) => (None, Some(failure)),
@@ -911,14 +998,38 @@ impl<R: Runner> Runtime<R> {
     /// the next load cannot find (an orphan until it exits), and the key is not marked
     /// interrupted. The window is one `fork`/`exec` and one fsynced line; closing it would take a
     /// record written before the spawn (an intent line) and is not done in v1.
+    ///
+    /// A key of a registered built-in is started through it, with no process of its own: it is
+    /// recorded with pid 0.
     fn start(&mut self, index: usize, key: NodeKey) {
         let run = &mut self.runs[index];
         let try_number = run.next_try(&key);
-        match self
-            .runner
-            .start(&run.id, &run.definition, &key, try_number)
-        {
+        let builtin = self.builtins.for_key(&run.definition, &key);
+        let started = match &builtin {
+            Some(builtin) => {
+                let state = run.state();
+                builtin
+                    .start(BuiltinStart {
+                        run: &run.id,
+                        definition: &run.definition,
+                        state: &state,
+                        key: &key,
+                        try_number,
+                    })
+                    .map(|()| ProcessRecord {
+                        pid: 0,
+                        start_time: 0,
+                    })
+            }
+            None => self
+                .runner
+                .start(&run.id, &run.definition, &key, try_number),
+        };
+        match started {
             Ok(process) => {
+                if let Some(builtin) = builtin {
+                    run.builtins.insert(key.clone(), builtin);
+                }
                 run.append(Event::NodeStarted {
                     key: key.clone(),
                     try_number,
@@ -964,9 +1075,7 @@ impl<R: Runner> Runtime<R> {
             .filter(|(key, _)| run.in_flight.remove(key))
             .map(|(key, _)| (run.id.clone(), key.clone()))
             .collect();
-        if !tries.is_empty() {
-            self.runner.stop(&tries);
-        }
+        self.stop_tries(tries);
         for (key, try_number) in stopped {
             let failure = Failure::new(
                 FailureReason::InterruptedNotResumed,
@@ -1020,7 +1129,16 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
         events: parsed.events,
         status: Status::Held,
         in_flight: BTreeSet::new(),
+        builtins: BTreeMap::new(),
     })
+}
+
+/// Whether a try of `key` holds a session slot: every node's but a checks node's, which pools
+/// govern instead.
+pub fn holds_session(definition: &Definition, key: &NodeKey) -> bool {
+    !definition
+        .node(&key.node)
+        .is_some_and(bongos_workflow_model::definition::Node::is_checks)
 }
 
 /// A scripted [`Runner`] for tests. Each start takes the node's scripted result (or the default

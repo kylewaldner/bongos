@@ -288,7 +288,8 @@ impl ChecksEngine {
     }
 
     /// Follows the project of `repo` when this process holds its state writer: clears its
-    /// `checks.live` (the store was just opened here, or a crash or handover left rows), decides
+    /// `checks.live` (the store was just opened here, or a crash or handover left rows), stops
+    /// the parts a crashed bongos left running ([`ChecksEngine::kill_store_orphans`]), decides
     /// once at once, and again after each transaction and each change of its verified commit.
     pub fn follow_project(&mut self, repo: &ProjectRepo, cx: &mut Context<Self>) {
         let Some(writer) = repo.state().and_then(StateHandle::writer).cloned() else {
@@ -304,6 +305,8 @@ impl ChecksEngine {
             return;
         }
         self.live_rows.adopt(&writer);
+        // A writer taken anew (at load, say): the parts an earlier bongos left running go.
+        self.kill_store_orphans(&writer, cx).detach();
         // A writer taken anew: what it finds was recorded before, and its refs are cleaned.
         self.decider.last_seen.remove(&project);
         self.decider.cleaned.remove(&project);
