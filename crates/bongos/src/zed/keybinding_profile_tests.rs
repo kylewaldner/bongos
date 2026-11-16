@@ -10,17 +10,17 @@ use std::path::PathBuf;
 
 use super::tests::init_keymap_test;
 
-const EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full"];
-const WORKSPACE: [&str; 1] = ["Workspace"];
+pub(super) const EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full"];
+pub(super) const WORKSPACE: [&str; 1] = ["Workspace"];
 const PICKER: [&str; 3] = ["Workspace", "Picker", "Editor mode=single_line"];
 const MINIBUFFER: [&str; 4] = ["Workspace", "Minibuffer", "Picker", "Editor mode=full"];
-const PANE_TERMINAL: [&str; 3] = ["Workspace", "Pane", "Terminal"];
-const TERMINAL: [&str; 4] = ["Workspace", "Dock", "TerminalPanel", "Terminal"];
+pub(super) const PANE_TERMINAL: [&str; 3] = ["Workspace", "Pane", "Terminal"];
+pub(super) const TERMINAL: [&str; 4] = ["Workspace", "Dock", "TerminalPanel", "Terminal"];
 const CHAT_TERMINAL: [&str; 4] = ["Workspace", "Dock", "ChatPanel", "Terminal"];
-const PROMPTS_EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full prompts"];
+pub(super) const PROMPTS_EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full prompts"];
 
 /// The bindings a profile loads, in load order, with the sources the app loads them with.
-fn load_profile(
+pub(super) fn load_profile(
     base: BaseKeymap,
     vim_enabled: bool,
     macos: bool,
@@ -29,7 +29,7 @@ fn load_profile(
     cx.update(|cx| super::profile_key_bindings(base, vim_enabled, macos, cx))
 }
 
-fn stack(contexts: &[&str]) -> Vec<KeyContext> {
+pub(super) fn stack(contexts: &[&str]) -> Vec<KeyContext> {
     contexts
         .iter()
         .map(|context| KeyContext::parse(context).unwrap())
@@ -37,7 +37,11 @@ fn stack(contexts: &[&str]) -> Vec<KeyContext> {
 }
 
 /// The names of the actions a key resolves to, deepest first, and whether it waits for more keys.
-fn resolve(keymap: &Keymap, input: &str, contexts: &[&str]) -> (Vec<&'static str>, bool) {
+pub(super) fn resolve(
+    keymap: &Keymap,
+    input: &str,
+    contexts: &[&str],
+) -> (Vec<&'static str>, bool) {
     let keystrokes: Vec<Keystroke> = input
         .split(' ')
         .map(|key| Keystroke::parse(key).unwrap())
@@ -52,7 +56,7 @@ fn resolve(keymap: &Keymap, input: &str, contexts: &[&str]) -> (Vec<&'static str
     )
 }
 
-fn first(keymap: &Keymap, input: &str, contexts: &[&str]) -> Option<&'static str> {
+pub(super) fn first(keymap: &Keymap, input: &str, contexts: &[&str]) -> Option<&'static str> {
     resolve(keymap, input, contexts).0.first().copied()
 }
 
@@ -350,7 +354,7 @@ fn the_lowercase_aliases_parse_and_written_values_stay() {
 }
 
 /// The keys of a binding, one string per keystroke.
-fn keys_of(binding: &KeyBinding) -> Vec<String> {
+pub(super) fn keys_of(binding: &KeyBinding) -> Vec<String> {
     binding
         .keystrokes()
         .iter()
@@ -358,7 +362,7 @@ fn keys_of(binding: &KeyBinding) -> Vec<String> {
         .collect()
 }
 
-fn context_of(binding: &KeyBinding) -> String {
+pub(super) fn context_of(binding: &KeyBinding) -> String {
     binding
         .predicate()
         .map(|predicate| predicate.to_string())
@@ -375,15 +379,11 @@ fn leader_keys(macos: bool) -> Vec<String> {
         .collect()
 }
 
-/// The bongos command rows of a platform's Emacs keymap: two or more keys starting with `ctrl-c`,
-/// an action that is not `null`, `emacs::` or `terminal::`, in a context without `Terminal`.
-fn emacs_command_rows(macos: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
-    let path = if macos {
-        "keymaps/macos/emacs.json"
-    } else {
-        "keymaps/linux/emacs.json"
-    };
-    cx.update(|cx| KeymapFile::load_asset(path, Some(KeybindSource::Base), cx).unwrap())
+/// The bongos command rows among some bindings of an Emacs keymap: two or more keys starting with
+/// `ctrl-c`, an action that is not `null`, `emacs::` or `terminal::`, in a context without
+/// `Terminal`.
+pub(super) fn command_rows(bindings: Vec<KeyBinding>) -> Vec<KeyBinding> {
+    bindings
         .into_iter()
         .filter(|binding| {
             let keys = keys_of(binding);
@@ -396,6 +396,18 @@ fn emacs_command_rows(macos: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
                 && !context_of(binding).contains("Terminal")
         })
         .collect()
+}
+
+/// The bongos command rows of a platform's Emacs keymap.
+fn emacs_command_rows(macos: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
+    let path = if macos {
+        "keymaps/macos/emacs.json"
+    } else {
+        "keymaps/linux/emacs.json"
+    };
+    command_rows(
+        cx.update(|cx| KeymapFile::load_asset(path, Some(KeybindSource::Base), cx).unwrap()),
+    )
 }
 
 /// The derived leader part of the VS Code profile, loaded the way the loader loads it.
@@ -613,7 +625,7 @@ const EMACS_ONLY_PANEL_KEYS: &[(&str, &str)] = &[];
 /// A panel key: a binding whose context is one bare name (no operators, not an editor, workspace,
 /// pane, terminal or markdown context) and whose keys are a single keystroke with no modifier.
 /// Emacs-only keys (`ctrl-` re-declarations) always carry a modifier, so they are never panel keys.
-fn is_panel_key(binding: &KeyBinding) -> bool {
+pub(super) fn is_panel_key(binding: &KeyBinding) -> bool {
     let context = context_of(binding);
     let bare = !context.is_empty() && context.chars().all(|c| c.is_alphanumeric() || c == '_');
     let keystrokes = binding.keystrokes();
@@ -681,7 +693,7 @@ async fn panel_keys_resolve_under_emacs_vscode_and_vim(cx: &mut TestAppContext) 
     }
 }
 
-const VIM_NORMAL: [&str; 3] = [
+pub(super) const VIM_NORMAL: [&str; 3] = [
     "Workspace",
     "Pane",
     "Editor mode=full vim_mode=normal vim_operator=none VimControl",
