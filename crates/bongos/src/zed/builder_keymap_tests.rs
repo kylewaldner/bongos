@@ -32,6 +32,19 @@ fn load(paths: &[&str], cx: &TestAppContext) -> (Keymap, Vec<KeyBinding>) {
                 KeymapFile::load_asset(path, None, cx)
                     .unwrap_or_else(|error| panic!("{path}: {error}")),
             );
+            // The panel keys live in the specific overrides, which every profile loads after
+            // its base keymap.
+            let overrides = match *path {
+                "keymaps/linux/emacs.json" => Some("keymaps/specific-overrides.json"),
+                "keymaps/macos/emacs.json" => Some("keymaps/specific-overrides-macos.json"),
+                _ => None,
+            };
+            if let Some(overrides) = overrides {
+                all.extend(
+                    KeymapFile::load_asset(overrides, None, cx)
+                        .unwrap_or_else(|error| panic!("{overrides}: {error}")),
+                );
+            }
         }
         (Keymap::new(all.clone()), all)
     })
@@ -208,6 +221,10 @@ async fn vscode_binds_the_builder_keys_only_under_its_leader(cx: &mut TestAppCon
         }
         for binding in &bindings {
             let name = binding.action().name();
+            // The proposal view's panel keys are in the overrides every profile loads.
+            if matches!(name, "proposal::Descend" | "proposal::Up") {
+                continue;
+            }
             assert!(
                 !name.starts_with("proposal::") && !UNBOUND.contains(&name),
                 "macos={macos}: {name}"
