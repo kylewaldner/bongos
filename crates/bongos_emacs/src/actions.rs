@@ -144,6 +144,40 @@ no_count!(
     XrefFindImplementations,
 );
 
+/// Starts or extends the prefix argument: C-u.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, JsonSchema, Action)]
+#[action(namespace = emacs)]
+#[serde(deny_unknown_fields)]
+pub struct UniversalArgument;
+
+/// Starts or extends the prefix argument with a digit: M-0 to M-9.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, JsonSchema, Action)]
+#[action(namespace = emacs)]
+#[serde(deny_unknown_fields)]
+pub struct DigitArgument {
+    /// The digit, 0 to 9.
+    #[serde(default)]
+    pub digit: u8,
+}
+
+/// Starts or extends the prefix argument as negative: M--.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, JsonSchema, Action)]
+#[action(namespace = emacs)]
+#[serde(deny_unknown_fields)]
+pub struct NegativeArgument;
+
+impl CountArg for UniversalArgument {
+    const BUILDS: bool = true;
+}
+
+impl CountArg for DigitArgument {
+    const BUILDS: bool = true;
+}
+
+impl CountArg for NegativeArgument {
+    const BUILDS: bool = true;
+}
+
 motion_action!(
     /// Moves forward over N words.
     ForwardWord

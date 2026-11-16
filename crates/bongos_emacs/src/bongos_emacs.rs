@@ -19,6 +19,7 @@ mod lines;
 pub mod mark;
 mod motion;
 pub mod prefix_arg;
+mod prefix_commands;
 pub mod quit;
 pub mod recenter;
 pub mod region;
@@ -94,6 +95,7 @@ pub fn init(cx: &mut App) {
     kill_ring_store::init(cx);
     kill_ring_sink::init(cx);
     quit::init(cx);
+    prefix_arg::init(cx);
     cursor::init(cx);
     global_mark::init(cx);
     cx.observe_new(|editor: &mut Editor, mut window, cx| {
@@ -156,6 +158,19 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, cx, jumps::end_of_buffer_command);
         register(editor, &weak, cx, jumps::xref_find_definitions_command);
         register(editor, &weak, cx, jumps::xref_find_implementations_command);
+        register(
+            editor,
+            &weak,
+            cx,
+            prefix_commands::universal_argument_command,
+        );
+        register(editor, &weak, cx, prefix_commands::digit_argument_command);
+        register(
+            editor,
+            &weak,
+            cx,
+            prefix_commands::negative_argument_command,
+        );
         prefix_arg::init_editor(editor, window.as_deref_mut(), cx);
         recenter::init_editor(cx);
         kill_ring_sink::init_editor(cx);
@@ -176,7 +191,7 @@ fn register<A: CountArg>(
     cx: &mut App,
     handler: fn(&A, &Entity<Editor>, &mut Window, &mut App),
 ) {
-    let meaning = if A::READS {
+    let meaning = if A::READS || A::BUILDS {
         prefix_arg::Meaning::Reads
     } else {
         prefix_arg::Meaning::Ignored
@@ -188,10 +203,20 @@ fn register<A: CountArg>(
             let Some(editor) = weak.upgrade() else {
                 return;
             };
+            if A::BUILDS {
+                handler(action, &editor, window, cx);
+                return;
+            }
             let handed = prefix_arg::take(window, cx);
+            let clamped =
+                A::INSERTS && handed.is_some_and(|arg| arg.value() > prefix_arg::MAX_INSERT);
             match prefix_arg::counted(action, handed) {
                 Some(counted) => handler(&counted, &editor, window, cx),
                 None => handler(action, &editor, window, cx),
+            }
+            if clamped {
+                let text = format!("Count limited to {}", prefix_arg::MAX_INSERT);
+                bongos_minibuffer::set_prefix_echo(window, cx, Some(text));
             }
             last_command::record(window, Some(action.name()), cx);
         })

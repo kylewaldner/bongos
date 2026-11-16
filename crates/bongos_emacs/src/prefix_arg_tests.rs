@@ -1,10 +1,19 @@
 use bongos_emacs_model::prefix_arg::PrefixArg;
+use bongos_minibuffer::{KEY_HINT, minibuffer_for_window};
+use editor::Editor;
 use editor::test::editor_test_context::EditorTestContext;
-use gpui::{Action as _, Focusable as _, TestAppContext};
+use gpui::{
+    Action as _, AppContext as _, BorrowAppContext as _, Entity, Focusable as _, TestAppContext,
+    VisualTestContext,
+};
+use settings::SettingsStore;
 
-use crate::actions::{DuplicateLine, KeyboardQuit, KillWord};
+use crate::actions::{
+    DigitArgument, DuplicateLine, KeyboardQuit, KillWord, NegativeArgument, UniversalArgument,
+};
 use crate::apply_tests::init_test;
 use crate::prefix_arg::{self, MAX_INSERT, Meaning};
+use crate::quit_tests::workspace_window_with;
 
 fn start(cx: &mut EditorTestContext, arg: PrefixArg) {
     let editor = cx.editor.clone();
@@ -175,4 +184,88 @@ async fn every_emacs_action_is_declared(cx: &mut TestAppContext) {
             );
         }
     });
+}
+
+/// A workspace window whose strip shows the prefix echo, with the editor focused.
+async fn echo_window(cx: &mut TestAppContext) -> (Entity<Editor>, VisualTestContext) {
+    let (_workspace, editor, cx) = workspace_window_with(cx, |cx| {
+        bongos_minibuffer::init(cx);
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.minibuffer.get_or_insert_default().enabled_for =
+                    Some(vec![KEY_HINT.to_string()]);
+            });
+        });
+    })
+    .await;
+    (editor, cx)
+}
+
+fn echo(cx: &mut VisualTestContext) -> Option<String> {
+    cx.run_until_parked();
+    let strip = cx
+        .update(|window, cx| minibuffer_for_window(window.window_handle(), cx))
+        .expect("the window has a strip");
+    strip.read_with(cx, |strip, _| {
+        strip.hint_text().map(|text| text.to_string())
+    })
+}
+
+fn pending_in(cx: &mut VisualTestContext) -> Option<PrefixArg> {
+    cx.update(|window, cx| prefix_arg::pending(window, cx))
+}
+
+#[gpui::test]
+async fn two_universal_arguments_make_sixteen_and_echo_it(cx: &mut TestAppContext) {
+    let (_editor, mut cx) = echo_window(cx).await;
+    cx.dispatch_action(UniversalArgument);
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u 4"));
+    cx.dispatch_action(UniversalArgument);
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u 16"));
+    assert_eq!(pending_in(&mut cx).map(|arg| arg.value()), Some(16));
+}
+
+#[gpui::test]
+async fn digit_and_negative_arguments_start_and_echo(cx: &mut TestAppContext) {
+    let (_editor, mut cx) = echo_window(cx).await;
+    cx.dispatch_action(DigitArgument { digit: 3 });
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u 3"));
+    cx.dispatch_action(DigitArgument { digit: 5 });
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u 35"));
+    cx.update(|window, cx| prefix_arg::cancel(window, cx));
+    assert_eq!(echo(&mut cx), None);
+    cx.dispatch_action(NegativeArgument);
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u -"));
+    assert_eq!(pending_in(&mut cx).map(|arg| arg.value()), Some(-1));
+}
+
+#[gpui::test]
+async fn quit_clears_the_argument_and_the_echo_and_edits_nothing(cx: &mut TestAppContext) {
+    let (editor, mut cx) = echo_window(cx).await;
+    cx.dispatch_action(UniversalArgument);
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u 4"));
+    cx.simulate_keystrokes("ctrl-g");
+    assert_eq!(pending_in(&mut cx), None);
+    assert_eq!(echo(&mut cx), None);
+    editor.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "one two"));
+}
+
+#[gpui::test]
+async fn a_single_line_editor_propagates_and_sets_nothing(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = {
+        let (workspace, _editor, cx) = workspace_window_with(cx, |_| {}).await;
+        (workspace, cx)
+    };
+    let reached = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = reached.clone();
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let single = cx.new(|cx| Editor::single_line(window, cx));
+        workspace.add_item_to_active_pane(Box::new(single.clone()), None, true, window, cx);
+        window.focus(&single.focus_handle(cx), cx);
+        workspace.register_action(move |_, _: &UniversalArgument, _, _| seen.set(seen.get() + 1));
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(UniversalArgument);
+    assert_eq!(reached.get(), 1);
+    assert_eq!(pending_in(&mut cx), None);
 }
