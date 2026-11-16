@@ -723,7 +723,9 @@ async fn completion_hook_makes_the_task_done_when_its_checks_pass_on_the_run_wor
     assert_eq!(world.hold(), None);
     assert!(world.marker().is_some(), "the marker stays");
     assert!(
-        world.engine.read_with(cx, |engine, _| engine.completing.is_empty()),
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.completing.is_empty()),
         "the run's worktree is forgotten once decided"
     );
 }
@@ -774,7 +776,9 @@ async fn completion_hook_does_nothing_while_task_checks_is_off(cx: &mut TestAppC
     assert!(world.done().is_none());
     assert!(!world.hold_row_exists(), "no decision ran");
     assert!(
-        world.engine.read_with(cx, |engine, _| engine.completing.is_empty()),
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.completing.is_empty()),
         "nothing was kept"
     );
 }

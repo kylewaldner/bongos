@@ -41,7 +41,12 @@ impl CompletionHooks {
 
     /// Calls every hook and resolves once all of their tasks have. With none registered it
     /// resolves at once.
-    pub fn after_complete(task_id: &str, run_id: &RunId, worktree: &Path, cx: &mut App) -> Task<()> {
+    pub fn after_complete(
+        task_id: &str,
+        run_id: &RunId,
+        worktree: &Path,
+        cx: &mut App,
+    ) -> Task<()> {
         let hooks: Vec<Rc<dyn CompletionHook>> = cx
             .try_global::<Self>()
             .map(|hooks| hooks.0.clone())

@@ -120,8 +120,15 @@ fn completion_hook_runs_after_the_todo_and_before_the_run_ends(cx: &mut TestAppC
     assert!(calls[0].worktree_exists);
     assert_eq!(calls[0].todo, TodoState::Done);
     assert_ne!(calls[0].status, RunStatus::Succeeded);
-    assert_ne!(linked.status(&run), RunStatus::Succeeded, "Ended waits for the hook");
-    assert_eq!(linked.engine.active_run_worktree(LEAF), Some((run.clone(), worktree)));
+    assert_ne!(
+        linked.status(&run),
+        RunStatus::Succeeded,
+        "Ended waits for the hook"
+    );
+    assert_eq!(
+        linked.engine.active_run_worktree(LEAF),
+        Some((run.clone(), worktree))
+    );
 
     hook.release();
     linked.drive(cx);
@@ -147,7 +154,11 @@ fn completion_hook_failure_skips_no_hook_and_still_ends_the_run(cx: &mut TestApp
 
     assert_eq!(*failing.called.borrow(), 1);
     assert_eq!(hook.calls.borrow().len(), 1, "the failure skipped no hook");
-    assert_ne!(linked.status(&run), RunStatus::Succeeded, "Ended waits for every hook");
+    assert_ne!(
+        linked.status(&run),
+        RunStatus::Succeeded,
+        "Ended waits for every hook"
+    );
     hook.release();
     linked.drive(cx);
     assert_eq!(linked.status(&run), RunStatus::Succeeded);

@@ -39,8 +39,8 @@ mod trees;
 mod work_tree;
 
 pub use actions::{ChecksToast, action_types, init_palette, register, task};
-pub use completion::ChecksCompletionHook;
 pub use changed_files::{ChangedFiles, ChangedFilesError, ChangedSet, changed_files};
+pub use completion::ChecksCompletionHook;
 pub use decider::{CHECKING_TREE, CLOSING_CHECKS, NO_TREE, OPEN_CHILDREN, missing_reason};
 pub use definitions::{CHECKS_FOLDER, CHECKS_VALID, ChecksValid, validate_folder};
 pub use engine::{

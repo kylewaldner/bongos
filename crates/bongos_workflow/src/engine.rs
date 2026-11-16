@@ -35,8 +35,8 @@ use serde_json::Value;
 use settings::Settings as _;
 
 use crate::WorkflowsSettings;
-use crate::completion::CompletionHooks;
 use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged};
+use crate::completion::CompletionHooks;
 use crate::definitions::{
     self, DefinitionError, NewDefinition, ProjectLayer, Report, SHIPPED_FILES, materialize,
     profile_dir, project_layer_in, shipped_dir,
