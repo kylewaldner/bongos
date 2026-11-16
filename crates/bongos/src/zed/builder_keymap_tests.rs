@@ -180,27 +180,7 @@ async fn no_builder_chord_is_bound_twice(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn other_base_keymaps_have_no_builder_keys(cx: &mut TestAppContext) {
     init_keymap_test(cx);
-    let bases: &[(&str, &[&str])] = &[
-        (
-            LINUX.0,
-            &[
-                "keymaps/linux/atom.json",
-                "keymaps/linux/cursor.json",
-                "keymaps/linux/jetbrains.json",
-                "keymaps/linux/sublime_text.json",
-            ],
-        ),
-        (
-            MACOS.0,
-            &[
-                "keymaps/macos/atom.json",
-                "keymaps/macos/cursor.json",
-                "keymaps/macos/jetbrains.json",
-                "keymaps/macos/sublime_text.json",
-                "keymaps/macos/textmate.json",
-            ],
-        ),
-    ];
+    let bases: &[(&str, &[&str])] = &[(LINUX.0, &[]), (MACOS.0, &[])];
     for (default, others) in bases {
         let mut sets: Vec<Vec<&str>> = vec![vec![default]];
         sets.extend(others.iter().map(|other| vec![*default, *other]));

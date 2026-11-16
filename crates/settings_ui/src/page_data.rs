@@ -2658,7 +2658,17 @@ fn keymap_page() -> SettingsPage {
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("base_keymap"),
-                    pick: |settings_content| settings_content.base_keymap.as_ref(),
+                    // A retired stored value is shown as Emacs (what it falls back to);
+                    // nothing is written unless the user picks another value.
+                    pick: |settings_content| {
+                        settings_content.base_keymap.as_ref().map(|keymap| {
+                            if keymap.is_retired() {
+                                &settings::BaseKeymapContent::Emacs
+                            } else {
+                                keymap
+                            }
+                        })
+                    },
                     write: |settings_content, value, _| {
                         settings_content.base_keymap = value;
                     },

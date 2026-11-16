@@ -13,17 +13,14 @@
   },
   "icon_theme": "Zed (Default)",
   // The name of a base set of key bindings to use.
-  // This setting can take these values, most named after another
-  // text editor:
+  // This setting can take these values:
   //
   // 1. "Emacs" (the default)
   // 2. "VSCode"
-  // 3. "Atom"
-  // 4. "JetBrains"
-  // 5. "Cursor"
-  // 6. "None"
-  // 7. "SublimeText"
-  // 8. "TextMate"
+  // 3. "None"
+  //
+  // The retired values "JetBrains", "Atom", "Cursor", "SublimeText" and "TextMate"
+  // still load and fall back to "Emacs".
   "base_keymap": "Emacs",
   // Settings of the Emacs mode.
   "emacs": {

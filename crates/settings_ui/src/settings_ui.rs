@@ -4915,7 +4915,7 @@ where
 
     EnumVariantDropdown::new("dropdown", current_value, variants(), labels(), {
         move |value, window, cx| {
-            if value == current_value {
+            if !dropdown_pick_changes_file(&field, &file, current_value, value, cx) {
                 return;
             }
             update_settings_file(
@@ -4937,6 +4937,29 @@ where
     .tab_index(0)
     .title_case(should_do_titlecase)
     .into_any_element()
+}
+
+/// Whether picking `value` in a dropdown needs a write. The shown value can differ
+/// from what the file stores (a retired value is displayed as its fallback), so for
+/// the user file this compares the stored content after the write instead, but only
+/// when the setting is stored there; otherwise the shown value is a default and
+/// re-picking it must not pin it into the file.
+fn dropdown_pick_changes_file<T: Copy + PartialEq + Send + Sync + 'static>(
+    field: &SettingField<T>,
+    file: &SettingsUiFile,
+    current_value: T,
+    value: T,
+    cx: &App,
+) -> bool {
+    if let SettingsUiFile::User = file
+        && let Some(stored) = SettingsStore::global(cx).raw_user_settings()
+        && (field.pick)(&stored.content).is_some()
+    {
+        let mut updated = (*stored.content).clone();
+        (field.write)(&mut updated, Some(value), cx);
+        return updated != *stored.content;
+    }
+    value != current_value
 }
 
 fn render_picker_trigger_button(id: SharedString, label: SharedString) -> Button {
@@ -6317,6 +6340,153 @@ pub mod test {
                 );
             })
             .unwrap();
+    }
+
+    struct BaseKeymapDropdownView {
+        field: SettingField<settings::BaseKeymapContent>,
+    }
+
+    impl Render for BaseKeymapDropdownView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            render_dropdown(self.field, SettingsUiFile::User, None, window, cx)
+        }
+    }
+
+    #[gpui::test]
+    async fn test_retired_base_keymap_renders_as_emacs_without_rewriting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use settings::BaseKeymapContent;
+
+        cx.update(|cx| register_settings(cx));
+        cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state, cx);
+        });
+        let field = cx.update(|cx| {
+            crate::page_data::settings_data(cx)
+                .into_iter()
+                .flat_map(|page| page.items.into_vec())
+                .find_map(|item| match item {
+                    SettingsPageItem::SettingItem(item) if item.title == "Base Keymap" => item
+                        .field
+                        .as_any()
+                        .downcast_ref::<SettingField<BaseKeymapContent>>()
+                        .copied(),
+                    _ => None,
+                })
+                .expect("the Base Keymap setting is on a page")
+        });
+
+        for name in ["JetBrains", "Atom", "SublimeText", "TextMate", "Cursor"] {
+            let stored = format!(r#"{{"base_keymap": "{name}"}}"#);
+            cx.update(|cx| {
+                let result = cx.update_global(|store: &mut SettingsStore, cx| {
+                    store.set_user_settings(&stored, cx)
+                });
+                assert!(
+                    matches!(result.parse_status, settings::ParseStatus::Success),
+                    "{name} must not be a settings error"
+                );
+                let store = cx.global::<SettingsStore>();
+                // The stored value is untouched ...
+                assert!(
+                    store
+                        .raw_user_settings()
+                        .and_then(|user| user.content.base_keymap)
+                        .is_some_and(|keymap| keymap.is_retired()),
+                    "{name}"
+                );
+                // ... but the page shows Emacs.
+                let shown = get_current_value(store, &SettingsUiFile::User, &field, cx)
+                    .map(|current| *current.value);
+                assert_eq!(shown, Some(BaseKeymapContent::Emacs), "{name}");
+            });
+            // Rendering the dropdown must not panic.
+            let (_view, _cx) = cx.add_window_view(|_, _| BaseKeymapDropdownView { field });
+        }
+    }
+
+    #[gpui::test]
+    async fn test_picking_emacs_over_retired_base_keymap_writes_it(cx: &mut gpui::TestAppContext) {
+        use settings::BaseKeymapContent;
+
+        cx.update(|cx| register_settings(cx));
+        cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state, cx);
+        });
+        let field = cx.update(|cx| {
+            crate::page_data::settings_data(cx)
+                .into_iter()
+                .flat_map(|page| page.items.into_vec())
+                .find_map(|item| match item {
+                    SettingsPageItem::SettingItem(item) if item.title == "Base Keymap" => item
+                        .field
+                        .as_any()
+                        .downcast_ref::<SettingField<BaseKeymapContent>>()
+                        .copied(),
+                    _ => None,
+                })
+                .expect("the Base Keymap setting is on a page")
+        });
+        let fs = cx.update(|cx| <dyn fs::Fs>::global(cx));
+        let fake_fs = fs.as_fake();
+        let settings_path = paths::settings_file();
+        fake_fs
+            .insert_tree(paths::config_dir(), serde_json::json!({}))
+            .await;
+
+        for (stored, picks_write) in [
+            ("JetBrains", true),
+            ("Emacs", false),
+            ("VSCode", true),
+            ("", false),
+        ] {
+            let text = if stored.is_empty() {
+                "{}".to_string()
+            } else {
+                format!(r#"{{"base_keymap": "{stored}"}}"#)
+            };
+            fake_fs
+                .insert_file(settings_path, text.clone().into_bytes())
+                .await;
+            cx.update(|cx| {
+                cx.update_global(|store: &mut SettingsStore, cx| store.set_user_settings(&text, cx))
+            });
+
+            // Rendering alone leaves the bytes unchanged.
+            let (_view, cx) = cx.add_window_view(|_, _| BaseKeymapDropdownView { field });
+            cx.run_until_parked();
+            assert_eq!(fs.load(settings_path).await.unwrap(), text);
+
+            // Selecting Emacs writes it only when the stored value differs.
+            cx.update(|window, cx| {
+                let current =
+                    get_current_value(SettingsStore::global(cx), &SettingsUiFile::User, &field, cx)
+                        .map(|current| *current.value)
+                        .unwrap();
+                let value = BaseKeymapContent::Emacs;
+                if dropdown_pick_changes_file(&field, &SettingsUiFile::User, current, value, cx) {
+                    update_settings_file(
+                        SettingsUiFile::User,
+                        field.json_path,
+                        window,
+                        cx,
+                        move |settings, app| (field.write)(settings, Some(value), app),
+                    )
+                    .unwrap();
+                }
+            });
+            cx.run_until_parked();
+            let after = fs.load(settings_path).await.unwrap();
+            if picks_write {
+                assert!(after.contains("\"Emacs\""), "{stored}: {after}");
+                assert!(!after.contains(stored), "{stored}: {after}");
+            } else {
+                assert_eq!(after, text, "{stored}");
+            }
+        }
     }
 }
 

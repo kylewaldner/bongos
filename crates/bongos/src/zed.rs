@@ -2233,6 +2233,50 @@ pub fn watch_settings_files(fs: Arc<dyn fs::Fs>, cx: &mut App) {
     });
 }
 
+/// Marks that the retired base keymap notice was already shown in this launch.
+struct RetiredBaseKeymapNoticeShown;
+
+impl gpui::Global for RetiredBaseKeymapNoticeShown {}
+
+/// Tells the user once per launch that the stored `base_keymap` names a retired keymap
+/// and fell back to Emacs. The settings file is never changed. Returns whether the
+/// notice was shown by this call.
+fn notify_retired_base_keymap(cx: &mut App) -> bool {
+    if cx.has_global::<RetiredBaseKeymapNoticeShown>() {
+        return false;
+    }
+    let retired = cx
+        .global::<SettingsStore>()
+        .raw_user_settings()
+        .and_then(|settings| settings.content.base_keymap)
+        .is_some_and(|keymap| keymap.is_retired());
+    if !retired {
+        return false;
+    }
+    cx.set_global(RetiredBaseKeymapNoticeShown);
+    struct RetiredBaseKeymapNotice;
+    show_app_notification(
+        NotificationId::unique::<RetiredBaseKeymapNotice>(),
+        cx,
+        |cx| {
+            cx.new(|cx| {
+                MessageNotification::new(
+                    "The base keymap in your settings is no longer available, so bongos \
+                    is using Emacs. Pick another base keymap in settings.",
+                    cx,
+                )
+                .primary_message("Open Settings")
+                .primary_icon(IconName::Settings)
+                .primary_on_click(|window, cx| {
+                    window.dispatch_action(zed_actions::OpenSettings.boxed_clone(), cx);
+                    cx.emit(DismissEvent);
+                })
+            })
+        },
+    );
+    true
+}
+
 pub fn handle_keymap_file_changes(
     mut user_keymap_file_rx: mpsc::UnboundedReceiver<String>,
     user_keymap_watcher: gpui::Task<()>,
@@ -2244,7 +2288,10 @@ pub fn handle_keymap_file_changes(
     let mut old_vim_enabled = VimModeSetting::get_global(cx).0;
     let mut old_helix_enabled = vim_mode_setting::HelixModeSetting::get_global(cx).0;
 
+    notify_retired_base_keymap(cx);
+
     cx.observe_global::<SettingsStore>(move |cx| {
+        notify_retired_base_keymap(cx);
         let new_base_keymap = *BaseKeymap::get_global(cx);
         let new_vim_enabled = VimModeSetting::get_global(cx).0;
         let new_helix_enabled = vim_mode_setting::HelixModeSetting::get_global(cx).0;
@@ -5282,6 +5329,17 @@ mod tests {
 
     actions!(test_only, [ActionA, ActionB]);
 
+    /// Whether the loaded keymaps bind a ctrl-g chord to `menu::Cancel`, which only the
+    /// Emacs base keymap does.
+    fn ctrl_g_cancels(cx: &TestAppContext) -> bool {
+        cx.update(|cx| {
+            cx.key_bindings()
+                .borrow()
+                .bindings_for_action(&menu::Cancel)
+                .any(|binding| binding.keystrokes().iter().any(|k| k.key() == "g"))
+        })
+    }
+
     #[gpui::test]
     async fn test_base_keymap(cx: &mut gpui::TestAppContext) {
         let executor = cx.executor();
@@ -5293,16 +5351,11 @@ mod tests {
             .read_with(cx, |mw, _| mw.workspace().clone())
             .unwrap();
 
-        // From the Atom keymap
-        use workspace::ActivatePreviousPane;
-        // From the JetBrains keymap
-        use workspace::ActivatePreviousItem;
-
         app_state
             .fs
             .save(
                 paths::settings_file(),
-                &r#"{"base_keymap": "Atom"}"#.into(),
+                &r#"{"base_keymap": "Emacs"}"#.into(),
                 Default::default(),
             )
             .await
@@ -5332,20 +5385,14 @@ mod tests {
                 workspace.update(cx, |workspace, cx| {
                     workspace.register_action(|_, _: &ActionA, _window, _cx| {});
                     workspace.register_action(|_, _: &ActionB, _window, _cx| {});
-                    workspace.register_action(|_, _: &ActivatePreviousPane, _window, _cx| {});
-                    workspace.register_action(|_, _: &ActivatePreviousItem, _window, _cx| {});
                     cx.notify();
                 });
             })
             .unwrap();
         executor.run_until_parked();
         // Test loading the keymap base at all
-        assert_key_bindings_for(
-            window.into(),
-            cx,
-            vec![("backspace", &ActionA), ("k", &ActivatePreviousPane)],
-            line!(),
-        );
+        assert_key_bindings_for(window.into(), cx, vec![("backspace", &ActionA)], line!());
+        assert!(ctrl_g_cancels(cx));
 
         // Test modifying the users keymap, while retaining the base keymap
         app_state
@@ -5360,35 +5407,26 @@ mod tests {
 
         executor.run_until_parked();
 
-        assert_key_bindings_for(
-            window.into(),
-            cx,
-            vec![("backspace", &ActionB), ("k", &ActivatePreviousPane)],
-            line!(),
-        );
+        assert_key_bindings_for(window.into(), cx, vec![("backspace", &ActionB)], line!());
+        assert!(ctrl_g_cancels(cx));
 
         // Test modifying the base, while retaining the users keymap
-        app_state
-            .fs
-            .save(
-                paths::settings_file(),
-                &r#"{"base_keymap": "JetBrains"}"#.into(),
-                Default::default(),
-            )
-            .await
-            .unwrap();
+        for (base, emacs) in [("VSCode", false), ("None", false), ("Emacs", true)] {
+            app_state
+                .fs
+                .save(
+                    paths::settings_file(),
+                    &format!(r#"{{"base_keymap": "{base}"}}"#).into(),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
 
-        executor.run_until_parked();
+            executor.run_until_parked();
 
-        assert_key_bindings_for(
-            window.into(),
-            cx,
-            vec![
-                ("backspace", &ActionB),
-                ("{", &ActivatePreviousItem::default()),
-            ],
-            line!(),
-        );
+            assert_key_bindings_for(window.into(), cx, vec![("backspace", &ActionB)], line!());
+            assert_eq!(ctrl_g_cancels(cx), emacs, "{base}");
+        }
     }
 
     #[gpui::test]
@@ -5402,17 +5440,11 @@ mod tests {
             .read_with(cx, |mw, _| mw.workspace().clone())
             .unwrap();
 
-        // From the Atom keymap
-        use workspace::ActivatePreviousPane;
-        // From the JetBrains keymap
-        use diagnostics::Deploy;
-
         window
             .update(cx, |_, _, cx| {
                 workspace.update(cx, |workspace, cx| {
                     workspace.register_action(|_, _: &ActionA, _window, _cx| {});
                     workspace.register_action(|_, _: &ActionB, _window, _cx| {});
-                    workspace.register_action(|_, _: &Deploy, _window, _cx| {});
                     cx.notify();
                 });
             })
@@ -5421,7 +5453,7 @@ mod tests {
             .fs
             .save(
                 paths::settings_file(),
-                &r#"{"base_keymap": "Atom"}"#.into(),
+                &r#"{"base_keymap": "Emacs"}"#.into(),
                 Default::default(),
             )
             .await
@@ -5448,22 +5480,16 @@ mod tests {
         });
 
         cx.background_executor.run_until_parked();
-
-        cx.background_executor.run_until_parked();
         // Test loading the keymap base at all
-        assert_key_bindings_for(
-            window.into(),
-            cx,
-            vec![("backspace", &ActionA), ("k", &ActivatePreviousPane)],
-            line!(),
-        );
+        assert_key_bindings_for(window.into(), cx, vec![("backspace", &ActionA)], line!());
+        assert!(ctrl_g_cancels(cx));
 
         // Test disabling the key binding for the base keymap
         app_state
             .fs
             .save(
                 "/keymap.json".as_ref(),
-                &r#"[{"bindings": {"backspace": null}}]"#.into(),
+                &r#"[{"bindings": {"backspace": null, "ctrl-g": null}}]"#.into(),
                 Default::default(),
             )
             .await
@@ -5471,27 +5497,48 @@ mod tests {
 
         cx.background_executor.run_until_parked();
 
-        assert_key_bindings_for(
-            window.into(),
-            cx,
-            vec![("k", &ActivatePreviousPane)],
-            line!(),
-        );
+        assert!(!ctrl_g_cancels(cx));
+    }
 
-        // Test modifying the base, while retaining the users keymap
+    #[gpui::test]
+    async fn test_retired_base_keymap_falls_back_with_one_notice(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let app_state = init_keymap_test(cx);
+        let stored = r#"{"base_keymap": "JetBrains"}"#;
         app_state
             .fs
-            .save(
-                paths::settings_file(),
-                &r#"{"base_keymap": "JetBrains"}"#.into(),
-                Default::default(),
-            )
+            .save(paths::settings_file(), &stored.into(), Default::default())
             .await
             .unwrap();
+        app_state
+            .fs
+            .save("/keymap.json".as_ref(), &"[]".into(), Default::default())
+            .await
+            .unwrap();
+        executor.run_until_parked();
+        cx.update(|cx| {
+            assert!(!cx.has_global::<RetiredBaseKeymapNoticeShown>());
+            let (keymap_rx, keymap_watcher) = watch_config_file(
+                &executor,
+                app_state.fs.clone(),
+                PathBuf::from("/keymap.json"),
+            );
+            watch_settings_files(app_state.fs.clone(), cx);
+            handle_keymap_file_changes(keymap_rx, keymap_watcher, cx);
+        });
+        executor.run_until_parked();
 
-        cx.background_executor.run_until_parked();
-
-        assert_key_bindings_for(window.into(), cx, vec![("6", &Deploy)], line!());
+        cx.update(|cx| {
+            assert_eq!(*BaseKeymap::get_global(cx), BaseKeymap::Emacs);
+            // The launch already showed the notice; a later change does not show it again.
+            assert!(cx.has_global::<RetiredBaseKeymapNoticeShown>());
+            assert!(!notify_retired_base_keymap(cx));
+        });
+        assert!(ctrl_g_cancels(cx));
+        assert_eq!(
+            app_state.fs.load(paths::settings_file()).await.unwrap(),
+            stored
+        );
     }
 
     #[gpui::test]
@@ -5842,6 +5889,13 @@ mod tests {
             let mut loaded = 0;
             for entry in walkdir_json(&keymaps_dir) {
                 let relative = entry.strip_prefix(&keymaps_dir).unwrap();
+                for retired in ["jetbrains", "atom", "sublime_text", "textmate", "cursor"] {
+                    assert_ne!(
+                        relative.file_stem().and_then(|stem| stem.to_str()),
+                        Some(retired),
+                        "retired base keymap asset still present: {relative:?}"
+                    );
+                }
                 let asset_path = format!("keymaps/{}", relative.to_string_lossy());
                 // Binds the storybook app's actions, which bongos does not link.
                 if asset_path == "keymaps/storybook.json" {

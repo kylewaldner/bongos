@@ -6867,11 +6867,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// JetBrains keymaps route Shift+Enter through `editor::NewlineBelow`.
+    /// Base keymaps loaded over the defaults must not make Shift+Enter insert a newline.
     #[gpui::test]
-    async fn test_thread_search_shift_enter_navigates_with_jetbrains_keymap(
-        cx: &mut TestAppContext,
-    ) {
+    async fn test_thread_search_shift_enter_navigates_with_emacs_keymap(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {
             // Load both the default binding and the conflicting base keymap.
@@ -6887,15 +6885,15 @@ pub(crate) mod tests {
             }
             cx.bind_keys(default_bindings);
 
-            let mut jetbrains_bindings = settings::KeymapFile::load_asset_allow_partial_failure(
-                "keymaps/linux/jetbrains.json",
+            let mut emacs_bindings = settings::KeymapFile::load_asset_allow_partial_failure(
+                "keymaps/linux/emacs.json",
                 cx,
             )
             .unwrap();
-            for binding in &mut jetbrains_bindings {
+            for binding in &mut emacs_bindings {
                 binding.set_meta(settings::KeybindSource::Base.meta());
             }
-            cx.bind_keys(jetbrains_bindings);
+            cx.bind_keys(emacs_bindings);
         });
 
         let connection = StubAgentConnection::new();
