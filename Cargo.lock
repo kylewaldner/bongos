@@ -2358,6 +2358,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bongos_extensions",
  "bongos_extensions_model",
  "bongos_minibuffer",
  "bongos_net",
@@ -2369,6 +2370,7 @@ dependencies = [
  "fs",
  "futures 0.3.32",
  "gpui",
+ "gpui_platform",
  "http_client",
  "language",
  "log",
@@ -2376,6 +2378,7 @@ dependencies = [
  "paths",
  "project",
  "release_channel",
+ "reqwest_client",
  "schemars 1.0.4",
  "semver",
  "serde",
