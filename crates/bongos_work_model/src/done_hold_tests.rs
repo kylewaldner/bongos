@@ -152,3 +152,17 @@ fn every_rule_that_tests_done_treats_a_held_task_as_not_done() {
     assert_eq!(open.len(), 1);
     assert_eq!(open[0].slug, "a");
 }
+
+#[test]
+fn reopen_on_a_held_open_leaf_with_no_open_todo_points_at_todo_reopen() {
+    let mut a = leaf("a", Status::Open);
+    file_mut(&mut a).todos = vec![todo("do it", None)];
+    let mut t = tree(vec![done(a, &[0])]);
+    hold(&mut t, &["a"]);
+    let id = id_of(&t, "a");
+    assert_ne!(state_of(&t, "a"), State::Done);
+    assert_eq!(
+        reopen(&t, &ctx(), &id).unwrap_err(),
+        "a is open but has no open todo; reopen one with todo: reopen"
+    );
+}

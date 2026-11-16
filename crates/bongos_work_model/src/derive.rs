@@ -159,7 +159,7 @@ fn is_held(task: &Task) -> bool {
     task.done_hold.is_some()
 }
 
-fn leaf_done_file(file: &TaskFile) -> bool {
+pub(crate) fn leaf_done_file(file: &TaskFile) -> bool {
     !file.todos.is_empty() && file.todos.iter().all(|todo| todo.state != TodoState::Open)
 }
 
