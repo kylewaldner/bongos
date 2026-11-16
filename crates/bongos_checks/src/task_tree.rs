@@ -24,6 +24,10 @@ pub trait RunWorktrees: 'static {
     fn active(&self, task_id: &str, cx: &App) -> Option<(RunId, PathBuf)>;
     /// The run of the task that ended last and its worktree; the caller checks it still exists.
     fn last_ended(&self, task_id: &str, cx: &App) -> Option<(RunId, PathBuf)>;
+    /// The task workflow run `run` works on.
+    fn task_of(&self, _run: &str, _cx: &App) -> Option<String> {
+        None
+    }
 }
 
 /// [`RunWorktrees`] over the app's workflow engine; nothing while there is none.
@@ -49,6 +53,12 @@ impl RunWorktrees for WorkflowRunWorktrees {
                 let path = lifecycle.worktree(&run)?.path.clone();
                 Some((run, path))
             })
+    }
+
+    fn task_of(&self, run: &str, cx: &App) -> Option<String> {
+        let engine = cx.try_global::<WorkflowEngine>()?;
+        let lifecycle = engine.lifecycle();
+        lifecycle.task_of(run).map(str::to_string)
     }
 }
 

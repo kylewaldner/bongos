@@ -9,7 +9,8 @@
 //! done hold they cause, and the decider that writes the done record of a leaf whose checks
 //! pass on its tree, and of a group whose closing checks pass on its last child's tree, and the
 //! hook that takes that decision on a workflow run's worktree when the run completes its todo,
-//! and the Checks section of a task's details tab with the output and edit views of its checks.
+//! the Checks section of a task's details tab with the output and edit views of its checks, and
+//! the workflow step that runs checks.
 
 mod actions;
 mod base_tree;
@@ -41,6 +42,7 @@ mod task_tree;
 mod tree_key;
 mod trees;
 mod work_tree;
+pub mod workflow_node;
 
 pub use actions::{ChecksToast, action_types, init_palette, register, task};
 pub use changed_files::{ChangedFiles, ChangedFilesError, ChangedSet, changed_files};
@@ -84,10 +86,12 @@ pub use task_source::{TaskChecks, TaskSource, WorkTaskSource};
 pub use task_tree::{RunWorktrees, TaskTree, WorkflowRunWorktrees};
 pub use tree_key::{TreeError, TreeKey, combine_trees, key_inputs_digest, tree_key};
 pub use trees::{EnvBase, SecondTree, SecondTreeLease, TaskTrees, TaskTreesRegistry};
+pub use workflow_node::{ChecksNode, ChecksNodeStatus, NodeJob, node_result};
 
 /// Registers the settings, the `checks-owed` state hook, the `checks` done hold source, the
 /// `checks` state exporter, the `checks` definition folder, the `checks-valid` landing check, the
-/// global [`ChecksEngine`] and its workflow completion hook (inert while the setting is off).
+/// global [`ChecksEngine`], its workflow completion hook and the built-in behind `use = "checks"`
+/// workflow nodes with its run view status (inert while the setting is off).
 /// Runs before any project opens: the first state writer seals the registry of state hooks.
 pub fn init(cx: &mut gpui::App) {
     use ::settings::Settings as _;
@@ -100,6 +104,7 @@ pub fn init(cx: &mut gpui::App) {
     decider::init(engine.clone(), cx);
     section_source::init(&engine, cx);
     completion::register(cx);
+    workflow_node::ChecksNode::register(&engine, cx);
     // What a crash left in the scratch folder goes at load.
     if let Ok(git) = bongos_project_repo::Git::locate() {
         engine
@@ -144,3 +149,5 @@ mod run_tests;
 mod test_support;
 #[cfg(test)]
 mod tree_key_tests;
+#[cfg(test)]
+mod workflow_node_tests;

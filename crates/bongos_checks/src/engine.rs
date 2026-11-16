@@ -571,6 +571,60 @@ impl ChecksEngine {
         self.active.contains_key(task_id)
     }
 
+    /// The task workflow run `run` works on, as the workflow engine knows it.
+    pub fn task_of_run(&self, run: &str, cx: &App) -> Option<String> {
+        self.runs.task_of(run, cx)
+    }
+
+    /// The workflow node (a `use = "checks"` node) the task's live run is for; `None` when no
+    /// run is live or it is a manual one.
+    pub fn node_of(&self, task_id: &str) -> Option<&(RunId, NodeKey)> {
+        self.active.get(task_id)?.node.as_ref()
+    }
+
+    /// The live run for workflow node `key` of run `run`: its task, and what each of its checks
+    /// is doing now.
+    pub fn node_live(&self, run: &str, key: &NodeKey) -> Option<(&str, &BTreeMap<String, Live>)> {
+        self.active.iter().find_map(|(task_id, active)| {
+            let (node_run, node_key) = active.node.as_ref()?;
+            (node_run == run && node_key == key).then_some((task_id.as_str(), &active.live))
+        })
+    }
+
+    /// After a relaunch: stops the processes an earlier bongos left running for the parts of
+    /// workflow node `key` of run `run` (on `task_id`), found through their unfinished records.
+    /// The records stay unfinished, so the node's next try resumes them with their finished
+    /// parts. Nothing is stopped while this engine runs that node itself. Resolves with one
+    /// outcome per part of each such record.
+    pub fn kill_node_orphans(
+        &self,
+        task_id: &str,
+        run: &str,
+        key: &NodeKey,
+        cx: &App,
+    ) -> Task<Vec<bongos_workflow::process::OrphanOutcome>> {
+        if self.node_live(run, key).is_some() {
+            return Task::ready(Vec::new());
+        }
+        let Some(task) = self.task(task_id, cx) else {
+            return Task::ready(Vec::new());
+        };
+        let node_key = key.to_string();
+        let parts: Vec<_> = task_records(&task)
+            .into_iter()
+            .filter(|record| {
+                !record.is_finished()
+                    && matches!(&record.started_by, StartedBy::Run { run_id, node_key: started }
+                        if run_id == run && *started == node_key)
+            })
+            .flat_map(|record| record.parts)
+            .collect();
+        if parts.is_empty() {
+            return Task::ready(Vec::new());
+        }
+        cx.background_spawn(async move { crate::process::kill_orphan_parts(&parts) })
+    }
+
     /// Stops the run of the task: the part that runs is stopped and no further check starts.
     /// False when no run is live.
     pub fn cancel(&mut self, task_id: &str) -> bool {

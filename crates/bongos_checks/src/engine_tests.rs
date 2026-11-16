@@ -37,7 +37,7 @@ use crate::test_support::{
 };
 use crate::trees::{SecondTree, TaskTrees, TaskTreesRegistry};
 
-const TASK: &str = "l1";
+pub(crate) const TASK: &str = "l1";
 const TASK_NAME: &str = "Backfill";
 const GROUP: &str = "g1";
 const SCRIPTS: [&str; 3] = ["part-log", "check-log", "where-log"];
@@ -91,6 +91,11 @@ impl RunWorktrees for FakeRuns {
 
     fn last_ended(&self, _: &str, _: &gpui::App) -> Option<(String, PathBuf)> {
         self.ended.borrow().clone()
+    }
+
+    /// Every workflow run works on the task `l1`.
+    fn task_of(&self, _: &str, _: &gpui::App) -> Option<String> {
+        Some(TASK.to_string())
     }
 }
 
@@ -149,7 +154,7 @@ fn work_tree(root: &TempDir) -> PathBuf {
     write_file(
         &tree,
         ".gitignore",
-        "runs\norder\nblock-at\nignore-term\nblocked-*\nscope-*\nitems-*\n",
+        "runs\norder\nblock-at\nno-verdict-at\nignore-term\nblocked-*\nscope-*\nitems-*\n",
     );
     write_file(&tree, "src/lib.rs", "pub fn one() {}\n");
     commit_everything(&tree, "start");
@@ -249,6 +254,19 @@ impl World {
             output_dir: self.output.clone(),
             index_dir: self.index.clone(),
         }
+    }
+
+    /// Another engine over the same task source, runs and clock, as a relaunched bongos would
+    /// have; not the global one.
+    pub(crate) fn second_engine(&self, cx: &mut TestAppContext) -> Entity<ChecksEngine> {
+        use gpui::AppContext as _;
+        let engine = ChecksEngine::new(
+            self.source.clone(),
+            self.runs.clone(),
+            self.engine.read_with(cx, |engine, _| engine.clock.clone()),
+            Arc::new(|| "2026-03-01T12:00:00Z".to_string()),
+        );
+        cx.update(|cx| cx.new(|_| engine))
     }
 
     pub(crate) fn run(
@@ -845,7 +863,7 @@ fn commands_say_how_a_run_ended_or_why_it_was_refused() {
 }
 
 /// `suite` runs in four parts, one after another, each holding a slot of the pool `gpu`.
-const DRAIN_CHECKS: &str = "
+pub(crate) const DRAIN_CHECKS: &str = "
 [[checks.check]]
 name = \"suite\"
 run = \"checks/part-log\"
@@ -863,7 +881,7 @@ fn stored_live(world: &World) -> std::collections::BTreeMap<String, LiveRow> {
 }
 
 /// Every key of `checks.live`, `part/` rows or not.
-fn live_keys(world: &World) -> Vec<String> {
+pub(crate) fn live_keys(world: &World) -> Vec<String> {
     world
         .writer()
         .read(|read| read.kv(LIVE_NAMESPACE).scan(""))
@@ -874,7 +892,7 @@ fn live_keys(world: &World) -> Vec<String> {
 }
 
 /// A receiver that resolves once part `part` of the tree's blocking script has started.
-fn when_blocked(world: &World, part: u32) -> oneshot::Receiver<()> {
+pub(crate) fn when_blocked(world: &World, part: u32) -> oneshot::Receiver<()> {
     let blocked = world.tree.join(format!("blocked-{part}"));
     let (reached, reaching) = oneshot::channel();
     std::thread::spawn(move || {
