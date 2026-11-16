@@ -423,6 +423,15 @@ impl MultiBuffer {
         }
     }
 
+    /// Whether the undo or redo history still holds the transaction `transaction_id`.
+    pub fn has_transaction(&self, transaction_id: TransactionId, cx: &App) -> bool {
+        if let Some(buffer) = self.as_singleton() {
+            buffer.read(cx).get_transaction(transaction_id).is_some()
+        } else {
+            self.history.transaction(transaction_id).is_some()
+        }
+    }
+
     pub fn finalize_last_transaction(&mut self, cx: &mut Context<Self>) {
         self.history.finalize_last_transaction();
         for BufferState { buffer, .. } in self.buffers.values() {

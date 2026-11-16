@@ -77,6 +77,8 @@ mod recenter_tests;
 #[cfg(test)]
 mod region_tests;
 #[cfg(test)]
+mod repeat_tests;
+#[cfg(test)]
 mod space_tests;
 #[cfg(test)]
 mod transpose_tests;
