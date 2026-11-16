@@ -215,6 +215,7 @@ members = [
     "crates/bongos_linear_model",
     "crates/bongos_emacs",
     "crates/bongos_emacs_model",
+    "crates/bongos_extensions",
     "crates/bongos_extensions_model",
     "crates/bongos_isearch",
     "crates/bongos_isearch_model",
@@ -485,6 +486,7 @@ bongos_linear_model = { path = "crates/bongos_linear_model" }
 bongos_languages = { path = "crates/bongos_languages" }
 bongos_emacs = { path = "crates/bongos_emacs" }
 bongos_emacs_model = { path = "crates/bongos_emacs_model" }
+bongos_extensions = { path = "crates/bongos_extensions" }
 bongos_extensions_model = { path = "crates/bongos_extensions_model" }
 bongos_isearch = { path = "crates/bongos_isearch" }
 bongos_isearch_model = { path = "crates/bongos_isearch_model" }

@@ -2049,6 +2049,7 @@ dependencies = [
  "bongos_builder",
  "bongos_chat",
  "bongos_emacs",
+ "bongos_extensions",
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",
@@ -2349,6 +2350,24 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "bongos_extensions"
+version = "0.1.0"
+dependencies = [
+ "bongos_minibuffer",
+ "command_palette_hooks",
+ "editor",
+ "gpui",
+ "project",
+ "release_channel",
+ "schemars 1.0.4",
+ "semver",
+ "serde",
+ "serde_json",
+ "settings",
+ "workspace",
 ]
 
 [[package]]

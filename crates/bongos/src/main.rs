@@ -558,6 +558,7 @@ fn main() {
             bongos_builder::BuilderDirs::new(util::paths::home_dir()),
             cx,
         );
+        bongos_extensions::init(cx);
         bongos_linear::init(cx);
         bongos_linear::init_client(cx);
         bongos_workflow::init(cx);
@@ -656,6 +657,7 @@ fn main() {
         bongos_chat::init_palette(cx);
         bongos_prompts::init_palette(cx);
         bongos_builder::init_palette(cx);
+        bongos_extensions::init_palette(cx);
         bongos_linear::init_palette(cx);
         bongos_workflow::init_palette(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
