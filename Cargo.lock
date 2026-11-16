@@ -2352,6 +2352,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_extensions_model"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_net",
+ "serde",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "bongos_isearch"
 version = "0.1.0"
 dependencies = [
