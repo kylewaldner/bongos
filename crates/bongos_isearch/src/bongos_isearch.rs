@@ -9,9 +9,9 @@
 
 pub mod actions;
 mod commands;
-mod display;
+pub mod display;
 pub mod engine;
-mod intercept;
+pub mod intercept;
 mod occur;
 pub mod seams;
 pub mod session;
@@ -38,7 +38,8 @@ mod session_tests;
 use gpui::App;
 
 pub use engine::{
-    Cancel, Count, Engine, FindOutcome, InvalidPattern, count, find, find_outcome, in_range,
+    Cancel, Count, Engine, FindOutcome, InvalidPattern, count, count_in, find, find_outcome,
+    in_range,
 };
 
 /// The action namespace of the isearch commands.

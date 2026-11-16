@@ -500,6 +500,71 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+/// The `query_replace` commands, with the palette text of each.
+const QUERY_REPLACE_ACTIONS: [(&str, &str); 18] = [
+    (
+        "query_replace::QueryReplace",
+        "query replace: query replace",
+    ),
+    (
+        "query_replace::QueryReplaceRegexp",
+        "query replace: query replace regexp",
+    ),
+    (
+        "query_replace::ReplaceString",
+        "query replace: replace string",
+    ),
+    (
+        "query_replace::ReplaceRegexp",
+        "query replace: replace regexp",
+    ),
+    ("query_replace::ToggleCase", "query replace: toggle case"),
+    (
+        "query_replace::QuotedInsert",
+        "query replace: quoted insert",
+    ),
+    ("query_replace::Abort", "query replace: abort"),
+    ("query_replace::Yes", "query replace: yes"),
+    ("query_replace::No", "query replace: no"),
+    ("query_replace::All", "query replace: all"),
+    ("query_replace::ThisAndExit", "query replace: this and exit"),
+    ("query_replace::ThisAndWait", "query replace: this and wait"),
+    ("query_replace::Previous", "query replace: previous"),
+    ("query_replace::Undo", "query replace: undo"),
+    (
+        "query_replace::EditReplacement",
+        "query replace: edit replacement",
+    ),
+    ("query_replace::Exit", "query replace: exit"),
+    ("query_replace::Recenter", "query replace: recenter"),
+    ("query_replace::Help", "query replace: help"),
+];
+
+#[gpui::test]
+async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in QUERY_REPLACE_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        let names = cx
+            .all_action_names()
+            .iter()
+            .filter(|name| name.starts_with("query_replace::"))
+            .count();
+        assert_eq!(names, QUERY_REPLACE_ACTIONS.len());
+        assert!(
+            cx.build_action("query_replace::ToggleCase", None)
+                .unwrap()
+                .partial_eq(&bongos_query_replace::actions::ToggleCase)
+        );
+    });
+}
+
 /// The `emacs` commands, with the palette text of each.
 const EMACS_ACTIONS: [(&str, &str); 49] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),

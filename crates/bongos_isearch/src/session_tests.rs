@@ -1083,12 +1083,7 @@ async fn isearch_the_session_block_binds_the_in_session_actions(cx: &mut TestApp
         });
         bound.sort_unstable();
         bound.dedup();
-        // Query replace is not bound by isearch: its own feature binds it.
-        let mut expected = IN_SESSION
-            .iter()
-            .copied()
-            .filter(|name| !name.starts_with("isearch::QueryReplace"))
-            .collect::<Vec<_>>();
+        let mut expected = IN_SESSION.to_vec();
         expected.sort_unstable();
         assert_eq!(bound, expected, "{path}");
     }

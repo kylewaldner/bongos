@@ -33,9 +33,6 @@ const STARTERS: &[(&str, &str)] = &[
     ("ctrl-alt-r", "isearch::BackwardRegexp"),
 ];
 
-/// The `isearch` commands with no key yet: query replace is bound by its own feature.
-const UNBOUND: &[&str] = &["isearch::QueryReplace", "isearch::QueryReplaceRegexp"];
-
 const EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full"];
 const SESSION: [&str; 3] = ["Workspace", "Isearch", "Editor mode=full"];
 const STRIP_SESSION: [&str; 4] = ["Workspace", "Minibuffer", "Isearch", "Editor mode=full"];
@@ -173,7 +170,7 @@ async fn a_session_leaves_the_regexp_starters_to_the_editor(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-async fn every_isearch_action_is_listed_and_bound_or_documented_unbound(cx: &mut TestAppContext) {
+async fn every_isearch_action_is_listed_and_bound(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     // Settings > Keymap lists `all_action_names`, bound or not.
     let listed: Vec<&str> = cx.update(|cx| {
@@ -191,18 +188,13 @@ async fn every_isearch_action_is_listed_and_bound_or_documented_unbound(cx: &mut
             .collect();
         for (action, _) in super::bongos_tests::ISEARCH_ACTIONS {
             assert!(listed.contains(&action), "{action} is not listed");
-            assert_eq!(
-                bound.contains(&action),
-                !UNBOUND.contains(&action),
-                "{}: {action}",
-                platform.emacs
-            );
+            assert!(bound.contains(&action), "{}: {action}", platform.emacs);
         }
     }
 }
 
 #[gpui::test]
-async fn a_session_binds_every_in_session_command_but_the_unbound_ones(cx: &mut TestAppContext) {
+async fn a_session_binds_every_in_session_command(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     for platform in [LINUX, MACOS] {
         let overrides = cx
@@ -215,12 +207,7 @@ async fn a_session_binds_every_in_session_command_but_the_unbound_ones(cx: &mut 
             .map(|binding| binding.action().name())
             .collect();
         for action in bongos_isearch::actions::IN_SESSION {
-            assert_eq!(
-                bound.contains(action),
-                !UNBOUND.contains(action),
-                "{}: {action}",
-                platform.overrides
-            );
+            assert!(bound.contains(action), "{}: {action}", platform.overrides);
         }
     }
 }

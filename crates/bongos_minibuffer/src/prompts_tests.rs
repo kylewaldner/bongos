@@ -487,3 +487,41 @@ async fn minibuffer_prompts_are_centered_while_their_host_is_not_routed(cx: &mut
     assert!(session_view(&workspace, cx).is_some());
     assert!(!in_strip(&workspace, cx));
 }
+
+#[gpui::test]
+async fn a_selected_initial_input_is_replaced_by_typing(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Log::default();
+    let cx = &mut cx;
+
+    open_session(&workspace, cx, string_session(&log).initial_input("abc"));
+    assert_eq!(input(&workspace, cx), "abc");
+    cx.simulate_input("x");
+    assert_eq!(
+        input(&workspace, cx),
+        "abcx",
+        "a plain initial input is kept"
+    );
+
+    open_session(
+        &workspace,
+        cx,
+        string_session(&log)
+            .initial_input("abc")
+            .select_initial_input(),
+    );
+    assert_eq!(input(&workspace, cx), "abc");
+    cx.dispatch_action(minibuffer::Confirm);
+    cx.run_until_parked();
+    assert_eq!(log.borrow().last().unwrap(), "input:abc", "RET accepts it");
+
+    open_session(
+        &workspace,
+        cx,
+        string_session(&log)
+            .initial_input("abc")
+            .select_initial_input(),
+    );
+    cx.simulate_input("x");
+    assert_eq!(input(&workspace, cx), "x", "typing replaces the selection");
+}
