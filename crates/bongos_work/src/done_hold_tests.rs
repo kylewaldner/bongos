@@ -311,3 +311,72 @@ fn only_a_write_outside_the_tree_reads_nothing_again() {
     assert!(refreshes(&names(&["r1"]), &names(&["checks.live"])));
     assert!(refreshes(&names(&["r1"]), &[]));
 }
+
+/// Holds what a refresher last copied in: a source over run state that another thread updates.
+#[derive(Default)]
+struct Snapshot {
+    /// What the next refresh copies in.
+    pending: parking_lot::Mutex<BTreeMap<String, String>>,
+    copied: parking_lot::Mutex<BTreeMap<String, String>>,
+    refreshes: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::DoneHoldRefresher for Snapshot {
+    fn refresh(&self) {
+        self.refreshes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.copied.lock() = self.pending.lock().clone();
+    }
+}
+
+struct SnapshotSource(std::sync::Arc<Snapshot>);
+
+impl DoneHoldSource for SnapshotSource {
+    fn hold(&self, task_id: &str, _cx: &App) -> Option<String> {
+        self.0.copied.lock().get(task_id).cloned()
+    }
+
+    fn would_hold(&self, _task_id: &str, _cx: &mut App) -> gpui::Task<Option<String>> {
+        gpui::Task::ready(None)
+    }
+}
+
+#[gpui::test]
+async fn a_refresher_runs_on_every_tree_read_before_the_sources_are_asked(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    to_last_todo(&harness, cx).await;
+    let snapshot = std::sync::Arc::new(Snapshot::default());
+    cx.update(|_, cx| {
+        DoneHolds::add_refresher("snapshot", snapshot.clone(), cx);
+        DoneHolds::add_source("snapshot", Rc::new(SnapshotSource(snapshot.clone())), cx);
+    });
+    // What the write that finishes the task commits with it, the refresher reads with the tree
+    // that write publishes: the first snapshot showing the task finished already holds it.
+    snapshot
+        .pending
+        .lock()
+        .insert("l1".to_string(), HOLD.to_string());
+    let refreshes = snapshot.refreshes.load(std::sync::atomic::Ordering::SeqCst);
+    harness
+        .run_and_wait(cx, "task::Advance", &[Input::Pick("backfill")])
+        .await;
+    assert!(snapshot.refreshes.load(std::sync::atomic::Ordering::SeqCst) > refreshes);
+    assert_eq!(todo_states(&harness, cx)[2], TodoState::Done);
+    let (hold, state) = backfill_state(&harness, cx);
+    assert_eq!(hold.as_deref(), Some(HOLD));
+    assert_ne!(state, State::Done);
+
+    // Removed, it runs no more.
+    cx.update(|_, cx| DoneHolds::remove_refresher("snapshot", cx));
+    let refreshes = snapshot.refreshes.load(std::sync::atomic::Ordering::SeqCst);
+    cx.update(|_, cx| {
+        if let Some(store) = crate::WorkStore::global(cx) {
+            store.update(cx, |store, cx| store.refresh_sources(cx));
+        }
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        snapshot.refreshes.load(std::sync::atomic::Ordering::SeqCst),
+        refreshes
+    );
+}

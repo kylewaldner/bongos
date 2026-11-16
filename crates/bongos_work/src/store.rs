@@ -53,7 +53,7 @@ use crate::changes::ChangedCount;
 use crate::overview::{self, Inputs, RepositoryRow};
 use crate::rebase::{RebaseChecks, RebaseState};
 use crate::ref_watch::{GitDirInfo, RefWatches};
-use crate::registry::DoneHolds;
+use crate::registry::{DoneHoldRefreshers, DoneHolds};
 use crate::seams::{DefinitionWriter, DefinitionWriters, ProjectSources, WriteOutcome};
 use crate::settings::Repository;
 use crate::worktrees::Layout;
@@ -642,6 +642,7 @@ impl WorkStore {
             needs_conversion: self.needs_conversion.clone(),
             locations: self.dirs.locations.clone(),
             done_holds: self.done_holds.clone(),
+            done_hold_refreshers: DoneHoldRefreshers::global(cx),
         };
         let run = cx.spawn({
             let alive = alive.clone();
@@ -781,6 +782,8 @@ struct Seams {
     locations: Option<PathBuf>,
     /// The done holds the store last collected, set on every tree read.
     done_holds: Arc<Mutex<BTreeMap<String, String>>>,
+    /// Brought up to date after every tree read, before the store asks the sources.
+    done_hold_refreshers: DoneHoldRefreshers,
 }
 
 /// The session: watch the root, load, then run one job at a time until the store or the session
@@ -1017,6 +1020,8 @@ impl Disk {
             }
         }
         tree.projects.extend(self.seams.sources.projects());
+        // After the projects, so what the hold sources know is at least as new as the tree.
+        self.seams.done_hold_refreshers.refresh();
         tree.set_done_holds(&self.seams.done_holds.lock());
         self.tree = Some(Arc::new(tree));
     }
