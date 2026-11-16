@@ -467,10 +467,7 @@ async fn the_starters_of_a_search_run_once_with_an_argument_pending(cx: &mut Tes
 async fn a_counted_motion_between_two_kills_keeps_them_apart(cx: &mut TestAppContext) {
     let mut cx = editor_with(cx, "ˇab\ncd\nef").await;
     cx.simulate_keystrokes("ctrl-k ctrl-u 2 ctrl-f ctrl-k");
-    assert_eq!(
-        ring_texts(&mut cx),
-        vec!["d".to_string(), "ab".to_string()]
-    );
+    assert_eq!(ring_texts(&mut cx), vec!["d".to_string(), "ab".to_string()]);
 }
 
 #[gpui::test]
@@ -528,9 +525,7 @@ async fn zap_back_to_char_with_a_count_reaches_the_nth_occurrence(cx: &mut TestA
 }
 
 #[gpui::test]
-async fn zap_back_up_to_char_with_a_count_stops_after_the_nth_occurrence(
-    cx: &mut TestAppContext,
-) {
+async fn zap_back_up_to_char_with_a_count_stops_after_the_nth_occurrence(cx: &mut TestAppContext) {
     let (editor, mut cx) = workspace_editor("a,b,c,d", 7, cx).await;
     cx.simulate_keystrokes("alt-2 ctrl-alt-shift-z");
     cx.run_until_parked();
