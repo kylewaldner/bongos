@@ -7,6 +7,7 @@ pub mod build_log;
 pub mod git;
 pub mod host;
 pub mod installer;
+pub mod offer;
 pub mod reconcile_run;
 
 use std::any::TypeId;
