@@ -8,12 +8,14 @@
 //!
 //! A temporary tree is `<scratch>/<uuid>`, with `<scratch>/<uuid>.owner` naming the process that
 //! made it (its pid and start time). At the next load, [`sweep_scratch`] removes every such tree
-//! whose owner is gone: what a crash left behind.
+//! whose owner file names a process that is gone: what a crash left behind. A tree without an
+//! owner file is not known to be one of these, so it stays.
 
 use std::path::{Path, PathBuf};
 
 use bongos_project_repo::Git;
 
+use crate::process::StopHandle;
 use crate::tree_key::private_index;
 use crate::work_tree::ensure_top_level;
 
@@ -122,8 +124,10 @@ impl Drop for TempTree {
 }
 
 /// Removes the temporary tree at `path` with git (from `repository`, else from inside the tree
-/// itself), then whatever git left of it, then its owner file and its private index. Never
-/// touches anything but a UUID-named directory directly inside `scratch`.
+/// itself), then whatever git left of it, then its owner file and its private index; the owner
+/// file and the index go too when the tree was never made. Never touches anything but a
+/// UUID-named directory directly inside `scratch`, and never prunes the repository's other
+/// worktrees: a registration a failed removal leaves is only marked prunable.
 async fn remove_temp_tree(
     git: &Git,
     repository: Option<&Path>,
@@ -131,32 +135,31 @@ async fn remove_temp_tree(
     path: &Path,
     index_dir: &Path,
 ) {
-    if !is_scratch_tree(scratch, path) {
+    let absent = std::fs::symlink_metadata(path).is_err();
+    if !is_scratch_name(scratch, path) || !(absent || is_scratch_tree(scratch, path)) {
         log::error!(
             "checks: refusing to remove {}, which is not a temporary tree",
             path.display()
         );
         return;
     }
-    if path.join(".git").is_file() {
-        let removed = match repository {
-            Some(repository) => git.worktree_remove(repository, path).await,
-            None => git
-                .run(
-                    path,
-                    &["worktree", "remove", "--force", &path.to_string_lossy()],
-                )
+    if !absent {
+        if path.join(".git").is_file()
+            && let Some(text) = path.to_str()
+        {
+            let directory = repository.unwrap_or(path);
+            if let Err(error) = git
+                .run(directory, &["worktree", "remove", "--force", text])
                 .await
-                .map(|_| ()),
-        };
-        if let Err(error) = removed {
-            log::warn!("checks: git removing {}: {error}", path.display());
+            {
+                log::warn!("checks: git removing {}: {error}", path.display());
+            }
         }
-    }
-    if std::fs::symlink_metadata(path).is_ok()
-        && let Err(error) = std::fs::remove_dir_all(path)
-    {
-        log::error!("checks: removing {}: {error}", path.display());
+        if std::fs::symlink_metadata(path).is_ok()
+            && let Err(error) = std::fs::remove_dir_all(path)
+        {
+            log::error!("checks: removing {}: {error}", path.display());
+        }
     }
     if let Some(owner) = owner_file(scratch, path) {
         std::fs::remove_file(owner).ok();
@@ -164,13 +167,18 @@ async fn remove_temp_tree(
     std::fs::remove_file(private_index(path, index_dir)).ok();
 }
 
-/// Whether `path` is a directory (not a symbolic link) directly inside `scratch` named by a UUID.
-fn is_scratch_tree(scratch: &Path, path: &Path) -> bool {
+/// Whether `path` is directly inside `scratch` and named by a UUID.
+fn is_scratch_name(scratch: &Path, path: &Path) -> bool {
     path.parent() == Some(scratch)
         && path
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| uuid::Uuid::parse_str(name).is_ok())
+}
+
+/// Whether `path` is a directory (not a symbolic link) directly inside `scratch` named by a UUID.
+fn is_scratch_tree(scratch: &Path, path: &Path) -> bool {
+    is_scratch_name(scratch, path)
         && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
 }
 
@@ -190,27 +198,40 @@ fn write_owner(scratch: &Path, id: &str) -> Result<(), String> {
     .map_err(|error| format!("writing the owner of a temporary tree: {error}"))
 }
 
-/// Whether the process an owner file names still runs: the same pid with the same start time.
-/// An owner file that is missing or unreadable names no live process.
-fn owner_alive(owner: &Path) -> bool {
+/// What an owner file says of the process that made its tree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    /// The same pid runs with the same start time.
+    Alive,
+    /// It names a process that is gone.
+    Gone,
+    /// The file is missing, unreadable or names no process.
+    Unknown,
+}
+
+fn owner_of(owner: &Path) -> Owner {
     let Ok(text) = std::fs::read_to_string(owner) else {
-        return false;
+        return Owner::Unknown;
     };
     let mut fields = text.split_whitespace();
     let (Some(Ok(pid)), Some(Ok(start))) = (
         fields.next().map(str::parse::<u32>),
         fields.next().map(str::parse::<u64>),
     ) else {
-        return false;
+        return Owner::Unknown;
     };
-    if pid == std::process::id() {
-        return true;
+    if pid == std::process::id()
+        || (start != 0 && bongos_workflow::process::start_time(pid) == Some(start))
+    {
+        Owner::Alive
+    } else {
+        Owner::Gone
     }
-    start != 0 && bongos_workflow::process::start_time(pid) == Some(start)
 }
 
-/// Removes every temporary tree in `scratch` whose owner process is gone, with its owner file,
-/// and every owner file left without its tree. Returns the trees removed.
+/// Removes every temporary tree in `scratch` whose owner file names a process that is gone,
+/// with its owner file, and every owner file left without its tree. A tree without a readable
+/// owner file stays. Returns the trees removed.
 pub(crate) async fn sweep_scratch(git: &Git, scratch: &Path, index_dir: &Path) -> Vec<PathBuf> {
     let Ok(scratch) = scratch.canonicalize() else {
         return Vec::new();
@@ -232,47 +253,69 @@ pub(crate) async fn sweep_scratch(git: &Git, scratch: &Path, index_dir: &Path) -
         if !is_scratch_tree(&scratch, &path) {
             continue;
         }
-        let owner = owner_file(&scratch, &path);
-        if owner.as_deref().is_some_and(owner_alive) {
+        if owner_file(&scratch, &path).map(|owner| owner_of(&owner)) != Some(Owner::Gone) {
             continue;
         }
         remove_temp_tree(git, None, &scratch, &path, index_dir).await;
         removed.push(path);
     }
     for (owner, tree) in owners {
-        if !tree.exists() && !owner_alive(&owner) {
+        if !tree.exists() && owner_of(&owner) != Owner::Alive {
             std::fs::remove_file(owner).ok();
         }
     }
     removed
 }
 
+/// Why a lent tree was not made ready.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LentTreeError {
+    /// `stop` was stopped after the checkout: the tree is at the commit but not cleaned.
+    Stopped,
+    Failed(String),
+}
+
 /// Checks out `commit` detached in the lent tree at `path`, dropping its changes, and removes
 /// its untracked files that are not ignored (build output stays). Refused when `path` is not
-/// apart from `protected` or not the top of a working tree.
+/// apart from `protected` or not the top of a working tree. Once `stop` is stopped, no further
+/// git command runs in the tree.
 pub(crate) async fn check_out_lent_tree(
     git: &Git,
     path: &Path,
     commit: &str,
     protected: &[&Path],
-) -> Result<(), String> {
-    ensure_commit(commit)?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| format!("the lent tree {} is not usable: {error}", path.display()))?;
-    ensure_apart(&canonical, protected)?;
+    stop: &StopHandle,
+) -> Result<(), LentTreeError> {
+    let failed = LentTreeError::Failed;
+    if stop.is_stopped() {
+        return Err(LentTreeError::Stopped);
+    }
+    ensure_commit(commit).map_err(failed)?;
+    let canonical = path.canonicalize().map_err(|error| {
+        failed(format!(
+            "the lent tree {} is not usable: {error}",
+            path.display()
+        ))
+    })?;
+    ensure_apart(&canonical, protected).map_err(failed)?;
     ensure_top_level(git, &canonical).await.map_err(|_| {
-        format!(
+        failed(format!(
             "the lent tree {} is not the top of a working tree",
             path.display()
-        )
+        ))
     })?;
+    if stop.is_stopped() {
+        return Err(LentTreeError::Stopped);
+    }
     git.run(&canonical, &["checkout", "--detach", "--force", commit])
         .await
-        .map_err(|error| format!("checking out the base in the lent tree: {error}"))?;
+        .map_err(|error| failed(format!("checking out the base in the lent tree: {error}")))?;
+    if stop.is_stopped() {
+        return Err(LentTreeError::Stopped);
+    }
     git.run(&canonical, &["clean", "-f", "-d"])
         .await
-        .map_err(|error| format!("cleaning the lent tree: {error}"))?;
+        .map_err(|error| failed(format!("cleaning the lent tree: {error}")))?;
     Ok(())
 }
 

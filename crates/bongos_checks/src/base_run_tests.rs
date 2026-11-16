@@ -13,10 +13,11 @@ use bongos_project_repo::Git;
 use gpui::{BorrowAppContext as _, TestAppContext};
 use settings::SettingsStore;
 
-use crate::base_tree::{TempTree, ensure_apart};
+use crate::base_tree::{LentTreeError, TempTree, check_out_lent_tree, ensure_apart};
 use crate::engine::RunChecksRequest;
-use crate::engine_tests::World;
+use crate::engine_tests::{World, finish, set_kill_grace};
 use crate::pools_tests::FakeClock;
+use crate::process::StopHandle;
 use crate::test_support::{
     FakeSecond, FakeTrees, commit_everything, git_in, init_git_repo, tree_snapshot, write_file,
 };
@@ -325,8 +326,9 @@ async fn a_leftover_from_a_crash_is_removed_at_the_next_load(cx: &mut TestAppCon
         );
         path
     };
-    // A crash left a tree whose owner is gone: no owner file, or one naming no live process.
-    let orphan = add("01890a5d-ac96-774b-bcce-b302099a8057");
+    // A crash left a tree whose owner file names a process that is gone. A tree with no owner
+    // file is not known to be bongos's, so it stays.
+    let ownerless = add("01890a5d-ac96-774b-bcce-b302099a8057");
     let dead = add("01890a5d-ac96-774b-bcce-b302099a8058");
     std::fs::write(
         scratch.join("01890a5d-ac96-774b-bcce-b302099a8058.owner"),
@@ -366,18 +368,17 @@ async fn a_leftover_from_a_crash_is_removed_at_the_next_load(cx: &mut TestAppCon
     removed.sort();
     assert_eq!(
         removed,
-        [
-            canonical_scratch.join("01890a5d-ac96-774b-bcce-b302099a8057"),
-            canonical_scratch.join("01890a5d-ac96-774b-bcce-b302099a8058"),
-        ]
+        [canonical_scratch.join("01890a5d-ac96-774b-bcce-b302099a8058")]
     );
-    assert!(!orphan.exists() && !dead.exists());
+    assert!(!dead.exists());
+    assert!(ownerless.join("marker.txt").exists());
     assert!(live.join("marker.txt").exists());
     assert!(other.join("file.txt").exists());
     assert!(outside.join("precious.txt").exists());
     assert_eq!(
         scratch_entries(&world),
         [
+            "01890a5d-ac96-774b-bcce-b302099a8057",
             "01890a5d-ac96-774b-bcce-b302099a8059",
             "01890a5d-ac96-774b-bcce-b302099a8059.owner",
             "01890a5d-ac96-774b-bcce-b302099a805a",
@@ -386,9 +387,35 @@ async fn a_leftover_from_a_crash_is_removed_at_the_next_load(cx: &mut TestAppCon
     );
     assert_eq!(
         worktree_count(&world.tree),
-        2,
-        "the task's tree and the live one"
+        3,
+        "the task's tree, the ownerless one and the live one"
     );
+}
+
+#[gpui::test]
+async fn a_temporary_tree_git_could_not_add_leaves_no_owner_file(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (world, _) = world(cx, FakeClock::automatic());
+    let protected = [world.tree.as_path()];
+    let missing = "0123456789abcdef0123456789abcdef01234567";
+
+    let created = TempTree::create(
+        &git(),
+        &world.tree,
+        &scratch(&world),
+        missing,
+        &world.index,
+        &protected,
+    )
+    .await;
+
+    assert!(created.is_err());
+    assert!(
+        scratch_entries(&world).is_empty(),
+        "{:?}",
+        scratch_entries(&world)
+    );
+    assert_eq!(worktree_count(&world.tree), 1);
 }
 
 #[gpui::test]
@@ -603,9 +630,15 @@ async fn busy_and_unavailable_fall_back_to_a_temporary_tree_at_once(cx: &mut Tes
 }
 
 #[gpui::test]
-async fn drain_during_a_base_run_releases_the_lease_it_holds(cx: &mut TestAppContext) {
+async fn a_drain_whose_grace_wins_releases_the_lease_while_the_check_still_runs(
+    cx: &mut TestAppContext,
+) {
     cx.executor().allow_parking();
-    let (world, _) = world(cx, FakeClock::manual());
+    let clock = FakeClock::manual();
+    let (world, _) = world(cx, clock.clone());
+    // SIGKILL comes four seconds after the stop, in real time: the check outlives SIGTERM, so
+    // only the engine's clock can end the drain first.
+    set_kill_grace(cx, 5);
     let second = second_tree(&world, &world.tree, "app");
     let trees = FakeTrees::default();
     trees.state().second.insert(
@@ -620,6 +653,7 @@ async fn drain_during_a_base_run_releases_the_lease_it_holds(cx: &mut TestAppCon
     );
     cx.update(|cx| TaskTreesRegistry::set(Rc::new(trees.clone()), cx));
     block(&world);
+    std::fs::write(world.output.join("ignore-term"), "").unwrap();
     let blocked = when_blocked(&world);
 
     let run = world.run(
@@ -633,14 +667,49 @@ async fn drain_during_a_base_run_releases_the_lease_it_holds(cx: &mut TestAppCon
         "held while the check runs"
     );
 
-    let drained = world.engine.update(cx, |engine, cx| engine.drain(cx)).await;
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    clock.advance(std::time::Duration::from_secs(5));
+    let drained = drain.await;
 
+    // The grace won: the check still runs, and the drain itself let the lease go.
     assert!(drained.is_empty());
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.is_running(TASK))
+    );
     assert_eq!(trees.state().released, ["app"]);
     assert!(trees.state().held.is_empty());
-    let report = run.await;
+    let report = finish(cx, run);
     assert!(report.cancelled());
     assert_eq!(trees.state().released, ["app"], "released once");
+}
+
+#[gpui::test]
+async fn a_stop_during_the_checkout_runs_no_further_git_in_the_lent_tree(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (world, base) = world(cx, FakeClock::automatic());
+    let second = second_tree(&world, &world.tree, "app");
+    let protected = [world.tree.as_path()];
+    let tip = git_in(&second, &["rev-parse", "HEAD"]);
+
+    // Stopped before it began: nothing runs in the tree.
+    let stop = StopHandle::default();
+    stop.stop();
+    assert_eq!(
+        check_out_lent_tree(&git(), &second, &base, &protected, &stop).await,
+        Err(LentTreeError::Stopped)
+    );
+    assert_eq!(git_in(&second, &["rev-parse", "HEAD"]), tip);
+    assert!(second.join("stray.txt").exists());
+
+    // Not stopped: checked out at the base and cleaned, build output kept.
+    check_out_lent_tree(&git(), &second, &base, &protected, &StopHandle::default())
+        .await
+        .unwrap();
+    assert_eq!(git_in(&second, &["rev-parse", "HEAD"]), base);
+    assert!(!second.join("stray.txt").exists());
+    assert!(second.join("ignored/build.out").exists());
 }
 
 #[gpui::test]

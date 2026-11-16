@@ -51,7 +51,7 @@ use gpui::{
 };
 use settings::Settings as _;
 
-use crate::base_tree::{TempTree, check_out_lent_tree, sweep_scratch};
+use crate::base_tree::{LentTreeError, TempTree, check_out_lent_tree, sweep_scratch};
 use crate::changed_files::merge_base;
 use crate::command_logic::dump_text;
 use crate::evidence_store::{scan_records, task_prefix};
@@ -569,8 +569,10 @@ impl ChecksEngine {
     /// runs). The engine answers no landing job yet, so there is nothing more to let go.
     ///
     /// Guaranteed at resolution: every run was told to stop, no run or part starts while
-    /// drained, every second tree lease is released, and `checks.live` is empty and stays so
-    /// while drained (no live row is written). Not guaranteed when the grace wins: a run that
+    /// drained, every second tree lease is released (but one whose tree git is checking out
+    /// right then, which goes as soon as that git command ends, with no other after it), and
+    /// `checks.live` is empty and stays so while drained (no live row is written). Not
+    /// guaranteed when the grace wins: a run that
     /// has not ended yet is still active ([`Self::is_running`]), its process may still be
     /// exiting, its pool lease may still be held, its temporary tree may not be removed yet and
     /// its record may not yet hold the stopped part; those settle when the run ends.
@@ -1060,10 +1062,18 @@ async fn base_trees(
             SecondTree::Lease(lease) => {
                 let path = lease.path().to_path_buf();
                 let env = EnvBase::for_lease(lease.as_ref());
-                plan.leases.borrow_mut().push(lease);
-                check_out_lent_tree(git, &path, commit, &protected)
+                // Held here, out of a drain's reach, while git changes the tree: a lease is
+                // let go only once no git command runs in it. Dropped on an error.
+                check_out_lent_tree(git, &path, commit, &protected, &plan.stop)
                     .await
-                    .map_err(NoVerdictReason::StartFailed)?;
+                    .map_err(|error| match error {
+                        LentTreeError::Stopped => NoVerdictReason::Cancelled,
+                        LentTreeError::Failed(why) => NoVerdictReason::StartFailed(why),
+                    })?;
+                plan.leases.borrow_mut().push(lease);
+                if plan.stop.is_stopped() {
+                    return Err(NoVerdictReason::Cancelled);
+                }
                 trees.push(RepoTree {
                     repo: tip.repo.clone(),
                     path,

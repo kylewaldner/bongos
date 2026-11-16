@@ -2,7 +2,8 @@
 # Writes where it runs to its output, one line each: its directory (symbolic links resolved),
 # the tree kind, the text of marker.txt there, LANE_MARK, and its part. Copies the file
 # BONGOS_CHECK_EVIDENCE names beside its result file. While the file block exists in the output
-# folder (the parent of the record's folder), touches blocked there and waits until stopped.
+# folder (the parent of the record's folder), touches blocked there and waits until stopped;
+# ignores SIGTERM there (and so does its sleep) when ignore-term exists in that folder too.
 echo "pwd=$(pwd -P)"
 echo "tree=$BONGOS_CHECK_TREE"
 echo "marker=$(cat marker.txt 2>/dev/null)"
@@ -13,6 +14,9 @@ if [ -n "${BONGOS_CHECK_EVIDENCE-}" ]; then
     cp "$BONGOS_CHECK_EVIDENCE" "$out/evidence-copy.json"
 fi
 if [ -f "$out/../block" ]; then
+    if [ -f "$out/../ignore-term" ]; then
+        trap '' TERM
+    fi
     touch "$out/../blocked"
     sleep 60
 fi

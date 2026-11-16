@@ -891,7 +891,22 @@ fn when_blocked(world: &World, part: u32) -> oneshot::Receiver<()> {
     reaching
 }
 
-fn set_kill_grace(cx: &mut TestAppContext, seconds: u32) {
+/// Waits for `task`, which ends only once real processes have ended, without parking the test
+/// scheduler: one park may not outlast a part that a loaded machine is slow to stop.
+pub(crate) fn finish<T: 'static>(cx: &mut TestAppContext, task: Task<T>) -> T {
+    let mut task = std::pin::pin!(task);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        cx.run_until_parked();
+        if let Some(value) = futures::FutureExt::now_or_never(task.as_mut()) {
+            return value;
+        }
+        assert!(std::time::Instant::now() < deadline, "the task never ended");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+pub(crate) fn set_kill_grace(cx: &mut TestAppContext, seconds: u32) {
     cx.update(|cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
@@ -942,9 +957,10 @@ async fn drain_request_during_part_three(
 
     // Real time only measures the drain against the grace; no outcome depends on the calendar.
     let began = std::time::Instant::now();
-    let drained = world.engine.update(cx, |engine, cx| engine.drain(cx)).await;
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    let drained = finish(cx, drain);
     let took = began.elapsed();
-    (run.await, drained, took)
+    (finish(cx, run), drained, took)
 }
 
 #[gpui::test]
@@ -1122,7 +1138,7 @@ async fn engine_drain_resolves_at_the_grace_on_its_clock_while_a_run_has_not_end
     assert!(live_keys(&world).is_empty(), "{:?}", live_keys(&world));
 
     // The run ends after the SIGKILL, still writing no live row while drained.
-    let report = run.await;
+    let report = finish(cx, run);
     cx.run_until_parked();
     assert!(report.cancelled());
     assert!(
