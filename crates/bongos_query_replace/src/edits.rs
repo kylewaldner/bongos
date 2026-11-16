@@ -225,15 +225,27 @@ impl Edits {
         let snapshot = editor.buffer().read(cx).snapshot(cx);
         let mut skipped = 0;
         let mut ranges = Vec::with_capacity(chunk.len());
-        for hit in chunk {
-            let start = hit.anchors.start.to_offset(&snapshot);
-            let end = hit.anchors.end.to_offset(&snapshot).max(start);
+        // The hits are in buffer order, so their starts and their ends are each resolved in one
+        // forward pass instead of one seek from the root per anchor.
+        let starts = snapshot.summaries_for_anchors::<MultiBufferOffset, _>(
+            chunk.iter().map(|hit| &hit.anchors.start),
+        );
+        let ends = snapshot.summaries_for_anchors::<MultiBufferOffset, _>(
+            chunk.iter().map(|hit| &hit.anchors.end),
+        );
+        for ((hit, start), end) in chunk.into_iter().zip(starts).zip(ends) {
+            let end = end.max(start);
             let Some(replacement) = hit.replacement else {
                 skipped += 1;
                 continue;
             };
-            let current = snapshot.text_for_range(start..end);
-            if !current.flat_map(str::chars).eq(hit.found.matched().chars()) {
+            let matched = hit.found.matched();
+            if end.0 - start.0 != matched.len()
+                || !snapshot
+                    .text_for_range(start..end)
+                    .flat_map(str::chars)
+                    .eq(matched.chars())
+            {
                 skipped += 1;
                 continue;
             }
