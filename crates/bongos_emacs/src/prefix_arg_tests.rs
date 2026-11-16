@@ -105,14 +105,13 @@ async fn blur_of_the_origin_editor_clears_the_argument(cx: &mut TestAppContext) 
     init_test(cx);
     let mut cx = EditorTestContext::new(cx).await;
     cx.update_editor(|editor, window, cx| window.focus(&editor.focus_handle(cx), cx));
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
+    cx.simulate_resize(gpui::size(gpui::px(800.), gpui::px(600.)));
     start(&mut cx, digit(3));
     assert_eq!(pending(&mut cx), Some(digit(3)));
     cx.update(|window, cx| {
         window.blur();
-        window.refresh();
     });
+    cx.simulate_resize(gpui::size(gpui::px(801.), gpui::px(600.)));
     cx.run_until_parked();
     assert_eq!(pending(&mut cx), None);
 }
