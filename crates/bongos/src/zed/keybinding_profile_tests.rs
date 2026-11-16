@@ -333,6 +333,7 @@ async fn load_default_keymap_binds_vim_json_for_vim_or_helix_mode_under_vscode(
 fn the_lowercase_aliases_parse_and_written_values_stay() {
     for (alias, value, written) in [
         ("emacs", BaseKeymapContent::Emacs, "Emacs"),
+        ("vim", BaseKeymapContent::Vim, "Vim"),
         ("vscode", BaseKeymapContent::VSCode, "VSCode"),
         ("none", BaseKeymapContent::None, "None"),
     ] {
@@ -677,4 +678,195 @@ async fn panel_keys_resolve_under_emacs_vscode_and_vim(cx: &mut TestAppContext) 
             }
         }
     }
+}
+
+const VIM_NORMAL: [&str; 3] = [
+    "Workspace",
+    "Pane",
+    "Editor mode=full vim_mode=normal vim_operator=none VimControl",
+];
+
+fn set_base_keymap_json(cx: &mut TestAppContext, base_keymap: &str) {
+    cx.update(|cx| {
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store
+                .set_user_settings(&format!(r#"{{"base_keymap": "{base_keymap}"}}"#), cx)
+                .expect("settings parse");
+        });
+    });
+}
+
+/// The bindings `load_default_keymap` binds for the current settings.
+fn loaded_keymap(cx: &mut TestAppContext) -> Vec<KeyBinding> {
+    cx.update(|cx| {
+        cx.clear_key_bindings();
+        super::load_default_keymap(cx);
+        let bindings: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
+        bindings
+    })
+}
+
+fn has_action_prefix(bindings: &[KeyBinding], prefix: &str) -> bool {
+    bindings
+        .iter()
+        .any(|binding| binding.action().name().starts_with(prefix))
+}
+
+#[gpui::test]
+async fn the_vim_profile_resolves_colon_and_the_space_leader(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        let keymap = Keymap::new(load_profile(BaseKeymap::Vim, true, macos, cx));
+        assert_eq!(
+            first(&keymap, ":", &VIM_NORMAL),
+            Some("vim::CommandLine"),
+            "macos={macos}"
+        );
+        let (names, pending) = resolve(&keymap, "space w w", &VIM_NORMAL);
+        assert_eq!(names.first(), Some(&"work::TogglePanel"), "macos={macos}");
+        assert!(!pending, "macos={macos}");
+        // `space` alone is a prefix now, and the timeout falls back to vim's own `space`.
+        let (names, pending) = resolve(&keymap, "space", &VIM_NORMAL);
+        assert_eq!(names.first(), Some(&"vim::WrappingRight"), "macos={macos}");
+        assert!(pending, "macos={macos}");
+        // The VS Code leader and the Terminal tail stay.
+        let modifier = if macos { "cmd" } else { "ctrl" };
+        assert_eq!(
+            first(&keymap, &format!("{modifier}-k b w w"), &WORKSPACE),
+            Some("work::TogglePanel"),
+            "macos={macos}"
+        );
+        // The space leader does not leak into insert mode.
+        let insert = ["Workspace", "Pane", "Editor mode=full vim_mode=insert"];
+        assert_ne!(
+            first(&keymap, "space w w", &insert),
+            Some("work::TogglePanel"),
+            "macos={macos}"
+        );
+    }
+    let keymap = Keymap::new(load_profile(BaseKeymap::Vim, true, false, cx));
+    assert_eq!(
+        first(&keymap, "ctrl-k", &TERMINAL),
+        Some("terminal::SendKeystroke")
+    );
+}
+
+#[gpui::test]
+async fn a_user_binding_on_ctrl_p_wins_under_vim(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    let user = user_bindings(
+        r#"[
+            {"context": "Editor", "bindings": {"ctrl-p": "menu::Confirm"}},
+            {"context": "Workspace", "bindings": {"ctrl-p": "menu::Confirm"}}
+        ]"#,
+        cx,
+    );
+    for macos in [false, true] {
+        let mut all = load_profile(BaseKeymap::Vim, true, macos, cx);
+        all.extend(user.clone());
+        let keymap = Keymap::new(all);
+        assert_eq!(
+            first(&keymap, "ctrl-p", &VIM_NORMAL),
+            Some("menu::Confirm"),
+            "macos={macos}"
+        );
+        assert_eq!(
+            first(&keymap, "ctrl-p", &WORKSPACE),
+            Some("menu::Confirm"),
+            "macos={macos}"
+        );
+    }
+}
+
+#[gpui::test]
+async fn switching_through_vim_binds_and_unbinds_vim_and_the_space_rows(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    let space_ww = |bindings: &[KeyBinding]| {
+        let keymap = Keymap::new(bindings.to_vec());
+        first(&keymap, "space w w", &VIM_NORMAL) == Some("work::TogglePanel")
+    };
+    let colon = |bindings: &[KeyBinding]| {
+        let keymap = Keymap::new(bindings.to_vec());
+        first(&keymap, ":", &VIM_NORMAL) == Some("vim::CommandLine")
+    };
+    for (base, vim, emacs) in [
+        ("Emacs", false, true),
+        ("Vim", true, false),
+        ("VSCode", false, false),
+        ("Vim", true, false),
+        ("Emacs", false, true),
+    ] {
+        set_base_keymap_json(cx, base);
+        assert_eq!(
+            cx.update(|cx| {
+                use settings::Settings as _;
+                vim_mode_setting::VimModeSetting::get_global(cx).0
+            }),
+            vim,
+            "{base}: vim mode"
+        );
+        let bindings = loaded_keymap(cx);
+        assert_eq!(has_action_prefix(&bindings, "vim::"), vim, "{base}: vim::");
+        assert_eq!(
+            has_action_prefix(&bindings, "emacs::"),
+            emacs,
+            "{base}: emacs::"
+        );
+        assert_eq!(space_ww(&bindings), vim, "{base}: space w w");
+        assert_eq!(colon(&bindings), vim, "{base}: colon");
+        if vim {
+            assert!(
+                bindings
+                    .iter()
+                    .any(|binding| binding.meta() == Some(KeybindSource::Vim.meta())),
+                "{base}: vim source"
+            );
+        } else {
+            assert!(
+                bindings
+                    .iter()
+                    .all(|binding| binding.meta() != Some(KeybindSource::Vim.meta())),
+                "{base}: stray vim source"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+async fn a_new_full_editor_opens_in_normal_mode_under_vim_and_i_inserts(cx: &mut TestAppContext) {
+    use editor::{Editor, EditorMode, MultiBuffer};
+    use gpui::{AppContext as _, Focusable as _, VisualTestContext};
+
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        editor::init(cx);
+        vim::init(cx);
+    });
+    set_base_keymap_json(cx, "Vim");
+    let bindings = loaded_keymap(cx);
+    cx.update(|cx| {
+        cx.clear_key_bindings();
+        cx.bind_keys(bindings);
+    });
+
+    // The same shape the agent prompt editor has: a full multi-line editor.
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let buffer = cx.new(|cx| language::Buffer::local("", cx));
+        let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        Editor::new(EditorMode::full(), buffer, None, window, cx)
+    });
+    let vim_mode = |cx: &mut VisualTestContext| {
+        editor.update_in(cx, |editor, window, cx| {
+            editor
+                .key_context(window, cx)
+                .get("vim_mode")
+                .map(|mode| mode.to_string())
+        })
+    };
+    editor.update_in(cx, |editor, window, cx| {
+        window.focus(&editor.focus_handle(cx), cx)
+    });
+    assert_eq!(vim_mode(cx).as_deref(), Some("normal"));
+    cx.simulate_keystrokes("i");
+    assert_eq!(vim_mode(cx).as_deref(), Some("insert"));
 }
