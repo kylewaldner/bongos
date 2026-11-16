@@ -166,6 +166,129 @@ async fn advance_on_the_last_todo_of_a_held_task_is_refused_and_writes_nothing(
     assert_eq!(backfill_state(&harness, cx), (None, State::Done));
 }
 
+/// Mirrors the start of the checks source's `OPEN_CHILDREN` text; this crate does not depend on
+/// the checks crate.
+const OPEN_CHILDREN: &str = "complete or drop its open children first";
+
+async fn status_of(
+    harness: &Harness,
+    cx: &mut VisualTestContext,
+    path: &[&str],
+) -> bongos_work_model::Status {
+    harness.file(cx, path).status
+}
+
+#[gpui::test]
+async fn complete_and_close_are_refused_naming_the_checks_and_write_nothing(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = harness(cx, true, true).await;
+    let source = register(cx);
+    *source.would.borrow_mut() = Some(HOLD.to_string());
+    let writes = harness.writes(cx);
+    for (index, action) in ["task::Complete", "task::Close"].into_iter().enumerate() {
+        harness.run(cx, action, &[Input::Pick("backfill")]).await;
+        wait_until(cx, "the refusal", |cx| {
+            last_toast(cx).as_deref() == Some(HOLD)
+        })
+        .await;
+        assert_eq!(source.asked.get(), index + 1);
+        assert_eq!(harness.writes(cx), writes);
+        assert_eq!(
+            status_of(&harness, cx, &["backfill"]).await,
+            bongos_work_model::Status::Open
+        );
+    }
+}
+
+#[gpui::test]
+async fn complete_of_a_satisfied_task_closes_it_done_with_a_history_entry(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    let source = register(cx);
+    let history = harness.file(cx, &["backfill"]).history.len();
+    assert!(harness.file(cx, &["backfill"]).closed.is_none());
+    harness
+        .run_and_wait(cx, "task::Complete", &[Input::Pick("backfill")])
+        .await;
+    assert_eq!(source.asked.get(), 1);
+    assert_eq!(
+        status_of(&harness, cx, &["backfill"]).await,
+        bongos_work_model::Status::Done
+    );
+    let file = harness.file(cx, &["backfill"]);
+    assert_eq!(file.history.len(), history + 1);
+    let entry = file.history.last().unwrap();
+    assert_eq!(entry.event, "closed");
+    assert_eq!(entry.detail, None);
+    assert_eq!(file.closed, Some(entry.at));
+}
+
+#[gpui::test]
+async fn a_group_with_closing_checks_and_an_open_child_is_refused_by_both_commands(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = harness(cx, true, true).await;
+    let source = register(cx);
+    *source.would.borrow_mut() = Some(format!("{OPEN_CHILDREN}: the closing checks run"));
+    let writes = harness.writes(cx);
+    for (index, action) in ["task::Complete", "task::Close"].into_iter().enumerate() {
+        harness.run(cx, action, &[Input::Pick("phase")]).await;
+        wait_until(cx, "the refusal", |cx| {
+            last_toast(cx).is_some_and(|toast| toast.contains(OPEN_CHILDREN))
+        })
+        .await;
+        assert_eq!(source.asked.get(), index + 1);
+        assert_eq!(harness.writes(cx), writes);
+        assert_eq!(
+            status_of(&harness, cx, &["phase"]).await,
+            bongos_work_model::Status::Open
+        );
+    }
+}
+
+#[gpui::test]
+async fn a_group_with_no_closing_checks_and_an_open_child_closes_by_both_commands(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = harness(cx, true, true).await;
+    register(cx);
+    harness
+        .run_and_wait(cx, "task::Complete", &[Input::Pick("phase")])
+        .await;
+    assert_eq!(
+        status_of(&harness, cx, &["phase"]).await,
+        bongos_work_model::Status::Done
+    );
+    harness
+        .run_and_wait(cx, "task::Reopen", &[Input::Pick("phase")])
+        .await;
+    harness
+        .run_and_wait(cx, "task::Close", &[Input::Pick("phase")])
+        .await;
+    assert_eq!(
+        status_of(&harness, cx, &["phase"]).await,
+        bongos_work_model::Status::Done
+    );
+}
+
+#[gpui::test]
+async fn with_no_source_complete_and_close_behave_as_close_did(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    cx.update(|_, cx| assert!(!DoneHolds::has_sources(cx)));
+    harness
+        .run_and_wait(cx, "task::Complete", &[Input::Pick("backfill")])
+        .await;
+    harness
+        .run_and_wait(cx, "task::Close", &[Input::Pick("alpha")])
+        .await;
+    for path in [&["backfill"][..], &["phase", "alpha"][..]] {
+        assert_eq!(
+            status_of(&harness, cx, path).await,
+            bongos_work_model::Status::Done
+        );
+    }
+}
+
 #[gpui::test]
 async fn two_advances_each_wait_for_the_source_before_writing(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx, true, true).await;

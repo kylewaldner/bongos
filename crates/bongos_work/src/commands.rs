@@ -51,6 +51,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<task::NewChild>(),
         TypeId::of::<task::Advance>(),
         TypeId::of::<task::AdvanceOverride>(),
+        TypeId::of::<task::Complete>(),
         TypeId::of::<task::Close>(),
         TypeId::of::<task::DropTask>(),
         TypeId::of::<task::Reopen>(),
@@ -192,7 +193,8 @@ pub fn register(workspace: &mut Workspace) {
         .register_action(|w, _: &task::NewChild, window, cx| new_child(w, window, cx))
         .register_action(|w, _: &task::Advance, window, cx| advance(w, false, window, cx))
         .register_action(|w, _: &task::AdvanceOverride, window, cx| advance(w, true, window, cx))
-        .register_action(|w, _: &task::Close, window, cx| close(w, window, cx))
+        .register_action(|w, _: &task::Complete, window, cx| complete(w, window, cx))
+        .register_action(|w, _: &task::Close, window, cx| complete(w, window, cx))
         .register_action(|w, _: &task::DropTask, window, cx| drop_task(w, window, cx))
         .register_action(|w, _: &task::Reopen, window, cx| reopen(w, window, cx))
         .register_action(|w, _: &task::Edit, window, cx| edit(w, window, cx))
@@ -802,20 +804,63 @@ fn ship_waits(task: &Task, tree: &WorkTree) -> bool {
         .is_ok_and(|place| rules::ship_waits_on(&place, tree, file, index).is_some())
 }
 
-fn close(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+/// `task: complete` and its alias `task: close`: marks the task done, unless a done hold source
+/// says it would be held; then a toast gives the reason and nothing is written.
+fn complete(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     with_task(
         workspace,
         window,
         cx,
-        "Close which task?",
-        "There is no open task to close",
+        "Complete which task?",
+        "There is no open task to complete",
         |task, _| has_status(task, |status| status == Status::Open),
         Box::new(|id, workspace, window, cx| {
-            submit(workspace, window, cx, move |tree, ctx| {
-                model::close(tree, ctx, &id)
-            })
+            if !DoneHolds::has_sources(cx) {
+                submit(workspace, window, cx, move |tree, ctx| {
+                    model::close(tree, ctx, &id)
+                });
+                return;
+            }
+            complete_unless_held(workspace, window, cx, id);
         }),
     );
+}
+
+/// Closes `id` unless a done hold source says the task would be held; then a toast gives the
+/// source's reason and nothing is written. The context is taken before the wait.
+fn complete_unless_held(
+    workspace: &mut Workspace,
+    window: &Window,
+    cx: &mut Context<Workspace>,
+    id: String,
+) {
+    let Some(store) = WorkStore::global(cx) else {
+        show_toast(workspace, WriteError::Off.to_string(), cx);
+        return;
+    };
+    let store = store.downgrade();
+    let ctx = keyboard_context(window, cx);
+    let hold = DoneHolds::would_hold(&id, cx);
+    cx.spawn(async move |workspace, cx| {
+        let refusal = match hold.await {
+            Some(hold) => Some(hold),
+            None => {
+                let write = store.update(cx, |store, cx| {
+                    store.write(ctx, move |tree, ctx| model::close(tree, ctx, &id), cx)
+                });
+                match write {
+                    Ok(write) => write.await.err().map(|error| error.to_string()),
+                    Err(_) => Some(WriteError::Off.to_string()),
+                }
+            }
+        };
+        if let Some(refusal) = refusal {
+            workspace
+                .update(cx, |workspace, cx| show_toast(workspace, refusal, cx))
+                .ok();
+        }
+    })
+    .detach();
 }
 
 fn drop_task(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
