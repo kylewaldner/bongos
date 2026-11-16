@@ -5567,6 +5567,7 @@ mod tests {
                 "editor",
                 "emacs",
                 "encoding_selector",
+                "extensions",
                 "file_finder",
                 "git",
                 "git_graph",
