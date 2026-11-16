@@ -24,7 +24,7 @@
 //! that waited never applies on its own later. Files present at the first scan (at start, or when
 //! the builder or the store is turned on) are only classified, never applied on their own.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;

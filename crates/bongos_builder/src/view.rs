@@ -7,7 +7,7 @@
 //! store changes. What the rows say is decided by [`analyze`] and [`build`], which have no
 //! window or entity in them.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
