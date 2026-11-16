@@ -19,6 +19,10 @@
 //! check ends with no verdict (other than a cancel) runs again after `no_verdict_rerun_minutes`,
 //! at most `no_verdict_reruns` times, keeping the parts that passed or failed, then reports.
 //! Every lease is dropped when its part ends, and with the run's future on any other exit.
+//!
+//! A check that declares several repositories runs each part once in every repository's tree,
+//! with that tree's environment; those runs are the record's parts and combine like parts. A
+//! parameterized run given items takes them as its scope instead of asking the scope script.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -89,11 +93,20 @@ pub enum LiveState {
 
 /// The scope answer when the task has no base branch, so no changed files can be listed.
 pub const NO_BASE_BRANCH: &str = "no base branch";
+/// The scope reason of a parameterized run given its items.
+pub const PARAMETERIZED_ITEMS: &str = "the items the run was given";
 /// The reason of a record a clean run closed.
 pub const SUPERSEDED: &str = "superseded by a clean run";
 
 /// The items file of a run with `items` in scope, in the record's output folder.
 const ITEMS_FILE: &str = "items.txt";
+
+/// A further tree a check runs in, for a check that declares several repositories.
+#[derive(Clone, Debug)]
+pub struct RunTree {
+    pub path: PathBuf,
+    pub env: EnvBase,
+}
 
 /// Everything one run of one check needs.
 pub struct CheckRun {
@@ -105,8 +118,15 @@ pub struct CheckRun {
     pub pin: Arc<Pin>,
     /// `definitions/` of the master checkout.
     pub master: PathBuf,
+    /// The tree of the check's first repository; the scope and plan scripts run here.
     pub tree: PathBuf,
+    /// The trees of the check's further repositories. Every part runs once in each tree, the
+    /// first tree's runs numbered first, so the record has `parts * (1 + these)` parts and the
+    /// per-repository verdicts combine like parts.
+    pub other_trees: Vec<RunTree>,
     pub tree_kind: TreeKind,
+    /// The base commit of a base run, as the record keeps it.
+    pub base: Option<String>,
     pub tree_key: String,
     /// The combined digest of the check's key input files.
     pub key_inputs: String,
@@ -245,7 +265,7 @@ impl CheckRun {
         };
         let variant = Variant {
             scope: scoped.scope.clone(),
-            parts,
+            parts: parts.saturating_mul(self.tree_count()),
             params: self.params.clone(),
         };
 
@@ -504,12 +524,17 @@ impl CheckRun {
         });
         let started = (self.now)();
         let record_id = lock(shared).id.clone();
+        let (tree, part, parts) = self.locate(n, total);
         let mut spec = self.spec(
             &process::part_output_path(&self.output_dir, &record_id, n),
             ProcessRole::Part,
             part_scope.clone(),
-            (n, total),
+            (part, parts),
         );
+        if let Some(tree) = tree {
+            spec.tree = tree.path.clone();
+            spec.env = tree.env.clone();
+        }
         let (started_tx, started_rx) = oneshot::channel();
         spec.on_start = Some(self.on_start(shared.clone(), n, started.clone(), started_tx));
         let bind = async {
@@ -580,6 +605,25 @@ impl CheckRun {
         })
     }
 
+    /// How many trees each part runs in: one per repository.
+    fn tree_count(&self) -> u32 {
+        u32::try_from(self.other_trees.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1)
+    }
+
+    /// Where part `n` of `total` runs: `None` for the first tree, else one of the further trees,
+    /// and its number and count within that tree.
+    fn locate(&self, n: u32, total: u32) -> (Option<&RunTree>, u32, u32) {
+        let per_tree = (total / self.tree_count()).max(1);
+        let index = (n.saturating_sub(1) / per_tree) as usize;
+        let part = (n.saturating_sub(1) % per_tree) + 1;
+        let tree = index
+            .checked_sub(1)
+            .and_then(|other| self.other_trees.get(other));
+        (tree, part, per_tree)
+    }
+
     /// Combines the parts and writes the record's end in one transaction.
     fn finish(&self, mut record: EvidenceRecord) -> Result<EvidenceRecord> {
         // A part that never finished and was not run again does not count.
@@ -637,6 +681,14 @@ impl CheckRun {
 
     /// The scope of this run: the check's lack of one, `all`, or the scope script's answer.
     async fn scope(&self, staging: &Path) -> Result<Scoped, NoVerdictReason> {
+        if let Some(items) = self
+            .params
+            .as_ref()
+            .map(|params| &params.items)
+            .filter(|items| !items.is_empty())
+        {
+            return items_scope(staging, items.clone(), PARAMETERIZED_ITEMS.to_string());
+        }
         let script = match &self.decl.scope {
             None => {
                 return Ok(Scoped {
@@ -693,22 +745,7 @@ impl CheckRun {
         let limit = self.result_limit();
         let file = read_capped(&result_path, limit);
         match parse_scope_answer(exit, file.as_deref(), limit)? {
-            ScopeAnswer::Items { items, reason } => {
-                let count = u32::try_from(items.len())
-                    .map_err(|_| NoVerdictReason::InvalidScope("too many items".to_string()))?;
-                let lines: String = items.iter().map(|item| format!("{item}\n")).collect();
-                std::fs::write(staging.join(ITEMS_FILE), lines).map_err(|error| {
-                    NoVerdictReason::StartFailed(format!("writing the items file: {error}"))
-                })?;
-                Ok(Scoped {
-                    scope: Scope::Items {
-                        digest: items_digest(&items),
-                        count,
-                    },
-                    reason: Some(reason),
-                    items: Some(items),
-                })
-            }
+            ScopeAnswer::Items { items, reason } => items_scope(staging, items, reason),
             ScopeAnswer::All { reason } => Ok(Scoped {
                 scope: Scope::All,
                 reason: Some(reason),
@@ -847,6 +884,7 @@ impl CheckRun {
             digest: self.digest.clone(),
             tree_key: self.tree_key.clone(),
             tree: self.tree_kind,
+            base: self.base.clone(),
             key_inputs: self.key_inputs.clone(),
             variant,
             pin_commit: self.pin.commit().to_string(),
@@ -996,6 +1034,28 @@ fn need_value(entry: &NeedEntry) -> toml::Value {
         }
         NeedEntry::Invalid(value) => value.clone(),
     }
+}
+
+/// The scope of `items`, written to the items file in `staging`.
+fn items_scope(
+    staging: &Path,
+    items: Vec<String>,
+    reason: String,
+) -> Result<Scoped, NoVerdictReason> {
+    let count = u32::try_from(items.len())
+        .map_err(|_| NoVerdictReason::InvalidScope("too many items".to_string()))?;
+    let lines: String = items.iter().map(|item| format!("{item}\n")).collect();
+    std::fs::write(staging.join(ITEMS_FILE), lines).map_err(|error| {
+        NoVerdictReason::StartFailed(format!("writing the items file: {error}"))
+    })?;
+    Ok(Scoped {
+        scope: Scope::Items {
+            digest: items_digest(&items),
+            count,
+        },
+        reason: Some(reason),
+        items: Some(items),
+    })
 }
 
 fn all_without_base_branch() -> Scoped {

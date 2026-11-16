@@ -40,7 +40,7 @@ use crate::trees::{SecondTree, TaskTrees, TaskTreesRegistry};
 const TASK: &str = "l1";
 const TASK_NAME: &str = "Backfill";
 const GROUP: &str = "g1";
-const SCRIPTS: [&str; 2] = ["part-log", "check-log"];
+const SCRIPTS: [&str; 3] = ["part-log", "check-log", "where-log"];
 
 /// `tests` runs in three parts; `lint` is accepted by `tests`, so `tests` runs right after it.
 const CHECKS: &str = "
@@ -118,8 +118,8 @@ pub(crate) struct World {
     pub(crate) engine: Entity<ChecksEngine>,
     repo: ProjectRepo,
     pub(crate) tree: PathBuf,
-    output: PathBuf,
-    index: PathBuf,
+    pub(crate) output: PathBuf,
+    pub(crate) index: PathBuf,
     _root: TempDir,
 }
 
@@ -168,7 +168,7 @@ impl World {
     }
 
     /// A world whose task `l1` declares `checks`.
-    fn with_checks(
+    pub(crate) fn with_checks(
         cx: &mut TestAppContext,
         with_tree: bool,
         clock: Rc<FakeClock>,
@@ -264,6 +264,11 @@ impl World {
             checks: Some(checks.iter().map(|check| check.to_string()).collect()),
             ..RunChecksRequest::person(TASK)
         }
+    }
+
+    /// The folder holding everything of the world.
+    pub(crate) fn root(&self) -> &Path {
+        self._root.path()
     }
 
     pub(crate) fn writer(&self) -> Arc<StateWriter> {

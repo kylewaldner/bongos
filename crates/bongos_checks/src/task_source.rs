@@ -17,6 +17,9 @@ use crate::definitions::named_sets;
 use crate::pin::master_definitions;
 use crate::settings::TaskChecksSettings;
 
+/// The folder inside the scratch folder that holds the private indexes of tree keys.
+pub(crate) const TREE_KEYS_FOLDER: &str = "tree-keys";
+
 /// One task as the engine runs its checks.
 #[derive(Clone)]
 pub struct TaskChecks {
@@ -79,7 +82,7 @@ impl TaskSource for WorkTaskSource {
             set,
             base_branch: file.base.clone(),
             output_dir: settings.output_folder(&project.location().files, task_id),
-            index_dir: settings.scratch_folder().join("tree-keys"),
+            index_dir: settings.scratch_folder().join(TREE_KEYS_FOLDER),
             project,
         })
     }

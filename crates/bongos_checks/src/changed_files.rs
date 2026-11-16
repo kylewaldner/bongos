@@ -71,6 +71,48 @@ pub async fn changed_files(
     let Some(branch) = base_branch else {
         return Ok(ChangedFiles::NoBaseBranch);
     };
+    let merge_base = merge_base(git, tree, branch).await?;
+
+    let tracked = git
+        .run_raw(
+            tree,
+            &[
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "--no-ext-diff",
+                &merge_base,
+                "--",
+            ],
+        )
+        .await?;
+    let untracked = git
+        .run_raw(tree, &["ls-files", "--others", "--exclude-standard", "-z"])
+        .await?;
+    let mut paths = Vec::new();
+    for listing in [tracked, untracked] {
+        for raw in listing
+            .split(|byte| *byte == 0)
+            .filter(|raw| !raw.is_empty())
+        {
+            let path = std::str::from_utf8(raw)
+                .map_err(|_| ChangedFilesError::NonUtf8Path { path: raw.to_vec() })?;
+            paths.push(path.to_string());
+        }
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    Ok(ChangedFiles::Changed(ChangedSet { merge_base, paths }))
+}
+
+/// The merge base of `HEAD` of the working copy at `tree` and `branch`, resolved now. A missing
+/// branch is `BaseBranchMissing`, never a guess; `tree` must be the top of its working tree.
+pub(crate) async fn merge_base(
+    git: &Git,
+    tree: &Path,
+    branch: &str,
+) -> Result<String, ChangedFilesError> {
     if branch.is_empty() || branch.starts_with('-') || branch.contains('\0') {
         return Err(ChangedFilesError::InvalidBaseBranch {
             branch: branch.to_string(),
@@ -112,52 +154,16 @@ pub async fn changed_files(
         }
         Err(error) => return Err(error.into()),
     };
-    let merge_base = match git.merge_base(tree, "HEAD", &base).await {
-        Ok(id) if !id.is_empty() => id,
-        Ok(_) => {
-            return Err(ChangedFilesError::NoMergeBase {
-                branch: branch.to_string(),
-                detail: "git printed nothing".to_string(),
-            });
-        }
-        Err(GitError::Failed { stderr, .. }) => {
-            return Err(ChangedFilesError::NoMergeBase {
-                branch: branch.to_string(),
-                detail: stderr,
-            });
-        }
-        Err(error) => return Err(error.into()),
-    };
-
-    let tracked = git
-        .run_raw(
-            tree,
-            &[
-                "diff",
-                "--name-only",
-                "-z",
-                "--no-renames",
-                "--no-ext-diff",
-                &merge_base,
-                "--",
-            ],
-        )
-        .await?;
-    let untracked = git
-        .run_raw(tree, &["ls-files", "--others", "--exclude-standard", "-z"])
-        .await?;
-    let mut paths = Vec::new();
-    for listing in [tracked, untracked] {
-        for raw in listing
-            .split(|byte| *byte == 0)
-            .filter(|raw| !raw.is_empty())
-        {
-            let path = std::str::from_utf8(raw)
-                .map_err(|_| ChangedFilesError::NonUtf8Path { path: raw.to_vec() })?;
-            paths.push(path.to_string());
-        }
+    match git.merge_base(tree, "HEAD", &base).await {
+        Ok(id) if !id.is_empty() => Ok(id),
+        Ok(_) => Err(ChangedFilesError::NoMergeBase {
+            branch: branch.to_string(),
+            detail: "git printed nothing".to_string(),
+        }),
+        Err(GitError::Failed { stderr, .. }) => Err(ChangedFilesError::NoMergeBase {
+            branch: branch.to_string(),
+            detail: stderr,
+        }),
+        Err(error) => Err(error.into()),
     }
-    paths.sort_unstable();
-    paths.dedup();
-    Ok(ChangedFiles::Changed(ChangedSet { merge_base, paths }))
 }

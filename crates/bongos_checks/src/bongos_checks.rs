@@ -5,9 +5,10 @@
 //! with its scope, parts, checkpoints, pool waits and no-verdict reruns, the pool seam, and the
 //! engine that runs a task's checks and the commands that drive it, its live rows in the state
 //! store, and the `checks` host command that reaches the engine from a process without the
-//! state writer.
+//! state writer, and the base trees of parameterized runs.
 
 mod actions;
+mod base_tree;
 mod changed_files;
 pub mod command_logic;
 mod definitions;
@@ -54,7 +55,7 @@ pub use pools::{
     PoolRequest, PoolWait, WaitStatus,
 };
 pub use process::{PartOutcome, PartScope, PartSpec, PartStart, ProcessRole, StopHandle, run_part};
-pub use run::{CheckRun, LiveState};
+pub use run::{CheckRun, LiveState, RunTree};
 pub use settings::TaskChecksSettings;
 pub use task_source::{TaskChecks, TaskSource, WorkTaskSource};
 pub use task_tree::{RunWorktrees, TaskTree, WorkflowRunWorktrees};
@@ -68,11 +69,19 @@ pub fn init(cx: &mut gpui::App) {
     TaskChecksSettings::register(cx);
     exporter::ChecksExporter::register();
     definitions::register(cx);
-    ChecksEngine::install(ChecksEngine::for_app(cx), cx);
+    let engine = ChecksEngine::install(ChecksEngine::for_app(cx), cx);
+    // What a crash left in the scratch folder goes at load.
+    if let Ok(git) = bongos_project_repo::Git::locate() {
+        engine
+            .update(cx, |engine, cx| engine.sweep_scratch(git, cx))
+            .detach();
+    }
 }
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod base_run_tests;
 #[cfg(test)]
 mod changed_files_tests;
 #[cfg(test)]
