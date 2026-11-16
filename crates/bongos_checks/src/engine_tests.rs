@@ -77,10 +77,12 @@ impl TaskSource for FakeSource {
 
 /// The workflow engine's answers, set by the test; it is only ever asked.
 #[derive(Default)]
-struct FakeRuns {
+pub(crate) struct FakeRuns {
     active: RefCell<Option<(String, PathBuf)>>,
     ended: RefCell<Option<(String, PathBuf)>>,
     asked: Cell<u32>,
+    /// The worktree of every fan-out branch.
+    pub(crate) branch: RefCell<Option<PathBuf>>,
 }
 
 impl RunWorktrees for FakeRuns {
@@ -96,6 +98,10 @@ impl RunWorktrees for FakeRuns {
     /// Every workflow run works on the task `l1`.
     fn task_of(&self, _: &str, _: &gpui::App) -> Option<String> {
         Some(TASK.to_string())
+    }
+
+    fn branch_worktree(&self, _: &str, _: &str, _: u32, _: &gpui::App) -> Option<PathBuf> {
+        self.branch.borrow().clone()
     }
 }
 
@@ -118,10 +124,10 @@ impl TaskTrees for FakeTips {
 /// Fields drop in order: the engine and the project go before the folder holding them.
 pub(crate) struct World {
     source: Rc<FakeSource>,
-    runs: Rc<FakeRuns>,
+    pub(crate) runs: Rc<FakeRuns>,
     pub(crate) events: Rc<RefCell<Vec<ChecksEvent>>>,
     pub(crate) engine: Entity<ChecksEngine>,
-    repo: ProjectRepo,
+    pub(crate) repo: ProjectRepo,
     pub(crate) tree: PathBuf,
     pub(crate) output: PathBuf,
     pub(crate) index: PathBuf,
@@ -1087,7 +1093,7 @@ async fn engine_after_undrain_runs_start_again_and_resume_from_the_kept_parts(
     let (report, _, _) = drain_during_part_three(&world, cx).await;
     assert!(report.cancelled());
 
-    world.engine.update(cx, |engine, _| engine.undrain());
+    world.engine.update(cx, |engine, cx| engine.undrain(cx));
 
     // A new run starts normally.
     let docs = world.run(cx, world.only(&["docs"])).await;
@@ -1125,6 +1131,44 @@ async fn engine_drain_returns_the_workflow_node_of_each_run_it_stopped(cx: &mut 
 
     assert_eq!(drained, [node]);
     assert!(report.cancelled());
+}
+
+#[gpui::test]
+async fn engine_a_workflow_node_in_a_fan_out_branch_runs_in_the_branch_worktree(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let world = World::new(cx, true);
+    let branch = world.root().join("branch");
+    std::fs::create_dir_all(&branch).unwrap();
+    init_git_repo(&branch);
+    write_file(&branch, ".gitignore", "order\n");
+    write_file(&branch, "src/lib.rs", "pub fn two() {}\n");
+    commit_everything(&branch, "start");
+    let mut key = bongos_workflow_model::NodeKey::new("verify", 1);
+    key.branch = vec![("fan".to_string(), 1)];
+    let request = RunChecksRequest {
+        node: Some(("run-1".to_string(), key)),
+        ..world.only(&["docs"])
+    };
+
+    // The branch's worktree is not there: refused, never run on the task's tree instead.
+    let refused = world.run(cx, request.clone()).await;
+    assert_eq!(
+        refused.refusal(),
+        Some(&Refusal::NoTree {
+            task: TASK_NAME.to_string()
+        })
+    );
+
+    *world.runs.branch.borrow_mut() = Some(branch.clone());
+    let report = world.run(cx, request).await;
+    assert_eq!(report.results()[0].verdict, Verdict::Pass);
+    assert_eq!(
+        std::fs::read_to_string(branch.join("order")).unwrap(),
+        "docs\n"
+    );
+    assert!(world.lines("order").is_empty());
 }
 
 #[gpui::test]
@@ -1185,7 +1229,7 @@ async fn engine_an_undrain_before_the_drain_resolves_lets_new_runs_write_live_ro
 
     let drain = world.engine.update(cx, |engine, cx| {
         let drain = engine.drain(cx);
-        engine.undrain();
+        engine.undrain(cx);
         drain
     });
     let report = run.await;

@@ -105,7 +105,8 @@ pub fn init(cx: &mut gpui::App) {
     section_source::init(&engine, cx);
     completion::register(cx);
     workflow_node::ChecksNode::register(&engine, cx);
-    // What a crash left in the scratch folder goes at load.
+    // What a crash left in the scratch folder goes at load. The parts it left running go as the
+    // decider (started above) follows each project's store: `ChecksEngine::follow_project`.
     if let Ok(git) = bongos_project_repo::Git::locate() {
         engine
             .update(cx, |engine, cx| engine.sweep_scratch(git, cx))

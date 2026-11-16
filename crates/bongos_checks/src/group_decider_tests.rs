@@ -789,7 +789,7 @@ async fn a_drain_while_git_writes_the_lent_tree_releases_the_lease_only_after_gi
     assert!(started.is_empty(), "{started:?}");
 
     // After the undrain the group runs its closing check after all.
-    world.engine.update(cx, |engine, _| engine.undrain());
+    world.engine.update(cx, |engine, cx| engine.undrain(cx));
     world.settle(cx).await;
     assert_eq!(
         ran_where(&world, "grp"),
@@ -924,7 +924,7 @@ async fn a_drain_while_waiting_for_a_busy_tree_starts_nothing_and_reruns_after_u
         .read_with(cx, |engine, _| engine.decider.started.clone());
     assert!(started.is_empty(), "{started:?}");
 
-    world.engine.update(cx, |engine, _| engine.undrain());
+    world.engine.update(cx, |engine, cx| engine.undrain(cx));
     world.settle(cx).await;
     assert_eq!(
         ran_where(&world, "grp"),

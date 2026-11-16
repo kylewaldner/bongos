@@ -16,10 +16,12 @@
 //! - When the task already has checks running (a person's run, or this key's stopped try still
 //!   ending) the node waits for them to end, then starts.
 //! - A drain stops the node's checks and reports nothing for it: whoever drained takes the key over
-//!   (the engine's [`ChecksEngine::drain`] names it). When the drain is abandoned, the key's checks
-//!   start again at the worker's next wake, from the kept parts.
-//! - After a relaunch the runtime calls [`BuiltinNode::recover`] for each interrupted key, and the
-//!   processes an earlier bongos left running for its parts are stopped.
+//!   (the engine's [`ChecksEngine::drain`] names it). When the drain is abandoned
+//!   ([`ChecksEngine::undrain`]), the key's checks start again from the kept parts.
+//! - After a relaunch the processes an earlier bongos left running for the parts are stopped when
+//!   the engine first follows the project's store, and again by [`BuiltinNode::recover`] for each
+//!   interrupted key a loaded run names.
+//! - In a fan-out branch the checks run in the branch's worktree, never the run's.
 //! - While `task_checks.enabled` is false the node gives no verdict ("task checks are off"), which
 //!   holds the run unless the definition routes it.
 
@@ -254,9 +256,9 @@ enum Message {
         run: RunId,
         keys: Vec<NodeKey>,
     },
-    /// The engine changed for `task_id`.
+    /// The engine changed for `task_id`, or for every task (an undrain).
     Wake {
-        task_id: String,
+        task_id: Option<String>,
     },
     Ended {
         id: TryId,
@@ -291,7 +293,8 @@ impl ChecksNode {
             let task_id = match event {
                 ChecksEvent::Changed { task_id }
                 | ChecksEvent::Waiting { task_id, .. }
-                | ChecksEvent::Finished { task_id, .. } => task_id.clone(),
+                | ChecksEvent::Finished { task_id, .. } => Some(task_id.clone()),
+                ChecksEvent::Undrained => None,
             };
             wake.unbounded_send(Message::Wake { task_id }).ok();
         })
@@ -438,7 +441,7 @@ impl Worker {
                 self.launched
                     .values()
                     .chain(&self.pending)
-                    .any(|job| job.task_id.as_deref() == Some(task_id.as_str()))
+                    .any(|job| task_id.is_none() || job.task_id.as_deref() == task_id.as_deref())
             }
             Message::Ended { id, report } => {
                 self.ended(id, report, cx);

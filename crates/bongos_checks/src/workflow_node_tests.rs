@@ -321,6 +321,8 @@ async fn a_check_running_past_ten_minutes_is_not_cut(cx: &mut TestAppContext) {
     assert!(records[0].parts[0].ended.is_none(), "part 1 still runs");
     let pid = part_pid(&world, 1);
     assert!(alive(pid));
+    // The key never went to the agent and program runner.
+    assert!(runtime.runner().started.is_empty());
 
     // A cancel stops it, and the stopped try reports nothing.
     runtime.cancel(&run_id(1)).unwrap();
@@ -554,4 +556,76 @@ async fn a_drain_during_a_checks_key_returns_its_run_and_key_and_stops_the_part_
     assert!(after.held.is_empty());
     assert_eq!(runtime.in_flight(&run_id(1)), [verify_key()]);
     runtime.quit();
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+async fn a_crash_during_a_part_has_its_process_killed_when_the_relaunch_follows_the_project(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let world = World::with_checks(cx, true, FakeClock::automatic(), DRAIN_CHECKS);
+    no_reruns(cx);
+    let (mut crashed, logs) = runtime(&world, cx, limits(4));
+    world.write("block-at", "3\n");
+    let blocked = when_blocked(&world, 3);
+    crashed.add(spec(logs.path(), 1, VERIFY)).unwrap();
+    drive(cx, &mut crashed, |_| {
+        world.root().join("tree/blocked-3").exists()
+    });
+    drop(blocked);
+    cx.run_until_parked();
+    let pid = part_pid(&world, 3);
+    assert!(alive(pid));
+    // The crash: the runtime is gone without a quit, and its part keeps running.
+    drop(crashed);
+
+    // The relaunched bongos loads no run at all; its engine follows the project's store at
+    // load, as the decider does for every open project, and that stops the part.
+    let engine = world.second_engine(cx);
+    engine.update(cx, |engine, cx| engine.follow_project(&world.repo, cx));
+    cx.run_until_parked();
+    wait_gone(pid);
+    wait_idle(&world, cx);
+    let records = world.records("suite");
+    assert_eq!(
+        records[0].parts[2].verdict,
+        bongos_checks_model::verdict::Verdict::NoVerdict(
+            bongos_checks_model::verdict::NoVerdictReason::Killed { signal: 15 }
+        )
+    );
+}
+
+#[gpui::test]
+async fn an_undrain_starts_the_drained_checks_key_again_with_no_other_event(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let world = World::with_checks(cx, true, FakeClock::manual(), DRAIN_CHECKS);
+    set_kill_grace(cx, 3);
+    let (mut runtime, logs) = runtime(&world, cx, limits(4));
+    world.write("block-at", "3\n");
+    runtime.add(spec(logs.path(), 1, VERIFY)).unwrap();
+    drive(cx, &mut runtime, |_| {
+        world.root().join("tree/blocked-3").exists()
+    });
+    cx.run_until_parked();
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    assert_eq!(finish(cx, drain), [(run_id(1), verify_key())]);
+    wait_idle(&world, cx);
+    settle(cx, &mut runtime);
+    // The key waits for the drain to be abandoned: nothing of it runs.
+    assert!(engine_idle(&world, cx));
+    assert_eq!(runtime.in_flight(&run_id(1)), [verify_key()]);
+    world.forget("block-at");
+    world.forget("runs");
+
+    // The undrain alone wakes the key: it starts again from the kept parts and passes.
+    world.engine.update(cx, |engine, cx| engine.undrain(cx));
+    drive(cx, &mut runtime, |runtime| {
+        state(runtime, 1).ended.is_some()
+    });
+    assert_eq!(state(&runtime, 1).ended, Some((EndState::Succeeded, None)));
+    assert_eq!(world.lines("runs"), ["3", "4"], "parts 1 and 2 were kept");
+    assert!(runtime.runner().started.is_empty());
 }
