@@ -1,0 +1,12 @@
+// Loaded after the VS Code base keymap's other parts so the terminal forwards these keys.
+[
+  {
+    "context": "Terminal",
+    "bindings": {
+      // Forward readline's kill-line instead of holding the Workspace `ctrl-k` chords.
+      "ctrl-k": ["terminal::SendKeystroke", "ctrl-k"],
+      // The documented way back to the first editor pane; the Pane context binds alt-1 otherwise.
+      "alt-1": ["workspace::ActivatePane", 0],
+    },
+  },
+]

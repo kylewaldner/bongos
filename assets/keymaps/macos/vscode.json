@@ -1,0 +1,11 @@
+// documentation: https://zed.dev/docs/key-bindings
+//
+// The VS Code base keymap: loaded after the default keymap, so C-g closes pickers and menus
+// as it does under the Emacs base.
+[
+  {
+    "bindings": {
+      "ctrl-g": "menu::Cancel",
+    },
+  },
+]
