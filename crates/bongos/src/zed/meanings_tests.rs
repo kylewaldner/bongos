@@ -7,7 +7,6 @@ use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use bongos_emacs::actions::UniversalArgument;
 use bongos_emacs::meanings::{COUNT_FIELDS, IGNORED, REDIRECTS};
 use bongos_emacs::prefix_arg;
 use editor::{Addon, Editor};
@@ -58,8 +57,8 @@ impl Addon for BatchContext {
     }
 }
 
-/// An editor in a window with the Linux app keymap (with its Emacs base) loaded, `C-u` bound to
-/// the universal argument and a stand-in key to every declared name.
+/// An editor in a window with the Linux app keymap (with its Emacs base) loaded and a stand-in key
+/// to every declared name.
 async fn editor_with_keymap(cx: &mut TestAppContext) -> (Entity<Editor>, &mut VisualTestContext) {
     init_keymap_test(cx);
     cx.update(|cx| {
@@ -77,7 +76,7 @@ async fn editor_with_keymap(cx: &mut TestAppContext) -> (Entity<Editor>, &mut Vi
             );
         }
         cx.bind_keys(all);
-        let mut own = vec![KeyBinding::new("ctrl-u", UniversalArgument, Some("Editor"))];
+        let mut own = Vec::new();
         for name in all_names() {
             let action = cx
                 .build_action(name, None)
