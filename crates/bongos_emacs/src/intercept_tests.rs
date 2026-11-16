@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use bongos_emacs_model::prefix_arg::PrefixArg;
 use editor::Editor;
 use gpui::{
-    Action, AppContext as _, Entity, Focusable as _, KeyBinding, KeyContext, Keymap, Keystroke,
-    TestAppContext, VisualTestContext, Window, actions,
+    Action, AppContext as _, DummyKeyboardMapper, Entity, Focusable as _, KeyBinding,
+    KeyBindingContextPredicate, KeyContext, Keymap, Keystroke, TestAppContext, VisualTestContext,
+    Window, actions,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -24,7 +25,10 @@ use crate::prefix_arg::{self, MAX_INSERT, Meaning};
 use crate::prefix_arg_tests::{echo, route_echo};
 use crate::quit_tests::workspace_window_with;
 
-actions!(intercept_tests, [Adapted, Redirected, Target, Plain]);
+actions!(
+    intercept_tests,
+    [Adapted, Redirected, Target, Plain, Unhandled, Broken]
+);
 
 /// An action whose count is filled in from the argument.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, JsonSchema, Action)]
@@ -33,6 +37,17 @@ actions!(intercept_tests, [Adapted, Redirected, Target, Plain]);
 struct Counted {
     #[serde(default)]
     count: Option<i32>,
+}
+
+/// A count field action with another field, which the binding's input sets.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, JsonSchema, Action)]
+#[action(namespace = intercept_tests)]
+#[serde(deny_unknown_fields)]
+struct CountedMode {
+    #[serde(default)]
+    count: Option<i32>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 /// The argument the adapter of `Adapted` last saw.
@@ -59,6 +74,24 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-t", Redirected, editor),
         KeyBinding::new("ctrl-a", Adapted, editor),
         KeyBinding::new("ctrl-p", Plain, editor),
+        KeyBinding::new("ctrl-n", Unhandled, editor),
+        KeyBinding::new("ctrl-r", Broken, editor),
+        KeyBinding::new("ctrl-c ctrl-f", ForwardWord::default(), editor),
+        KeyBinding::new("ctrl-c ctrl-w", ForwardWord::default(), editor),
+        KeyBinding::new("ctrl-c ctrl-w ctrl-w", Plain, editor),
+        KeyBinding::new("q w", Plain, editor),
+        KeyBinding::load(
+            "ctrl-y",
+            Box::new(CountedMode {
+                count: None,
+                mode: Some("fast".into()),
+            }),
+            Some(KeyBindingContextPredicate::parse("Editor").unwrap().into()),
+            false,
+            Some(r#"{"mode": "fast"}"#.into()),
+            &DummyKeyboardMapper,
+        )
+        .unwrap(),
     ]
 }
 
@@ -70,6 +103,12 @@ fn declare_test_meanings(cx: &mut gpui::App) {
         Meaning::Redirect(Target::name_for_type()),
     );
     prefix_arg::declare(cx, Adapted::name_for_type(), Meaning::Adapter(adapter));
+    prefix_arg::declare(cx, CountedMode::name_for_type(), Meaning::CountField);
+    prefix_arg::declare(
+        cx,
+        Broken::name_for_type(),
+        Meaning::Redirect("intercept_tests::Missing"),
+    );
 }
 
 fn test_meaning(name: &str) -> Option<Meaning> {
@@ -156,10 +195,7 @@ fn decide_routes_every_rule() {
     ));
 
     // A pending prefix keeps the argument for the binding it completes.
-    assert!(matches!(
-        route("", "ctrl-x", universal, true),
-        Route::Through
-    ));
+    assert!(matches!(route("", "ctrl-x", universal, true), Route::Wait));
     // A digit inside a chord does not extend the argument.
     assert!(matches!(
         route("ctrl-x", "7", universal, true),
@@ -169,7 +205,7 @@ fn decide_routes_every_rule() {
     // A resolved binding is routed by its action's meaning.
     assert!(matches!(
         route("", "alt-f", universal, true),
-        Route::HandOff
+        Route::HandOff(action) if action.name() == ForwardWord::name_for_type()
     ));
     assert!(matches!(
         route("ctrl-x", "ctrl-x", universal, true),
@@ -181,11 +217,12 @@ fn decide_routes_every_rule() {
     ));
     assert!(matches!(
         route("", "ctrl-o", universal, true),
-        Route::CountField(action) if action.name() == Counted::name_for_type()
+        Route::CountField(action, None) if action.name() == Counted::name_for_type()
     ));
     assert!(matches!(
         route("", "ctrl-t", universal, true),
-        Route::Redirect(target) if target == Target::name_for_type()
+        Route::Redirect(target, action)
+            if target == Target::name_for_type() && action.name() == Redirected::name_for_type()
     ));
     assert!(matches!(
         route("", "ctrl-p", universal, true),
@@ -421,11 +458,11 @@ async fn an_adapter_is_called_once_with_the_argument(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn an_undeclared_action_runs_once_and_consumes_the_argument(cx: &mut TestAppContext) {
+async fn an_undeclared_action_is_repeated_and_consumes_the_argument(cx: &mut TestAppContext) {
     let (_workspace, editor, mut cx) = window_with(cx, "one").await;
     let runs = count_runs::<Plain>(&editor, &mut cx);
     cx.simulate_keystrokes("ctrl-u ctrl-p");
-    assert_eq!(runs.get(), 1);
+    assert_eq!(runs.get(), 4);
     assert_eq!(pending(&mut cx), None);
     assert_eq!(echo(&mut cx), None);
 }
@@ -442,4 +479,87 @@ async fn the_limited_echo_clears_on_the_next_key(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("b");
     assert_eq!(echo(&mut cx), None);
     assert_eq!(text(&editor, &mut cx).len(), MAX_INSERT as usize + 1);
+}
+
+/// How long gpui waits for the rest of a chord before running what the keys typed so far mean.
+const CHORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[gpui::test]
+async fn an_action_nothing_handles_clears_the_argument_and_the_key_goes_on(
+    cx: &mut TestAppContext,
+) {
+    let (_workspace, _editor, mut cx) = window_with(cx, "one").await;
+    let seen = Rc::new(Cell::new(0));
+    let log = seen.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.observe_keystrokes(move |event, _, _| {
+            if event.keystroke.key == "n" && event.keystroke.modifiers.control {
+                log.set(log.get() + 1);
+            }
+        })
+    });
+    cx.simulate_keystrokes("ctrl-u ctrl-n");
+    assert_eq!(pending(&mut cx), None);
+    assert_eq!(echo(&mut cx), None);
+    // The key was not stopped: it went on to the keymap, as with no argument.
+    assert_eq!(seen.get(), 1);
+}
+
+#[gpui::test]
+async fn a_redirect_to_a_missing_action_runs_the_key_action(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) = window_with(cx, "one").await;
+    let runs = count_runs::<Broken>(&editor, &mut cx);
+    cx.simulate_keystrokes("ctrl-u ctrl-r");
+    assert_eq!(runs.get(), 1);
+    assert_eq!(pending(&mut cx), None);
+}
+
+#[gpui::test]
+async fn a_count_field_action_keeps_its_other_fields(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) = window_with(cx, "one").await;
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let log = seen.clone();
+    editor.update(&mut cx, |editor, _| {
+        editor
+            .register_action(move |action: &CountedMode, _, _| {
+                log.borrow_mut().push((action.count, action.mode.clone()))
+            })
+            .detach();
+    });
+    cx.simulate_keystrokes("ctrl-u 5 ctrl-y");
+    assert_eq!(*seen.borrow(), vec![(Some(5), Some("fast".to_string()))]);
+}
+
+#[gpui::test]
+async fn a_chord_completing_into_a_reading_command_gets_the_count(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) = window_with(cx, &words(10)).await;
+    cx.simulate_keystrokes("ctrl-u 3 ctrl-c ctrl-f |");
+    assert_eq!(text(&editor, &mut cx), "w0 w1 w2| w3 w4 w5 w6 w7 w8 w9");
+    assert_eq!(pending(&mut cx), None);
+}
+
+#[gpui::test]
+async fn a_reading_chord_that_prefixes_a_longer_one_gets_the_count(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) = window_with(cx, &words(10)).await;
+    // gpui waits for the longer binding, gives up and runs the chord's own binding.
+    cx.simulate_keystrokes("ctrl-u 3 ctrl-c ctrl-w");
+    assert!(pending(&mut cx).is_some());
+    cx.executor().advance_clock(CHORD_TIMEOUT);
+    cx.run_until_parked();
+    assert_eq!(pending(&mut cx), None);
+    cx.simulate_keystrokes("|");
+    assert_eq!(text(&editor, &mut cx), "w0 w1 w2| w3 w4 w5 w6 w7 w8 w9");
+}
+
+#[gpui::test]
+async fn a_text_key_that_prefixes_a_chord_leaves_no_argument(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) = window_with(cx, "").await;
+    // gpui waits for `q w`, gives up and types the `q` without the interceptor.
+    cx.simulate_keystrokes("ctrl-u 3 q");
+    cx.executor().advance_clock(CHORD_TIMEOUT);
+    cx.run_until_parked();
+    assert_eq!(text(&editor, &mut cx), "q");
+    assert_eq!(pending(&mut cx), None);
+    cx.simulate_keystrokes("c");
+    assert_eq!(text(&editor, &mut cx), "qc");
 }

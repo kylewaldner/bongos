@@ -6,9 +6,12 @@ use crate::quit;
 use bongos_emacs_model::prefix_arg::PrefixArg;
 use collections::{HashMap, HashSet};
 use editor::Editor;
-use gpui::{Action, App, Context, Entity, Focusable as _, Global, WeakEntity, Window, WindowId};
+use gpui::{
+    Action, App, Context, Entity, Focusable as _, Global, Subscription, WeakEntity, Window,
+    WindowId,
+};
 
-use crate::intercept;
+use crate::{intercept, repeat};
 
 /// The most an inserting command repeats: a huge count would hang the editor.
 pub const MAX_INSERT: i32 = 65_536;
@@ -96,6 +99,10 @@ struct WindowArg {
     handoff: Option<PrefixArg>,
     /// Counts hand-offs, so a deferred drop only clears the one it was scheduled for.
     generation: u64,
+    /// Set while the argument waits on a pending chord no key has settled yet.
+    awaiting_chord: bool,
+    /// Watches the window's pending keys while the argument waits on a chord.
+    chord_watch: Option<Subscription>,
 }
 
 #[derive(Default)]
@@ -174,6 +181,39 @@ pub(crate) fn hand_off(window: &mut Window, cx: &mut App) {
     });
 }
 
+/// The key just typed is a prefix of a longer binding, so the argument waits for it. gpui may
+/// give up waiting (after its timeout) and replay the keys without the interceptor; then the
+/// argument is handed to what they run, and dropped after it like any handoff, so it never stays
+/// pending past them.
+pub(crate) fn wait_for_chord(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+    let watched = with_state(window, cx, |state| {
+        state.awaiting_chord = true;
+        state.chord_watch.is_some()
+    });
+    if watched != Some(false) {
+        return;
+    }
+    let watch = editor.update(cx, |_, cx| {
+        cx.observe_pending_input(window, |_, window, cx| {
+            if window.pending_input_keystrokes().is_some() {
+                return;
+            }
+            let waited = with_state(window, cx, |state| {
+                std::mem::replace(&mut state.awaiting_chord, false)
+            });
+            if waited == Some(true) {
+                hand_off(window, cx);
+            }
+        })
+    });
+    with_state(window, cx, |state| state.chord_watch = Some(watch));
+}
+
+/// A key reached the interceptor, so the chord the argument waited on is settled by it.
+pub(crate) fn stop_waiting(window: &Window, cx: &mut App) {
+    with_state(window, cx, |state| state.awaiting_chord = false);
+}
+
 /// Clears an argument that belongs to `editor` when its focus is lost, so it never applies in a
 /// picker or the minibuffer.
 pub(crate) fn init_editor(
@@ -229,10 +269,14 @@ pub(crate) fn clear_limited(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// Registers the quit hook (C-g with an argument pending clears it and its echo) and installs
-/// the key interceptor that routes the keys typed while an argument is pending.
+/// Registers the quit hook (C-g with an argument pending clears it and its echo, and stops a
+/// running repeat) and installs the key interceptor that routes the keys typed while an argument
+/// is pending or a repeat runs.
 pub(crate) fn init(cx: &mut App) {
-    quit::register(cx, |window, cx| cancel(window, cx));
+    quit::register(cx, |window, cx| {
+        cancel(window, cx);
+        repeat::stop(window, cx);
+    });
     intercept::install(cx).detach();
 }
 
@@ -254,6 +298,8 @@ pub(crate) fn start(arg: PrefixArg, editor: &Entity<Editor>, window: &mut Window
             origin: editor.downgrade(),
             handoff: None,
             generation,
+            awaiting_chord: false,
+            chord_watch: None,
         },
     );
 }

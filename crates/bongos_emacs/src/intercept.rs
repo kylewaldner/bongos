@@ -8,17 +8,24 @@
 //!    untouched; those commands handle the argument themselves.
 //! 3. A digit (or a `-` before any digit) typed with no modifier but Shift, while the argument
 //!    accepts it, extends the argument; the key is stopped.
-//! 4. The keys are a pending prefix of a longer binding: the key goes on and the argument waits
-//!    for the binding to complete.
-//! 5. A binding resolved: its action's `Meaning` routes it.
+//! 4. The keys are a pending prefix of a longer binding (and resolve to nothing, or to a command
+//!    that reads the argument): the key goes on and the argument waits for the binding to
+//!    complete. When gpui gives up on the longer binding and replays the keys without the
+//!    interceptor, the argument is handed to whatever they run, so it never outlives them.
+//! 5. A binding resolved: its action's `Meaning` routes it. An action nothing on the focus path
+//!    handles clears the argument and the key goes on, as with no argument.
 //! 6. A typed character with no binding is inserted as many times as the argument says, as one
 //!    edit.
 //! 7. Anything else clears the argument and acts normally.
+//!
+//! While a repeat runs in the window (`repeat`), every key-down is held and replayed when the run
+//! ends, except C-g, which stops the run.
 
 use bongos_emacs_model::prefix_arg::PrefixArg;
 use editor::Editor;
 use gpui::{
-    Action, App, Entity, Focusable as _, KeyContext, Keymap, Keystroke, Subscription, Window,
+    Action, App, Entity, Focusable as _, KeyContext, Keymap, Keystroke, SharedString, Subscription,
+    Window,
 };
 
 use crate::actions::{DigitArgument, KeyboardQuit, NegativeArgument, UniversalArgument};
@@ -33,20 +40,23 @@ const QUERY_REPLACE_ABORT: &str = "query_replace::Abort";
 #[derive(Debug)]
 pub(crate) enum Route {
     /// The key goes on and the argument is left alone: a command that builds the argument or
-    /// quits, or a key that only extends a pending chord.
+    /// quits.
     Through,
+    /// The key goes on and the argument waits for the longer binding the key is a prefix of.
+    Wait,
     /// The argument is cleared and the key goes on.
     Cancel,
     /// The argument is handed to the command the key runs, and the key goes on.
-    HandOff,
+    HandOff(Box<dyn Action>),
     /// The key is stopped and the argument becomes this one.
     Press(PrefixArg),
     /// The key is stopped and the adapter is called once with the argument.
     Adapter(fn(PrefixArg, &Entity<Editor>, &mut Window, &mut App)),
-    /// The key is stopped and its action runs once, rebuilt with the argument as its count.
-    CountField(Box<dyn Action>),
-    /// The key is stopped and the named action runs once instead.
-    Redirect(&'static str),
+    /// The key is stopped and its action runs once, rebuilt with the argument as its count. The
+    /// binding's own input (its JSON arguments), when it has one, keeps its other fields.
+    CountField(Box<dyn Action>, Option<SharedString>),
+    /// The key is stopped and the named action runs once instead of the key's own action.
+    Redirect(&'static str, Box<dyn Action>),
     /// The key is stopped and its action is repeated by the argument.
     Repeat(Box<dyn Action>),
     /// The key is stopped and its text is inserted as many times as the argument says.
@@ -71,7 +81,8 @@ pub(crate) fn decide(
     let mut input = pending.to_vec();
     input.push(key.clone());
     let (bindings, has_pending) = keymap.bindings_for_input(&input, stack);
-    let first = bindings.first().map(|binding| binding.action());
+    let binding = bindings.first();
+    let first = binding.map(|binding| binding.action());
     if first.is_some_and(|action| handles_argument(action.name())) {
         return Route::Through;
     }
@@ -82,17 +93,22 @@ pub(crate) fn decide(
     }
     // A digit or `-` the argument no longer accepts (after C-u ended the number) leaves the
     // argument as it was and is an ordinary key: typed, it inserts its character as many times
-    // as the argument says, as in Emacs.
-    if has_pending && first.is_none() {
-        return Route::Through;
+    // as the argument says, as in Emacs. A binding that reads the argument and is also the
+    // prefix of a longer one only runs when gpui gives up waiting, so the argument waits too.
+    if has_pending
+        && first.is_none_or(|action| matches!(meaning(action.name()), Some(Meaning::Reads)))
+    {
+        return Route::Wait;
     }
-    if let Some(action) = first {
+    if let (Some(binding), Some(action)) = (binding, first) {
         return match meaning(action.name()) {
-            Some(Meaning::Reads) => Route::HandOff,
+            Some(Meaning::Reads) => Route::HandOff(action.boxed_clone()),
             Some(Meaning::Ignored) => Route::Cancel,
             Some(Meaning::Adapter(adapter)) => Route::Adapter(adapter),
-            Some(Meaning::CountField) => Route::CountField(action.boxed_clone()),
-            Some(Meaning::Redirect(target)) => Route::Redirect(target),
+            Some(Meaning::CountField) => {
+                Route::CountField(action.boxed_clone(), binding.action_input())
+            }
+            Some(Meaning::Redirect(target)) => Route::Redirect(target, action.boxed_clone()),
             None => Route::Repeat(action.boxed_clone()),
         };
     }
@@ -147,17 +163,35 @@ fn is_text(key: &Keystroke) -> bool {
 }
 
 /// Installs the interceptor for every window. It does nothing in a window with no argument
-/// pending, beyond clearing a "Count limited" echo on the next key.
+/// pending and no repeat running, beyond clearing a "Count limited" echo on the next key.
 pub(crate) fn install(cx: &mut App) -> Subscription {
     cx.intercept_keystrokes(|event, window, cx| {
         // A keystroke without a key names no key (gpui's simulated input sends some).
         if event.keystroke.key.is_empty() {
             return;
         }
+        if repeat::is_running(window, cx) {
+            let keymap = cx.key_bindings();
+            let quits = keymap
+                .borrow()
+                .bindings_for_input(std::slice::from_ref(&event.keystroke), &event.context_stack)
+                .0
+                .first()
+                .is_some_and(|binding| binding.action().name() == KeyboardQuit::name_for_type());
+            if quits {
+                repeat::stop(window, cx);
+            } else {
+                repeat::hold(window, cx, event.keystroke.clone());
+            }
+            cx.stop_propagation();
+            return;
+        }
         prefix_arg::clear_limited(window, cx);
         let Some(arg) = prefix_arg::pending(window, cx) else {
             return;
         };
+        // This key settles a chord the argument was waiting on, whatever it does with it.
+        prefix_arg::stop_waiting(window, cx);
         let origin = prefix_arg::origin(window, cx);
         let in_origin = origin
             .as_ref()
@@ -180,13 +214,23 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
             prefix_arg::cancel(window, cx);
             return;
         };
+        // An action nothing on the focus path handles does nothing with the argument either: the
+        // key goes on as it would with no argument.
+        let route = match route_action(&route) {
+            Some(action) if !available(action, window, cx) => Route::Cancel,
+            _ => route,
+        };
         match route {
             Route::Through => return,
+            Route::Wait => {
+                prefix_arg::wait_for_chord(&origin, window, cx);
+                return;
+            }
             Route::Cancel => {
                 prefix_arg::cancel(window, cx);
                 return;
             }
-            Route::HandOff => {
+            Route::HandOff(_) => {
                 prefix_arg::hand_off(window, cx);
                 return;
             }
@@ -195,8 +239,8 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
                 prefix_arg::cancel(window, cx);
                 adapter(arg, &origin, window, cx);
             }
-            Route::CountField(action) => {
-                let data = serde_json::json!({ "count": arg.value() });
+            Route::CountField(action, input) => {
+                let data = count_input(input.as_deref(), arg.value());
                 match cx.build_action(action.name(), Some(data)) {
                     Ok(counted) => {
                         prefix_arg::cancel(window, cx);
@@ -204,18 +248,21 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
                     }
                     Err(error) => {
                         log::error!("{} takes no count: {error}", action.name());
-                        repeat::start(window, cx, action.as_ref(), arg);
+                        repeat::start(window, cx, action.as_ref(), arg, Some(&origin));
                     }
                 }
             }
-            Route::Redirect(target) => {
+            Route::Redirect(target, original) => {
                 prefix_arg::cancel(window, cx);
                 match cx.build_action(target, None) {
                     Ok(action) => dispatch(action.as_ref(), window, cx),
-                    Err(error) => log::error!("cannot redirect to {target}: {error}"),
+                    Err(error) => {
+                        log::error!("cannot redirect to {target}: {error}");
+                        dispatch(original.as_ref(), window, cx);
+                    }
                 }
             }
-            Route::Repeat(action) => repeat::start(window, cx, action.as_ref(), arg),
+            Route::Repeat(action) => repeat::start(window, cx, action.as_ref(), arg, Some(&origin)),
             Route::Type(text) => type_text(&text, arg, &origin, window, cx),
         }
         // The key is consumed here, so the chord it completed is no longer pending. Dispatching
@@ -223,6 +270,34 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
         window.discard_pending_keystrokes(cx);
         cx.stop_propagation();
     })
+}
+
+/// The action a route runs on the focused element, when it runs the key's own action.
+fn route_action(route: &Route) -> Option<&dyn Action> {
+    match route {
+        Route::HandOff(action) | Route::CountField(action, _) | Route::Repeat(action) => {
+            Some(action.as_ref())
+        }
+        _ => None,
+    }
+}
+
+/// Whether something on the focus path of `window`, or a global listener, handles `action`.
+fn available(action: &dyn Action, window: &Window, cx: &mut App) -> bool {
+    // `App::is_action_available` cannot read this window while it is being updated; it still
+    // sees the global listeners.
+    window.is_action_available(action, cx) || cx.is_action_available(action)
+}
+
+/// The input of a count field action: the binding's own arguments, when they are an object,
+/// with `count` set to `count`.
+fn count_input(input: Option<&str>, count: i32) -> serde_json::Value {
+    let mut data = input
+        .and_then(|input| serde_json::from_str::<serde_json::Value>(input).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    data["count"] = serde_json::json!(count);
+    data
 }
 
 /// Dispatches `action` on the focused element.
