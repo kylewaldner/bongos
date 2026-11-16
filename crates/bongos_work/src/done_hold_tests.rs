@@ -43,7 +43,9 @@ impl DoneHoldSource for FakeHolds {
         if self.wait.get() {
             let (sender, receiver) = oneshot::channel();
             self.waiting.borrow_mut().push(sender);
-            return cx.background_spawn(async move { receiver.await.ok().flatten() });
+            return cx
+                .background_executor()
+                .spawn(async move { receiver.await.ok().flatten() });
         }
         gpui::Task::ready(self.would.borrow().clone())
     }

@@ -183,7 +183,8 @@ impl RowChipsRegistry {
 /// as a required check with no pass on the task's current tree.
 pub trait DoneHoldSource: 'static {
     /// Why `task_id` is held now, from what the source already knows; `None` when it is not.
-    /// Synchronous: it never computes anything new.
+    /// Synchronous: it never computes anything new. The store asks it while it updates, so it
+    /// must not read the store.
     fn hold(&self, task_id: &str, cx: &App) -> Option<String>;
 
     /// Why `task_id` would be held if it were finished now; `None` when it would not. It may
