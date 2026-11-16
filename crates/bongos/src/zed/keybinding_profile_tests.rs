@@ -599,3 +599,82 @@ async fn every_default_single_leader_key_still_fires_under_vscode(cx: &mut TestA
         }
     }
 }
+
+/// Panel contexts that are not editor-like: a bare context name, none of the contexts the
+/// Emacs file binds Emacs-only keys in.
+const NOT_PANEL_CONTEXTS: &[&str] = &["Editor", "Workspace", "Pane", "Terminal", "Markdown"];
+
+/// Panel blocks that may stay in `emacs.json` because they are Emacs-only. Empty today. Keys of
+/// later features' panels go to the specific overrides file, not here.
+const EMACS_ONLY_PANEL_KEYS: &[(&str, &str)] = &[];
+
+/// A panel key: a binding whose context is one bare name (no operators, not an editor, workspace,
+/// pane, terminal or markdown context) and whose keys are a single keystroke with no modifier.
+/// Emacs-only keys (`ctrl-` re-declarations) always carry a modifier, so they are never panel keys.
+fn is_panel_key(binding: &KeyBinding) -> bool {
+    let context = context_of(binding);
+    let bare = !context.is_empty() && context.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let keystrokes = binding.keystrokes();
+    bare && !NOT_PANEL_CONTEXTS.contains(&context.as_str())
+        && keystrokes.len() == 1
+        && !keystrokes[0].inner().modifiers.modified()
+}
+
+#[gpui::test]
+async fn emacs_json_keeps_no_single_key_panel_blocks(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for path in ["keymaps/linux/emacs.json", "keymaps/macos/emacs.json"] {
+        let bindings =
+            cx.update(|cx| KeymapFile::load_asset(path, Some(KeybindSource::Base), cx).unwrap());
+        for binding in bindings.iter().filter(|binding| is_panel_key(binding)) {
+            let entry = (context_of(binding), keys_of(binding).join(" "));
+            assert!(
+                EMACS_ONLY_PANEL_KEYS
+                    .iter()
+                    .any(|(context, key)| entry.0 == *context && entry.1 == *key),
+                "{path}: panel key `{}` in `{}` belongs in the specific overrides file",
+                entry.1,
+                entry.0
+            );
+        }
+    }
+}
+
+/// One key of each moved panel block, with the context stack it resolves in.
+const PANEL_KEYS: &[(&str, &[&str], &str)] = &[
+    ("r", &["Workspace", "ChatList"], "chat::Rename"),
+    ("/", &["Workspace", "ChatList"], "chat::Filter"),
+    ("tab", &["Workspace", "WorkPanel"], "work::ToggleRow"),
+    ("^", &["Workspace", "WorkPanel"], "work::Up"),
+    ("a", &["Workspace", "RunsPanel"], "workflow::Approve"),
+    ("enter", &["Workspace", "RunsPanel"], "workflow::OpenLogs"),
+    ("g", &["Workspace", "RunView"], "workflow::ToggleGraph"),
+    ("v", &["Workspace", "RunView"], "workflow::Revise"),
+    ("r", &["Workspace", "LandingView"], "project::ResolveSplit"),
+    ("enter", &["Workspace", "ProposalView"], "proposal::Descend"),
+    ("^", &["Workspace", "ProposalView"], "proposal::Up"),
+];
+
+#[gpui::test]
+async fn panel_keys_resolve_under_emacs_vscode_and_vim(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        for (base, vim) in [
+            (BaseKeymap::Emacs, false),
+            (BaseKeymap::Emacs, true),
+            (BaseKeymap::VSCode, false),
+            (BaseKeymap::VSCode, true),
+        ] {
+            let keymap = Keymap::new(load_profile(base, vim, macos, cx));
+            for (key, contexts, action) in PANEL_KEYS {
+                let (names, pending) = resolve(&keymap, key, contexts);
+                assert_eq!(
+                    names.first(),
+                    Some(action),
+                    "macos={macos} {base:?} vim={vim}: {key} in {contexts:?}"
+                );
+                assert!(!pending, "macos={macos} {base:?} vim={vim}: {key}");
+            }
+        }
+    }
+}
