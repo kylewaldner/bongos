@@ -346,7 +346,6 @@ async fn transpose_chars_with_a_count_moves_the_character_that_far(cx: &mut Test
 }
 
 #[gpui::test]
-#[ignore = "a prefix key that is also bound alone (C-x, C-c) is repeated as that binding instead of waiting for the chord"]
 async fn transpose_lines_with_a_count_moves_the_line_past_that_many(cx: &mut TestAppContext) {
     let mut cx = editor_with(cx, "a\nb\nˇc\nd\ne").await;
     cx.simulate_keystrokes("alt-2 ctrl-x ctrl-t");
@@ -385,7 +384,6 @@ async fn kill_whole_line_with_a_count_kills_that_many_lines(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-#[ignore = "a prefix key that is also bound alone (C-x, C-c) is repeated as that binding instead of waiting for the chord"]
 async fn duplicate_line_with_a_count_adds_that_many_copies(cx: &mut TestAppContext) {
     let mut cx = editor_with(cx, "aˇb\nc").await;
     cx.simulate_keystrokes("alt-3 ctrl-c y");
@@ -393,7 +391,6 @@ async fn duplicate_line_with_a_count_adds_that_many_copies(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-#[ignore = "a prefix key that is also bound alone (C-x, C-c) is repeated as that binding instead of waiting for the chord"]
 async fn copy_from_above_with_a_count_copies_that_many_characters(cx: &mut TestAppContext) {
     let mut cx = editor_with(cx, "abcdef\nˇ").await;
     cx.simulate_keystrokes("alt-3 ctrl-c a");
@@ -469,7 +466,6 @@ async fn move_line_with_a_count_moves_the_line_that_many_lines(cx: &mut TestAppC
 }
 
 #[gpui::test]
-#[ignore = "a prefix key that is also bound alone (C-x, C-c) is repeated as that binding instead of waiting for the chord"]
 async fn exchange_point_and_mark_ignores_the_argument_and_runs_once(cx: &mut TestAppContext) {
     let mut cx = editor_with(cx, "ˇone two").await;
     cx.simulate_keystrokes("ctrl-space ctrl-f ctrl-f ctrl-f");
