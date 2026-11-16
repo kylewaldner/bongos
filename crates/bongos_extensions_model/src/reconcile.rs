@@ -52,6 +52,8 @@ pub struct Snapshot {
     pub staging: Vec<String>,
     pub extensions: Vec<ExtensionSnapshot>,
     pub symlinks: Vec<SymlinkSnapshot>,
+    /// Ids whose lock is held but that have no `git/<id>` folder, so they are not in `extensions`.
+    pub locked_ids_without_folder: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -98,13 +100,16 @@ impl Fix {
 ///
 /// Extension and symlink ids that fail `validate_id` (including reserved names in any ASCII case)
 /// are skipped. Staging folders are not scoped to an id, so no `DeleteStaging` is emitted while
-/// any extension holds its lock: an install in another process may be using staging.
+/// any extension holds its lock, including one that has no folder yet: an install in another
+/// process may be using staging.
 pub fn plan(snapshot: &Snapshot) -> Vec<Fix> {
     if !snapshot.git_dir_exists {
         return Vec::new();
     }
     let mut fixes: Vec<Fix> = Vec::new();
-    if !snapshot.extensions.iter().any(|e| e.lock_held) {
+    if snapshot.locked_ids_without_folder.is_empty()
+        && !snapshot.extensions.iter().any(|e| e.lock_held)
+    {
         fixes.extend(snapshot.staging.iter().map(|nonce| Fix::DeleteStaging {
             nonce: nonce.clone(),
         }));
@@ -187,6 +192,9 @@ fn plan_extension(
     let id = &extension.id;
     let mut keep: BTreeSet<&str> = BTreeSet::new();
     let mut delete_others = true;
+    // A link whose checkout is missing (a crash left it dangling) tells us nothing reliable.
+    let link_dangling =
+        link.is_some_and(|(commit, _)| !extension.checkouts.iter().any(|c| c.folder == commit));
     match &extension.record {
         RecordSnapshot::Some(record) if record.id != *id => {
             // A record that belongs to another id cannot be trusted: touch nothing.
@@ -198,7 +206,7 @@ fn plan_extension(
             }
             return;
         }
-        RecordSnapshot::Some(record) => match link {
+        RecordSnapshot::Some(record) => match link.filter(|_| !link_dangling) {
             Some((commit, origin_url)) => {
                 keep.insert(commit);
                 if commit != record.commit {
@@ -221,6 +229,7 @@ fn plan_extension(
                 });
             }
         },
+        RecordSnapshot::Unreadable if link_dangling => delete_others = false,
         RecordSnapshot::None | RecordSnapshot::Unreadable => match link {
             Some((commit, origin_url)) => {
                 keep.insert(commit);

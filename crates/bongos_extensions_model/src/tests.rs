@@ -326,6 +326,7 @@ mod install_state {
             staging: Vec::new(),
             extensions,
             symlinks,
+            locked_ids_without_folder: Vec::new(),
         }
     }
 
@@ -528,6 +529,71 @@ mod install_state {
             vec![link("k", "c1")],
         );
         assert_eq!(plan(&s), vec![del("k", "c0"), wr("k", "c1")]);
+    }
+
+    #[test]
+    fn plan_dangling_link_keeps_the_recorded_checkout() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true)],
+                rec("k", "c0", RecordState::Installed),
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(
+            plan(&s),
+            vec![Fix::Relink {
+                id: "k".into(),
+                commit: "c0".into()
+            }]
+        );
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", false)],
+                rec("k", "c0", RecordState::Installed),
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(plan(&s), vec![Fix::MarkBuildMissing { id: "k".into() }]);
+        let s = snap(
+            vec![ext("k", &[("c0", true)], RecordSnapshot::Unreadable, false)],
+            vec![link("k", "c1")],
+        );
+        assert!(plan(&s).is_empty());
+    }
+
+    #[test]
+    fn plan_finish_removal_skipped_when_another_link_points_in() {
+        let mut foreign = link("foo", "c0");
+        foreign.target = SymlinkTarget::Checkout {
+            id: "k".into(),
+            commit: "c0".into(),
+            origin_url: None,
+        };
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true)],
+                rec("k", "c0", RecordState::Removing),
+                false,
+            )],
+            vec![foreign],
+        );
+        assert!(plan(&s).is_empty());
+    }
+
+    #[test]
+    fn plan_staging_kept_while_a_folderless_id_is_locked() {
+        let mut s = snap(vec![], vec![]);
+        s.staging = vec!["n".into()];
+        s.locked_ids_without_folder = vec!["fresh".into()];
+        assert!(plan(&s).is_empty());
+        s.locked_ids_without_folder.clear();
+        assert_eq!(plan(&s), vec![Fix::DeleteStaging { nonce: "n".into() }]);
     }
 
     #[test]
