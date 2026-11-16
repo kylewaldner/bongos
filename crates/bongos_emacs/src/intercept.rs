@@ -212,7 +212,7 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
         // The action the key is bound to, for the last-command tracker: the keystroke observers
         // never see a key this interceptor stops.
         let key_action = {
-            let mut input = pending.clone();
+            let mut input = pending;
             input.push(event.keystroke.clone());
             keymap
                 .borrow()
