@@ -23,19 +23,59 @@ pub struct GitEnv {
     pub set: Vec<(&'static str, &'static str)>,
     /// Variables removed.
     pub remove: Vec<&'static str>,
+    /// Prefixes of variables removed: every inherited variable whose name starts with one of them.
+    pub remove_prefixes: Vec<&'static str>,
 }
 
-/// The environment policy shared by [`RealGit`] and the fake runner: no terminal prompt, no
-/// askpass helper and no interactive credential manager.
+/// The ssh command used when the caller chose none: never asks for a password, passphrase or
+/// host-key confirmation.
+pub const BATCH_SSH_COMMAND: &str = "ssh -o BatchMode=yes";
+
+/// The environment policy shared by [`RealGit`] and the fake runner, for the current process
+/// environment. See [`git_env_for`].
 pub fn git_env() -> GitEnv {
+    git_env_for(|key| std::env::var_os(key).is_some())
+}
+
+/// The environment policy given which variables the caller's environment has: no terminal prompt,
+/// no askpass helper, no interactive credential manager, ssh in batch mode unless the caller chose
+/// an ssh command, and no inherited variable that would select another repository or inject
+/// configuration.
+pub fn git_env_for(has_var: impl Fn(&str) -> bool) -> GitEnv {
+    let mut set = vec![("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")];
+    if !has_var("GIT_SSH_COMMAND") && !has_var("GIT_SSH") {
+        set.push(("GIT_SSH_COMMAND", BATCH_SSH_COMMAND));
+    }
     GitEnv {
-        set: vec![("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")],
-        remove: vec!["GIT_ASKPASS", "SSH_ASKPASS"],
+        set,
+        remove: vec![
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_NAMESPACE",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+        ],
+        remove_prefixes: vec!["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"],
     }
 }
 
-/// Options passed to every `git` invocation before the subcommand.
-const HARDENING: [&str; 4] = [
+/// Options passed to every `git` invocation before the subcommand: only https, ssh and file
+/// transports, and no filesystem monitor hook.
+const HARDENING: [&str; 12] = [
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "protocol.https.allow=always",
+    "-c",
+    "protocol.ssh.allow=always",
+    "-c",
+    "protocol.file.allow=always",
     "-c",
     "protocol.ext.allow=never",
     "-c",
@@ -89,6 +129,17 @@ impl RealGit {
         let policy = git_env();
         for key in policy.remove {
             command.env_remove(key);
+        }
+        for (key, _) in std::env::vars_os() {
+            let matches = key.to_str().is_some_and(|key| {
+                policy
+                    .remove_prefixes
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+            });
+            if matches {
+                command.env_remove(key);
+            }
         }
         for (key, value) in policy.set {
             command.env(key, value);
@@ -190,7 +241,21 @@ impl GitRunner for RealGit {
                 ],
             )
             .await;
-        if shallow.is_ok() {
+        if let Err(shallow_err) = shallow {
+            // The server refuses unadvertised commits: fetch everything and look for it.
+            self.run(Some(dir), &[os("fetch"), os("--quiet"), os("origin")])
+                .await
+                .map_err(|full_err| {
+                    anyhow!(
+                        "the shallow fetch failed ({shallow_err:#}) and so did the full fetch ({full_err:#})"
+                    )
+                })?;
+            self.run(
+                Some(dir),
+                &[os("checkout"), os("--quiet"), os("--detach"), os(commit)],
+            )
+            .await?;
+        } else {
             self.run(
                 Some(dir),
                 &[
@@ -199,15 +264,6 @@ impl GitRunner for RealGit {
                     os("--detach"),
                     os("FETCH_HEAD"),
                 ],
-            )
-            .await?;
-        } else {
-            // The server refuses unadvertised commits: fetch everything and look for it.
-            self.run(Some(dir), &[os("fetch"), os("--quiet"), os("origin")])
-                .await?;
-            self.run(
-                Some(dir),
-                &[os("checkout"), os("--quiet"), os("--detach"), os(commit)],
             )
             .await?;
         }
@@ -370,6 +426,16 @@ pub async fn stage(
         .fetch_commit(url, commit, &staged.dir)
         .await
         .map_err(|err| anyhow!("could not fetch {commit} from {url}: {err:#}"))?;
+    if let Some(path) = path {
+        // A committed symlink could point the subdirectory outside the checkout.
+        let inside = match (staged.dir.canonicalize(), staged.root.canonicalize()) {
+            (Ok(dir), Ok(root)) => root.starts_with(&dir) && root.is_dir(),
+            _ => false,
+        };
+        if !inside {
+            bail!("`{path}` of {url} at {commit} is not a directory inside the repository");
+        }
+    }
     Ok(staged)
 }
 

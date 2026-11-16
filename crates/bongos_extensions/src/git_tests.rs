@@ -222,6 +222,81 @@ fn real_dropped_stage_leaves_no_folder() {
     });
 }
 
+#[test]
+fn real_stage_refuses_a_symlinked_subdirectory_leaving_the_checkout() {
+    smol::block_on(async {
+        let sandbox = Sandbox::new();
+        let (repo, url) = sandbox.source().await;
+        std::fs::create_dir_all(repo.join("ext")).unwrap();
+        std::fs::write(repo.join("ext/extension.toml"), "x").unwrap();
+        std::os::unix::fs::symlink("../..", repo.join("escape")).unwrap();
+        sandbox.git(&repo, &["add", "ext", "escape"]).await;
+        sandbox.git(&repo, &["commit", "--quiet", "-m", "x"]).await;
+        let commit = sandbox.git(&repo, &["rev-parse", "HEAD"]).await;
+        let runner = sandbox.runner();
+        let layout = sandbox.layout();
+
+        let staged = stage(&runner, &layout, &url, &commit, Some("ext"))
+            .await
+            .unwrap();
+        assert_eq!(staged.root(), staged.dir().join("ext"));
+        assert!(staged.root().join("extension.toml").is_file());
+        drop(staged);
+
+        for path in ["escape", "escape/staging"] {
+            let err = stage(&runner, &layout, &url, &commit, Some(path))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(url.as_str()), "{err}");
+            assert!(err.contains(path), "{err}");
+            assert_eq!(std::fs::read_dir(layout.staging_dir()).unwrap().count(), 0);
+        }
+    });
+}
+
+#[test]
+fn real_stages_a_reachable_commit_the_server_will_not_serve_directly() {
+    smol::block_on(async {
+        let sandbox = Sandbox::new();
+        let (repo, url) = sandbox.source().await;
+        sandbox.commit(&repo, "a").await;
+        sandbox
+            .git(&repo, &["checkout", "--quiet", "-b", "dev"])
+            .await;
+        let wanted = sandbox.commit(&repo, "b").await;
+        sandbox.commit(&repo, "c").await;
+        sandbox.git(&repo, &["checkout", "--quiet", "main"]).await;
+        for key in [
+            "uploadpack.allowAnySHA1InWant",
+            "uploadpack.allowReachableSHA1InWant",
+            "uploadpack.allowTipSHA1InWant",
+        ] {
+            sandbox.git(&repo, &["config", key, "false"]).await;
+        }
+
+        // Protocol v0 enforces the want checks, so the shallow fetch is refused and the full
+        // fetch fallback has to find the commit.
+        let mut env = sandbox.env.clone();
+        env.extend(
+            [
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "protocol.version"),
+                ("GIT_CONFIG_VALUE_0", "0"),
+            ]
+            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+        );
+        let runner = RealGit::with_env(env);
+        let layout = sandbox.layout();
+        let staged = stage(&runner, &layout, &url, &wanted, None).await.unwrap();
+        assert_eq!(runner.head(staged.dir()).await.unwrap(), wanted);
+        assert!(staged.dir().join("b").is_file());
+        assert!(!staged.dir().join("c").exists());
+        // Only the fallback leaves a complete, not shallow, history.
+        assert!(!staged.dir().join(".git/shallow").exists());
+    });
+}
+
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const TAG_OBJECT: &str = "1111111111111111111111111111111111111111";
 const BRANCH: &str = "2222222222222222222222222222222222222222";
@@ -242,7 +317,50 @@ fn fake_records_the_prompt_free_env() {
         assert!(envs[0].set.contains(&("GIT_TERMINAL_PROMPT", "0")));
         assert!(envs[0].remove.contains(&"GIT_ASKPASS"));
         assert_eq!(envs[0], git_env());
+        let user_chose_ssh =
+            std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some();
+        assert_eq!(
+            envs[0]
+                .set
+                .contains(&("GIT_SSH_COMMAND", BATCH_SSH_COMMAND)),
+            !user_chose_ssh
+        );
     });
+}
+
+#[test]
+fn env_policy_runs_ssh_in_batch_mode_unless_the_user_chose_ssh() {
+    let batch = ("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    assert!(git_env_for(|_| false).set.contains(&batch));
+    assert!(
+        !git_env_for(|key| key == "GIT_SSH_COMMAND")
+            .set
+            .iter()
+            .any(|(key, _)| *key == "GIT_SSH_COMMAND")
+    );
+    assert!(!git_env_for(|key| key == "GIT_SSH").set.contains(&batch));
+}
+
+#[test]
+fn env_policy_scrubs_repository_selecting_variables() {
+    let env = git_env_for(|_| false);
+    for key in [
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+    ] {
+        assert!(env.remove.contains(&key), "{key}");
+    }
+    assert!(env.remove_prefixes.contains(&"GIT_CONFIG_KEY_"));
+    assert!(env.remove_prefixes.contains(&"GIT_CONFIG_VALUE_"));
 }
 
 #[test]
@@ -296,12 +414,12 @@ fn fake_first_use_creates_git_and_staging() {
         let layout = Layout::new(temp.path().join("extensions"));
         assert!(!layout.git_dir().exists());
         let fake = FakeGit::new();
-        let staged = stage(&fake, &layout, &fake_url(), COMMIT, Some("sub/dir"))
+        let staged = stage(&fake, &layout, &fake_url(), COMMIT, None)
             .await
             .unwrap();
         assert!(layout.staging_dir().is_dir());
         assert!(staged.dir().starts_with(layout.staging_dir()));
-        assert_eq!(staged.root(), staged.dir().join("sub/dir"));
+        assert_eq!(staged.root(), staged.dir());
     });
 }
 
