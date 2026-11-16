@@ -1267,6 +1267,8 @@ fn the_engine_reports_the_worktree_of_the_active_run(cx: &mut TestAppContext) {
     assert_eq!(engine.active_run_worktree(LEAF), None);
 }
 
+#[path = "completion_tests.rs"]
+mod completion_tests;
 #[path = "enable_tests.rs"]
 mod enable_tests;
 #[path = "gates_tests.rs"]

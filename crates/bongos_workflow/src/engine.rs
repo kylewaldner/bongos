@@ -35,6 +35,7 @@ use serde_json::Value;
 use settings::Settings as _;
 
 use crate::WorkflowsSettings;
+use crate::completion::CompletionHooks;
 use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged};
 use crate::definitions::{
     self, DefinitionError, NewDefinition, ProjectLayer, Report, SHIPPED_FILES, materialize,
@@ -1064,6 +1065,18 @@ impl WorkflowEngine {
                         )
                     });
                     let result = write.await;
+                    if result.is_ok() {
+                        // The hooks look at the run's worktree, so the run ends only after them.
+                        let hooks = cx.update(|cx| {
+                            CompletionHooks::after_complete(
+                                &context.task_id,
+                                &context.run,
+                                &context.worktree.path,
+                                cx,
+                            )
+                        });
+                        hooks.await;
+                    }
                     return match task_link::completed(&context.state, &result) {
                         Completed::Done => Settlement::Succeed,
                         Completed::Wait { key, question } => Settlement::Wait { key, question },
