@@ -282,7 +282,7 @@ async fn open_line_inserts_newlines_and_point_stays(cx: &mut TestAppContext) {
 async fn open_line_is_refused_in_a_read_only_editor(cx: &mut TestAppContext) {
     let mut cx = test_context(cx).await;
     cx.set_state("fooˇbar");
-    cx.update_editor(|editor, _, cx| editor.set_read_only(true));
+    cx.update_editor(|editor, _, _| editor.set_read_only(true));
     cx.dispatch_action(OpenLine { count: Some(2) });
     cx.assert_editor_state("fooˇbar");
 }
