@@ -2,6 +2,7 @@
 //! running, and the registry of what each action does with it. The pure model is
 //! `bongos_emacs_model::prefix_arg`.
 
+use crate::quit;
 use bongos_emacs_model::prefix_arg::PrefixArg;
 use collections::HashMap;
 use editor::Editor;
@@ -56,6 +57,9 @@ pub trait CountArg: Action + Clone {
     const READS: bool = false;
     /// Whether the count is not bounded by the text, so it is clamped to `MAX_INSERT`.
     const INSERTS: bool = false;
+    /// Whether the action builds the argument (C-u, M-digit, M--): it is not recorded as the
+    /// last command, and it reads the pending argument itself.
+    const BUILDS: bool = false;
 
     fn count(&self) -> Option<i32> {
         None
@@ -82,8 +86,6 @@ pub(crate) fn counted<A: CountArg>(action: &A, handed: Option<PrefixArg>) -> Opt
     action.with_count(value)
 }
 
-// Nothing builds a `WindowArg` or hands off outside tests until the prefix commands exist.
-#[cfg_attr(not(test), allow(dead_code))]
 struct WindowArg {
     arg: Option<PrefixArg>,
     /// The full editor the argument was started in.
@@ -120,23 +122,33 @@ pub fn pending(window: &Window, cx: &App) -> Option<PrefixArg> {
 }
 
 /// The argument handed to the command now running, cleared on read.
-pub fn take(window: &Window, cx: &mut App) -> Option<PrefixArg> {
-    with_state(window, cx, |state| state.handoff.take()).flatten()
+pub fn take(window: &mut Window, cx: &mut App) -> Option<PrefixArg> {
+    let taken = with_state(window, cx, |state| state.handoff.take()).flatten();
+    if taken.is_some() {
+        show_echo(window, cx, None);
+    }
+    taken
+}
+
+fn show_echo(window: &mut Window, cx: &mut App, text: Option<String>) {
+    bongos_minibuffer::set_prefix_echo(window, cx, text);
 }
 
 /// Clears the argument and the handoff.
-pub fn cancel(window: &Window, cx: &mut App) {
+pub fn cancel(window: &mut Window, cx: &mut App) {
     let id = window_id(window);
-    if let Some(args) = args_mut(cx) {
-        args.0.remove(&id);
+    let had = args_mut(cx).is_some_and(|args| args.0.remove(&id).is_some());
+    if had {
+        show_echo(window, cx, None);
     }
 }
 
 /// Moves the pending argument into the handoff, to be read by the command about to be
 /// dispatched, and schedules a drop of a handoff nobody took, so an argument is consumed by
 /// exactly one command even when its action has no handler in the context.
+// Only the key interceptor hands off, and it comes with the keybindings.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn hand_off(window: &Window, cx: &mut App) {
+pub(crate) fn hand_off(window: &mut Window, cx: &mut App) {
     let Some(generation) = with_state(window, cx, |state| {
         state.handoff = state.arg.take();
         state.generation += 1;
@@ -144,6 +156,7 @@ pub(crate) fn hand_off(window: &Window, cx: &mut App) {
     }) else {
         return;
     };
+    show_echo(window, cx, None);
     window.defer(cx, move |window, cx| {
         let id = window_id(window);
         let Some(args) = args_mut(cx) else {
@@ -185,9 +198,14 @@ pub(crate) fn init_editor(
     .detach();
 }
 
-/// Starts `arg` in `window` as if typed in `editor`.
-#[cfg(test)]
-pub(crate) fn start(arg: PrefixArg, editor: &Entity<Editor>, window: &Window, cx: &mut App) {
+/// Registers the quit hook: C-g with an argument pending clears it and its echo.
+pub(crate) fn init(cx: &mut App) {
+    quit::register(cx, |window, cx| cancel(window, cx));
+}
+
+/// Starts `arg` in `window` as if typed in `editor`, and echoes it.
+pub(crate) fn start(arg: PrefixArg, editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+    show_echo(window, cx, Some(arg.echo()));
     let args = cx.default_global::<PrefixArgs>();
     let generation = args
         .0
@@ -202,4 +220,29 @@ pub(crate) fn start(arg: PrefixArg, editor: &Entity<Editor>, window: &Window, cx
             generation,
         },
     );
+}
+
+/// Runs one press of a prefix action: starts an argument when none is pending, otherwise
+/// applies `press` to it. A press the argument does not accept leaves it as it was. The key
+/// only counts in a full editor; elsewhere it propagates.
+pub(crate) fn press(
+    editor: &Entity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+    start_new: impl FnOnce() -> PrefixArg,
+    apply: impl FnOnce(&mut PrefixArg) -> bool,
+) {
+    if !editor.read(cx).mode().is_full() {
+        cx.propagate();
+        return;
+    }
+    let current = take(window, cx).or_else(|| pending(window, cx));
+    let arg = match current {
+        None => start_new(),
+        Some(mut arg) => {
+            apply(&mut arg);
+            arg
+        }
+    };
+    start(arg, editor, window, cx);
 }

@@ -13,13 +13,22 @@ impl Global for LastCommand {}
 /// the action, so a handler still sees the previous command.
 pub(crate) fn init(cx: &mut App) {
     cx.observe_keystrokes(|event, window, cx| {
-        record(
-            window,
-            event.action.as_ref().map(|action| action.name()),
-            cx,
-        );
+        let name = event.action.as_ref().map(|action| action.name());
+        if name.is_some_and(is_prefix_action) {
+            return;
+        }
+        record(window, name, cx);
     })
     .detach();
+}
+
+/// The actions that build a prefix argument; they are not commands of their own, so they never
+/// become the last command.
+fn is_prefix_action(name: &str) -> bool {
+    matches!(
+        name,
+        "emacs::UniversalArgument" | "emacs::DigitArgument" | "emacs::NegativeArgument"
+    )
 }
 
 /// Stores `command` as the window's last command. Each `emacs` handler records itself, so a

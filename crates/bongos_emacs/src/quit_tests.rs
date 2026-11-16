@@ -182,10 +182,19 @@ impl Render for TestModal {
 pub(crate) async fn workspace_window(
     cx: &mut TestAppContext,
 ) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
+    workspace_window_with(cx, |_| {}).await
+}
+
+/// `workspace_window`, running `setup` after the crate's init and before the window opens.
+pub(crate) async fn workspace_window_with(
+    cx: &mut TestAppContext,
+    setup: impl FnOnce(&mut gpui::App),
+) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
         editor::init(cx);
         crate::init(cx);
+        setup(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-g", KeyboardQuit, Some("Editor")),
             KeyBinding::new("ctrl-g", KeyboardQuit, Some("Workspace")),
