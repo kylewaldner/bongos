@@ -63,9 +63,9 @@ impl Display for BaseKeymap {
 
 impl BaseKeymap {
     pub const OPTIONS: [(&'static str, Self); 4] = [
-        ("VS Code", Self::VSCode),
-        ("Vim", Self::Vim),
         ("Emacs (Default)", Self::Emacs),
+        ("Vim", Self::Vim),
+        ("VS Code", Self::VSCode),
         ("None", Self::None),
     ];
 
