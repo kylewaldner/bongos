@@ -121,7 +121,7 @@
   },
   {
     // The prefix argument (universal-argument): C-u, M-0 to M-9 and M--. Full editors only, so picker query
-    // editors and other small editors keep their own keys. Zed's `ctrl-u` (undo selection) is outranked
+    // editors and other small editors keep their own keys. The default `ctrl-u` (undo selection) is outranked
     // here, and `alt-1` to `alt-9` stay `pane::ActivateItem` outside editors. Keep this block after the
     // `Editor` block above. On macOS the Option chords match by key code, like the other `alt-` rows.
     "context": "Editor && mode == full",
