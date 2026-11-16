@@ -59,19 +59,14 @@ impl BaseKeymap {
     pub const OPTIONS: [(&'static str, Self); 2] =
         [("VS Code", Self::VSCode), ("Emacs (Default)", Self::Emacs)];
 
+    /// The Emacs keymap asset for this platform, if the base keymap has one.
     pub fn asset_path(&self) -> Option<&'static str> {
-        #[cfg(target_os = "macos")]
         match self {
-            BaseKeymap::Emacs => Some("keymaps/macos/emacs.json"),
-            BaseKeymap::VSCode => None,
-            BaseKeymap::None => None,
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        match self {
-            BaseKeymap::Emacs => Some("keymaps/linux/emacs.json"),
-            BaseKeymap::VSCode => None,
-            BaseKeymap::None => None,
+            BaseKeymap::Emacs => profile_keymap(*self, false)
+                .into_iter()
+                .map(|KeymapPart::Asset { path, .. }| path)
+                .find(|path| path.contains("emacs")),
+            BaseKeymap::VSCode | BaseKeymap::None => None,
         }
     }
 

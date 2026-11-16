@@ -2,7 +2,7 @@
 //! `escape` leave prompts under every profile, and that the user's `keymap.json` is never written
 //! and always wins.
 
-use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
+use gpui::{BorrowAppContext, KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext};
 use settings::{
     BaseKeymap, BaseKeymapContent, KeybindSource, KeymapFile, KeymapFileLoadResult, KeymapPart,
 };
@@ -157,10 +157,17 @@ async fn a_user_binding_on_ctrl_p_wins_under_each_profile(cx: &mut TestAppContex
         cx,
     );
     for macos in [false, true] {
-        for (base, contexts) in [
-            (BaseKeymap::Emacs, &EDITOR[..]),
-            (BaseKeymap::VSCode, &WORKSPACE[..]),
-            (BaseKeymap::None, &WORKSPACE[..]),
+        // Under VS Code, `ctrl-p` is the file finder in `Workspace` on Linux and `editor::MoveUp`
+        // in `Editor` on macOS.
+        let (vscode_contexts, vscode_profile) = if macos {
+            (&EDITOR[..], Some("editor::MoveUp"))
+        } else {
+            (&WORKSPACE[..], Some("file_finder::Toggle"))
+        };
+        for (base, contexts, profile) in [
+            (BaseKeymap::Emacs, &EDITOR[..], Some("editor::MoveUp")),
+            (BaseKeymap::VSCode, vscode_contexts, vscode_profile),
+            (BaseKeymap::None, &WORKSPACE[..], None),
         ] {
             let mut all = load_profile(base, false, macos, cx);
             let profile_only = Keymap::new(all.clone());
@@ -173,10 +180,11 @@ async fn a_user_binding_on_ctrl_p_wins_under_each_profile(cx: &mut TestAppContex
                 Some("menu::Confirm"),
                 "{base:?} macos={macos}"
             );
-            if base == BaseKeymap::Emacs {
+            if base != BaseKeymap::None {
                 assert_eq!(
                     first(&profile_only, "ctrl-p", contexts),
-                    Some("editor::MoveUp")
+                    profile,
+                    "{base:?} macos={macos} profile only"
                 );
             }
         }
@@ -299,6 +307,33 @@ async fn vscode_loads_vim_json_when_vim_or_helix_is_on(cx: &mut TestAppContext) 
     };
     assert!(vim(true));
     assert!(!vim(false));
+}
+
+#[gpui::test]
+async fn load_default_keymap_binds_vim_json_for_vim_or_helix_mode_under_vscode(
+    cx: &mut TestAppContext,
+) {
+    init_keymap_test(cx);
+    // vim.json adds bindings no other part of the profile has, so the total grows.
+    let count = |cx: &mut TestAppContext, settings_json: &str| -> usize {
+        cx.update(|cx| {
+            cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+                store
+                    .set_user_settings(settings_json, cx)
+                    .expect("settings parse");
+            });
+            cx.clear_key_bindings();
+            super::load_default_keymap(cx);
+            let keymap = cx.key_bindings();
+            let bindings = keymap.borrow().bindings().count();
+            bindings
+        })
+    };
+    let off = count(cx, r#"{"base_keymap": "VSCode"}"#);
+    let vim = count(cx, r#"{"base_keymap": "VSCode", "vim_mode": true}"#);
+    let helix = count(cx, r#"{"base_keymap": "VSCode", "helix_mode": true}"#);
+    assert!(vim > off, "vim_mode adds vim.json: {vim} vs {off}");
+    assert!(helix > off, "helix_mode adds vim.json: {helix} vs {off}");
 }
 
 #[test]
