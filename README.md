@@ -729,8 +729,8 @@ on your machine. There is no marketplace: bongos carries a short list of extensi
 to a commit, and you can install any other repository by its URL.
 
 When you open a file of a language bongos does not know but the list does, the status bar says
-"Swift support is available" with Install, Not now (hides the offer for that language only, until
-restart) and Don't offer again
+"Swift support is available" with Install, Not now (hides the offer for that language in that window
+until restart) and Don't offer again
 (adds the language to `language_extensions.never_offer`). Opening the file only reads the list;
 nothing is cloned or built until you choose Install.
 
@@ -760,9 +760,9 @@ Settings:
 }
 ```
 
-`enabled: false` turns the commands off (each then only says that language extensions are off)
-and the startup repair off; extensions already installed still load. `offer: false` turns the
-offer line off.
+`enabled: false` turns the commands off (each then only says that language extensions are off),
+and the startup repair, the offer line and the build status item too; extensions already installed
+still load. `offer: false` turns the offer line off.
 
 Trust: an extension runs code. Its build runs on your machine, and once loaded it can download and
 start a language server. An install from the list at its pinned commit does not ask. Anything else,
