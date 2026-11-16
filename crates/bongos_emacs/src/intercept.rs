@@ -105,7 +105,7 @@ pub(crate) fn decide(
             Some(Meaning::Reads) => Route::HandOff(action.boxed_clone()),
             Some(Meaning::Ignored) => Route::Cancel,
             Some(Meaning::Adapter(adapter)) => Route::Adapter(adapter),
-            Some(Meaning::CountField) => {
+            Some(Meaning::CountField | Meaning::CountFieldSwap(_)) => {
                 Route::CountField(action.boxed_clone(), binding.action_input())
             }
             Some(Meaning::Redirect(target)) => Route::Redirect(target, action.boxed_clone()),
@@ -240,8 +240,15 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
                 adapter(arg, &origin, window, cx);
             }
             Route::CountField(action, input) => {
-                let data = count_input(input.as_deref(), arg.value());
-                match cx.build_action(action.name(), Some(data)) {
+                // A negative argument swaps to the opposite action, with the count made positive.
+                let (name, value) = match prefix_arg::meaning(cx, action.name()) {
+                    Some(Meaning::CountFieldSwap(opposite)) if arg.value() < 0 => {
+                        (opposite, arg.value().saturating_abs())
+                    }
+                    _ => (action.name(), arg.value()),
+                };
+                let data = count_input(input.as_deref(), value);
+                match cx.build_action(name, Some(data)) {
                     Ok(counted) => {
                         prefix_arg::cancel(window, cx);
                         dispatch(counted.as_ref(), window, cx);

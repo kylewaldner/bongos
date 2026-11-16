@@ -19,6 +19,7 @@ pub mod kill_sink;
 pub mod last_command;
 mod lines;
 pub mod mark;
+pub mod meanings;
 mod motion;
 pub mod prefix_arg;
 mod prefix_commands;
