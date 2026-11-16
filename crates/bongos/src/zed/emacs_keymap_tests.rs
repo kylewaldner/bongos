@@ -211,6 +211,9 @@ const EDITOR_KEYS: &[(&str, &str)] = &[
     ("alt-<", "emacs::BeginningOfBuffer"),
     ("alt->", "emacs::EndOfBuffer"),
     ("alt-.", "emacs::XrefFindDefinitions"),
+    ("ctrl-u", "emacs::UniversalArgument"),
+    ("alt--", "emacs::NegativeArgument"),
+    ("ctrl-o", "emacs::OpenLine"),
 ];
 
 /// Keys where the Emacs action replaces Zed's inside editors, with Zed's Linux action in an
@@ -342,20 +345,80 @@ async fn every_emacs_key_resolves_in_an_editor(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+async fn the_digit_keys_and_the_minus_key_start_a_prefix_argument_in_full_editors(
+    cx: &mut gpui::TestAppContext,
+) {
+    super::tests::init_keymap_test(cx);
+    for platform in [LINUX, MACOS] {
+        let keymap = Keymap::new(load_all(&platform, true, cx));
+        for contexts in [&EDITOR, &MARK_MODE_EDITOR] {
+            for digit in 0..=9u8 {
+                let input = format!("alt-{digit}");
+                let (found, pending) = bindings(&keymap, &input, contexts);
+                assert!(!pending, "{input}");
+                assert_eq!(
+                    found[0].action().name(),
+                    "emacs::DigitArgument",
+                    "{}: {input} in {contexts:?}",
+                    platform.emacs
+                );
+                assert_eq!(
+                    found[0].action_input().as_deref(),
+                    Some(format!("{{\"digit\":{digit}}}").as_str()),
+                    "{}: {input}",
+                    platform.emacs
+                );
+            }
+        }
+    }
+}
+
+#[gpui::test]
+async fn the_prefix_keys_belong_to_full_editors_only(cx: &mut gpui::TestAppContext) {
+    super::tests::init_keymap_test(cx);
+    // A picker's query editor is an editor in single-line mode.
+    const QUERY_EDITOR: [&str; 4] = ["Workspace", "Modal", "Picker", "Editor mode=single_line"];
+    for platform in [LINUX, MACOS] {
+        let keymap = Keymap::new(load_all(&platform, true, cx));
+        for input in ["ctrl-u", "alt-1", "alt-0", "alt--", "ctrl-o"] {
+            let (names, _) = resolve(&keymap, input, &QUERY_EDITOR);
+            assert!(
+                !names.iter().any(|name| matches!(
+                    *name,
+                    "emacs::UniversalArgument"
+                        | "emacs::DigitArgument"
+                        | "emacs::NegativeArgument"
+                        | "emacs::OpenLine"
+                )),
+                "{}: {input} in a query editor: {names:?}",
+                platform.emacs
+            );
+        }
+    }
+    // Outside editors the digit keys keep switching tabs on Linux (macOS uses cmd).
+    let keymap = Keymap::new(load_all(&LINUX, true, cx));
+    for digit in 1..=9 {
+        let input = format!("alt-{digit}");
+        assert_eq!(
+            first(&keymap, &input, &PANE),
+            Some("pane::ActivateItem"),
+            "{input}"
+        );
+    }
+}
+
+#[gpui::test]
 async fn the_key_table_covers_every_emacs_action(cx: &mut gpui::TestAppContext) {
     super::tests::init_keymap_test(cx);
     cx.update(|cx| {
         let names = cx.all_action_names();
         // Every emacs action has an editor key; the cursor toggle is left unbound on purpose.
         // `pop-global-mark` is a workspace key (`mark_keymap_tests`) and the implementations
-        // jump stays in the palette. The prefix commands and open-line are bound in a later step.
-        const UNBOUND: [&str; 6] = [
+        // jump stays in the palette. The digit keys carry an argument, so they are tested apart.
+        const UNBOUND: [&str; 3] = [
             "emacs::PopGlobalMark",
             "emacs::XrefFindImplementations",
-            "emacs::UniversalArgument",
             "emacs::DigitArgument",
-            "emacs::NegativeArgument",
-            "emacs::OpenLine",
         ];
         for name in names
             .iter()

@@ -462,6 +462,7 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-Y | browse-kill-ring: pick an entry from the kill ring in the minibuffer strip |
 | C-M-k | kill-whole-line |
 | C-M-w | append-next-kill: the next kill is added to the last entry |
+| C-o | open line: insert a newline after the cursor and stay before it |
 | C-/, C-_, C-x u | undo |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
@@ -502,8 +503,7 @@ three C-M-k in a row followed by C-y brings all three lines back; C-M-w makes th
 the last entry even after other commands. M-y, right after a yank, swaps the yanked text for the
 next older entry, and again for the one before it. M-Y opens the ring in the minibuffer strip,
 newest first, narrowed as you type, with the highlighted entry previewed under the list; Enter
-inserts it. A C-u prefix will change how many lines these commands take once the prefix-argument
-feature lands.
+inserts it. A prefix argument changes how many lines these commands take; see Universal argument.
 
 Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` is `true`
 (default `false`); then a copy in a terminal goes into the ring and a paste there reads it.
@@ -525,8 +525,8 @@ Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` i
 | M-. | push the mark, then go to the definition |
 | M-t, C-x C-t | with a mark away from point, swap the word or line at point with the one at the mark |
 
-C-SPC pressed right after a pop keeps popping, as in Emacs. C-u is not a prefix key yet, so
-C-x C-SPC stands in for C-u C-SPC. Inside editors C-. sets the mark instead of opening code
+C-SPC pressed right after a pop keeps popping, as in Emacs. C-u C-SPC does the same as C-x C-SPC
+(one entry per press, whatever the count). Inside editors C-. sets the mark instead of opening code
 actions, which stay in the command palette.
 
 The mark and its ring belong to the buffer, so two panes showing one file share them, and edits
@@ -539,6 +539,74 @@ deactivated; set it to `true` to have typing replace the region, as in other edi
 ```json
 { "emacs": { "delete_selection": true } }
 ```
+
+### Universal argument
+
+C-u, M-0 to M-9 and M-- give the next command a count, as in Emacs. The keys work in a full
+editor (a file you edit); in a picker's query editor, the minibuffer and other small editors they
+keep the meaning they have there, and where M-1 to M-9 switch tabs (outside editors, on Linux) they keep doing that.
+
+- **C-u** alone is 4, and each further C-u multiplies by 4: C-u C-u is 16, C-u C-u C-u is 64.
+- **Digits** after C-u, or M-0 to M-9 from the start, build the number: C-u 1 0 and M-1 0 are 10.
+  A C-u typed after digits ends the number, so C-u 3 C-u 7 is a 7 typed with the count 3, which
+  inserts 777; a digit typed with no argument pending is only a digit.
+- **Minus** makes the count negative: M-- is -1 and C-u - is -4 (Emacs reads C-u - as -1). Most
+  commands run the opposite way with a negative count; C-u - M-f goes four words back, M-- C-f
+  one character back. The minus is only taken before the digits.
+- **The echo.** While an argument is pending the echo area shows it: `C-u 4`, `C-u 10`, `C-u -`.
+  It goes when the next command takes the argument. The argument belongs to the editor it was
+  started in: moving focus to a picker or the minibuffer drops it.
+- **C-g** cancels a pending argument and its echo, so C-u 7 C-g changes nothing and the next
+  key is typed as usual. C-g also stops a long repeat after the repeat in progress, keeping what
+  was done.
+- **Typed characters.** C-u 5 and then a character inserts it 5 times. The count is limited to
+  65536, and the echo then says "Count limited to 65536".
+
+Commands that read the count themselves:
+
+| Command | With a count N |
+|---|---|
+| C-f, C-b, C-n, C-p | move N characters or lines (a negative count goes the other way) |
+| M-f, M-b, M-d, M-DEL, M-u, M-l, M-c | move over, kill or change the case of N words |
+| C-k, C-w, M-w, C-M-k | kill or copy N lines as one entry (C-k from the cursor, with a region C-w ignores N) |
+| C-y | yank the Nth newest entry of the kill ring (it wraps round); C-u C-y is the 4th |
+| M-y | step N entries older in the kill ring |
+| C-SPC | pop one entry of the mark ring and go to the mark, whatever N is |
+| M-g | go to line N |
+| M-z, M-Z, C-M-z, C-M-Z | the Nth occurrence of the character |
+| C-l | put the cursor line at row N of the window, with no cycling |
+| C-t, M-t, C-x C-t | move the character, word or line N places |
+| C-o | insert N newlines |
+| C-c y, C-c a | duplicate the line N times, copy N characters from the line above |
+| M-SPC | leave N spaces (0 leaves none) |
+| C-BS | any argument deletes only the space before the cursor |
+| M-up, M-down | move the line N lines |
+
+Commands that give the argument another meaning (the plain command runs with no argument):
+
+| Command | With C-u or any argument |
+|---|---|
+| C-c w a (advance) | advance even when the task it is stacked on is not Done, leaving a marker |
+| C-c w n (new task) | create the task without the plan todo |
+| C-c c n (new chat) | ask also for the name, model and layout |
+| C-c c o (open chat) | pick from the chats of any task |
+| C-c c f (fork to task) | ask for the session type |
+| C-c C-c in the prompts file (send) | send without marking the prompt as sent |
+| C-c f t (retry step) | read the workflow definition again before the retry |
+| C-c C-p, C-c C-f in the prompts file | move N prompts; a negative count goes the other way |
+
+Commands that have no use for a count (C-x C-x, C-s, C-r, C-M-s, C-M-r, M-%, C-M-%, C-x C-.)
+clear it and run once; C-u C-x C-x swaps point and mark once, not four times.
+
+Any other command is repeated: C-u 3 on a command with no count of its own runs it three times
+(a negative count means nothing to it, and 0 runs nothing). The whole repeat is one undo step, so
+one C-/ takes it all back. It runs in slices so the window keeps drawing, and C-g ends it early.
+
+Where C-u is not the prefix, such as a picker's query editor, a command that takes an argument has
+another way in: the variants above are commands in the command palette (`task: advance override`,
+`chat: new with options`, `chat: open any`, `chat: fork to task as`, `task: new without plan`,
+`prompts: send without marking`, `workflow: retry step fresh`), and C-x C-SPC stands in for
+C-u C-SPC.
 
 ## Incremental search
 

@@ -8,14 +8,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bongos_emacs::actions::{DigitArgument, NegativeArgument, UniversalArgument};
 use bongos_emacs::mark::{push_mark, ring_for};
 use bongos_emacs::prefix_arg;
 use editor::test::editor_test_context::EditorTestContext;
 use editor::{Editor, EditorEvent, MultiBufferOffset, kill_ring};
 use gpui::{
-    App, AppContext as _, Entity, Focusable as _, KeyBinding, TestAppContext, VisualTestContext,
-    WindowHandle,
+    App, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle,
 };
 use project::Project;
 use settings::{KeybindSource, KeymapFile};
@@ -40,32 +38,13 @@ fn load_app_keymap(cx: &mut App) {
     cx.bind_keys(all);
 }
 
-/// The keys that start a prefix argument, bound for the tests only: C-u, M-0 to M-9 and M--. The
-/// app keymap does not bind them yet; when it does, delete this function and its call in
-/// `setup`, and nothing else in this file changes.
-fn bind_test_only_prefix_keys(cx: &mut App) {
-    let mut keys = vec![
-        KeyBinding::new("ctrl-u", UniversalArgument, Some("Editor")),
-        KeyBinding::new("alt--", NegativeArgument, Some("Editor")),
-    ];
-    for digit in 0..=9u8 {
-        keys.push(KeyBinding::new(
-            &format!("alt-{digit}"),
-            DigitArgument { digit },
-            Some("Editor"),
-        ));
-    }
-    cx.bind_keys(keys);
-}
-
-/// Starts the app: its actions, the app keymap and the test-only prefix keys.
+/// Starts the app: its actions and the app keymap.
 fn setup(cx: &mut TestAppContext) -> Arc<AppState> {
     let app_state = init_keymap_test(cx);
     cx.update(|cx| {
         editor::init(cx);
         bongos_emacs::init(cx);
         load_app_keymap(cx);
-        bind_test_only_prefix_keys(cx);
     });
     app_state
 }

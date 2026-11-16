@@ -120,6 +120,28 @@
     },
   },
   {
+    // The prefix argument (universal-argument): C-u, M-0 to M-9 and M--. Full editors only, so picker query
+    // editors and other small editors keep their own keys. The default `ctrl-u` (undo selection) is outranked
+    // here, and `alt-1` to `alt-9` stay `pane::ActivateItem` outside editors. Keep this block after the
+    // `Editor` block above. On macOS the Option chords match by key code, like the other `alt-` rows.
+    "context": "Editor && mode == full",
+    "bindings": {
+      "ctrl-u": "emacs::UniversalArgument", // universal-argument
+      "alt-0": ["emacs::DigitArgument", { "digit": 0 }], // digit-argument
+      "alt-1": ["emacs::DigitArgument", { "digit": 1 }], // digit-argument
+      "alt-2": ["emacs::DigitArgument", { "digit": 2 }], // digit-argument
+      "alt-3": ["emacs::DigitArgument", { "digit": 3 }], // digit-argument
+      "alt-4": ["emacs::DigitArgument", { "digit": 4 }], // digit-argument
+      "alt-5": ["emacs::DigitArgument", { "digit": 5 }], // digit-argument
+      "alt-6": ["emacs::DigitArgument", { "digit": 6 }], // digit-argument
+      "alt-7": ["emacs::DigitArgument", { "digit": 7 }], // digit-argument
+      "alt-8": ["emacs::DigitArgument", { "digit": 8 }], // digit-argument
+      "alt-9": ["emacs::DigitArgument", { "digit": 9 }], // digit-argument
+      "alt--": "emacs::NegativeArgument", // negative-argument
+      "ctrl-o": "emacs::OpenLine", // open-line
+    },
+  },
+  {
     // The agent's message editor keeps its thinking-mode and keep-all keys over the Emacs ones. Keep this
     // block after the `Editor` block above.
     "context": "AcpThread > Editor",
