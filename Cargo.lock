@@ -2322,6 +2322,7 @@ dependencies = [
  "bongos_checks_model",
  "bongos_project_repo",
  "bongos_project_repo_model",
+ "bongos_work",
  "bongos_work_model",
  "bongos_workflow",
  "bongos_workflow_model",
