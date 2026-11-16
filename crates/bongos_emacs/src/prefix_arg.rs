@@ -11,7 +11,7 @@ use gpui::{Action, App, Context, Entity, Focusable as _, Global, WeakEntity, Win
 pub const MAX_INSERT: i32 = 65_536;
 
 /// What an action does with a pending prefix argument.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub enum Meaning {
     /// The action's handler takes the argument: it is handed off and the key goes through.
     Reads,
@@ -38,7 +38,7 @@ pub fn declare(cx: &mut App, name: &str, meaning: Meaning) {
         .0
         .insert(name.to_string(), meaning);
     if let Some(previous) = previous
-        && previous != meaning
+        && std::mem::discriminant(&previous) != std::mem::discriminant(&meaning)
     {
         log::warn!("prefix argument meaning of {name} was declared twice; keeping the last");
     }

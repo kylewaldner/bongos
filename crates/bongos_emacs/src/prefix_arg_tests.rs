@@ -68,10 +68,10 @@ async fn ignored_action_runs_once_and_clears_the_handoff(cx: &mut TestAppContext
     let mut cx = EditorTestContext::new(cx).await;
     cx.set_state("ˇone");
     cx.update(|_, cx| {
-        assert_eq!(
+        assert!(matches!(
             prefix_arg::meaning(cx, KeyboardQuit.name()),
             Some(Meaning::Ignored)
-        );
+        ));
     });
     start(&mut cx, digit(5));
     hand_off_and_dispatch(&mut cx, KeyboardQuit);
