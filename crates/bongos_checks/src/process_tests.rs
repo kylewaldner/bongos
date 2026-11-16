@@ -606,10 +606,17 @@ fn reaching_the_time_budget_is_no_verdict() {
     let mut spec = fixture.spec(script("slow", "slow-output"));
     spec.budget = Some(Duration::from_millis(300));
     let output = spec.output.clone();
+    let began = Instant::now();
     let outcome = block_on(run_part(spec));
+    let took = began.elapsed();
     assert_eq!(
         outcome.verdict,
         Verdict::NoVerdict(NoVerdictReason::TimeBudgetReached)
+    );
+    // Bound: 300 ms budget + 5 s kill grace (the fixture's default) + 3 s slack.
+    assert!(
+        took < Duration::from_millis(300) + Duration::from_secs(5 + 3),
+        "took {took:?}"
     );
     // Stopped long before the script's own end, however loaded the machine: it never got past
     // its sleep.
@@ -648,8 +655,8 @@ fn cancel_ends_a_script_ignoring_sigterm_and_its_detached_child_within_the_grace
     let took = cancelled.elapsed();
     // SIGTERM is ignored, so only the SIGKILL one second before the end of the grace ends it.
     // The script never ends by itself; the bound leaves room past the two-second grace for
-    // finding the processes on a loaded machine.
-    let bound = Duration::from_secs(15);
+    // finding the processes (grace plus two seconds).
+    let bound = Duration::from_secs(2 + 2);
     assert!(took >= Duration::from_secs(1), "took {took:?}");
     assert!(took <= bound, "took {took:?}");
     assert_eq!(
