@@ -22,8 +22,9 @@ use tempfile::TempDir;
 
 use crate::definitions::named_sets;
 use crate::engine::{ChecksEngine, RunChecksRequest};
+use crate::engine_tests::set_kill_grace;
 use crate::evidence_store::{DoneRecord, done_record, put_done, scan_records, task_prefix};
-use crate::group_decider::{CHILDREN_HELD, as_found};
+use crate::group_decider::{CHILDREN_HELD, SECOND_TREE_RETRY, as_found, tree_gone};
 use crate::live::HoldRow;
 use crate::owed::{ChecksOwedHook, FolderSets, LastRow, OwedMarker, put_marker};
 use crate::pin::master_definitions;
@@ -32,9 +33,10 @@ use crate::settings::TaskChecksSettings;
 use crate::task_source::{TaskChecks, TaskSource};
 use crate::task_tree::RunWorktrees;
 use crate::test_support::{
-    commit_everything, definition_toml, fixture_project_with_hooks, git_in, init_git_repo, land,
-    main_commit, new_copy, person, write_definition, write_file,
+    FakeSecond, FakeTrees, commit_everything, definition_toml, fixture_project_with_hooks, git_in,
+    init_git_repo, land, main_commit, new_copy, person, write_definition, write_file,
 };
+use crate::trees::{SecondTree, TaskTrees as _, TaskTreesRegistry};
 use crate::{LAST_NAMESPACE, OWED_NAMESPACE, read_hold_rows};
 
 const PROJECT: &str = "project-1";
@@ -79,6 +81,7 @@ impl RunWorktrees for NoRuns {
 /// Fields drop in order: the engine and the project go before the folder holding them.
 struct World {
     engine: Entity<ChecksEngine>,
+    clock: Rc<FakeClock>,
     source: Rc<Source>,
     repo: ProjectRepo,
     /// The primary checkout of the code repository `app`, where every task's tree lives.
@@ -92,6 +95,15 @@ impl World {
     /// group, the code repository `app`, the verified commit recorded, the owed hook on its
     /// writer, and the engine with the setting on. No task has a tree yet.
     fn new(cx: &mut TestAppContext, tasks: &[(&str, &str, &str)]) -> Self {
+        Self::with_clock(cx, tasks, FakeClock::automatic())
+    }
+
+    /// [`World::new`] with the engine on `clock`.
+    fn with_clock(
+        cx: &mut TestAppContext,
+        tasks: &[(&str, &str, &str)],
+        clock: Rc<FakeClock>,
+    ) -> Self {
         let root = TempDir::new().unwrap();
         let repository = root.path().join("project/repository");
         let hooks = StateApplyHooks::new();
@@ -119,9 +131,8 @@ impl World {
             .repositories
             .borrow_mut()
             .insert("app".to_string(), app.clone());
-        let counter = Arc::new(AtomicU64::new(0));
         let scratch_setting = scratch.to_string_lossy().to_string();
-        let engine = cx.update(|cx| {
+        cx.update(|cx| {
             let store = SettingsStore::new(cx, &settings::default_settings());
             cx.set_global(store);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
@@ -134,21 +145,11 @@ impl World {
                     checks.scratch_dir = Some(scratch_setting);
                 });
             });
-            ChecksEngine::install(
-                ChecksEngine::new(
-                    source.clone(),
-                    Rc::new(NoRuns),
-                    FakeClock::automatic(),
-                    Arc::new(move || {
-                        let n = counter.fetch_add(1, Ordering::SeqCst);
-                        format!("2026-03-01T10:{:02}:{:02}Z", n / 60 % 60, n % 60)
-                    }),
-                ),
-                cx,
-            )
         });
+        let engine = new_engine(cx, &source, &clock, 0);
         let world = Self {
             engine,
+            clock,
             source,
             repo,
             app,
@@ -351,6 +352,679 @@ impl World {
             .filter(|name| name != "tree-keys")
             .collect()
     }
+}
+
+/// A new engine over `source` on `clock`, installed as the app's; its times count from `start`
+/// seconds after a fixed hour, never from the wall clock.
+fn new_engine(
+    cx: &mut TestAppContext,
+    source: &Rc<Source>,
+    clock: &Rc<FakeClock>,
+    start: u64,
+) -> Entity<ChecksEngine> {
+    let counter = Arc::new(AtomicU64::new(start));
+    let source = source.clone();
+    let clock = clock.clone();
+    cx.update(|cx| {
+        ChecksEngine::install(
+            ChecksEngine::new(
+                source,
+                Rc::new(NoRuns),
+                clock,
+                Arc::new(move || {
+                    let n = counter.fetch_add(1, Ordering::SeqCst);
+                    format!("2026-03-01T10:{:02}:{:02}Z", n / 60 % 60, n % 60)
+                }),
+            ),
+            cx,
+        )
+    })
+}
+
+impl World {
+    /// Replaces the engine with a new one, as a restart of the process holding the writer
+    /// does: the decider remembers nothing of what it saw.
+    fn restart(&mut self, cx: &mut TestAppContext) {
+        self.engine = new_engine(cx, &self.source, &self.clock, 600);
+    }
+
+    /// A second tree of `app` a lane could lend: a detached worktree at `HEAD` with a stray
+    /// file an earlier job left and ignored build output.
+    fn second_tree(&self) -> PathBuf {
+        let exclude = self.app.join(".git/info/exclude");
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        std::fs::write(&exclude, "ignored/\n").unwrap();
+        let path = self.root.path().join("second-app");
+        git_in(
+            &self.app,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        write_file(&path, "stray.txt", "left by an earlier job\n");
+        write_file(&path, "ignored/build.out", "build output\n");
+        path
+    }
+
+    /// Lets the group runs started so far end.
+    async fn runs_ended(&self, cx: &mut TestAppContext) {
+        let ended = self
+            .engine
+            .read_with(cx, |engine, _| engine.group_runs_ended());
+        ended.await;
+    }
+}
+
+/// A closing check that passes where the files of the tree were written out, and prints where
+/// it ran and the lane mark of its environment (`own` without one).
+const WHERE_CLOSING: &str = "\n[[checks.closing]]\nname = \"full\"\ncommand = [\"sh\", \"-c\", \"test -f src/lib.rs && echo pwd=$(pwd -P) && echo mark=${LANE_MARK:-own}\"]\n";
+
+/// What the group's one run printed: where it ran and its lane mark.
+fn ran_where(world: &World, group: &str) -> (String, String) {
+    let records = world.records(group);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].verdict, Verdict::Pass, "{records:?}");
+    let folder = match &records[0].output {
+        bongos_checks_model::evidence::Output::Path(path) => PathBuf::from(path),
+        other => panic!("no output folder: {other:?}"),
+    };
+    let text = std::fs::read_to_string(folder.join("part-1.log")).unwrap();
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    (field("pwd"), field("mark"))
+}
+
+fn canonical(path: &Path) -> String {
+    path.canonicalize().unwrap().to_string_lossy().into_owned()
+}
+
+/// Lane trees for `app`: `second` answers its second tree; registered as the app's.
+fn lane_trees(cx: &mut TestAppContext, second: FakeSecond) -> FakeTrees {
+    let trees = FakeTrees::default();
+    trees.state().second.insert("app".to_string(), second);
+    cx.update(|cx| TaskTreesRegistry::set(Rc::new(trees.clone()), cx));
+    trees
+}
+
+fn lane_env(mark: &str) -> Vec<(String, String)> {
+    vec![
+        (
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        ),
+        ("LANE_MARK".to_string(), mark.to_string()),
+    ]
+}
+
+/// The world of a group whose children owe nothing and whose last child c2 has the tree
+/// `pub fn c2() {}`, both finished with the decider following: its closing check is ready to run.
+fn finished_group(cx: &mut TestAppContext, clock: Rc<FakeClock>) -> (World, PathBuf) {
+    let world = World::with_clock(cx, &group(WHERE_CLOSING, ""), clock);
+    world.worktree("c1", "pub fn c1() {}\n");
+    let tree = world.worktree("c2", "pub fn c2() {}\n");
+    (world, tree)
+}
+
+#[gpui::test]
+async fn a_lent_second_tree_runs_the_closing_check_there_with_its_environment(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (world, tree) = finished_group(cx, FakeClock::automatic());
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    let head = git_in(&tree, &["rev-parse", "HEAD"]);
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+
+    world.settle(cx).await;
+
+    let done = world.done("grp").expect("the group is Done");
+    assert_eq!(done.tree_key, key_of(&world, &tree));
+    assert_eq!(
+        ran_where(&world, "grp"),
+        (canonical(&second), "lent".to_string())
+    );
+    // The recorded tree was written out in the lent tree: the stray file went, build output
+    // stayed, and the last child's own tree was not touched.
+    assert_eq!(
+        std::fs::read_to_string(second.join("src/lib.rs")).unwrap(),
+        "pub fn c2() {}\n"
+    );
+    assert!(!second.join("stray.txt").exists());
+    assert!(second.join("ignored/build.out").exists());
+    assert_eq!(
+        std::fs::read_to_string(tree.join("src/lib.rs")).unwrap(),
+        "pub fn c2() {}\n"
+    );
+    assert_eq!(git_in(&tree, &["rev-parse", "HEAD"]), head);
+    assert!(!tree.join("ignored").exists() && !tree.join("stray.txt").exists());
+    let state = trees.state();
+    assert_eq!(state.leased, ["app"]);
+    assert_eq!(state.released, ["app"], "released after the run");
+    drop(state);
+    assert_eq!(
+        world.scratch_left(),
+        Vec::<String>::new(),
+        "nothing ran cold"
+    );
+}
+
+#[gpui::test]
+async fn a_busy_second_tree_is_awaited_and_taken_once_the_lane_releases_it(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let (world, _) = finished_group(cx, clock.clone());
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    // The lane holds its second tree now.
+    let SecondTree::Lease(held) = trees.second_tree("a-lane-job", "app") else {
+        panic!("the lane leases its tree");
+    };
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    world.decide(cx).await;
+    cx.run_until_parked();
+
+    assert_eq!(world.group_runs(cx), 1, "the run waits");
+    assert!(world.records("grp").is_empty(), "nothing ran yet");
+    assert_eq!(trees.state().leased, ["app"], "only the lane's own lease");
+    assert_eq!(clock.sleeps(), [SECOND_TREE_RETRY]);
+
+    // The lane lets the tree go; the next ask takes it.
+    drop(held);
+    clock.advance(SECOND_TREE_RETRY);
+    world.runs_ended(cx).await;
+
+    assert_eq!(
+        ran_where(&world, "grp"),
+        (canonical(&second), "lent".to_string())
+    );
+    let state = trees.state();
+    assert_eq!(state.leased, ["app", "app"]);
+    assert_eq!(state.released, ["app", "app"]);
+    assert!(state.held.is_empty());
+}
+
+#[gpui::test]
+async fn a_second_tree_busy_past_the_wait_limit_runs_cold(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::automatic();
+    let (world, _) = finished_group(cx, clock.clone());
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content
+                    .task_checks
+                    .get_or_insert_default()
+                    .pool_wait_limit_hours = Some(1);
+            });
+        });
+    });
+    let trees = lane_trees(cx, FakeSecond::Busy);
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+
+    world.settle(cx).await;
+
+    let (pwd, mark) = ran_where(&world, "grp");
+    assert!(pwd.starts_with(&canonical(&world.scratch)), "{pwd}");
+    assert_eq!(mark, "own", "no lane variables");
+    assert!(world.done("grp").is_some());
+    // Asked every retry for an hour, then once more at the bound.
+    let retries = clock
+        .sleeps()
+        .iter()
+        .filter(|sleep| **sleep == SECOND_TREE_RETRY)
+        .count();
+    assert_eq!(retries, 240);
+    assert_eq!(trees.state().asked.len(), 241);
+    assert_eq!(world.scratch_left(), Vec::<String>::new());
+}
+
+#[gpui::test]
+async fn an_unavailable_second_tree_runs_cold_at_once(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    // The clock never moves: a run that waited on it would never end.
+    let clock = FakeClock::manual();
+    let (world, _) = finished_group(cx, clock.clone());
+    let trees = lane_trees(cx, FakeSecond::Unavailable);
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+
+    world.settle(cx).await;
+
+    let (pwd, mark) = ran_where(&world, "grp");
+    assert!(pwd.starts_with(&canonical(&world.scratch)), "{pwd}");
+    assert_eq!(mark, "own", "no lane variables");
+    assert!(world.done("grp").is_some());
+    assert_eq!(trees.state().asked, ["app"]);
+    assert!(clock.sleeps().is_empty(), "no wait");
+    assert_eq!(world.scratch_left(), Vec::<String>::new());
+}
+
+#[gpui::test]
+async fn a_lent_tree_that_is_not_usable_runs_cold_and_is_released(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (world, _) = finished_group(cx, FakeClock::automatic());
+    // A folder that is no working tree fails the lent tree's checks.
+    let plain = world.root.path().join("not-a-tree");
+    std::fs::create_dir_all(&plain).unwrap();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: plain.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+
+    world.settle(cx).await;
+
+    let (pwd, mark) = ran_where(&world, "grp");
+    assert!(pwd.starts_with(&canonical(&world.scratch)), "{pwd}");
+    assert_eq!(mark, "own", "no lane variables");
+    assert!(world.done("grp").is_some());
+    let state = trees.state();
+    assert_eq!(state.leased, ["app"]);
+    assert_eq!(state.released, ["app"], "released once");
+    assert!(state.held.is_empty());
+    drop(state);
+    assert_eq!(
+        std::fs::read_dir(&plain).unwrap().count(),
+        0,
+        "nothing written"
+    );
+    assert_eq!(world.scratch_left(), Vec::<String>::new());
+}
+
+/// A closing check that ignores SIGTERM, marks `ignored/blocked` in the tree it runs in and
+/// waits there until `ignored/go` exists.
+const BLOCKING_CLOSING: &str = "\n[[checks.closing]]\nname = \"full\"\ncommand = [\"sh\", \"-c\", \"trap '' TERM; touch ignored/blocked; while [ ! -f ignored/go ]; do sleep 0.05; done\"]\n";
+
+#[gpui::test]
+async fn a_drain_releases_the_lease_a_group_run_holds_while_its_check_still_runs(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let world = World::with_clock(cx, &group(BLOCKING_CLOSING, ""), clock.clone());
+    world.worktree("c1", "pub fn c1() {}\n");
+    world.worktree("c2", "pub fn c2() {}\n");
+    // SIGKILL comes in real time after the stop: the check outlives SIGTERM, so only the
+    // engine's clock can end the drain first.
+    set_kill_grace(cx, 5);
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    let blocked = second.join("ignored/blocked");
+    let (reached, reaching) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !blocked.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the check never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        reached.send(()).ok();
+    });
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    world.decide(cx).await;
+    reaching.await.unwrap();
+    assert_eq!(trees.state().leased, ["app"]);
+    assert!(
+        trees.state().released.is_empty(),
+        "held while the check runs"
+    );
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    clock.advance(std::time::Duration::from_secs(5));
+    drain.await;
+
+    // The grace won: the group run has not ended, and the drain itself let the lease go.
+    assert_eq!(world.group_runs(cx), 1);
+    assert_eq!(trees.state().released, ["app"]);
+    assert!(trees.state().held.is_empty());
+    std::fs::write(second.join("ignored/go"), "").unwrap();
+    world.runs_ended(cx).await;
+    assert_eq!(world.group_runs(cx), 0);
+    assert_eq!(trees.state().released, ["app"], "released once");
+}
+
+/// Waits on a thread, up to a minute, until `path` exists.
+fn reached(path: PathBuf) -> futures::channel::oneshot::Receiver<()> {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !path.exists() {
+            assert!(std::time::Instant::now() < deadline, "{path:?} never came");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        sender.send(()).ok();
+    });
+    receiver
+}
+
+#[gpui::test]
+async fn a_drain_while_git_writes_the_lent_tree_releases_the_lease_only_after_git_and_reruns_after_undrain(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let (world, _) = finished_group(cx, clock.clone());
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    // Writing out a Rust file in the lent tree waits until `go` exists.
+    let marks = world.root.path().join("filter");
+    std::fs::create_dir_all(&marks).unwrap();
+    let marks_arg = marks.to_str().unwrap();
+    git_in(
+        &world.app,
+        &[
+            "config",
+            "filter.slow.smudge",
+            &format!(
+                "touch {marks_arg}/writing; while [ ! -f {marks_arg}/go ]; do sleep 0.05; done; cat"
+            ),
+        ],
+    );
+    std::fs::write(world.app.join(".git/info/attributes"), "*.rs filter=slow\n").unwrap();
+    world.decide(cx).await;
+    reached(marks.join("writing")).await.unwrap();
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    drain.await;
+
+    // Git still writes in the lent tree: its lease is held there, out of the drain's reach.
+    assert_eq!(trees.state().leased, ["app"]);
+    assert!(trees.state().released.is_empty(), "held while git runs");
+    std::fs::write(marks.join("go"), "").unwrap();
+    world.runs_ended(cx).await;
+    assert_eq!(trees.state().released, ["app"], "released once git ended");
+    assert!(world.records("grp").is_empty(), "nothing ran");
+    let started = world
+        .engine
+        .read_with(cx, |engine, _| engine.decider.started.clone());
+    assert!(started.is_empty(), "{started:?}");
+
+    // After the undrain the group runs its closing check after all.
+    world.engine.update(cx, |engine, _| engine.undrain());
+    world.settle(cx).await;
+    assert_eq!(
+        ran_where(&world, "grp"),
+        (canonical(&second), "lent".to_string())
+    );
+    assert!(world.done("grp").is_some());
+}
+
+/// A closing check over the repositories `app` and `lib`.
+const TWO_REPO_CLOSING: &str =
+    "\n[[checks.closing]]\nname = \"full\"\ncommand = [\"true\"]\nrepos = [\"app\", \"lib\"]\n";
+
+#[gpui::test]
+async fn a_drain_while_git_writes_one_lent_tree_releases_the_other_repositorys_lease_at_once(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let world = World::with_clock(cx, &group(TWO_REPO_CLOSING, ""), FakeClock::manual());
+    world.worktree("c1", "pub fn c1() {}\n");
+    world.worktree("c2", "pub fn c2() {}\n");
+    let lib = world.root.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    init_git_repo(&lib);
+    write_file(&lib, "src/lib.rs", "pub fn lib() {}\n");
+    commit_everything(&lib, "start");
+    world
+        .source
+        .repositories
+        .borrow_mut()
+        .insert("lib".to_string(), lib.clone());
+    let lib_second = world.root.path().join("second-lib");
+    git_in(
+        &lib,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            lib_second.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    {
+        let mut state = trees.state();
+        state.tips.insert("lib".to_string(), lib.clone());
+        state.second.insert(
+            "lib".to_string(),
+            FakeSecond::Lease {
+                path: lib_second.clone(),
+                env: lane_env("lent-lib"),
+            },
+        );
+    }
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    // Writing out a Rust file in app's lent tree waits until `go` exists.
+    let marks = world.root.path().join("filter");
+    std::fs::create_dir_all(&marks).unwrap();
+    let marks_arg = marks.to_str().unwrap();
+    git_in(
+        &world.app,
+        &[
+            "config",
+            "filter.slow.smudge",
+            &format!(
+                "touch {marks_arg}/writing; while [ ! -f {marks_arg}/go ]; do sleep 0.05; done; cat"
+            ),
+        ],
+    );
+    std::fs::write(world.app.join(".git/info/attributes"), "*.rs filter=slow\n").unwrap();
+    world.decide(cx).await;
+    reached(marks.join("writing")).await.unwrap();
+    assert_eq!(trees.state().leased, ["app", "lib"]);
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    drain.await;
+
+    // Git still writes in app's lent tree, which stays held; lib's, untouched, went at once.
+    assert_eq!(trees.state().released, ["lib"], "lib released by the drain");
+    std::fs::write(marks.join("go"), "").unwrap();
+    world.runs_ended(cx).await;
+    assert_eq!(
+        trees.state().released,
+        ["lib", "app"],
+        "app released once git ended, each once"
+    );
+    assert!(world.records("grp").is_empty(), "nothing ran");
+}
+
+#[gpui::test]
+async fn a_drain_while_waiting_for_a_busy_tree_starts_nothing_and_reruns_after_undrain(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let (world, _) = finished_group(cx, clock.clone());
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    let SecondTree::Lease(held) = trees.second_tree("a-lane-job", "app") else {
+        panic!("the lane leases its tree");
+    };
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    world.decide(cx).await;
+    cx.run_until_parked();
+    assert_eq!(world.group_runs(cx), 1, "the run waits");
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    drain.await;
+    drop(held);
+    clock.advance(SECOND_TREE_RETRY);
+    world.runs_ended(cx).await;
+
+    assert!(world.records("grp").is_empty(), "nothing ran");
+    assert_eq!(trees.state().leased, ["app"], "only the lane's own lease");
+    let started = world
+        .engine
+        .read_with(cx, |engine, _| engine.decider.started.clone());
+    assert!(started.is_empty(), "{started:?}");
+
+    world.engine.update(cx, |engine, _| engine.undrain());
+    world.settle(cx).await;
+    assert_eq!(
+        ran_where(&world, "grp"),
+        (canonical(&second), "lent".to_string())
+    );
+    assert!(world.done("grp").is_some());
+}
+
+#[gpui::test]
+async fn a_restart_before_the_last_key_is_filled_keys_the_tree_as_found(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut world = World::new(cx, &group(CLOSING, ""));
+    world.worktree("c1", "pub fn c1() {}\n");
+    let tree = world.worktree("c2", "pub fn c2() {}\n");
+    world.decide(cx).await;
+    // Closed by hand; the process stops before the decider sees it.
+    world.finish(&["c1", "c2"]);
+    assert_eq!(world.last("grp").and_then(|last| last.tree_key), None);
+    world.restart(cx);
+
+    world.decide(cx).await;
+
+    let last = world.last("grp").expect("the last child row");
+    assert_eq!(last.id, "c2");
+    assert_eq!(
+        last.tree_key.as_deref(),
+        Some(key_of(&world, &tree).as_str())
+    );
+    let at = last.found_at.clone().expect("the tree as found");
+    let hold = world.hold("grp").expect("held while its check runs");
+    assert!(hold.reason.ends_with(&as_found("c2", &at)), "{hold:?}");
+    world.settle(cx).await;
+    assert_eq!(world.done("grp").map(|done| done.tree_key), last.tree_key);
+}
+
+#[gpui::test]
+async fn a_restart_after_the_last_childs_tree_went_shows_it_is_gone(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut world = World::new(cx, &group(CLOSING, ""));
+    world.worktree("c1", "pub fn c1() {}\n");
+    let tree = world.worktree("c2", "pub fn c2() {}\n");
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    git_in(
+        &world.app,
+        &["worktree", "remove", "--force", tree.to_str().unwrap()],
+    );
+    world.restart(cx);
+
+    world.settle(cx).await;
+
+    assert_eq!(world.last("grp").and_then(|last| last.tree_key), None);
+    assert_eq!(world.done("grp"), None);
+    assert_eq!(world.hold("grp"), Some(HoldRow::new(tree_gone("c2"))));
+    assert!(tree_gone("c2").ends_with("gone; reopen it"));
+    assert!(world.records("grp").is_empty(), "nothing ran");
+}
+
+#[gpui::test]
+async fn at_writer_start_the_ref_of_a_task_deleted_from_the_definitions_is_removed(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let mut world = World::new(
+        cx,
+        &[
+            ("tasks/grp", "grp", FAILING_CLOSING),
+            ("tasks/grp/tasks/c1", "c1", TESTS),
+            ("tasks/grp/tasks/c2", "c2", ""),
+        ],
+    );
+    let first = world.worktree("c1", "pub fn c1() {}\n");
+    world.worktree("c2", "pub fn c2() {}\n");
+    world.decide(cx).await;
+    world.run_checks("c1", cx).await;
+    // Closing together, neither carries the group's check; c2 is recorded last.
+    world.finish(&["c1", "c2"]);
+    world.settle(cx).await;
+    assert!(world.done("c1").is_some(), "c1 is Done");
+    assert_eq!(world.last("grp").map(|last| last.id).as_deref(), Some("c2"));
+    assert_eq!(world.done("grp"), None, "its closing check fails");
+    let key = key_of(&world, &first);
+    assert_eq!(world.kept("refs/bongos/checks/c1"), Some(key));
+    assert!(world.kept("refs/bongos/checks/c2").is_some());
+
+    // c1 is deleted from the definitions; the process stops before the decider sees it.
+    let author = person();
+    let copy = new_copy(&world.repo, "calm-heron-0003", &author);
+    std::fs::remove_dir_all(copy.path.join("definitions/tasks/grp/tasks/c1")).unwrap();
+    let landed = land(&world.repo, &copy, &author);
+    assert!(matches!(landed, LandingResult::Landed { .. }), "{landed:?}");
+    assert_eq!(world.done("c1"), None, "its done record went with it");
+    world.restart(cx);
+
+    world.decide(cx).await;
+
+    assert_eq!(world.kept("refs/bongos/checks/c1"), None, "deleted");
+    assert!(
+        world.kept("refs/bongos/checks/c2").is_some(),
+        "the ref of the last child stays"
+    );
 }
 
 fn missing(count: u32) -> HoldRow {
