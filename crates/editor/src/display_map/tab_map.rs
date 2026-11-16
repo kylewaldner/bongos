@@ -41,7 +41,7 @@ impl TabMap {
     pub fn sync(
         &mut self,
         fold_snapshot: FoldSnapshot,
-        mut fold_edits: Vec<FoldEdit>,
+        fold_edits: Vec<FoldEdit>,
         tab_size: NonZeroU32,
     ) -> (TabSnapshot, Vec<TabEdit>) {
         let tab_size = tab_size.min(MAX_TABS);
@@ -73,7 +73,6 @@ impl TabMap {
             return (old_snapshot.clone(), vec![]);
         }
 
-        let old_fold_max_point = old_snapshot.fold_snapshot.max_point();
         let new_snapshot = TabSnapshot {
             fold_snapshot,
             tab_size,
@@ -81,145 +80,154 @@ impl TabMap {
             version: new_version,
         };
 
-        // Expand each edit to include the next tab on the same line as the edit,
-        // and any subsequent tabs on that line that moved across the tab expansion
-        // boundary.
-        //
-        // This is necessary because a tab's display width depends on its column
-        // position: it expands to fill up to the next tab stop. When an edit
-        // shifts text on a line, any tab character after the edit may now render
-        // at a different width even though the tab byte itself wasn't touched.
-        // Additionally, tabs beyond `max_expansion_column` are rendered as a
-        // single space instead of expanding to the next tab stop. An edit that
-        // shifts a tab across that boundary changes its display width, so the
-        // edit must cover it. We scan forward from the edit end to the end of
-        // the line, extending the edit to include the first subsequent tab (whose
-        // rendered width may have changed) and the last tab that crossed the
-        // expansion boundary (transitioning between expanded and non-expanded).
-        //
-        // Each edit is converted to tab points in the same pass. A row is read once
-        // for both ends of an edit on it, the scan continues that read, and the
-        // edit's end points and new start follow from offsets where they can, so a
-        // batch of many edits (a replace-all) costs a few reads per edit instead of
-        // a dozen seeks through every layer.
-        let mut tab_edits: Vec<TabEdit> = Vec::with_capacity(fold_edits.len());
-        let mut last_old_end = None;
-        let mut previous_ends = (
-            (FoldOffset::default(), FoldPoint::default()),
-            (FoldOffset::default(), FoldPoint::default()),
-        );
-        for fold_edit in &mut fold_edits {
-            let old_start = fold_edit.old.start.to_point(&old_snapshot.fold_snapshot);
-            let mut old_row = old_snapshot.row_expansion(fold_edit.old.start, old_start);
-            let old_start_column = old_snapshot.expand_tabs_to(&mut old_row, old_start.column());
-            let (mut old_end, mut old_end_column) = old_snapshot.expand_tabs_to_edit_end(
-                &mut old_row,
-                (fold_edit.old.start, old_start),
-                fold_edit.old.end,
-            );
-
-            // The text between this edit and the previous one is the same in both snapshots, so
-            // the new start follows from the old start and the previous edit's ends.
-            let (previous_old_end, previous_new_end) = previous_ends;
-            let new_start = if fold_edit.old.start >= previous_old_end.0
-                && fold_edit.new.start >= previous_new_end.0
-                && fold_edit.old.start - previous_old_end.0
-                    == fold_edit.new.start - previous_new_end.0
-            {
-                let (previous_old_end, previous_new_end) = (previous_old_end.1, previous_new_end.1);
-                let new_start = if old_start.row() > previous_old_end.row() {
-                    FoldPoint::new(
-                        previous_new_end.row() + (old_start.row() - previous_old_end.row()),
-                        old_start.column(),
-                    )
-                } else {
-                    FoldPoint::new(
-                        previous_new_end.row(),
-                        previous_new_end.column()
-                            + (old_start.column() - previous_old_end.column()),
-                    )
-                };
-                debug_assert_eq!(
-                    new_start,
-                    fold_edit.new.start.to_point(&new_snapshot.fold_snapshot)
-                );
-                new_start
-            } else {
-                fold_edit.new.start.to_point(&new_snapshot.fold_snapshot)
-            };
-            let mut new_row = new_snapshot.row_expansion(fold_edit.new.start, new_start);
-            let new_start_column = new_snapshot.expand_tabs_to(&mut new_row, new_start.column());
-            let (mut new_end, mut new_end_column) = new_snapshot.expand_tabs_to_edit_end(
-                &mut new_row,
-                (fold_edit.new.start, new_start),
-                fold_edit.new.end,
-            );
-
-            // The scan continues the old row's cursor when it stopped at the edit's end, and
-            // reads the rest of the row afresh otherwise.
-            let tab_offset = if old_row.cursor.byte_offset == old_end.column() {
-                scan_tabs_after_edit(
-                    old_row.cursor.into_rest_of_row(),
-                    old_end,
-                    new_end,
-                    old_snapshot.max_expansion_column,
-                )
-            } else {
-                let old_end_row_successor_offset =
-                    cmp::min(FoldPoint::new(old_end.row() + 1, 0), old_fold_max_point)
-                        .to_offset(&old_snapshot.fold_snapshot);
-                scan_tabs_after_edit(
-                    old_snapshot
-                        .fold_snapshot
-                        .chunks(
-                            fold_edit.old.end..old_end_row_successor_offset,
-                            LanguageAwareStyling {
-                                tree_sitter: false,
-                                diagnostics: false,
-                            },
-                            Highlights::default(),
-                        )
-                        .map(|chunk| (chunk.text.len() as u32, chunk.tabs)),
-                    old_end,
-                    new_end,
-                    old_snapshot.max_expansion_column,
-                )
-            };
-
-            previous_ends = ((fold_edit.old.end, old_end), (fold_edit.new.end, new_end));
-
-            if let Some(offset) = tab_offset {
-                fold_edit.old.end.0 += offset as usize + 1;
-                fold_edit.new.end.0 += offset as usize + 1;
-                old_end = fold_edit.old.end.to_point(&old_snapshot.fold_snapshot);
-                new_end = fold_edit.new.end.to_point(&new_snapshot.fold_snapshot);
-                old_end_column = old_snapshot.fold_point_to_tab_point(old_end).column();
-                new_end_column = new_snapshot.fold_point_to_tab_point(new_end).column();
-            }
-
-            let old_start = TabPoint::new(old_start.row(), old_start_column);
-            let old_end = TabPoint::new(old_end.row(), old_end_column);
-            let new_start = TabPoint::new(new_start.row(), new_start_column);
-            let new_end = TabPoint::new(new_end.row(), new_end_column);
-
-            // Combine any edits that overlap due to the expansion.
-            if let Some(last_tab_edit) = tab_edits.last_mut()
-                && last_old_end.is_some_and(|last_old_end| last_old_end >= fold_edit.old.start)
-            {
-                last_tab_edit.old.end = old_end;
-                last_tab_edit.new.end = new_end;
-            } else {
-                tab_edits.push(TabEdit {
-                    old: old_start..old_end,
-                    new: new_start..new_end,
-                });
-            }
-            last_old_end = Some(fold_edit.old.end);
-        }
-
+        let tab_edits = sync_without_tabs(old_snapshot, &new_snapshot, &fold_edits)
+            .unwrap_or_else(|| sync_edit_by_edit(old_snapshot, &new_snapshot, fold_edits));
         *old_snapshot = new_snapshot;
         (old_snapshot.clone(), tab_edits)
     }
+}
+
+/// Converts `fold_edits` to tab edits one edit at a time.
+fn sync_edit_by_edit(
+    old_snapshot: &TabSnapshot,
+    new_snapshot: &TabSnapshot,
+    mut fold_edits: Vec<FoldEdit>,
+) -> Vec<TabEdit> {
+    let old_fold_max_point = old_snapshot.fold_snapshot.max_point();
+    // Expand each edit to include the next tab on the same line as the edit,
+    // and any subsequent tabs on that line that moved across the tab expansion
+    // boundary.
+    //
+    // This is necessary because a tab's display width depends on its column
+    // position: it expands to fill up to the next tab stop. When an edit
+    // shifts text on a line, any tab character after the edit may now render
+    // at a different width even though the tab byte itself wasn't touched.
+    // Additionally, tabs beyond `max_expansion_column` are rendered as a
+    // single space instead of expanding to the next tab stop. An edit that
+    // shifts a tab across that boundary changes its display width, so the
+    // edit must cover it. We scan forward from the edit end to the end of
+    // the line, extending the edit to include the first subsequent tab (whose
+    // rendered width may have changed) and the last tab that crossed the
+    // expansion boundary (transitioning between expanded and non-expanded).
+    //
+    // Each edit is converted to tab points in the same pass. A row is read once
+    // for both ends of an edit on it, the scan continues that read, and the
+    // edit's end points and new start follow from offsets where they can, so a
+    // batch of many edits (a replace-all) costs a few reads per edit instead of
+    // a dozen seeks through every layer.
+    let mut tab_edits: Vec<TabEdit> = Vec::with_capacity(fold_edits.len());
+    let mut last_old_end = None;
+    let mut previous_ends = (
+        (FoldOffset::default(), FoldPoint::default()),
+        (FoldOffset::default(), FoldPoint::default()),
+    );
+    for fold_edit in &mut fold_edits {
+        let old_start = fold_edit.old.start.to_point(&old_snapshot.fold_snapshot);
+        let mut old_row = old_snapshot.row_expansion(fold_edit.old.start, old_start);
+        let old_start_column = old_snapshot.expand_tabs_to(&mut old_row, old_start.column());
+        let (mut old_end, mut old_end_column) = old_snapshot.expand_tabs_to_edit_end(
+            &mut old_row,
+            (fold_edit.old.start, old_start),
+            fold_edit.old.end,
+        );
+
+        // The text between this edit and the previous one is the same in both snapshots, so
+        // the new start follows from the old start and the previous edit's ends.
+        let (previous_old_end, previous_new_end) = previous_ends;
+        let new_start = if fold_edit.old.start >= previous_old_end.0
+            && fold_edit.new.start >= previous_new_end.0
+            && fold_edit.old.start - previous_old_end.0 == fold_edit.new.start - previous_new_end.0
+        {
+            let (previous_old_end, previous_new_end) = (previous_old_end.1, previous_new_end.1);
+            let new_start = if old_start.row() > previous_old_end.row() {
+                FoldPoint::new(
+                    previous_new_end.row() + (old_start.row() - previous_old_end.row()),
+                    old_start.column(),
+                )
+            } else {
+                FoldPoint::new(
+                    previous_new_end.row(),
+                    previous_new_end.column() + (old_start.column() - previous_old_end.column()),
+                )
+            };
+            debug_assert_eq!(
+                new_start,
+                fold_edit.new.start.to_point(&new_snapshot.fold_snapshot)
+            );
+            new_start
+        } else {
+            fold_edit.new.start.to_point(&new_snapshot.fold_snapshot)
+        };
+        let mut new_row = new_snapshot.row_expansion(fold_edit.new.start, new_start);
+        let new_start_column = new_snapshot.expand_tabs_to(&mut new_row, new_start.column());
+        let (mut new_end, mut new_end_column) = new_snapshot.expand_tabs_to_edit_end(
+            &mut new_row,
+            (fold_edit.new.start, new_start),
+            fold_edit.new.end,
+        );
+
+        // The scan continues the old row's cursor when it stopped at the edit's end, and
+        // reads the rest of the row afresh otherwise.
+        let tab_offset = if old_row.cursor.byte_offset == old_end.column() {
+            scan_tabs_after_edit(
+                old_row.cursor.into_rest_of_row(),
+                old_end,
+                new_end,
+                old_snapshot.max_expansion_column,
+            )
+        } else {
+            let old_end_row_successor_offset =
+                cmp::min(FoldPoint::new(old_end.row() + 1, 0), old_fold_max_point)
+                    .to_offset(&old_snapshot.fold_snapshot);
+            scan_tabs_after_edit(
+                old_snapshot
+                    .fold_snapshot
+                    .chunks(
+                        fold_edit.old.end..old_end_row_successor_offset,
+                        LanguageAwareStyling {
+                            tree_sitter: false,
+                            diagnostics: false,
+                        },
+                        Highlights::default(),
+                    )
+                    .map(|chunk| (chunk.text.len() as u32, chunk.tabs)),
+                old_end,
+                new_end,
+                old_snapshot.max_expansion_column,
+            )
+        };
+
+        previous_ends = ((fold_edit.old.end, old_end), (fold_edit.new.end, new_end));
+
+        if let Some(offset) = tab_offset {
+            fold_edit.old.end.0 += offset as usize + 1;
+            fold_edit.new.end.0 += offset as usize + 1;
+            old_end = fold_edit.old.end.to_point(&old_snapshot.fold_snapshot);
+            new_end = fold_edit.new.end.to_point(&new_snapshot.fold_snapshot);
+            old_end_column = old_snapshot.fold_point_to_tab_point(old_end).column();
+            new_end_column = new_snapshot.fold_point_to_tab_point(new_end).column();
+        }
+
+        let old_start = TabPoint::new(old_start.row(), old_start_column);
+        let old_end = TabPoint::new(old_end.row(), old_end_column);
+        let new_start = TabPoint::new(new_start.row(), new_start_column);
+        let new_end = TabPoint::new(new_end.row(), new_end_column);
+
+        // Combine any edits that overlap due to the expansion.
+        if let Some(last_tab_edit) = tab_edits.last_mut()
+            && last_old_end.is_some_and(|last_old_end| last_old_end >= fold_edit.old.start)
+        {
+            last_tab_edit.old.end = old_end;
+            last_tab_edit.new.end = new_end;
+        } else {
+            tab_edits.push(TabEdit {
+                old: old_start..old_end,
+                new: new_start..new_end,
+            });
+        }
+        last_old_end = Some(fold_edit.old.end);
+    }
+    tab_edits
 }
 
 #[derive(Clone)]
@@ -1059,6 +1067,121 @@ fn low_bits(len: u32) -> u128 {
 /// end, for the tab the edit must be extended to: the first tab after the edit, or the last one
 /// whose expansion changes because the edit moved it across the expansion column. Returns its
 /// offset from the edit's end.
+/// Converts `fold_edits` to tab edits when no row they touch holds a tab in either snapshot, where
+/// a tab point is its fold point and no edit has to grow to cover a tab after it. The rows from the
+/// first edit's to the last edit's are read once in each snapshot, instead of every edit's rows
+/// being sought apart through every layer, so a batch of many edits (a replace-all) costs a read
+/// of the text it spans. `None` when a tab is found, or the rows between the edits are long
+/// enough that the per-edit conversion reads less.
+fn sync_without_tabs(
+    old_snapshot: &TabSnapshot,
+    new_snapshot: &TabSnapshot,
+    fold_edits: &[FoldEdit],
+) -> Option<Vec<TabEdit>> {
+    let budget = fold_edits
+        .len()
+        .saturating_mul(BYTES_READ_PER_EDIT)
+        .saturating_add(BYTES_READ_PER_BATCH);
+    let old_points = fold_points_without_tabs(
+        &old_snapshot.fold_snapshot,
+        fold_edits
+            .iter()
+            .flat_map(|edit| [edit.old.start, edit.old.end]),
+        budget,
+    )?;
+    let new_points = fold_points_without_tabs(
+        &new_snapshot.fold_snapshot,
+        fold_edits
+            .iter()
+            .flat_map(|edit| [edit.new.start, edit.new.end]),
+        budget,
+    )?;
+
+    let mut tab_edits: Vec<TabEdit> = Vec::with_capacity(fold_edits.len());
+    let mut last_old_end = None;
+    for ((fold_edit, old), new) in fold_edits
+        .iter()
+        .zip(old_points.chunks_exact(2))
+        .zip(new_points.chunks_exact(2))
+    {
+        let old = TabPoint(old[0].0)..TabPoint(old[1].0);
+        let new = TabPoint(new[0].0)..TabPoint(new[1].0);
+        // Combine edits that touch, as the per-edit conversion does.
+        if let Some(last_tab_edit) = tab_edits.last_mut()
+            && last_old_end.is_some_and(|last_old_end| last_old_end >= fold_edit.old.start)
+        {
+            last_tab_edit.old.end = old.end;
+            last_tab_edit.new.end = new.end;
+        } else {
+            tab_edits.push(TabEdit { old, new });
+        }
+        last_old_end = Some(fold_edit.old.end);
+    }
+    Some(tab_edits)
+}
+
+/// How many bytes [`sync_without_tabs`] may read for each edit, plus once for the batch, before
+/// it leaves the batch to the per-edit conversion.
+const BYTES_READ_PER_EDIT: usize = 1024;
+const BYTES_READ_PER_BATCH: usize = 64 * 1024;
+
+/// The fold points of `offsets`, which must be in order, read in one pass from the start of the
+/// first one's row to the end of the last one's row. `None` when that text holds a tab, the
+/// offsets are out of order or past the end, or the read would pass `budget` bytes.
+fn fold_points_without_tabs(
+    snapshot: &FoldSnapshot,
+    offsets: impl IntoIterator<Item = FoldOffset>,
+    budget: usize,
+) -> Option<Vec<FoldPoint>> {
+    let offsets: Vec<FoldOffset> = offsets.into_iter().collect();
+    let len = snapshot.len();
+    if !offsets.is_sorted() || *offsets.last()? > len {
+        return None;
+    }
+    let first = offsets[0];
+    let first_point = first.to_point(snapshot);
+    let row_start = first.0 - first_point.column() as usize;
+
+    let mut points = Vec::with_capacity(offsets.len());
+    let mut targets = offsets.into_iter().peekable();
+    let mut offset = row_start;
+    let mut row = first_point.row();
+    let mut column = 0;
+    let chunks = snapshot.chunks(
+        FoldOffset(row_start)..len,
+        LanguageAwareStyling {
+            tree_sitter: false,
+            diagnostics: false,
+        },
+        Highlights::default(),
+    );
+    for chunk in chunks {
+        for &byte in chunk.text.as_bytes() {
+            while targets.next_if(|target| target.0 == offset).is_some() {
+                points.push(FoldPoint::new(row, column));
+            }
+            match byte {
+                b'\t' => return None,
+                // The last offset's row ends here, and nothing after it matters.
+                b'\n' if targets.peek().is_none() => return Some(points),
+                b'\n' => {
+                    row += 1;
+                    column = 0;
+                }
+                _ => column += 1,
+            }
+            offset += 1;
+            if offset - row_start > budget {
+                return None;
+            }
+        }
+    }
+    while targets.next_if(|target| target.0 == offset).is_some() {
+        points.push(FoldPoint::new(row, column));
+    }
+    targets.peek().is_none().then_some(points)
+}
+
 fn scan_tabs_after_edit(
     chunks: impl Iterator<Item = (u32, u128)>,
     old_end: FoldPoint,
@@ -1534,6 +1657,108 @@ mod tests {
             .map(|c| c.text)
             .collect();
         assert!(!result.is_empty());
+    }
+
+    #[gpui::test(iterations = 100)]
+    fn test_sync_without_tabs_matches_edit_by_edit(cx: &mut gpui::App, mut rng: StdRng) {
+        fn random_text(rng: &mut StdRng, max_len: usize) -> String {
+            (0..rng.random_range(0..=max_len))
+                .map(|_| {
+                    if rng.random_bool(0.15) {
+                        '\n'
+                    } else {
+                        char::from(b'a' + rng.random_range(0..26u8))
+                    }
+                })
+                .collect()
+        }
+
+        let tab_size = NonZeroU32::new(rng.random_range(1..=4)).unwrap();
+        let text = random_text(&mut rng, 300);
+        let buffer = MultiBuffer::build_simple(&text, cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+        fold_map.randomly_mutate(&mut rng);
+        let (fold_snapshot, _) = fold_map.read(inlay_snapshot, vec![]);
+        let (tab_map, _) = TabMap::new(fold_snapshot, tab_size);
+        let old_snapshot = tab_map.0.clone();
+
+        // Many sorted, disjoint edits, as a replace-all makes.
+        let mut edits = Vec::new();
+        let mut offset = 0;
+        while offset <= text.len() {
+            let start = rng.random_range(offset..=text.len());
+            let end = rng.random_range(start..=(start + 4).min(text.len()));
+            edits.push((
+                MultiBufferOffset(start)..MultiBufferOffset(end),
+                random_text(&mut rng, 6),
+            ));
+            offset = end + rng.random_range(1..20);
+        }
+        let (buffer_snapshot, buffer_edits) = buffer.update(cx, |buffer, cx| {
+            let subscription = buffer.subscribe();
+            buffer.edit(edits, None, cx);
+            (buffer.snapshot(cx), subscription.consume().into_inner())
+        });
+        let (inlay_snapshot, inlay_edits) = inlay_map.sync(buffer_snapshot, buffer_edits);
+        let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+        // `TabMap::sync` returns before converting when nothing changed.
+        if fold_edits.is_empty() {
+            return;
+        }
+        let new_snapshot = TabSnapshot {
+            fold_snapshot,
+            tab_size,
+            max_expansion_column: old_snapshot.max_expansion_column,
+            version: old_snapshot.version + 1,
+        };
+
+        let in_one_pass = sync_without_tabs(&old_snapshot, &new_snapshot, &fold_edits);
+        let edit_by_edit = sync_edit_by_edit(&old_snapshot, &new_snapshot, fold_edits);
+        assert_eq!(in_one_pass, Some(edit_by_edit));
+    }
+
+    #[gpui::test]
+    fn test_sync_without_tabs_declines_rows_with_tabs(cx: &mut gpui::App) {
+        let buffer = MultiBuffer::build_simple("ab\tcd\nef\n", cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let (mut fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let tab_size = NonZeroU32::new(4).unwrap();
+        let (mut tab_map, _) = TabMap::new(fold_snapshot, tab_size);
+        let old_snapshot = tab_map.0.clone();
+
+        // An edit before the tab on its row, and one on a row without a tab.
+        let (buffer_snapshot, buffer_edits) = buffer.update(cx, |buffer, cx| {
+            let subscription = buffer.subscribe();
+            buffer.edit(
+                [
+                    (MultiBufferOffset(1)..MultiBufferOffset(1), "x"),
+                    (MultiBufferOffset(7)..MultiBufferOffset(7), "y"),
+                ],
+                None,
+                cx,
+            );
+            (buffer.snapshot(cx), subscription.consume().into_inner())
+        });
+        let (inlay_snapshot, inlay_edits) = inlay_map.sync(buffer_snapshot, buffer_edits);
+        let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+        let new_snapshot = TabSnapshot {
+            fold_snapshot: fold_snapshot.clone(),
+            tab_size,
+            max_expansion_column: old_snapshot.max_expansion_column,
+            version: old_snapshot.version + 1,
+        };
+        assert_eq!(
+            sync_without_tabs(&old_snapshot, &new_snapshot, &fold_edits),
+            None
+        );
+
+        // The edit before the tab grows to cover it.
+        let (_, tab_edits) = tab_map.sync(fold_snapshot, fold_edits, tab_size);
+        assert_eq!(tab_edits[0].old.end, TabPoint::new(0, 4));
+        assert_eq!(tab_edits[0].new.end, TabPoint::new(0, 4));
     }
 
     #[gpui::test(iterations = 100)]
