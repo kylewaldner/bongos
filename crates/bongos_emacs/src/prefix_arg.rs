@@ -185,13 +185,18 @@ pub(crate) fn init_editor(
 /// Starts `arg` in `window` as if typed in `editor`.
 #[cfg(test)]
 pub(crate) fn start(arg: PrefixArg, editor: &Entity<Editor>, window: &Window, cx: &mut App) {
-    cx.default_global::<PrefixArgs>().0.insert(
+    let args = cx.default_global::<PrefixArgs>();
+    let generation = args
+        .0
+        .get(&window_id(window))
+        .map_or(0, |state| state.generation);
+    args.0.insert(
         window_id(window),
         WindowArg {
             arg: Some(arg),
             origin: editor.downgrade(),
             handoff: None,
-            generation: 0,
+            generation,
         },
     );
 }

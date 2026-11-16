@@ -15,11 +15,14 @@ fn hand_off(cx: &mut EditorTestContext) {
     cx.update(|window, cx| prefix_arg::hand_off(window, cx));
 }
 
-/// Dispatches synchronously on the focused editor, as a key's binding is, so a deferred handoff
-/// drop has not run yet.
-fn dispatch(cx: &mut EditorTestContext, action: impl gpui::Action) {
+/// Hands the argument off and dispatches in one step, as the interceptor and the key's binding
+/// do, so the deferred drop of an unread handoff runs after the command.
+fn hand_off_and_dispatch(cx: &mut EditorTestContext, action: impl gpui::Action) {
     let editor = cx.editor.clone();
-    cx.update(|window, cx| editor.focus_handle(cx).dispatch_action(&action, window, cx));
+    cx.update(|window, cx| {
+        prefix_arg::hand_off(window, cx);
+        editor.focus_handle(cx).dispatch_action(&action, window, cx)
+    });
 }
 
 fn pending(cx: &mut EditorTestContext) -> Option<PrefixArg> {
@@ -42,9 +45,8 @@ async fn handed_off_argument_becomes_the_count_and_is_gone(cx: &mut TestAppConte
     cx.set_state("ˇone two three four five");
     start(&mut cx, digit(3));
     assert_eq!(pending(&mut cx), Some(digit(3)));
-    hand_off(&mut cx);
+    hand_off_and_dispatch(&mut cx, KillWord { count: None });
     assert_eq!(pending(&mut cx), None);
-    dispatch(&mut cx, KillWord { count: None });
     cx.assert_editor_state("ˇ four five");
     assert!(handoff_is_gone(&mut cx));
 }
@@ -55,8 +57,7 @@ async fn explicit_count_wins_and_the_handoff_is_cleared(cx: &mut TestAppContext)
     let mut cx = EditorTestContext::new(cx).await;
     cx.set_state("ˇone two three four five");
     start(&mut cx, digit(3));
-    hand_off(&mut cx);
-    dispatch(&mut cx, KillWord { count: Some(1) });
+    hand_off_and_dispatch(&mut cx, KillWord { count: Some(1) });
     cx.assert_editor_state("ˇ two three four five");
     assert!(handoff_is_gone(&mut cx));
 }
@@ -73,8 +74,7 @@ async fn ignored_action_runs_once_and_clears_the_handoff(cx: &mut TestAppContext
         );
     });
     start(&mut cx, digit(5));
-    hand_off(&mut cx);
-    dispatch(&mut cx, KeyboardQuit);
+    hand_off_and_dispatch(&mut cx, KeyboardQuit);
     assert!(handoff_is_gone(&mut cx));
     assert_eq!(pending(&mut cx), None);
 }
@@ -89,10 +89,13 @@ async fn unhandled_handoff_is_dropped_after_dispatch(cx: &mut TestAppContext) {
     assert!(handoff_is_gone(&mut cx));
 
     // A drop scheduled for an older handoff does not clear a newer one.
-    start(&mut cx, digit(2));
-    hand_off(&mut cx);
-    start(&mut cx, digit(4));
-    hand_off(&mut cx);
+    let editor = cx.editor.clone();
+    cx.update(|window, cx| {
+        prefix_arg::start(digit(2), &editor, window, cx);
+        prefix_arg::hand_off(window, cx);
+        prefix_arg::start(digit(4), &editor, window, cx);
+        prefix_arg::hand_off(window, cx);
+    });
     cx.run_until_parked();
     assert!(handoff_is_gone(&mut cx));
 }
@@ -106,6 +109,7 @@ async fn blur_of_the_origin_editor_clears_the_argument(cx: &mut TestAppContext) 
     assert_eq!(pending(&mut cx), Some(digit(3)));
     cx.update(|window, cx| {
         window.blur();
+        window.refresh();
     });
     cx.run_until_parked();
     assert_eq!(pending(&mut cx), None);
