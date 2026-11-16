@@ -248,6 +248,11 @@ count_action!(
     true
 );
 count_action!(
+    /// Inserts N newlines after the cursor and leaves the cursor before them.
+    OpenLine;
+    true
+);
+count_action!(
     /// Copies N characters from the nearest non-blank line above.
     CopyFromAbove
 );
