@@ -111,3 +111,5 @@ crates/open_router/src/open_router.rs bongos.rocks
 crates/bongos_kotlin/src/manifest.rs bongos.rocks
 crates/bongos_kotlin/src/manifest.rs www.bongos.rocks
 crates/bongos_kotlin/src/manifest.rs notbongos.rocks
+# The same rule for the jdtls and terraform-ls tables of the user manifest: a refused test URL, never contacted
+crates/bongos_kotlin/src/pinned.rs downloads.bongos.rocks

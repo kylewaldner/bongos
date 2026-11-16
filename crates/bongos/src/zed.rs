@@ -320,6 +320,40 @@ pub fn init(cx: &mut App) {
             .detach_and_log_err(cx);
         });
     })
+    .on_action(|_: &bongos_java::ShowJdk, cx| {
+        with_active_or_new_workspace(cx, |workspace, window, cx| {
+            let worktrees = workspace
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .filter_map(|worktree| {
+                    let worktree = worktree.read(cx);
+                    worktree
+                        .is_local()
+                        .then(|| (worktree.abs_path().to_path_buf(), worktree.id()))
+                })
+                .collect::<Vec<_>>();
+            let request = bongos_java::ShowJdkRequest::new(
+                worktrees,
+                &bongos_java::JdkEnvironment::from_process(),
+                cx,
+            );
+            cx.spawn_in(window, async move |workspace, cx| {
+                let text = cx.background_spawn(async move { request.text() }).await;
+                workspace.update_in(cx, |workspace, window, cx| {
+                    open_bundled_file(
+                        workspace,
+                        text.into(),
+                        bongos_java::SHOW_JDK_TITLE,
+                        "Plain Text",
+                        window,
+                        cx,
+                    );
+                })
+            })
+            .detach_and_log_err(cx);
+        });
+    })
     .on_action(|_: &OpenDefaultSettings, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
             open_bundled_file(
@@ -680,6 +714,32 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             bongos_kotlin::cancel_installs(&project, cx);
         });
 
+        let language_status_menu_handle = PopoverMenuHandle::default();
+        let language_status = cx.new(|cx| {
+            bongos_language_status::LanguageStatusItem::new(
+                workspace.project().clone(),
+                language_status_menu_handle,
+                cx,
+            )
+        });
+        workspace.register_action(
+            |workspace, _: &bongos_language_status::ShowLogs, window, cx| {
+                bongos_language_status::show_logs(workspace, window, cx);
+            },
+        );
+        workspace.register_action({
+            let language_status = language_status.clone();
+            move |_, _: &bongos_language_status::RetryServer, _, cx| {
+                language_status.update(cx, |item, cx| item.retry(cx));
+            }
+        });
+        workspace.register_action({
+            let language_status = language_status.clone();
+            move |_, _: &bongos_language_status::CancelDownload, _, cx| {
+                language_status.update(cx, |item, cx| item.cancel_downloads(cx));
+            }
+        });
+
         bongos_work::register(workspace);
         bongos_chat::register(workspace);
         bongos_prompts::register(workspace);
@@ -700,6 +760,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(search_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(kotlin_status, window, cx);
+            status_bar.add_left_item(language_status, window, cx);
             status_bar.add_left_item(work_focus, window, cx);
             status_bar.add_left_item(workflow_status, window, cx);
             status_bar.add_left_item(prompts_mode_line, window, cx);
@@ -5518,11 +5579,13 @@ mod tests {
                 "image_viewer",
                 "inline_assistant",
                 "isearch",
+                "java",
                 "journal",
                 "keymap_editor",
                 "keystroke_input",
                 "kotlin",
                 "language_selector",
+                "languages",
                 "line_ending_selector",
                 "linear",
                 "lsp_tool",

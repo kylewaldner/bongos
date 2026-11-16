@@ -18,6 +18,18 @@ use std::sync::Arc;
 use std::{any::type_name, fmt};
 pub use url::{Host, Url};
 
+/// The error of a download stopped by its cancel flag. Its text is "download cancelled".
+#[derive(Debug)]
+pub struct DownloadCancelled;
+
+impl std::fmt::Display for DownloadCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("download cancelled")
+    }
+}
+
+impl std::error::Error for DownloadCancelled {}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RedirectPolicy {
     #[default]

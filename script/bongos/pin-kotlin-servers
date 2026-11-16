@@ -2,12 +2,20 @@
 # Refreshes crates/bongos_kotlin/servers.toml: the newest kotlin-lsp build and the current IntelliJ
 # server, with the SHA-256 of every platform's archive. A developer runs this with network access
 # before a release (kotlin-lsp builds expire about 29 days after they are built); no gate runs it.
+# Every other server table in the file is kept as it is.
 #   pin-kotlin-servers            rewrite crates/bongos_kotlin/servers.toml
 #   pin-kotlin-servers --print    print the new file instead
 #   --built YYYY-MM-DD            the kotlin-lsp build date, when the pin changes: take it from
 #                                 `bin/intellij-server license status` of the new build ("valid
 #                                 through" is the expiry). Without it the release date is used and
 #                                 the script says so. An unchanged version keeps its dates.
+#   --server jdtls|terraform-ls   refresh only that server's table, keeping the rest of the file:
+#                                 jdtls from the newest download.eclipse.org milestone (one archive
+#                                 for every platform; the script downloads it, about 50 MB, checks
+#                                 it against the published .sha256 and names the launcher jar),
+#                                 terraform-ls from releases.hashicorp.com (index.json and the
+#                                 release's SHA256SUMS). Neither expires.
+#   --version <version>           with --server: pin this version instead of the newest
 # kotlin-lsp: the newest Kotlin/kotlin-lsp GitHub release (RELEASES.md on main lags behind it) and
 # the .sha256 file beside each archive. IntelliJ: the newest Open VSX JetBrains.intellij-server
 # vsix per target; its extension/server-bundle.json holds the archive URL and SHA-256.
@@ -18,20 +26,145 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/lib.sh"
 cd "$BONGOS_ROOT"
 
-print_only=0 built=""
+usage() {
+  echo "usage: pin-kotlin-servers [--print] [--built YYYY-MM-DD]" >&2
+  echo "       pin-kotlin-servers [--print] --server jdtls|terraform-ls [--version <version>]" >&2
+  exit 2
+}
+print_only=0 built="" server="" version=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --print) print_only=1 ;;
     --built) shift; built=${1:?--built needs a date} ;;
-    *) echo "usage: pin-kotlin-servers [--print] [--built YYYY-MM-DD]" >&2; exit 2 ;;
+    --server) shift; server=${1:?--server needs jdtls or terraform-ls} ;;
+    --version) shift; version=${1:?--version needs a version} ;;
+    *) usage ;;
   esac
   shift
 done
+case "$server" in
+  "") [ -z "$version" ] || usage ;;
+  jdtls | terraform-ls) [ -z "$built" ] || usage ;;
+  *) usage ;;
+esac
 
 manifest=crates/bongos_kotlin/servers.toml
 mkdir -p "$BONGOS_WORKSPACE/scratch"
 work=$(mktemp -d "$BONGOS_WORKSPACE/scratch/pin-kotlin-servers.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+
+# merge_tables <file of new tables>: prints servers.toml with each top-level server table of the new
+# file (the comment lines right above its header, the header and its subtables) put in place of the
+# table of the same name, or appended. The new file's leading comment, when it has one, replaces the
+# old one; every other table is kept byte for byte.
+merge_tables() {
+  MERGE_OLD=$manifest MERGE_NEW=$1 python3 -I -c '
+import os, re
+
+def split(text):
+    lines = text.splitlines(keepends=True)
+    starts = []
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"\[([A-Za-z0-9_-]+)\]\s*", line)
+        if match:
+            start = index
+            while start > 0 and lines[start - 1].startswith("#"):
+                start -= 1
+            starts.append((start, match.group(1)))
+    head = "".join(lines[: starts[0][0]]) if starts else text
+    tables = {}
+    for position, (start, name) in enumerate(starts):
+        end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+        tables[name] = "".join(lines[start:end]).rstrip("\n") + "\n"
+    return head, tables
+
+old_head, old_tables = split(open(os.environ["MERGE_OLD"]).read())
+new_head, new_tables = split(open(os.environ["MERGE_NEW"]).read())
+tables = dict(old_tables)
+tables.update(new_tables)
+print((new_head if new_head.strip() else old_head) + "\n".join(tables.values()), end="")
+'
+}
+
+# finish <new servers.toml> <what was pinned>: prints the file, or installs it when it changed.
+finish() {
+  if [ "$print_only" = 1 ]; then
+    cat "$1"
+  elif cmp -s "$1" "$manifest"; then
+    echo "pin-kotlin-servers: $manifest is already current ($2)"
+  else
+    cp "$1" "$manifest"
+    echo "pin-kotlin-servers: updated $manifest; review the diff, then run script/bongos/test bongos_kotlin"
+  fi
+}
+
+pin_jdtls() {
+  local milestones=https://download.eclipse.org/jdtls/milestones file url published digest jar platform
+  if [ -z "$version" ]; then
+    version=$(curl -fsSL "$milestones/" | grep -oE 'milestones/[0-9]+\.[0-9]+\.[0-9]+/' \
+      | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -uV | tail -n 1)
+    [ -n "$version" ] || { echo "pin-kotlin-servers: no jdtls milestone listed at $milestones" >&2; exit 1; }
+  fi
+  file=$(curl -fsSL "$milestones/$version/latest.txt" | tr -d '[:space:]')
+  case "$file" in
+    jdt-language-server-"$version"-*.tar.gz) ;;
+    *) echo "pin-kotlin-servers: unexpected jdtls archive name: $file" >&2; exit 1 ;;
+  esac
+  url="$milestones/$version/$file"
+  published=$(curl -fsSL "$url.sha256" | tr -d '[:space:]' | tr 'A-F' 'a-f')
+  curl -fsSL -o "$work/$file" "$url"
+  digest=$(sha256sum "$work/$file" | cut -d' ' -f1)
+  [ "$digest" = "$published" ] \
+    || { echo "pin-kotlin-servers: $file has sha256 $digest, the published one is $published" >&2; exit 1; }
+  tar -tzf "$work/$file" >"$work/jdtls-files"
+  grep -qxE '(\./)?bin/jdtls' "$work/jdtls-files" \
+    || { echo "pin-kotlin-servers: $file has no bin/jdtls at its root" >&2; exit 1; }
+  jar=$(grep -oE 'plugins/org\.eclipse\.equinox\.launcher_[^/]*\.jar$' "$work/jdtls-files" | head -n 1)
+  {
+    echo "# Eclipse JDT Language Server (Java), a stable release with no expiry. One archive serves every"
+    echo "# platform; \`bin/jdtls\` is a Python 3 wrapper around"
+    echo "# $jar and needs a JDK 25 or newer."
+    printf '[jdtls]\nversion = "%s"\n' "$version"
+    for platform in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+      printf '\n[jdtls.platform.%s]\nurl = "%s"\nsha256 = "%s"\narchive = "tar.gz"\nstrip_components = 0\nlauncher = "bin/jdtls"\n' \
+        "$platform" "$url" "$digest"
+    done
+  } >"$work/table.toml"
+}
+
+pin_terraform_ls() {
+  local releases=https://releases.hashicorp.com/terraform-ls pair platform target file digest
+  if [ -z "$version" ]; then
+    version=$(curl -fsSL "$releases/index.json" | python3 -I -c '
+import json, re, sys
+versions = [v for v in json.load(sys.stdin)["versions"] if re.fullmatch(r"\d+\.\d+\.\d+", v)]
+print(max(versions, key=lambda v: tuple(map(int, v.split(".")))))')
+  fi
+  curl -fsSL -o "$work/SHA256SUMS" "$releases/$version/terraform-ls_${version}_SHA256SUMS"
+  {
+    echo "# HashiCorp terraform-ls, a stable release with no expiry. CHECKPOINT_DISABLE stops its"
+    echo "# version-check call home."
+    printf '[terraform-ls]\nversion = "%s"\nargs = ["serve"]\n\n[terraform-ls.env]\nCHECKPOINT_DISABLE = "1"\n' "$version"
+    for pair in linux-x64:linux_amd64 linux-arm64:linux_arm64 macos-x64:darwin_amd64 macos-arm64:darwin_arm64; do
+      platform=${pair%%:*} target=${pair#*:}
+      file="terraform-ls_${version}_$target.zip"
+      digest=$(awk -v name="$file" '$2 == name { print tolower($1) }' "$work/SHA256SUMS")
+      [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "pin-kotlin-servers: no sha256 for $file" >&2; exit 1; }
+      printf '\n[terraform-ls.platform.%s]\nurl = "%s/%s/%s"\nsha256 = "%s"\narchive = "zip"\nstrip_components = 0\nlauncher = "terraform-ls"\n' \
+        "$platform" "$releases" "$version" "$file" "$digest"
+    done
+  } >"$work/table.toml"
+}
+
+if [ -n "$server" ]; then
+  case "$server" in
+    jdtls) pin_jdtls ;;
+    terraform-ls) pin_terraform_ls ;;
+  esac
+  merge_tables "$work/table.toml" >"$work/servers.toml"
+  finish "$work/servers.toml" "$server $version"
+  exit 0
+fi
 
 latest_tag=$(gh api repos/Kotlin/kotlin-lsp/releases --jq '[.[] | select(.prerelease | not)][0] | [.tag_name, .published_at] | @tsv')
 tag=${latest_tag%%$'\t'*}
@@ -53,7 +186,7 @@ for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
 done
 
 PIN_WORK=$work PIN_MANIFEST=$manifest PIN_LSP_VERSION=$lsp_version PIN_RELEASED=$released PIN_BUILT=$built \
-  python3 -I - >"$work/servers.toml" <<'PY'
+  python3 -I - >"$work/kotlin.toml" <<'PY'
 import datetime, json, os, re, sys, tomllib
 
 work = os.environ["PIN_WORK"]
@@ -93,9 +226,10 @@ targets = {"linux-x64": "linux-x64", "linux-arm64": "linux-arm64", "macos-arm64"
 runtimes = {name: spec[2] for name, spec in lsp_platforms.items()}
 
 out = []
-out.append(f"""# Pinned Kotlin language servers, embedded in the binary. Refresh with script/bongos/pin-kotlin-servers
+out.append(f"""# Pinned language servers, embedded in the binary. Refresh kotlin-lsp and intellij with
+# script/bongos/pin-kotlin-servers, jdtls or terraform-ls with `pin-kotlin-servers --server <name>`
 # (needs the network; never run by a gate). Every download is checked against `sha256` before it is
-# extracted, and bongos never asks a server what the newest version is.
+# extracted, and bongos never asks a server what the newest version is. Only kotlin-lsp expires.
 #
 # kotlin-lsp builds are early access and expire about 29 days after `built`; `expires` is the last
 # day the build runs (`license status` prints it). Pin a newer build before then.
@@ -149,11 +283,5 @@ runtime = "{runtimes[platform]}"
 print("\n".join(out), end="")
 PY
 
-if [ "$print_only" = 1 ]; then
-  cat "$work/servers.toml"
-elif cmp -s "$work/servers.toml" "$manifest"; then
-  echo "pin-kotlin-servers: $manifest is already current (kotlin-lsp $lsp_version)"
-else
-  cp "$work/servers.toml" "$manifest"
-  echo "pin-kotlin-servers: updated $manifest; review the diff, then run script/bongos/test bongos_kotlin"
-fi
+merge_tables "$work/kotlin.toml" >"$work/servers.toml"
+finish "$work/servers.toml" "kotlin-lsp $lsp_version"

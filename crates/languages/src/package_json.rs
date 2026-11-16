@@ -17,8 +17,14 @@ pub struct PackageJsonData {
     pub jasmine_package_path: Option<Arc<Path>>,
     pub bun_package_path: Option<Arc<Path>>,
     pub node_package_path: Option<Arc<Path>>,
+    /// The nearest `package.json`, used as the working directory when no package declares
+    /// a test runner of its own.
+    pub nearest_package_json_path: Option<Arc<Path>>,
     pub scripts: BTreeSet<(Arc<Path>, String)>,
     pub package_manager: Option<&'static str>,
+    /// Package managers of the lockfiles found beside each `package.json` and up to the
+    /// worktree root, nearest directory first.
+    pub lockfiles: Vec<&'static str>,
 }
 
 impl PackageJsonData {
@@ -89,8 +95,10 @@ impl PackageJsonData {
             jasmine_package_path,
             bun_package_path,
             node_package_path,
+            nearest_package_json_path: Some(path),
             scripts,
             package_manager,
+            lockfiles: Vec::new(),
         }
     }
 
@@ -107,9 +115,51 @@ impl PackageJsonData {
             .or(other.jasmine_package_path);
         self.bun_package_path = self.bun_package_path.take().or(other.bun_package_path);
         self.node_package_path = self.node_package_path.take().or(other.node_package_path);
+        self.nearest_package_json_path = self
+            .nearest_package_json_path
+            .take()
+            .or(other.nearest_package_json_path);
         self.scripts.extend(other.scripts);
         self.package_manager = self.package_manager.or(other.package_manager);
+        self.lockfiles.extend(other.lockfiles);
     }
+
+    /// The package manager the project uses: the `packageManager` or `devEngines.packageManager`
+    /// field, else the nearest lockfile, else npm.
+    pub fn resolved_package_manager(&self) -> &'static str {
+        self.package_manager
+            .or_else(|| self.lockfiles.first().copied())
+            .unwrap_or("npm")
+    }
+
+    pub fn is_bun(&self) -> bool {
+        self.resolved_package_manager() == "bun"
+    }
+}
+
+/// Lockfile names and the package manager each one belongs to, in priority order.
+pub const LOCKFILES: [(&str, &str); 5] = [
+    ("bun.lock", "bun"),
+    ("bun.lockb", "bun"),
+    ("pnpm-lock.yaml", "pnpm"),
+    ("yarn.lock", "yarn"),
+    ("package-lock.json", "npm"),
+];
+
+/// The package managers of the lockfiles found in `directories`, nearest directory first.
+pub async fn detect_lockfiles(
+    fs: &dyn project::Fs,
+    directories: &[std::path::PathBuf],
+) -> Vec<&'static str> {
+    let mut lockfiles = Vec::new();
+    for directory in directories {
+        for (file_name, manager) in LOCKFILES {
+            if fs.is_file(&directory.join(file_name)).await {
+                lockfiles.push(manager);
+            }
+        }
+    }
+    lockfiles
 }
 
 fn package_manager_from_package_json(

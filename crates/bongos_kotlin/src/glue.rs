@@ -14,6 +14,7 @@ use workspace::{
 
 use crate::{
     KotlinDirs, KotlinUpdates, KotlinUpdatesEvent, ManifestNoticePending,
+    java::{JAVA_LANGUAGE, JavaRoutes},
     manager::{ADAPTER_NAME, KotlinEvent, KotlinHost, KotlinProjectManager, KotlinRegistry},
 };
 
@@ -30,9 +31,46 @@ impl KotlinHost for ProjectHost {
         let project = self.project.clone();
         cx.defer(move |cx| restart_worktree(&project, worktree_id, cx));
     }
+
+    fn reapply_policy(&self, worktree_id: WorktreeId, cx: &mut App) {
+        // Deferred like `restart`, and queued before it: the policy's stops raise the store's
+        // switch count first, so the restart's new start waits for them.
+        let project = self.project.clone();
+        cx.defer(move |cx| switch_java_server(project, worktree_id, cx));
+    }
 }
 
-/// Stops the worktree's Kotlin server and starts it again for its open Kotlin buffers.
+/// Applies a switch of the worktree's Java server in two passes. The first runs while
+/// `JavaRoutes` says the switch is on, so it stops the worktree's `kotlin` and `jdtls` servers and
+/// starts nothing; once those processes are gone the switch ends and the second pass starts the
+/// servers the new answer allows.
+fn switch_java_server(project: WeakEntity<Project>, worktree_id: WorktreeId, cx: &mut App) {
+    let Some(lsp_store) = project
+        .upgrade()
+        .map(|project| project.read(cx).lsp_store())
+    else {
+        JavaRoutes::end_switch(worktree_id, cx);
+        return;
+    };
+    let stops = lsp_store.update(cx, |lsp_store, cx| lsp_store.reapply_server_policy(cx));
+    let lsp_store = lsp_store.downgrade();
+    cx.spawn(async move |cx| {
+        stops.await;
+        cx.update(|cx| {
+            if JavaRoutes::end_switch(worktree_id, cx)
+                && let Some(lsp_store) = lsp_store.upgrade()
+            {
+                lsp_store
+                    .update(cx, |lsp_store, cx| lsp_store.reapply_server_policy(cx))
+                    .detach();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Stops the worktree's Kotlin server and starts it again for its open Kotlin buffers, and for
+/// its Java buffers, which the policy lets it serve only on the IntelliJ server.
 fn restart_worktree(project: &WeakEntity<Project>, worktree_id: WorktreeId, cx: &mut App) {
     let Some(project) = project.upgrade() else {
         return;
@@ -44,12 +82,11 @@ fn restart_worktree(project: &WeakEntity<Project>, worktree_id: WorktreeId, cx: 
         .buffers()
         .filter(|buffer| {
             let buffer = buffer.read(cx);
-            buffer
-                .language()
-                .is_some_and(|language| language.name().as_ref() == KOTLIN_LANGUAGE)
-                && buffer
-                    .file()
-                    .is_some_and(|file| file.worktree_id(cx) == worktree_id)
+            buffer.language().is_some_and(|language| {
+                matches!(language.name().as_ref(), KOTLIN_LANGUAGE | JAVA_LANGUAGE)
+            }) && buffer
+                .file()
+                .is_some_and(|file| file.worktree_id(cx) == worktree_id)
         })
         .collect();
     // By worktree, not by `server_id`: a server whose start failed, or that has not been

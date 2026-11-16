@@ -532,6 +532,8 @@ impl VsCodeSettings {
             git_hosting_providers: None,
             disable_ai: None,
             kotlin: None,
+            java: None,
+            terraform: None,
         }
     }
 
