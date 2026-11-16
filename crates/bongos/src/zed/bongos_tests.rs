@@ -135,6 +135,17 @@ async fn switch_profile_dispatches_by_name(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn set_keybindings_dispatches_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let action = cx
+            .build_action("settings::SetKeybindings", None)
+            .expect("settings::SetKeybindings is registered");
+        assert!(action.partial_eq(&zed_actions::settings::SetKeybindings));
+    });
+}
+
+#[gpui::test]
 async fn kotlin_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     cx.update(|cx| {
