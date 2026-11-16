@@ -520,7 +520,7 @@ async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 52] = [
+const EMACS_ACTIONS: [(&str, &str); 53] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
