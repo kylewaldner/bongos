@@ -13,13 +13,8 @@ use settings::{RegisterSetting, Settings};
 )]
 pub enum BaseKeymap {
     VSCode,
-    JetBrains,
-    SublimeText,
-    Atom,
-    TextMate,
     #[default]
     Emacs,
-    Cursor,
     None,
 }
 
@@ -27,12 +22,13 @@ impl From<BaseKeymapContent> for BaseKeymap {
     fn from(value: BaseKeymapContent) -> Self {
         match value {
             BaseKeymapContent::VSCode => Self::VSCode,
-            BaseKeymapContent::JetBrains => Self::JetBrains,
-            BaseKeymapContent::SublimeText => Self::SublimeText,
-            BaseKeymapContent::Atom => Self::Atom,
-            BaseKeymapContent::TextMate => Self::TextMate,
             BaseKeymapContent::Emacs => Self::Emacs,
-            BaseKeymapContent::Cursor => Self::Cursor,
+            // Retired keymaps fall back to Emacs; the stored value is left alone.
+            BaseKeymapContent::JetBrains
+            | BaseKeymapContent::SublimeText
+            | BaseKeymapContent::Atom
+            | BaseKeymapContent::TextMate
+            | BaseKeymapContent::Cursor => Self::Emacs,
             BaseKeymapContent::None => Self::None,
         }
     }
@@ -41,12 +37,7 @@ impl Into<BaseKeymapContent> for BaseKeymap {
     fn into(self) -> BaseKeymapContent {
         match self {
             BaseKeymap::VSCode => BaseKeymapContent::VSCode,
-            BaseKeymap::JetBrains => BaseKeymapContent::JetBrains,
-            BaseKeymap::SublimeText => BaseKeymapContent::SublimeText,
-            BaseKeymap::Atom => BaseKeymapContent::Atom,
-            BaseKeymap::TextMate => BaseKeymapContent::TextMate,
             BaseKeymap::Emacs => BaseKeymapContent::Emacs,
-            BaseKeymap::Cursor => BaseKeymapContent::Cursor,
             BaseKeymap::None => BaseKeymapContent::None,
         }
     }
@@ -56,60 +47,27 @@ impl Display for BaseKeymap {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             BaseKeymap::VSCode => write!(f, "VS Code"),
-            BaseKeymap::JetBrains => write!(f, "JetBrains"),
-            BaseKeymap::SublimeText => write!(f, "Sublime Text"),
-            BaseKeymap::Atom => write!(f, "Atom"),
-            BaseKeymap::TextMate => write!(f, "TextMate"),
             BaseKeymap::Emacs => write!(f, "Emacs"),
-            BaseKeymap::Cursor => write!(f, "Cursor (beta)"),
             BaseKeymap::None => write!(f, "None"),
         }
     }
 }
 
 impl BaseKeymap {
-    #[cfg(target_os = "macos")]
-    pub const OPTIONS: [(&'static str, Self); 7] = [
-        ("VS Code", Self::VSCode),
-        ("Atom", Self::Atom),
-        ("JetBrains", Self::JetBrains),
-        ("Sublime Text", Self::SublimeText),
-        ("Emacs (Default)", Self::Emacs),
-        ("TextMate", Self::TextMate),
-        ("Cursor", Self::Cursor),
-    ];
-
-    #[cfg(not(target_os = "macos"))]
-    pub const OPTIONS: [(&'static str, Self); 6] = [
-        ("VS Code", Self::VSCode),
-        ("Atom", Self::Atom),
-        ("JetBrains", Self::JetBrains),
-        ("Sublime Text", Self::SublimeText),
-        ("Emacs (Default)", Self::Emacs),
-        ("Cursor", Self::Cursor),
-    ];
+    pub const OPTIONS: [(&'static str, Self); 2] =
+        [("VS Code", Self::VSCode), ("Emacs (Default)", Self::Emacs)];
 
     pub fn asset_path(&self) -> Option<&'static str> {
         #[cfg(target_os = "macos")]
         match self {
-            BaseKeymap::JetBrains => Some("keymaps/macos/jetbrains.json"),
-            BaseKeymap::SublimeText => Some("keymaps/macos/sublime_text.json"),
-            BaseKeymap::Atom => Some("keymaps/macos/atom.json"),
-            BaseKeymap::TextMate => Some("keymaps/macos/textmate.json"),
             BaseKeymap::Emacs => Some("keymaps/macos/emacs.json"),
-            BaseKeymap::Cursor => Some("keymaps/macos/cursor.json"),
             BaseKeymap::VSCode => None,
             BaseKeymap::None => None,
         }
 
         #[cfg(not(target_os = "macos"))]
         match self {
-            BaseKeymap::JetBrains => Some("keymaps/linux/jetbrains.json"),
-            BaseKeymap::SublimeText => Some("keymaps/linux/sublime_text.json"),
-            BaseKeymap::Atom => Some("keymaps/linux/atom.json"),
             BaseKeymap::Emacs => Some("keymaps/linux/emacs.json"),
-            BaseKeymap::Cursor => Some("keymaps/linux/cursor.json"),
-            BaseKeymap::TextMate => None,
             BaseKeymap::VSCode => None,
             BaseKeymap::None => None,
         }
@@ -131,5 +89,49 @@ impl BaseKeymap {
 impl Settings for BaseKeymap {
     fn from_settings(s: &crate::settings_content::SettingsContent) -> Self {
         s.base_keymap.unwrap().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RETIRED: [&str; 5] = ["JetBrains", "Atom", "SublimeText", "TextMate", "Cursor"];
+
+    #[test]
+    fn retired_values_load_as_emacs() {
+        for name in RETIRED {
+            let content: BaseKeymapContent = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert!(content.is_retired(), "{name}");
+            assert_eq!(BaseKeymap::from(content), BaseKeymap::Emacs, "{name}");
+        }
+        for kept in [
+            BaseKeymapContent::Emacs,
+            BaseKeymapContent::VSCode,
+            BaseKeymapContent::None,
+        ] {
+            assert!(!kept.is_retired());
+        }
+    }
+
+    #[test]
+    fn retired_values_are_not_options() {
+        for name in RETIRED {
+            assert!(
+                BaseKeymap::OPTIONS
+                    .iter()
+                    .all(|(label, _)| !label.contains(name)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn options_have_assets_only_where_needed() {
+        for (_, keymap) in BaseKeymap::OPTIONS {
+            if let Some(path) = keymap.asset_path() {
+                assert!(path.contains("emacs"), "{path}");
+            }
+        }
     }
 }
