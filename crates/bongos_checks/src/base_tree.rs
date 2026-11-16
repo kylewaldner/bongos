@@ -75,6 +75,70 @@ impl TempTree {
         Ok(tree)
     }
 
+    /// Writes out the files of the tree object `tree` of the repository at `repository` as the
+    /// new folder `<scratch>/<uuid>`: the tree is read into a private index and checked out
+    /// from it with `checkout-index --all --prefix`. No worktree is registered, no ref moves and
+    /// the repository's own index and files are not touched. The folder is not a git working
+    /// tree; it is removed like a temporary base tree.
+    pub(crate) async fn materialize(
+        git: &Git,
+        repository: &Path,
+        scratch: &Path,
+        tree: &str,
+        index_dir: &Path,
+    ) -> Result<Self, String> {
+        ensure_commit(tree).map_err(|_| format!("{tree:?} is not a tree id"))?;
+        std::fs::create_dir_all(scratch)
+            .map_err(|error| format!("creating the scratch folder: {error}"))?;
+        let scratch = scratch
+            .canonicalize()
+            .map_err(|error| format!("resolving the scratch folder: {error}"))?;
+        std::fs::create_dir_all(index_dir)
+            .map_err(|error| format!("creating the index folder: {error}"))?;
+        let index_dir = std::path::absolute(index_dir)
+            .map_err(|error| format!("resolving the index folder: {error}"))?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let path = scratch.join(&id);
+        write_owner(&scratch, &id)?;
+        let made = Self {
+            git: git.clone(),
+            repository: repository.to_path_buf(),
+            scratch,
+            path,
+            index_dir,
+            armed: true,
+        };
+        if let Err(error) = made.write_out(tree).await {
+            made.remove().await;
+            return Err(format!("writing out the tree {tree}: {error}"));
+        }
+        Ok(made)
+    }
+
+    async fn write_out(&self, tree: &str) -> Result<(), String> {
+        std::fs::create_dir(&self.path).map_err(|error| error.to_string())?;
+        let index = private_index(&self.path, &self.index_dir);
+        let prefix = self
+            .path
+            .to_str()
+            .ok_or_else(|| "the scratch folder's path is not UTF-8".to_string())?;
+        let prefix = format!("--prefix={prefix}/");
+        self.git
+            .run_on_index(&self.repository, &index, &["read-tree", tree], None)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.git
+            .run_on_index(
+                &self.repository,
+                &index,
+                &["checkout-index", "--all", "--force", &prefix],
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

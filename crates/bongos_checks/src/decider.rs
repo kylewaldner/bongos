@@ -21,7 +21,10 @@
 //! `checks.live`, so every `hold/` row is written again from what is true now), after every
 //! committed transaction that writes more than `checks.live` (a finish, a reopen, new
 //! evidence, the landing that moves the verified commit), and on each change of the verified
-//! commit. Decisions of one project run one after another. Groups are left alone here.
+//! commit. Decisions of one project run one after another: leaves first, then groups from the
+//! deepest, so a group sees the done records its children just got. Groups are decided in
+//! [`crate::group_decider`], which also fills the tree keys of `checks.last` and keeps the trees
+//! of finished tasks under groups with closing checks.
 //!
 //! The reasons in the `hold/` rows: "checking the tree" while the first decision runs, "not
 //! done: N checks missing", "not done: no tree to check", or what could not be computed.
@@ -38,9 +41,11 @@ use bongos_checks_model::evidence::{
 };
 use bongos_checks_model::verdict::NoVerdictReason;
 use bongos_checks_model::{Applicability, EffectiveSet, NamedSets, Row, effective_set};
-use bongos_project_repo::{Git, ProjectRepo, StateEvent, StateHandle, StateRead, StateWriter};
+use bongos_project_repo::{
+    Git, ProjectRepo, StateEvent, StateHandle, StateRead, StateTx, StateWriter,
+};
 use bongos_project_repo_model::{DefinitionNode, DefinitionTree};
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AsyncApp, Context, Task, WeakEntity};
 use settings::Settings as _;
@@ -111,8 +116,22 @@ pub(crate) struct Decider {
     pins: BTreeMap<String, Arc<Pinned>>,
     /// Projects whose last decision met a task the task source did not know yet; decided again
     /// when the Work tree changes.
-    waiting: BTreeSet<String>,
+    pub(crate) waiting: BTreeSet<String>,
     store_subscription: Option<gpui::Subscription>,
+    /// The automatic runs of groups' closing checks that have not ended, by group id; each
+    /// resolves when its run ends and its scratch folder is removed.
+    pub(crate) group_runs: BTreeMap<String, futures::future::Shared<oneshot::Receiver<()>>>,
+    /// The (group, check, digest, tree key) each automatic run was started for: at most one
+    /// per key in this process, whatever its records say.
+    pub(crate) started: BTreeSet<(String, String, String, String)>,
+    /// Why a group's trees could not be written out for its automatic run, by group id.
+    pub(crate) blocked: BTreeMap<String, String>,
+    /// Per project, the `checks.last` rows (group, generation) its last decision saw. A row new
+    /// since then was recorded while the decider followed, so its key is computed right away;
+    /// any row met at the first decision is computed on the tree as found.
+    pub(crate) last_seen: BTreeMap<String, BTreeSet<(String, u64)>>,
+    /// Per project, the verified commit its refs of kept trees were last cleaned for.
+    pub(crate) cleaned: BTreeMap<String, Option<String>>,
     #[cfg(test)]
     decided: Vec<mpsc::UnboundedSender<Option<String>>>,
 }
@@ -134,6 +153,11 @@ impl Decider {
         }
     }
 
+    /// The sender that asks `project` for a decision, while it is followed.
+    pub(crate) fn followed_poke(&self, project: &str) -> Option<&mpsc::UnboundedSender<()>> {
+        self.projects.get(project).map(|followed| &followed.poke)
+    }
+
     /// Forgets which `hold/` rows were written (a drain deleted them all).
     pub(crate) fn forget_holds(&mut self) {
         for followed in self.projects.values_mut() {
@@ -145,12 +169,12 @@ impl Decider {
 /// The definitions of one commit, pinned, parsed, with their named sets.
 pub(crate) struct Pinned {
     /// The commit pinned: the verified commit, or before one is recorded the commit shown.
-    commit: String,
+    pub(crate) commit: String,
     /// The verified commit as the state store recorded it when the pin was taken.
-    verified: Option<String>,
-    pin: Pin,
-    tree: DefinitionTree,
-    sets: NamedSets,
+    pub(crate) verified: Option<String>,
+    pub(crate) pin: Pin,
+    pub(crate) tree: DefinitionTree,
+    pub(crate) sets: NamedSets,
 }
 
 /// How a leaf stands on its tree now.
@@ -160,6 +184,8 @@ pub(crate) enum Judgment {
         tree_key: String,
         evidence: Vec<String>,
         current: Current,
+        /// Each repository of that key: its name, its tree's directory and its tree id.
+        trees: Vec<(String, PathBuf, String)>,
     },
     Unsatisfied(Satisfaction),
     NoTree,
@@ -224,6 +250,8 @@ impl ChecksEngine {
         self.decider.pins.clear();
         self.decider.waiting.clear();
         self.decider.store_subscription = None;
+        self.decider.last_seen.clear();
+        self.decider.cleaned.clear();
     }
 
     fn poke_waiting(&mut self) {
@@ -251,6 +279,9 @@ impl ChecksEngine {
             return;
         }
         self.live_rows.adopt(&writer);
+        // A writer taken anew: what it finds was recorded before, and its refs are cleaned.
+        self.decider.last_seen.remove(&project);
+        self.decider.cleaned.remove(&project);
         let (poke, pokes) = mpsc::unbounded();
         poke.unbounded_send(()).ok();
         let states = writer
@@ -305,7 +336,7 @@ impl ChecksEngine {
     }
 
     /// Writes the `hold/` row of `task_id` (none: deletes it), throttled with its part rows.
-    fn write_hold(
+    pub(crate) fn write_hold(
         &mut self,
         project: &str,
         writer: &Arc<StateWriter>,
@@ -471,7 +502,9 @@ fn held_tasks(read: &StateRead) -> Result<Vec<(String, OwedMarker)>> {
     Ok(held)
 }
 
-/// One decision for every held task of the project `project` whose writer is `writer`.
+/// One decision for every held task of the project `project` whose writer is `writer`, with
+/// the tree keys of its `checks.last` rows filled first and, on the first decision and after
+/// each change of the verified commit, its refs of kept trees cleaned.
 async fn decide_project(
     this: &WeakEntity<ChecksEngine>,
     project: &str,
@@ -482,16 +515,35 @@ async fn decide_project(
         return Ok(());
     }
     let held = writer.read(held_tasks)?;
+    let last_rows = writer.read(crate::group_decider::last_rows)?;
+    let verified = writer.read(|read| read.verified_commit())?;
     let ids: BTreeSet<String> = held.iter().map(|(id, _)| id.clone()).collect();
-    this.update(cx, |engine, cx| {
-        engine.drop_stale_holds(project, writer, &ids, cx)
+    let (fresh, clean) = this.update(cx, |engine, cx| {
+        engine.drop_stale_holds(project, writer, &ids, cx);
+        let fresh = engine.decider.note_last_rows(project, &last_rows);
+        let clean = engine.decider.cleaned.get(project) != Some(&verified);
+        (fresh, clean)
     })?;
-    if held.is_empty() {
+    let unkeyed = last_rows.iter().any(|(_, row)| row.tree_key.is_none());
+    if held.is_empty() && !unkeyed && !clean {
         return Ok(());
     }
     // The project's repository, from any task the task source knows.
+    let mut known: Vec<String> = ids.iter().cloned().collect();
+    for (group, row) in &last_rows {
+        known.push(group.clone());
+        known.push(row.id.clone());
+    }
+    known.extend(writer.read(|read| {
+        Ok(read
+            .kv(DONE_NAMESPACE)
+            .scan("")?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>())
+    })?);
     let repo = this.update(cx, |engine, cx| {
-        held.iter().find_map(|(id, _)| {
+        known.iter().find_map(|id| {
             engine
                 .task(id, cx)
                 .map(|task| task.project)
@@ -499,9 +551,11 @@ async fn decide_project(
         })
     })?;
     let Some(repo) = repo else {
-        this.update(cx, |engine, _| {
-            engine.decider.waiting.insert(project.to_string());
-        })?;
+        if !held.is_empty() || unkeyed {
+            this.update(cx, |engine, _| {
+                engine.decider.waiting.insert(project.to_string());
+            })?;
+        }
         return Ok(());
     };
     let pinned = match pinned(this, &repo, cx).await {
@@ -519,16 +573,67 @@ async fn decide_project(
             return Err(error);
         }
     };
+    if unkeyed {
+        crate::group_decider::fill_last_keys(
+            this, project, writer, &pinned, &last_rows, &fresh, cx,
+        )
+        .await?;
+    }
+    // Leaves first, then groups from the deepest: a group is judged on what its children got.
+    let mut held = held;
+    held.sort_by_cached_key(|(task_id, _)| {
+        let group = pinned
+            .tree
+            .node(task_id)
+            .is_some_and(|node| node.folder.is_empty() || !node.children.is_empty());
+        (group, std::cmp::Reverse(depth(&pinned.tree, task_id)))
+    });
     for (task_id, marker) in held {
         decide_task(this, project, writer, &pinned, &task_id, &marker, cx).await?;
     }
+    if clean {
+        crate::group_decider::clean_refs(this, writer, &pinned, &repo, cx).await?;
+        this.update(cx, |engine, _| {
+            engine.decider.cleaned.insert(project.to_string(), verified);
+        })?;
+    }
     Ok(())
+}
+
+/// How many groups are above `task_id`.
+fn depth(tree: &DefinitionTree, task_id: &str) -> usize {
+    let mut chain = Vec::new();
+    if let Some(top) = &tree.top {
+        find_chain(top, task_id, &mut chain);
+    }
+    chain.len()
+}
+
+impl Decider {
+    /// The `checks.last` rows of `project` that are new since its last decision; none at its
+    /// first, whose rows were all recorded before.
+    fn note_last_rows(
+        &mut self,
+        project: &str,
+        rows: &[(String, crate::owed::LastRow)],
+    ) -> BTreeSet<(String, u64)> {
+        let now: BTreeSet<(String, u64)> = rows
+            .iter()
+            .map(|(group, row)| (group.clone(), row.generation))
+            .collect();
+        let fresh = match self.last_seen.get(project) {
+            Some(seen) => now.difference(seen).cloned().collect(),
+            None => BTreeSet::new(),
+        };
+        self.last_seen.insert(project.to_string(), now);
+        fresh
+    }
 }
 
 /// The closing groups of a leaf: none from the top down until the first group its marker
 /// names, then every group below that one, so the leaf carries the closing set of each group
 /// it carried for when it finished (a group's closing set holds those passed down to it).
-fn leaf_set(
+pub(crate) fn leaf_set(
     task_id: &str,
     tree: &DefinitionTree,
     sets: &NamedSets,
@@ -554,7 +659,11 @@ fn leaf_set(
     effective_set(task_id, tree, sets, &|id| done.contains(id))
 }
 
-fn find_chain<'a>(node: &'a DefinitionNode, id: &str, chain: &mut Vec<&'a DefinitionNode>) -> bool {
+pub(crate) fn find_chain<'a>(
+    node: &'a DefinitionNode,
+    id: &str,
+    chain: &mut Vec<&'a DefinitionNode>,
+) -> bool {
     chain.push(node);
     if node.definition.id == id
         || node
@@ -570,7 +679,7 @@ fn find_chain<'a>(node: &'a DefinitionNode, id: &str, chain: &mut Vec<&'a Defini
 
 /// Decides one held task: a leaf whose checks all pass on its tree now gets its done record;
 /// any other leaf gets the reason it stays held, as does a task the pinned definitions lack.
-/// Groups are left alone.
+/// A group is decided by [`crate::group_decider::decide_group`].
 async fn decide_task(
     this: &WeakEntity<ChecksEngine>,
     project: &str,
@@ -595,7 +704,10 @@ async fn decide_task(
         return Ok(());
     };
     if node.folder.is_empty() || !node.children.is_empty() {
-        return Ok(());
+        return crate::group_decider::decide_group(
+            this, project, writer, pinned, task_id, marker, cx,
+        )
+        .await;
     }
     let set = leaf_set(task_id, &pinned.tree, &pinned.sets, &marker.closing_from);
     let rows = set.judged().to_vec();
@@ -661,7 +773,25 @@ async fn decide_task(
             tree_key,
             evidence,
             current,
+            trees,
         } => {
+            // The tree of a task under a group with closing checks is kept by a ref before the
+            // record names it; a ref left by a record not written is cleaned later.
+            if crate::group_decider::has_closing_ancestor(task_id, pinned) {
+                let kept: Vec<crate::retained::KeptTree> = trees
+                    .iter()
+                    .map(|(repo, directory, tree)| crate::retained::KeptTree {
+                        repo,
+                        directory,
+                        tree,
+                    })
+                    .collect();
+                if let Err(error) =
+                    crate::retained::keep_trees(task.project.git(), task_id, &kept).await
+                {
+                    log::error!("keeping the tree of {task_id}: {error:#}");
+                }
+            }
             let decision = Decision {
                 task_id,
                 marker,
@@ -695,7 +825,7 @@ async fn decide_task(
 
 impl ChecksEngine {
     /// A done record of `task_id` was written, its `hold/` row deleted with it.
-    fn done_written(&mut self, project: &str, task_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn done_written(&mut self, project: &str, task_id: &str, cx: &mut Context<Self>) {
         self.live_rows.hold_deleted(task_id);
         if let Some(followed) = self.decider.projects.get_mut(project) {
             followed.holds.remove(task_id);
@@ -708,7 +838,7 @@ impl ChecksEngine {
 
 /// Whether the decider may still write: a drain or the setting going off while a decision ran
 /// stops it before its done record.
-fn still_deciding(this: &WeakEntity<ChecksEngine>, cx: &mut AsyncApp) -> Result<bool> {
+pub(crate) fn still_deciding(this: &WeakEntity<ChecksEngine>, cx: &mut AsyncApp) -> Result<bool> {
     this.update(cx, |engine, cx| engine.deciding(cx))
 }
 
@@ -812,10 +942,22 @@ pub(crate) async fn judge(
     if !satisfaction.is_satisfied() {
         return Judgment::Unsatisfied(satisfaction);
     }
+    let trees = done_trees
+        .iter()
+        .filter_map(|tree| {
+            let key = keys.tree_of(&tree.repo)?;
+            Some((
+                tree.repo.clone(),
+                tree.path.clone(),
+                key.as_str().to_string(),
+            ))
+        })
+        .collect();
     Judgment::Pass {
         tree_key,
         evidence: evidence_of(rows, &records, &current, &task.task_id),
         current,
+        trees,
     }
 }
 
@@ -827,6 +969,11 @@ pub(crate) async fn judge(
 pub(crate) struct TreeKeys(BTreeMap<String, TreeKey>);
 
 impl TreeKeys {
+    /// The key `repo`'s tree had when this judgment first asked for it.
+    pub(crate) fn tree_of(&self, repo: &str) -> Option<&TreeKey> {
+        self.0.get(repo)
+    }
+
     /// The key of `trees` (as [`crate::tree_key::trees_key`] derives it), from the key each
     /// repository's tree had the first time this judgment asked for it.
     pub(crate) async fn key(
@@ -898,7 +1045,7 @@ async fn state_of(
 }
 
 /// The ids of the records that satisfy the required rows, each once, in the order of `rows`.
-fn evidence_of(
+pub(crate) fn evidence_of(
     rows: &[Row],
     records: &[EvidenceRecord],
     current: &Current,
@@ -939,6 +1086,22 @@ pub(crate) struct Decision<'a> {
 /// commit was recorded meanwhile. A move of the commit shown while the decision ran is not seen
 /// here, so such a record rests on the definitions shown when the decision began.
 pub(crate) fn write_done(writer: &StateWriter, decision: &Decision) -> Result<bool> {
+    write_done_if(writer, decision, |tx| {
+        let records = scan_records_in(tx, &task_prefix(decision.task_id))?;
+        let satisfaction = satisfied(decision.rows, &records, decision.current, decision.task_id);
+        Ok(satisfaction.is_satisfied()
+            && evidence_of(decision.rows, &records, decision.current, decision.task_id)
+                == decision.evidence)
+    })
+}
+
+/// [`write_done`] with `still_holds` in place of the check of the task's own evidence: it reads
+/// in the transaction whatever the decision rests on and says whether it still stands.
+pub(crate) fn write_done_if(
+    writer: &StateWriter,
+    decision: &Decision,
+    still_holds: impl FnOnce(&mut StateTx) -> Result<bool>,
+) -> Result<bool> {
     writer
         .transact(|tx| {
             if marker_in(tx, decision.task_id)?.as_ref() != Some(decision.marker) {
@@ -958,13 +1121,7 @@ pub(crate) fn write_done(writer: &StateWriter, decision: &Decision) -> Result<bo
             if tx.verified_commit()? != *decision.verified {
                 return Ok(false);
             }
-            let records = scan_records_in(tx, &task_prefix(decision.task_id))?;
-            let satisfaction =
-                satisfied(decision.rows, &records, decision.current, decision.task_id);
-            if !satisfaction.is_satisfied()
-                || evidence_of(decision.rows, &records, decision.current, decision.task_id)
-                    != decision.evidence
-            {
+            if !still_holds(tx)? {
                 return Ok(false);
             }
             let generation = next_generation(tx)?;
@@ -1003,5 +1160,14 @@ impl ChecksEngine {
                 .await
                 .expect("the decision runs");
         })
+    }
+
+    /// Resolves once every automatic run of a group's closing checks started so far has ended
+    /// and its scratch folders are removed; for tests.
+    pub(crate) fn group_runs_ended(&self) -> impl std::future::Future<Output = ()> + use<> {
+        let runs: Vec<_> = self.decider.group_runs.values().cloned().collect();
+        async move {
+            futures::future::join_all(runs).await;
+        }
     }
 }
