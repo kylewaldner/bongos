@@ -82,6 +82,8 @@ pub(crate) fn counted<A: CountArg>(action: &A, handed: Option<PrefixArg>) -> Opt
     action.with_count(value)
 }
 
+// Nothing builds a `WindowArg` or hands off outside tests until the prefix commands exist.
+#[cfg_attr(not(test), allow(dead_code))]
 struct WindowArg {
     arg: Option<PrefixArg>,
     /// The full editor the argument was started in.
@@ -133,6 +135,7 @@ pub fn cancel(window: &Window, cx: &mut App) {
 /// Moves the pending argument into the handoff, to be read by the command about to be
 /// dispatched, and schedules a drop of a handoff nobody took, so an argument is consumed by
 /// exactly one command even when its action has no handler in the context.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn hand_off(window: &Window, cx: &mut App) {
     let Some(generation) = with_state(window, cx, |state| {
         state.handoff = state.arg.take();
