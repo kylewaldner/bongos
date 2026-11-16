@@ -66,6 +66,13 @@ pub trait TaskSource: 'static {
         let _ = (name, cx);
         None
     }
+
+    /// The open project repository whose id is `project_id`, for a check a landing asks for.
+    /// None by default.
+    fn project(&self, project_id: &str, cx: &App) -> Option<ProjectRepo> {
+        let _ = (project_id, cx);
+        None
+    }
 }
 
 /// [`TaskSource`] over the Work tree and the open project repositories.
@@ -117,6 +124,14 @@ impl TaskSource for WorkTaskSource {
         let repositories = &WorkSettings::get_global(cx).repositories;
         let repository = bongos_work::find_repository(repositories, name)?;
         Some(bongos_work::expand_home(&repository.path))
+    }
+
+    fn project(&self, project_id: &str, cx: &App) -> Option<ProjectRepo> {
+        cx.try_global::<bongos_work::OpenProjectRepos>()?
+            .list()
+            .into_iter()
+            .map(|loaded| loaded.repo().clone())
+            .find(|repo| repo.location().id == project_id)
     }
 }
 
