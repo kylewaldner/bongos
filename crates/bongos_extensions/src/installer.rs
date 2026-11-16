@@ -322,6 +322,19 @@ impl Installer {
         &self.deps.list
     }
 
+    /// The git runner, for resolving a revision before the trust question.
+    pub fn git(&self) -> Arc<dyn GitRunner> {
+        self.deps.git.clone()
+    }
+
+    /// The refusal an update, rebuild or remove of `id` would get from this installer right now
+    /// ("<id> is busy: <what it is doing>"), or `None` when no operation here holds `id`.
+    pub fn busy_message(&self, id: &str) -> Option<String> {
+        self.busy_ids
+            .get(id)
+            .map(|(_, doing)| format!("{id} is busy: {doing}"))
+    }
+
     /// Whether the list entry is installed or being installed right now. Reads only local state.
     pub fn is_installed_or_installing(&self, entry: &ListEntry, cx: &App) -> bool {
         if self

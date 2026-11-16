@@ -4,6 +4,7 @@
 //! touched.
 
 pub mod build_log;
+pub mod commands;
 pub mod git;
 pub mod host;
 pub mod installer;
@@ -14,7 +15,7 @@ use std::any::TypeId;
 
 use bongos_minibuffer::message;
 use command_palette_hooks::CommandPaletteFilter;
-use gpui::{App, Global, TaskExt as _};
+use gpui::{App, Global, TaskExt as _, WeakEntity};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
@@ -147,15 +148,20 @@ pub fn action_types() -> Vec<TypeId> {
     ]
 }
 
-/// Runs an action that got past the setting check. Nothing happens here yet.
-fn dispatch(_kind: ActionKind, _window: &mut gpui::Window, _cx: &mut App) {}
-
-fn handle(kind: ActionKind, window: &mut gpui::Window, cx: &mut App) {
+fn handle(
+    kind: ActionKind,
+    workspace: WeakEntity<Workspace>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) {
     if !LanguageExtensionsSettings::get_global(cx).enabled {
         message(window, cx, OFF_MESSAGE);
         return;
     }
-    dispatch(kind, window, cx);
+    // After the workspace's update: the prompts open as the workspace's modal.
+    window.defer(cx, move |window, cx| {
+        commands::run(kind, workspace, window, cx)
+    });
 }
 
 /// Registers the settings and the handlers of the six actions on every workspace.
@@ -165,7 +171,8 @@ pub fn init(cx: &mut App) {
         macro_rules! register {
             ($($action:ident),*) => {$(
                 workspace.register_action(|_, action: &$action, window, cx| {
-                    handle(ActionKind::$action(action.clone()), window, cx);
+                    let workspace = cx.entity().downgrade();
+                    handle(ActionKind::$action(action.clone()), workspace, window, cx);
                 });
             )*};
         }
@@ -224,5 +231,7 @@ fn sync_palette(cx: &mut App) {
     });
 }
 
+#[cfg(test)]
+mod commands_tests;
 #[cfg(test)]
 mod tests;
