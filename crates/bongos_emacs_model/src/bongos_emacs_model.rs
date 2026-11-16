@@ -8,6 +8,7 @@ mod kill;
 pub mod kill_ring;
 mod lines;
 pub mod mark_ring;
+pub mod prefix_arg;
 pub mod recenter;
 mod space;
 mod text;
@@ -29,6 +30,8 @@ mod kill_tests;
 mod lines_tests;
 #[cfg(test)]
 mod mark_ring_tests;
+#[cfg(test)]
+mod prefix_arg_tests;
 #[cfg(test)]
 mod recenter_tests;
 #[cfg(test)]
