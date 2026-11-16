@@ -230,3 +230,29 @@ fn randomized_line_plans_are_consistent() {
         }
     }
 }
+
+fn open(t: &str, c: &[Caret], n: Option<i32>) -> Plan {
+    open_line(t, c, n)
+}
+
+#[test]
+fn open_line_inserts_newlines_and_the_caret_stays_before_them() {
+    assert_eq!(run("fooˇbar", None, open).0, "fooˇ\nbar");
+    assert_eq!(run("fooˇbar", Some(2), open).0, "fooˇ\n\nbar");
+    assert_eq!(run("é ˇß", Some(1), open).0, "é ˇ\nß");
+    assert_eq!(run("ˇ", Some(3), open).0, "ˇ\n\n\n");
+}
+
+#[test]
+fn open_line_zero_inserts_nothing_and_negative_is_its_magnitude() {
+    let (out, plan) = run("fooˇbar", Some(0), open);
+    assert_eq!(out, "fooˇbar");
+    assert!(plan.edits.is_empty());
+    assert_eq!(run("fooˇbar", Some(-2), open).0, "fooˇ\n\nbar");
+}
+
+#[test]
+fn open_line_works_at_every_caret_and_drops_a_region() {
+    assert_eq!(run("aˇb\ncˇd", Some(1), open).0, "aˇ\nb\ncˇ\nd");
+    assert_eq!(run("a«bc»d", Some(1), open).0, "abcˇ\nd");
+}

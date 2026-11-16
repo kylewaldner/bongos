@@ -6,6 +6,7 @@ pub mod actions;
 pub mod apply;
 mod browse_kill_ring;
 mod comments;
+mod count_adapters;
 mod cursor;
 mod global_mark;
 mod goto_line;
@@ -37,6 +38,8 @@ mod apply_tests;
 mod browse_kill_ring_tests;
 #[cfg(test)]
 mod comments_tests;
+#[cfg(test)]
+mod count_adapters_tests;
 #[cfg(test)]
 mod cursor_tests;
 #[cfg(test)]
@@ -96,6 +99,7 @@ pub fn init(cx: &mut App) {
     kill_ring_sink::init(cx);
     quit::init(cx);
     prefix_arg::init(cx);
+    count_adapters::init(cx);
     cursor::init(cx);
     global_mark::init(cx);
     cx.observe_new(|editor: &mut Editor, mut window, cx| {
@@ -138,6 +142,7 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, cx, lines::move_line_up_command);
         register(editor, &weak, cx, lines::move_line_down_command);
         register(editor, &weak, cx, lines::duplicate_line_command);
+        register(editor, &weak, cx, lines::open_line_command);
         register(editor, &weak, cx, lines::copy_from_above_command);
         register(editor, &weak, cx, comments::comment_dwim_command);
         register(editor, &weak, cx, comments::duplicate_and_comment_command);

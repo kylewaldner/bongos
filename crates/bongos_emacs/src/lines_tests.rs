@@ -7,7 +7,7 @@ use editor::actions::Undo;
 use editor::test::editor_test_context::EditorTestContext;
 use gpui::{Action as _, Focusable as _, TestAppContext, VisualTestContext};
 
-use crate::actions::{CopyFromAbove, DuplicateLine, MoveLineDown, MoveLineUp};
+use crate::actions::{CopyFromAbove, DuplicateLine, MoveLineDown, MoveLineUp, OpenLine};
 use crate::apply_tests::{capture_kills, init_test};
 
 async fn test_context(cx: &mut TestAppContext) -> EditorTestContext {
@@ -258,4 +258,31 @@ async fn a_single_line_editor_propagates_the_key(cx: &mut TestAppContext) {
     });
     assert_eq!(passed.get(), 4);
     assert_eq!(editor.update(cx, |editor, cx| editor.text(cx)), "one two");
+}
+
+#[gpui::test]
+async fn open_line_inserts_newlines_and_point_stays(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("fooˇbar");
+    cx.dispatch_action(OpenLine { count: Some(2) });
+    cx.assert_editor_state("fooˇ\n\nbar");
+    cx.dispatch_action(Undo);
+    cx.assert_editor_state("fooˇbar");
+
+    cx.dispatch_action(OpenLine { count: None });
+    cx.assert_editor_state("fooˇ\nbar");
+    cx.set_state("fooˇbar");
+    cx.dispatch_action(OpenLine { count: Some(0) });
+    cx.assert_editor_state("fooˇbar");
+    cx.dispatch_action(OpenLine { count: Some(-2) });
+    cx.assert_editor_state("fooˇ\n\nbar");
+}
+
+#[gpui::test]
+async fn open_line_is_refused_in_a_read_only_editor(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    cx.set_state("fooˇbar");
+    cx.update_editor(|editor, _, cx| editor.set_read_only(true));
+    cx.dispatch_action(OpenLine { count: Some(2) });
+    cx.assert_editor_state("fooˇbar");
 }
