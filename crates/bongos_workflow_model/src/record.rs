@@ -176,6 +176,12 @@ pub enum Event {
     Paused,
     Halted,
     Resumed,
+    /// The run is held on `key` for a person, without failing: a check gave no verdict and the
+    /// definition has no route for that. A resume reruns just the held key.
+    Held {
+        key: NodeKey,
+        failure: Failure,
+    },
     Interrupted {
         keys: Vec<NodeKey>,
     },
@@ -511,6 +517,8 @@ pub struct RunState {
     /// Keys the log marked interrupted and that have not started again. The value is the try that
     /// was running, `None` when the key was not running when interrupted.
     pub interrupted: BTreeMap<NodeKey, Option<RunningNode>>,
+    /// Keys the run is held on, with why, until a resume or a new try of the key.
+    pub held: BTreeMap<NodeKey, Failure>,
     /// The definition revision in use: `None` until a `DefinitionReloaded`, meaning revision 0.
     pub definition_rev: Option<u32>,
     /// How the attempt ended. A failed end is not final: retry step reruns the failed key in the
@@ -624,6 +632,7 @@ fn apply(state: &mut RunState, event: &Event) {
             pid_start_time,
         } => {
             state.interrupted.remove(key);
+            state.held.remove(key);
             bump_pass(state, &key.node, key.pass);
             state.running.insert(
                 key.clone(),
@@ -699,6 +708,10 @@ fn apply(state: &mut RunState, event: &Event) {
         Event::Resumed => {
             state.paused = false;
             state.halted = false;
+            state.held.clear();
+        }
+        Event::Held { key, failure } => {
+            state.held.insert(key.clone(), failure.clone());
         }
         Event::Interrupted { keys } => {
             for key in keys {

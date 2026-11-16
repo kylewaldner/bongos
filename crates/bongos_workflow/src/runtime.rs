@@ -226,7 +226,11 @@ impl LiveRun {
 
     /// Whether the run waits for Kyle or is done, so it gets no command and holds no run slot.
     fn is_held(state: &RunState) -> bool {
-        state.cancelled || state.ended.is_some() || state.halted || !state.interrupted.is_empty()
+        state.cancelled
+            || state.ended.is_some()
+            || state.halted
+            || !state.interrupted.is_empty()
+            || !state.held.is_empty()
     }
 }
 
@@ -881,6 +885,9 @@ impl<R: Runner> Runtime<R> {
                 }
             }
             Command::CancelBranch { branch, .. } => self.cancel_branch(index, &branch),
+            Command::Hold { key, failure } => {
+                self.runs[index].append(Event::Held { key, failure });
+            }
             Command::End {
                 state: record::EndState::Succeeded,
                 ..
