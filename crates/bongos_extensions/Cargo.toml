@@ -12,13 +12,21 @@ workspace = true
 path = "src/bongos_extensions.rs"
 doctest = false
 
+[features]
+test-support = []
+
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bongos_extensions_model.workspace = true
 bongos_minibuffer.workspace = true
 command_palette_hooks.workspace = true
 gpui.workspace = true
+parking_lot.workspace = true
 schemars.workspace = true
 serde.workspace = true
 settings.workspace = true
+util.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
@@ -30,4 +38,6 @@ release_channel.workspace = true
 semver.workspace = true
 serde_json.workspace = true
 settings = { workspace = true, features = ["test-support"] }
+smol.workspace = true
+tempfile.workspace = true
 workspace = { workspace = true, features = ["test-support"] }

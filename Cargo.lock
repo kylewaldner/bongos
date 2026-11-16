@@ -2356,10 +2356,14 @@ dependencies = [
 name = "bongos_extensions"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "bongos_extensions_model",
  "bongos_minibuffer",
  "command_palette_hooks",
  "editor",
  "gpui",
+ "parking_lot",
  "project",
  "release_channel",
  "schemars 1.0.4",
@@ -2367,6 +2371,9 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "smol",
+ "tempfile",
+ "util",
  "workspace",
 ]
 
