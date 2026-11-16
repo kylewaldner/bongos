@@ -5,7 +5,7 @@
 use bongos_emacs_model::prefix_arg::PrefixArg;
 use collections::HashMap;
 use editor::Editor;
-use gpui::{Action, App, Context, Entity, Global, WeakEntity, Window, WindowId};
+use gpui::{Action, App, Context, Entity, Focusable as _, Global, WeakEntity, Window, WindowId};
 
 /// The most an inserting command repeats: a huge count would hang the editor.
 pub const MAX_INSERT: i32 = 65_536;
@@ -96,15 +96,18 @@ struct PrefixArgs(HashMap<WindowId, WindowArg>);
 
 impl Global for PrefixArgs {}
 
+fn args_mut(cx: &mut App) -> Option<&mut PrefixArgs> {
+    cx.has_global::<PrefixArgs>()
+        .then(|| cx.global_mut::<PrefixArgs>())
+}
+
 fn window_id(window: &Window) -> WindowId {
     window.window_handle().window_id()
 }
 
 fn with_state<R>(window: &Window, cx: &mut App, f: impl FnOnce(&mut WindowArg) -> R) -> Option<R> {
     let id = window_id(window);
-    cx.try_global_mut::<PrefixArgs>()
-        .and_then(|args| args.0.get_mut(&id))
-        .map(f)
+    args_mut(cx).and_then(|args| args.0.get_mut(&id)).map(f)
 }
 
 /// The argument being built in `window`.
@@ -122,7 +125,7 @@ pub fn take(window: &Window, cx: &mut App) -> Option<PrefixArg> {
 /// Clears the argument and the handoff.
 pub fn cancel(window: &Window, cx: &mut App) {
     let id = window_id(window);
-    if let Some(args) = cx.try_global_mut::<PrefixArgs>() {
+    if let Some(args) = args_mut(cx) {
         args.0.remove(&id);
     }
 }
@@ -140,7 +143,7 @@ pub(crate) fn hand_off(window: &Window, cx: &mut App) {
     };
     window.defer(cx, move |window, cx| {
         let id = window_id(window);
-        let Some(args) = cx.try_global_mut::<PrefixArgs>() else {
+        let Some(args) = args_mut(cx) else {
             return;
         };
         if let Some(state) = args.0.get_mut(&id) {

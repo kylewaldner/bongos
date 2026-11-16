@@ -156,7 +156,7 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, cx, jumps::end_of_buffer_command);
         register(editor, &weak, cx, jumps::xref_find_definitions_command);
         register(editor, &weak, cx, jumps::xref_find_implementations_command);
-        prefix_arg::init_editor(editor, window, cx);
+        prefix_arg::init_editor(editor, window.as_deref_mut(), cx);
         recenter::init_editor(cx);
         kill_ring_sink::init_editor(cx);
         mark::init_editor(window, cx);
