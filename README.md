@@ -729,7 +729,8 @@ on your machine. There is no marketplace: bongos carries a short list of extensi
 to a commit, and you can install any other repository by its URL.
 
 When you open a file of a language bongos does not know but the list does, the status bar says
-"Swift support is available" with Install, Not now (hidden until restart) and Don't offer again
+"Swift support is available" with Install, Not now (hides the offer for that language only, until
+restart) and Don't offer again
 (adds the language to `language_extensions.never_offer`). Opening the file only reads the list;
 nothing is cloned or built until you choose Install.
 
@@ -759,8 +760,9 @@ Settings:
 }
 ```
 
-`enabled: false` hides the commands (each then only says that language extensions are off) and
-bongos reads nothing under the extensions directory. `offer: false` turns the offer line off.
+`enabled: false` turns the commands off (each then only says that language extensions are off)
+and the startup repair off; extensions already installed still load. `offer: false` turns the
+offer line off.
 
 Trust: an extension runs code. Its build runs on your machine, and once loaded it can download and
 start a language server. An install from the list at its pinned commit does not ask. Anything else,
@@ -797,7 +799,9 @@ a timer:
 | Cargo's registry (`index.crates.io` and `static.crates.io` unless Cargo is configured otherwise) | Building an extension with a Rust part |
 
 A loaded extension may then download its language server from wherever it names, within
-`granted_extension_capabilities`.
+`granted_extension_capabilities`. The test `crates/bongos_extensions/tests/idle.rs` checks the
+"never on a timer" part: a day passes with a file of a listed language open and nothing is
+contacted. The language extensions smoke run has no idle window of its own.
 
 Disk: everything is under the data directory (`~/.local/share/bongos` on Linux), in
 `extensions/git`: one checkout per extension (`git/<id>/<commit>`, with its build output), its
