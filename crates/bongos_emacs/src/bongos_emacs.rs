@@ -18,6 +18,7 @@ pub mod last_command;
 mod lines;
 pub mod mark;
 mod motion;
+pub mod prefix_arg;
 pub mod quit;
 pub mod recenter;
 pub mod region;
@@ -60,6 +61,8 @@ mod mark_tests;
 #[cfg(test)]
 mod motion_tests;
 #[cfg(test)]
+mod prefix_arg_tests;
+#[cfg(test)]
 mod quit_tests;
 #[cfg(test)]
 mod recenter_tests;
@@ -77,7 +80,9 @@ mod yank_tests;
 mod zap_tests;
 
 use editor::Editor;
-use gpui::{Action, App, Entity, Window};
+use gpui::{App, Entity, Window};
+
+use crate::prefix_arg::CountArg;
 
 pub use kill_sink::{Kill, KillDirection, KillKind, set_kill_sink};
 pub use last_command::last_command;
@@ -93,54 +98,65 @@ pub fn init(cx: &mut App) {
     global_mark::init(cx);
     cx.observe_new(|editor: &mut Editor, window, cx| {
         let weak = cx.entity().downgrade();
-        register(editor, &weak, motion::forward_word);
-        register(editor, &weak, motion::backward_word);
-        register(editor, &weak, words::kill_word_command);
-        register(editor, &weak, words::backward_kill_word_command);
-        register(editor, &weak, words::upcase_word_command);
-        register(editor, &weak, words::downcase_word_command);
-        register(editor, &weak, words::capitalize_word_command);
-        register(editor, &weak, words::upcase_previous_word_command);
-        register(editor, &weak, words::downcase_previous_word_command);
-        register(editor, &weak, words::capitalize_previous_word_command);
-        register(editor, &weak, kill::kill_line_command);
-        register(editor, &weak, kill::kill_region_or_line_command);
-        register(editor, &weak, kill::copy_region_or_line_command);
-        register(editor, &weak, kill::kill_whole_line_command);
-        register(editor, &weak, kill::append_next_kill_command);
-        register(editor, &weak, yank::yank_command);
-        register(editor, &weak, yank::yank_pop_command);
-        register(editor, &weak, browse_kill_ring::browse_kill_ring_command);
-        register(editor, &weak, space::delete_horizontal_space_command);
-        register(editor, &weak, space::just_one_space_command);
-        register(editor, &weak, space::delete_blank_lines_command);
-        register(editor, &weak, transpose::transpose_chars_command);
-        register(editor, &weak, transpose::transpose_words_command);
-        register(editor, &weak, transpose::transpose_words_reverse_command);
-        register(editor, &weak, transpose::transpose_lines_command);
-        register(editor, &weak, lines::move_line_up_command);
-        register(editor, &weak, lines::move_line_down_command);
-        register(editor, &weak, lines::duplicate_line_command);
-        register(editor, &weak, lines::copy_from_above_command);
-        register(editor, &weak, comments::comment_dwim_command);
-        register(editor, &weak, comments::duplicate_and_comment_command);
-        register(editor, &weak, zap::zap_to_char_command);
-        register(editor, &weak, zap::zap_up_to_char_command);
-        register(editor, &weak, zap::zap_back_to_char_command);
-        register(editor, &weak, zap::zap_back_up_to_char_command);
-        register(editor, &weak, recenter::recenter_command);
-        register(editor, &weak, recenter::reposition_command);
-        register(editor, &weak, goto_line::goto_line_command);
-        register(editor, &weak, region_commands::expand_region_command);
-        register(editor, &weak, region_commands::contract_region_command);
-        register(editor, &weak, quit::keyboard_quit_command);
-        register(editor, &weak, mark::set_mark_command);
-        register(editor, &weak, mark::exchange_point_and_mark_command);
-        register(editor, &weak, mark::pop_mark_command);
-        register(editor, &weak, jumps::beginning_of_buffer_command);
-        register(editor, &weak, jumps::end_of_buffer_command);
-        register(editor, &weak, jumps::xref_find_definitions_command);
-        register(editor, &weak, jumps::xref_find_implementations_command);
+        register(editor, &weak, cx, motion::forward_word);
+        register(editor, &weak, cx, motion::backward_word);
+        register(editor, &weak, cx, words::kill_word_command);
+        register(editor, &weak, cx, words::backward_kill_word_command);
+        register(editor, &weak, cx, words::upcase_word_command);
+        register(editor, &weak, cx, words::downcase_word_command);
+        register(editor, &weak, cx, words::capitalize_word_command);
+        register(editor, &weak, cx, words::upcase_previous_word_command);
+        register(editor, &weak, cx, words::downcase_previous_word_command);
+        register(editor, &weak, cx, words::capitalize_previous_word_command);
+        register(editor, &weak, cx, kill::kill_line_command);
+        register(editor, &weak, cx, kill::kill_region_or_line_command);
+        register(editor, &weak, cx, kill::copy_region_or_line_command);
+        register(editor, &weak, cx, kill::kill_whole_line_command);
+        register(editor, &weak, cx, kill::append_next_kill_command);
+        register(editor, &weak, cx, yank::yank_command);
+        register(editor, &weak, cx, yank::yank_pop_command);
+        register(
+            editor,
+            &weak,
+            cx,
+            browse_kill_ring::browse_kill_ring_command,
+        );
+        register(editor, &weak, cx, space::delete_horizontal_space_command);
+        register(editor, &weak, cx, space::just_one_space_command);
+        register(editor, &weak, cx, space::delete_blank_lines_command);
+        register(editor, &weak, cx, transpose::transpose_chars_command);
+        register(editor, &weak, cx, transpose::transpose_words_command);
+        register(
+            editor,
+            &weak,
+            cx,
+            transpose::transpose_words_reverse_command,
+        );
+        register(editor, &weak, cx, transpose::transpose_lines_command);
+        register(editor, &weak, cx, lines::move_line_up_command);
+        register(editor, &weak, cx, lines::move_line_down_command);
+        register(editor, &weak, cx, lines::duplicate_line_command);
+        register(editor, &weak, cx, lines::copy_from_above_command);
+        register(editor, &weak, cx, comments::comment_dwim_command);
+        register(editor, &weak, cx, comments::duplicate_and_comment_command);
+        register(editor, &weak, cx, zap::zap_to_char_command);
+        register(editor, &weak, cx, zap::zap_up_to_char_command);
+        register(editor, &weak, cx, zap::zap_back_to_char_command);
+        register(editor, &weak, cx, zap::zap_back_up_to_char_command);
+        register(editor, &weak, cx, recenter::recenter_command);
+        register(editor, &weak, cx, recenter::reposition_command);
+        register(editor, &weak, cx, goto_line::goto_line_command);
+        register(editor, &weak, cx, region_commands::expand_region_command);
+        register(editor, &weak, cx, region_commands::contract_region_command);
+        register(editor, &weak, cx, quit::keyboard_quit_command);
+        register(editor, &weak, cx, mark::set_mark_command);
+        register(editor, &weak, cx, mark::exchange_point_and_mark_command);
+        register(editor, &weak, cx, mark::pop_mark_command);
+        register(editor, &weak, cx, jumps::beginning_of_buffer_command);
+        register(editor, &weak, cx, jumps::end_of_buffer_command);
+        register(editor, &weak, cx, jumps::xref_find_definitions_command);
+        register(editor, &weak, cx, jumps::xref_find_implementations_command);
+        prefix_arg::init_editor(editor, window, cx);
         recenter::init_editor(cx);
         kill_ring_sink::init_editor(cx);
         mark::init_editor(window, cx);
@@ -150,19 +166,33 @@ pub fn init(cx: &mut App) {
 
 /// Registers `handler` for `A` on `editor`. The editor's action listener gets the app, not the
 /// editor, so the handler reaches the editor through its weak handle; each run records itself
-/// as the window's last command, so a dispatch by name counts too.
-fn register<A: Action>(
+/// as the window's last command, so a dispatch by name counts too. The prefix argument handed
+/// to the command is taken here, so it is gone after one run; it becomes the action's count
+/// unless the action already carries one. `A` is declared as reading the argument when it has a
+/// count and as ignoring it otherwise.
+fn register<A: CountArg>(
     editor: &mut Editor,
     weak: &gpui::WeakEntity<Editor>,
+    cx: &mut App,
     handler: fn(&A, &Entity<Editor>, &mut Window, &mut App),
 ) {
+    let meaning = if A::READS {
+        prefix_arg::Meaning::Reads
+    } else {
+        prefix_arg::Meaning::Ignored
+    };
+    prefix_arg::declare(cx, A::name_for_type(), meaning);
     let weak = weak.clone();
     editor
         .register_action(move |action: &A, window, cx| {
             let Some(editor) = weak.upgrade() else {
                 return;
             };
-            handler(action, &editor, window, cx);
+            let handed = prefix_arg::take(window, cx);
+            match prefix_arg::counted(action, handed) {
+                Some(counted) => handler(&counted, &editor, window, cx),
+                None => handler(action, &editor, window, cx),
+            }
             last_command::record(window, Some(action.name()), cx);
         })
         .detach();
