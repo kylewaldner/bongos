@@ -111,7 +111,7 @@ fn ship_waits_sees_a_held_parent_as_not_done() {
     let b = id_of(&t, "b");
     assert!(advance(&t, &ctx(), &b, false).is_ok());
 
-    let mut held = t.clone();
+    let mut held = t;
     hold(&mut held, &["a"]);
     assert_eq!(
         advance(&held, &ctx(), &b, false).unwrap_err(),
