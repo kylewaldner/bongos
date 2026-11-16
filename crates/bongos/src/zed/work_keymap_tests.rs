@@ -18,7 +18,7 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w o", "task::NewOneOff"),
     ("ctrl-c w s", "task::Start"),
     ("ctrl-c w a", "task::Advance"),
-    ("ctrl-c w c", "task::Close"),
+    ("ctrl-c w c", "task::Complete"),
     ("ctrl-c w t", "task::Think"),
     ("ctrl-c w m", "task::Mode"),
     ("ctrl-c w f", "task::Focus"),

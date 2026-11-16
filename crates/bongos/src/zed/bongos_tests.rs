@@ -233,11 +233,12 @@ async fn cursor_toggle_style_dispatches_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `task` and `todo` actions that name a task or todo, with the palette text of each.
-const WORK_ACTIONS: [(&str, &str); 16] = [
+const WORK_ACTIONS: [(&str, &str); 17] = [
     ("task::New", "task: new"),
     ("task::NewChild", "task: new child"),
     ("task::Advance", "task: advance"),
     ("task::AdvanceOverride", "task: advance override"),
+    ("task::Complete", "task: complete"),
     ("task::Close", "task: close"),
     ("task::Drop", "task: drop"),
     ("task::Reopen", "task: reopen"),

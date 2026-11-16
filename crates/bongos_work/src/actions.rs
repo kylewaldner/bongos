@@ -18,7 +18,10 @@ pub mod task {
             /// Picks a task and completes its ships todo although the task it is stacked on is
             /// not Done, leaving a marker.
             AdvanceOverride,
-            /// Picks a task and marks it done, whatever its todos.
+            /// Picks a task and marks it done, whatever its todos, unless a done hold source
+            /// refuses.
+            Complete,
+            /// The same as `task: complete`, kept as an alias.
             Close,
             /// Picks a task and cancels it. A group with open tasks asks first.
             #[action(name = "Drop")]
