@@ -1,0 +1,26 @@
+// Loaded after the VS Code leader rows (`cmd-k b ...`). A pending `cmd-k` chord outranks any
+// single `cmd-k` loaded before it, so every single `cmd-k` that must still fire is bound here
+// again, with its default action. `cmd-1` already activates the first pane.
+[
+  {
+    "context": "Terminal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k": "terminal::Clear",
+    },
+  },
+  {
+    "context": "RecentProjects || (RecentProjects > Picker > Editor)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k": "recent_projects::ToggleActionsMenu",
+    },
+  },
+  {
+    "context": "KeymapEditor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k": "keymap_editor::OpenCreateKeybindingModal",
+    },
+  },
+]
