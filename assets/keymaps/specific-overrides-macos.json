@@ -100,6 +100,8 @@
       "alt-s alt->": "isearch::LastMatch",
       "ctrl-l": "isearch::Recenter",
       "ctrl-c ctrl-o": "isearch::Occur",
+      "alt-%": "isearch::QueryReplace",
+      "ctrl-alt-%": "isearch::QueryReplaceRegexp",
     },
   },
   // The kill ring browser (the `KillRing` context of its prompt). M-n and M-p move the
@@ -117,6 +119,49 @@
     "bindings": {
       "ctrl-g": "minibuffer::Cancel",
       "escape": "minibuffer::Cancel",
+    },
+  },
+  // The query replace prompts (the `QueryReplacePrompt` context). Without `Minibuffer`, so the
+  // keys also hold when the prompt opens centered. They are deeper than the Emacs `Editor` rows
+  // (`alt-c`, capitalize word) and the default `ctrl-q` (quit).
+  {
+    "context": "QueryReplacePrompt > Editor",
+    "bindings": {
+      "alt-c": "query_replace::ToggleCase",
+      "ctrl-q": "query_replace::QuotedInsert",
+    },
+  },
+  // The query replace decision view (the `QueryReplace` context of the view the session opens).
+  // `ctrl-g` is deeper than the strip's `Minibuffer` cancel, and `ctrl-h` is deeper than the
+  // Emacs help prefix of the workspace.
+  {
+    "context": "QueryReplace",
+    "bindings": {
+      "y": "query_replace::Yes",
+      "space": "query_replace::Yes",
+      "n": "query_replace::No",
+      "backspace": "query_replace::No",
+      "!": "query_replace::All",
+      ".": "query_replace::ThisAndExit",
+      ",": "query_replace::ThisAndWait",
+      "^": "query_replace::Previous",
+      "u": "query_replace::Undo",
+      "e": "query_replace::EditReplacement",
+      "q": "query_replace::Exit",
+      "enter": "query_replace::Exit",
+      "escape": "query_replace::Exit",
+      "ctrl-g": "query_replace::Abort",
+      "ctrl-l": "query_replace::Recenter",
+      "?": "query_replace::Help",
+      "ctrl-h": "query_replace::Help",
+    },
+  },
+  // A running replace-string or replace-regexp (the `QueryReplaceBatch` context its editor has
+  // while it runs). C-g stops it; the replacements already made stay.
+  {
+    "context": "Editor && QueryReplaceBatch",
+    "bindings": {
+      "ctrl-g": "query_replace::Abort",
     },
   },
 ]

@@ -212,39 +212,7 @@ impl Scan<'_> {
             if self.cancel.is_canceled() {
                 return FindOutcome::Canceled;
             }
-            let truncated = window.start..if self.multiline {
-                clip_right(self.snapshot, window::overlapped(window, bound).end)
-            } else {
-                window.end
-            };
-            let mut searched = line_start(self.snapshot, window.start)..truncated.end;
-            if line_start(self.snapshot, window.end) != window.end {
-                searched.end = searched.end.max(line_end(self.snapshot, window.end));
-            }
-            let keep = |found: &Range<usize>| {
-                found.start >= window.start
-                    && found.end <= bound
-                    && (!self.multiline || found.start < window.end)
-            };
-            let mut found = search_range(self.snapshot, self.query, searched.clone());
-            // The query returns non-overlapping matches, so a dropped match straddling `from`
-            // can hide one that starts (forward) or ends (backward) at a valid place, as "aa"
-            // from 1 in "aaa". Then the window is also searched without the line context, as
-            // before it was added: such a match may miss a whole-word or `^`/`$` check, but the
-            // result is never worse than searching from `from` alone.
-            if searched != truncated {
-                let pivot = match self.direction {
-                    Direction::Forward => window.start,
-                    Direction::Backward => window.end,
-                };
-                let straddles = found
-                    .iter()
-                    .any(|found| found.start < pivot && pivot < found.end && !keep(found));
-                if straddles {
-                    found.extend(search_range(self.snapshot, self.query, truncated));
-                }
-            }
-            let matches = found.into_iter().filter(|found| keep(found));
+            let matches = self.candidates(window, bound).into_iter();
             let chosen = match self.direction {
                 Direction::Forward => matches.min_by_key(|found| found.start),
                 Direction::Backward => matches.max_by_key(|found| found.start),
@@ -258,6 +226,73 @@ impl Scan<'_> {
         }
         FindOutcome::NotFound
     }
+
+    /// The matches of one window that [`Self::run`] chooses from, in the order found.
+    fn candidates(&self, window: &Range<usize>, bound: usize) -> Vec<Range<usize>> {
+        let truncated = window.start..if self.multiline {
+            clip_right(self.snapshot, window::overlapped(window, bound).end)
+        } else {
+            window.end
+        };
+        let mut searched = line_start(self.snapshot, window.start)..truncated.end;
+        if line_start(self.snapshot, window.end) != window.end {
+            searched.end = searched.end.max(line_end(self.snapshot, window.end));
+        }
+        let keep = |found: &Range<usize>| {
+            found.start >= window.start
+                && found.end <= bound
+                && (!self.multiline || found.start < window.end)
+        };
+        let mut found = search_range(self.snapshot, self.query, searched.clone());
+        // The query returns non-overlapping matches, so a dropped match straddling `from`
+        // can hide one that starts (forward) or ends (backward) at a valid place, as "aa"
+        // from 1 in "aaa". Then the window is also searched without the line context, as
+        // before it was added: such a match may miss a whole-word or `^`/`$` check, but the
+        // result is never worse than searching from `from` alone.
+        if searched != truncated {
+            let pivot = match self.direction {
+                Direction::Forward => window.start,
+                Direction::Backward => window.end,
+            };
+            let straddles = found
+                .iter()
+                .any(|found| found.start < pivot && pivot < found.end && !keep(found));
+            if straddles {
+                found.extend(search_range(self.snapshot, self.query, truncated));
+            }
+        }
+        found.retain(|found| keep(found));
+        found
+    }
+}
+
+/// Every match a forward [`find`] from `window.start` chooses from when its first window is
+/// `window`, sorted by start, the first one found kept for each start. For a pattern without a
+/// newline, matches are found line by line over whole lines, so a [`find`] from a later offset in
+/// the window returns the first of them starting at or after it, unless one of them straddles that
+/// offset (then [`find`] also searches from the offset alone). A caller walking many matches takes
+/// its windows from [`bongos_isearch_model::window::plan`], as [`find`] does.
+pub fn forward_candidates(
+    snapshot: &MultiBufferSnapshot,
+    query: &SearchQuery,
+    window: Range<MultiBufferOffset>,
+) -> Vec<Range<MultiBufferOffset>> {
+    let len = snapshot.len().0;
+    let window = window.start.0.min(len)..window.end.0.min(len);
+    let scan = Scan {
+        snapshot,
+        query,
+        direction: Direction::Forward,
+        multiline: is_multiline(query),
+        cancel: &Cancel::new(),
+    };
+    let mut found = scan.candidates(&window, len);
+    found.sort_by_key(|found| found.start);
+    found.dedup_by_key(|found| found.start);
+    found
+        .into_iter()
+        .map(|found| MultiBufferOffset(found.start)..MultiBufferOffset(found.end))
+        .collect()
 }
 
 /// The starts of every match, in order, up to `cap` of them.
@@ -275,8 +310,7 @@ impl Count {
     }
 }
 
-/// Counts the matches of the whole multibuffer, stopping at `cap`. Walks 1 MB windows, each split
-/// into pieces searched in parallel over the available cpus. `None` when canceled.
+/// Counts the matches of the whole multibuffer, stopping at `cap`: [`count_in`] over all of it.
 ///
 /// The parallel part runs on `std::thread::scope` workers, one 64 KB piece at a time, not on the
 /// gpui executor: the engine's functions are plain sync functions, callable both from tests and
@@ -291,6 +325,19 @@ pub fn count(
     count_with_threads(snapshot, query, cap, cancel, available_threads())
 }
 
+/// Counts the matches lying wholly inside `range`, stopping at `cap`. Walks 1 MB windows, each
+/// split into pieces searched in parallel over the available cpus. `None` when canceled. The text
+/// is searched from `range.start` as it stands, without the rest of its line before it.
+pub fn count_in(
+    snapshot: &MultiBufferSnapshot,
+    query: &SearchQuery,
+    range: Range<MultiBufferOffset>,
+    cap: usize,
+    cancel: &Cancel,
+) -> Option<Count> {
+    count_in_with_threads(snapshot, query, range, cap, cancel, available_threads())
+}
+
 pub(crate) fn count_with_threads(
     snapshot: &MultiBufferSnapshot,
     query: &SearchQuery,
@@ -298,11 +345,24 @@ pub(crate) fn count_with_threads(
     cancel: &Cancel,
     threads: usize,
 ) -> Option<Count> {
+    let all = MultiBufferOffset(0)..snapshot.len();
+    count_in_with_threads(snapshot, query, all, cap, cancel, threads)
+}
+
+fn count_in_with_threads(
+    snapshot: &MultiBufferSnapshot,
+    query: &SearchQuery,
+    range: Range<MultiBufferOffset>,
+    cap: usize,
+    cancel: &Cancel,
+    threads: usize,
+) -> Option<Count> {
     let len = snapshot.len().0;
+    let range = range.start.0.min(len)..range.end.0.min(len);
     let multiline = is_multiline(query);
     let line_start = |offset| line_start(snapshot, offset);
     let mut starts = Vec::new();
-    for window in split(0..len, COUNT_WINDOW, line_start) {
+    for window in split(range.clone(), COUNT_WINDOW, line_start) {
         if cancel.is_canceled() {
             return None;
         }
@@ -312,7 +372,10 @@ pub(crate) fn count_with_threads(
         } else {
             split(window, COUNT_PIECE, line_start)
         };
-        for piece_starts in count_pieces(snapshot, query, &pieces, multiline, cancel, threads)? {
+        let piece_starts = count_pieces(
+            snapshot, query, &pieces, range.end, multiline, cancel, threads,
+        )?;
+        for piece_starts in piece_starts {
             for start in piece_starts {
                 if starts.len() >= cap {
                     return Some(Count {
@@ -330,17 +393,18 @@ pub(crate) fn count_with_threads(
     })
 }
 
-/// The match starts of each piece, in piece order. Pieces are dealt round-robin to `threads`
-/// workers; every worker checks the cancel flag before each of its pieces.
+/// The match starts of each piece, in piece order. A multiline match may run past its piece up
+/// to `bound`. Pieces are dealt round-robin to `threads` workers; every worker checks the cancel
+/// flag before each of its pieces.
 fn count_pieces(
     snapshot: &MultiBufferSnapshot,
     query: &SearchQuery,
     pieces: &[Range<usize>],
+    bound: usize,
     multiline: bool,
     cancel: &Cancel,
     threads: usize,
 ) -> Option<Vec<Vec<MultiBufferOffset>>> {
-    let len = snapshot.len().0;
     let threads = threads.clamp(1, pieces.len().max(1));
     let work = |worker: usize| -> Option<Vec<(usize, Vec<MultiBufferOffset>)>> {
         let mut done = Vec::new();
@@ -350,7 +414,7 @@ fn count_pieces(
             }
             let piece = &pieces[index];
             let searched = if multiline {
-                piece.start..clip_right(snapshot, window::overlapped(piece, len).end)
+                piece.start..clip_right(snapshot, window::overlapped(piece, bound).end)
             } else {
                 piece.clone()
             };
@@ -411,7 +475,7 @@ pub fn in_range(
 
 /// A pattern with a newline can match across lines, so its windows are searched as one string
 /// with an overlap.
-fn is_multiline(query: &SearchQuery) -> bool {
+pub fn is_multiline(query: &SearchQuery) -> bool {
     let pattern = query.as_str();
     pattern.contains('\n') || (query.is_regex() && pattern.contains("\\n"))
 }

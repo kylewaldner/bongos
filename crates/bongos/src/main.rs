@@ -739,6 +739,7 @@ fn main() {
         bongos_minibuffer::init(cx);
         bongos_emacs::init(cx);
         bongos_isearch::init(cx);
+        bongos_query_replace::init(cx);
         zed::install_isearch_kill_source(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);

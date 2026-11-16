@@ -172,6 +172,7 @@ bongos_linear.workspace = true
 bongos_minibuffer.workspace = true
 bongos_net.workspace = true
 bongos_prompts.workspace = true
+bongos_query_replace.workspace = true
 bongos_version.workspace = true
 bongos_work.workspace = true
 bongos_workflow.workspace = true

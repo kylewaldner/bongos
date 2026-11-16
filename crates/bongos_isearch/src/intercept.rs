@@ -32,7 +32,7 @@ use crate::session::{KEY_CONTEXT, SessionState, exit_implicitly, holds_keys, is_
 
 /// What becomes of a key typed in a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Decision {
+pub enum Decision {
     /// The session handles the key: an in-session command, or text for the string.
     Through,
     /// The session ends, and these keys (the pending ones and the key) run again after it.
@@ -46,19 +46,35 @@ pub(crate) fn decide(
     key: &Keystroke,
     stack: &[KeyContext],
 ) -> Decision {
+    decide_with(keymap, pending, key, stack, is_in_session, true)
+}
+
+/// The key rule of a session, for any set of in-session actions: `key`, typed after `pending` in
+/// the context `stack`, goes through when its first binding runs an action `in_session` accepts
+/// (or the keys are a pending prefix of such a binding). With `text_through`, a printable
+/// character with no command modifier goes through too, as text for the session. Any other key
+/// ends the session, with the keys to run again after it.
+pub fn decide_with(
+    keymap: &Keymap,
+    pending: &[Keystroke],
+    key: &Keystroke,
+    stack: &[KeyContext],
+    in_session: impl Fn(&str) -> bool,
+    text_through: bool,
+) -> Decision {
     let mut input = pending.to_vec();
     input.push(key.clone());
     let (bindings, has_pending) = keymap.bindings_for_input(&input, stack);
     if bindings
         .first()
-        .is_some_and(|binding| is_in_session(binding.action().name()))
+        .is_some_and(|binding| in_session(binding.action().name()))
     {
         return Decision::Through;
     }
-    if has_pending && is_in_session_prefix(keymap, &input, stack) {
+    if has_pending && is_in_session_prefix(keymap, &input, stack, &in_session) {
         return Decision::Through;
     }
-    if pending.is_empty() && is_text(key) {
+    if text_through && pending.is_empty() && is_text(key) {
         return Decision::Through;
     }
     Decision::Exit(input)
@@ -69,9 +85,14 @@ fn is_in_session(name: &str) -> bool {
 }
 
 /// Whether `input` begins a longer binding of an in-session action that holds in `stack`.
-fn is_in_session_prefix(keymap: &Keymap, input: &[Keystroke], stack: &[KeyContext]) -> bool {
+fn is_in_session_prefix(
+    keymap: &Keymap,
+    input: &[Keystroke],
+    stack: &[KeyContext],
+    in_session: &impl Fn(&str) -> bool,
+) -> bool {
     keymap.bindings().any(|binding| {
-        is_in_session(binding.action().name())
+        in_session(binding.action().name())
             && binding
                 .predicate()
                 .is_none_or(|predicate| predicate.depth_of(stack).is_some())

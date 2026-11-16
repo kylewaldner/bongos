@@ -113,6 +113,8 @@
       "ctrl-r": "isearch::Backward", // isearch-backward
       "ctrl-alt-s": "isearch::ForwardRegexp", // isearch-forward-regexp
       "ctrl-alt-r": "isearch::BackwardRegexp", // isearch-backward-regexp
+      "alt-%": "query_replace::QueryReplace", // query-replace
+      "ctrl-alt-%": "query_replace::QueryReplaceRegexp", // query-replace-regexp
       "alt-^": "editor::JoinLines", // join-line
       "alt-q": "editor::Rewrap", // fill-paragraph
     },

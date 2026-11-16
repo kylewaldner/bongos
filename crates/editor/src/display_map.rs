@@ -184,6 +184,8 @@ pub enum HighlightKey {
     PickerPreview,
     ProjectSearchView,
     PromptsSent,
+    QueryReplace,
+    QueryReplaceRegion,
     Rename,
     SearchWithinRange,
     SelectedTextHighlight,
