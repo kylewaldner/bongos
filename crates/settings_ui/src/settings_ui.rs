@@ -4941,7 +4941,9 @@ where
 
 /// Whether picking `value` in a dropdown needs a write. The shown value can differ
 /// from what the file stores (a retired value is displayed as its fallback), so for
-/// the user file this compares the stored content after the write instead.
+/// the user file this compares the stored content after the write instead, but only
+/// when the setting is stored there; otherwise the shown value is a default and
+/// re-picking it must not pin it into the file.
 fn dropdown_pick_changes_file<T: Copy + PartialEq + Send + Sync + 'static>(
     field: &SettingField<T>,
     file: &SettingsUiFile,
@@ -4951,6 +4953,7 @@ fn dropdown_pick_changes_file<T: Copy + PartialEq + Send + Sync + 'static>(
 ) -> bool {
     if let SettingsUiFile::User = file
         && let Some(stored) = SettingsStore::global(cx).raw_user_settings()
+        && (field.pick)(&stored.content).is_some()
     {
         let mut updated = (*stored.content).clone();
         (field.write)(&mut updated, Some(value), cx);
@@ -6434,8 +6437,17 @@ pub mod test {
             .insert_tree(paths::config_dir(), serde_json::json!({}))
             .await;
 
-        for (stored, picks_write) in [("JetBrains", true), ("Emacs", false), ("VSCode", true)] {
-            let text = format!(r#"{{"base_keymap": "{stored}"}}"#);
+        for (stored, picks_write) in [
+            ("JetBrains", true),
+            ("Emacs", false),
+            ("VSCode", true),
+            ("", false),
+        ] {
+            let text = if stored.is_empty() {
+                "{}".to_string()
+            } else {
+                format!(r#"{{"base_keymap": "{stored}"}}"#)
+            };
             fake_fs
                 .insert_file(settings_path, text.clone().into_bytes())
                 .await;
