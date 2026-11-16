@@ -4,14 +4,17 @@
 
 use crate::quit;
 use bongos_emacs_model::prefix_arg::PrefixArg;
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::Editor;
 use gpui::{Action, App, Context, Entity, Focusable as _, Global, WeakEntity, Window, WindowId};
+
+use crate::intercept;
 
 /// The most an inserting command repeats: a huge count would hang the editor.
 pub const MAX_INSERT: i32 = 65_536;
 
-/// What an action does with a pending prefix argument.
+/// What an action does with a pending prefix argument. An action nothing declared is repeated:
+/// the key is stopped and the action runs as many times as the argument says.
 #[derive(Clone, Copy, Debug)]
 pub enum Meaning {
     /// The action's handler takes the argument: it is handed off and the key goes through.
@@ -146,8 +149,6 @@ pub fn cancel(window: &mut Window, cx: &mut App) {
 /// Moves the pending argument into the handoff, to be read by the command about to be
 /// dispatched, and schedules a drop of a handoff nobody took, so an argument is consumed by
 /// exactly one command even when its action has no handler in the context.
-// Only the key interceptor hands off, and it comes with the keybindings.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn hand_off(window: &mut Window, cx: &mut App) {
     let Some(generation) = with_state(window, cx, |state| {
         state.handoff = state.arg.take();
@@ -198,13 +199,48 @@ pub(crate) fn init_editor(
     .detach();
 }
 
-/// Registers the quit hook: C-g with an argument pending clears it and its echo.
+/// The editor the argument pending in `window` was started in, while it exists.
+pub(crate) fn origin(window: &Window, cx: &App) -> Option<Entity<Editor>> {
+    cx.try_global::<PrefixArgs>()
+        .and_then(|args| args.0.get(&window_id(window)))
+        .and_then(|state| state.origin.upgrade())
+}
+
+/// The windows showing the "Count limited" echo, which stays until the next keystroke.
+#[derive(Default)]
+struct Limited(HashSet<WindowId>);
+
+impl Global for Limited {}
+
+/// Echoes that an inserting count was clamped to `MAX_INSERT`, until the next keystroke.
+pub(crate) fn show_limited(window: &mut Window, cx: &mut App) {
+    let text = format!("Count limited to {MAX_INSERT}");
+    show_echo(window, cx, Some(text));
+    cx.default_global::<Limited>().0.insert(window_id(window));
+}
+
+/// Clears the "Count limited" echo of `window`, if it shows one. An argument started since then
+/// owns the echo and keeps it.
+pub(crate) fn clear_limited(window: &mut Window, cx: &mut App) {
+    let id = window_id(window);
+    let shown = cx.has_global::<Limited>() && cx.global_mut::<Limited>().0.remove(&id);
+    if shown && pending(window, cx).is_none() {
+        show_echo(window, cx, None);
+    }
+}
+
+/// Registers the quit hook (C-g with an argument pending clears it and its echo) and installs
+/// the key interceptor that routes the keys typed while an argument is pending.
 pub(crate) fn init(cx: &mut App) {
     quit::register(cx, |window, cx| cancel(window, cx));
+    intercept::install(cx).detach();
 }
 
 /// Starts `arg` in `window` as if typed in `editor`, and echoes it.
 pub(crate) fn start(arg: PrefixArg, editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+    if cx.has_global::<Limited>() {
+        cx.global_mut::<Limited>().0.remove(&window_id(window));
+    }
     show_echo(window, cx, Some(arg.echo()));
     let args = cx.default_global::<PrefixArgs>();
     let generation = args

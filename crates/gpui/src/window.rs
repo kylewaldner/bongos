@@ -4959,6 +4959,15 @@ impl Window {
         self.pending_input.take();
     }
 
+    /// Drops the pending keystrokes and notifies their observers. For a keystroke interceptor
+    /// that stops the key completing them: the stopped key never reaches the matcher, so the
+    /// keystrokes before it would otherwise stay pending.
+    pub fn discard_pending_keystrokes(&mut self, cx: &mut App) {
+        if self.pending_input.take().is_some() {
+            self.pending_input_changed(cx);
+        }
+    }
+
     /// Returns the currently pending input keystrokes that might result in a multi-stroke key binding.
     pub fn pending_input_keystrokes(&self) -> Option<&[Keystroke]> {
         self.pending_input
