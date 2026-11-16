@@ -411,6 +411,9 @@ pub struct ChecksEngine {
     pub(crate) decider: crate::decider::Decider,
     /// Told when the last active run has ended.
     idle: Vec<oneshot::Sender<()>>,
+    /// The worktree of each task whose workflow run just completed its todo, by task id, while
+    /// the done decision taken for that completion runs ([`crate::completion`]).
+    pub(crate) completing: BTreeMap<String, TaskTree>,
 }
 
 impl EventEmitter<ChecksEvent> for ChecksEngine {}
@@ -439,6 +442,7 @@ impl ChecksEngine {
             drained: false,
             decider: crate::decider::Decider::default(),
             idle: Vec::new(),
+            completing: BTreeMap::new(),
         }
     }
 
@@ -465,8 +469,12 @@ impl ChecksEngine {
             .map(|global| global.0.clone())
     }
 
-    /// The tree of `task`'s own repository: see [`crate::task_tree`] for the order.
+    /// The tree of `task`'s own repository: see [`crate::task_tree`] for the order. While the
+    /// decision for a run's completion runs, it is that run's worktree.
     pub fn task_tree(&self, task: &TaskChecks, cx: &App) -> Option<TaskTree> {
+        if let Some(tree) = self.completing.get(&task.task_id) {
+            return Some(tree.clone());
+        }
         let trees = TaskTreesRegistry::get(cx);
         resolve_task_tree(
             &task.task_id,

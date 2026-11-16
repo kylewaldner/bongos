@@ -149,6 +149,8 @@ pub(crate) struct GroupRunHold {
 struct Followed {
     writer: Weak<StateWriter>,
     poke: mpsc::UnboundedSender<()>,
+    /// Told when a decision that began after they were added has ended.
+    waiters: Vec<oneshot::Sender<()>>,
     /// The tasks whose `hold/` row this decider wrote.
     holds: BTreeSet<String>,
     _decisions: Task<()>,
@@ -165,6 +167,16 @@ impl Decider {
     /// The sender that asks `project` for a decision, while it is followed.
     pub(crate) fn followed_poke(&self, project: &str) -> Option<&mpsc::UnboundedSender<()>> {
         self.projects.get(project).map(|followed| &followed.poke)
+    }
+
+    /// Asks `project` for a decision; the receiver resolves once a decision that began after this
+    /// call has ended, or once the project is no longer followed. `None` while it is not followed.
+    pub(crate) fn decide_and_wait(&mut self, project: &str) -> Option<oneshot::Receiver<()>> {
+        let followed = self.projects.get_mut(project)?;
+        let (sender, receiver) = oneshot::channel();
+        followed.waiters.push(sender);
+        followed.poke.unbounded_send(()).ok();
+        Some(receiver)
     }
 
     /// Forgets which `hold/` rows were written (a drain deleted them all).
@@ -309,12 +321,26 @@ impl ChecksEngine {
                 let Some(writer) = weak.upgrade() else {
                     break;
                 };
+                // Whoever waits now waits for this decision; a later waiter pokes again.
+                let waiters = this
+                    .update(cx, |engine, _| {
+                        engine
+                            .decider
+                            .projects
+                            .get_mut(&id)
+                            .map(|followed| std::mem::take(&mut followed.waiters))
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
                 #[cfg(test)]
                 let verified = writer.read(|read| read.verified_commit()).ok().flatten();
                 if let Err(error) = decide_project(&this, &id, &writer, cx).await {
                     log::error!("deciding the checks of project {id}: {error:#}");
                 }
                 drop(writer);
+                for waiter in waiters {
+                    waiter.send(()).ok();
+                }
                 #[cfg(test)]
                 this.update(cx, |engine, _| {
                     engine
@@ -330,6 +356,7 @@ impl ChecksEngine {
             Followed {
                 writer: Arc::downgrade(&writer),
                 poke,
+                waiters: Vec::new(),
                 holds: BTreeSet::new(),
                 _decisions: decisions,
             },
