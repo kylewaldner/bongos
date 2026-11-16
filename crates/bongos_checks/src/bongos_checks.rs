@@ -9,8 +9,10 @@
 //! done hold they cause, and the decider that writes the done record of a leaf whose checks
 //! pass on its tree, and of a group whose closing checks pass on its last child's tree, and the
 //! hook that takes that decision on a workflow run's worktree when the run completes its todo,
-//! the Checks section of a task's details tab with the output and edit views of its checks, and
-//! the workflow step that runs checks.
+//! the Checks section of a task's details tab with the output and edit views of its checks, the
+//! workflow step that runs checks, and the checks of a landing: the `check` kind of
+//! `[[landing.checks]]`, run by the engine with master's copy of its scripts, and the approval
+//! hook over loosened checks of started tasks.
 
 mod actions;
 mod base_tree;
@@ -26,6 +28,7 @@ mod exporter;
 pub mod group_decider;
 pub mod holds;
 pub mod host;
+pub mod landing;
 pub mod live;
 mod output;
 mod output_view;
@@ -68,6 +71,10 @@ pub use host::{
     CHECKS_NAMESPACE, ChecksAccess, ChecksCommand, ChecksForwarder, ChecksForwarderRegistry,
     ChecksReply, checks_access,
 };
+pub use landing::{
+    CHECKS_LOOSENING, CHECKS_OFF, ChecksLoosening, LANDING_KIND, LandingJob, MOVING_TO_HOST,
+    NO_PROJECT_ID, TaskCheckLanding, parse_landing_check,
+};
 pub use live::{HoldRow, LiveRow, clear_live, hold_key, live_rows, part_key};
 pub use output::{OutputSummary, cut_marker};
 pub use owed::{
@@ -90,8 +97,9 @@ pub use workflow_node::{ChecksNode, ChecksNodeStatus, NodeJob, node_result};
 
 /// Registers the settings, the `checks-owed` state hook, the `checks` done hold source, the
 /// `checks` state exporter, the `checks` definition folder, the `checks-valid` landing check, the
-/// global [`ChecksEngine`], its workflow completion hook and the built-in behind `use = "checks"`
-/// workflow nodes with its run view status (inert while the setting is off).
+/// global [`ChecksEngine`], its workflow completion hook, the built-in behind `use = "checks"`
+/// workflow nodes with its run view status, the `check` landing kind whose jobs the engine
+/// receives, and the approval hook over loosened checks (inert while the setting is off).
 /// Runs before any project opens: the first state writer seals the registry of state hooks.
 pub fn init(cx: &mut gpui::App) {
     use ::settings::Settings as _;
@@ -104,6 +112,7 @@ pub fn init(cx: &mut gpui::App) {
     decider::init(engine.clone(), cx);
     section_source::init(&engine, cx);
     completion::register(cx);
+    landing::register(&engine, cx);
     workflow_node::ChecksNode::register(&engine, cx);
     // What a crash left in the scratch folder goes at load. The parts it left running go as the
     // decider (started above) follows each project's store: `ChecksEngine::follow_project`.
@@ -136,6 +145,8 @@ mod exporter_tests;
 mod group_decider_tests;
 #[cfg(test)]
 mod host_tests;
+#[cfg(test)]
+mod landing_tests;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]

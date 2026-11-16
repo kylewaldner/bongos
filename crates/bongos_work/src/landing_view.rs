@@ -164,13 +164,20 @@ fn state_text(listed: &ListedChange) -> Option<String> {
         .or_else(|| (row.state == ChangeState::Requested).then(|| "landing".to_string()))
 }
 
+/// A check's result, with the file it wrote when it has one.
 fn check_text(result: &CheckResult) -> String {
-    match &result.outcome {
-        CheckOutcome::Pass => format!("{} passed", result.check),
-        CheckOutcome::Fail { message, .. } => format!("{} failed: {message}", result.check),
-        CheckOutcome::NoVerdict { reason, .. } => {
-            format!("{} no verdict: {reason}", result.check)
+    let (text, output) = match &result.outcome {
+        CheckOutcome::Pass => return format!("{} passed", result.check),
+        CheckOutcome::Fail { message, output } => {
+            (format!("{} failed: {message}", result.check), output)
         }
+        CheckOutcome::NoVerdict { reason, output } => {
+            (format!("{} no verdict: {reason}", result.check), output)
+        }
+    };
+    match output {
+        Some(output) => format!("{text}, output {}", output.display()),
+        None => text,
     }
 }
 

@@ -82,13 +82,13 @@ pub(crate) fn fixture_project_with_hooks(root: &TempDir, hooks: &StateApplyHooks
     ProjectRepo::new(location, git).with_state(StateHandle::Writer(writer))
 }
 
-fn start() -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn start() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339("2026-03-01T10:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc)
 }
 
-fn keyboard() -> Context {
+pub(crate) fn keyboard() -> Context {
     Context::at_keyboard(PersonAtKeyboard::for_test())
 }
 

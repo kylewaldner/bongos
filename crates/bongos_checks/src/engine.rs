@@ -411,11 +411,16 @@ pub struct ChecksEngine {
     pub(crate) drained: bool,
     /// The done decider's projects and pins.
     pub(crate) decider: crate::decider::Decider,
-    /// Told when the last active run has ended.
-    idle: Vec<oneshot::Sender<()>>,
+    /// Told when the last active run and the last landing check have ended.
+    pub(crate) idle: Vec<oneshot::Sender<()>>,
     /// The worktree of each task whose workflow run just completed its todo, by task id, while
     /// the done decision taken for that completion runs ([`crate::completion`]).
     pub(crate) completing: BTreeMap<String, TaskTree>,
+    /// The checks landings asked for that run now, by job number ([`crate::landing`]).
+    pub(crate) landing: BTreeMap<u64, crate::landing::LandingRun>,
+    pub(crate) next_landing: u64,
+    /// Receives the jobs of landing checks while the engine lives.
+    pub(crate) landing_jobs: Option<Task<()>>,
 }
 
 impl EventEmitter<ChecksEvent> for ChecksEngine {}
@@ -445,6 +450,9 @@ impl ChecksEngine {
             decider: crate::decider::Decider::default(),
             idle: Vec::new(),
             completing: BTreeMap::new(),
+            landing: BTreeMap::new(),
+            next_landing: 0,
+            landing_jobs: None,
         }
     }
 
@@ -768,11 +776,7 @@ impl ChecksEngine {
             this.update(cx, |engine, cx| {
                 engine.active.remove(&id);
                 engine.live_rows.release(&id);
-                if engine.active.is_empty() {
-                    for idle in engine.idle.drain(..) {
-                        idle.send(()).ok();
-                    }
-                }
+                engine.tell_idle();
                 cx.emit(ChecksEvent::Changed {
                     task_id: id.clone(),
                 });
@@ -808,7 +812,10 @@ impl ChecksEngine {
     ///
     /// Resolves once every run has ended, or once the grace has passed on the engine's clock,
     /// whichever comes first, with the workflow nodes whose runs it stopped (none for manual
-    /// runs). The engine answers no landing job yet, so there is nothing more to let go.
+    /// runs). Every landing check that runs is stopped too and answered no verdict, "the engine
+    /// is moving to the host", once its process has ended (so the landing keeps its trees until
+    /// then), and a landing job that arrives while drained is answered so at once; the landing
+    /// tries again later.
     ///
     /// Guaranteed at resolution: every run was told to stop, no run or part starts while
     /// drained, every second tree lease is released (but one whose tree git is checking out
@@ -839,7 +846,11 @@ impl ChecksEngine {
             group.stop.stop();
             leases.push(group.leases.clone());
         }
-        let ended = if self.active.is_empty() {
+        for run in self.landing.values_mut() {
+            run.moving = true;
+            run.stop.stop();
+        }
+        let ended = if self.active.is_empty() && self.landing.is_empty() {
             None
         } else {
             let (sender, receiver) = oneshot::channel();
@@ -874,6 +885,15 @@ impl ChecksEngine {
             let index_dir = scratch.join(TREE_KEYS_FOLDER);
             sweep_scratch(&git, &scratch, &index_dir).await
         })
+    }
+
+    /// Tells those waiting for the engine to be idle, once no run and no landing check is left.
+    pub(crate) fn tell_idle(&mut self) {
+        if self.active.is_empty() && self.landing.is_empty() {
+            for idle in self.idle.drain(..) {
+                idle.send(()).ok();
+            }
+        }
     }
 
     /// Takes runs again after [`Self::drain`], when the writer stays in this process, and says so
