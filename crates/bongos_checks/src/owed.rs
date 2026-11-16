@@ -6,37 +6,48 @@
 //! the finishing write leaves it held, and nothing is recomputed at start.
 //!
 //! "Done-looking" is the Done the Work view would derive for the task if no hold existed: a leaf
-//! whose todos are all closed or skipped, or whose status is Done. For each task a transaction
-//! touches:
+//! whose todos are all closed or skipped, or whose status is Done; a group whose status is Done
+//! or whose live (not cancelled) children are all Done-looking. For each task a transaction
+//! touches, and each group above one (on a landing, every group):
 //! - a leaf that becomes Done-looking while `task_checks.enabled` is on in this process, whose
-//!   kind takes checks and whose ordinary required set (from the definitions in force after the
-//!   transaction) is not empty, gets its marker;
+//!   kind takes checks and whose required set (from the definitions in force after the
+//!   transaction) is not empty, gets its marker. Its set includes the closing checks of each
+//!   group above it for which it is the last open child: every other live child of that group
+//!   was Done before this transaction and still is, owing nothing or holding a readable done
+//!   record. A sibling that finishes in the same transaction counts as held, so of children
+//!   finishing together none carries them. The marker's `closing_from` names those groups;
+//! - any child that becomes Done-looking, whatever it owes and whether the setting is on, is
+//!   recorded as `checks.last/<group id>` of its group when the group has a closing set (the
+//!   last in child order when several finish together), with the next value of `checks.seq`;
+//! - a group that becomes Done-looking while the setting is on and whose required closing set
+//!   is not empty gets its marker, with `last_child` from its `checks.last` row (a recorded
+//!   child that is no longer a live child of the group is ignored for the live child with the
+//!   latest generation in its done record or its own `checks.last` row). A group's ordinary rows
+//!   pass to its children and never mark it;
 //! - a task that is not Done-looking afterward loses its marker and its done record, whether the
 //!   setting is on or off, so a task reopened and finished again while it is off is not held
-//!   later by an old marker;
+//!   later by an old marker; a leaf that becomes a group loses the rows of the leaf it was;
 //! - any other task keeps or lacks its marker as it was: a check added to a task that is already
 //!   finished never marks it, and turning the setting off and on changes nothing.
 //!
-//! Groups (their closing checks, the last child to finish) are not judged here yet: a task with
-//! children is never marked (a leaf that gains children loses its marker and done record), and a
-//! leaf's marker names no group. Before the project's definitions are loaded nothing is marked,
-//! and the marker and done record go only when the state record alone proves the task is not
-//! Done: its state row is gone, or it is cancelled.
+//! Before the project's definitions are loaded nothing is marked, and the marker and done record
+//! go only when the state record alone proves the task is not Done: its state row is gone, or it
+//! is cancelled.
 //!
 //! The hook writes only `kv` rows, runs no git and no process, and any error aborts the whole
 //! transaction, so no task is finished without its marker. Its one read outside the transaction
 //! is the named check sets of the project's master checkout, which the definitions tree does not
-//! carry; when they cannot be read and the task uses one, the task is marked, and the decider
-//! judges it with the sets it reads.
+//! carry; when they cannot be read and a task or a group above it uses one, the task is marked
+//! (a group as having a closing set), and the decider judges it with the sets it reads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context as _, Result};
 use bongos_checks_model::{Applicability, NamedSets, Source, decl, effective_set};
-use bongos_project_repo::{StateApplyChange, StateApplyHook, StateApplyHooks, StateTx};
+use bongos_project_repo::{StateApplyChange, StateApplyHook, StateApplyHooks, StateTx, TaskTouch};
 use bongos_project_repo_model::{
     DefinitionNode, DefinitionTree, TaskDefinition, TaskStateRecord, join,
 };
@@ -49,7 +60,9 @@ use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
 
 use crate::definitions::named_sets;
-use crate::evidence_store::{DONE_NAMESPACE, OWED_NAMESPACE};
+use crate::evidence_store::{
+    DONE_NAMESPACE, DoneRecord, LAST_NAMESPACE, OWED_NAMESPACE, done_record_in, next_generation,
+};
 use crate::pin::master_definitions;
 use crate::settings::TaskChecksSettings;
 
@@ -59,8 +72,7 @@ pub const CHECKS_OWED_HOOK: &str = "checks-owed";
 /// The marker of a finished task that owes checks, `checks.owed/<task id>`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwedMarker {
-    /// The groups whose closing checks this task carries as their last open child. Always
-    /// empty for now: closing checks are not carried yet.
+    /// The groups whose closing checks this task carries as their last open child.
     #[serde(default)]
     pub closing_from: Vec<String>,
     /// On a group's marker only: the last child to become Done-looking.
@@ -73,6 +85,36 @@ pub struct OwedMarker {
 pub struct LastChild {
     pub id: String,
     pub generation: u64,
+}
+
+/// The row `checks.last/<group id>` of a group with a closing set: the last of its children to
+/// become Done-looking, recorded by the hook whatever that child owes and whether the setting
+/// is on, with the generation that orders it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastRow {
+    pub id: String,
+    pub generation: u64,
+    /// The tree key of the child's tree, filled in by the decider; empty until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_key: Option<String>,
+}
+
+/// Writes the `checks.last` row of `group_id`.
+pub fn put_last(tx: &mut StateTx, group_id: &str, row: &LastRow) -> Result<()> {
+    let value = toml::Value::try_from(row).context("serializing a last child row")?;
+    tx.kv(LAST_NAMESPACE).put(group_id, value)
+}
+
+/// The `checks.last` row of `group_id` as `tx` sees it.
+pub fn last_row_in(tx: &mut StateTx, group_id: &str) -> Result<Option<LastRow>> {
+    tx.kv(LAST_NAMESPACE)
+        .get(group_id)?
+        .map(|value| {
+            value
+                .try_into()
+                .with_context(|| format!("reading the last child of {group_id}"))
+        })
+        .transpose()
 }
 
 /// Writes the marker of `task_id`.
@@ -179,23 +221,56 @@ impl ChecksOwedHook {
         lookup.named_sets(&project)
     }
 
-    /// Whether the leaf `task_id` owes checks when it finishes under `definitions`: its kind
-    /// takes checks and a required ordinary check applies to it, or it uses a named set that
-    /// cannot be read here.
-    fn owes_checks(&self, task_id: &str, definitions: &DefinitionTree) -> bool {
-        let sets = self.named_sets_of(definitions).unwrap_or_default();
-        // Every other task counts as finished, so no closing check is carried: those are not
-        // judged here yet.
-        let set = effective_set(task_id, definitions, &sets, &|_| true);
+    /// The marker `task_id` gets when it finishes under `definitions`, `done` saying which
+    /// other tasks are Done; `None` when it owes nothing. A leaf owes its required rows, the
+    /// closing checks it carries as the last open child included; a group owes its required
+    /// closing set and never its ordinary rows. A task that uses, or sits under a group that
+    /// uses, a named set that cannot be read here owes checks. The marker names the groups
+    /// whose closing checks the task carries; `last_child` is left to the caller.
+    fn owed_marker(
+        &self,
+        task_id: &str,
+        definitions: &DefinitionTree,
+        sets: &NamedSets,
+        done: &dyn Fn(&str) -> bool,
+    ) -> Option<OwedMarker> {
+        let set = effective_set(task_id, definitions, sets, done);
         if matches!(
             set.applicability,
             Applicability::NoChecksApply | Applicability::UnknownTask
         ) {
-            return false;
+            return None;
         }
-        set.required()
-            .any(|row| !matches!(row.source, Source::Closing { .. }))
-            || uses_unknown_set(task_id, definitions, &sets)
+        if set.required().next().is_none() && !uses_unknown_set(task_id, definitions, sets) {
+            return None;
+        }
+        let mut closing_from: Vec<String> = Vec::new();
+        for row in set.judged() {
+            if let Source::Closing { group } = &row.source
+                && !closing_from.contains(group)
+            {
+                closing_from.push(group.clone());
+            }
+        }
+        Some(OwedMarker {
+            closing_from,
+            last_child: None,
+        })
+    }
+
+    /// Whether the group `group_id` has a closing set (its own closing checks and those passed
+    /// down to it), or uses a named set that cannot be read here, which may hold some.
+    fn has_closing_set(
+        &self,
+        group_id: &str,
+        definitions: &DefinitionTree,
+        sets: &NamedSets,
+        done: &dyn Fn(&str) -> bool,
+    ) -> bool {
+        !effective_set(group_id, definitions, sets, done)
+            .closing
+            .is_empty()
+            || uses_unknown_set(group_id, definitions, sets)
     }
 }
 
@@ -221,39 +296,434 @@ impl StateApplyHook for ChecksOwedHook {
             return Ok(());
         }
         let enabled = self.is_enabled();
-        for touch in change.touched {
-            let id = touch.id.as_str();
-            // Groups are not marked yet: a leaf that became one loses its old leaf rows.
-            if is_group(change.definitions, id) {
-                delete_rows(tx, id)?;
-                continue;
+        // An unreadable set counts as unknown, so a task that uses one is marked.
+        let sets = self.named_sets_of(change.definitions).unwrap_or_default();
+        let mut view = View::new(change);
+
+        // Which tasks became Done-looking, and which lost it.
+        let mut finished = Vec::new();
+        for id in view.candidates(change) {
+            let before = view.looks_done(tx, Side::Before, &id)?;
+            let after = view.looks_done(tx, Side::After, &id)?;
+            // A leaf that became a group: its rows judged the leaf it was.
+            if view.became_group(&id) {
+                delete_rows(tx, &id)?;
             }
-            if !done_looking(touch.definition_after, touch.after.as_ref()) {
-                delete_rows(tx, id)?;
-                continue;
-            }
-            if !enabled || done_looking(touch.definition_before, touch.before.as_ref()) {
-                continue;
-            }
-            if self.owes_checks(id, change.definitions) {
-                put_marker(tx, id, &OwedMarker::default())?;
-                // A done record is only valid for the finish it judged: none survives a reopen,
-                // so one found here is stale.
-                delete_present(tx, DONE_NAMESPACE, id)?;
+            if !after {
+                delete_rows(tx, &id)?;
+            } else if !before {
+                finished.push(id);
             }
         }
-        // A leaf that gains children in a landing whose own definition did not change is not
-        // touched; it is a group now, so its leaf rows go too.
-        if let Some(old) = change.old_definitions {
-            for node in change.definitions.nodes() {
-                let id = node.definition.id.as_str();
-                if is_group(change.definitions, id) && old.node(id).is_some() && !is_group(old, id)
-                {
-                    delete_rows(tx, id)?;
+
+        // The last child of each group: of the children of one group that became Done-looking
+        // here, the last in child order. Recorded whether the setting is on or off and whatever
+        // the child owes, for every group with a closing set.
+        let mut last_by_group: BTreeMap<String, (usize, String)> = BTreeMap::new();
+        for id in &finished {
+            let Some((parent, position)) = view.parent_and_position(id) else {
+                continue;
+            };
+            let entry = last_by_group
+                .entry(parent.definition.id.clone())
+                .or_insert((position, id.clone()));
+            if position >= entry.0 {
+                *entry = (position, id.clone());
+            }
+        }
+        for (group, (_, child)) in last_by_group {
+            let done = view.done_map(tx, &group)?;
+            let done = |other: &str| done.get(other).copied().unwrap_or(false);
+            if !self.has_closing_set(&group, change.definitions, &sets, &done) {
+                continue;
+            }
+            let generation = next_generation(tx)?;
+            put_last(
+                tx,
+                &group,
+                &LastRow {
+                    id: child,
+                    generation,
+                    tree_key: None,
+                },
+            )?;
+        }
+
+        if !enabled {
+            return Ok(());
+        }
+        // The markers. A sibling that became Done-looking in this transaction is not Done for
+        // its siblings (it is held), so of children finishing together none carries the
+        // closing checks of their group; the group judges them itself.
+        for id in &finished {
+            let done = view.done_map(tx, id)?;
+            let done = |other: &str| done.get(other).copied().unwrap_or(false);
+            let Some(mut marker) = self.owed_marker(id, change.definitions, &sets, &done) else {
+                continue;
+            };
+            if view.is_group(Side::After, id) {
+                marker.last_child = view.last_child(tx, id)?;
+            }
+            put_marker(tx, id, &marker)?;
+            // A done record is only valid for the finish it judged: none survives a reopen, so
+            // one found here is stale.
+            delete_present(tx, DONE_NAMESPACE, id)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Side {
+    /// Before the transaction: the old verified commit's definitions and the rows before it.
+    Before,
+    /// After the transaction.
+    After,
+}
+
+/// The nodes of one definitions tree by id, with the parent of each.
+#[derive(Default)]
+struct TreeIndex<'a> {
+    nodes: HashMap<&'a str, &'a DefinitionNode>,
+    parents: HashMap<&'a str, &'a DefinitionNode>,
+}
+
+impl<'a> TreeIndex<'a> {
+    fn new(tree: &'a DefinitionTree) -> Self {
+        let mut index = Self::default();
+        if let Some(top) = &tree.top {
+            index.add(top);
+        }
+        index
+    }
+
+    fn add(&mut self, node: &'a DefinitionNode) {
+        self.nodes.insert(node.definition.id.as_str(), node);
+        for child in &node.children {
+            self.parents.insert(child.definition.id.as_str(), node);
+            self.add(child);
+        }
+    }
+}
+
+/// What one transaction looks like before and after, for the hook: the Done-looking state of any
+/// task on either side (a group's from its children), and whether a task is Done for the
+/// question of who carries a group's closing checks. Rows of tasks the transaction did not touch
+/// are read through it and are the same on both sides.
+struct View<'a> {
+    before: TreeIndex<'a>,
+    after: TreeIndex<'a>,
+    touched: HashMap<&'a str, &'a TaskTouch<'a>>,
+    records: HashMap<String, Option<TaskStateRecord>>,
+    looks: HashMap<(Side, String), bool>,
+    cancelled: HashMap<(Side, String), bool>,
+    done: HashMap<String, bool>,
+}
+
+impl<'a> View<'a> {
+    fn new(change: &StateApplyChange<'a>) -> Self {
+        Self {
+            before: TreeIndex::new(change.old_definitions.unwrap_or(change.definitions)),
+            after: TreeIndex::new(change.definitions),
+            touched: change
+                .touched
+                .iter()
+                .map(|touch| (touch.id.as_str(), touch))
+                .collect(),
+            records: HashMap::new(),
+            looks: HashMap::new(),
+            cancelled: HashMap::new(),
+            done: HashMap::new(),
+        }
+    }
+
+    fn index(&self, side: Side) -> &TreeIndex<'a> {
+        match side {
+            Side::Before => &self.before,
+            Side::After => &self.after,
+        }
+    }
+
+    fn node(&self, side: Side, id: &str) -> Option<&'a DefinitionNode> {
+        self.index(side).nodes.get(id).copied()
+    }
+
+    fn is_group(&self, side: Side, id: &str) -> bool {
+        self.node(side, id).is_some_and(is_group_node)
+    }
+
+    /// Whether `id` was a leaf before the transaction and is a group after it.
+    fn became_group(&self, id: &str) -> bool {
+        self.node(Side::Before, id)
+            .is_some_and(|node| !is_group_node(node))
+            && self.is_group(Side::After, id)
+    }
+
+    /// The tasks whose Done-looking state the transaction may change: the touched tasks and
+    /// every group above them on either side, and on a landing every group (one may have lost
+    /// or gained children without its own row or definition changing). In id order.
+    fn candidates(&self, change: &StateApplyChange) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        for touch in change.touched {
+            ids.insert(touch.id.clone());
+            for side in [Side::Before, Side::After] {
+                let mut parent = self.index(side).parents.get(touch.id.as_str()).copied();
+                while let Some(node) = parent {
+                    let id = node.definition.id.as_str();
+                    ids.insert(id.to_string());
+                    parent = self.index(side).parents.get(id).copied();
                 }
             }
         }
-        Ok(())
+        if change.old_definitions.is_some() {
+            for (id, node) in &self.after.nodes {
+                if is_group_node(node) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+        ids
+    }
+
+    /// The parent of `id` after the transaction and `id`'s place among its children.
+    fn parent_and_position(&self, id: &str) -> Option<(&'a DefinitionNode, usize)> {
+        let parent = self.after.parents.get(id).copied()?;
+        let position = parent
+            .children
+            .iter()
+            .position(|child| child.definition.id == id)?;
+        Some((parent, position))
+    }
+
+    fn record(&mut self, tx: &StateTx, side: Side, id: &str) -> Result<Option<TaskStateRecord>> {
+        if let Some(touch) = self.touched.get(id) {
+            return Ok(match side {
+                Side::Before => touch.before.clone(),
+                Side::After => touch.after.clone(),
+            });
+        }
+        if let Some(record) = self.records.get(id) {
+            return Ok(record.clone());
+        }
+        let record = tx.task(id)?;
+        self.records.insert(id.to_string(), record.clone());
+        Ok(record)
+    }
+
+    fn definition(&self, side: Side, id: &str) -> Option<&'a TaskDefinition> {
+        match self.touched.get(id) {
+            Some(touch) => match side {
+                Side::Before => touch.definition_before,
+                Side::After => touch.definition_after,
+            },
+            None => self.node(side, id).map(|node| &node.definition),
+        }
+    }
+
+    /// Whether `id` is cancelled on `side`: its status says so, or it has children and all of
+    /// them are.
+    fn is_cancelled(&mut self, tx: &StateTx, side: Side, id: &str) -> Result<bool> {
+        let key = (side, id.to_string());
+        if let Some(cancelled) = self.cancelled.get(&key) {
+            return Ok(*cancelled);
+        }
+        let Some(node) = self.node(side, id) else {
+            return Ok(false);
+        };
+        let mut cancelled = self
+            .record(tx, side, id)?
+            .is_some_and(|record| record.status == Status::Cancelled);
+        if !cancelled && !node.children.is_empty() {
+            cancelled = true;
+            for child in &node.children {
+                if !self.is_cancelled(tx, side, &child.definition.id)? {
+                    cancelled = false;
+                    break;
+                }
+            }
+        }
+        self.cancelled.insert(key, cancelled);
+        Ok(cancelled)
+    }
+
+    /// Whether `id` is Done on `side` as the Work view derives it, ignoring every hold: a leaf
+    /// by its todos, status and result; a group not cancelled whose status is Done or that has
+    /// live (not cancelled) children, all Done-looking. A task missing on that side is not.
+    fn looks_done(&mut self, tx: &StateTx, side: Side, id: &str) -> Result<bool> {
+        let key = (side, id.to_string());
+        if let Some(looks) = self.looks.get(&key) {
+            return Ok(*looks);
+        }
+        let Some(node) = self.node(side, id) else {
+            return Ok(false);
+        };
+        let looks = if is_group_node(node) {
+            self.group_looks_done(tx, side, node)?
+        } else {
+            let record = self.record(tx, side, id)?;
+            done_looking(self.definition(side, id), record.as_ref())
+        };
+        self.looks.insert(key, looks);
+        Ok(looks)
+    }
+
+    fn group_looks_done(
+        &mut self,
+        tx: &StateTx,
+        side: Side,
+        node: &'a DefinitionNode,
+    ) -> Result<bool> {
+        let id = node.definition.id.as_str();
+        if self.is_cancelled(tx, side, id)? {
+            return Ok(false);
+        }
+        if self
+            .record(tx, side, id)?
+            .is_some_and(|record| record.status == Status::Done)
+        {
+            return Ok(true);
+        }
+        let mut any_live = false;
+        for child in &node.children {
+            let child = child.definition.id.as_str();
+            if self.is_cancelled(tx, side, child)? {
+                continue;
+            }
+            any_live = true;
+            if !self.looks_done(tx, side, child)? {
+                return Ok(false);
+            }
+        }
+        Ok(any_live)
+    }
+
+    /// Whether `id`, or a task below it, keeps it from being Done for its siblings: it became
+    /// Done-looking in this transaction, or it has a marker and no readable done record.
+    fn held(&mut self, tx: &mut StateTx, id: &str) -> Result<bool> {
+        if self.looks_done(tx, Side::After, id)? && !self.looks_done(tx, Side::Before, id)? {
+            return Ok(true);
+        }
+        if tx.kv(OWED_NAMESPACE).get(id)?.is_some() && !has_valid_done(tx, id)? {
+            return Ok(true);
+        }
+        let Some(node) = self.node(Side::After, id) else {
+            return Ok(false);
+        };
+        for child in &node.children {
+            if self.held(tx, &child.definition.id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether `id` is Done when a sibling asks who carries their group's closing checks: it
+    /// is cancelled (not live), or it looked Done before this transaction and still does, and
+    /// neither it nor a task below it is held.
+    fn sibling_done(&mut self, tx: &mut StateTx, id: &str) -> Result<bool> {
+        if let Some(done) = self.done.get(id) {
+            return Ok(*done);
+        }
+        let done = if self.is_cancelled(tx, Side::After, id)? {
+            true
+        } else {
+            self.looks_done(tx, Side::Before, id)?
+                && self.looks_done(tx, Side::After, id)?
+                && !self.held(tx, id)?
+        };
+        self.done.insert(id.to_string(), done);
+        Ok(done)
+    }
+
+    /// Whether each child of every group above `id` is Done, for [`effective_set`]'s `done`
+    /// (a task missing from the map is not Done). `id` itself is never Done here: it is
+    /// finishing in this transaction.
+    fn done_map(&mut self, tx: &mut StateTx, id: &str) -> Result<HashMap<String, bool>> {
+        let mut map = HashMap::new();
+        let mut parent = self.after.parents.get(id).copied();
+        while let Some(node) = parent {
+            for child in &node.children {
+                let child = child.definition.id.as_str();
+                let done = self.sibling_done(tx, child)?;
+                map.insert(child.to_string(), done);
+            }
+            parent = self.after.parents.get(node.definition.id.as_str()).copied();
+        }
+        Ok(map)
+    }
+
+    /// The last child the marker of the group `group_id` names: its `checks.last` row when that
+    /// child is still a live child of the group; when it is not (moved away or dropped), the
+    /// live child with the highest generation in its done record or its own `checks.last`
+    /// row. `None` when the group has no `checks.last` row.
+    fn last_child(&mut self, tx: &mut StateTx, group_id: &str) -> Result<Option<LastChild>> {
+        let Some(row) = readable_last_row(tx, group_id)? else {
+            return Ok(None);
+        };
+        let Some(group) = self.node(Side::After, group_id) else {
+            return Ok(None);
+        };
+        let mut live = Vec::new();
+        for child in &group.children {
+            let child = child.definition.id.as_str();
+            if !self.is_cancelled(tx, Side::After, child)? {
+                live.push(child);
+            }
+        }
+        if live.contains(&row.id.as_str()) {
+            return Ok(Some(LastChild {
+                id: row.id,
+                generation: row.generation,
+            }));
+        }
+        let mut latest: Option<LastChild> = None;
+        for child in live {
+            let done = done_record_in(tx, child).ok().flatten();
+            let last = readable_last_row(tx, child)?;
+            let generation = done
+                .map(|done| done.generation)
+                .into_iter()
+                .chain(last.map(|last| last.generation))
+                .max();
+            if let Some(generation) = generation
+                && latest
+                    .as_ref()
+                    .is_none_or(|latest| generation > latest.generation)
+            {
+                latest = Some(LastChild {
+                    id: child.to_string(),
+                    generation,
+                });
+            }
+        }
+        Ok(latest)
+    }
+}
+
+/// Whether `node` is a group: the top task or a task with children.
+fn is_group_node(node: &DefinitionNode) -> bool {
+    node.folder.is_empty() || !node.children.is_empty()
+}
+
+/// Whether `task_id` has a done record that reads as one.
+fn has_valid_done(tx: &mut StateTx, task_id: &str) -> Result<bool> {
+    Ok(tx
+        .kv(DONE_NAMESPACE)
+        .get(task_id)?
+        .is_some_and(|value| value.try_into::<DoneRecord>().is_ok()))
+}
+
+/// The `checks.last` row of `group_id`; one that cannot be read counts as missing.
+fn readable_last_row(tx: &mut StateTx, group_id: &str) -> Result<Option<LastRow>> {
+    let Some(value) = tx.kv(LAST_NAMESPACE).get(group_id)? else {
+        return Ok(None);
+    };
+    match value.try_into() {
+        Ok(row) => Ok(Some(row)),
+        Err(error) => {
+            log::error!("reading the last child of {group_id}: {error}");
+            Ok(None)
+        }
     }
 }
 
@@ -278,13 +748,6 @@ fn delete_present(tx: &mut StateTx, namespace: &str, key: &str) -> Result<()> {
         tx.kv(namespace).delete(key)?;
     }
     Ok(())
-}
-
-/// Whether `task_id` is the top group or has children in `definitions`.
-fn is_group(definitions: &DefinitionTree, task_id: &str) -> bool {
-    definitions
-        .node(task_id)
-        .is_some_and(|node| node.folder.is_empty() || !node.children.is_empty())
 }
 
 /// Whether the leaf with `definition` and state `record` is Done as the Work view derives it,
