@@ -32,8 +32,8 @@ use crate::registry::{DoneHolds, LiveModesRegistry};
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
 use crate::{
-    artifacts, backup_commands, convert_commands, filters, focus, landing_commands, links, modes,
-    open, panel, projects, rebase, repositories, restore_commands, structure,
+    artifacts, backup_commands, convert_commands, detail, filters, focus, landing_commands, links,
+    modes, open, panel, projects, rebase, repositories, restore_commands, structure,
     working_copy_commands, worktrees,
 };
 
@@ -223,6 +223,7 @@ pub fn register(workspace: &mut Workspace) {
     artifacts::register(workspace);
     modes::register(workspace);
     panel::register(workspace);
+    detail::register(workspace);
     filters::register(workspace);
 }
 

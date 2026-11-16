@@ -55,6 +55,10 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w H", "artifact::HideAll"),
     ("ctrl-c w U", "artifact::ShareAll"),
     ("ctrl-c w l", "artifact::Link"),
+    ("ctrl-c w i", "task::ShowDetails"),
+    ("ctrl-c w x s", "task::ShowChecks"),
+    ("ctrl-c w x o", "task::ShowCheckOutput"),
+    ("ctrl-c w x e", "task::EditChecks"),
 ];
 
 /// Commands that stay in the palette with no key.
@@ -152,6 +156,7 @@ async fn emacs_binds_every_work_key(cx: &mut TestAppContext) {
             "ctrl-c w d",
             "ctrl-c w p",
             "ctrl-c w g",
+            "ctrl-c w x",
         ] {
             assert!(
                 resolve(&keymap, prefix, &["Workspace", "Pane"]).1,
@@ -397,5 +402,31 @@ async fn resolve_split_is_bound_only_in_the_landing_view(cx: &mut TestAppContext
                 "{emacs}: {contexts:?}"
             );
         }
+    }
+}
+
+#[gpui::test]
+async fn task_detail_view_keys(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for (default, emacs) in [LINUX, MACOS] {
+        let (keymap, _) = load(&[default, emacs], cx);
+        let view = ["Workspace", "Pane", "TaskDetailView"];
+        for (input, action) in [
+            ("g", "task_detail::Refresh"),
+            ("s", "task_detail::ToggleSources"),
+            ("x", "task::RunChecks"),
+            ("r", "task::RunCheck"),
+            ("k", "task::CancelChecks"),
+            ("c", "task::Complete"),
+        ] {
+            let (names, pending) = resolve(&keymap, input, &view);
+            assert_eq!(names.first(), Some(&action), "{emacs}: {input}");
+            assert!(!pending, "{emacs}: {input}");
+        }
+        // Outside the view they bind nothing.
+        assert_ne!(
+            resolve(&keymap, "x", &["Workspace", "Pane"]).0.first(),
+            Some(&"task::RunChecks")
+        );
     }
 }

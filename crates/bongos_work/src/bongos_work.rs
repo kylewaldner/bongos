@@ -9,6 +9,7 @@ mod backup_commands;
 mod changes;
 mod commands;
 mod convert_commands;
+mod detail;
 mod filters;
 mod focus;
 mod landing_commands;
@@ -34,6 +35,7 @@ mod settings;
 mod status;
 mod store;
 mod structure;
+mod text_views;
 mod view;
 mod working_copy_commands;
 mod worktrees;
@@ -46,11 +48,16 @@ pub use bongos_work_model as model;
 use fs::Fs;
 use gpui::{App, AppContext as _, Entity, Global};
 
-pub use actions::{artifact, project, task, todo, work};
+pub use actions::{artifact, project, task, task_detail, todo, work};
 pub use artifacts::focused;
 pub use changes::CHANGES_INTERVAL;
 pub use commands::{DEFAULT_ACTIVITY, WorkToast, action_types, init_palette, register};
 pub use commands::{ready, set_new_task_todos, show_toast, with_task};
+pub use detail::{
+    DetailLine, LineKind, SectionFocus, SectionRow, SectionTone, TaskDetailView, TaskSection,
+    TaskSectionSource, TaskSectionsRegistry, lines as detail_lines, show_details,
+    show_details_with_sources,
+};
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, focus_task, is_project_top, target};
 pub use master_files::{MASTER_SUFFIX, MasterFile, master_file, master_file_at};
 pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
@@ -78,6 +85,7 @@ pub use store::{
     MAX_RETRIES, OLD_WORKTREE_NOTICE_KEY, Stats, WATCH_LATENCY, WorkCommand, WorkStore,
     WorkStoreEvent, WriteError,
 };
+pub use text_views::{open_file_at_line, open_following_text};
 pub use working_copy_commands::{
     edit_in_working_copy, working_copy_open_path, working_copy_to_edit,
 };
@@ -188,6 +196,8 @@ mod command_tests;
 mod command_tests_more;
 #[cfg(test)]
 mod convert_command_tests;
+#[cfg(test)]
+mod detail_tests;
 #[cfg(test)]
 mod done_hold_tests;
 #[cfg(test)]

@@ -2,8 +2,9 @@
 //! `task_checks.enabled` is false, and their handlers. While it is false each handler only says
 //! that task checks are off. While it is true, run checks, run checks clean, run check, cancel
 //! checks and dump checks act on a task (the task at point, else the focused one, else a pick)
-//! through the checks engine; they start no agent and call no model. The others still say that
-//! they are not available yet.
+//! through the checks engine; they start no agent and call no model. Show checks and show check
+//! sources open the details tab at the Checks section, show check output opens the output of a
+//! check in a read-only buffer, and edit checks opens the task's checks in a working copy.
 //!
 //! Run checks, run checks clean, run check and cancel checks reach the engine through
 //! [`checks_access`]: the engine of this process while it holds the state writer, else the
@@ -12,6 +13,9 @@
 use std::any::TypeId;
 
 use anyhow::Result;
+use bongos_project_repo::{ProjectRepositorySettings, fresh_name};
+use bongos_work::model::PersonAtKeyboard;
+use bongos_work::model::commands::Context as WorkContext;
 use command_palette_hooks::CommandPaletteFilter;
 #[cfg(test)]
 use gpui::Global;
@@ -23,8 +27,10 @@ use workspace::notifications::NotificationId;
 
 use crate::TaskChecksSettings;
 use crate::command_logic::{NO_TASK_MESSAGE, Target, choose_target, report_message, write_dump};
-use crate::engine::{ChecksEngine, RunChecksRequest, plan_rows};
+use crate::edit::{checks_table_row, edit_target};
+use crate::engine::{ChecksEngine, Refusal, RunChecksRequest, plan_rows, task_records};
 use crate::host::{ChecksAccess, ChecksCommand, ChecksReply, checks_access};
+use crate::output_view::{latest_per_check, read_output, view_text};
 
 /// New actions in the `task` namespace, shared with the work tree's, the builder's, Linear's and
 /// Zed's task runner; no name collides.
@@ -104,9 +110,6 @@ impl Global for LastToast {}
 /// The toast a command shows while `task_checks.enabled` is false.
 pub(crate) const OFF_MESSAGE: &str = "Task checks are off (task_checks.enabled)";
 
-/// The toast a command shows while `task_checks.enabled` is true and it is not built yet.
-pub(crate) const NOT_AVAILABLE_MESSAGE: &str = "Running task checks is not available yet";
-
 pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
     #[cfg(test)]
     cx.set_global(LastToast(message.clone()));
@@ -116,23 +119,26 @@ pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Co
     );
 }
 
-/// Registers the handler of `A`: the off toast while `task_checks.enabled` is false, the
-/// not-available toast while it is true.
-fn register_action<A: gpui::Action>(workspace: &mut Workspace) {
-    workspace.register_action(
-        move |workspace, _: &A, _window: &mut Window, cx: &mut Context<Workspace>| {
-            let message = if TaskChecksSettings::get_global(cx).enabled {
-                NOT_AVAILABLE_MESSAGE
-            } else {
-                OFF_MESSAGE
-            };
-            show_toast(workspace, message.to_string(), cx);
-        },
-    );
-}
-
 /// What a command that acts on a task does once it has the task's id.
 type OnTask = fn(String, &mut Workspace, &mut Window, &mut Context<Workspace>);
+
+/// What a command that offers every task says when there is none.
+pub(crate) const NO_TASKS_MESSAGE: &str = "There are no tasks to act on";
+
+fn has_tasks(cx: &App) -> bool {
+    bongos_work::WorkStore::global(cx)
+        .and_then(|store| store.read(cx).snapshot())
+        .is_some_and(|tree| !tree.tasks().is_empty())
+}
+
+/// Which tasks a command offers when it acts on none at point.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Offer {
+    /// The tasks that have checks.
+    WithChecks,
+    /// Every task: the command can give a task its first checks.
+    Any,
+}
 
 /// Registers the handler of `A`: the off toast while `task_checks.enabled` is false, else `act`
 /// on the task the command is for.
@@ -141,29 +147,55 @@ fn register_task_action<A: gpui::Action>(
     placeholder: &'static str,
     act: OnTask,
 ) {
+    register_offering::<A>(workspace, placeholder, Offer::WithChecks, act);
+}
+
+fn register_offering<A: gpui::Action>(
+    workspace: &mut Workspace,
+    placeholder: &'static str,
+    offer: Offer,
+    act: OnTask,
+) {
     workspace.register_action(
         move |workspace, _: &A, window: &mut Window, cx: &mut Context<Workspace>| {
             if !TaskChecksSettings::get_global(cx).enabled {
                 show_toast(workspace, OFF_MESSAGE.to_string(), cx);
                 return;
             }
-            on_task(workspace, window, cx, placeholder, act);
+            on_task(workspace, window, cx, placeholder, offer, act);
         },
     );
 }
 
-/// Calls `act` with the task at point, else asks which task among those with checks.
+/// Calls `act` with the task at point, else asks which task among those `offer` names.
 fn on_task(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
     placeholder: &'static str,
+    offer: Offer,
     act: OnTask,
 ) {
     let Some(engine) = ChecksEngine::global(cx) else {
         return;
     };
     let at_point = bongos_work::task_at_point(workspace, window, cx);
+    if offer == Offer::Any {
+        match at_point {
+            Some(id) => act(id, workspace, window, cx),
+            None if !has_tasks(cx) => show_toast(workspace, NO_TASKS_MESSAGE.to_string(), cx),
+            None => bongos_work::with_task(
+                workspace,
+                window,
+                cx,
+                placeholder,
+                NO_TASKS_MESSAGE,
+                |_, _| true,
+                Box::new(move |id, workspace, window, cx| act(id, workspace, window, cx)),
+            ),
+        }
+        return;
+    }
     let with_checks = match at_point {
         Some(_) => Vec::new(),
         None => tasks_with_checks(&engine, cx),
@@ -385,6 +417,194 @@ fn dump_checks(id: String, workspace: &mut Workspace, _: &mut Window, cx: &mut C
     show_toast(workspace, message, cx);
 }
 
+/// Refuses with a toast when the task has no checks. True when it may go on.
+fn has_checks_or_toast(id: &str, workspace: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
+    let Some(engine) = ChecksEngine::global(cx) else {
+        return false;
+    };
+    let name = task_name(id, cx);
+    let task = engine.read(cx).task(id, cx);
+    let refusal = match task {
+        Some(task) => plan_rows(&task, None).err(),
+        None => Some(Refusal::NoChecks { task: name }),
+    };
+    match refusal {
+        Some(refusal) => {
+            show_toast(workspace, refusal.to_string(), cx);
+            false
+        }
+        None => true,
+    }
+}
+
+/// `task: show checks`: the details of the task, at its Checks section.
+fn show_checks(
+    id: String,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let focus = bongos_work::SectionFocus {
+        title: CHECKS_TITLE.to_string(),
+    };
+    bongos_work::show_details(&id, Some(focus), workspace, window, cx);
+}
+
+/// `task: show check sources`: the same, with the effective set's derivation under it.
+fn show_check_sources(
+    id: String,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let focus = bongos_work::SectionFocus {
+        title: CHECKS_TITLE.to_string(),
+    };
+    bongos_work::show_details_with_sources(&id, Some(focus), workspace, window, cx);
+}
+
+/// The title of the Checks section.
+const CHECKS_TITLE: &str = "Checks";
+
+/// `task: show check output`: the output of a check, asked for when the task has several that
+/// ran.
+fn show_check_output(
+    id: String,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !has_checks_or_toast(&id, workspace, cx) {
+        return;
+    }
+    let Some(engine) = ChecksEngine::global(cx) else {
+        return;
+    };
+    let records = engine.read(cx).records(&id, cx);
+    let checks: Vec<String> = latest_per_check(&records)
+        .into_iter()
+        .map(|record| record.check.clone())
+        .collect();
+    match checks.len() {
+        0 => {
+            let name = task_name(&id, cx);
+            show_toast(workspace, format!("No check of {name} has run yet"), cx);
+        }
+        1 => open_output_of(&id, &checks[0], workspace, window, cx),
+        _ => {
+            let chosen = checks.clone();
+            bongos_work::pick(
+                workspace,
+                "Check output",
+                checks,
+                0,
+                Box::new(move |index, workspace, window, cx| {
+                    open_output_of(&id, &chosen[index], workspace, window, cx)
+                }),
+                window,
+                cx,
+            );
+        }
+    }
+}
+
+/// Opens the output of the latest record of `check` of the task in a read-only buffer, which
+/// follows the files while the check runs.
+pub(crate) fn open_output_of(
+    task_id: &str,
+    check: &str,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(engine) = ChecksEngine::global(cx) else {
+        return;
+    };
+    let Some(task) = engine.read(cx).task(task_id, cx) else {
+        return;
+    };
+    let records = task_records(&task);
+    let latest = latest_per_check(&records)
+        .into_iter()
+        .find(|record| record.check == check)
+        .cloned();
+    let Some(record) = latest else {
+        let message = format!("{check} of {} has not run yet", task.name);
+        show_toast(workspace, message, cx);
+        return;
+    };
+    let text = view_text(&record, read_output(&record).as_deref());
+    let title = format!("Output: {check} of {}", task.name);
+    let (task_id, record_id) = (task_id.to_string(), record.id);
+    let follow = move |cx: &App| {
+        let records = task_records(&task);
+        let Some(record) = records.iter().find(|record| record.id == record_id) else {
+            return (String::new(), true);
+        };
+        let running =
+            ChecksEngine::global(cx).is_some_and(|engine| engine.read(cx).is_running(&task_id));
+        let text = view_text(record, read_output(record).as_deref());
+        (text, record.is_finished() && !running)
+    };
+    bongos_work::open_following_text(workspace, title, text, follow, window, cx);
+}
+
+/// `task: edit checks`: the file of the task's checks in a new working copy, with the cursor at
+/// its `checks` table.
+fn edit_checks(
+    id: String,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(engine) = ChecksEngine::global(cx) else {
+        return;
+    };
+    let Some(task) = engine.read(cx).task(&id, cx) else {
+        let name = task_name(&id, cx);
+        show_toast(
+            workspace,
+            format!("{name} is not in a project with definitions"),
+            cx,
+        );
+        return;
+    };
+    let folder = bongos_work::WorkStore::global(cx)
+        .and_then(|store| store.read(cx).snapshot())
+        .and_then(|tree| tree.task_by_id(&id)?.definition.clone());
+    let relative = edit_target(folder.as_deref(), None);
+    let prefix = ProjectRepositorySettings::get_global(cx)
+        .branch_prefix
+        .clone();
+    let author = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx)).author;
+    let created =
+        bongos_work::working_copy_to_edit(task.project, fresh_name(), None, author, prefix, cx);
+    cx.spawn_in(window, async move |workspace, cx| match created.await {
+        Ok(definitions) => {
+            let path = definitions.join(&relative);
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let row = checks_table_row(&text);
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    bongos_work::open_file_at_line(path, row, workspace, window, cx)
+                })
+                .ok();
+        }
+        Err(error) => {
+            workspace
+                .update(cx, |workspace, cx| {
+                    show_toast(
+                        workspace,
+                        format!("Could not edit the checks: {error:#}"),
+                        cx,
+                    )
+                })
+                .ok();
+        }
+    })
+    .detach();
+}
+
 /// Registers the handlers of the actions of task checks on `workspace`.
 pub fn register(workspace: &mut Workspace) {
     register_task_action::<task::RunChecks>(workspace, "Run checks of", run_checks);
@@ -394,10 +614,20 @@ pub fn register(workspace: &mut Workspace) {
         run_checks_clean,
     );
     register_task_action::<task::RunCheck>(workspace, "Run a check of", run_check);
-    register_action::<task::ShowChecks>(workspace);
-    register_action::<task::ShowCheckSources>(workspace);
-    register_action::<task::ShowCheckOutput>(workspace);
-    register_action::<task::EditChecks>(workspace);
+    // Show checks and show check sources open the details tab, whose header says "no checks".
+    register_offering::<task::ShowChecks>(workspace, "Show checks of", Offer::Any, show_checks);
+    register_offering::<task::ShowCheckSources>(
+        workspace,
+        "Show check sources of",
+        Offer::Any,
+        show_check_sources,
+    );
+    register_task_action::<task::ShowCheckOutput>(
+        workspace,
+        "Show check output of",
+        show_check_output,
+    );
+    register_offering::<task::EditChecks>(workspace, "Edit checks of", Offer::Any, edit_checks);
     register_task_action::<task::CancelChecks>(workspace, "Stop checks of", cancel_checks);
     register_task_action::<task::DumpChecks>(workspace, "Dump checks of", dump_checks);
 }

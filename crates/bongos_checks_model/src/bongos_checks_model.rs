@@ -20,7 +20,7 @@ pub use evidence::{
     Accepted, CheckState, Current, EvidenceRecord, Freshness, RowStatus, Satisfaction, Stale,
     freshness, or_accepted, row_status, satisfied,
 };
-pub use section::{SectionRow, TaskSection, Tone, section};
+pub use section::{SectionRow, TaskSection, Tone, section, source_rows};
 pub use verdict::{
     Exit, NoVerdictReason, ResultFile, ScopeAnswer, Verdict, combine, judge, parse_plan_answer,
     parse_result_file, parse_scope_answer,

@@ -5557,6 +5557,7 @@ mod tests {
                 "syntax_tree_view",
                 "tab_switcher",
                 "task",
+                "task_detail",
                 "terminal",
                 "terminal_panel",
                 "text_finder",

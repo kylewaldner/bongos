@@ -8,7 +8,7 @@ use settings::{Settings as _, SettingsStore};
 use workspace::notifications::NotificationId;
 use workspace::{AppState, MultiWorkspace, Workspace};
 
-use crate::actions::{LastToast, NOT_AVAILABLE_MESSAGE, OFF_MESSAGE};
+use crate::actions::{LastToast, NO_TASKS_MESSAGE, OFF_MESSAGE};
 use crate::command_logic::NO_TASK_MESSAGE;
 use crate::{ChecksToast, TaskChecksSettings, action_types};
 
@@ -162,17 +162,15 @@ async fn checks_dispatch_by_name_shows_the_off_toast_while_off(cx: &mut TestAppC
     }
 }
 
-/// The commands that act on a task's checks; the others are not built yet.
-const ACTING: &[&str] = &[
-    "task::RunChecks",
-    "task::RunChecksClean",
-    "task::RunCheck",
-    "task::CancelChecks",
-    "task::DumpChecks",
+/// The commands that offer every task, not only those with checks.
+const OFFERING_ANY: &[&str] = &[
+    "task::ShowChecks",
+    "task::ShowCheckSources",
+    "task::EditChecks",
 ];
 
 #[gpui::test]
-async fn checks_dispatch_by_name_acts_on_a_task_or_says_it_is_not_available_while_on(
+async fn checks_dispatch_by_name_acts_on_a_task_or_says_there_is_none_while_on(
     cx: &mut TestAppContext,
 ) {
     let (workspace, cx) = workspace_with_actions(cx).await;
@@ -184,10 +182,10 @@ async fn checks_dispatch_by_name_acts_on_a_task_or_says_it_is_not_available_whil
         dispatch(name, cx);
         assert!(toast_shown(&workspace, cx), "{name} shows a toast");
         // With no Work tree there is no task to act on, and nothing runs.
-        let expected = if ACTING.contains(name) {
-            NO_TASK_MESSAGE
+        let expected = if OFFERING_ANY.contains(name) {
+            NO_TASKS_MESSAGE
         } else {
-            NOT_AVAILABLE_MESSAGE
+            NO_TASK_MESSAGE
         };
         cx.update(|_, cx| {
             assert_eq!(cx.global::<LastToast>().0, expected, "{name}");

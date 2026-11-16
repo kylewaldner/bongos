@@ -8,7 +8,8 @@
 //! state writer, the base trees of parameterized runs, the owed markers of finished tasks, the
 //! done hold they cause, and the decider that writes the done record of a leaf whose checks
 //! pass on its tree, and of a group whose closing checks pass on its last child's tree, and the
-//! hook that takes that decision on a workflow run's worktree when the run completes its todo.
+//! hook that takes that decision on a workflow run's worktree when the run completes its todo,
+//! and the Checks section of a task's details tab with the output and edit views of its checks.
 
 mod actions;
 mod base_tree;
@@ -17,6 +18,7 @@ pub mod command_logic;
 mod completion;
 pub mod decider;
 mod definitions;
+mod edit;
 pub mod engine;
 mod evidence_store;
 mod exporter;
@@ -25,12 +27,14 @@ pub mod holds;
 pub mod host;
 pub mod live;
 mod output;
+mod output_view;
 pub mod owed;
 mod pin;
 pub mod pools;
 pub mod process;
 mod retained;
 pub mod run;
+mod section_source;
 mod settings;
 mod task_source;
 mod task_tree;
@@ -94,6 +98,7 @@ pub fn init(cx: &mut gpui::App) {
     definitions::register(cx);
     let engine = ChecksEngine::install(ChecksEngine::for_app(cx), cx);
     decider::init(engine.clone(), cx);
+    section_source::init(&engine, cx);
     completion::register(cx);
     // What a crash left in the scratch folder goes at load.
     if let Ok(git) = bongos_project_repo::Git::locate() {
@@ -113,6 +118,8 @@ mod changed_files_tests;
 mod decider_tests;
 #[cfg(test)]
 mod definitions_tests;
+#[cfg(test)]
+mod edit_checks_tests;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
