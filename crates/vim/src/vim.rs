@@ -1,6 +1,8 @@
 //! Vim support for Zed.
 
 #[cfg(test)]
+mod cursor_tests;
+#[cfg(test)]
 mod test;
 
 mod change_list;
@@ -1004,12 +1006,7 @@ impl Vim {
     }
 
     fn deactivate(editor: &mut Editor, cx: &mut Context<Editor>) {
-        editor.set_cursor_shape(
-            EditorSettings::get_global(cx)
-                .cursor_shape
-                .unwrap_or_default(),
-            cx,
-        );
+        editor.set_mode_cursor_shape(None, cx);
         editor.set_clip_at_line_ends(false, cx);
         editor.set_collapse_matches(false);
         editor.set_input_enabled(true);
@@ -1143,7 +1140,6 @@ impl Vim {
             }
             EditorEvent::Edited { .. } => self.push_to_change_list(window, cx),
             EditorEvent::FocusedIn => self.sync_vim_settings(window, cx),
-            EditorEvent::CursorShapeChanged => self.cursor_shape_changed(window, cx),
             EditorEvent::PushedToNavHistory {
                 anchor,
                 is_deactivate,
@@ -1356,9 +1352,21 @@ impl Vim {
         forced_motion
     }
 
+    /// The shape the current mode draws, falling back to the editor's settings shape when the
+    /// mode inherits it.
     pub fn cursor_shape(&self, cx: &App) -> CursorShape {
+        self.mode_cursor_shape(cx).unwrap_or_else(|| {
+            EditorSettings::get_global(cx)
+                .cursor_shape
+                .unwrap_or_default()
+        })
+    }
+
+    /// The shape the current mode asks the editor for, or `None` when insert mode inherits the
+    /// editor's own shape.
+    fn mode_cursor_shape(&self, cx: &App) -> Option<CursorShape> {
         let cursor_shape = VimSettings::get_global(cx).cursor_shape;
-        match self.mode {
+        Some(match self.mode {
             Mode::Normal => {
                 if let Some(operator) = self.operator_stack.last() {
                     match operator {
@@ -1389,12 +1397,9 @@ impl Vim {
             }
             Mode::Insert => match cursor_shape.insert {
                 InsertModeCursorShape::Explicit(shape) => shape,
-                InsertModeCursorShape::Inherit => {
-                    let editor_settings = EditorSettings::get_global(cx);
-                    editor_settings.cursor_shape.unwrap_or_default()
-                }
+                InsertModeCursorShape::Inherit => return None,
             },
-        }
+        })
     }
 
     fn expects_character_input(&self) -> bool {
@@ -1570,14 +1575,8 @@ impl Vim {
         self.clear_operator(window, cx);
         self.update_editor(cx, |vim, editor, cx| {
             if vim.cursor_shape(cx) == CursorShape::Block {
-                editor.set_cursor_shape(CursorShape::Hollow, cx);
+                editor.set_mode_cursor_shape(Some(CursorShape::Hollow), cx);
             }
-        });
-    }
-
-    fn cursor_shape_changed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.update_editor(cx, |vim, editor, cx| {
-            editor.set_cursor_shape(vim.cursor_shape(cx), cx);
         });
     }
 
@@ -2227,7 +2226,7 @@ impl Vim {
 
     fn state_for_editor_settings(&self, cx: &App) -> VimEditorSettingsState {
         VimEditorSettingsState {
-            cursor_shape: self.cursor_shape(cx),
+            cursor_shape: self.mode_cursor_shape(cx),
             clip_at_line_ends: self.clip_at_line_ends(),
             collapse_matches: !HelixModeSetting::get_global(cx).0 && !self.search.cmd_f_search,
             input_enabled: self.editor_input_enabled(),
@@ -2247,7 +2246,7 @@ impl Vim {
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) {
-        editor.set_cursor_shape(state.cursor_shape, cx);
+        editor.set_mode_cursor_shape(state.cursor_shape, cx);
         editor.set_clip_at_line_ends(state.clip_at_line_ends, cx);
         editor.set_collapse_matches(state.collapse_matches);
         editor.set_input_enabled(state.input_enabled);
@@ -2265,7 +2264,7 @@ impl Vim {
 }
 
 struct VimEditorSettingsState {
-    cursor_shape: CursorShape,
+    cursor_shape: Option<CursorShape>,
     clip_at_line_ends: bool,
     collapse_matches: bool,
     input_enabled: bool,

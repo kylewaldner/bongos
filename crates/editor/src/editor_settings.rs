@@ -18,7 +18,12 @@ use ui::scrollbars::ShowScrollbar;
 #[derive(Clone, RegisterSetting)]
 pub struct EditorSettings {
     pub cursor_blink: bool,
+    /// The shape the settings give: `emacs.cursor_style` when set to `emacs` or `modern`, else a
+    /// block under the Emacs base keymap, else `cursor_shape`.
     pub cursor_shape: Option<CursorShape>,
+    /// The shape `emacs.cursor_style` forces when the user set it to `emacs` (block) or `modern`
+    /// (bar); `None` for `auto` or unset. It beats a mode's shape, such as vim's.
+    pub explicit_cursor_style: Option<CursorShape>,
     /// Whether typing over a non-empty selection replaces it; false under the Emacs base keymap
     /// unless `emacs.delete_selection` is set.
     pub typing_replaces_selection: bool,
@@ -203,7 +208,8 @@ impl EditorSettings {
 /// The cursor shape the session toggle (`cursor: toggle style`) forces on every editor, or
 /// `None` while the settings decide. It lives for the session and is never written to disk;
 /// every editor observes it. A shape set on one editor with
-/// `Editor::set_cursor_shape_override` beats it.
+/// `Editor::set_cursor_shape_override` beats it; it beats `emacs.cursor_style` and a mode's
+/// shape.
 #[derive(Default)]
 pub struct CursorStyleOverride(pub Option<CursorShape>);
 
@@ -218,7 +224,7 @@ impl CursorStyleOverride {
     /// Makes the shape the editors draw now (the previous toggle, else the settings) the other
     /// of block and bar.
     pub fn toggle(cx: &mut App) {
-        let next = if effective_cursor_shape(None, cx) == CursorShape::Block {
+        let next = if effective_cursor_shape(None, None, cx) == CursorShape::Block {
             CursorShape::Bar
         } else {
             CursorShape::Block
@@ -232,10 +238,18 @@ impl CursorStyleOverride {
     }
 }
 
-/// The shape an editor draws: its own override, else the session toggle, else the settings.
-pub(crate) fn effective_cursor_shape(own: Option<CursorShape>, cx: &App) -> CursorShape {
+/// The shape an editor draws, highest first: its own override, the session toggle, an explicit
+/// `emacs.cursor_style`, the shape of its current mode (such as a vim mode), then the settings.
+pub(crate) fn effective_cursor_shape(
+    own: Option<CursorShape>,
+    mode: Option<CursorShape>,
+    cx: &App,
+) -> CursorShape {
+    let settings = EditorSettings::get_global(cx);
     own.or_else(|| CursorStyleOverride::get(cx))
-        .or(EditorSettings::get_global(cx).cursor_shape)
+        .or(settings.explicit_cursor_style)
+        .or(mode)
+        .or(settings.cursor_shape)
         .unwrap_or_default()
 }
 
@@ -250,19 +264,22 @@ impl Settings for EditorSettings {
         let search = editor.search.unwrap();
         let drag_and_drop_selection = editor.drag_and_drop_selection.unwrap();
         let sticky_scroll = editor.sticky_scroll.unwrap();
-        Self {
-            cursor_blink: editor.cursor_blink.unwrap(),
-            cursor_shape: match content.emacs.as_ref().and_then(|emacs| emacs.cursor_style) {
+        let explicit_cursor_style =
+            match content.emacs.as_ref().and_then(|emacs| emacs.cursor_style) {
                 Some(EmacsCursorStyle::Emacs) => Some(CursorShape::Block),
                 Some(EmacsCursorStyle::Modern) => Some(CursorShape::Bar),
-                Some(EmacsCursorStyle::Auto) | None => {
-                    if content.base_keymap.map(BaseKeymap::from) == Some(BaseKeymap::Emacs) {
-                        Some(CursorShape::Block)
-                    } else {
-                        editor.cursor_shape.map(Into::into)
-                    }
+                Some(EmacsCursorStyle::Auto) | None => None,
+            };
+        Self {
+            cursor_blink: editor.cursor_blink.unwrap(),
+            cursor_shape: explicit_cursor_style.or_else(|| {
+                if content.base_keymap.map(BaseKeymap::from) == Some(BaseKeymap::Emacs) {
+                    Some(CursorShape::Block)
+                } else {
+                    editor.cursor_shape.map(Into::into)
                 }
-            },
+            }),
+            explicit_cursor_style,
             typing_replaces_selection: content.base_keymap.map(BaseKeymap::from)
                 != Some(BaseKeymap::Emacs)
                 || content
