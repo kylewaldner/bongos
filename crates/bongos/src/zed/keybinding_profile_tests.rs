@@ -16,6 +16,7 @@ const PICKER: [&str; 3] = ["Workspace", "Picker", "Editor mode=single_line"];
 const MINIBUFFER: [&str; 4] = ["Workspace", "Minibuffer", "Picker", "Editor mode=full"];
 const PANE_TERMINAL: [&str; 3] = ["Workspace", "Pane", "Terminal"];
 const TERMINAL: [&str; 4] = ["Workspace", "Dock", "TerminalPanel", "Terminal"];
+const CHAT_TERMINAL: [&str; 4] = ["Workspace", "Dock", "ChatPanel", "Terminal"];
 const PROMPTS_EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full prompts"];
 
 /// The bindings a profile loads, in load order, with the sources the app loads them with.
@@ -869,4 +870,103 @@ async fn a_new_full_editor_opens_in_normal_mode_under_vim_and_i_inserts(cx: &mut
     assert_eq!(vim_mode(cx).as_deref(), Some("normal"));
     cx.simulate_keystrokes("i");
     assert_eq!(vim_mode(cx).as_deref(), Some("insert"));
+}
+
+#[gpui::test]
+async fn terminal_keys_forward_and_never_wait_under_vscode_and_vim(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        for (base, vim_enabled) in [(BaseKeymap::VSCode, false), (BaseKeymap::Vim, true)] {
+            let keymap = Keymap::new(load_profile(base, vim_enabled, macos, cx));
+            let pane = if macos { "cmd-1" } else { "alt-1" };
+            for contexts in [&TERMINAL[..], &PANE_TERMINAL[..], &CHAT_TERMINAL[..]] {
+                let label = format!("{base:?} macos={macos}: {contexts:?}");
+                for input in [
+                    "ctrl-c", "ctrl-d", "ctrl-k", "ctrl-w", "ctrl-r", "escape", "a", "j", "q",
+                ] {
+                    let (names, pending) = resolve(&keymap, input, contexts);
+                    assert!(
+                        matches!(
+                            names.first().copied(),
+                            None | Some("terminal::SendKeystroke")
+                        ),
+                        "{label}: {input} -> {names:?}"
+                    );
+                    assert!(!pending, "{label}: {input}");
+                }
+                assert_eq!(
+                    first(&keymap, pane, contexts),
+                    Some("workspace::ActivatePane"),
+                    "{label}: {pane}"
+                );
+            }
+        }
+    }
+}
+
+#[gpui::test]
+async fn the_prompt_editor_keys_resolve_under_vim_and_vscode(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        let vscode = Keymap::new(load_profile(BaseKeymap::VSCode, false, macos, cx));
+        assert_eq!(
+            first(
+                &vscode,
+                if macos { "cmd-c" } else { "ctrl-c" },
+                &PROMPTS_EDITOR
+            ),
+            Some("editor::Copy"),
+            "macos={macos}"
+        );
+        let vim = Keymap::new(load_profile(BaseKeymap::Vim, true, macos, cx));
+        let (names, pending) = resolve(
+            &vim,
+            if macos {
+                "cmd-k b ctrl-c"
+            } else {
+                "ctrl-k b ctrl-c"
+            },
+            &PROMPTS_EDITOR,
+        );
+        assert_eq!(names.first(), Some(&"prompts::Send"), "macos={macos}");
+        assert!(!pending, "macos={macos}");
+    }
+}
+
+#[gpui::test]
+async fn the_prompt_editor_leaves_insert_mode_with_escape_under_vim(cx: &mut TestAppContext) {
+    use editor::{Editor, EditorMode, MultiBuffer};
+    use gpui::{AppContext as _, Focusable as _, VisualTestContext};
+
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        editor::init(cx);
+        vim::init(cx);
+    });
+    set_base_keymap_json(cx, "Vim");
+    let bindings = loaded_keymap(cx);
+    cx.update(|cx| {
+        cx.clear_key_bindings();
+        cx.bind_keys(bindings);
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let buffer = cx.new(|cx| language::Buffer::local("", cx));
+        let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        Editor::new(EditorMode::full(), buffer, None, window, cx)
+    });
+    let vim_mode = |cx: &mut VisualTestContext| {
+        editor.update_in(cx, |editor, window, cx| {
+            editor
+                .key_context(window, cx)
+                .get("vim_mode")
+                .map(|mode| mode.to_string())
+        })
+    };
+    editor.update_in(cx, |editor, window, cx| {
+        window.focus(&editor.focus_handle(cx), cx)
+    });
+    cx.simulate_keystrokes("i");
+    assert_eq!(vim_mode(cx).as_deref(), Some("insert"));
+    cx.simulate_keystrokes("escape");
+    assert_eq!(vim_mode(cx).as_deref(), Some("normal"));
 }
