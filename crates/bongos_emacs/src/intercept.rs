@@ -24,8 +24,8 @@
 use bongos_emacs_model::prefix_arg::PrefixArg;
 use editor::Editor;
 use gpui::{
-    Action, App, Entity, Focusable as _, KeyContext, Keymap, Keystroke, SharedString,
-    Subscription, Window,
+    Action, App, Entity, Focusable as _, KeyContext, Keymap, Keystroke, SharedString, Subscription,
+    Window,
 };
 
 use crate::actions::{DigitArgument, KeyboardQuit, NegativeArgument, UniversalArgument};
@@ -262,9 +262,7 @@ pub(crate) fn install(cx: &mut App) -> Subscription {
                     }
                 }
             }
-            Route::Repeat(action) => {
-                repeat::start(window, cx, action.as_ref(), arg, Some(&origin))
-            }
+            Route::Repeat(action) => repeat::start(window, cx, action.as_ref(), arg, Some(&origin)),
             Route::Type(text) => type_text(&text, arg, &origin, window, cx),
         }
         // The key is consumed here, so the chord it completed is no longer pending. Dispatching

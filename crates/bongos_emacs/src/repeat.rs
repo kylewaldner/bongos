@@ -282,10 +282,7 @@ impl Runner {
     }
 
     fn show_progress(&self, window: &mut Window, cx: &mut App) {
-        let text = format!(
-            "{}: {}/{}, C-g stops",
-            self.echo, self.done, self.total
-        );
+        let text = format!("{}: {}/{}, C-g stops", self.echo, self.done, self.total);
         bongos_minibuffer::set_prefix_echo(window, cx, Some(text));
     }
 }
@@ -294,7 +291,10 @@ impl Runner {
 fn progress_mark(
     editor: &Entity<Editor>,
     cx: &App,
-) -> (usize, std::sync::Arc<[text::Selection<multi_buffer::Anchor>]>) {
+) -> (
+    usize,
+    std::sync::Arc<[text::Selection<multi_buffer::Anchor>]>,
+) {
     let editor = editor.read(cx);
     let edits = editor.buffer().read(cx).snapshot(cx).edit_count();
     (edits, editor.selections.disjoint_anchors_arc())

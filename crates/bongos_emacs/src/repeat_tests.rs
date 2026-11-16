@@ -21,7 +21,7 @@ use crate::prefix_arg_tests::route_echo;
 use crate::quit_tests::workspace_window_with;
 use crate::repeat::{self, REPEATS_PER_SLICE};
 
-actions!(repeat_tests, [InsertX, Mark, Leave, Nothing]);
+actions!(repeat_tests, [InsertX, Weave, Mark, Leave, Nothing]);
 
 thread_local! {
     /// The number of `x` in the editor each time `Mark` ran.
@@ -41,6 +41,7 @@ fn setup(cx: &mut gpui::App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-u", UniversalArgument, editor),
         KeyBinding::new("ctrl-k", InsertX, editor),
+        KeyBinding::new("ctrl-w", Weave, editor),
         KeyBinding::new("ctrl-p", Mark, editor),
         KeyBinding::new("ctrl-l", Leave, editor),
         KeyBinding::new("ctrl-n", Nothing, editor),
@@ -52,6 +53,17 @@ fn setup(cx: &mut gpui::App) {
             .register_action(move |_: &InsertX, window, cx| {
                 insert
                     .update(cx, |editor, cx| editor.insert("x", window, cx))
+                    .ok();
+            })
+            .detach();
+        let weave = weak.clone();
+        editor
+            .register_action(move |_: &Weave, window, cx| {
+                weave
+                    .update(cx, |editor, cx| {
+                        editor.insert("x", window, cx);
+                        editor.move_right(&editor::actions::MoveRight, window, cx);
+                    })
                     .ok();
             })
             .detach();
@@ -134,7 +146,10 @@ fn buffer(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Entity<Buffer>
 }
 
 /// Counts the buffer's `Edited` events.
-fn count_edits(buffer: &Entity<Buffer>, cx: &mut VisualTestContext) -> (Rc<Cell<usize>>, Subscription) {
+fn count_edits(
+    buffer: &Entity<Buffer>,
+    cx: &mut VisualTestContext,
+) -> (Rc<Cell<usize>>, Subscription) {
     let edits = Rc::new(Cell::new(0));
     let seen = edits.clone();
     let subscription = cx.update(|_, cx| {
@@ -212,9 +227,33 @@ async fn a_long_run_is_sliced_and_one_undo_step(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, &mut cx), "abc");
     redo(&editor, &mut cx);
     assert_eq!(text(&editor, &mut cx), format!("{}abc", xs(120)));
-    // Redo puts the cursor where the run ended.
+}
+
+#[gpui::test]
+async fn redo_puts_the_cursor_where_the_run_ended(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) = window(cx).await;
+    let original = "abc".repeat(50);
+    editor.update_in(&mut cx, |editor, window, cx| {
+        editor.set_text(original.clone(), window, cx);
+        editor.move_to_beginning(&editor::actions::MoveToBeginning, window, cx);
+    });
+    // Each run of `Weave` puts an `x` before the next character and steps over it, so the
+    // cursor ends past where any slice's edits sit.
+    type_keys(&mut cx, "ctrl-u 1 2 0 ctrl-w");
+    cx.run_until_parked();
+    let woven: String = original[..120].chars().map(|c| format!("x{c}")).collect();
+    assert_eq!(
+        text(&editor, &mut cx),
+        format!("{woven}{}", &original[120..])
+    );
+    undo(&editor, &mut cx);
+    assert_eq!(text(&editor, &mut cx), original);
+    redo(&editor, &mut cx);
     cx.simulate_keystrokes("|");
-    assert_eq!(text(&editor, &mut cx), format!("{}|abc", xs(120)));
+    assert_eq!(
+        text(&editor, &mut cx),
+        format!("{woven}|{}", &original[120..])
+    );
 }
 
 #[gpui::test]
@@ -311,14 +350,20 @@ async fn releasing_the_editor_mid_run_leaves_nothing_open(cx: &mut TestAppContex
     cx.run_until_parked();
     assert_eq!(progress(&mut cx), None);
     assert!(no_open_transaction(&buffer, &mut cx));
-    assert_eq!(buffer.read_with(&cx, |buffer, _| buffer.text()), format!("{}abc", xs(50)));
+    assert_eq!(
+        buffer.read_with(&cx, |buffer, _| buffer.text()),
+        format!("{}abc", xs(50))
+    );
     // A later edit and its undo work on the same buffer.
     buffer.update(&mut cx, |buffer, cx| {
         buffer.edit([(0..0, "q")], None, cx);
         assert!(buffer.text().starts_with('q'));
         buffer.undo(cx);
     });
-    assert_eq!(buffer.read_with(&cx, |buffer, _| buffer.text()), format!("{}abc", xs(50)));
+    assert_eq!(
+        buffer.read_with(&cx, |buffer, _| buffer.text()),
+        format!("{}abc", xs(50))
+    );
 }
 
 #[gpui::test]
@@ -336,7 +381,10 @@ async fn a_zero_count_runs_nothing(cx: &mut TestAppContext) {
     type_keys(&mut cx, "ctrl-u 0 ctrl-k");
     cx.run_until_parked();
     assert_eq!(text(&editor, &mut cx), "abc");
-    assert_eq!(cx.update(|window, cx| prefix_arg::pending(window, cx)), None);
+    assert_eq!(
+        cx.update(|window, cx| prefix_arg::pending(window, cx)),
+        None
+    );
 }
 
 #[gpui::test]
