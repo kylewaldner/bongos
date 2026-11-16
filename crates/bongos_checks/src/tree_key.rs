@@ -211,6 +211,45 @@ pub fn key_inputs_digest(paths: &[PathBuf]) -> Result<String, TreeError> {
     Ok(format!("{:x}", combined.finalize()))
 }
 
+/// [`key_inputs_digest`] of the files at `paths` inside the tree object `tree` of the repository
+/// at `repository` instead of files on disk: the same digest when the tree holds the same bytes.
+/// A path the tree does not hold is missing; one that is not a file there is an error.
+pub(crate) async fn key_inputs_in_tree(
+    git: &Git,
+    repository: &Path,
+    tree: &str,
+    paths: &[String],
+) -> Result<String, TreeError> {
+    if tree.len() < 40 || !tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TreeError::BadTreeId {
+            output: tree.to_string(),
+        });
+    }
+    let mut combined = Sha256::new();
+    for path in paths {
+        let path = path.trim_start_matches("./");
+        let object = format!("{tree}:{path}");
+        let digest = match git.run(repository, &["cat-file", "-t", &object]).await {
+            Err(_) => MISSING_INPUT.to_string(),
+            Ok(kind) if kind == "blob" => {
+                let bytes = git
+                    .run_raw(repository, &["cat-file", "blob", &object])
+                    .await?;
+                format!("{:x}", Sha256::digest(&bytes))
+            }
+            Ok(kind) => {
+                return Err(TreeError::io(
+                    format!("reading {path} in the tree {tree}"),
+                    std::io::Error::other(format!("it is a {kind}, not a file")),
+                ));
+            }
+        };
+        combined.update(digest.as_bytes());
+        combined.update(b"\n");
+    }
+    Ok(format!("{:x}", combined.finalize()))
+}
+
 fn hash_file(mut file: std::fs::File, path: &Path) -> Result<String, TreeError> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];

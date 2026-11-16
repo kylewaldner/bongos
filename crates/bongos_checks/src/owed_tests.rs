@@ -1083,6 +1083,7 @@ fn last_row(id: &str, generation: u64) -> LastRow {
         id: id.to_string(),
         generation,
         tree_key: None,
+        found_at: None,
     }
 }
 

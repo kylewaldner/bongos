@@ -53,8 +53,15 @@ pub struct Variant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StartedBy {
     Person,
-    Run { run_id: String, node_key: String },
-    Landing { tree: String },
+    Run {
+        run_id: String,
+        node_key: String,
+    },
+    Landing {
+        tree: String,
+    },
+    /// The done decider, running a group's closing checks on the tree of its last child.
+    GroupDecision,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
