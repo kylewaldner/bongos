@@ -195,6 +195,11 @@ fn real_stages_a_commit_not_on_any_ref() {
         let copy = sandbox.temp.path().join("copy");
         runner.clone_local(staged.dir(), &copy).await.unwrap();
         assert_eq!(runner.head(&copy).await.unwrap(), hidden);
+        assert_eq!(
+            runner.remote_url(&copy).await.unwrap(),
+            url.as_str(),
+            "a local clone keeps the source's origin"
+        );
     });
 }
 

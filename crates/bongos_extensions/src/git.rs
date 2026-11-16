@@ -134,7 +134,8 @@ pub trait GitRunner: Send + Sync {
     /// Creates `dir` as a repository holding `commit` of `url`, checked out detached. Reaches the
     /// network.
     async fn fetch_commit(&self, url: &SourceUrl, commit: &str, dir: &Path) -> Result<()>;
-    /// Clones the local repository `src` into `dir`.
+    /// Clones the local repository `src` into `dir` without reaching the network. The clone's
+    /// `origin` is `src`'s `origin`, so it still names where the code came from.
     async fn clone_local(&self, src: &Path, dir: &Path) -> Result<()>;
     /// The `origin` URL of the repository in `dir`.
     async fn remote_url(&self, dir: &Path) -> Result<String>;
@@ -341,11 +342,13 @@ impl GitRunner for RealGit {
     }
 
     async fn clone_local(&self, src: &Path, dir: &Path) -> Result<()> {
+        let origin = self.remote_url(src).await.ok();
         self.run(
             None,
             &[
                 os("clone"),
                 os("--quiet"),
+                os("--local"),
                 os("--"),
                 src.as_os_str(),
                 dir.as_os_str(),
@@ -353,6 +356,20 @@ impl GitRunner for RealGit {
             None,
         )
         .await?;
+        if let Some(origin) = origin {
+            self.run(
+                Some(dir),
+                &[
+                    os("remote"),
+                    os("set-url"),
+                    os("--"),
+                    os("origin"),
+                    os(&origin),
+                ],
+                None,
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -472,6 +489,37 @@ pub async fn stage(
     commit: &str,
     path: Option<&str>,
 ) -> Result<StagedClone> {
+    let staged = new_staged_clone(layout, commit, path)?;
+    runner
+        .fetch_commit(url, commit, &staged.dir)
+        .await
+        .map_err(|err| anyhow!("could not fetch {commit} from {url}: {err:#}"))?;
+    check_subdirectory(&staged, path, &url.to_string())?;
+    Ok(staged)
+}
+
+/// Clones the local checkout `src`, which holds `commit`, into a new folder under the staging
+/// directory. Reaches no network. On failure the folder is deleted.
+pub async fn stage_local(
+    runner: &dyn GitRunner,
+    layout: &Layout,
+    src: &Path,
+    commit: &str,
+    path: Option<&str>,
+) -> Result<StagedClone> {
+    let staged = new_staged_clone(layout, commit, path)?;
+    // `git clone` wants a folder that does not exist yet.
+    std::fs::remove_dir(&staged.dir)
+        .with_context(|| format!("could not prepare {}", staged.dir.display()))?;
+    runner
+        .clone_local(src, &staged.dir)
+        .await
+        .map_err(|err| anyhow!("could not clone {}: {err:#}", src.display()))?;
+    check_subdirectory(&staged, path, &src.display().to_string())?;
+    Ok(staged)
+}
+
+fn new_staged_clone(layout: &Layout, commit: &str, path: Option<&str>) -> Result<StagedClone> {
     if let Some(path) = path {
         validate_relative_path(path)?;
     }
@@ -492,16 +540,15 @@ pub async fn stage(
         Some(path) => dir.join(path),
         None => dir.clone(),
     };
-    let staged = StagedClone {
+    Ok(StagedClone {
         dir,
         root,
         commit: commit.to_string(),
         armed: true,
-    };
-    runner
-        .fetch_commit(url, commit, &staged.dir)
-        .await
-        .map_err(|err| anyhow!("could not fetch {commit} from {url}: {err:#}"))?;
+    })
+}
+
+fn check_subdirectory(staged: &StagedClone, path: Option<&str>, source: &str) -> Result<()> {
     if let Some(path) = path {
         // A committed symlink could point the subdirectory outside the checkout.
         let inside = match (staged.dir.canonicalize(), staged.root.canonicalize()) {
@@ -509,10 +556,13 @@ pub async fn stage(
             _ => false,
         };
         if !inside {
-            bail!("`{path}` of {url} at {commit} is not a directory inside the repository");
+            bail!(
+                "`{path}` of {source} at {} is not a directory inside the repository",
+                staged.commit
+            );
         }
     }
-    Ok(staged)
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -584,6 +634,14 @@ mod fake {
                 .push(message.to_string());
         }
 
+        /// Makes `dir` a repository of `url` at `commit`, as if it had been fetched there.
+        pub fn add_repository(&self, dir: &Path, url: &str, commit: &str) {
+            self.state
+                .lock()
+                .checkouts
+                .insert(dir.to_path_buf(), (url.to_string(), commit.to_string()));
+        }
+
         /// How many network operations (`ls_remote` and `fetch_commit`) ran.
         pub fn network_ops(&self) -> usize {
             self.state.lock().network_ops
@@ -601,6 +659,21 @@ mod fake {
                 state.network_ops += 1;
             }
         }
+    }
+
+    /// Copies the files of `src` into the new folder `dst`, like the working tree of a clone.
+    fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let target = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &target)?;
+            } else {
+                std::fs::copy(entry.path(), target)?;
+            }
+        }
+        Ok(())
     }
 
     fn pop_failure(failures: &mut HashMap<String, Vec<String>>, url: &str) -> Option<String> {
@@ -649,7 +722,10 @@ mod fake {
                 .get(src)
                 .cloned()
                 .ok_or_else(|| anyhow!("{} is not a repository", src.display()))?;
-            std::fs::create_dir_all(dir)?;
+            if dir.exists() {
+                return Err(anyhow!("{} already exists", dir.display()));
+            }
+            copy_tree(src, dir)?;
             state.checkouts.insert(dir.to_path_buf(), entry);
             Ok(())
         }
