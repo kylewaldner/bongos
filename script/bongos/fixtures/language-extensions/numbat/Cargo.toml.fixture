@@ -1,0 +1,12 @@
+[package]
+name = "numbat"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/numbat.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.99.0"

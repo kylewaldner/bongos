@@ -5937,6 +5937,17 @@ mod tests {
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
             debugger_ui::init(cx);
+            // These tests do not start the extension store, which the language extension offer
+            // line reads when a file of an unknown language opens, so the feature stays off here.
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .extension
+                        .language_extensions
+                        .get_or_insert_default()
+                        .enabled = Some(false);
+                });
+            });
             initialize_workspace(app_state.clone(), cx);
             search::init(cx);
             cx.set_global(workspace::PaneSearchBarCallbacks {

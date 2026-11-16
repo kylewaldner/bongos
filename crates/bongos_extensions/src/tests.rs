@@ -64,7 +64,7 @@ fn defaults_parse(cx: &mut TestAppContext) {
     use_default_settings(cx);
     cx.update(|cx| {
         let settings = LanguageExtensionsSettings::get_global(cx);
-        assert!(!settings.enabled);
+        assert!(settings.enabled);
         assert!(settings.offer);
         assert!(settings.never_offer.is_empty());
     });
@@ -86,7 +86,7 @@ fn never_offer_merges_from_user_settings(cx: &mut TestAppContext) {
         let settings = LanguageExtensionsSettings::get_global(cx);
         assert_eq!(settings.never_offer, ["Zig", "Lua"]);
         assert!(settings.offer, "other keys keep their defaults");
-        assert!(!settings.enabled);
+        assert!(settings.enabled);
     });
 }
 
@@ -130,15 +130,15 @@ fn actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext) {
     cx.update(init_palette);
     assert_eq!(NAMES.len(), action_types().len());
     for name in NAMES {
+        assert!(!palette_hidden(name, cx), "{name} shows by default");
+    }
+    set_enabled(cx, false);
+    for name in NAMES {
         assert!(palette_hidden(name, cx), "{name} is hidden while off");
     }
     set_enabled(cx, true);
     for name in NAMES {
-        assert!(!palette_hidden(name, cx), "{name} shows while on");
-    }
-    set_enabled(cx, false);
-    for name in NAMES {
-        assert!(palette_hidden(name, cx), "{name} is hidden again");
+        assert!(!palette_hidden(name, cx), "{name} shows again");
     }
 }
 
@@ -156,6 +156,11 @@ async fn window(cx: &mut TestAppContext) -> (Entity<Workspace>, VisualTestContex
             store.update_user_settings(cx, |content| {
                 content.minibuffer.get_or_insert_default().enabled_for =
                     Some(vec!["messages".to_string()]);
+                content
+                    .extension
+                    .language_extensions
+                    .get_or_insert_default()
+                    .enabled = Some(false);
             });
         });
     });

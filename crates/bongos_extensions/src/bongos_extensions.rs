@@ -1,7 +1,6 @@
 //! The `extensions` actions of language extensions and the `language_extensions` settings. While
-//! `language_extensions.enabled` is false the six actions are hidden from the command palette and
-//! each only says "language extensions are off" in the echo area, and nothing on disk is read or
-//! touched.
+//! `language_extensions.enabled` is false the commands, the offer line, the build status item and
+//! the startup repair are off; extensions already installed still load through the extension host.
 
 pub mod build_log;
 pub mod commands;

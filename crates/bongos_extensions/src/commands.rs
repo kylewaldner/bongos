@@ -90,6 +90,9 @@ impl Asker for MinibufferAsker {
                 )
             })
         });
+        if let Ok(Ok(())) = &opened {
+            log::info!("language extensions: asked the trust question");
+        }
         async move {
             match opened {
                 Ok(Ok(())) => receiver.await.ok().flatten(),
