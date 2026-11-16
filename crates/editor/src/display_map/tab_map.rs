@@ -1682,7 +1682,7 @@ mod tests {
         fold_map.randomly_mutate(&mut rng);
         let (fold_snapshot, _) = fold_map.read(inlay_snapshot, vec![]);
         let (tab_map, _) = TabMap::new(fold_snapshot, tab_size);
-        let old_snapshot = tab_map.0.clone();
+        let old_snapshot = tab_map.0;
 
         // Many sorted, disjoint edits, as a replace-all makes.
         let mut edits = Vec::new();
