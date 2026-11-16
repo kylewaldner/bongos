@@ -33,6 +33,8 @@ mod prompts_keymap_tests;
 mod query_replace_keymap_tests;
 mod quick_action_bar;
 pub mod remote_debug;
+#[cfg(test)]
+mod universal_argument_tests;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 pub mod visual_tests;
 #[cfg(target_os = "windows")]
