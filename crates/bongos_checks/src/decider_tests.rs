@@ -782,3 +782,60 @@ async fn completion_hook_does_nothing_while_task_checks_is_off(cx: &mut TestAppC
         "nothing was kept"
     );
 }
+
+#[gpui::test]
+async fn completion_pin_goes_when_the_run_end_drops_the_hook(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (world, _runs) = World::with_run(cx, Tree::Git);
+    world.finish();
+
+    let hook = world.engine.update(cx, |engine, cx| {
+        engine.decide_completed(TASK, &RUN.to_string(), world.tree.clone(), cx)
+    });
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.completing.contains_key(TASK)),
+        "the run's worktree is pinned while the decision runs"
+    );
+
+    // The run's end gave up on the hook before its decision ended.
+    drop(hook);
+    cx.run_until_parked();
+    assert!(
+        world
+            .engine
+            .read_with(cx, |engine, _| engine.completing.is_empty()),
+        "the pin went with the hook"
+    );
+}
+
+#[gpui::test]
+async fn completion_waiters_are_let_go_when_the_writer_is_gone(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let world = World::new(cx, TESTS, Tree::Git);
+    // A project of its own whose writer this test drops.
+    let root = TempDir::new().unwrap();
+    let repo = crate::test_support::fixture_project(&root);
+    world
+        .engine
+        .update(cx, |engine, cx| engine.follow_project(&repo, cx));
+    cx.run_until_parked();
+
+    let mut waiting = world
+        .engine
+        .update(cx, |engine, _| engine.decider.decide_and_wait(PROJECT))
+        .expect("the project is followed");
+    drop(repo);
+    cx.run_until_parked();
+
+    // The decisions stopped, and the waiter was let go rather than left waiting.
+    assert!(waiting.try_recv().is_err(), "the waiter was dropped");
+    assert!(
+        world
+            .engine
+            .update(cx, |engine, _| engine.decider.decide_and_wait(PROJECT))
+            .is_none(),
+        "no one waits on a project whose writer is gone"
+    );
+}

@@ -933,6 +933,11 @@ struct SettleContext {
 /// again after a wait does not deliver them twice.
 pub const DELIVERED_FILE: &str = "outcomes.json";
 
+/// How long the end of a successful run waits for its completion hooks. Past it the run ends
+/// anyway; a hook still running then leaves its task as the completion left it.
+pub(crate) const COMPLETION_HOOKS_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+
 impl WorkflowEngine {
     fn settle_context(&self, run: &str, cx: &App) -> Option<SettleContext> {
         let (workflow, task_id, todo, definition, state, checkout, worktree, attempt_dir) = {
@@ -1075,7 +1080,16 @@ impl WorkflowEngine {
                                 cx,
                             )
                         });
-                        hooks.await;
+                        let timeout = cx.background_executor().timer(COMPLETION_HOOKS_TIMEOUT);
+                        if let futures::future::Either::Right(_) =
+                            futures::future::select(hooks, timeout).await
+                        {
+                            log::warn!(
+                                "workflows: run {} ends without its completion hooks, which \
+                                 took longer than {COMPLETION_HOOKS_TIMEOUT:?}",
+                                context.run
+                            );
+                        }
                     }
                     return match task_link::completed(&context.state, &result) {
                         Completed::Done => Settlement::Succeed,

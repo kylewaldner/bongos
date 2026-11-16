@@ -3,6 +3,8 @@
 //! run to end as it would; a completion that did not happen calls no hook. A child of the
 //! lifecycle tests, sharing the task link tests' engine with task writes in memory.
 
+use std::time::Duration;
+
 use futures::channel::oneshot;
 use gpui::AppContext as _;
 
@@ -193,4 +195,32 @@ fn completion_with_no_hook_ends_as_before(cx: &mut TestAppContext) {
     assert_eq!(linked.status(&run), RunStatus::Succeeded);
     assert_eq!(linked.writes.todo_states()[1].1, TodoState::Done);
     assert_eq!(linked.writes.changes.lock().unwrap().len(), 2);
+}
+
+#[gpui::test]
+fn completion_hook_that_never_resolves_is_given_up_after_the_timeout(cx: &mut TestAppContext) {
+    let world = World::new();
+    let linked = linked(&world, auto_runner(), cx);
+    // Held and never released, as a hook whose decision can no longer end.
+    let hook = RecordingHook::new(&linked, true);
+    cx.update(|cx| CompletionHooks::register(hook.clone(), cx));
+    let run = linked.start(StartRequest::new(LEAF), cx);
+    linked.drive(cx);
+    linked.approve(&run, MERGE_GATE, cx);
+    assert_eq!(hook.calls.borrow().len(), 1);
+
+    cx.executor()
+        .advance_clock(crate::engine::COMPLETION_HOOKS_TIMEOUT - Duration::from_millis(1));
+    linked.drive(cx);
+    assert_ne!(
+        linked.status(&run),
+        RunStatus::Succeeded,
+        "the run waits until the timeout"
+    );
+
+    cx.executor().advance_clock(Duration::from_millis(1));
+    linked.drive(cx);
+    assert_eq!(linked.status(&run), RunStatus::Succeeded);
+    assert_eq!(linked.writes.todo_states()[1].1, TodoState::Done);
+    assert_eq!(hook.calls.borrow().len(), 1, "called once");
 }

@@ -170,9 +170,13 @@ impl Decider {
     }
 
     /// Asks `project` for a decision; the receiver resolves once a decision that began after this
-    /// call has ended, or once the project is no longer followed. `None` while it is not followed.
+    /// call has ended, or once the project is no longer followed or its decisions stopped. `None`
+    /// while it is not followed, or while its writer is gone and so no decision will run.
     pub(crate) fn decide_and_wait(&mut self, project: &str) -> Option<oneshot::Receiver<()>> {
         let followed = self.projects.get_mut(project)?;
+        if followed.writer.strong_count() == 0 || followed.poke.is_closed() {
+            return None;
+        }
         let (sender, receiver) = oneshot::channel();
         followed.waiters.push(sender);
         followed.poke.unbounded_send(()).ok();
@@ -350,6 +354,13 @@ impl ChecksEngine {
                 })
                 .ok();
             }
+            // No decision runs any more: whoever still waits is let go.
+            this.update(cx, |engine, _| {
+                if let Some(followed) = engine.decider.projects.get_mut(&id) {
+                    followed.waiters.clear();
+                }
+            })
+            .ok();
         });
         self.decider.projects.insert(
             project,

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use bongos_workflow::{CompletionHook, CompletionHooks, RunId};
-use gpui::{App, Context, Task};
+use gpui::{App, AsyncApp, Context, Task, WeakEntity};
 
 use crate::engine::ChecksEngine;
 use crate::task_tree::TaskTree;
@@ -73,20 +73,61 @@ impl ChecksEngine {
                 run: Some(run.clone()),
             },
         );
-        let task_id = task_id.to_string();
-        let run = run.clone();
+        let pin = CompletingPin {
+            engine: cx.weak_entity(),
+            task_id: task_id.to_string(),
+            run: run.clone(),
+            cx: Some(cx.to_async()),
+        };
         cx.spawn(async move |this, cx| {
+            let mut pin = pin;
             decided.await.ok();
             this.update(cx, |engine, _| {
-                if engine
-                    .completing
-                    .get(&task_id)
-                    .is_some_and(|tree| tree.run.as_ref() == Some(&run))
-                {
-                    engine.completing.remove(&task_id);
-                }
+                engine.unpin_completing(&pin.task_id, &pin.run)
             })
             .ok();
+            pin.cx = None;
         })
+    }
+
+    /// Forgets the worktree `run` pinned for `task_id`, unless another run pinned it since.
+    fn unpin_completing(&mut self, task_id: &str, run: &RunId) {
+        if self
+            .completing
+            .get(task_id)
+            .is_some_and(|tree| tree.run.as_ref() == Some(run))
+        {
+            self.completing.remove(task_id);
+        }
+    }
+}
+
+/// The pin of a completing run's worktree, held by the task [`ChecksEngine::decide_completed`]
+/// returns. Dropped before its decision ended (the run's end gave up on it), it unpins the
+/// worktree on the next turn of the foreground executor, since the app may be borrowed then.
+struct CompletingPin {
+    engine: WeakEntity<ChecksEngine>,
+    task_id: String,
+    run: RunId,
+    /// `None` once the decision ended and unpinned the worktree itself.
+    cx: Option<AsyncApp>,
+}
+
+impl Drop for CompletingPin {
+    fn drop(&mut self) {
+        let Some(mut cx) = self.cx.take() else {
+            return;
+        };
+        let engine = self.engine.clone();
+        let task_id = std::mem::take(&mut self.task_id);
+        let run = std::mem::take(&mut self.run);
+        cx.foreground_executor()
+            .clone()
+            .spawn(async move {
+                engine
+                    .update(&mut cx, |engine, _| engine.unpin_completing(&task_id, &run))
+                    .ok();
+            })
+            .detach();
     }
 }
