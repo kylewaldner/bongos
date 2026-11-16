@@ -48,6 +48,11 @@ pub(crate) fn definition_toml(id: &str, goal: &str, extra: &str) -> String {
 /// A new-format project in a real git repository inside `root`: the top group `g1` with the leaf
 /// `backfill` (`l1`) committed on `main`, and the state store open with its writer.
 pub(crate) fn fixture_project(root: &TempDir) -> ProjectRepo {
+    fixture_project_with_hooks(root, &StateApplyHooks::new())
+}
+
+/// [`fixture_project`] whose writer runs `hooks`.
+pub(crate) fn fixture_project_with_hooks(root: &TempDir, hooks: &StateApplyHooks) -> ProjectRepo {
     let location = location(root);
     let definitions = location.repository.join("definitions");
     for (path, text) in [
@@ -73,8 +78,7 @@ pub(crate) fn fixture_project(root: &TempDir) -> ProjectRepo {
             .await
             .unwrap();
     });
-    let writer =
-        Arc::new(StateStore::open_writer_with_hooks(&location, &StateApplyHooks::new()).unwrap());
+    let writer = Arc::new(StateStore::open_writer_with_hooks(&location, hooks).unwrap());
     ProjectRepo::new(location, git).with_state(StateHandle::Writer(writer))
 }
 

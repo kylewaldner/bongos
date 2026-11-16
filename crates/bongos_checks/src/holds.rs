@@ -11,6 +11,10 @@
 //! tree again; in the process that holds a project's writer the source follows them itself and
 //! tells [`DoneHolds::changed`] when a reason changed. A process without the writer gets them
 //! through [`ChecksHolds::state_changed`].
+//!
+//! A held task whose required checks the decider counted shows the row chip "checks N" (missing,
+//! failing, stale or without a verdict). It is not "needs you": a held task waits on its checks,
+//! not on the owner.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -19,13 +23,18 @@ use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::Result;
 use bongos_project_repo::{StateEvent, StateHandle, StateRead, StateWriter};
-use bongos_work::{DoneHoldRefresher, DoneHoldSource, DoneHolds, OpenProjectRepos};
+use bongos_work::{
+    DoneHoldRefresher, DoneHoldSource, DoneHolds, OpenProjectRepos, RowChipsRegistry,
+    RowChipsSource,
+};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
-use gpui::{App, AppContext as _, AsyncApp, Global};
+use gpui::{App, AppContext as _, AsyncApp, Global, SharedString};
 use settings::{Settings as _, SettingsStore};
 
+use crate::engine::ChecksEngine;
 use crate::evidence_store::{DONE_NAMESPACE, DoneRecord, LIVE_NAMESPACE, OWED_NAMESPACE};
+use crate::host::{ChecksCommand, ChecksReply, checks_access};
 use crate::live::{HOLD_PREFIX, HoldRow};
 use crate::settings::TaskChecksSettings;
 
@@ -37,6 +46,15 @@ pub const CHECKING: &str = "checking";
 /// The holds in one project's run state, by task id: every task with a marker and no valid done
 /// record, with its reason. A done record that cannot be read does not count.
 pub fn read_holds(read: &StateRead) -> Result<BTreeMap<String, String>> {
+    Ok(read_hold_rows(read)?
+        .into_iter()
+        .map(|(task_id, row)| (task_id, row.reason))
+        .collect())
+}
+
+/// [`read_holds`] with each hold's whole row: its reason and, once the decider counted them,
+/// how many required checks are unsatisfied.
+pub fn read_hold_rows(read: &StateRead) -> Result<BTreeMap<String, HoldRow>> {
     let owed = read.kv(OWED_NAMESPACE).scan("")?;
     if owed.is_empty() {
         return Ok(BTreeMap::new());
@@ -44,14 +62,14 @@ pub fn read_holds(read: &StateRead) -> Result<BTreeMap<String, String>> {
     let done: BTreeMap<String, toml::Value> =
         read.kv(DONE_NAMESPACE).scan("")?.into_iter().collect();
     let prefix = format!("{HOLD_PREFIX}/");
-    let reasons: BTreeMap<String, String> = read
+    let reasons: BTreeMap<String, HoldRow> = read
         .kv(LIVE_NAMESPACE)
         .scan(&prefix)?
         .into_iter()
         .filter_map(|(key, value)| {
             let task_id = key.strip_prefix(&prefix)?.to_string();
             match value.try_into::<HoldRow>() {
-                Ok(row) => Some((task_id, row.reason)),
+                Ok(row) => Some((task_id, row)),
                 Err(error) => {
                     log::error!("reading the hold reason of {task_id}: {error}");
                     None
@@ -73,11 +91,11 @@ pub fn read_holds(read: &StateRead) -> Result<BTreeMap<String, String>> {
         if valid {
             continue;
         }
-        let reason = reasons
+        let row = reasons
             .get(&task_id)
             .cloned()
-            .unwrap_or_else(|| CHECKING.to_string());
-        holds.insert(task_id, reason);
+            .unwrap_or_else(|| HoldRow::new(CHECKING));
+        holds.insert(task_id, row);
     }
     Ok(holds)
 }
@@ -118,6 +136,16 @@ impl ChecksHolds {
 
     /// The reason `task_id` is held, from the snapshot.
     pub fn hold(&self, task_id: &str) -> Option<String> {
+        self.hold_row(task_id).map(|row| row.reason)
+    }
+
+    /// How many required checks of the held `task_id` are unsatisfied, once the decider counted
+    /// them.
+    pub fn unsatisfied(&self, task_id: &str) -> Option<u32> {
+        self.hold_row(task_id).and_then(|row| row.unsatisfied)
+    }
+
+    fn hold_row(&self, task_id: &str) -> Option<HoldRow> {
         lock(&self.holds)
             .by_project
             .values()
@@ -165,7 +193,7 @@ impl ChecksHolds {
                 if let StateHandle::Writer(writer) = handle {
                     self.follow_writer(writer);
                 }
-                let holds = handle.read(read_holds).map_err(|error| {
+                let holds = handle.read(read_hold_rows).map_err(|error| {
                     log::error!("reading the checks holds of project {project}: {error:#}");
                 });
                 (project.clone(), holds.ok())
@@ -244,14 +272,14 @@ impl ChecksHolds {
 #[derive(Default)]
 struct Snapshot {
     number: u64,
-    by_project: BTreeMap<String, BTreeMap<String, String>>,
+    by_project: BTreeMap<String, BTreeMap<String, HoldRow>>,
 }
 
 /// One read of the holds, not yet applied: its number and each project's holds (`None` when the
 /// read failed).
 pub(crate) struct HoldsRead {
     number: u64,
-    projects: Vec<(String, Option<BTreeMap<String, String>>)>,
+    projects: Vec<(String, Option<BTreeMap<String, HoldRow>>)>,
 }
 
 /// Reads the holds again on the background executor and tells the store when one changed.
@@ -261,6 +289,7 @@ async fn reread(holds: Arc<ChecksHolds>, cx: &mut AsyncApp) {
         cx.update(|cx| {
             if DoneHolds::has_sources(cx) {
                 DoneHolds::changed(cx);
+                RowChipsRegistry::changed(cx);
             }
         });
     }
@@ -284,9 +313,44 @@ impl DoneHoldSource for ChecksHoldSource {
         self.0.hold(task_id)
     }
 
-    /// Nothing is judged before the write yet: the marker the write puts is what holds the task.
-    fn would_hold(&self, _task_id: &str, _cx: &mut App) -> gpui::Task<Option<String>> {
-        gpui::Task::ready(None)
+    /// Asks the decider of the process that holds the writer, which computes the tree key
+    /// there. An answer that cannot be had holds: nothing is finished unjudged.
+    fn would_hold(&self, task_id: &str, cx: &mut App) -> gpui::Task<Option<String>> {
+        let Some(access) = checks_access(cx) else {
+            return gpui::Task::ready(None);
+        };
+        let reply = access.send(
+            &ChecksCommand::WouldHold {
+                task_id: task_id.to_string(),
+            },
+            cx,
+        );
+        cx.background_spawn(async move {
+            match reply.await {
+                Ok(ChecksReply::Hold { reason }) => reason,
+                Ok(other) => Some(format!(
+                    "not done: the checks could not be judged (unexpected reply {other:?})"
+                )),
+                Err(error) => Some(format!(
+                    "not done: the checks could not be judged ({error:#})"
+                )),
+            }
+        })
+    }
+}
+
+/// The name of the row chips source of held tasks.
+pub const CHECKS_CHIPS_SOURCE: &str = "checks";
+
+/// The row chip of a held task: "checks N", N its unsatisfied required checks. Not "needs you".
+pub struct ChecksChips(pub Arc<ChecksHolds>);
+
+impl RowChipsSource for ChecksChips {
+    fn chips(&self, task_id: &str, _cx: &App) -> Vec<SharedString> {
+        match self.0.unsatisfied(task_id) {
+            Some(count) if count > 0 => vec![SharedString::from(format!("checks {count}"))],
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -311,6 +375,12 @@ pub fn init(cx: &mut App) {
         while let Some(mut events) = followed.next().await {
             let holds = holds.clone();
             cx.spawn(async move |cx| {
+                // A writer seen for the first time may be a project the decider should follow.
+                cx.update(|cx| {
+                    if let Some(engine) = ChecksEngine::global(cx) {
+                        engine.update(cx, |engine, cx| engine.scan_projects(cx));
+                    }
+                });
                 while let Some(StateEvent::Changed { namespaces, .. }) = events.next().await {
                     if namespaces
                         .iter()
@@ -343,9 +413,15 @@ fn sync_registration(cx: &mut App) {
         // Read once before the store first asks, so nothing finished is missed in between.
         holds.refresh();
         DoneHolds::add_refresher(CHECKS_HOLD_SOURCE, holds.clone(), cx);
-        DoneHolds::add_source(CHECKS_HOLD_SOURCE, Rc::new(ChecksHoldSource(holds)), cx);
+        DoneHolds::add_source(
+            CHECKS_HOLD_SOURCE,
+            Rc::new(ChecksHoldSource(holds.clone())),
+            cx,
+        );
+        RowChipsRegistry::add_source(CHECKS_CHIPS_SOURCE, Rc::new(ChecksChips(holds)), cx);
     } else {
         DoneHolds::remove_refresher(CHECKS_HOLD_SOURCE, cx);
         DoneHolds::remove_source(CHECKS_HOLD_SOURCE, cx);
+        RowChipsRegistry::remove_source(CHECKS_CHIPS_SOURCE, cx);
     }
 }
