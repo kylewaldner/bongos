@@ -324,7 +324,9 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
             return;
         };
         workspace.update(cx, |workspace, cx| {
-            command_palette::CommandPalette::toggle(workspace, "'<,'>", window, cx);
+            command_palette::CommandPalette::toggle_with_prompt(
+                workspace, "'<,'>", ":", window, cx,
+            );
         })
     });
 
@@ -333,7 +335,9 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
             return;
         };
         workspace.update(cx, |workspace, cx| {
-            command_palette::CommandPalette::toggle(workspace, "'<,'>!", window, cx);
+            command_palette::CommandPalette::toggle_with_prompt(
+                workspace, "'<,'>!", ":", window, cx,
+            );
         })
     });
 
@@ -859,7 +863,7 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
             ".".to_string()
         };
         workspace.update(cx, |workspace, cx| {
-            command_palette::CommandPalette::toggle(workspace, &n, window, cx);
+            command_palette::CommandPalette::toggle_with_prompt(workspace, &n, ":", window, cx);
         })
     });
 
@@ -1662,6 +1666,7 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
         VimCommand::new(("bf", "irst"), workspace::ActivateItem(0)),
         VimCommand::new(("br", "ewind"), workspace::ActivateItem(0)),
         VimCommand::new(("bl", "ast"), workspace::ActivateLastItem),
+        VimCommand::str(("b", "uffer"), "tab_switcher::Toggle"),
         VimCommand::str(("buffers", ""), "tab_switcher::ToggleAll"),
         VimCommand::str(("ls", ""), "tab_switcher::ToggleAll"),
         VimCommand::new(("new", ""), workspace::NewFileSplitHorizontal),
@@ -2391,7 +2396,9 @@ impl Vim {
         });
         if let Some(command) = command {
             workspace.update(cx, |workspace, cx| {
-                command_palette::CommandPalette::toggle(workspace, &command, window, cx);
+                command_palette::CommandPalette::toggle_with_prompt(
+                    workspace, &command, ":", window, cx,
+                );
             });
         }
     }
@@ -2430,7 +2437,9 @@ impl Vim {
         });
         if let Some(command) = command {
             workspace.update(cx, |workspace, cx| {
-                command_palette::CommandPalette::toggle(workspace, &command, window, cx);
+                command_palette::CommandPalette::toggle_with_prompt(
+                    workspace, &command, ":", window, cx,
+                );
             });
         }
     }
@@ -3628,5 +3637,78 @@ mod test {
             "},
             Mode::VisualLine,
         );
+    }
+
+    fn palette_label(cx: &mut VimTestContext) -> Option<String> {
+        use picker::PickerDelegate as _;
+        cx.workspace(|workspace, _, cx| {
+            let palette = workspace.active_modal::<command_palette::CommandPalette>(cx)?;
+            let picker = palette.read(cx).picker().clone();
+            picker
+                .read(cx)
+                .delegate
+                .prompt_label(cx)
+                .map(|label| label.to_string())
+        })
+    }
+
+    #[gpui::test]
+    async fn test_colon_opens_minibuffer_with_colon_label(cx: &mut TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.set_state("ˇabc\n", Mode::Normal);
+
+        cx.simulate_keystrokes(":");
+        assert_eq!(palette_label(&mut cx).as_deref(), Some(":"));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(palette_label(&mut cx), None);
+        cx.assert_state("ˇabc\n", Mode::Normal);
+    }
+
+    #[gpui::test]
+    async fn test_m_x_keeps_m_x_label(cx: &mut TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.dispatch_action(zed_actions::command_palette::Toggle);
+        assert_eq!(palette_label(&mut cx).as_deref(), Some("M-x "));
+    }
+
+    #[gpui::test]
+    async fn test_visual_colon_prefills_range_with_colon_label(cx: &mut TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.set_state("ˇabc\ndef\n", Mode::Normal);
+        cx.simulate_keystrokes("v :");
+        assert_eq!(palette_label(&mut cx).as_deref(), Some(":"));
+        let query = cx.workspace(|workspace, _, cx| {
+            let palette = workspace
+                .active_modal::<command_palette::CommandPalette>(cx)
+                .unwrap();
+            let picker = palette.read(cx).picker().clone();
+            picker.read(cx).query(cx)
+        });
+        assert_eq!(query, "'<,'>");
+    }
+
+    #[gpui::test]
+    async fn test_colon_substitute_and_write_quit(cx: &mut TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.set_state("ˇaaa\n", Mode::Normal);
+        cx.simulate_keystrokes(": % s / a / b / g enter");
+        cx.assert_state("ˇbbb\n", Mode::Normal);
+        cx.simulate_keystrokes(": w q enter");
+        cx.run_until_parked();
+        cx.workspace(|workspace, _, cx| assert_eq!(workspace.items(cx).count(), 0));
+    }
+
+    #[gpui::test]
+    async fn test_colon_b_is_buffer_command(cx: &mut TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        let name = cx.update(|_, cx| {
+            super::commands(cx)
+                .iter()
+                .find(|command| command.get_parsed_query("b".to_string()).is_some())
+                .and_then(|command| command.action_name)
+        });
+        assert_eq!(name, Some("tab_switcher::Toggle"));
     }
 }
