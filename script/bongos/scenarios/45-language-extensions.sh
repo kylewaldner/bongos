@@ -15,7 +15,8 @@
 #      saves it while the install is held (install-held.png); the gate opens, the install finishes:
 #      record, link, build log, the language in the extension index, Quokka in the status bar
 #      (quokka-installed.png). Nothing ran cargo build or rustup beyond the probe.
-#   3. Restart: the build log, the checkout and the record are byte for byte the same (no build), and
+#   3. Restart with the extension index deleted: the app rebuilds it from installed/ and Quokka is in
+#      it again, the build log, the checkout and the record are byte for byte the same (no build), and
 #      the buffer shows Quokka again (quokka-after-restart.png).
 #   4. extensions: install from git, the off-list wombat repository: the strict question
 #      (trust-question.png); "no" leaves no git/wombat folder, no link and no log.
@@ -27,6 +28,8 @@
 #   8. A repository that does not exist, at a full commit, typed yes: the failure line
 #      (install-failed.png) and a build log with the error; extensions: show build log opens it.
 #   9. The proxy got no request but the two every launch makes, no Zed host, no marketplace host.
+#      The run has no long idle window: that nothing runs on a timer while idle is covered by the
+#      unit test crates/bongos_extensions/tests/idle.rs.
 # Capture: the feature has no design directory, so there are no design- shots. The text of the
 # offer line, the status bar, the question and the Extensions page is read from the shots.
 # Deviations: the offer's Install button is not clicked (its position is not known to the harness);
@@ -68,6 +71,7 @@ DATA_DIR="$HOME/${BONGOS_LOG_PATH%/logs/*}"
 EXT_DIR="$DATA_DIR/extensions"
 GIT_EXT="$EXT_DIR/git"
 INDEX="$EXT_DIR/index.json"
+APP_LOG="$HOME/$BONGOS_LOG_PATH"
 
 scenario_exit() {
   local rc=$?
@@ -113,6 +117,14 @@ extension_state() {
 }
 
 gone() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
+
+# The app logs a line each time the strict trust question opens.
+questions_asked() {
+  local n
+  n=$(grep -c 'language extensions: asked the trust question' "$APP_LOG" 2>/dev/null) || true
+  echo "${n:-0}"
+}
+question_asked_since() { [ "$(questions_asked)" -gt "$1" ]; }
 
 # Fails when the proxy got a request since the scenario began other than the two kinds every launch
 # makes (the ACP registry and localhost, as in scenarios 04, 28 and 44).
@@ -224,6 +236,8 @@ say "smoke: offer, held install and loaded language: $RUN/offer.png, $RUN/instal
 step "Extensions 3: after a restart Quokka loads with no build"
 quit_app
 before=$(extension_state quokka; sha256sum <"$QUOKKA_LOG")
+# Without the index the app rebuilds it from installed/, so Quokka in it is the load after restart.
+rm -f "$INDEX"
 launch "$PROJ" "$PROJ/hello.quok"
 window_ready
 wait_for_title 'hello\.quok'
@@ -239,12 +253,13 @@ say "smoke: after the restart: $RUN/quokka-after-restart.png"
 # ---------------------------------------------------------------------------------------------
 step "Extensions 4: an off-list repository asks the strict question; no installs nothing"
 quok_before=$(sha256sum <"$PROJ/hello.quok")
+asked_before=$(questions_asked)
 palette 'extensions: install from git'
 act type_text "$WOMBAT_URL"
 act keys Return
 act keys Return
 # The question opens after `git ls-remote`, a moment after the ref prompt closed.
-sleep 1
+poll 60 "the trust question for wombat" question_asked_since "$asked_before"
 wait_for_settled
 shot trust-question
 frame_has_ui trust-question
@@ -307,12 +322,13 @@ file_has "$QUOKKA_LOG" 'removed quokka' || fail "the quokka log has no remove li
 # ---------------------------------------------------------------------------------------------
 step "Extensions 8: a repository that does not exist gives the failure line and a build log"
 before_logs=$(ls "$GIT_EXT/logs")
+asked_before=$(questions_asked)
 palette 'extensions: install from git'
 act type_text "$MISSING_URL"
 act keys Return
 act type_text "$MISSING_COMMIT"
 act keys Return
-sleep 1
+poll 60 "the trust question for the missing repository" question_asked_since "$asked_before"
 wait_for_settled
 type_text yes
 keys Return
