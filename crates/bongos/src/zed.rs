@@ -11,6 +11,8 @@ mod emacs_keymap_tests;
 #[cfg(test)]
 mod isearch_keymap_tests;
 #[cfg(test)]
+mod keybinding_page_tests;
+#[cfg(test)]
 mod keybinding_profile_tests;
 #[cfg(test)]
 mod kill_ring_keymap_tests;
