@@ -1,6 +1,6 @@
 use super::{
     Highlights,
-    fold_map::{self, Chunk, FoldChunks, FoldEdit, FoldPoint, FoldSnapshot},
+    fold_map::{self, Chunk, FoldChunks, FoldEdit, FoldOffset, FoldPoint, FoldSnapshot},
 };
 
 use language::{LanguageAwareStyling, Point};
@@ -74,6 +74,12 @@ impl TabMap {
         }
 
         let old_fold_max_point = old_snapshot.fold_snapshot.max_point();
+        let new_snapshot = TabSnapshot {
+            fold_snapshot,
+            tab_size,
+            max_expansion_column: old_snapshot.max_expansion_column,
+            version: new_version,
+        };
 
         // Expand each edit to include the next tab on the same line as the edit,
         // and any subsequent tabs on that line that moved across the tab expansion
@@ -90,104 +96,127 @@ impl TabMap {
         // the line, extending the edit to include the first subsequent tab (whose
         // rendered width may have changed) and the last tab that crossed the
         // expansion boundary (transitioning between expanded and non-expanded).
+        //
+        // Each edit is converted to tab points in the same pass. A row is read once
+        // for both ends of an edit on it, the scan continues that read, and the
+        // edit's end points and new start follow from offsets where they can, so a
+        // batch of many edits (a replace-all) costs a few reads per edit instead of
+        // a dozen seeks through every layer.
+        let mut tab_edits: Vec<TabEdit> = Vec::with_capacity(fold_edits.len());
+        let mut last_old_end = None;
+        let mut previous_ends = (
+            (FoldOffset::default(), FoldPoint::default()),
+            (FoldOffset::default(), FoldPoint::default()),
+        );
         for fold_edit in &mut fold_edits {
-            let old_end = fold_edit.old.end.to_point(&old_snapshot.fold_snapshot);
-            let old_end_row_successor_offset =
-                cmp::min(FoldPoint::new(old_end.row() + 1, 0), old_fold_max_point)
-                    .to_offset(&old_snapshot.fold_snapshot);
-            let new_end = fold_edit.new.end.to_point(&fold_snapshot);
+            let old_start = fold_edit.old.start.to_point(&old_snapshot.fold_snapshot);
+            let mut old_row = old_snapshot.row_expansion(fold_edit.old.start, old_start);
+            let old_start_column = old_snapshot.expand_tabs_to(&mut old_row, old_start.column());
+            let (mut old_end, mut old_end_column) = old_snapshot.expand_tabs_to_edit_end(
+                &mut old_row,
+                (fold_edit.old.start, old_start),
+                fold_edit.old.end,
+            );
 
-            let mut offset_from_edit = 0;
-            let mut first_tab_offset = None;
-            let mut last_tab_with_changed_expansion_offset = None;
-            'outer: for chunk in old_snapshot.fold_snapshot.chunks(
-                fold_edit.old.end..old_end_row_successor_offset,
-                LanguageAwareStyling {
-                    tree_sitter: false,
-                    diagnostics: false,
-                },
-                Highlights::default(),
-            ) {
-                let mut remaining_tabs = chunk.tabs;
-                while remaining_tabs != 0 {
-                    let ix = remaining_tabs.trailing_zeros();
-                    let offset_from_edit = offset_from_edit + ix;
-                    if first_tab_offset.is_none() {
-                        first_tab_offset = Some(offset_from_edit);
-                    }
+            // The text between this edit and the previous one is the same in both snapshots, so
+            // the new start follows from the old start and the previous edit's ends.
+            let (previous_old_end, previous_new_end) = previous_ends;
+            let new_start = if fold_edit.old.start >= previous_old_end.0
+                && fold_edit.new.start >= previous_new_end.0
+                && fold_edit.old.start - previous_old_end.0
+                    == fold_edit.new.start - previous_new_end.0
+            {
+                let (previous_old_end, previous_new_end) = (previous_old_end.1, previous_new_end.1);
+                let new_start = if old_start.row() > previous_old_end.row() {
+                    FoldPoint::new(
+                        previous_new_end.row() + (old_start.row() - previous_old_end.row()),
+                        old_start.column(),
+                    )
+                } else {
+                    FoldPoint::new(
+                        previous_new_end.row(),
+                        previous_new_end.column()
+                            + (old_start.column() - previous_old_end.column()),
+                    )
+                };
+                debug_assert_eq!(
+                    new_start,
+                    fold_edit.new.start.to_point(&new_snapshot.fold_snapshot)
+                );
+                new_start
+            } else {
+                fold_edit.new.start.to_point(&new_snapshot.fold_snapshot)
+            };
+            let mut new_row = new_snapshot.row_expansion(fold_edit.new.start, new_start);
+            let new_start_column = new_snapshot.expand_tabs_to(&mut new_row, new_start.column());
+            let (mut new_end, mut new_end_column) = new_snapshot.expand_tabs_to_edit_end(
+                &mut new_row,
+                (fold_edit.new.start, new_start),
+                fold_edit.new.end,
+            );
 
-                    let old_column = old_end.column() + offset_from_edit;
-                    let new_column = new_end.column() + offset_from_edit;
-                    let was_expanded = old_column < old_snapshot.max_expansion_column;
-                    let is_expanded = new_column < old_snapshot.max_expansion_column;
-                    if was_expanded != is_expanded {
-                        last_tab_with_changed_expansion_offset = Some(offset_from_edit);
-                    } else if !was_expanded && !is_expanded {
-                        break 'outer;
-                    }
+            // The scan continues the old row's cursor when it stopped at the edit's end, and
+            // reads the rest of the row afresh otherwise.
+            let tab_offset = if old_row.cursor.byte_offset == old_end.column() {
+                scan_tabs_after_edit(
+                    old_row.cursor.into_rest_of_row(),
+                    old_end,
+                    new_end,
+                    old_snapshot.max_expansion_column,
+                )
+            } else {
+                let old_end_row_successor_offset =
+                    cmp::min(FoldPoint::new(old_end.row() + 1, 0), old_fold_max_point)
+                        .to_offset(&old_snapshot.fold_snapshot);
+                scan_tabs_after_edit(
+                    old_snapshot
+                        .fold_snapshot
+                        .chunks(
+                            fold_edit.old.end..old_end_row_successor_offset,
+                            LanguageAwareStyling {
+                                tree_sitter: false,
+                                diagnostics: false,
+                            },
+                            Highlights::default(),
+                        )
+                        .map(|chunk| (chunk.text.len() as u32, chunk.tabs)),
+                    old_end,
+                    new_end,
+                    old_snapshot.max_expansion_column,
+                )
+            };
 
-                    remaining_tabs &= remaining_tabs - 1;
-                }
+            previous_ends = ((fold_edit.old.end, old_end), (fold_edit.new.end, new_end));
 
-                offset_from_edit += chunk.text.len() as u32;
-                if old_end.column() + offset_from_edit >= old_snapshot.max_expansion_column
-                    && new_end.column() + offset_from_edit >= old_snapshot.max_expansion_column
-                {
-                    break;
-                }
-            }
-
-            if let Some(offset) = last_tab_with_changed_expansion_offset.or(first_tab_offset) {
+            if let Some(offset) = tab_offset {
                 fold_edit.old.end.0 += offset as usize + 1;
                 fold_edit.new.end.0 += offset as usize + 1;
+                old_end = fold_edit.old.end.to_point(&old_snapshot.fold_snapshot);
+                new_end = fold_edit.new.end.to_point(&new_snapshot.fold_snapshot);
+                old_end_column = old_snapshot.fold_point_to_tab_point(old_end).column();
+                new_end_column = new_snapshot.fold_point_to_tab_point(new_end).column();
             }
+
+            let old_start = TabPoint::new(old_start.row(), old_start_column);
+            let old_end = TabPoint::new(old_end.row(), old_end_column);
+            let new_start = TabPoint::new(new_start.row(), new_start_column);
+            let new_end = TabPoint::new(new_end.row(), new_end_column);
+
+            // Combine any edits that overlap due to the expansion.
+            if let Some(last_tab_edit) = tab_edits.last_mut()
+                && last_old_end.is_some_and(|last_old_end| last_old_end >= fold_edit.old.start)
+            {
+                last_tab_edit.old.end = old_end;
+                last_tab_edit.new.end = new_end;
+            } else {
+                tab_edits.push(TabEdit {
+                    old: old_start..old_end,
+                    new: new_start..new_end,
+                });
+            }
+            last_old_end = Some(fold_edit.old.end);
         }
 
-        let new_snapshot = TabSnapshot {
-            fold_snapshot,
-            tab_size,
-            max_expansion_column: old_snapshot.max_expansion_column,
-            version: new_version,
-        };
-
-        let _old_alloc_ptr = fold_edits.as_ptr();
-        // Combine any edits that overlap due to the expansion.
-        let mut fold_edits = fold_edits.into_iter();
-        let mut first_edit = fold_edits.next().unwrap();
-        // This code relies on reusing allocations from the Vec<_> - at the time of writing .flatten() prevents them.
-        #[allow(clippy::filter_map_identity)]
-        let mut v: Vec<_> = fold_edits
-            .scan(&mut first_edit, |state, edit| {
-                if state.old.end >= edit.old.start {
-                    state.old.end = edit.old.end;
-                    state.new.end = edit.new.end;
-                    Some(None) // Skip this edit, it's merged
-                } else {
-                    let new_state = edit;
-                    let result = Some(Some(state.clone())); // Yield the previous edit
-                    **state = new_state;
-                    result
-                }
-            })
-            .filter_map(|x| x)
-            .collect();
-        v.push(first_edit);
-        debug_assert_eq!(v.as_ptr(), _old_alloc_ptr, "Fold edits were reallocated");
-        let tab_edits = v
-            .into_iter()
-            .map(|fold_edit| {
-                let old_start = fold_edit.old.start.to_point(&old_snapshot.fold_snapshot);
-                let old_end = fold_edit.old.end.to_point(&old_snapshot.fold_snapshot);
-                let new_start = fold_edit.new.start.to_point(&new_snapshot.fold_snapshot);
-                let new_end = fold_edit.new.end.to_point(&new_snapshot.fold_snapshot);
-                TabEdit {
-                    old: old_snapshot.fold_point_to_tab_point(old_start)
-                        ..old_snapshot.fold_point_to_tab_point(old_end),
-                    new: new_snapshot.fold_point_to_tab_point(new_start)
-                        ..new_snapshot.fold_point_to_tab_point(new_end),
-                }
-            })
-            .collect();
         *old_snapshot = new_snapshot;
         (old_snapshot.clone(), tab_edits)
     }
@@ -369,6 +398,47 @@ impl TabSnapshot {
         TabPoint::new(input.row(), expanded)
     }
 
+    /// Starts expanding the row of `point`, whose fold offset is `offset`, from its first column.
+    /// Reads the same chunks as [`Self::fold_point_to_tab_point`] does for that row.
+    fn row_expansion(&self, offset: FoldOffset, point: FoldPoint) -> TabExpansion<'_> {
+        let row_start = FoldOffset(offset.0 - point.column() as usize);
+        debug_assert_eq!(
+            row_start,
+            FoldPoint::new(point.row(), 0).to_offset(&self.fold_snapshot)
+        );
+        TabExpansion::new(TabStopCursor::new(
+            self.fold_snapshot.chunks_at_offset(row_start),
+        ))
+    }
+
+    /// Finds the fold point of an edit's end and its expanded column, continuing `expansion`,
+    /// which stopped at the edit's start. When the edit stays on its start's row (no newline in
+    /// its text, within the expansion column) the point follows from the edit's length without a
+    /// seek; otherwise the end's row is expanded afresh. Either way `expansion` ends at the end.
+    fn expand_tabs_to_edit_end<'a>(
+        &'a self,
+        expansion: &mut TabExpansion<'a>,
+        (start_offset, start): (FoldOffset, FoldPoint),
+        end_offset: FoldOffset,
+    ) -> (FoldPoint, u32) {
+        let column = start.column() as usize + (end_offset.0 - start_offset.0);
+        if column <= self.max_expansion_column as usize {
+            let column = column as u32;
+            expansion.cursor.crossed_newline = Some(false);
+            let expanded = self.expand_tabs_to(expansion, column);
+            let crossed_newline = expansion.cursor.crossed_newline.take();
+            if expansion.cursor.byte_offset == column && crossed_newline == Some(false) {
+                let end = FoldPoint::new(start.row(), column);
+                debug_assert_eq!(end, end_offset.to_point(&self.fold_snapshot));
+                return (end, expanded);
+            }
+        }
+        let end = end_offset.to_point(&self.fold_snapshot);
+        *expansion = self.row_expansion(end_offset, end);
+        let expanded = self.expand_tabs_to(expansion, end.column());
+        (end, expanded)
+    }
+
     #[ztracing::instrument(skip_all)]
     pub fn tab_point_cursor(&self) -> TabPointCursor<'_> {
         TabPointCursor { this: self }
@@ -409,23 +479,34 @@ impl TabSnapshot {
     }
 
     #[ztracing::instrument(skip_all)]
-    fn expand_tabs<'a>(&self, mut cursor: TabStopCursor<'a>, column: u32) -> u32 {
+    fn expand_tabs<'a>(&self, cursor: TabStopCursor<'a>, column: u32) -> u32 {
+        self.expand_tabs_to(&mut TabExpansion::new(cursor), column)
+    }
+
+    /// Expands the row up to `column`, continuing from where `expansion` stopped, so a later
+    /// column on the same row costs only the bytes between the two. Each call must pass a column
+    /// no smaller than the previous one.
+    fn expand_tabs_to(&self, expansion: &mut TabExpansion<'_>, column: u32) -> u32 {
         // we only ever act on a single row at a time
         // so the main difference is that other layers build a transform sumtree, and can then just run through that
         // we cant quite do this here, as we need to work with the previous layer chunk to understand the tabs of the corresponding row
         // we can still do forward searches for this though, we search for a row, then traverse the column up to where we need to be
         let tab_size = self.tab_size.get();
+        let TabExpansion {
+            cursor,
+            tab_count,
+            expanded_tab_len,
+        } = expansion;
 
         let end_column = column.min(self.max_expansion_column);
-        let mut seek_target = end_column;
-        let mut tab_count = 0;
-        let mut expanded_tab_len = 0;
+        debug_assert!(cursor.byte_offset <= end_column);
+        let mut seek_target = end_column - cursor.byte_offset;
 
         while let Some(tab_stop) = cursor.seek_forward(seek_target) {
-            let expanded_chars_old = tab_stop.char_offset + expanded_tab_len - tab_count;
+            let expanded_chars_old = tab_stop.char_offset + *expanded_tab_len - *tab_count;
             let tab_len = tab_size - ((expanded_chars_old - 1) % tab_size);
-            tab_count += 1;
-            expanded_tab_len += tab_len;
+            *tab_count += 1;
+            *expanded_tab_len += tab_len;
 
             seek_target = end_column - cursor.byte_offset;
         }
@@ -438,7 +519,7 @@ impl TabSnapshot {
 
         let collapsed_bytes = cursor.byte_offset() + left_over_char_bytes;
         let expanded_bytes =
-            cursor.byte_offset() + expanded_tab_len - tab_count + left_over_char_bytes;
+            cursor.byte_offset() + *expanded_tab_len - *tab_count + left_over_char_bytes;
 
         expanded_bytes + column.saturating_sub(collapsed_bytes)
     }
@@ -773,10 +854,29 @@ impl<'a> Iterator for TabChunks<'a> {
     }
 }
 
+/// A row's tab expansion in progress: the cursor and the tabs it has passed.
+struct TabExpansion<'a> {
+    cursor: TabStopCursor<'a>,
+    tab_count: u32,
+    expanded_tab_len: u32,
+}
+
+impl<'a> TabExpansion<'a> {
+    fn new(cursor: TabStopCursor<'a>) -> Self {
+        Self {
+            cursor,
+            tab_count: 0,
+            expanded_tab_len: 0,
+        }
+    }
+}
+
 struct TabStopCursor<'a> {
     chunks: FoldChunks<'a>,
     byte_offset: u32,
     char_offset: u32,
+    /// Whether a newline was passed, tracked only while `Some`.
+    crossed_newline: Option<bool>,
     /// Chunk
     /// last tab position iterated through
     current_chunk: Option<(TabStopChunk<'a>, u32)>,
@@ -794,8 +894,50 @@ impl<'a> TabStopCursor<'a> {
             chunks,
             byte_offset: 0,
             char_offset: 0,
+            crossed_newline: None,
             current_chunk: None,
         }
+    }
+
+    /// Records whether `text[range]` of the chunk being passed holds a newline.
+    #[inline(always)]
+    fn pass_bytes(&mut self, text: &str, range: Range<u32>) {
+        if let Some(crossed_newline) = &mut self.crossed_newline
+            && !*crossed_newline
+        {
+            *crossed_newline =
+                text.as_bytes()[range.start as usize..range.end as usize].contains(&b'\n');
+        }
+    }
+
+    /// The chunks from the cursor to the end of its row, as each chunk's length in bytes and
+    /// its tabs, the last one ending with the row's newline. These are the chunks
+    /// [`FoldSnapshot::chunks`] yields from the cursor's offset to the next row's start.
+    fn into_rest_of_row(self) -> impl Iterator<Item = (u32, u128)> + use<'a> {
+        let current = self.current_chunk.and_then(|(chunk, position)| {
+            let text = &chunk.text.as_bytes()[position as usize..];
+            (!text.is_empty()).then(|| {
+                (
+                    text,
+                    chunk.tabs.unbounded_shr(position) & low_bits(text.len() as u32),
+                )
+            })
+        });
+        current
+            .into_iter()
+            .chain(self.chunks.map(|chunk| (chunk.text.as_bytes(), chunk.tabs)))
+            .scan(false, |row_ended, (text, tabs)| {
+                if *row_ended {
+                    return None;
+                }
+                Some(match text.iter().position(|&byte| byte == b'\n') {
+                    Some(newline) => {
+                        *row_ended = true;
+                        (newline as u32 + 1, tabs & low_bits(newline as u32))
+                    }
+                    None => (text.len() as u32, tabs),
+                })
+            })
     }
 
     fn bytes_until_next_char(&self) -> Option<usize> {
@@ -845,6 +987,7 @@ impl<'a> TabStopCursor<'a> {
                 let chunk_remaining = chunk_len - chunk_position;
                 if chunk_remaining >= distance_remaining {
                     let end = chunk_position + distance_remaining;
+                    self.pass_bytes(chunk.text, chunk_position..end);
                     self.byte_offset += distance_remaining;
                     self.char_offset +=
                         count_chars_in_byte_range(chunk_position..(end - 1), chunk.chars);
@@ -854,6 +997,7 @@ impl<'a> TabStopCursor<'a> {
                     return None;
                 }
 
+                self.pass_bytes(chunk.text, chunk_position..chunk_len);
                 self.byte_offset += chunk_remaining;
                 self.char_offset +=
                     count_chars_in_byte_range(chunk_position..(chunk_len - 1), chunk.chars);
@@ -866,6 +1010,7 @@ impl<'a> TabStopCursor<'a> {
 
             if bytes_to_tab > distance_remaining {
                 let end = chunk_position + distance_remaining;
+                self.pass_bytes(chunk.text, chunk_position..end);
                 self.byte_offset += distance_remaining;
                 self.char_offset +=
                     count_chars_in_byte_range(chunk_position..(end - 1), chunk.chars);
@@ -873,6 +1018,7 @@ impl<'a> TabStopCursor<'a> {
                 return None;
             }
 
+            self.pass_bytes(chunk.text, chunk_position..tab_end);
             self.byte_offset += bytes_to_tab;
             self.char_offset +=
                 count_chars_in_byte_range(chunk_position..(tab_end - 1), chunk.chars);
@@ -901,6 +1047,57 @@ impl<'a> TabStopCursor<'a> {
     fn char_offset(&self) -> u32 {
         self.char_offset
     }
+}
+
+/// A mask of the bits below `len`.
+#[inline(always)]
+fn low_bits(len: u32) -> u128 {
+    1u128.unbounded_shl(len).wrapping_sub(1)
+}
+
+/// Scans the rest of an edit's row, given as each chunk's length and tabs from the edit's old
+/// end, for the tab the edit must be extended to: the first tab after the edit, or the last one
+/// whose expansion changes because the edit moved it across the expansion column. Returns its
+/// offset from the edit's end.
+fn scan_tabs_after_edit(
+    chunks: impl Iterator<Item = (u32, u128)>,
+    old_end: FoldPoint,
+    new_end: FoldPoint,
+    max_expansion_column: u32,
+) -> Option<u32> {
+    let mut offset_from_edit = 0;
+    let mut first_tab_offset = None;
+    let mut last_tab_with_changed_expansion_offset = None;
+    'outer: for (len, tabs) in chunks {
+        let mut remaining_tabs = tabs;
+        while remaining_tabs != 0 {
+            let ix = remaining_tabs.trailing_zeros();
+            let offset_from_edit = offset_from_edit + ix;
+            if first_tab_offset.is_none() {
+                first_tab_offset = Some(offset_from_edit);
+            }
+
+            let old_column = old_end.column() + offset_from_edit;
+            let new_column = new_end.column() + offset_from_edit;
+            let was_expanded = old_column < max_expansion_column;
+            let is_expanded = new_column < max_expansion_column;
+            if was_expanded != is_expanded {
+                last_tab_with_changed_expansion_offset = Some(offset_from_edit);
+            } else if !was_expanded && !is_expanded {
+                break 'outer;
+            }
+
+            remaining_tabs &= remaining_tabs - 1;
+        }
+
+        offset_from_edit += len;
+        if old_end.column() + offset_from_edit >= max_expansion_column
+            && new_end.column() + offset_from_edit >= max_expansion_column
+        {
+            break;
+        }
+    }
+    last_tab_with_changed_expansion_offset.or(first_tab_offset)
 }
 
 #[inline(always)]
