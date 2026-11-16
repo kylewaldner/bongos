@@ -27,9 +27,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
 use bongos_extensions_model::{
-    Fix, InstallRecord, LanguageList, Layout, ManifestFacts, Probe, ReadOutcome, RecordState,
-    RevSpec, SourceUrl, ToolProbe, check_after_clone, check_before_clone, check_built_api,
-    validate_id, validate_relative_path, write_atomic,
+    Fix, InstallRecord, LanguageList, Layout, ListEntry, ManifestFacts, Probe, ReadOutcome,
+    RecordState, RevSpec, SourceUrl, ToolProbe, check_after_clone, check_before_clone,
+    check_built_api, validate_id, validate_relative_path, write_atomic,
 };
 use futures::FutureExt as _;
 use futures::channel::oneshot;
@@ -315,6 +315,38 @@ impl Installer {
 
     pub fn layout(&self) -> &Layout {
         &self.deps.layout
+    }
+
+    /// The curated list of language extensions.
+    pub fn list(&self) -> &Arc<LanguageList> {
+        &self.deps.list
+    }
+
+    /// Whether the list entry is installed or being installed right now. Reads only local state.
+    pub fn is_installed_or_installing(&self, entry: &ListEntry, cx: &App) -> bool {
+        if self
+            .deps
+            .host
+            .installed(cx)
+            .iter()
+            .any(|installed| installed.id == entry.id)
+        {
+            return true;
+        }
+        if self.busy_ids.contains_key(&entry.id) {
+            return true;
+        }
+        let Ok(url) = SourceUrl::parse(&entry.repository) else {
+            return false;
+        };
+        let path = entry
+            .path
+            .as_deref()
+            .map(|path| path.trim_matches('/'))
+            .filter(|path| !path.is_empty());
+        self.in_flight
+            .keys()
+            .any(|key| key.url == url && key.path.as_deref() == path)
     }
 
     /// The running operations, oldest first.
