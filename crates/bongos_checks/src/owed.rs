@@ -20,7 +20,8 @@
 //! Groups (their closing checks, the last child to finish) are not judged here yet: a task with
 //! children is never marked (a leaf that gains children loses its marker and done record), and a
 //! leaf's marker names no group. Before the project's definitions are loaded nothing is marked,
-//! and only a reopen the state record alone shows deletes.
+//! and the marker and done record go only when the state record alone proves the task is not
+//! Done: its state row is gone, or it is cancelled.
 //!
 //! The hook writes only `kv` rows, runs no git and no process, and any error aborts the whole
 //! transaction, so no task is finished without its marker. Its one read outside the transaction
@@ -40,9 +41,9 @@ use bongos_project_repo_model::{
     DefinitionNode, DefinitionTree, TaskDefinition, TaskStateRecord, join,
 };
 use bongos_work::OpenProjectRepos;
+use bongos_work::model::Status;
 use bongos_work::model::derive::{self, State};
 use bongos_work::model::store::{Task, WorkTree};
-use bongos_work::model::{ResultState, Status, TodoState};
 use gpui::App;
 use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
@@ -210,10 +211,10 @@ impl StateApplyHook for ChecksOwedHook {
         }
         // Before the project's definitions are loaded no task can be marked, and a task missing
         // from an empty tree is not a deleted task. The deletes still run for a task the record
-        // alone shows reopened.
+        // alone shows is not Done: its state row is gone, or it is cancelled.
         if change.definitions.top.is_none() {
             for touch in change.touched {
-                if surely_reopened(touch.before.as_ref(), touch.after.as_ref()) {
+                if surely_not_done(touch.after.as_ref()) {
                     delete_rows(tx, touch.id.as_str())?;
                 }
             }
@@ -262,37 +263,12 @@ fn delete_rows(tx: &mut StateTx, task_id: &str) -> Result<()> {
     delete_present(tx, DONE_NAMESPACE, task_id)
 }
 
-/// Whether a write that took a task's record from `before` to `after` reopened it, judged from
-/// the record alone so that no definition is needed: it has no state row now, it is cancelled,
-/// or it is neither Done nor merged and a todo this write opened is open (one that was closed
-/// before, or any open todo when the task was Done before). A todo the record has but the
-/// definition may not have is not trusted alone.
-fn surely_reopened(before: Option<&TaskStateRecord>, after: Option<&TaskStateRecord>) -> bool {
-    let Some(after) = after else {
-        return true;
-    };
-    if after.status == Status::Cancelled {
-        return true;
-    }
-    let merged = after
-        .result
-        .as_ref()
-        .is_some_and(|result| result.state == Some(ResultState::Merged));
-    if after.status == Status::Done || merged {
-        return false;
-    }
-    let Some(before) = before else {
-        return false;
-    };
-    after.todos.iter().any(|todo| {
-        todo.state == TodoState::Open
-            && todo.id.is_some()
-            && (before.status == Status::Done
-                || before
-                    .todos
-                    .iter()
-                    .any(|old| old.id == todo.id && old.state != TodoState::Open))
-    })
+/// Whether the task whose record is now `after` surely no longer looks Done, judged from the
+/// record alone so that no definition is needed: it has no state row, or it is cancelled. An
+/// open todo or a status set back from Done proves nothing without the definition (it may have
+/// dropped that todo, and its todos may all be closed), so neither counts.
+fn surely_not_done(after: Option<&TaskStateRecord>) -> bool {
+    after.is_none_or(|after| after.status == Status::Cancelled)
 }
 
 /// Deletes `key` of `namespace` when it is there, so a transaction that changes no marker does

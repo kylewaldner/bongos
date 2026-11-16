@@ -747,15 +747,17 @@ fn a_leaf_that_gains_children_loses_its_rows_even_when_its_file_is_unchanged() {
 }
 
 #[test]
-fn before_the_definitions_load_only_a_reopen_the_record_shows_deletes() {
+fn before_the_definitions_load_only_a_cancel_or_a_deleted_row_deletes() {
     let fixture = Fixture::with(true, DefinitionTree::default());
+    // Without the definition an open todo may be one it dropped, so no todo or status change
+    // alone deletes.
     let cases = [
-        ("a todo reopened", closed(), last_open(), (false, false)),
+        ("a todo reopened", closed(), last_open(), (true, true)),
         (
             "the status set back from Done",
             completed(),
             last_open(),
-            (false, false),
+            (true, true),
         ),
         ("a cancel", closed(), cancelled(), (false, false)),
         (
@@ -898,9 +900,9 @@ fn an_older_read_applied_after_a_newer_one_never_drops_a_hold() {
 
     // Two refreshes run at once: the first reads before the task finishes, the second after,
     // and the first one's swap comes last.
-    let older = holds.read_from(&handles);
+    let older = holds.read_from(holds.begin_read(), &handles);
     fixture.set("plain", closed()).unwrap();
-    let newer = holds.read_from(&handles);
+    let newer = holds.read_from(holds.begin_read(), &handles);
     assert!(holds.apply(newer));
     assert_eq!(holds.hold("plain").as_deref(), Some(CHECKING));
     assert!(!holds.apply(older), "the older read is dropped");
@@ -913,6 +915,29 @@ fn an_older_read_applied_after_a_newer_one_never_drops_a_hold() {
         .unwrap();
     assert!(holds.refresh_from(&handles));
     assert_eq!(holds.hold("plain"), None);
+}
+
+#[test]
+fn a_read_that_listed_before_a_project_opened_never_drops_its_holds() {
+    let fixture = Fixture::new(true);
+    let reader = Arc::new(StateStore::open_reader(&location(&fixture.root)).unwrap());
+    let (follow, _followed) = mpsc::unbounded();
+    let holds = ChecksHolds::new(Default::default(), follow);
+    fixture.set("plain", last_open()).unwrap();
+    fixture.set("plain", closed()).unwrap();
+
+    // A slow refresh begins and lists no project; the project opens and a second refresh reads
+    // it and applies first. The slow one's read, numbered when it began, comes last.
+    let slow_number = holds.begin_read();
+    let handles = [(PROJECT.to_string(), StateHandle::Reader(reader))];
+    assert!(holds.refresh_from(&handles));
+    assert_eq!(holds.hold("plain").as_deref(), Some(CHECKING));
+    let slow = holds.read_from(slow_number, &[]);
+    assert!(
+        !holds.apply(slow),
+        "the read that missed the project is dropped"
+    );
+    assert_eq!(holds.hold("plain").as_deref(), Some(CHECKING));
 }
 
 #[test]

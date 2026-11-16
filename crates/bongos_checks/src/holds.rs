@@ -85,7 +85,7 @@ pub fn read_holds(read: &StateRead) -> Result<BTreeMap<String, String>> {
 /// What the `checks` source knows: the holds of each open project, by its id.
 ///
 /// Refreshes may run at once (the store's tree read and a `checks.live` event each start one).
-/// Each takes a read number before it reads any store, and its snapshot replaces the current one
+/// Each takes a read number before it lists the open projects or reads any store, and its snapshot replaces the current one
 /// only when no read with a larger number has replaced it already. A read with a larger number
 /// began after every smaller one began, so it saw every commit that came before their causes; a
 /// snapshot read earlier never replaces one read later, and a marker it missed is never lost.
@@ -126,6 +126,9 @@ impl ChecksHolds {
 
     /// Reads the holds of every open project again. Returns whether any changed.
     pub fn refresh(&self) -> bool {
+        // Taken before the projects are listed, so a read that missed a project opened since
+        // never replaces one that saw it.
+        let number = self.begin_read();
         let handles: Vec<(String, StateHandle)> = self
             .repos
             .list()
@@ -135,7 +138,7 @@ impl ChecksHolds {
                 Some((repo.location().id.clone(), repo.state()?.clone()))
             })
             .collect();
-        self.refresh_from(&handles)
+        self.apply(self.read_from(number, &handles))
     }
 
     /// Reads the holds of the projects `handles` (project id and its open store), replacing the
@@ -143,14 +146,19 @@ impl ChecksHolds {
     /// keeps what was read before, so a failed read never lets a held task through. Returns
     /// whether any hold changed.
     pub fn refresh_from(&self, handles: &[(String, StateHandle)]) -> bool {
-        let read = self.read_from(handles);
-        self.apply(read)
+        let number = self.begin_read();
+        self.apply(self.read_from(number, handles))
     }
 
-    /// Reads the holds of the projects `handles` without touching the snapshot.
-    pub(crate) fn read_from(&self, handles: &[(String, StateHandle)]) -> HoldsRead {
-        // Taken before any store is read: see the type's comment.
-        let number = self.next_read.fetch_add(1, Ordering::SeqCst);
+    /// Takes the number of a read that begins now. A caller takes it before it lists the
+    /// projects or reads any store: see the type's comment.
+    pub(crate) fn begin_read(&self) -> u64 {
+        self.next_read.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Reads the holds of the projects `handles` as the read `number` (from
+    /// [`Self::begin_read`]), without touching the snapshot.
+    pub(crate) fn read_from(&self, number: u64, handles: &[(String, StateHandle)]) -> HoldsRead {
         let projects = handles
             .iter()
             .map(|(project, handle)| {
