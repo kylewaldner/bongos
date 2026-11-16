@@ -53,7 +53,10 @@ pub use host::{
 };
 pub use live::{HoldRow, LiveRow, clear_live, hold_key, live_rows, part_key};
 pub use output::{OutputSummary, cut_marker};
-pub use owed::{CHECKS_OWED_HOOK, ChecksOwedHook, OwedMarker, marker_in, put_marker};
+pub use owed::{
+    CHECKS_OWED_HOOK, ChecksOwedHook, LastChild, LastRow, OwedMarker, last_row_in, marker_in,
+    put_last, put_marker,
+};
 pub use pin::{Pin, PinPathError, master_definitions};
 pub use pools::{
     CheckClock, CheckPools, CheckPoolsRegistry, ExecutorClock, Holder, PoolLease, PoolLeaseHandle,

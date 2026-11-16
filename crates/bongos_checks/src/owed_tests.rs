@@ -16,10 +16,12 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use tempfile::TempDir;
 
-use crate::evidence_store::{DONE_NAMESPACE, DoneRecord, OWED_NAMESPACE, put_done};
+use crate::evidence_store::{
+    DONE_NAMESPACE, DoneRecord, LAST_NAMESPACE, OWED_NAMESPACE, SEQ_KEY, SEQ_NAMESPACE, put_done,
+};
 use crate::holds::{CHECKING, ChecksHolds};
 use crate::live::{HoldRow, hold_key};
-use crate::owed::{ChecksOwedHook, FolderSets, OwedMarker, put_marker};
+use crate::owed::{ChecksOwedHook, FolderSets, LastChild, LastRow, OwedMarker, put_marker};
 use crate::test_support::{PROJECT_TOML, location};
 use crate::{LIVE_NAMESPACE, read_holds};
 
@@ -987,6 +989,348 @@ fn the_writer_s_events_are_followed_once() {
         panic!("no event");
     };
     assert_eq!(namespaces, [LIVE_NAMESPACE]);
+}
+
+const CLOSING: &str = "[[checks.closing]]\nname = \"full\"\ncommand = [\"make\", \"full\"]\n";
+
+/// A tree with the group `grp` (its checks table `group_checks`) holding the leaves `children`,
+/// each `(id, checks)`, in that order (the slugs sort as the ids), plus `extra` tasks.
+fn group_tree(
+    group_checks: &str,
+    children: &[(&str, &str)],
+    extra: &[(&str, String)],
+) -> DefinitionTree {
+    let mut tasks = vec![(
+        "tasks/grp".to_string(),
+        task_toml("grp", "other", &[], group_checks),
+    )];
+    for (id, checks) in children {
+        tasks.push((
+            format!("tasks/grp/tasks/{id}"),
+            task_toml(id, "other", &["a", "b"], checks),
+        ));
+    }
+    for (folder, text) in extra {
+        tasks.push((folder.to_string(), text.clone()));
+    }
+    let tasks: Vec<(&str, String)> = tasks
+        .iter()
+        .map(|(folder, text)| (folder.as_str(), text.clone()))
+        .collect();
+    tree_of(&tasks)
+}
+
+impl Fixture {
+    fn marker(&self, id: &str) -> Option<OwedMarker> {
+        self.writer()
+            .read(|read| {
+                Ok(read
+                    .kv(OWED_NAMESPACE)
+                    .get(id)?
+                    .map(|value| value.try_into().unwrap()))
+            })
+            .unwrap()
+    }
+
+    fn last(&self, group: &str) -> Option<LastRow> {
+        self.writer()
+            .read(|read| {
+                Ok(read
+                    .kv(LAST_NAMESPACE)
+                    .get(group)?
+                    .map(|value| value.try_into().unwrap()))
+            })
+            .unwrap()
+    }
+
+    fn seq(&self) -> Option<i64> {
+        self.writer()
+            .read(|read| {
+                Ok(read
+                    .kv(SEQ_NAMESPACE)
+                    .get(SEQ_KEY)?
+                    .and_then(|value| value.as_integer()))
+            })
+            .unwrap()
+    }
+
+    /// Finishes every task of `ids` in one transaction.
+    fn finish_together(&self, ids: &[&str]) {
+        self.writer()
+            .transact(|tx| {
+                for id in ids {
+                    tx.set_task(id, closed())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+fn carries(closing_from: &[&str]) -> OwedMarker {
+    OwedMarker {
+        closing_from: closing_from.iter().map(|id| id.to_string()).collect(),
+        last_child: None,
+    }
+}
+
+fn last_row(id: &str, generation: u64) -> LastRow {
+    LastRow {
+        id: id.to_string(),
+        generation,
+        tree_key: None,
+    }
+}
+
+fn group_marker(id: &str, generation: u64) -> OwedMarker {
+    OwedMarker {
+        closing_from: Vec::new(),
+        last_child: Some(LastChild {
+            id: id.to_string(),
+            generation,
+        }),
+    }
+}
+
+#[test]
+fn the_last_child_to_finish_while_every_sibling_is_done_carries_the_closing_checks() {
+    // c1 owes tests and has passed them, c2 owes nothing, c3 owes tests.
+    let tree = group_tree(CLOSING, &[("c1", TESTS), ("c2", ""), ("c3", TESTS)], &[]);
+    let fixture = Fixture::with(true, tree);
+    for id in ["c1", "c2", "c3"] {
+        fixture.set(id, last_open()).unwrap();
+    }
+
+    fixture.set("c1", closed()).unwrap();
+    assert_eq!(
+        fixture.marker("c1"),
+        Some(carries(&[])),
+        "c1 is not the last"
+    );
+    assert_eq!(fixture.last("grp"), Some(last_row("c1", 1)));
+    fixture.seed("c1", (true, true));
+
+    fixture.set("c2", closed()).unwrap();
+    assert_eq!(
+        fixture.marker("c2"),
+        None,
+        "c2 owes nothing and is not the last"
+    );
+    assert_eq!(fixture.last("grp"), Some(last_row("c2", 2)));
+    assert_eq!(fixture.marker("grp"), None, "the group is still open");
+
+    fixture.set("c3", closed()).unwrap();
+    assert_eq!(fixture.marker("c3"), Some(carries(&["grp"])));
+    assert_eq!(
+        fixture.marker("c1"),
+        Some(carries(&[])),
+        "no earlier child carries"
+    );
+    assert_eq!(fixture.marker("c2"), None);
+    assert_eq!(fixture.last("grp"), Some(last_row("c3", 3)));
+    assert_eq!(fixture.marker("grp"), Some(group_marker("c3", 3)));
+    assert_eq!(fixture.seq(), Some(3));
+    assert!(fixture.holds().contains_key("grp"));
+
+    // Reopened, the group loses its marker; the last child row stays.
+    fixture.set("c3", last_open()).unwrap();
+    assert_eq!(fixture.rows("grp"), (false, false));
+    assert_eq!(fixture.rows("c3"), (false, false));
+    assert_eq!(fixture.last("grp"), Some(last_row("c3", 3)));
+}
+
+#[test]
+fn a_last_child_owing_nothing_itself_carries_the_closing_checks() {
+    let tree = group_tree(CLOSING, &[("c1", ""), ("c2", "")], &[]);
+    let fixture = Fixture::with(true, tree);
+    fixture.set("c1", closed()).unwrap();
+    fixture.set("c2", closed()).unwrap();
+    assert_eq!(fixture.marker("c1"), None);
+    assert_eq!(fixture.marker("c2"), Some(carries(&["grp"])));
+    assert_eq!(fixture.marker("grp"), Some(group_marker("c2", 2)));
+}
+
+#[test]
+fn a_held_sibling_or_one_finishing_in_the_same_transaction_means_no_child_carries() {
+    // c1 finished but has not passed its checks: c2 does not carry them.
+    let tree = group_tree(CLOSING, &[("c1", TESTS), ("c2", TESTS)], &[]);
+    let fixture = Fixture::with(true, tree);
+    fixture.set("c1", closed()).unwrap();
+    fixture.set("c2", closed()).unwrap();
+    assert_eq!(fixture.marker("c2"), Some(carries(&[])));
+    assert_eq!(fixture.marker("grp"), Some(group_marker("c2", 2)));
+
+    // Children finishing together: none carries, the last in child order is recorded, and the
+    // group is marked to judge its closing checks itself.
+    let tree = group_tree(CLOSING, &[("c1", ""), ("c2", TESTS), ("c3", "")], &[]);
+    let fixture = Fixture::with(true, tree);
+    fixture.set("c1", closed()).unwrap();
+    fixture.finish_together(&["c3", "c2"]);
+    assert_eq!(fixture.marker("c2"), Some(carries(&[])));
+    assert_eq!(fixture.marker("c3"), None);
+    assert_eq!(fixture.last("grp"), Some(last_row("c3", 2)));
+    assert_eq!(fixture.marker("grp"), Some(group_marker("c3", 2)));
+}
+
+#[test]
+fn closing_checks_of_a_group_above_pass_through_a_group_that_is_its_last_open_child() {
+    // top: outer (closing) > inner (no closing of its own) > leaf.
+    let tree = tree_of(&[
+        ("tasks/outer", task_toml("outer", "other", &[], CLOSING)),
+        (
+            "tasks/outer/tasks/inner",
+            task_toml("inner", "other", &[], ""),
+        ),
+        (
+            "tasks/outer/tasks/inner/tasks/leaf",
+            task_toml("leaf", "other", &["a", "b"], ""),
+        ),
+    ]);
+    let fixture = Fixture::with(true, tree);
+    fixture.set("leaf", closed()).unwrap();
+    assert_eq!(fixture.marker("leaf"), Some(carries(&["outer"])));
+    // inner carries outer's closing checks as its closing set, so it is marked too.
+    assert_eq!(
+        fixture.marker("inner"),
+        Some(OwedMarker {
+            closing_from: vec!["outer".to_string()],
+            last_child: Some(LastChild {
+                id: "leaf".to_string(),
+                generation: 1,
+            }),
+        })
+    );
+    assert_eq!(fixture.last("inner"), Some(last_row("leaf", 1)));
+    assert_eq!(fixture.last("outer"), Some(last_row("inner", 2)));
+    assert_eq!(fixture.marker("outer"), Some(group_marker("inner", 2)));
+    // The top group has no closing set: no row, no marker.
+    assert_eq!(fixture.last("g1"), None);
+    assert_eq!(fixture.marker("g1"), None);
+}
+
+#[test]
+fn a_group_with_inherited_checks_and_no_closing_checks_gets_no_marker_and_is_done() {
+    let tree = group_tree(TESTS, &[("c1", ""), ("c2", "")], &[]);
+    let fixture = Fixture::with(true, tree);
+    fixture.set("c1", closed()).unwrap();
+    assert_eq!(
+        fixture.marker("c1"),
+        Some(carries(&[])),
+        "c1 inherits tests"
+    );
+    fixture.seed("c1", (true, true));
+    fixture.set("c2", closed()).unwrap();
+    assert_eq!(fixture.marker("c2"), Some(carries(&[])));
+    fixture.seed("c2", (true, true));
+    assert_eq!(fixture.rows("grp"), (false, false));
+    assert_eq!(
+        fixture.last("grp"),
+        None,
+        "no closing set, no last child row"
+    );
+    assert_eq!(fixture.seq(), None);
+    assert!(fixture.holds().is_empty(), "{:?}", fixture.holds());
+}
+
+#[test]
+fn a_child_owing_nothing_or_finishing_while_off_is_still_recorded() {
+    let tree = group_tree(CLOSING, &[("c1", ""), ("c2", TESTS), ("c3", TESTS)], &[]);
+    let fixture = Fixture::with(true, tree);
+    fixture.set("c1", closed()).unwrap();
+    assert_eq!(fixture.marker("c1"), None);
+    assert_eq!(fixture.last("grp"), Some(last_row("c1", 1)));
+
+    fixture.hook.set_enabled(false);
+    fixture.set("c2", closed()).unwrap();
+    assert_eq!(fixture.marker("c2"), None);
+    assert_eq!(fixture.last("grp"), Some(last_row("c2", 2)));
+    fixture.set("c3", closed()).unwrap();
+    assert_eq!(fixture.rows("c3"), (false, false));
+    assert_eq!(
+        fixture.rows("grp"),
+        (false, false),
+        "off: the group is not marked"
+    );
+    assert_eq!(fixture.last("grp"), Some(last_row("c3", 3)));
+}
+
+#[test]
+fn a_child_moved_out_of_the_group_is_ignored() {
+    let before = group_tree(CLOSING, &[("c1", TESTS), ("c2", TESTS), ("c3", TESTS)], &[]);
+    let mut fixture = Fixture::with(true, before);
+    for id in ["c1", "c2", "c3"] {
+        fixture.set(id, last_open()).unwrap();
+    }
+    fixture.set("c1", closed()).unwrap();
+    // c1 passed its checks: its done record carries generation 1.
+    fixture.seed("c1", (true, true));
+    fixture.set("c2", closed()).unwrap();
+    assert_eq!(fixture.last("grp"), Some(last_row("c2", 2)));
+
+    // c2 and the still open c3 move out of the group: only the finished c1 is left, so the
+    // group finishes in the landing. Its recorded last child is gone, so c1 is used.
+    fixture.land(group_tree(
+        CLOSING,
+        &[("c1", TESTS)],
+        &[
+            ("tasks/c2", task_toml("c2", "other", &["a", "b"], TESTS)),
+            ("tasks/c3", task_toml("c3", "other", &["a", "b"], TESTS)),
+        ],
+    ));
+    assert_eq!(fixture.marker("grp"), Some(group_marker("c1", 1)));
+
+    // c3 finishing outside the group leaves its last child row alone.
+    fixture.set("c3", closed()).unwrap();
+    assert_eq!(fixture.marker("c3"), Some(carries(&[])));
+    assert_eq!(fixture.last("grp"), Some(last_row("c2", 2)));
+    assert_eq!(fixture.seq(), Some(2));
+}
+
+#[test]
+fn a_group_with_no_last_child_row_gets_no_last_child() {
+    // c1 finished, its row is gone (as for a group whose children all finished before it had a
+    // row), and the cancelled c2 finishes the group with no child finishing: no row to copy.
+    let tree = group_tree(CLOSING, &[("c1", ""), ("c2", "")], &[]);
+    let fixture = Fixture::with(true, tree);
+    fixture
+        .writer()
+        .transact(|tx| tx.set_task("c1", closed()))
+        .unwrap();
+    fixture
+        .writer()
+        .transact(|tx| tx.kv(LAST_NAMESPACE).delete("grp"))
+        .unwrap();
+    fixture.set("c2", cancelled()).unwrap();
+    assert_eq!(fixture.marker("grp"), Some(OwedMarker::default()));
+}
+
+#[test]
+fn a_snapshot_round_trip_keeps_the_counter_order_and_the_last_child() {
+    use crate::exporter::ChecksExporter;
+    use bongos_project_repo::StateExporter as _;
+
+    let tree = group_tree(CLOSING, &[("c1", ""), ("c2", ""), ("c3", "")], &[]);
+    let source = Fixture::with(true, tree.clone());
+    source.set("c1", closed()).unwrap();
+    source.set("c2", closed()).unwrap();
+    assert_eq!(source.seq(), Some(2));
+    let files = source
+        .writer()
+        .read(|read| ChecksExporter.export(read))
+        .unwrap();
+
+    let target = Fixture::with(true, tree);
+    target
+        .writer()
+        .transact(|tx| ChecksExporter.import(tx, &files))
+        .unwrap();
+    assert_eq!(target.seq(), Some(2));
+    assert_eq!(target.last("grp"), Some(last_row("c2", 2)));
+    // The next event orders after every one before the snapshot.
+    target.set("c1", closed()).unwrap();
+    target.set("c2", closed()).unwrap();
+    target.set("c3", closed()).unwrap();
+    assert_eq!(target.last("grp"), Some(last_row("c3", 5)));
 }
 
 mod registered_in_init {
