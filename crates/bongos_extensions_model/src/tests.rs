@@ -191,3 +191,432 @@ fn is_listed_requires_the_listed_commit() {
     assert!(list.is_listed(&zed, proto.path.as_deref(), &proto.commit));
     assert!(!list.is_listed(&zed, None, &proto.commit));
 }
+
+mod install_state {
+    use super::super::*;
+    use std::fs;
+
+    fn sample_record() -> InstallRecord {
+        InstallRecord {
+            version: 1,
+            id: "kotlin".into(),
+            source_url: "https://example.com/org/kotlin".into(),
+            path: Some("ext".into()),
+            requested_ref: Some("main".into()),
+            commit: "a".repeat(40),
+            listed: true,
+            trusted_commit: None,
+            state: RecordState::Installed,
+            installed_at: "2026-01-01T00:00:00Z".into(),
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn record_round_trips_and_keeps_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kotlin").join("record.json");
+        let record = sample_record();
+        write_atomic(&path, &record, "n1").unwrap();
+        assert_eq!(read(&path).unwrap(), ReadOutcome::Ok(record));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["future_field"] = serde_json::json!({"a": [1, 2]});
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let ReadOutcome::Ok(read_back) = read(&path).unwrap() else {
+            panic!("record should be readable");
+        };
+        assert!(read_back.extra.contains_key("future_field"));
+        write_atomic(&path, &read_back, "n2").unwrap();
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["future_field"], value["future_field"]);
+    }
+
+    #[test]
+    fn torn_temp_file_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.json");
+        fs::write(dir.path().join("record.json.tmp-x"), b"{\"version\":").unwrap();
+        assert_eq!(read(&path).unwrap(), ReadOutcome::Missing);
+        write_atomic(&path, &sample_record(), "y").unwrap();
+        assert!(matches!(read(&path).unwrap(), ReadOutcome::Ok(_)));
+        remove_torn_temp_files(dir.path()).unwrap();
+        assert!(!dir.path().join("record.json.tmp-x").exists());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn unreadable_record_is_renamed_bad() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.json");
+        let bad = dir.path().join("record.json.bad");
+        fs::write(&bad, b"old").unwrap();
+        fs::write(&path, b"not json").unwrap();
+        assert_eq!(read(&path).unwrap(), ReadOutcome::Unreadable);
+        assert!(!path.exists());
+        assert_eq!(fs::read(&bad).unwrap(), b"not json");
+        let mut newer = sample_record();
+        newer.version = 2;
+        fs::write(&path, serde_json::to_vec(&newer).unwrap()).unwrap();
+        assert_eq!(read(&path).unwrap(), ReadOutcome::Unreadable);
+    }
+
+    #[test]
+    fn layout_paths_and_ids() {
+        let layout = Layout::new("/x".into());
+        assert_eq!(
+            layout.rebuild_checkout_dir("k", "c", "n").to_str().unwrap(),
+            "/x/git/k/c.rebuild-n"
+        );
+        assert_eq!(layout.symlink_path("k").to_str().unwrap(), "/x/installed/k");
+        let url = SourceUrl::parse("https://Example.com/a/b.git").unwrap();
+        let same = SourceUrl::parse("https://example.com/a/b").unwrap();
+        let key = layout.source_key(&url);
+        assert_eq!(key, layout.source_key(&same));
+        assert!(key.starts_with("source-") && key.len() == 15);
+        assert!(validate_id("kotlin-2_x").is_ok());
+        for bad in ["", "staging", "Logs", "LOCKS", ".", "..", "a/b"] {
+            assert!(validate_id(bad).is_err(), "{bad}");
+        }
+    }
+
+    fn rec(id: &str, commit: &str, state: RecordState) -> RecordSnapshot {
+        let mut r = sample_record();
+        r.id = id.into();
+        r.commit = commit.into();
+        r.state = state;
+        RecordSnapshot::Some(r)
+    }
+
+    fn ext(
+        id: &str,
+        checkouts: &[(&str, bool)],
+        record: RecordSnapshot,
+        lock: bool,
+    ) -> ExtensionSnapshot {
+        ExtensionSnapshot {
+            id: id.into(),
+            checkouts: checkouts
+                .iter()
+                .map(|(f, m)| CheckoutSnapshot {
+                    folder: (*f).into(),
+                    has_manifest: *m,
+                })
+                .collect(),
+            record,
+            lock_held: lock,
+        }
+    }
+
+    fn link(id: &str, commit: &str) -> SymlinkSnapshot {
+        SymlinkSnapshot {
+            id: id.into(),
+            target: SymlinkTarget::Checkout {
+                id: id.into(),
+                commit: commit.into(),
+                origin_url: Some("https://example.com/o".into()),
+            },
+        }
+    }
+
+    fn snap(extensions: Vec<ExtensionSnapshot>, symlinks: Vec<SymlinkSnapshot>) -> Snapshot {
+        Snapshot {
+            git_dir_exists: true,
+            staging: Vec::new(),
+            extensions,
+            symlinks,
+            locked_ids_without_folder: Vec::new(),
+        }
+    }
+
+    fn del(id: &str, folder: &str) -> Fix {
+        Fix::DeleteCheckout {
+            id: id.into(),
+            folder: folder.into(),
+        }
+    }
+
+    fn wr(id: &str, commit: &str) -> Fix {
+        Fix::WriteRecordFromSymlink {
+            id: id.into(),
+            commit: commit.into(),
+            origin_url: Some("https://example.com/o".into()),
+        }
+    }
+
+    #[test]
+    fn plan_first_use_and_staging_swept() {
+        let mut s = snap(vec![], vec![]);
+        s.git_dir_exists = false;
+        s.staging = vec!["a".into()];
+        assert!(plan(&s).is_empty());
+        s.git_dir_exists = true;
+        s.staging = vec!["b".into(), "a".into()];
+        s.extensions = vec![ext("k", &[], RecordSnapshot::None, false)];
+        s.symlinks = vec![SymlinkSnapshot {
+            id: "other".into(),
+            target: SymlinkTarget::Elsewhere,
+        }];
+        assert_eq!(
+            plan(&s),
+            vec![
+                Fix::DeleteStaging { nonce: "a".into() },
+                Fix::DeleteStaging { nonce: "b".into() }
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_crash_after_build_before_link() {
+        let s = snap(
+            vec![ext("k", &[("c1", true)], RecordSnapshot::None, false)],
+            vec![],
+        );
+        assert_eq!(plan(&s), vec![del("k", "c1")]);
+    }
+
+    #[test]
+    fn plan_crash_after_link_before_record() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c1", true), ("c0", true)],
+                RecordSnapshot::None,
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(plan(&s), vec![del("k", "c0"), wr("k", "c1")]);
+        // A stale record naming another commit is replaced the same way.
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c1", true), ("c0", true)],
+                rec("k", "c0", RecordState::Installed),
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(plan(&s), vec![del("k", "c0"), wr("k", "c1")]);
+        // An unreadable record is rewritten from the link and the linked checkout is kept.
+        let s = snap(
+            vec![ext("k", &[("c1", true)], RecordSnapshot::Unreadable, false)],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(plan(&s), vec![wr("k", "c1")]);
+    }
+
+    #[test]
+    fn plan_crash_during_update_swap() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true), ("c1", true)],
+                rec("k", "c0", RecordState::Installed),
+                false,
+            )],
+            vec![],
+        );
+        assert_eq!(
+            plan(&s),
+            vec![
+                del("k", "c1"),
+                Fix::Relink {
+                    id: "k".into(),
+                    commit: "c0".into()
+                }
+            ]
+        );
+        for checkouts in [&[("c0", false)][..], &[][..]] {
+            let s = snap(
+                vec![ext(
+                    "k",
+                    checkouts,
+                    rec("k", "c0", RecordState::Installed),
+                    false,
+                )],
+                vec![],
+            );
+            assert_eq!(plan(&s), vec![Fix::MarkBuildMissing { id: "k".into() }]);
+        }
+    }
+
+    #[test]
+    fn plan_record_removing() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true), ("c1", true)],
+                rec("k", "c0", RecordState::Removing),
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(plan(&s), vec![Fix::FinishRemoval { id: "k".into() }]);
+    }
+
+    #[test]
+    fn plan_lock_held() {
+        let mut s = snap(
+            vec![
+                ext("k", &[("c0", true)], RecordSnapshot::None, true),
+                ext("m", &[("c9", true)], RecordSnapshot::None, false),
+            ],
+            vec![],
+        );
+        s.staging = vec!["n".into()];
+        assert_eq!(plan(&s), vec![del("m", "c9")]);
+        s.extensions[0].lock_held = false;
+        assert_eq!(
+            plan(&s),
+            vec![
+                Fix::DeleteStaging { nonce: "n".into() },
+                del("k", "c0"),
+                del("m", "c9")
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_skips_reserved_and_invalid_ids() {
+        let s = snap(
+            vec![
+                ext("logs", &[("c", true)], RecordSnapshot::None, false),
+                ext("LOCKS", &[("c", true)], RecordSnapshot::None, false),
+                ext("a/b", &[("c", true)], RecordSnapshot::None, false),
+            ],
+            vec![link("Staging", "c"), link("logs", "c")],
+        );
+        assert!(plan(&s).is_empty());
+    }
+
+    #[test]
+    fn plan_link_to_another_ids_checkout() {
+        let mut foreign = link("foo", "c");
+        foreign.target = SymlinkTarget::Checkout {
+            id: "bar".into(),
+            commit: "c".into(),
+            origin_url: None,
+        };
+        let s = snap(
+            vec![ext(
+                "bar",
+                &[("c", true), ("d", true)],
+                RecordSnapshot::None,
+                false,
+            )],
+            vec![foreign],
+        );
+        assert_eq!(plan(&s), vec![del("bar", "d")]);
+    }
+
+    #[test]
+    fn plan_orphan_link_marks_build_missing() {
+        let s = snap(vec![], vec![link("k", "c1")]);
+        assert_eq!(plan(&s), vec![Fix::MarkBuildMissing { id: "k".into() }]);
+    }
+
+    #[test]
+    fn plan_unreadable_record_with_link_writes_record() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true), ("c1", true)],
+                RecordSnapshot::Unreadable,
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(plan(&s), vec![del("k", "c0"), wr("k", "c1")]);
+    }
+
+    #[test]
+    fn plan_dangling_link_keeps_the_recorded_checkout() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true)],
+                rec("k", "c0", RecordState::Installed),
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(
+            plan(&s),
+            vec![Fix::Relink {
+                id: "k".into(),
+                commit: "c0".into()
+            }]
+        );
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", false)],
+                rec("k", "c0", RecordState::Installed),
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert_eq!(plan(&s), vec![Fix::MarkBuildMissing { id: "k".into() }]);
+        let s = snap(
+            vec![ext("k", &[("c0", true)], RecordSnapshot::Unreadable, false)],
+            vec![link("k", "c1")],
+        );
+        assert!(plan(&s).is_empty());
+    }
+
+    #[test]
+    fn plan_finish_removal_skipped_when_another_link_points_in() {
+        let mut foreign = link("foo", "c0");
+        foreign.target = SymlinkTarget::Checkout {
+            id: "k".into(),
+            commit: "c0".into(),
+            origin_url: None,
+        };
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true)],
+                rec("k", "c0", RecordState::Removing),
+                false,
+            )],
+            vec![foreign],
+        );
+        assert!(plan(&s).is_empty());
+    }
+
+    #[test]
+    fn plan_staging_kept_while_a_folderless_id_is_locked() {
+        let mut s = snap(vec![], vec![]);
+        s.staging = vec!["n".into()];
+        s.locked_ids_without_folder = vec!["fresh".into()];
+        assert!(plan(&s).is_empty());
+        s.locked_ids_without_folder.clear();
+        assert_eq!(plan(&s), vec![Fix::DeleteStaging { nonce: "n".into() }]);
+    }
+
+    #[test]
+    fn plan_record_id_mismatch_is_left_alone() {
+        let s = snap(
+            vec![ext(
+                "k",
+                &[("c0", true)],
+                rec("other", "c0", RecordState::Installed),
+                false,
+            )],
+            vec![link("k", "c1")],
+        );
+        assert!(plan(&s).is_empty());
+    }
+
+    #[test]
+    fn unreadable_io_error_keeps_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.json");
+        fs::create_dir(&path).unwrap();
+        assert!(read(&path).is_err());
+        assert!(path.exists());
+        assert!(!dir.path().join("record.json.bad").exists());
+    }
+}
