@@ -2492,13 +2492,30 @@ pub fn load_default_keymap(cx: &mut App) {
     let vim_enabled =
         VimModeSetting::get_global(cx).0 || vim_mode_setting::HelixModeSetting::get_global(cx).0;
 
-    for part in settings::profile_keymap(base_keymap, vim_enabled) {
-        match part {
-            settings::KeymapPart::Asset { path, source } => {
-                cx.bind_keys(KeymapFile::load_asset(path, Some(source), cx).unwrap());
-            }
-        }
+    cx.bind_keys(profile_key_bindings(
+        base_keymap,
+        vim_enabled,
+        cfg!(target_os = "macos"),
+        cx,
+    ));
+}
+
+/// The bindings of every part of a base keymap's profile, in load order, with their sources. A
+/// derived leader part parses its Emacs keymap once here.
+pub(crate) fn profile_key_bindings(
+    base_keymap: BaseKeymap,
+    vim_enabled: bool,
+    macos: bool,
+    cx: &App,
+) -> Vec<KeyBinding> {
+    let mut bindings = Vec::new();
+    for part in settings::profile_keymap_for_platform(base_keymap, vim_enabled, macos) {
+        bindings.extend(
+            part.load(cx)
+                .unwrap_or_else(|error| panic!("built-in keymap part {part:?}: {error}")),
+        );
     }
+    bindings
 }
 
 pub fn open_new_ssh_project_from_project(

@@ -16,6 +16,7 @@ const PICKER: [&str; 3] = ["Workspace", "Picker", "Editor mode=single_line"];
 const MINIBUFFER: [&str; 4] = ["Workspace", "Minibuffer", "Picker", "Editor mode=full"];
 const PANE_TERMINAL: [&str; 3] = ["Workspace", "Pane", "Terminal"];
 const TERMINAL: [&str; 4] = ["Workspace", "Dock", "TerminalPanel", "Terminal"];
+const PROMPTS_EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full prompts"];
 
 /// The bindings a profile loads, in load order, with the sources the app loads them with.
 fn load_profile(
@@ -24,17 +25,7 @@ fn load_profile(
     macos: bool,
     cx: &TestAppContext,
 ) -> Vec<KeyBinding> {
-    cx.update(|cx| {
-        let mut all = Vec::new();
-        for part in settings::profile_keymap_for_platform(base, vim_enabled, macos) {
-            let KeymapPart::Asset { path, source } = part;
-            all.extend(
-                KeymapFile::load_asset(path, Some(source), cx)
-                    .unwrap_or_else(|error| panic!("{path}: {error}")),
-            );
-        }
-        all
-    })
+    cx.update(|cx| super::profile_key_bindings(base, vim_enabled, macos, cx))
 }
 
 fn stack(contexts: &[&str]) -> Vec<KeyContext> {
@@ -303,7 +294,9 @@ async fn vscode_loads_vim_json_when_vim_or_helix_is_on(cx: &mut TestAppContext) 
     let vim = |vim_enabled| {
         settings::profile_keymap(BaseKeymap::VSCode, vim_enabled)
             .iter()
-            .any(|KeymapPart::Asset { path, .. }| *path == settings::VIM_KEYMAP_PATH)
+            .any(|part| {
+                matches!(part, KeymapPart::Asset { path, .. } if *path == settings::VIM_KEYMAP_PATH)
+            })
     };
     assert!(vim(true));
     assert!(!vim(false));
@@ -351,5 +344,258 @@ fn the_lowercase_aliases_parse_and_written_values_stay() {
             serde_json::to_string(&value).unwrap(),
             format!("\"{written}\"")
         );
+    }
+}
+
+/// The keys of a binding, one string per keystroke.
+fn keys_of(binding: &KeyBinding) -> Vec<String> {
+    binding
+        .keystrokes()
+        .iter()
+        .map(|keystroke| keystroke.inner().unparse())
+        .collect()
+}
+
+fn context_of(binding: &KeyBinding) -> String {
+    binding
+        .predicate()
+        .map(|predicate| predicate.to_string())
+        .unwrap_or_default()
+}
+
+/// The VS Code leader's keys, spelled the way `keys_of` spells them (`cmd` prints as the
+/// platform's own name).
+fn leader_keys(macos: bool) -> Vec<String> {
+    let leader = if macos { "cmd-k b" } else { "ctrl-k b" };
+    leader
+        .split(' ')
+        .map(|key| Keystroke::parse(key).unwrap().unparse())
+        .collect()
+}
+
+/// The bongos command rows of a platform's Emacs keymap: two or more keys starting with `ctrl-c`,
+/// an action that is not `null`, `emacs::` or `terminal::`, in a context without `Terminal`.
+fn emacs_command_rows(macos: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
+    let path = if macos {
+        "keymaps/macos/emacs.json"
+    } else {
+        "keymaps/linux/emacs.json"
+    };
+    cx.update(|cx| KeymapFile::load_asset(path, Some(KeybindSource::Base), cx).unwrap())
+        .into_iter()
+        .filter(|binding| {
+            let keys = keys_of(binding);
+            let name = binding.action().name();
+            keys.len() >= 2
+                && keys[0] == "ctrl-c"
+                && !gpui::is_no_action(binding.action())
+                && !name.starts_with("emacs::")
+                && !name.starts_with("terminal::")
+                && !context_of(binding).contains("Terminal")
+        })
+        .collect()
+}
+
+/// The derived leader part of the VS Code profile, loaded the way the loader loads it.
+fn vscode_leader_rows(macos: bool, cx: &TestAppContext) -> Vec<KeyBinding> {
+    let parts = settings::profile_keymap_for_platform(BaseKeymap::VSCode, false, macos);
+    let leaders: Vec<_> = parts
+        .iter()
+        .filter(|part| matches!(part, KeymapPart::Leader { .. }))
+        .collect();
+    assert_eq!(leaders.len(), 1, "macos={macos}");
+    cx.update(|cx| leaders[0].load(cx).unwrap())
+}
+
+/// The context stacks a derived row is checked in.
+fn stacks_for(context: &str) -> Vec<&'static [&'static str]> {
+    match context {
+        "Workspace" => vec![&WORKSPACE[..], &EDITOR[..]],
+        "Editor && prompts" => vec![&PROMPTS_EDITOR[..]],
+        other => panic!("no context stack for derived rows in `{other}`"),
+    }
+}
+
+#[gpui::test]
+async fn every_emacs_command_row_has_exactly_one_vscode_leader_row(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        let rows = emacs_command_rows(macos, cx);
+        let derived = vscode_leader_rows(macos, cx);
+        assert!(!rows.is_empty(), "macos={macos}");
+        assert_eq!(derived.len(), rows.len(), "macos={macos}");
+        for row in &rows {
+            let mut expected_keys = leader_keys(macos);
+            expected_keys.extend(keys_of(row).into_iter().skip(1));
+            let matching = derived
+                .iter()
+                .filter(|binding| {
+                    keys_of(binding) == expected_keys
+                        && context_of(binding) == context_of(row)
+                        && binding.action().partial_eq(row.action())
+                })
+                .count();
+            assert_eq!(
+                matching,
+                1,
+                "macos={macos}: {:?} in {}",
+                keys_of(row),
+                context_of(row)
+            );
+        }
+        for binding in &derived {
+            assert_eq!(
+                binding.meta(),
+                Some(KeybindSource::Base.meta()),
+                "macos={macos}"
+            );
+            let name = binding.action().name();
+            assert!(
+                !name.starts_with("emacs::") && !name.starts_with("terminal::"),
+                "macos={macos}: {name}"
+            );
+            assert!(
+                !context_of(binding).contains("Terminal"),
+                "macos={macos}: {}",
+                context_of(binding)
+            );
+        }
+    }
+}
+
+#[gpui::test]
+async fn the_leader_reaches_work_chat_workflow_and_prompts_under_vscode(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        let keymap = Keymap::new(load_profile(BaseKeymap::VSCode, false, macos, cx));
+        let leader = leader_keys(macos).join(" ");
+        for (rest, contexts, action) in [
+            ("w w", &WORKSPACE[..], "work::TogglePanel"),
+            ("c n", &WORKSPACE[..], "chat::New"),
+            ("f r", &WORKSPACE[..], "workflow::Run"),
+            ("ctrl-c", &PROMPTS_EDITOR[..], "prompts::Send"),
+        ] {
+            let input = format!("{leader} {rest}");
+            let (names, pending) = resolve(&keymap, &input, contexts);
+            assert_eq!(names.first(), Some(&action), "macos={macos}: {input}");
+            assert!(!pending, "macos={macos}: {input}");
+        }
+    }
+}
+
+#[gpui::test]
+async fn no_default_binding_or_prefix_outranks_a_derived_chord(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        let keymap = Keymap::new(load_profile(BaseKeymap::VSCode, false, macos, cx));
+        for binding in vscode_leader_rows(macos, cx) {
+            let keys = keys_of(&binding);
+            let input = keys.join(" ");
+            for contexts in stacks_for(&context_of(&binding)) {
+                let label = format!("macos={macos}: {input} in {contexts:?}");
+                let (names, pending) = resolve(&keymap, &input, contexts);
+                assert_eq!(names.first(), Some(&binding.action().name()), "{label}");
+                assert!(!pending, "{label}");
+                // Every shorter prefix waits for more keys instead of running something.
+                for len in 1..keys.len() {
+                    let prefix = keys[..len].join(" ");
+                    assert!(
+                        resolve(&keymap, &prefix, contexts).1,
+                        "{label}: {prefix} does not wait"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+async fn the_terminal_still_forwards_ctrl_k_with_the_leader_loaded(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    // Linux forwards `ctrl-k` to the shell; macOS clears the terminal on `cmd-k`.
+    for (macos, action) in [
+        (false, "terminal::SendKeystroke"),
+        (true, "terminal::Clear"),
+    ] {
+        let leader = leader_keys(macos);
+        let bindings = load_profile(BaseKeymap::VSCode, false, macos, cx);
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| keys_of(binding).starts_with(&leader)),
+            "macos={macos}: the leader block is loaded"
+        );
+        let keymap = Keymap::new(bindings);
+        let input = if macos { "cmd-k" } else { "ctrl-k" };
+        for contexts in [&TERMINAL[..], &PANE_TERMINAL[..]] {
+            let (names, pending) = resolve(&keymap, input, contexts);
+            assert_eq!(names.first(), Some(&action), "macos={macos}: {contexts:?}");
+            assert!(!pending, "macos={macos}: {contexts:?}");
+        }
+    }
+}
+
+/// Context stacks a default single-key binding is checked in; each binding is checked in every
+/// stack its context matches.
+const SINGLE_KEY_STACKS: [&[&str]; 5] = [
+    &TERMINAL,
+    &PANE_TERMINAL,
+    &["Workspace", "RecentProjects"],
+    &[
+        "Workspace",
+        "RecentProjects",
+        "Picker",
+        "Editor mode=single_line",
+    ],
+    &["Workspace", "Pane", "KeymapEditor"],
+];
+
+#[gpui::test]
+async fn every_default_single_leader_key_still_fires_under_vscode(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for macos in [false, true] {
+        let leader = leader_keys(macos);
+        let default_path = if macos {
+            "keymaps/default-macos.json"
+        } else {
+            "keymaps/default-linux.json"
+        };
+        let defaults: Vec<KeyBinding> = cx
+            .update(|cx| KeymapFile::load_asset(default_path, Some(KeybindSource::Default), cx))
+            .unwrap()
+            .into_iter()
+            .filter(|binding| {
+                keys_of(binding) == leader[..1] && !gpui::is_no_action(binding.action())
+            })
+            .collect();
+        assert!(
+            !defaults.is_empty(),
+            "macos={macos}: no single {}",
+            leader[0]
+        );
+        let keymap = Keymap::new(load_profile(BaseKeymap::VSCode, false, macos, cx));
+        let input = if macos { "cmd-k" } else { "ctrl-k" };
+        for binding in &defaults {
+            let predicate = binding.predicate();
+            let stacks: Vec<_> = SINGLE_KEY_STACKS
+                .iter()
+                .filter(|contexts| {
+                    predicate
+                        .as_ref()
+                        .is_none_or(|predicate| predicate.eval(&stack(contexts)))
+                })
+                .collect();
+            assert!(
+                !stacks.is_empty(),
+                "macos={macos}: add a context stack for `{}`",
+                context_of(binding)
+            );
+            for contexts in stacks {
+                let label = format!("macos={macos}: {input} in {contexts:?}");
+                let (names, pending) = resolve(&keymap, input, contexts);
+                assert_eq!(names.first(), Some(&binding.action().name()), "{label}");
+                assert!(!pending, "{label}");
+            }
+        }
     }
 }
