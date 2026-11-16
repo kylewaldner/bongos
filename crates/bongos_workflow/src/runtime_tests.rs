@@ -80,6 +80,47 @@ routes = [{ to = "done" }]
 kind = "success"
 "#;
 
+/// Two checks run side by side in a fan-out, neither with a route for `no_verdict`.
+const CHECKED_FAN: &str = r#"
+schema = 1
+name = "checkedfan"
+start = "split"
+
+[nodes.split]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = ["lint", "test"] }]
+
+[nodes.lint]
+kind = "program"
+use = "checks"
+routes = [
+  { when = { verdict = "pass" }, to = "gather" },
+  { when = { verdict = "fail" }, to = "broken" },
+]
+
+[nodes.test]
+kind = "program"
+use = "checks"
+routes = [
+  { when = { verdict = "pass" }, to = "gather" },
+  { when = { verdict = "fail" }, to = "broken" },
+]
+
+[nodes.gather]
+kind = "agent"
+join = { wait = "all" }
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+
+[ends.broken]
+kind = "failure"
+reason = "checks failed"
+"#;
+
 fn definition(text: &str) -> Definition {
     parse(text).unwrap()
 }
@@ -650,4 +691,67 @@ fn an_orphan_group_is_killed_even_when_its_leader_exits_on_sigterm() {
     assert!(!process::group_alive(records[1].pid));
     assert!(leader.has_exited());
     assert!(sleeping.has_exited());
+}
+
+fn check_result(verdict: &str) -> serde_json::Value {
+    json!({
+        "verdict": verdict,
+        "failing": [],
+        "scope": "changed files",
+        "evidence": [],
+        "summary": "",
+    })
+}
+
+fn held_nodes(runtime: &Runtime<FakeRunner>) -> Vec<String> {
+    let state = runtime.state(&run_id(1)).unwrap();
+    state.held.keys().map(|key| key.node.clone()).collect()
+}
+
+#[test]
+fn checks_without_a_verdict_in_two_branches_hold_the_run_one_at_a_time() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.auto_finish = true;
+    runner
+        .script("lint", check_result("no_verdict"))
+        .script("test", check_result("no_verdict"));
+    let mut runtime = runtime(runner);
+    runtime.add(spec(temp.path(), 1, CHECKED_FAN)).unwrap();
+    for _ in 0..5 {
+        runtime.tick();
+    }
+    // Both checks came up without a verdict; the run is held on the first.
+    assert_eq!(held_nodes(&runtime), ["lint"]);
+    assert_eq!(runtime.state(&run_id(1)).unwrap().ended, None);
+    assert_eq!(
+        runtime.runner().started.len(),
+        3,
+        "a held run starts nothing"
+    );
+
+    // A resume reruns only the held check; the other's recorded result then holds the run.
+    runtime.runner_mut().script("lint", check_result("pass"));
+    assert_eq!(runtime.resume(&run_id(1)).unwrap().len(), 1);
+    for _ in 0..5 {
+        runtime.tick();
+    }
+    assert_eq!(held_nodes(&runtime), ["test"]);
+    assert_eq!(runtime.runner().started.len(), 4);
+
+    runtime.runner_mut().script("test", check_result("pass"));
+    assert_eq!(runtime.resume(&run_id(1)).unwrap().len(), 1);
+    for _ in 0..5 {
+        runtime.tick();
+    }
+    let state = runtime.state(&run_id(1)).unwrap();
+    assert_eq!(state.ended, Some((EndState::Succeeded, None)));
+    assert!(state.held.is_empty());
+    let started: Vec<&str> = runtime
+        .runner()
+        .started
+        .iter()
+        .map(|(_, key)| key.node.as_str())
+        .collect();
+    assert_eq!(started, ["split", "lint", "test", "lint", "test", "gather"]);
 }

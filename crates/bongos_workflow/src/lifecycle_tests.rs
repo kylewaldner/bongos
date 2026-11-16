@@ -1,9 +1,10 @@
 //! Tests of the run lifecycle: every start refusal in order with its text, pause, halt and resume
-//! with a hand edit, retry (one of three branches, several failed, fresh with its refusal),
-//! restart as a new attempt, cancel, revise and approve with a field edit, the resume command,
-//! and the `workflows` live-modes source refusing a second run through `can_start_run`. Runs use
-//! the scripted [`FakeRunner`]; no agent runs. Worktrees are real git worktrees of a temporary
-//! repository where a test needs them, with git isolated from the real configuration.
+//! with a hand edit, a hold on a check without a verdict and its resume, retry (one of three
+//! branches, several failed, fresh with its refusal), restart as a new attempt, cancel, revise
+//! and approve with a field edit, the resume command, and the `workflows` live-modes source
+//! refusing a second run through `can_start_run`. Runs use the scripted [`FakeRunner`]; no agent
+//! runs. Worktrees are real git worktrees of a temporary repository where a test needs them, with
+//! git isolated from the real configuration.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,6 +172,57 @@ routes = [{ to = "done" }]
 [ends.done]
 kind = "success"
 "#;
+
+/// A build checked by the shipped checks program, with no route for `no_verdict`.
+const CHECKED: &str = r#"
+schema = 1
+name = "checked"
+start = "build"
+
+[nodes.build]
+kind = "agent"
+prompt = "work.md"
+output = { summary = { type = "text" } }
+routes = [{ to = "check" }]
+
+[nodes.check]
+kind = "program"
+use = "checks"
+routes = [
+  { when = { verdict = "pass" }, to = "done" },
+  { when = { verdict = "fail" }, to = "broken" },
+]
+
+[ends.done]
+kind = "success"
+
+[ends.broken]
+kind = "failure"
+reason = "checks failed"
+"#;
+
+/// A checks result with `verdict`, failing `lint`, and `summary`.
+fn check_result(verdict: &str, summary: &str) -> serde_json::Value {
+    json!({
+        "verdict": verdict,
+        "failing": ["lint"],
+        "scope": "changed files",
+        "evidence": [],
+        "summary": summary,
+    })
+}
+
+/// Starts `checked` with its check giving no verdict, and runs until the run is held on it.
+fn held_on_the_check(world: &World, lifecycle: &mut Lifecycle<FakeRunner>) -> String {
+    write_definition(world.profile(), "checked", CHECKED);
+    lifecycle
+        .runtime_mut()
+        .runner_mut()
+        .script("check", check_result("no_verdict", "the runner crashed"));
+    let run = world.start(lifecycle, with_workflow("checked")).unwrap();
+    finish_all(lifecycle);
+    run
+}
 
 const BROKEN: &str = r#"
 schema = 1
@@ -1092,6 +1144,32 @@ fn halt_then_resume_reruns_the_node_in_the_same_worktree_with_the_hand_edit() {
     finish_all(&mut lifecycle);
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
     assert_eq!(started_nodes(&lifecycle), ["work", "work"]);
+}
+
+#[test]
+fn a_check_without_a_verdict_holds_the_run_until_resumed() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let run = held_on_the_check(&world, &mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::WaitingOnYou));
+    let state = lifecycle.state(&run).unwrap();
+    assert_eq!(
+        state.held.keys().collect::<Vec<_>>(),
+        [&NodeKey::new("check", 1)]
+    );
+    assert_eq!(started_nodes(&lifecycle), ["build", "check"]);
+
+    lifecycle
+        .runtime_mut()
+        .runner_mut()
+        .script("check", check_result("pass", "all green"));
+    lifecycle.resume(&run).unwrap();
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Running));
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
+    assert!(lifecycle.state(&run).unwrap().held.is_empty());
+    // Only the held check reran; the build kept its result.
+    assert_eq!(started_nodes(&lifecycle), ["build", "check", "check"]);
 }
 
 #[gpui::test]
