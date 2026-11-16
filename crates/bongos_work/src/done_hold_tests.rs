@@ -166,6 +166,8 @@ async fn advance_on_the_last_todo_of_a_held_task_is_refused_and_writes_nothing(
     assert_eq!(backfill_state(&harness, cx), (None, State::Done));
 }
 
+/// Mirrors the start of the checks source's `OPEN_CHILDREN` text; this crate does not depend on
+/// the checks crate.
 const OPEN_CHILDREN: &str = "complete or drop its open children first";
 
 async fn status_of(
@@ -204,6 +206,7 @@ async fn complete_of_a_satisfied_task_closes_it_done_with_a_history_entry(cx: &m
     let (harness, cx) = harness(cx, true, true).await;
     let source = register(cx);
     let history = harness.file(cx, &["backfill"]).history.len();
+    assert!(harness.file(cx, &["backfill"]).closed.is_none());
     harness
         .run_and_wait(cx, "task::Complete", &[Input::Pick("backfill")])
         .await;
@@ -212,7 +215,12 @@ async fn complete_of_a_satisfied_task_closes_it_done_with_a_history_entry(cx: &m
         status_of(&harness, cx, &["backfill"]).await,
         bongos_work_model::Status::Done
     );
-    assert_eq!(harness.file(cx, &["backfill"]).history.len(), history + 1);
+    let file = harness.file(cx, &["backfill"]);
+    assert_eq!(file.history.len(), history + 1);
+    let entry = file.history.last().unwrap();
+    assert_eq!(entry.event, "closed");
+    assert_eq!(entry.detail, None);
+    assert_eq!(file.closed, Some(entry.at));
 }
 
 #[gpui::test]
@@ -223,12 +231,13 @@ async fn a_group_with_closing_checks_and_an_open_child_is_refused_by_both_comman
     let source = register(cx);
     *source.would.borrow_mut() = Some(format!("{OPEN_CHILDREN}: the closing checks run"));
     let writes = harness.writes(cx);
-    for action in ["task::Complete", "task::Close"] {
+    for (index, action) in ["task::Complete", "task::Close"].into_iter().enumerate() {
         harness.run(cx, action, &[Input::Pick("phase")]).await;
         wait_until(cx, "the refusal", |cx| {
             last_toast(cx).is_some_and(|toast| toast.contains(OPEN_CHILDREN))
         })
         .await;
+        assert_eq!(source.asked.get(), index + 1);
         assert_eq!(harness.writes(cx), writes);
         assert_eq!(
             status_of(&harness, cx, &["phase"]).await,

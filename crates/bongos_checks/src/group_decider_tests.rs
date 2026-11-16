@@ -20,6 +20,7 @@ use gpui::{BorrowAppContext as _, Entity, TestAppContext};
 use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
 
+use crate::OPEN_CHILDREN;
 use crate::definitions::named_sets;
 use crate::engine::{ChecksEngine, RunChecksRequest};
 use crate::evidence_store::{DoneRecord, done_record, put_done, scan_records, task_prefix};
@@ -684,4 +685,28 @@ async fn a_nested_group_uses_its_own_last_childs_tree(cx: &mut TestAppContext) {
     assert_eq!(outer.tree_key, key, "the outer group ran on c2's tree");
     assert_group_run(&world, "b-in", Verdict::Pass);
     assert_group_run(&world, "outer", Verdict::Pass);
+}
+
+#[gpui::test]
+async fn would_hold_refuses_a_group_with_closing_checks_and_an_open_child(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let world = World::new(cx, &group(CLOSING, ""));
+    let held = world
+        .engine
+        .update(cx, |engine, cx| engine.would_hold("grp", cx))
+        .await;
+    assert_eq!(held.as_deref(), Some(OPEN_CHILDREN));
+}
+
+#[gpui::test]
+async fn would_hold_lets_a_group_with_no_closing_checks_close_over_an_open_child(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let world = World::new(cx, &group("", ""));
+    let held = world
+        .engine
+        .update(cx, |engine, cx| engine.would_hold("grp", cx))
+        .await;
+    assert_eq!(held, None);
 }
