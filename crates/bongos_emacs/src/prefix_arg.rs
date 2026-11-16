@@ -11,7 +11,7 @@ use gpui::{
     WindowId,
 };
 
-use crate::{intercept, repeat};
+use crate::{intercept, meanings, repeat};
 
 /// The most an inserting command repeats: a huge count would hang the editor.
 pub const MAX_INSERT: i32 = 65_536;
@@ -28,6 +28,9 @@ pub enum Meaning {
     Adapter(fn(PrefixArg, &Entity<Editor>, &mut Window, &mut App)),
     /// The key is stopped and the action is rebuilt by name with `{"count": N}`.
     CountField,
+    /// Like `CountField`, and a negative argument runs the named opposite action with the
+    /// argument's absolute value instead (`prompts::Previous` with -2 is `prompts::Next` with 2).
+    CountFieldSwap(&'static str),
     /// The key is stopped and the named action runs once instead.
     Redirect(&'static str),
 }
@@ -273,6 +276,7 @@ pub(crate) fn clear_limited(window: &mut Window, cx: &mut App) {
 /// running repeat) and installs the key interceptor that routes the keys typed while an argument
 /// is pending or a repeat runs.
 pub(crate) fn init(cx: &mut App) {
+    meanings::declare_all(cx);
     quit::register(cx, |window, cx| {
         cancel(window, cx);
         repeat::stop(window, cx);
