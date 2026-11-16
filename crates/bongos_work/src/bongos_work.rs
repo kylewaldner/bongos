@@ -63,8 +63,9 @@ pub use project_repos::{
 pub use rebase::RebaseState;
 pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};
 pub use registry::{
-    ActiveRun, DoneHoldSource, DoneHolds, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou, NeedsYouRegistry,
-    NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart, observe_view_opened,
+    ActiveRun, DoneHoldSource, DoneHolds, LiveModes, LiveModesRegistry, LiveModesSource, NeedsYou,
+    NeedsYouRegistry, NeedsYouSource, RowChipsRegistry, RowChipsSource, RunStart,
+    observe_view_opened,
 };
 pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
 pub use seams::{
