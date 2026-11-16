@@ -658,6 +658,7 @@ fn main() {
         bongos_prompts::init_palette(cx);
         bongos_builder::init_palette(cx);
         bongos_extensions::init_palette(cx);
+        bongos_extensions::init_reconcile(cx);
         bongos_linear::init_palette(cx);
         bongos_workflow::init_palette(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
