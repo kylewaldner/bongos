@@ -62,10 +62,11 @@ impl Display for BaseKeymap {
 }
 
 impl BaseKeymap {
-    pub const OPTIONS: [(&'static str, Self); 3] = [
+    pub const OPTIONS: [(&'static str, Self); 4] = [
         ("VS Code", Self::VSCode),
         ("Vim", Self::Vim),
         ("Emacs (Default)", Self::Emacs),
+        ("None", Self::None),
     ];
 
     /// The Emacs keymap asset for this platform, if the base keymap has one.

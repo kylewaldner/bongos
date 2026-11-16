@@ -286,6 +286,10 @@ pub struct VimGlobals {
     pub focused_vim: Option<WeakEntity<Vim>>,
 
     pub marks: HashMap<EntityId, Entity<MarksState>>,
+
+    /// The non-Vim base keymap that `ToggleVimMode` restores when it turns Vim off.
+    /// Defaults to Emacs.
+    pub previous_base_keymap: settings::BaseKeymap,
 }
 
 pub struct MarksState {
