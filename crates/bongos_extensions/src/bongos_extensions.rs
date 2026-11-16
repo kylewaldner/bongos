@@ -10,6 +10,7 @@ pub mod host;
 pub mod installer;
 pub mod offer;
 pub mod reconcile_run;
+pub mod status_item;
 
 use std::any::TypeId;
 

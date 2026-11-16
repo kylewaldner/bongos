@@ -22,7 +22,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -106,6 +106,8 @@ pub struct Operation {
     /// The extension id, once the manifest was read.
     pub id: Option<String>,
     pub phase: Phase,
+    /// When the operation started, by the installer's clock.
+    pub started: SystemTime,
 }
 
 /// The last failed install, for the failure line and "show build log".
@@ -252,6 +254,8 @@ pub struct Installer {
     build_slot: Arc<futures::lock::Mutex<()>>,
     last_failure: Option<Failure>,
     last_installed: Option<Installed>,
+    /// When `last_installed` finished, by the installer's clock.
+    last_installed_at: Option<SystemTime>,
 }
 
 struct GlobalInstaller(Entity<Installer>);
@@ -269,6 +273,7 @@ impl Installer {
             build_slot: Arc::default(),
             last_failure: None,
             last_installed: None,
+            last_installed_at: None,
         }
     }
 
@@ -375,6 +380,15 @@ impl Installer {
         self.last_installed.as_ref()
     }
 
+    /// When `last_installed` finished.
+    pub fn last_installed_at(&self) -> Option<SystemTime> {
+        self.last_installed_at
+    }
+
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        self.deps.clock.clone()
+    }
+
     pub fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
         if self.last_failure.take().is_some() {
             cx.notify();
@@ -428,6 +442,7 @@ impl Installer {
                 key: key.clone(),
                 id: None,
                 phase: Phase::Resolving,
+                started: self.deps.clock.now(),
             },
         ));
         let (sender, receiver) = oneshot::channel();
@@ -620,6 +635,7 @@ impl Installer {
         match result {
             Ok(installed) => {
                 self.last_installed = Some(installed.clone());
+                self.last_installed_at = Some(self.deps.clock.now());
                 if self
                     .last_failure
                     .as_ref()
@@ -996,6 +1012,7 @@ async fn run_existing(
                 key: request.key.clone(),
                 id: Some(id.clone()),
                 phase: Phase::Resolving,
+                started: this.deps.clock.now(),
             },
         ));
         cx.notify();
