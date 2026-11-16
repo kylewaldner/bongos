@@ -1888,3 +1888,22 @@ mod base_keymap_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod base_keymap_variant_tests {
+    use super::BaseKeymapContent;
+
+    #[test]
+    fn the_kept_variant_list_is_exactly_four_in_order() {
+        use strum::VariantArray as _;
+        assert_eq!(
+            BaseKeymapContent::VARIANTS,
+            &[
+                BaseKeymapContent::Emacs,
+                BaseKeymapContent::Vim,
+                BaseKeymapContent::VSCode,
+                BaseKeymapContent::None
+            ]
+        );
+    }
+}

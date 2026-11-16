@@ -95,6 +95,65 @@ async fn test_base_keymap_vim_switches_vim_on_and_off(cx: &mut gpui::TestAppCont
     cx.assert_editor_state("zˇjklabc");
 }
 
+#[gpui::test]
+async fn test_base_keymap_vim_regression_set(cx: &mut gpui::TestAppContext) {
+    // vim.json is bound but `vim_mode` stays off; only `base_keymap` turns vim on.
+    let mut cx = VimTestContext::new(cx, true).await;
+    cx.disable_vim();
+    cx.update(|_, cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |s| {
+                s.base_keymap = Some(settings::BaseKeymapContent::Vim)
+            });
+        });
+    });
+    assert_eq!(cx.mode(), Mode::Normal);
+
+    // `d i w`
+    cx.set_state("one tˇwo three", Mode::Normal);
+    cx.simulate_keystrokes("d i w");
+    cx.assert_state("one ˇ three", Mode::Normal);
+
+    // `3 d d` and `.` repeat
+    cx.set_state("ˇa\nb\nc\nd\ne\nf\ng", Mode::Normal);
+    cx.simulate_keystrokes("3 d d");
+    cx.assert_state("ˇd\ne\nf\ng", Mode::Normal);
+    cx.simulate_keystrokes(".");
+    cx.assert_state("ˇg", Mode::Normal);
+
+    // marks
+    cx.set_state("ˇone two", Mode::Normal);
+    cx.simulate_keystrokes("w m a 0");
+    cx.assert_state("ˇone two", Mode::Normal);
+    cx.simulate_keystrokes("` a");
+    cx.assert_state("one ˇtwo", Mode::Normal);
+
+    // registers
+    cx.set_state("ˇfirst\nsecond", Mode::Normal);
+    cx.simulate_keystrokes("\" a y y j \" a p");
+    cx.assert_state("first\nsecond\nˇfirst", Mode::Normal);
+
+    // search
+    cx.set_state("ˇx a x a x", Mode::Normal);
+    cx.simulate_keystrokes("/ a enter");
+    cx.assert_state("x ˇa x a x", Mode::Normal);
+    cx.simulate_keystrokes("n");
+    cx.assert_state("x a x ˇa x", Mode::Normal);
+    cx.simulate_keystrokes("shift-n");
+    cx.assert_state("x ˇa x a x", Mode::Normal);
+
+    // mode changes
+    cx.set_state("ˇabc", Mode::Normal);
+    cx.simulate_keystrokes("i");
+    assert_eq!(cx.mode(), Mode::Insert);
+    cx.simulate_keystrokes("escape v");
+    assert_eq!(cx.mode(), Mode::Visual);
+    cx.simulate_keystrokes("escape shift-r");
+    assert_eq!(cx.mode(), Mode::Replace);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(cx.mode(), Mode::Normal);
+}
+
 #[perf]
 #[gpui::test]
 async fn test_toggle_through_settings(cx: &mut gpui::TestAppContext) {

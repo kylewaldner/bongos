@@ -831,3 +831,42 @@ async fn switching_through_vim_binds_and_unbinds_vim_and_the_space_rows(cx: &mut
         }
     }
 }
+
+#[gpui::test]
+async fn a_new_full_editor_opens_in_normal_mode_under_vim_and_i_inserts(cx: &mut TestAppContext) {
+    use editor::{Editor, EditorMode, MultiBuffer};
+    use gpui::{AppContext as _, Focusable as _, VisualTestContext};
+
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        editor::init(cx);
+        vim::init(cx);
+    });
+    set_base_keymap_json(cx, "Vim");
+    let bindings = loaded_keymap(cx);
+    cx.update(|cx| {
+        cx.clear_key_bindings();
+        cx.bind_keys(bindings);
+    });
+
+    // The same shape the agent prompt editor has: a full multi-line editor.
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let buffer = cx.new(|cx| language::Buffer::local("", cx));
+        let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        Editor::new(EditorMode::full(), buffer, None, window, cx)
+    });
+    let vim_mode = |cx: &mut VisualTestContext| {
+        editor.update_in(cx, |editor, window, cx| {
+            editor
+                .key_context(window, cx)
+                .get("vim_mode")
+                .map(|mode| mode.to_string())
+        })
+    };
+    editor.update_in(cx, |editor, window, cx| {
+        window.focus(&editor.focus_handle(cx), cx)
+    });
+    assert_eq!(vim_mode(cx).as_deref(), Some("normal"));
+    cx.simulate_keystrokes("i");
+    assert_eq!(vim_mode(cx).as_deref(), Some("insert"));
+}
