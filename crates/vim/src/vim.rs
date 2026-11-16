@@ -286,6 +286,30 @@ actions!(
     ]
 );
 
+/// Decides what `ToggleVimMode` writes to `base_keymap`. Returns the new base keymap and the
+/// non-Vim keymap to remember for the next toggle.
+pub fn toggled_base_keymap(
+    current: settings::BaseKeymap,
+    vim_on: bool,
+    previous: settings::BaseKeymap,
+) -> (settings::BaseKeymap, settings::BaseKeymap) {
+    use settings::BaseKeymap;
+    if vim_on {
+        if current != BaseKeymap::Vim {
+            // Only `vim_mode` made Vim active; the base keymap is already the non-Vim one.
+            return (current, current);
+        }
+        let restored = if previous == BaseKeymap::Vim {
+            BaseKeymap::Emacs
+        } else {
+            previous
+        };
+        (restored, restored)
+    } else {
+        (BaseKeymap::Vim, current)
+    }
+}
+
 /// Initializes the `vim` crate.
 pub fn init(cx: &mut App) {
     VimGlobals::register(cx);
@@ -299,9 +323,14 @@ pub fn init(cx: &mut App) {
 
         workspace.register_action(|workspace, _: &ToggleVimMode, _, cx| {
             let fs = workspace.app_state().fs.clone();
-            let currently_enabled = VimModeSetting::get_global(cx).0;
+            let current = *settings::BaseKeymap::get_global(cx);
+            let vim_on = VimModeSetting::get_global(cx).0;
+            let previous = cx.global::<VimGlobals>().previous_base_keymap;
+            let (next, next_previous) = toggled_base_keymap(current, vim_on, previous);
+            cx.global_mut::<VimGlobals>().previous_base_keymap = next_previous;
             update_settings_file(fs, cx, move |setting, _| {
-                setting.vim_mode = Some(!currently_enabled);
+                setting.base_keymap = Some(next.into());
+                setting.vim_mode = Some(false);
                 if let Some(helix_mode) = &mut setting.helix_mode {
                     *helix_mode = false;
                 }
@@ -2382,5 +2411,35 @@ impl Settings for VimSettings {
             cursor_shape: vim.cursor_shape.unwrap().into(),
             show_edit_predictions_in_normal_mode: vim.show_edit_predictions_in_normal_mode.unwrap(),
         }
+    }
+}
+
+#[cfg(test)]
+mod toggle_base_keymap_tests {
+    use super::toggled_base_keymap;
+    use settings::BaseKeymap;
+
+    #[test]
+    fn toggling_twice_from_vscode_ends_on_vscode() {
+        let (first, previous) =
+            toggled_base_keymap(BaseKeymap::VSCode, false, BaseKeymap::default());
+        assert_eq!(first, BaseKeymap::Vim);
+        assert_eq!(previous, BaseKeymap::VSCode);
+        let (second, _) = toggled_base_keymap(first, true, previous);
+        assert_eq!(second, BaseKeymap::VSCode);
+    }
+
+    #[test]
+    fn toggling_off_without_a_remembered_keymap_returns_to_emacs() {
+        let (next, _) = toggled_base_keymap(BaseKeymap::Vim, true, BaseKeymap::Vim);
+        assert_eq!(next, BaseKeymap::Emacs);
+        let (next, _) = toggled_base_keymap(BaseKeymap::Vim, true, BaseKeymap::default());
+        assert_eq!(next, BaseKeymap::Emacs);
+    }
+
+    #[test]
+    fn vim_mode_alone_keeps_the_base_keymap() {
+        let (next, _) = toggled_base_keymap(BaseKeymap::VSCode, true, BaseKeymap::Emacs);
+        assert_eq!(next, BaseKeymap::VSCode);
     }
 }
