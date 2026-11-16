@@ -316,19 +316,21 @@ impl Global for GlobalChecksEngine {}
 
 /// The global engine of task checks.
 pub struct ChecksEngine {
-    source: Rc<dyn TaskSource>,
+    pub(crate) source: Rc<dyn TaskSource>,
     runs: Rc<dyn RunWorktrees>,
-    clock: Rc<dyn CheckClock>,
-    now: Now,
+    pub(crate) clock: Rc<dyn CheckClock>,
+    pub(crate) now: Now,
     active: BTreeMap<String, ActiveRun>,
     /// What each task's checks are now, from the last run's keys.
     current: BTreeMap<String, Current>,
     /// The live rows in the state store, throttled.
-    live_rows: LiveRows,
+    pub(crate) live_rows: LiveRows,
     /// Counts drains, so a write scheduled before one is dropped.
     live_epoch: u64,
     /// While true no run starts and no live row is written.
-    drained: bool,
+    pub(crate) drained: bool,
+    /// The done decider's projects and pins.
+    pub(crate) decider: crate::decider::Decider,
     /// Told when the last active run has ended.
     idle: Vec<oneshot::Sender<()>>,
 }
@@ -357,6 +359,7 @@ impl ChecksEngine {
             live_rows: LiveRows::default(),
             live_epoch: 0,
             drained: false,
+            decider: crate::decider::Decider::default(),
             idle: Vec::new(),
         }
     }
@@ -582,6 +585,7 @@ impl ChecksEngine {
         // At once, so an undrain before this resolves starts from no stale row and no write
         // left scheduled for a dropped timer.
         self.live_rows.clear_all();
+        self.decider.forget_holds();
         let mut stopped = Vec::new();
         let mut leases = Vec::new();
         for run in self.active.values() {
@@ -631,6 +635,8 @@ impl ChecksEngine {
     /// Takes runs again after [`Self::drain`], when the writer stays in this process.
     pub fn undrain(&mut self) {
         self.drained = false;
+        // The drain cleared the hold rows: the decider writes them again.
+        self.decider.poke_all();
     }
 
     /// Whether the engine is drained.
@@ -652,10 +658,15 @@ impl ChecksEngine {
             Duration::from_millis(u64::from(TaskChecksSettings::get_global(cx).live_write_ms));
         let row = self.live_rows.next_row(task_id, check, row);
         let now = self.clock.now();
-        match self
+        let flush = self
             .live_rows
-            .update(&writer, task_id, check, row, now, interval)
-        {
+            .update(&writer, task_id, check, row, now, interval);
+        self.schedule_live(task_id, flush, cx);
+    }
+
+    /// Writes the task's live rows now or later, as `flush` says.
+    pub(crate) fn schedule_live(&mut self, task_id: &str, flush: Flush, cx: &mut Context<Self>) {
+        match flush {
             Flush::Now => self.flush_live(task_id),
             Flush::After(wait) => {
                 let wait = self.clock.sleep(wait);
@@ -951,43 +962,65 @@ impl Leftovers {
 }
 
 /// One repository's tree a check runs in.
-struct RepoTree {
-    repo: String,
-    path: PathBuf,
-    env: EnvBase,
+pub(crate) struct RepoTree {
+    pub(crate) repo: String,
+    pub(crate) path: PathBuf,
+    pub(crate) env: EnvBase,
 }
 
 /// The tip tree of each repository the check runs in, in its order: the task's own tree for the
 /// task's own repository (and for a check that names none), else the tree a lane serves.
 fn tip_trees(plan: &Plan, decl: &CheckDecl) -> Result<Vec<RepoTree>, NoVerdictReason> {
-    let task = &plan.task;
+    tip_trees_of(&plan.task, &plan.tree.path, plan.trees.as_ref(), decl)
+}
+
+/// The repositories `decl` runs in, in its order: those it names, else the task's own.
+pub(crate) fn check_repos(task: &TaskChecks, decl: &CheckDecl) -> Vec<String> {
     let own = task.repo.clone().unwrap_or_default();
-    let repos = decl
-        .repos
+    decl.repos
         .clone()
         .filter(|repos| !repos.is_empty())
-        .unwrap_or_else(|| vec![own.clone()]);
+        .unwrap_or_else(|| vec![own])
+}
+
+/// [`tip_trees`] for `task`, whose own tree is `own_tree`, with the lanes' trees `trees`.
+pub(crate) fn tip_trees_of(
+    task: &TaskChecks,
+    own_tree: &Path,
+    trees: Option<&Rc<dyn crate::trees::TaskTrees>>,
+    decl: &CheckDecl,
+) -> Result<Vec<RepoTree>, NoVerdictReason> {
+    repo_trees(task, own_tree, trees, check_repos(task, decl))
+}
+
+/// The tip tree of each of `repos` for `task`: its own tree for its own repository, else the
+/// tree a lane serves.
+pub(crate) fn repo_trees(
+    task: &TaskChecks,
+    own_tree: &Path,
+    trees: Option<&Rc<dyn crate::trees::TaskTrees>>,
+    repos: Vec<String>,
+) -> Result<Vec<RepoTree>, NoVerdictReason> {
+    let own = task.repo.clone().unwrap_or_default();
     repos
         .into_iter()
         .map(|repo| {
             let path = if repo == own {
-                Some(plan.tree.path.clone())
+                Some(own_tree.to_path_buf())
             } else {
-                plan.trees
-                    .as_ref()
-                    .and_then(|trees| trees.tip(&task.task_id, &repo))
+                trees.and_then(|trees| trees.tip(&task.task_id, &repo))
             };
             let path = path.ok_or_else(|| {
                 NoVerdictReason::TreeUnavailable(format!("{} has no tree in {repo}", task.name))
             })?;
-            let env = EnvBase::for_tip(plan.trees.as_deref(), &task.task_id, &repo);
+            let env = EnvBase::for_tip(trees.map(|trees| trees.as_ref()), &task.task_id, &repo);
             Ok(RepoTree { repo, path, env })
         })
         .collect()
 }
 
 /// The key of `trees`: one tree's own key, or the digest of the sorted (repository, key) pairs.
-async fn key_of(
+pub(crate) async fn key_of(
     git: &Git,
     trees: &[RepoTree],
     index_dir: &Path,
@@ -1154,6 +1187,20 @@ fn write_evidence(
     Ok(path)
 }
 
+/// The digest of `decl` with the files it names, read from `pin`.
+pub(crate) fn check_digest(decl: &CheckDecl, pin: &Pin) -> Result<decl::Digest, NoVerdictReason> {
+    let mut files = BTreeMap::new();
+    for path in decl.named_files() {
+        let resolved = pin
+            .resolve(path)
+            .map_err(|error| start_failed("reading the check's files", error))?;
+        let bytes = std::fs::read(&resolved)
+            .map_err(|error| start_failed(&format!("reading {path}"), error))?;
+        files.insert(path.to_string(), bytes);
+    }
+    decl::digest(decl, &files).map_err(|error| start_failed("digesting the check", error))
+}
+
 /// The run of one check: its digest, its trees and their key, its environment and its hooks,
 /// and the check's current state on the tip (none for a base run). A reason when it cannot
 /// start. What must be undone when the check ends goes into `leftovers`.
@@ -1166,17 +1213,7 @@ async fn prepare(
 ) -> Result<(CheckRun, Option<CheckState>), NoVerdictReason> {
     let task = &plan.task;
     let decl = row.decl.clone();
-    let mut files = BTreeMap::new();
-    for path in decl.named_files() {
-        let resolved = pin
-            .resolve(path)
-            .map_err(|error| start_failed("reading the check's files", error))?;
-        let bytes = std::fs::read(&resolved)
-            .map_err(|error| start_failed(&format!("reading {path}"), error))?;
-        files.insert(path.to_string(), bytes);
-    }
-    let digest =
-        decl::digest(&decl, &files).map_err(|error| start_failed("digesting the check", error))?;
+    let digest = check_digest(&decl, pin)?;
     let git = task.project.git().clone();
     let tips = tip_trees(plan, &decl)?;
     let tip_key = key_of(&git, &tips, &task.index_dir).await?;

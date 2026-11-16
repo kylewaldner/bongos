@@ -2,6 +2,7 @@
 //! repository and the `worktree` of its file. The seam keeps the engine free of the work tree, so
 //! a test supplies a task without one.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -51,6 +52,13 @@ impl TaskChecks {
 pub trait TaskSource: 'static {
     /// The task, or `None` when it is unknown or has no project repository.
     fn task(&self, task_id: &str, cx: &App) -> Option<TaskChecks>;
+
+    /// The ids of the tasks that are Done or cancelled now, for the question of which child of
+    /// a group would carry its closing checks. None by default.
+    fn done_tasks(&self, cx: &App) -> HashSet<String> {
+        let _ = cx;
+        HashSet::new()
+    }
 }
 
 /// [`TaskSource`] over the Work tree and the open project repositories.
@@ -85,6 +93,17 @@ impl TaskSource for WorkTaskSource {
             index_dir: settings.scratch_folder().join(TREE_KEYS_FOLDER),
             project,
         })
+    }
+
+    fn done_tasks(&self, cx: &App) -> HashSet<String> {
+        let Some(tree) = WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()) else {
+            return HashSet::new();
+        };
+        tree.tasks()
+            .into_iter()
+            .filter(|task| matches!(derive::state(task, &tree), State::Done | State::Cancelled))
+            .filter_map(|task| task.id().map(str::to_string))
+            .collect()
     }
 }
 

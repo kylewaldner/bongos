@@ -78,6 +78,15 @@ pub struct OwedMarker {
     /// On a group's marker only: the last child to become Done-looking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_child: Option<LastChild>,
+    /// The run state's generation of the transaction that put the marker. A task finished
+    /// again gets a new one, so a decision taken for an earlier finish never lands on a later
+    /// one. Zero on a marker written before it was kept.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub state_generation: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// The last child of a group to become Done-looking, with the generation that orders it.
@@ -255,6 +264,7 @@ impl ChecksOwedHook {
         Some(OwedMarker {
             closing_from,
             last_child: None,
+            state_generation: 0,
         })
     }
 
@@ -296,8 +306,6 @@ impl StateApplyHook for ChecksOwedHook {
             return Ok(());
         }
         let enabled = self.is_enabled();
-        // An unreadable set counts as unknown, so a task that uses one is marked.
-        let sets = self.named_sets_of(change.definitions).unwrap_or_default();
         let mut view = View::new(change);
 
         // Which tasks became Done-looking, and which lost it.
@@ -315,6 +323,13 @@ impl StateApplyHook for ChecksOwedHook {
                 finished.push(id);
             }
         }
+
+        if finished.is_empty() {
+            return Ok(());
+        }
+        // Read only when a task finishes: most transactions finish none. An unreadable set
+        // counts as unknown, so a task that uses one is marked.
+        let sets = self.named_sets_of(change.definitions).unwrap_or_default();
 
         // The last child of each group: of the children of one group that became Done-looking
         // here, the last in child order. Recorded whether the setting is on or off and whatever
@@ -364,6 +379,8 @@ impl StateApplyHook for ChecksOwedHook {
             if view.is_group(Side::After, id) {
                 marker.last_child = view.last_child(tx, id)?;
             }
+            // The generation this transaction commits as.
+            marker.state_generation = tx.generation()? + 1;
             put_marker(tx, id, &marker)?;
             // A done record is only valid for the finish it judged: none survives a reopen, so
             // one found here is stale.
@@ -779,7 +796,11 @@ pub(crate) fn done_looking(
 }
 
 /// Whether the task or a group above it uses a named set that `sets` does not have.
-fn uses_unknown_set(task_id: &str, definitions: &DefinitionTree, sets: &NamedSets) -> bool {
+pub(crate) fn uses_unknown_set(
+    task_id: &str,
+    definitions: &DefinitionTree,
+    sets: &NamedSets,
+) -> bool {
     let mut chain = Vec::new();
     let Some(top) = &definitions.top else {
         return false;

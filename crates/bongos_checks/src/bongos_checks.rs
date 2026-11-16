@@ -5,13 +5,15 @@
 //! with its scope, parts, checkpoints, pool waits and no-verdict reruns, the pool seam, and the
 //! engine that runs a task's checks and the commands that drive it, its live rows in the state
 //! store, and the `checks` host command that reaches the engine from a process without the
-//! state writer, the base trees of parameterized runs, the owed markers of finished tasks and
-//! the done hold they cause.
+//! state writer, the base trees of parameterized runs, the owed markers of finished tasks, the
+//! done hold they cause, and the decider that writes the done record of a leaf whose checks
+//! pass on its tree.
 
 mod actions;
 mod base_tree;
 mod changed_files;
 pub mod command_logic;
+pub mod decider;
 mod definitions;
 pub mod engine;
 mod evidence_store;
@@ -34,6 +36,7 @@ mod work_tree;
 
 pub use actions::{ChecksToast, action_types, init_palette, register, task};
 pub use changed_files::{ChangedFiles, ChangedFilesError, ChangedSet, changed_files};
+pub use decider::{CHECKING_TREE, CLOSING_CHECKS, NO_TREE, OPEN_CHILDREN, missing_reason};
 pub use definitions::{CHECKS_FOLDER, CHECKS_VALID, ChecksValid, validate_folder};
 pub use engine::{
     CheckResult, ChecksEngine, ChecksEvent, ChecksStatus, Refusal, RunChecksRequest, RunOutcome,
@@ -46,7 +49,10 @@ pub use evidence_store::{
     put_done, record_key, scan_records, scan_records_in, store_record, task_prefix,
 };
 pub use exporter::{ChecksExporter, EXPORT_NAMESPACE};
-pub use holds::{CHECKING, CHECKS_HOLD_SOURCE, ChecksHoldSource, ChecksHolds, read_holds};
+pub use holds::{
+    CHECKING, CHECKS_CHIPS_SOURCE, CHECKS_HOLD_SOURCE, ChecksChips, ChecksHoldSource, ChecksHolds,
+    read_hold_rows, read_holds,
+};
 pub use host::{
     CHECKS_NAMESPACE, ChecksAccess, ChecksCommand, ChecksForwarder, ChecksForwarderRegistry,
     ChecksReply, checks_access,
@@ -82,6 +88,7 @@ pub fn init(cx: &mut gpui::App) {
     exporter::ChecksExporter::register();
     definitions::register(cx);
     let engine = ChecksEngine::install(ChecksEngine::for_app(cx), cx);
+    decider::init(engine.clone(), cx);
     // What a crash left in the scratch folder goes at load.
     if let Ok(git) = bongos_project_repo::Git::locate() {
         engine
@@ -96,6 +103,8 @@ mod actions_tests;
 mod base_run_tests;
 #[cfg(test)]
 mod changed_files_tests;
+#[cfg(test)]
+mod decider_tests;
 #[cfg(test)]
 mod definitions_tests;
 #[cfg(test)]

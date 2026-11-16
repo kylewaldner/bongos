@@ -6,8 +6,8 @@
 //! - `part/<task id>/<check>`: what the check's run does now, a [`LiveRow`] (waiting in line for a
 //!   pool at a place, running part K of N, or ended with its verdict). Each row carries `since`,
 //!   when that state began; elapsed time is never written, a view computes it.
-//! - `hold/<task id>`: the reason the done rule holds the task. Written by the done decider,
-//!   which does not exist yet; nothing here writes one.
+//! - `hold/<task id>`: the reason the done rule holds the task, a [`HoldRow`], written by the
+//!   done decider in the same throttled transactions as the task's part rows.
 //!
 //! The rules that keep the namespace cheap: at most one transaction per task per
 //! `task_checks.live_write_ms`, with later states of the same row replacing earlier ones until
@@ -46,6 +46,20 @@ pub fn hold_key(task_id: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HoldRow {
     pub reason: String,
+    /// How many required checks are missing, failing, stale or without a verdict, when the
+    /// decider judged them; the row chip shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsatisfied: Option<u32>,
+}
+
+impl HoldRow {
+    /// A row with `reason` and no count.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            unsatisfied: None,
+        }
+    }
 }
 
 /// What a check's run does now, as its live row holds it.
@@ -136,6 +150,23 @@ pub(crate) enum Flush {
     Unchanged,
 }
 
+impl TaskLive {
+    /// When the rows just updated are written: now, after the rest of the interval, or with
+    /// the write already scheduled.
+    fn when(&mut self, now: Instant, interval: Duration) -> Flush {
+        if self.scheduled {
+            return Flush::Scheduled;
+        }
+        match self.last_write {
+            Some(last) if now < last + interval => {
+                self.scheduled = true;
+                Flush::After(last + interval - now)
+            }
+            _ => Flush::Now,
+        }
+    }
+}
+
 struct TaskLive {
     /// Weak, so a closed project's store (and its lock) is never held open by a row.
     writer: Weak<StateWriter>,
@@ -143,6 +174,10 @@ struct TaskLive {
     rows: BTreeMap<String, LiveRow>,
     /// The rows changed since the last write, by check.
     pending: BTreeMap<String, LiveRow>,
+    /// The task's `hold/` row as last updated (`Some(None)`: none); `None` while unknown.
+    hold: Option<Option<HoldRow>>,
+    /// The `hold/` row to write (`Some(None)`: delete it).
+    pending_hold: Option<Option<HoldRow>>,
     last_write: Option<Instant>,
     scheduled: bool,
 }
@@ -207,6 +242,49 @@ impl LiveRows {
         now: Instant,
         interval: Duration,
     ) -> Flush {
+        let task = self.task(writer, task_id);
+        if task.rows.get(check) == Some(&row) {
+            return Flush::Unchanged;
+        }
+        task.rows.insert(check.to_string(), row.clone());
+        task.pending.insert(check.to_string(), row);
+        task.when(now, interval)
+    }
+
+    /// Records the new `hold/` row of `task_id` (`None`: no row) at `now` and says when to
+    /// write. Throttled together with the task's part rows: one transaction carries both.
+    pub fn update_hold(
+        &mut self,
+        writer: &Arc<StateWriter>,
+        task_id: &str,
+        hold: Option<HoldRow>,
+        now: Instant,
+        interval: Duration,
+    ) -> Flush {
+        let task = self.task(writer, task_id);
+        if task.hold.as_ref() == Some(&hold) {
+            return Flush::Unchanged;
+        }
+        task.hold = Some(hold.clone());
+        task.pending_hold = Some(hold);
+        task.when(now, interval)
+    }
+
+    /// The `hold/` row of `task_id` as last updated; `None` while unknown.
+    pub fn hold(&self, task_id: &str) -> Option<Option<HoldRow>> {
+        self.tasks.get(task_id).and_then(|task| task.hold.clone())
+    }
+
+    /// Notes that a transaction outside these rows deleted the `hold/` row of `task_id`, so no
+    /// pending write puts it back.
+    pub fn hold_deleted(&mut self, task_id: &str) {
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.hold = Some(None);
+            task.pending_hold = None;
+        }
+    }
+
+    fn task(&mut self, writer: &Arc<StateWriter>, task_id: &str) -> &mut TaskLive {
         self.adopt(writer);
         let task = self
             .tasks
@@ -215,25 +293,13 @@ impl LiveRows {
                 writer: Arc::downgrade(writer),
                 rows: BTreeMap::new(),
                 pending: BTreeMap::new(),
+                hold: None,
+                pending_hold: None,
                 last_write: None,
                 scheduled: false,
             });
         task.writer = Arc::downgrade(writer);
-        if task.rows.get(check) == Some(&row) {
-            return Flush::Unchanged;
-        }
-        task.rows.insert(check.to_string(), row.clone());
-        task.pending.insert(check.to_string(), row);
-        if task.scheduled {
-            return Flush::Scheduled;
-        }
-        match task.last_write {
-            Some(last) if now < last + interval => {
-                task.scheduled = true;
-                Flush::After(last + interval - now)
-            }
-            _ => Flush::Now,
-        }
+        task
     }
 
     /// Writes the pending rows of `task_id` in one transaction.
@@ -242,10 +308,11 @@ impl LiveRows {
             return Ok(());
         };
         task.scheduled = false;
-        if task.pending.is_empty() {
+        if task.pending.is_empty() && task.pending_hold.is_none() {
             return Ok(());
         }
         let pending = std::mem::take(&mut task.pending);
+        let hold = task.pending_hold.take();
         // The store is closed: nothing is left to write to.
         let Some(writer) = task.writer.upgrade() else {
             return Ok(());
@@ -263,18 +330,32 @@ impl LiveRows {
                 tx.kv(LIVE_NAMESPACE)
                     .put(&part_key(task_id, check), value)?;
             }
+            match &hold {
+                Some(Some(row)) => {
+                    let value = toml::Value::try_from(row).context("serializing a hold row")?;
+                    tx.kv(LIVE_NAMESPACE).put(&hold_key(task_id), value)?;
+                }
+                Some(None) => {
+                    if tx.kv(LIVE_NAMESPACE).get(&hold_key(task_id))?.is_some() {
+                        tx.kv(LIVE_NAMESPACE).delete(&hold_key(task_id))?;
+                    }
+                }
+                None => {}
+            }
             Ok(())
         })
     }
 
     /// Forgets the task once nothing of it waits to be written: called when its run has ended,
-    /// so a task is kept only while it runs or has rows still to write.
+    /// so a task is kept only while it runs, has rows still to write, or has a `hold/` row
+    /// (kept so an unchanged reason is not written again).
     pub fn release(&mut self, task_id: &str) {
-        if self
-            .tasks
-            .get(task_id)
-            .is_some_and(|task| !task.scheduled && task.pending.is_empty())
-        {
+        if self.tasks.get(task_id).is_some_and(|task| {
+            !task.scheduled
+                && task.pending.is_empty()
+                && task.pending_hold.is_none()
+                && !matches!(task.hold, Some(Some(_)))
+        }) {
             self.tasks.remove(task_id);
         }
     }
