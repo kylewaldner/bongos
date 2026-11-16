@@ -1,17 +1,19 @@
 //! The `extensions` actions of language extensions and the `language_extensions` settings. While
 //! `language_extensions.enabled` is false the six actions are hidden from the command palette and
-//! each only says "language extensions are off" in the echo area.
+//! each only says "language extensions are off" in the echo area, and nothing on disk is read or
+//! touched.
 
 pub mod build_log;
 pub mod git;
 pub mod host;
 pub mod installer;
+pub mod reconcile_run;
 
 use std::any::TypeId;
 
 use bongos_minibuffer::message;
 use command_palette_hooks::CommandPaletteFilter;
-use gpui::App;
+use gpui::{App, Global, TaskExt as _};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
@@ -183,6 +185,30 @@ pub fn init(cx: &mut App) {
 pub fn init_palette(cx: &mut App) {
     sync_palette(cx);
     cx.observe_global::<SettingsStore>(sync_palette).detach();
+}
+
+/// Repairs what a crash left in the extensions directory, once, as soon as
+/// `language_extensions.enabled` is true: at start, or when it is turned on later. Does nothing
+/// while it is off. Call after `extension_host::init` and [`init`].
+pub fn init_reconcile(cx: &mut App) {
+    reconcile_once_enabled(cx);
+    cx.observe_global::<SettingsStore>(reconcile_once_enabled)
+        .detach();
+}
+
+struct Reconciled;
+
+impl Global for Reconciled {}
+
+fn reconcile_once_enabled(cx: &mut App) {
+    if !LanguageExtensionsSettings::get_global(cx).enabled || cx.has_global::<Reconciled>() {
+        return;
+    }
+    cx.set_global(Reconciled);
+    let installer = installer::Installer::global(cx);
+    installer
+        .update(cx, |installer, cx| installer.reconcile(cx))
+        .detach_and_log_err(cx);
 }
 
 fn sync_palette(cx: &mut App) {

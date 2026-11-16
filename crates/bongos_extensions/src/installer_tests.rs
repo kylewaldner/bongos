@@ -643,3 +643,257 @@ async fn same_id_from_another_source_is_refused_while_busy(cx: &mut TestAppConte
         Some(h.layout.checkout_dir("swift", C1))
     );
 }
+
+fn log_text(h: &Harness, id: &str) -> String {
+    std::fs::read_to_string(h.layout.log_path(id)).unwrap_or_default()
+}
+
+/// Installs swift at `C1` and returns its checkout.
+async fn install_c1(h: &Harness, cx: &mut TestAppContext) -> PathBuf {
+    let task = h.install(URL, Some(C1), Trust::Listed, cx);
+    cx.run_until_parked();
+    task.await.expect("the install succeeds");
+    let checkout = h.layout.checkout_dir("swift", C1);
+    assert_eq!(h.link_target("swift"), Some(checkout.clone()));
+    checkout
+}
+
+fn update(h: &Harness, rev: &str, cx: &mut TestAppContext) -> InstallTask {
+    h.installer.update(cx, |installer, cx| {
+        installer.update("swift", Some(rev), Trust::Confirmed(rev.to_string()), cx)
+    })
+}
+
+#[gpui::test]
+async fn update_moves_the_record_and_deletes_the_old_checkout_only_after_the_link(
+    cx: &mut TestAppContext,
+) {
+    let h = Harness::new(cx);
+    let old = install_c1(&h, cx).await;
+    let new = h.layout.checkout_dir("swift", C2);
+
+    // The link fails: the old checkout is still there and linked again.
+    h.host.fail_link("swift", "permission denied");
+    let err = update(&h, C2, cx);
+    cx.run_until_parked();
+    let err = err.await.expect_err("a failed link fails the update");
+    assert!(
+        format!("{err:#}").contains("could not load the extension"),
+        "{err:#}"
+    );
+    assert!(
+        old.join("extension.toml").is_file(),
+        "the old checkout stays"
+    );
+    assert_eq!(h.link_target("swift"), Some(old.clone()));
+    assert!(!new.exists(), "the new checkout is removed");
+    assert_eq!(h.record("swift").map(|r| r.commit), Some(C1.to_string()));
+
+    // The link succeeds: the record moves and the old checkout goes, after the link.
+    let task = update(&h, C2, cx);
+    cx.run_until_parked();
+    let updated = task.await.expect("the update succeeds");
+    assert_eq!(updated.commit, C2);
+    assert!(!updated.already_installed);
+    assert_eq!(h.link_target("swift"), Some(new.clone()));
+    assert_eq!(
+        h.host.linked().last(),
+        Some(&("swift".to_string(), new.clone()))
+    );
+    assert!(!old.exists(), "the old checkout is deleted");
+    let record = h.record("swift").unwrap();
+    assert_eq!(record.commit, C2);
+    assert_eq!(record.trusted_commit.as_deref(), Some(C2));
+    assert_eq!(record.requested_ref.as_deref(), Some(C2));
+
+    let log = log_text(&h, "swift");
+    let linked_at = log.find("link installed/swift").expect(&log);
+    let recorded_at = log.find(" record\n").expect(&log);
+    let removed_at = log.find("removed the old checkout").expect(&log);
+    assert!(linked_at < recorded_at && recorded_at < removed_at, "{log}");
+    h.installer.read_with(cx, |installer, _| {
+        assert_eq!(installer.operations().count(), 0);
+    });
+}
+
+#[gpui::test]
+async fn failed_update_keeps_the_old_build_loaded_and_on_disk(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    let old = install_c1(&h, cx).await;
+    let linked_before = h.host.linked().len();
+
+    for (fail, expected) in [("fetch", "connection reset"), ("build", "the build failed")] {
+        if fail == "fetch" {
+            h.git.inner.fail_next_fetch(&url(URL), "connection reset");
+        } else {
+            h.host
+                .push_build(FakeBuild::Fail("error[E0308]: mismatched types".into()));
+        }
+        let task = update(&h, C2, cx);
+        cx.run_until_parked();
+        let err = task.await.expect_err("the update fails");
+        assert!(format!("{err:#}").contains(expected), "{fail}: {err:#}");
+        assert_eq!(h.link_target("swift"), Some(old.clone()), "{fail}");
+        assert!(old.join("extension.toml").is_file(), "{fail}");
+        assert!(!h.layout.checkout_dir("swift", C2).exists(), "{fail}");
+        assert!(h.staging_is_empty(), "{fail}");
+        assert_eq!(
+            h.host.linked().len(),
+            linked_before,
+            "{fail}: nothing relinked"
+        );
+        assert_eq!(h.record("swift").map(|r| r.commit), Some(C1.to_string()));
+        let log = log_text(&h, "swift");
+        assert!(log.contains("error: "), "{fail}: {log}");
+        assert!(log.contains(expected), "{fail}: {log}");
+        let failure = h
+            .installer
+            .read_with(cx, |installer, _| installer.last_failure().cloned())
+            .unwrap();
+        assert_eq!(failure.log_path, Some(h.layout.log_path("swift")));
+    }
+}
+
+#[gpui::test]
+async fn update_to_the_installed_commit_changes_nothing(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    let old = install_c1(&h, cx).await;
+    let task = update(&h, C1, cx);
+    cx.run_until_parked();
+    assert!(task.await.unwrap().already_installed);
+    assert_eq!(h.link_target("swift"), Some(old));
+    assert_eq!(h.host.compiled().len(), 1);
+}
+
+#[gpui::test]
+async fn rebuild_reaches_no_network(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    let old = install_c1(&h, cx).await;
+    h.git.inner.add_repository(&old, url(URL).as_str(), C1);
+    let network_before = h.git.inner.network_ops();
+    let record_before = h.record("swift").unwrap();
+
+    let task = h
+        .installer
+        .update(cx, |installer, cx| installer.rebuild("swift", cx));
+    cx.run_until_parked();
+    let rebuilt = task.await.expect("the rebuild succeeds");
+    assert_eq!(h.git.inner.network_ops(), network_before, "no network call");
+    assert!(!rebuilt.already_installed);
+    assert_eq!(rebuilt.commit, C1);
+
+    let built = h.host.compiled().last().cloned().unwrap();
+    let name = built.file_name().unwrap().to_str().unwrap().to_string();
+    assert!(name.starts_with(&format!("{C1}.rebuild-")), "{name}");
+    assert!(built.join("extension.toml").is_file(), "a local clone");
+    assert_eq!(h.link_target("swift"), Some(built));
+    assert!(!old.exists(), "the old checkout goes after the link");
+    let record = h.record("swift").unwrap();
+    assert_eq!(record.commit, C1);
+    assert_eq!(record.listed, record_before.listed);
+    assert_eq!(record.trusted_commit, record_before.trusted_commit);
+    let log = log_text(&h, "swift");
+    assert!(log.contains("git clone --quiet --local"), "{log}");
+    assert!(!log.contains("git fetch"), "{log}");
+}
+
+#[gpui::test]
+async fn remove_leaves_nothing_and_the_checkout_survives_the_unload(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    install_c1(&h, cx).await;
+    // An unload that follows the link would delete the checkout through it.
+    h.host.set_unlink_follows_links(true);
+
+    let task = h
+        .installer
+        .update(cx, |installer, cx| installer.remove("swift", cx));
+    cx.run_until_parked();
+    task.await.expect("the remove succeeds");
+    assert_eq!(
+        h.host.unlinked(),
+        vec![("swift".to_string(), vec![C1.to_string()])],
+        "the checkout was still there when the host unloaded the extension"
+    );
+    assert!(
+        !h.layout.extension_dir("swift").exists(),
+        "nothing under git/swift/"
+    );
+    assert_eq!(h.link_target("swift"), None);
+    let log = log_text(&h, "swift");
+    assert!(log.contains("marked the record removing"), "{log}");
+    assert!(log.contains("removed swift"), "{log}");
+
+    let again = h
+        .installer
+        .update(cx, |installer, cx| installer.remove("swift", cx));
+    cx.run_until_parked();
+    let err = again.await.expect_err("nothing left to remove");
+    assert_eq!(format!("{err}"), "swift is not installed from git");
+}
+
+#[gpui::test]
+async fn held_lock_refuses_update_rebuild_and_remove(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    let old = install_c1(&h, cx).await;
+    let lock = h.hold_lock("swift");
+    let busy = "swift is busy: another bongos is changing it";
+
+    let task = update(&h, C2, cx);
+    cx.run_until_parked();
+    assert_eq!(format!("{}", task.await.unwrap_err()), busy);
+    let task = h
+        .installer
+        .update(cx, |installer, cx| installer.rebuild("swift", cx));
+    cx.run_until_parked();
+    assert_eq!(format!("{}", task.await.unwrap_err()), busy);
+    let task = h
+        .installer
+        .update(cx, |installer, cx| installer.remove("swift", cx));
+    cx.run_until_parked();
+    assert_eq!(format!("{}", task.await.unwrap_err()), busy);
+
+    assert_eq!(h.link_target("swift"), Some(old.clone()));
+    assert!(old.is_dir());
+    assert_eq!(h.record("swift").map(|r| r.commit), Some(C1.to_string()));
+    assert_eq!(h.host.compiled().len(), 1);
+    h.installer.read_with(cx, |installer, _| {
+        assert_eq!(installer.operations().count(), 0);
+    });
+    drop(lock);
+}
+
+#[gpui::test]
+async fn remove_is_refused_while_an_update_runs(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    install_c1(&h, cx).await;
+    let release = pending_build(&h.host);
+    let updating = update(&h, C2, cx);
+    cx.run_until_parked();
+
+    let remove = h
+        .installer
+        .update(cx, |installer, cx| installer.remove("swift", cx));
+    let err = remove.await.expect_err("the remove is refused");
+    assert_eq!(format!("{err}"), "swift is busy: updating");
+    let rebuild = h
+        .installer
+        .update(cx, |installer, cx| installer.rebuild("swift", cx));
+    let err = rebuild.await.expect_err("a rebuild is refused too");
+    assert_eq!(format!("{err}"), "swift is busy: updating");
+
+    release.send(Ok(None)).unwrap();
+    cx.run_until_parked();
+    updating.await.expect("the update finishes");
+    assert_eq!(
+        h.link_target("swift"),
+        Some(h.layout.checkout_dir("swift", C2))
+    );
+
+    // Once it finished the id is free again.
+    let remove = h
+        .installer
+        .update(cx, |installer, cx| installer.remove("swift", cx));
+    cx.run_until_parked();
+    remove.await.expect("the remove runs now");
+    assert!(!h.layout.extension_dir("swift").exists());
+}

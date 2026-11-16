@@ -1,4 +1,5 @@
-//! The installer service: installs an extension from a git repository.
+//! The installer service: installs, updates, rebuilds and removes extensions from git
+//! repositories.
 //!
 //! An install resolves the revision, fetches the commit into a staging folder, runs the preflight,
 //! moves the checkout to `git/<id>/<commit>`, builds it (one build at a time), checks the
@@ -6,6 +7,12 @@
 //! at any point keeps what was installed before, deletes the new checkout, writes the build log
 //! and returns one error. A crash between the clone and the record is left for the startup
 //! reconcile.
+//!
+//! Update and rebuild work like an install: the new build goes into a fresh checkout and replaces
+//! the old one only once it built, passed the API check and was linked, so a failure keeps the old
+//! build loaded and on disk. A rebuild clones the current checkout locally and reaches no network
+//! for the extension. A remove marks the record `removing`, unloads the extension, then deletes
+//! every checkout of the id.
 //!
 //! Every file and process operation runs on the background executor; the foreground only updates
 //! the observable state and talks to the extension host.
@@ -20,21 +27,25 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
 use bongos_extensions_model::{
-    InstallRecord, LanguageList, Layout, ManifestFacts, Probe, ReadOutcome, RecordState, RevSpec,
-    SourceUrl, ToolProbe, check_after_clone, check_before_clone, check_built_api, validate_id,
-    validate_relative_path, write_atomic,
+    Fix, InstallRecord, LanguageList, Layout, ManifestFacts, Probe, ReadOutcome, RecordState,
+    RevSpec, SourceUrl, ToolProbe, check_after_clone, check_before_clone, check_built_api,
+    validate_id, validate_relative_path, write_atomic,
 };
 use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{Either, LocalBoxFuture, Shared};
 use gpui::{
-    App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, Global, WeakEntity,
+    App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, Global, Task, WeakEntity,
 };
 use util::command::{Stdio, new_command};
 
 use crate::build_log::{BuildLog, Clock, SystemClock, rfc3339};
-use crate::git::{GitRunner, RealGit, StagedClone, resolve, stage};
+use crate::git::{GitRunner, RealGit, StagedClone, resolve, stage, stage_local};
 use crate::host::{ExtensionStoreHost, HostApi, InstalledExtension};
+
+/// The record field set when the build of a recorded extension is gone and it needs a rebuild or
+/// reinstall. A successful install clears it.
+pub const BUILD_MISSING_KEY: &str = "build_missing";
 
 /// How an install is trusted. Asking the user is the caller's job; the installer only checks
 /// that the answer matches what it is about to install.
@@ -234,8 +245,9 @@ pub struct Installer {
     next_operation: u64,
     operations: Vec<(u64, Operation)>,
     in_flight: HashMap<RequestKey, InstallTask>,
-    /// Ids being installed, and the operation installing each.
-    busy_ids: HashMap<String, u64>,
+    /// Ids being changed, with the operation changing each and what it is doing ("installing",
+    /// "updating", "rebuilding" or "removing").
+    busy_ids: HashMap<String, (u64, &'static str)>,
     /// The build semaphore: builds share the builder's cache folder, so one runs at a time.
     build_slot: Arc<futures::lock::Mutex<()>>,
     last_failure: Option<Failure>,
@@ -388,7 +400,8 @@ impl Installer {
             op,
             key,
             rev: rev_spec,
-            trust,
+            trust: RequestTrust::Given(trust),
+            kind: Kind::Install,
         };
         cx.spawn(async move |this, cx| {
             let (result, log_path) = run(this.clone(), request.clone(), cx).await;
@@ -400,6 +413,120 @@ impl Installer {
         task
     }
 
+    /// Updates the git-installed extension `id` to `rev` of its recorded source (a tag, branch or
+    /// full commit; `None` for the default branch). The old build stays loaded until the new one is
+    /// built and linked. Refused while another operation on `id` runs.
+    pub fn update(
+        &mut self,
+        id: &str,
+        rev: Option<&str>,
+        trust: Trust,
+        cx: &mut Context<Self>,
+    ) -> InstallTask {
+        let rev_spec = match RevSpec::parse(rev) {
+            Ok(rev) => rev,
+            Err(err) => return ready(Err(Arc::new(err.into()))),
+        };
+        let rev_text = rev
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(String::from);
+        self.start_existing(
+            id,
+            Existing::Update {
+                rev: rev_spec,
+                rev_text,
+                trust,
+            },
+            cx,
+        )
+    }
+
+    /// Rebuilds the git-installed extension `id` from a local clone of its current checkout. Reaches
+    /// no network for the extension. The old build stays loaded until the new one is built and
+    /// linked. Refused while another operation on `id` runs.
+    pub fn rebuild(&mut self, id: &str, cx: &mut Context<Self>) -> InstallTask {
+        self.start_existing(id, Existing::Rebuild, cx)
+    }
+
+    fn start_existing(
+        &mut self,
+        id: &str,
+        existing: Existing,
+        cx: &mut Context<Self>,
+    ) -> InstallTask {
+        if let Err(err) = validate_id(id) {
+            return ready(Err(Arc::new(err.into())));
+        }
+        let op = self.next_operation;
+        self.next_operation += 1;
+        if let Err(err) = self.claim_id(op, id, existing.doing(), cx) {
+            return ready(Err(Arc::new(err)));
+        }
+        let (sender, receiver) = oneshot::channel();
+        let task: InstallTask = async move {
+            receiver
+                .await
+                .unwrap_or_else(|_| Err(Arc::new(anyhow!("the operation was cancelled"))))
+        }
+        .boxed_local()
+        .shared();
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let (result, log_path, request) =
+                run_existing(this.clone(), op, id, existing, cx).await;
+            this.update(cx, |this, cx| match &request {
+                Some(request) => this.finish(request, &result, log_path, cx),
+                None => this.release(op, cx),
+            })
+            .ok();
+            sender.send(result).ok();
+        })
+        .detach();
+        task
+    }
+
+    /// Removes the git-installed extension `id`: marks its record `removing`, unloads it, then
+    /// deletes every checkout under `git/<id>/` and the record. Refused while another operation on
+    /// `id` runs. A removal cut short is finished by the startup reconcile.
+    pub fn remove(&mut self, id: &str, cx: &mut Context<Self>) -> Task<Result<()>> {
+        if let Err(err) = validate_id(id) {
+            return Task::ready(Err(err.into()));
+        }
+        let op = self.next_operation;
+        self.next_operation += 1;
+        if let Err(err) = self.claim_id(op, id, "removing", cx) {
+            return Task::ready(Err(err));
+        }
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = run_remove(this.clone(), id, cx).await;
+            this.update(cx, |this, cx| this.release(op, cx)).ok();
+            result
+        })
+    }
+
+    /// Repairs what a crash left in the extensions directory (see [`crate::reconcile_run`]). Ids
+    /// this installer is changing are left alone. Builds, fetches and contacts nothing.
+    pub fn reconcile(&mut self, cx: &mut Context<Self>) -> Task<Result<Vec<Fix>>> {
+        let inputs = crate::reconcile_run::Inputs {
+            layout: self.deps.layout.clone(),
+            git: self.deps.git.clone(),
+            host: self.deps.host.clone(),
+            clock: self.deps.clock.clone(),
+            list: self.deps.list.clone(),
+            write_record: self.deps.write_record,
+            busy: self.busy_ids.keys().cloned().collect(),
+        };
+        cx.spawn(async move |_, cx| crate::reconcile_run::run(inputs, cx).await)
+    }
+
+    fn release(&mut self, op: u64, cx: &mut Context<Self>) {
+        self.operations.retain(|(o, _)| *o != op);
+        self.busy_ids.retain(|_, (o, _)| *o != op);
+        cx.notify();
+    }
+
     fn set_phase(&mut self, op: u64, phase: Phase, cx: &mut Context<Self>) {
         if let Some((_, operation)) = self.operations.iter_mut().find(|(o, _)| *o == op) {
             operation.phase = phase;
@@ -407,13 +534,20 @@ impl Installer {
         }
     }
 
-    /// Claims `id` for operation `op`, refusing when another operation holds it.
-    fn claim_id(&mut self, op: u64, id: &str, cx: &mut Context<Self>) -> Result<()> {
+    /// Claims `id` for operation `op`, which is `doing` something to it, refusing when another
+    /// operation holds it.
+    fn claim_id(
+        &mut self,
+        op: u64,
+        id: &str,
+        doing: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
         match self.busy_ids.get(id) {
-            Some(other) if *other != op => bail!("{id} is busy: installing"),
+            Some((other, other_doing)) if *other != op => bail!("{id} is busy: {other_doing}"),
             _ => {}
         }
-        self.busy_ids.insert(id.to_string(), op);
+        self.busy_ids.insert(id.to_string(), (op, doing));
         if let Some((_, operation)) = self.operations.iter_mut().find(|(o, _)| *o == op) {
             operation.id = Some(id.to_string());
         }
@@ -434,8 +568,10 @@ impl Installer {
             .find(|(o, _)| *o == request.op)
             .and_then(|(_, op)| op.id.clone());
         self.operations.retain(|(o, _)| *o != request.op);
-        self.busy_ids.retain(|_, o| *o != request.op);
-        self.in_flight.remove(&request.key);
+        self.busy_ids.retain(|_, (o, _)| *o != request.op);
+        if let Kind::Install = request.kind {
+            self.in_flight.remove(&request.key);
+        }
         match result {
             Ok(installed) => {
                 self.last_installed = Some(installed.clone());
@@ -471,7 +607,61 @@ struct Request {
     op: u64,
     key: RequestKey,
     rev: RevSpec,
-    trust: Trust,
+    trust: RequestTrust,
+    kind: Kind,
+}
+
+#[derive(Clone)]
+enum RequestTrust {
+    /// Checked against what is about to be installed.
+    Given(Trust),
+    /// Carried over from the record: the same commit is built again.
+    Kept {
+        listed: bool,
+        trusted_commit: Option<String>,
+    },
+}
+
+#[derive(Clone)]
+enum Kind {
+    Install,
+    Update {
+        id: String,
+    },
+    /// Builds a local clone of `checkout`, the current checkout of `id`.
+    Rebuild {
+        id: String,
+        checkout: PathBuf,
+    },
+}
+
+impl Kind {
+    /// The id claimed and locked before the operation started.
+    fn held_id(&self) -> Option<&str> {
+        match self {
+            Kind::Install => None,
+            Kind::Update { id } | Kind::Rebuild { id, .. } => Some(id),
+        }
+    }
+}
+
+/// An operation on an extension that is already installed from git.
+enum Existing {
+    Update {
+        rev: RevSpec,
+        rev_text: Option<String>,
+        trust: Trust,
+    },
+    Rebuild,
+}
+
+impl Existing {
+    fn doing(&self) -> &'static str {
+        match self {
+            Existing::Update { .. } => "updating",
+            Existing::Rebuild => "rebuilding",
+        }
+    }
 }
 
 /// What an install holds while it runs. Moved to the background for every file operation, so
@@ -525,6 +715,17 @@ impl Work {
 /// Takes the OS file lock at `path`, refusing when another process holds it. The lock goes away
 /// when the file is closed or the process dies.
 fn take_lock(path: &Path, what: &str) -> Result<File> {
+    try_lock(path)?.ok_or_else(|| anyhow!("another bongos is installing {what}"))
+}
+
+/// Takes the lock of an installed id for an update, rebuild or remove.
+fn take_id_lock(layout: &Layout, id: &str) -> Result<File> {
+    try_lock(&layout.lock_path(id))?
+        .ok_or_else(|| anyhow!("{id} is busy: another bongos is changing it"))
+}
+
+/// Takes the OS file lock at `path`, creating the file; `None` when another process holds it.
+pub(crate) fn try_lock(path: &Path) -> Result<Option<File>> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("could not create {}", dir.display()))?;
@@ -537,8 +738,8 @@ fn take_lock(path: &Path, what: &str) -> Result<File> {
         .open(path)
         .with_context(|| format!("could not open {}", path.display()))?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => bail!("another bongos is installing {what}"),
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(err)) => {
             Err(err).with_context(|| format!("could not lock {}", path.display()))
         }
@@ -640,16 +841,6 @@ async fn run(
     (outcome.map_err(Arc::new), Some(log_path))
 }
 
-struct Steps {
-    git: Arc<dyn GitRunner>,
-    tools: Arc<dyn ToolProber>,
-    clock: Arc<dyn Clock>,
-    list: Arc<LanguageList>,
-    is_blocked_host: fn(&str) -> bool,
-    write_record: RecordWriter,
-    host: Rc<dyn HostApi>,
-}
-
 /// Runs one step of `work` on the background executor (see [`on_background`]).
 macro_rules! background {
     ($cx:expr, $work:expr, $f:expr) => {{
@@ -658,6 +849,283 @@ macro_rules! background {
         *$work = back;
         result
     }};
+}
+
+/// Runs an update or rebuild of the installed `id` and returns its result, the path of its build
+/// log (none when it stopped before writing one) and its request (none when it stopped before
+/// reading the record).
+async fn run_existing(
+    this: WeakEntity<Installer>,
+    op: u64,
+    id: String,
+    existing: Existing,
+    cx: &mut AsyncApp,
+) -> (InstallResult, Option<PathBuf>, Option<Request>) {
+    let gone = || Err(Arc::new(anyhow!("the installer is gone")));
+    let Ok((layout, steps)) =
+        this.read_with(cx, |this, _| (this.deps.layout.clone(), this.deps.steps()))
+    else {
+        return (gone(), None, None);
+    };
+    let work = Work {
+        layout: layout.clone(),
+        clock: steps.clock.clone(),
+        log: BuildLog::start(layout.clone(), steps.clock.clone(), id.clone()),
+        locks: Vec::new(),
+        staged: None,
+        checkout: None,
+    };
+    let (mut work, prepared) = {
+        let id = id.clone();
+        on_background(
+            cx,
+            work,
+            move |work| -> Result<(InstallRecord, Option<PathBuf>)> {
+                // Lock first: a held lock means the id's log belongs to the other process.
+                let lock = take_id_lock(&work.layout, &id)?;
+                work.locks.push(lock);
+                let record = installed_record(&work.layout, &id)?;
+                let linked = std::fs::read_link(work.layout.symlink_path(&id)).ok();
+                Ok((record, linked))
+            },
+        )
+        .await
+    };
+    let (record, linked) = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => return (Err(Arc::new(err)), None, None),
+    };
+    let url = match SourceUrl::parse(&record.source_url) {
+        Ok(url) => url,
+        Err(err) => {
+            let err = anyhow::Error::from(err).context(format!("the record of {id} is damaged"));
+            return (Err(Arc::new(err)), None, None);
+        }
+    };
+    let (key_rev, rev, trust, kind) = match existing {
+        Existing::Update {
+            rev,
+            rev_text,
+            trust,
+        } => (
+            rev_text,
+            rev,
+            RequestTrust::Given(trust),
+            Kind::Update { id: id.clone() },
+        ),
+        Existing::Rebuild => {
+            let checkout = linked
+                .as_deref()
+                .and_then(|target| checkout_of(&layout, &id, target))
+                .filter(|checkout| is_checkout_of_commit(checkout, &record.commit))
+                .unwrap_or_else(|| layout.checkout_dir(&id, &record.commit));
+            (
+                record.requested_ref.clone(),
+                RevSpec::Commit(record.commit.clone()),
+                RequestTrust::Kept {
+                    listed: record.listed,
+                    trusted_commit: record.trusted_commit.clone(),
+                },
+                Kind::Rebuild {
+                    id: id.clone(),
+                    checkout,
+                },
+            )
+        }
+    };
+    let request = Request {
+        op,
+        key: RequestKey {
+            url: url.clone(),
+            path: record.path.clone(),
+            rev: key_rev,
+        },
+        rev,
+        trust,
+        kind,
+    };
+    let registered = this.update(cx, |this, cx| {
+        this.operations.push((
+            op,
+            Operation {
+                key: request.key.clone(),
+                id: Some(id.clone()),
+                phase: Phase::Resolving,
+            },
+        ));
+        cx.notify();
+    });
+    if registered.is_err() {
+        return (gone(), None, None);
+    }
+
+    let locked = {
+        let source_key = layout.source_key(&url);
+        let what = url.to_string();
+        let line = match &request.kind {
+            Kind::Rebuild { checkout, .. } => format!(
+                "rebuild {id} at {} from {}",
+                record.commit,
+                checkout.display()
+            ),
+            _ => format!(
+                "update {id} from {} to {}",
+                record.commit,
+                request.key.rev.as_deref().unwrap_or("the default branch")
+            ),
+        };
+        let work = &mut work;
+        background!(cx, work, move |work| -> Result<()> {
+            work.log.line(line);
+            let lock = take_lock(&work.layout.lock_path(&source_key), &what)?;
+            work.locks.push(lock);
+            Ok(())
+        })
+    };
+    let outcome = match locked {
+        Ok(()) => install_steps(&this, &request, &mut work, steps, cx).await,
+        Err(err) => Err(err),
+    };
+    let log_path = work.log.path();
+    let (_, outcome) = on_background(cx, work, move |work| {
+        if let Err(err) = &outcome {
+            work.fail(err);
+        }
+        outcome
+    })
+    .await;
+    (outcome.map_err(Arc::new), Some(log_path), Some(request))
+}
+
+/// The record of `id`, which must be installed (not being removed).
+fn installed_record(layout: &Layout, id: &str) -> Result<InstallRecord> {
+    let path = layout.record_path(id);
+    match bongos_extensions_model::read(&path)
+        .with_context(|| format!("could not read {}", path.display()))?
+    {
+        ReadOutcome::Ok(record) if record.state == RecordState::Installed => Ok(record),
+        ReadOutcome::Ok(_) => bail!("{id} is being removed"),
+        ReadOutcome::Missing | ReadOutcome::Unreadable => bail!("{id} is not installed from git"),
+    }
+}
+
+/// Runs one remove.
+async fn run_remove(this: WeakEntity<Installer>, id: String, cx: &mut AsyncApp) -> Result<()> {
+    let (layout, clock, host, write_record) = this.read_with(cx, |this, _| {
+        let deps = &this.deps;
+        (
+            deps.layout.clone(),
+            deps.clock.clone(),
+            deps.host.clone(),
+            deps.write_record,
+        )
+    })?;
+    let work = Work {
+        layout: layout.clone(),
+        clock: clock.clone(),
+        log: BuildLog::start(layout, clock, id.clone()),
+        locks: Vec::new(),
+        staged: None,
+        checkout: None,
+    };
+    let (mut work, linked) = {
+        let id = id.clone();
+        on_background(cx, work, move |work| -> Result<bool> {
+            // Lock first: a held lock means the id's log belongs to the other process.
+            let lock = take_id_lock(&work.layout, &id)?;
+            work.locks.push(lock);
+            let marked = mark_removing(work, &id, write_record);
+            if let Err(err) = &marked {
+                work.log.error(err);
+            }
+            marked
+        })
+        .await
+    };
+    if linked? {
+        let unlink = cx.update(|cx| host.unlink(&id, cx));
+        if let Err(err) = unlink.await {
+            let err = err.context(format!("could not unload {id}"));
+            let (_, err) = on_background(cx, work, move |work| {
+                work.log.error(&err);
+                work.log.line("the next start finishes the removal");
+                err
+            })
+            .await;
+            return Err(err);
+        }
+        work.log.line(format!("unloaded {id}"));
+    }
+    let (_, result) = on_background(cx, work, move |work| -> Result<()> {
+        let dir = work.layout.extension_dir(&id);
+        let result = match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).with_context(|| format!("could not remove {}", dir.display())),
+        };
+        match &result {
+            Ok(()) => work.log.line(format!("removed {id}")),
+            Err(err) => work.log.error(err),
+        }
+        work.locks.clear();
+        result
+    })
+    .await;
+    result
+}
+
+/// Marks the record of `id` `removing` and removes `installed/<id>` when it points into
+/// `git/<id>/`. Returns whether it did, so the host has to unload the extension.
+fn mark_removing(work: &mut Work, id: &str, write_record: RecordWriter) -> Result<bool> {
+    let layout = work.layout.clone();
+    let link = layout.symlink_path(id);
+    let ours = std::fs::read_link(&link).is_ok_and(|t| t.starts_with(layout.extension_dir(id)));
+    let record_path = layout.record_path(id);
+    let record = bongos_extensions_model::read(&record_path)
+        .with_context(|| format!("could not read {}", record_path.display()))?;
+    if !ours && !layout.extension_dir(id).is_dir() {
+        bail!("{id} is not installed from git");
+    }
+    work.log.line(format!("remove {id}"));
+    if let ReadOutcome::Ok(mut record) = record {
+        record.state = RecordState::Removing;
+        let nonce = format!("{}-remove", std::process::id());
+        write_record(&record_path, &record, &nonce)
+            .with_context(|| format!("could not write {}", record_path.display()))?;
+        work.log.line("marked the record removing");
+    }
+    if ours {
+        // The host deletes `installed/<id>` recursively; removing the link first keeps that
+        // removal from reaching the checkout through it.
+        std::fs::remove_file(&link)
+            .with_context(|| format!("could not remove {}", link.display()))?;
+        work.log.line(format!("removed the link installed/{id}"));
+    }
+    Ok(ours)
+}
+
+impl InstallerDeps {
+    fn steps(&self) -> Steps {
+        Steps {
+            git: self.git.clone(),
+            tools: self.tools.clone(),
+            clock: self.clock.clone(),
+            list: self.list.clone(),
+            is_blocked_host: self.is_blocked_host,
+            write_record: self.write_record,
+            host: self.host.clone(),
+        }
+    }
+}
+
+struct Steps {
+    git: Arc<dyn GitRunner>,
+    tools: Arc<dyn ToolProber>,
+    clock: Arc<dyn Clock>,
+    list: Arc<LanguageList>,
+    is_blocked_host: fn(&str) -> bool,
+    write_record: RecordWriter,
+    host: Rc<dyn HostApi>,
 }
 
 impl Work {
@@ -710,7 +1178,8 @@ async fn install_steps(
     };
     work.log.line(format!("resolved to {commit}"));
     let listed = match &request.trust {
-        Trust::Listed => {
+        RequestTrust::Kept { listed, .. } => *listed,
+        RequestTrust::Given(Trust::Listed) => {
             if !steps.list.is_listed(&url, path.as_deref(), &commit) {
                 bail!(
                     "{url} at {commit} is not on the list of language extensions; install it from git and confirm it instead"
@@ -718,7 +1187,7 @@ async fn install_steps(
             }
             true
         }
-        Trust::Confirmed(confirmed) => {
+        RequestTrust::Given(Trust::Confirmed(confirmed)) => {
             if !confirmed.eq_ignore_ascii_case(&commit) {
                 bail!(
                     "{url} now resolves to {commit}, not the confirmed {confirmed}; install again to confirm the new commit"
@@ -731,24 +1200,22 @@ async fn install_steps(
     // Clone.
     this.update(cx, |this, cx| this.set_phase(op, Phase::Cloning, cx))?;
     work.log.line("clone");
-    for command in [
-        "git init --quiet -- <staging folder>".to_string(),
-        format!("git remote add -- origin {url}"),
-        format!("git fetch --quiet --no-tags --depth 1 origin {commit}"),
-        "git checkout --quiet --detach FETCH_HEAD".to_string(),
-    ] {
-        work.log.command(command);
-    }
-    let staged = {
+    let staged = if let Kind::Rebuild { checkout, .. } = &request.kind {
+        work.log.command(format!(
+            "git clone --quiet --local -- {} <staging folder>",
+            checkout.display()
+        ));
         let git = steps.git.clone();
         let layout = work.layout.clone();
-        let url = url.clone();
+        let checkout = checkout.clone();
         let commit = commit.clone();
         let path = path.clone();
         cx.background_spawn(async move {
-            stage(git.as_ref(), &layout, &url, &commit, path.as_deref()).await
+            stage_local(git.as_ref(), &layout, &checkout, &commit, path.as_deref()).await
         })
         .await?
+    } else {
+        stage_remote(&url, &commit, path.as_deref(), work, &steps, cx).await?
     };
     work.staged = Some(staged);
 
@@ -761,15 +1228,26 @@ async fn install_steps(
     })?;
     if facts.has_extension_toml {
         validate_id(&facts.id)?;
-        this.update(cx, |this, cx| this.claim_id(op, &facts.id, cx))??;
-        let id = facts.id.clone();
-        background!(cx, work, move |work| -> Result<()> {
-            // Lock first: a held lock means the id's log belongs to the other process.
-            let lock = take_lock(&work.layout.lock_path(&id), &id)?;
-            work.locks.push(lock);
-            work.log.rekey(id);
-            Ok(())
-        })?;
+        if let Some(held) = request.kind.held_id() {
+            if facts.id != held {
+                bail!(
+                    "{url} at {commit} is the extension `{}`, not `{held}`",
+                    facts.id
+                );
+            }
+        } else {
+            this.update(cx, |this, cx| {
+                this.claim_id(op, &facts.id, "installing", cx)
+            })??;
+            let id = facts.id.clone();
+            background!(cx, work, move |work| -> Result<()> {
+                // Lock first: a held lock means the id's log belongs to the other process.
+                let lock = take_lock(&work.layout.lock_path(&id), &id)?;
+                work.locks.push(lock);
+                work.log.rekey(id);
+                Ok(())
+            })?;
+        }
     }
     let id = facts.id.clone();
 
@@ -811,9 +1289,11 @@ async fn install_steps(
     let (already, root) = {
         let id = id.clone();
         let commit = commit.clone();
-        let same_record = previous_record
-            .as_ref()
-            .is_some_and(|r| r.commit.eq_ignore_ascii_case(&commit));
+        // A rebuild builds the same commit again on purpose.
+        let same_record = !matches!(request.kind, Kind::Rebuild { .. })
+            && previous_record
+                .as_ref()
+                .is_some_and(|r| r.commit.eq_ignore_ascii_case(&commit));
         let nonce = format!("{}-{op}", std::process::id());
         background!(cx, work, move |work| -> Result<(bool, PathBuf)> {
             place_checkout(work, &id, &commit, same_record, &nonce)
@@ -923,12 +1403,19 @@ async fn install_steps(
         commit: commit.clone(),
         listed,
         trusted_commit: match &request.trust {
-            Trust::Listed => None,
-            Trust::Confirmed(_) => Some(commit.clone()),
+            RequestTrust::Given(Trust::Listed) => None,
+            RequestTrust::Given(Trust::Confirmed(_)) => Some(commit.clone()),
+            RequestTrust::Kept { trusted_commit, .. } => trusted_commit.clone(),
         },
         state: RecordState::Installed,
         installed_at: rfc3339(steps.clock.now()),
-        extra: previous_record.map(|r| r.extra).unwrap_or_default(),
+        extra: previous_record
+            .map(|r| {
+                let mut extra = r.extra;
+                extra.remove(BUILD_MISSING_KEY);
+                extra
+            })
+            .unwrap_or_default(),
     };
     let write_record = steps.write_record;
     let recorded = {
@@ -969,6 +1456,34 @@ async fn install_steps(
         log_path: work.log.path(),
         already_installed: false,
     })
+}
+
+/// Fetches `commit` of `url` into a new staging folder.
+async fn stage_remote(
+    url: &SourceUrl,
+    commit: &str,
+    path: Option<&str>,
+    work: &mut Work,
+    steps: &Steps,
+    cx: &mut AsyncApp,
+) -> Result<StagedClone> {
+    for command in [
+        "git init --quiet -- <staging folder>".to_string(),
+        format!("git remote add -- origin {url}"),
+        format!("git fetch --quiet --no-tags --depth 1 origin {commit}"),
+        "git checkout --quiet --detach FETCH_HEAD".to_string(),
+    ] {
+        work.log.command(command);
+    }
+    let git = steps.git.clone();
+    let layout = work.layout.clone();
+    let url = url.clone();
+    let commit = commit.to_string();
+    let path = path.map(String::from);
+    cx.background_spawn(async move {
+        stage(git.as_ref(), &layout, &url, &commit, path.as_deref()).await
+    })
+    .await
 }
 
 /// Points `installed/<id>` back at `previous` (or removes it when nothing was linked) after `err`,

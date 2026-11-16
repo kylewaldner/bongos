@@ -173,6 +173,8 @@ mod fake {
         linked: Vec<(String, PathBuf)>,
         link_failures: HashMap<String, String>,
         wasi_sdk_present: bool,
+        unlink_follows_links: bool,
+        unlinked: Vec<(String, Vec<String>)>,
     }
 
     /// A host that never compiles: builds follow a script and links are real symlinks under the
@@ -219,6 +221,17 @@ mod fake {
 
         pub fn set_wasi_sdk_present(&self, present: bool) {
             self.state.lock().wasi_sdk_present = present;
+        }
+
+        /// Makes `unlink` delete what `installed/<id>` points at before removing the link, as a
+        /// recursive removal that followed the link would.
+        pub fn set_unlink_follows_links(&self, follows: bool) {
+            self.state.lock().unlink_follows_links = follows;
+        }
+
+        /// Each unlink so far: the id and the folders left under `git/<id>/` right after it.
+        pub fn unlinked(&self) -> Vec<(String, Vec<String>)> {
+            self.state.lock().unlinked.clone()
         }
 
         /// The folders compiled so far.
@@ -323,9 +336,26 @@ mod fake {
         }
 
         fn unlink(&self, id: &str, _: &mut App) -> Task<Result<()>> {
+            let mut state = self.state.lock();
             let link = self.layout.symlink_path(id);
+            if state.unlink_follows_links
+                && let Ok(target) = std::fs::read_link(&link)
+            {
+                std::fs::remove_dir_all(target).ok();
+            }
             std::fs::remove_file(&link).ok();
-            self.state.lock().installed.retain(|e| e.id != id);
+            state.installed.retain(|e| e.id != id);
+            let mut left: Vec<String> = std::fs::read_dir(self.layout.extension_dir(id))
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .filter(|entry| entry.path().is_dir())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            left.sort();
+            state.unlinked.push((id.to_string(), left));
             Task::ready(Ok(()))
         }
     }
