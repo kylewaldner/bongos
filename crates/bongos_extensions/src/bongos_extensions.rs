@@ -8,6 +8,7 @@ pub mod commands;
 pub mod git;
 pub mod host;
 pub mod installer;
+pub mod list_check;
 pub mod offer;
 pub mod reconcile_run;
 pub mod status_item;

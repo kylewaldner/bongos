@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Checks the curated language list (crates/bongos_extensions_model/languages.toml): fetches every
+# entry's pinned commit, runs the install preflight, builds the extension and checks its extension
+# API version against the range a Stable build loads. A developer runs this with network access
+# before a release (it clones, downloads toolchain pieces and compiles); no gate runs it.
+#   check-language-list            check the embedded list
+#   check-language-list <list>     check another list file or file:// URL
+# Prints one line per entry; exits non-zero when any entry fails. Checkouts go under
+# $BONGOS_WORKSPACE/scratch and are deleted afterwards.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/env.sh"
+. "$here/lib.sh"
+cd "$BONGOS_ROOT"
+
+[ "$#" -le 1 ] || { echo "usage: check-language-list [<list file or file:// URL>]" >&2; exit 2; }
+mkdir -p "$BONGOS_WORKSPACE/scratch"
+work=$(mktemp -d "$BONGOS_WORKSPACE/scratch/check-language-list.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+cargo_limited build -p bongos_extensions --bin bongos-extension-list-check --locked --color never
+"$CARGO_TARGET_DIR/debug/bongos-extension-list-check" --scratch "$work/checkouts" "$@"
