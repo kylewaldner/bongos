@@ -39,7 +39,7 @@ use crate::test_support::{
     main_commit, new_copy, person, write_definition, write_file,
 };
 use crate::trees::EnvBase;
-use crate::{LIVE_NAMESPACE, OWED_NAMESPACE, read_hold_rows};
+use crate::{DONE_NAMESPACE, LIVE_NAMESPACE, OWED_NAMESPACE, read_hold_rows};
 
 const TASK: &str = "l1";
 const PROJECT: &str = "project-1";
@@ -455,7 +455,7 @@ async fn removing_a_held_tasks_check_then_adding_it_back_leaves_it_done(cx: &mut
     });
     // Every change of state is followed by a decision; wait for the one that settles `done`.
     async fn until(
-        decisions: &mut mpsc::UnboundedReceiver<String>,
+        decisions: &mut mpsc::UnboundedReceiver<Option<String>>,
         world: &World,
         settled: impl Fn(&World) -> bool,
     ) {
@@ -497,8 +497,11 @@ async fn removing_a_held_tasks_check_then_adding_it_back_leaves_it_done(cx: &mut
         &definition_toml(TASK, "Backfill", TESTS),
     );
     let landed = land(&world.repo, &copy, &author);
-    assert!(matches!(landed, LandingResult::Landed { .. }), "{landed:?}");
-    decisions.next().await.expect("the decider runs");
+    let LandingResult::Landed { commit } = landed else {
+        panic!("{landed:?}");
+    };
+    // Wait for a decision that began on the landed commit, not one still running from before.
+    while decisions.next().await.expect("the decider runs") != Some(commit.to_string()) {}
     assert_eq!(world.done(), Some(done));
     assert_eq!(world.hold(), None);
 }
@@ -586,4 +589,48 @@ fn every_key_of_a_judgment_rests_on_the_first_key_of_each_tree() {
     );
     assert_eq!(key(&mut keys, &[tree("app", &app)]), app_key);
     assert_ne!(key(&mut TreeKeys::default(), &both()), before);
+}
+
+#[gpui::test]
+async fn a_done_row_that_cannot_be_read_is_replaced(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let world = World::new(cx, TESTS, Tree::Git);
+    world.run_checks(cx).await;
+    world.finish();
+    world
+        .writer()
+        .transact(|tx| {
+            tx.kv(DONE_NAMESPACE)
+                .put(TASK, toml::Value::String("garbled".to_string()))
+        })
+        .unwrap();
+
+    world.decide(cx).await;
+
+    let done = world.done().expect("a readable done record");
+    assert_eq!(done.evidence, world.record_ids());
+    assert_eq!(world.hold(), None);
+}
+
+#[gpui::test]
+async fn a_held_task_the_definitions_lack_gets_a_hold_row(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let world = World::new(cx, TESTS, Tree::Git);
+    world.finish();
+    let marker = toml::Value::try_from(OwedMarker::default()).unwrap();
+    world
+        .writer()
+        .transact(|tx| tx.kv(OWED_NAMESPACE).put("ghost", marker.clone()))
+        .unwrap();
+
+    world.decide(cx).await;
+
+    let rows = world.writer().read(read_hold_rows).unwrap();
+    let ghost = rows.get("ghost").expect("the task shows why it is held");
+    assert!(
+        ghost
+            .reason
+            .starts_with("not done: the task is not in the definitions of "),
+        "{ghost:?}"
+    );
 }

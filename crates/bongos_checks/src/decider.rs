@@ -68,6 +68,9 @@ pub const NO_TREE: &str = "not done: no tree to check";
 /// What `would_hold` answers for a group with closing checks and open children.
 pub const OPEN_CHILDREN: &str = "complete or drop its open children first: the closing checks run on the tree of the last finished child";
 
+/// What `would_hold` answers for a group with closing checks and every child finished.
+pub const CLOSING_CHECKS: &str = "not done: its closing checks are still to be judged";
+
 /// "not done: N checks missing".
 pub fn missing_reason(count: usize) -> String {
     format!("not done: {count} {} missing", checks_word(count))
@@ -111,7 +114,7 @@ pub(crate) struct Decider {
     waiting: BTreeSet<String>,
     store_subscription: Option<gpui::Subscription>,
     #[cfg(test)]
-    decided: Vec<mpsc::UnboundedSender<String>>,
+    decided: Vec<mpsc::UnboundedSender<Option<String>>>,
 }
 
 /// One project whose writer the decider follows.
@@ -266,6 +269,8 @@ impl ChecksEngine {
                 let Some(writer) = weak.upgrade() else {
                     break;
                 };
+                #[cfg(test)]
+                let verified = writer.read(|read| read.verified_commit()).ok().flatten();
                 if let Err(error) = decide_project(&this, &id, &writer, cx).await {
                     log::error!("deciding the checks of project {id}: {error:#}");
                 }
@@ -275,7 +280,7 @@ impl ChecksEngine {
                     engine
                         .decider
                         .decided
-                        .retain(|sender| sender.unbounded_send(id.clone()).is_ok());
+                        .retain(|sender| sender.unbounded_send(verified.clone()).is_ok());
                 })
                 .ok();
             }
@@ -291,9 +296,9 @@ impl ChecksEngine {
         );
     }
 
-    /// The ids of the projects each decision finished for, from now on; for tests.
+    /// For each decision from now on, the verified commit it began with; for tests.
     #[cfg(test)]
-    pub(crate) fn decisions(&mut self) -> mpsc::UnboundedReceiver<String> {
+    pub(crate) fn decisions(&mut self) -> mpsc::UnboundedReceiver<Option<String>> {
         let (sender, receiver) = mpsc::unbounded();
         self.decider.decided.push(sender);
         receiver
@@ -347,8 +352,9 @@ impl ChecksEngine {
 
     /// Why `task_id` would be held if it were finished now; `None` when it would not be. Judged
     /// like a decision, on the task's tree as it is now, with the closing checks it would carry
-    /// as the last open child; a group with closing checks and open children is refused. Nothing
-    /// is written. What cannot be computed holds.
+    /// as the last open child; a group with closing checks and open children is refused, and one
+    /// with closing checks and no open child is held until they are judged. Nothing is written.
+    /// What cannot be computed holds.
     pub fn would_hold(&mut self, task_id: &str, cx: &mut Context<Self>) -> Task<Option<String>> {
         if !TaskChecksSettings::get_global(cx).enabled {
             return Task::ready(None);
@@ -394,7 +400,9 @@ impl ChecksEngine {
                         .iter()
                         .any(|child| !done.contains(&child.definition.id))
                 });
-                return open.then(|| OPEN_CHILDREN.to_string());
+                // With no open child the group is marked when it finishes and stays held until
+                // its closing checks are judged.
+                return Some(if open { OPEN_CHILDREN } else { CLOSING_CHECKS }.to_string());
             }
             let rows = set.judged().to_vec();
             if !rows.iter().any(|row| row.decl.is_required()) {
@@ -496,7 +504,21 @@ async fn decide_project(
         })?;
         return Ok(());
     };
-    let pinned = pinned(this, &repo, cx).await?;
+    let pinned = match pinned(this, &repo, cx).await {
+        Ok(pinned) => pinned,
+        Err(error) => {
+            // Every held task shows why it cannot be judged; the error is logged by the caller.
+            let hold = HoldRow::new(format!(
+                "not done: the checks could not be read ({error:#})"
+            ));
+            this.update(cx, |engine, cx| {
+                for (task_id, _) in &held {
+                    engine.write_hold(project, writer, task_id, Some(hold.clone()), cx);
+                }
+            })?;
+            return Err(error);
+        }
+    };
     for (task_id, marker) in held {
         decide_task(this, project, writer, &pinned, &task_id, &marker, cx).await?;
     }
@@ -547,8 +569,8 @@ fn find_chain<'a>(node: &'a DefinitionNode, id: &str, chain: &mut Vec<&'a Defini
 }
 
 /// Decides one held task: a leaf whose checks all pass on its tree now gets its done record;
-/// any other leaf gets the reason it stays held. Groups and tasks the pinned definitions lack
-/// are left alone.
+/// any other leaf gets the reason it stays held, as does a task the pinned definitions lack.
+/// Groups are left alone.
 async fn decide_task(
     this: &WeakEntity<ChecksEngine>,
     project: &str,
@@ -563,6 +585,13 @@ async fn decide_task(
             "{task_id} owes checks but is not in the definitions of {}",
             pinned.commit
         );
+        let reason = format!(
+            "not done: the task is not in the definitions of {}",
+            pinned.commit
+        );
+        this.update(cx, |engine, cx| {
+            engine.write_hold(project, writer, task_id, Some(HoldRow::new(reason)), cx)
+        })?;
         return Ok(());
     };
     if node.folder.is_empty() || !node.children.is_empty() {
@@ -900,17 +929,31 @@ pub(crate) struct Decision<'a> {
 }
 
 /// Writes the done record of `decision` in one transaction, if that transaction still finds the
-/// marker decided on, no done record, the verified commit decided on, and, on its own read of
-/// the evidence, every required row satisfied by the same records. Returns whether it wrote.
-/// The task's `hold/` row goes in the same transaction.
+/// marker decided on, no done record (a row that cannot be read as one is logged and replaced),
+/// the verified commit decided on, and, on its own read of the evidence, every required row
+/// satisfied by the same records. Returns whether it wrote. The task's `hold/` row goes in the
+/// same transaction.
+///
+/// Before a verified commit is recorded, the decision was judged on the definitions of the commit
+/// shown, which the store does not record; the comparison then only refuses when a verified
+/// commit was recorded meanwhile. A move of the commit shown while the decision ran is not seen
+/// here, so such a record rests on the definitions shown when the decision began.
 pub(crate) fn write_done(writer: &StateWriter, decision: &Decision) -> Result<bool> {
     writer
         .transact(|tx| {
             if marker_in(tx, decision.task_id)?.as_ref() != Some(decision.marker) {
                 return Ok(false);
             }
-            if tx.kv(DONE_NAMESPACE).get(decision.task_id)?.is_some() {
-                return Ok(false);
+            if let Some(existing) = tx.kv(DONE_NAMESPACE).get(decision.task_id)? {
+                if existing.try_into::<DoneRecord>().is_ok() {
+                    return Ok(false);
+                }
+                // A row that does not read as a done record holds the task like no record at
+                // all; left alone it would refuse every decision for good.
+                log::error!(
+                    "replacing the done record of {} that cannot be read",
+                    decision.task_id
+                );
             }
             if tx.verified_commit()? != *decision.verified {
                 return Ok(false);
