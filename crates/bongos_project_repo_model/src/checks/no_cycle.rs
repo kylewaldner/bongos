@@ -83,6 +83,7 @@ fn task_of(node: &DefinitionNode) -> Task {
         definition: Some(PathBuf::from(&node.folder)),
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         file: Some(join(node.definition.clone(), TaskStateRecord::default())),
         artifacts: None,
         errors: Vec::new(),

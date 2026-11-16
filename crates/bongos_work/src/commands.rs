@@ -28,7 +28,7 @@ use workspace::{Toast, Workspace};
 use crate::actions::{artifact, project, task, todo, work};
 use crate::master_files;
 use crate::modals::{self, Then};
-use crate::registry::LiveModesRegistry;
+use crate::registry::{DoneHolds, LiveModesRegistry};
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
 use crate::{
@@ -225,11 +225,20 @@ pub fn register(workspace: &mut Workspace) {
 }
 
 pub fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>) {
+    #[cfg(test)]
+    cx.set_global(LastWorkToast(message.clone()));
     workspace.show_toast(
         Toast::new(NotificationId::unique::<WorkToast>(), message),
         cx,
     );
 }
+
+/// The text of the last toast these commands showed, for tests.
+#[cfg(test)]
+pub(crate) struct LastWorkToast(pub(crate) String);
+
+#[cfg(test)]
+impl Global for LastWorkToast {}
 
 /// The tree, when the store is on and has loaded it; otherwise a toast says why.
 pub fn ready(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Arc<WorkTree>> {
@@ -675,11 +684,106 @@ fn advance(
             if refuse_active_run(&id, workspace, cx) {
                 return;
             }
-            submit(workspace, window, cx, move |tree, ctx| {
-                model::advance(tree, ctx, &id, override_ship)
-            })
+            if !DoneHolds::has_sources(cx) {
+                submit(workspace, window, cx, move |tree, ctx| {
+                    model::advance(tree, ctx, &id, override_ship)
+                });
+                return;
+            }
+            if !on_last_open_todo(&id, cx) {
+                // The snapshot can lag writes still queued (an earlier press), so the writer
+                // checks again on its own tree and refuses an advance that would now finish the
+                // task without the hold sources having been asked.
+                submit(workspace, window, cx, move |tree, ctx| {
+                    advance_not_finishing(tree, ctx, &id, override_ship)
+                });
+                return;
+            }
+            advance_unless_held(workspace, window, cx, id, override_ship);
         }),
     );
+}
+
+/// The number of open todos of the task `id` in `tree`.
+fn open_todos(tree: &WorkTree, id: &str) -> Option<usize> {
+    let file = tree.task_by_id(id)?.file.as_ref()?;
+    Some(
+        file.todos
+            .iter()
+            .filter(|todo| todo.state == TodoState::Open)
+            .count(),
+    )
+}
+
+/// Whether the task `id` has exactly one open todo in the published snapshot, so advancing it
+/// finishes the task.
+fn on_last_open_todo(id: &str, cx: &App) -> bool {
+    WorkStore::global(cx)
+        .and_then(|store| store.read(cx).snapshot())
+        .is_some_and(|tree| open_todos(&tree, id) == Some(1))
+}
+
+/// [`model::advance`] for an advance whose press saw more than one open todo and so asked no
+/// hold source: refused when the writer's tree shows that it would close the last open todo.
+fn advance_not_finishing(
+    tree: &WorkTree,
+    ctx: &WorkContext,
+    id: &str,
+    override_ship: bool,
+) -> model::Outcome {
+    if open_todos(tree, id) == Some(1) {
+        let slug = tree.task_by_id(id).map_or(id, |task| task.slug.as_str());
+        return Err(format!(
+            "{slug} changed while this advance waited to be written; run task: advance again"
+        ));
+    }
+    model::advance(tree, ctx, id, override_ship)
+}
+
+/// Advances the last open todo of `id` unless a done hold source says the task would be held
+/// once finished; then a toast gives the source's reason and nothing is written. The context
+/// (with the attestation of the person at the keyboard) is taken before the wait, and nothing
+/// is queued until every source has answered.
+fn advance_unless_held(
+    workspace: &mut Workspace,
+    window: &Window,
+    cx: &mut Context<Workspace>,
+    id: String,
+    override_ship: bool,
+) {
+    let Some(store) = WorkStore::global(cx) else {
+        show_toast(workspace, WriteError::Off.to_string(), cx);
+        return;
+    };
+    let store = store.downgrade();
+    let ctx = keyboard_context(window, cx);
+    let hold = DoneHolds::would_hold(&id, cx);
+    cx.spawn(async move |workspace, cx| {
+        let refusal = match hold.await {
+            Some(hold) => Some(hold),
+            None => {
+                // The hold may change between the sources answering and this write; the hold
+                // the store derives after the write is the authority on whether the task is Done.
+                let write = store.update(cx, |store, cx| {
+                    store.write(
+                        ctx,
+                        move |tree, ctx| model::advance(tree, ctx, &id, override_ship),
+                        cx,
+                    )
+                });
+                match write {
+                    Ok(write) => write.await.err().map(|error| error.to_string()),
+                    Err(_) => Some(WriteError::Off.to_string()),
+                }
+            }
+        };
+        if let Some(refusal) = refusal {
+            workspace
+                .update(cx, |workspace, cx| show_toast(workspace, refusal, cx))
+                .ok();
+        }
+    })
+    .detach();
 }
 
 /// Whether the current todo of `task` is a ships todo that waits for the task it is stacked on.

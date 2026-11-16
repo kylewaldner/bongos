@@ -2,7 +2,7 @@
 
 use super::{Change, Context, Outcome, Write, edit_task, kind_name, single, writable};
 use crate::activity::to_utc;
-use crate::derive::{self, Shape, State};
+use crate::derive::{self, Shape};
 use crate::layout;
 use crate::rules::{self, Place, Refusal};
 use crate::slug::{oneoff_dir_name, slugify, unique_slug};
@@ -464,9 +464,9 @@ pub fn drop_task(tree: &WorkTree, ctx: &Context, id: &str, confirmed: bool) -> O
 pub fn reopen(tree: &WorkTree, ctx: &Context, id: &str) -> Outcome {
     edit_task(tree, ctx, id, |place, file| {
         if file.status == Status::Open {
-            if derive::shape(place.task, tree) == Shape::Leaf
-                && derive::state(place.task, tree) == State::Done
-            {
+            // Tested on the file, not the derived state: a done hold keeps such a leaf from
+            // Done, yet it still has no open todo to work on.
+            if derive::shape(place.task, tree) == Shape::Leaf && derive::leaf_done_file(file) {
                 return Err(format!(
                     "{} is open but has no open todo; reopen one with todo: reopen",
                     place.slug()

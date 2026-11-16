@@ -404,7 +404,8 @@ impl DefinitionWriter for RepoWriter {
 
 /// Serves `loaded` in the Work view and routes writes to its tasks. First a landing a crash
 /// interrupted is completed, then its definitions are loaded; then every committed state
-/// transaction refreshes the store, after loading the definitions again when the verified commit
+/// transaction that names a task or a namespace in the tree refreshes the store (a write to
+/// `checks.live` alone does not), after loading the definitions again when the verified commit
 /// moved, and every change of the repository's refs compares master with the verified commit.
 /// The returned task does that until dropped.
 pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<()> {
@@ -466,7 +467,16 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
             return;
         };
         let refresh = async {
-            while let Some(StateEvent::Changed { .. }) = events.next().await {
+            while let Some(StateEvent::Changed {
+                task_ids,
+                namespaces,
+                ..
+            }) = events.next().await
+            {
+                // A write to a namespace outside the tree (`checks.live`) reads nothing again.
+                if !crate::store::state_change_refreshes_tree(&task_ids, &namespaces) {
+                    continue;
+                }
                 let reload = loaded.clone();
                 cx.background_spawn(async move {
                     let loaded = reload.load().await;

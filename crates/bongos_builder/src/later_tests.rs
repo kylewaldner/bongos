@@ -483,6 +483,7 @@ fn flat_task(id: &str, goal: &str, children: Vec<Task>) -> Task {
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         broken_edges: Vec::new(),
         files: Default::default(),
         hashes: Default::default(),

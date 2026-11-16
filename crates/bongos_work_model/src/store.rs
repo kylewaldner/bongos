@@ -111,6 +111,12 @@ pub struct Task {
     /// Set on an old-format task once project repositories are enabled: every write is refused
     /// until the project is converted.
     pub needs_conversion: bool,
+    /// Why the task is held back from Done although its files say it is finished (a required
+    /// check without a pass, say). While it is set, [`crate::derive::state`] never derives Done
+    /// for the task. Runtime data the Work store fills from its hold sources each time it
+    /// publishes a tree; never read from or written to a file, and `None` in every tree a loader
+    /// returns.
+    pub done_hold: Option<String>,
     /// The last good parse of `task.toml`; `None` when it has never parsed.
     pub file: Option<TaskFile>,
     /// The last good parse of `artifacts.toml`; `None` when it is absent or has never parsed.
@@ -277,6 +283,20 @@ impl WorkTree {
         let mut path = Vec::new();
         roots.any(|root| path_to(root, id, &mut path))
             && path.iter().any(|task| task.id() == Some(ancestor_id))
+    }
+
+    /// Sets [`Task::done_hold`] of every task from `holds`, by task id: a task not in `holds`
+    /// is not held. Returns whether any task's hold changed.
+    pub fn set_done_holds(&mut self, holds: &BTreeMap<String, String>) -> bool {
+        let mut changed = false;
+        self.tasks_mut(&mut |task| {
+            let hold = task.id().and_then(|id| holds.get(id)).cloned();
+            if task.done_hold != hold {
+                task.done_hold = hold;
+                changed = true;
+            }
+        });
+        changed
     }
 
     fn tasks_mut(&mut self, visit: &mut impl FnMut(&mut Task)) {
@@ -601,6 +621,7 @@ fn load_task(slug: String, dir: PathBuf, previous: &Previous, errors: &mut Vec<F
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         broken_edges: Vec::new(),
         files,
         hashes,

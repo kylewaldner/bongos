@@ -11,7 +11,8 @@
 //! the workflow engine enforces.
 //!
 //! [`RowChipsRegistry`] holds sources of extra chips for a task's row, shown after its Linear
-//! identifier. [`observe_view_opened`] holds observers told when the Work panel is shown or
+//! identifier. [`DoneHolds`] holds sources that keep a finished task from Done; the store fills
+//! each task's `done_hold` from them. [`observe_view_opened`] holds observers told when the Work panel is shown or
 //! `task: focus` runs. With nothing registered, neither changes anything.
 //!
 //! Adding or removing a source, and a source telling the registry its answer changed, notify the
@@ -175,6 +176,94 @@ impl RowChipsRegistry {
             .into_iter()
             .flat_map(|source| source.chips(task_id, cx))
             .collect()
+    }
+}
+
+/// Something that may hold a task back from Done although its files say it is finished, such
+/// as a required check with no pass on the task's current tree.
+pub trait DoneHoldSource: 'static {
+    /// Why `task_id` is held now, from what the source already knows; `None` when it is not.
+    /// Synchronous: it never computes anything new. The store asks it while it updates, so it
+    /// must not read the store.
+    fn hold(&self, task_id: &str, cx: &App) -> Option<String>;
+
+    /// Why `task_id` would be held if it were finished now; `None` when it would not. It may
+    /// take time (a fresh look at the task's tree), so it answers through a task.
+    fn would_hold(&self, task_id: &str, cx: &mut App) -> gpui::Task<Option<String>>;
+}
+
+#[derive(Default)]
+struct DoneHoldSources(Vec<(String, Rc<dyn DoneHoldSource>)>);
+
+impl Global for DoneHoldSources {}
+
+/// The sources of done holds. A namespace for the global registry. With no source, nothing is
+/// ever held: [`DoneHolds::hold`] is `None` and [`DoneHolds::would_hold`] resolves to `None` at
+/// once.
+pub struct DoneHolds;
+
+impl DoneHolds {
+    /// Adds the source `name`, replacing one of the same name, and notifies the store.
+    pub fn add_source(name: &str, source: Rc<dyn DoneHoldSource>, cx: &mut App) {
+        let sources = cx.default_global::<DoneHoldSources>();
+        sources.0.retain(|(existing, _)| existing != name);
+        sources.0.push((name.to_string(), source));
+        Self::changed(cx);
+    }
+
+    /// Removes the source `name` and notifies the store.
+    pub fn remove_source(name: &str, cx: &mut App) {
+        cx.default_global::<DoneHoldSources>()
+            .0
+            .retain(|(existing, _)| existing != name);
+        Self::changed(cx);
+    }
+
+    /// Tells the store that what a source holds changed, so it fills the holds of its tree again.
+    pub fn changed(cx: &mut App) {
+        if let Some(store) = WorkStore::global(cx) {
+            store.update(cx, |store, cx| store.refresh_done_holds(cx));
+        }
+    }
+
+    /// Whether any source is registered.
+    pub fn has_sources(cx: &App) -> bool {
+        cx.try_global::<DoneHoldSources>()
+            .is_some_and(|sources| !sources.0.is_empty())
+    }
+
+    fn sources(cx: &App) -> Vec<Rc<dyn DoneHoldSource>> {
+        cx.try_global::<DoneHoldSources>()
+            .map(|sources| sources.0.iter().map(|(_, source)| source.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Why `task_id` is held now: the answer of the first source, in the order they were added,
+    /// that holds it.
+    pub fn hold(task_id: &str, cx: &App) -> Option<String> {
+        Self::sources(cx)
+            .into_iter()
+            .find_map(|source| source.hold(task_id, cx))
+    }
+
+    /// Why `task_id` would be held if it were finished now: the answer of the first source, in
+    /// the order they were added, that would hold it. Every source is asked at once.
+    pub fn would_hold(task_id: &str, cx: &mut App) -> gpui::Task<Option<String>> {
+        let sources = Self::sources(cx);
+        if sources.is_empty() {
+            return gpui::Task::ready(None);
+        }
+        let answers: Vec<_> = sources
+            .into_iter()
+            .map(|source| source.would_hold(task_id, cx))
+            .collect();
+        cx.background_executor().spawn(async move {
+            futures::future::join_all(answers)
+                .await
+                .into_iter()
+                .flatten()
+                .next()
+        })
     }
 }
 

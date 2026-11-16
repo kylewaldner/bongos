@@ -175,7 +175,13 @@ pub(crate) fn candidates(
         let Some(edge) = &file.stacked_on else {
             continue;
         };
-        if file.status != Status::Open {
+        // A closed task a done hold keeps from Done still has work ahead, so it is still checked.
+        let finished = match file.status {
+            Status::Open => false,
+            Status::Done => task.done_hold.is_none(),
+            Status::Cancelled => true,
+        };
+        if finished {
             continue;
         }
         let Ok(place) = Place::locate(tree, id) else {
