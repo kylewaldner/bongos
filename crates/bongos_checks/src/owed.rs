@@ -18,7 +18,9 @@
 //!   finished never marks it, and turning the setting off and on changes nothing.
 //!
 //! Groups (their closing checks, the last child to finish) are not judged here yet: a task with
-//! children is left as it is, and a leaf's marker names no group.
+//! children is never marked (a leaf that gains children loses its marker and done record), and a
+//! leaf's marker names no group. Before the project's definitions are loaded nothing is marked,
+//! and only a reopen the state record alone shows deletes.
 //!
 //! The hook writes only `kv` rows, runs no git and no process, and any error aborts the whole
 //! transaction, so no task is finished without its marker. Its one read outside the transaction
@@ -40,6 +42,7 @@ use bongos_project_repo_model::{
 use bongos_work::OpenProjectRepos;
 use bongos_work::model::derive::{self, State};
 use bongos_work::model::store::{Task, WorkTree};
+use bongos_work::model::{ResultState, Status, TodoState};
 use gpui::App;
 use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
@@ -95,7 +98,10 @@ pub trait NamedSetsLookup: Send + Sync + 'static {
     fn named_sets(&self, project_id: &str) -> Option<NamedSets>;
 }
 
-/// The named sets of the open project repositories, read from their master checkouts.
+/// The named sets of the open project repositories, read from their master checkouts. Those may
+/// differ from the verified definitions the hook judges by (an unlanded change to a set); a set
+/// that cannot be read there counts as unknown, and a task that uses one is marked, so a stale
+/// or missing checkout never lets a task finish unchecked.
 struct OpenReposSets(OpenProjectRepos);
 
 impl NamedSetsLookup for OpenReposSets {
@@ -202,21 +208,27 @@ impl StateApplyHook for ChecksOwedHook {
         if self.fail.load(Ordering::SeqCst) {
             anyhow::bail!("the owed markers could not be written");
         }
-        // Before the project's definitions are loaded no task can be judged, and a task missing
-        // from an empty tree is not a deleted task: leave every row as it is.
+        // Before the project's definitions are loaded no task can be marked, and a task missing
+        // from an empty tree is not a deleted task. The deletes still run for a task the record
+        // alone shows reopened.
         if change.definitions.top.is_none() {
+            for touch in change.touched {
+                if surely_reopened(touch.before.as_ref(), touch.after.as_ref()) {
+                    delete_rows(tx, touch.id.as_str())?;
+                }
+            }
             return Ok(());
         }
         let enabled = self.is_enabled();
         for touch in change.touched {
             let id = touch.id.as_str();
-            // Groups: their markers come with their closing checks, later.
+            // Groups are not marked yet: a leaf that became one loses its old leaf rows.
             if is_group(change.definitions, id) {
+                delete_rows(tx, id)?;
                 continue;
             }
             if !done_looking(touch.definition_after, touch.after.as_ref()) {
-                delete_present(tx, OWED_NAMESPACE, id)?;
-                delete_present(tx, DONE_NAMESPACE, id)?;
+                delete_rows(tx, id)?;
                 continue;
             }
             if !enabled || done_looking(touch.definition_before, touch.before.as_ref()) {
@@ -229,8 +241,58 @@ impl StateApplyHook for ChecksOwedHook {
                 delete_present(tx, DONE_NAMESPACE, id)?;
             }
         }
+        // A leaf that gains children in a landing whose own definition did not change is not
+        // touched; it is a group now, so its leaf rows go too.
+        if let Some(old) = change.old_definitions {
+            for node in change.definitions.nodes() {
+                let id = node.definition.id.as_str();
+                if is_group(change.definitions, id) && old.node(id).is_some() && !is_group(old, id)
+                {
+                    delete_rows(tx, id)?;
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// Deletes the marker and the done record of `task_id`.
+fn delete_rows(tx: &mut StateTx, task_id: &str) -> Result<()> {
+    delete_present(tx, OWED_NAMESPACE, task_id)?;
+    delete_present(tx, DONE_NAMESPACE, task_id)
+}
+
+/// Whether a write that took a task's record from `before` to `after` reopened it, judged from
+/// the record alone so that no definition is needed: it has no state row now, it is cancelled,
+/// or it is neither Done nor merged and a todo this write opened is open (one that was closed
+/// before, or any open todo when the task was Done before). A todo the record has but the
+/// definition may not have is not trusted alone.
+fn surely_reopened(before: Option<&TaskStateRecord>, after: Option<&TaskStateRecord>) -> bool {
+    let Some(after) = after else {
+        return true;
+    };
+    if after.status == Status::Cancelled {
+        return true;
+    }
+    let merged = after
+        .result
+        .as_ref()
+        .is_some_and(|result| result.state == Some(ResultState::Merged));
+    if after.status == Status::Done || merged {
+        return false;
+    }
+    let Some(before) = before else {
+        return false;
+    };
+    after.todos.iter().any(|todo| {
+        todo.state == TodoState::Open
+            && todo.id.is_some()
+            && (before.status == Status::Done
+                || before
+                    .todos
+                    .iter()
+                    .any(|old| old.id == todo.id && old.state != TodoState::Open))
+    })
 }
 
 /// Deletes `key` of `namespace` when it is there, so a transaction that changes no marker does

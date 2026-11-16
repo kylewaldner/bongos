@@ -7,9 +7,11 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use bongos_project_repo::{StateApplyHooks, StateEvent, StateHandle, StateStore, StateWriter};
+use bongos_project_repo::{
+    StateApplyHooks, StateEvent, StateHandle, StateOp, StateStore, StateWriter,
+};
 use bongos_project_repo_model::{DefinitionTree, RelPath, TaskStateRecord, TodoStateRecord};
-use bongos_work_model::{Status, TodoState};
+use bongos_work_model::{ResultKind, ResultState, Status, TaskResult, TodoState};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use tempfile::TempDir;
@@ -134,6 +136,33 @@ fn cancelled() -> TaskStateRecord {
     record(Status::Cancelled, [TodoState::Done, TodoState::Open])
 }
 
+/// A record with the todos `(id, state)`.
+fn todos_record(status: Status, todos: &[(&str, TodoState)]) -> TaskStateRecord {
+    TaskStateRecord {
+        status,
+        todos: todos
+            .iter()
+            .map(|(id, state)| TodoStateRecord {
+                id: Some(id.to_string()),
+                state: *state,
+                started: None,
+            })
+            .collect(),
+        ..TaskStateRecord::default()
+    }
+}
+
+fn merged(mut record: TaskStateRecord) -> TaskStateRecord {
+    record.result = Some(TaskResult {
+        kind: ResultKind::Pr,
+        url: Some("https://example.com/pr/1".to_string()),
+        state: Some(ResultState::Merged),
+        urls: Vec::new(),
+        extra: Default::default(),
+    });
+    record
+}
+
 fn done_record() -> DoneRecord {
     DoneRecord {
         tree_key: "tree1".to_string(),
@@ -252,6 +281,19 @@ impl Fixture {
         let definitions = Arc::new(definitions);
         self.writer()
             .transact(|tx| tx.set_verified_commit("c2", definitions.clone()))
+            .unwrap();
+        self.definitions = definitions;
+    }
+
+    /// Lands `definitions` and applies `ops` in one transaction, as a landed change does.
+    fn land_with(&mut self, definitions: DefinitionTree, ops: Vec<StateOp>) {
+        let definitions = Arc::new(definitions);
+        self.writer()
+            .transact(|tx| {
+                tx.set_verified_commit("c2", definitions.clone())?;
+                tx.apply_ops(&ops)?;
+                Ok(())
+            })
             .unwrap();
         self.definitions = definitions;
     }
@@ -562,6 +604,200 @@ fn a_landed_change_that_removes_the_last_open_todo_marks_the_task() {
 }
 
 #[test]
+fn landed_changes_that_move_todos_or_work_or_delete_a_task() {
+    struct Case {
+        name: &'static str,
+        before: Vec<(&'static str, String)>,
+        after: Vec<(&'static str, String)>,
+        /// Each task's state, then its seeded marker and done record.
+        states: Vec<(&'static str, TaskStateRecord, (bool, bool))>,
+        ops: Vec<StateOp>,
+        /// The marker and done record of each task afterward.
+        expected: Vec<(&'static str, (bool, bool))>,
+    }
+    let move_todo = |from: &str, to: &str, todo: &str| StateOp::MoveTodo {
+        from_task: from.to_string(),
+        to_task: to.to_string(),
+        todo_id: todo.to_string(),
+    };
+    let (open, done) = (TodoState::Open, TodoState::Done);
+    let cases = vec![
+        Case {
+            name: "the last open todo moved away finishes the source; the target reopens",
+            before: vec![
+                (
+                    "tasks/plain",
+                    task_toml("plain", "other", &["a", "b"], TESTS),
+                ),
+                ("tasks/sink", task_toml("sink", "other", &["x"], TESTS)),
+            ],
+            after: vec![
+                ("tasks/plain", task_toml("plain", "other", &["a"], TESTS)),
+                ("tasks/sink", task_toml("sink", "other", &["x", "b"], TESTS)),
+            ],
+            states: vec![
+                ("plain", last_open(), (false, false)),
+                (
+                    "sink",
+                    todos_record(Status::Open, &[("x", done)]),
+                    (true, true),
+                ),
+            ],
+            ops: vec![move_todo("plain", "sink", "b")],
+            expected: vec![("plain", (true, false)), ("sink", (false, false))],
+        },
+        Case {
+            name: "a split turns the finished leaf into a group of new leaves",
+            before: vec![(
+                "tasks/plain",
+                task_toml("plain", "other", &["a", "b"], TESTS),
+            )],
+            after: vec![
+                ("tasks/plain", task_toml("plain", "other", &[], TESTS)),
+                (
+                    "tasks/plain/tasks/one",
+                    task_toml("one", "other", &["a"], TESTS),
+                ),
+                (
+                    "tasks/plain/tasks/two",
+                    task_toml("two", "other", &["b"], TESTS),
+                ),
+            ],
+            states: vec![("plain", closed(), (true, false))],
+            ops: vec![
+                move_todo("plain", "one", "a"),
+                move_todo("plain", "two", "b"),
+            ],
+            expected: vec![
+                ("plain", (false, false)),
+                ("one", (true, false)),
+                ("two", (true, false)),
+            ],
+        },
+        Case {
+            name: "moving the merged work away reopens a merge task and finishes the target",
+            before: vec![
+                ("tasks/pr", task_toml("pr", "pr-merge", &["a"], TESTS)),
+                ("tasks/next", task_toml("next", "pr-merge", &["a"], TESTS)),
+            ],
+            after: vec![
+                ("tasks/pr", task_toml("pr", "pr-merge", &["a"], TESTS)),
+                ("tasks/next", task_toml("next", "pr-merge", &["a"], TESTS)),
+            ],
+            states: vec![
+                (
+                    "pr",
+                    merged(todos_record(Status::Open, &[("a", open)])),
+                    (true, true),
+                ),
+                (
+                    "next",
+                    todos_record(Status::Open, &[("a", open)]),
+                    (false, false),
+                ),
+            ],
+            ops: vec![StateOp::MoveWork {
+                from_task: "pr".to_string(),
+                to_task: "next".to_string(),
+            }],
+            expected: vec![("pr", (false, false)), ("next", (true, false))],
+        },
+        Case {
+            name: "a task deleted from the definitions loses its rows",
+            before: vec![
+                (
+                    "tasks/plain",
+                    task_toml("plain", "other", &["a", "b"], TESTS),
+                ),
+                ("tasks/bare", task_toml("bare", "other", &["a"], "")),
+            ],
+            after: vec![("tasks/bare", task_toml("bare", "other", &["a"], ""))],
+            states: vec![("plain", closed(), (true, true))],
+            ops: Vec::new(),
+            expected: vec![("plain", (false, false))],
+        },
+    ];
+    for case in cases {
+        let mut fixture = Fixture::with(true, tree_of(&case.before));
+        for (task, state, seeded) in case.states {
+            fixture.set(task, state).unwrap();
+            fixture.seed(task, seeded);
+        }
+        fixture.land_with(tree_of(&case.after), case.ops);
+        for (task, expected) in case.expected {
+            assert_eq!(fixture.rows(task), expected, "{}: {task}", case.name);
+        }
+    }
+}
+
+#[test]
+fn a_leaf_that_gains_children_loses_its_rows_even_when_its_file_is_unchanged() {
+    let leaf = task_toml("plain", "other", &[], TESTS);
+    let mut fixture = Fixture::with(true, tree_of(&[("tasks/plain", leaf.clone())]));
+    fixture.set("plain", completed()).unwrap();
+    fixture.seed("plain", (true, true));
+    fixture.land(tree_of(&[
+        ("tasks/plain", leaf),
+        (
+            "tasks/plain/tasks/child",
+            task_toml("child", "other", &["a"], TESTS),
+        ),
+    ]));
+    assert_eq!(fixture.rows("plain"), (false, false));
+}
+
+#[test]
+fn before_the_definitions_load_only_a_reopen_the_record_shows_deletes() {
+    let fixture = Fixture::with(true, DefinitionTree::default());
+    let cases = [
+        ("a todo reopened", closed(), last_open(), (false, false)),
+        (
+            "the status set back from Done",
+            completed(),
+            last_open(),
+            (false, false),
+        ),
+        ("a cancel", closed(), cancelled(), (false, false)),
+        (
+            "a task that stays finished",
+            closed(),
+            completed(),
+            (true, true),
+        ),
+        (
+            "an open todo that was open before",
+            last_open(),
+            record(Status::Open, [TodoState::Skipped, TodoState::Open]),
+            (true, true),
+        ),
+        (
+            "a reopened todo on a merged task",
+            merged(closed()),
+            merged(last_open()),
+            (true, true),
+        ),
+    ];
+    for (name, from, to, expected) in cases {
+        fixture.set("plain", from).unwrap();
+        assert_eq!(fixture.rows("plain"), (false, false), "{name}: not marked");
+        fixture.seed("plain", (true, true));
+        fixture.set("plain", to).unwrap();
+        assert_eq!(fixture.rows("plain"), expected, "{name}");
+        fixture.seed("plain", (false, false));
+    }
+    fixture.seed("plain", (true, true));
+    fixture
+        .writer()
+        .transact(|tx| {
+            tx.apply_ops(&[StateOp::Delete {
+                task: "plain".to_string(),
+            }])
+        })
+        .unwrap();
+    assert_eq!(fixture.rows("plain"), (false, false), "a deleted state row");
+}
+
+#[test]
 fn a_check_added_later_to_a_finished_task_leaves_it_done() {
     let late = |kind: &str, checks: &str| task_toml("late", kind, &["a", "b"], checks);
     let checked_group = task_toml("checked", "other", &[], TESTS);
@@ -649,6 +885,34 @@ fn a_reader_holds_the_task_at_once_and_follows_its_hold_row() {
     assert!(holds.refresh_from(&handles));
     assert_eq!(holds.hold("plain"), None);
     assert!(!holds.refresh_from(&handles));
+}
+
+#[test]
+fn an_older_read_applied_after_a_newer_one_never_drops_a_hold() {
+    let fixture = Fixture::new(true);
+    let reader = Arc::new(StateStore::open_reader(&location(&fixture.root)).unwrap());
+    let (follow, _followed) = mpsc::unbounded();
+    let holds = ChecksHolds::new(Default::default(), follow);
+    let handles = [(PROJECT.to_string(), StateHandle::Reader(reader))];
+    fixture.set("plain", last_open()).unwrap();
+
+    // Two refreshes run at once: the first reads before the task finishes, the second after,
+    // and the first one's swap comes last.
+    let older = holds.read_from(&handles);
+    fixture.set("plain", closed()).unwrap();
+    let newer = holds.read_from(&handles);
+    assert!(holds.apply(newer));
+    assert_eq!(holds.hold("plain").as_deref(), Some(CHECKING));
+    assert!(!holds.apply(older), "the older read is dropped");
+    assert_eq!(holds.hold("plain").as_deref(), Some(CHECKING));
+
+    // A later read still replaces it.
+    fixture
+        .writer()
+        .transact(|tx| put_done(tx, "plain", &done_record()))
+        .unwrap();
+    assert!(holds.refresh_from(&handles));
+    assert_eq!(holds.hold("plain"), None);
 }
 
 #[test]
