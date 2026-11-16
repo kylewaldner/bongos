@@ -166,6 +166,8 @@ struct PushLiteral {
 actions!(
     vim,
     [
+        /// Opens the minibuffer with a `:` prompt for entering a vim command.
+        CommandLine,
         /// Switches to normal mode.
         SwitchToNormalMode,
         /// Switches to insert mode.
@@ -289,6 +291,10 @@ pub fn init(cx: &mut App) {
     cx.observe_new(Vim::register).detach();
 
     cx.observe_new(|workspace: &mut Workspace, _, _| {
+        workspace.register_action(|workspace, _: &CommandLine, window, cx| {
+            command_palette::CommandPalette::toggle_with_prompt(workspace, "", ":", window, cx);
+        });
+
         workspace.register_action(|workspace, _: &ToggleVimMode, _, cx| {
             let fs = workspace.app_state().fs.clone();
             let currently_enabled = VimModeSetting::get_global(cx).0;
