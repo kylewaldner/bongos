@@ -2137,6 +2137,15 @@
   },
   // Bongos has no extension marketplace, so nothing is installed automatically.
   "auto_install_extensions": {},
+  // Installing language extensions from git. While `enabled` is false, the `extensions:`
+  // commands are hidden and only say that language extensions are off.
+  "language_extensions": {
+    "enabled": false,
+    // Offer to install an extension when a file of an unknown language is opened.
+    "offer": true,
+    // Languages never offered an extension.
+    "never_offer": [],
+  },
   // The capabilities granted to extensions.
   //
   // This list can be customized to restrict what extensions are able to do.
