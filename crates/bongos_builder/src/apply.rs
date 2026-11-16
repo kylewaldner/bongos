@@ -247,7 +247,7 @@ fn check(
         &tree,
         &live,
         TaskBuilderSettings::get_global(cx).todo_warning,
-        live::workflow_names(cx),
+        live::known_names(cx),
     );
     if analysis
         .problems

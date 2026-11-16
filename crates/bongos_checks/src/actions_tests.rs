@@ -55,11 +55,11 @@ fn palette_hidden(name: &str, cx: &mut TestAppContext) -> bool {
 }
 
 #[gpui::test]
-fn checks_default_settings_are_off_and_say_so(cx: &mut TestAppContext) {
+fn checks_default_settings_are_on_with_the_documented_values(cx: &mut TestAppContext) {
     use_default_settings(cx);
     cx.update(|cx| {
         let settings = TaskChecksSettings::get_global(cx);
-        assert!(!settings.enabled);
+        assert!(settings.enabled);
         assert_eq!(settings.output_retention_days, 30);
         assert_eq!(settings.output_limit_mb, 256);
         assert_eq!(settings.result_file_limit_kb, 256);
@@ -78,14 +78,21 @@ fn checks_default_settings_are_off_and_say_so(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn checks_actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext) {
+async fn checks_actions_are_shown_by_default_hidden_while_off_and_shown_while_on(
+    cx: &mut TestAppContext,
+) {
     cx.update(|cx| command_palette_hooks::init(cx));
     use_default_settings(cx);
     cx.update(crate::init_palette);
 
     assert_eq!(NAMES.len(), action_types().len(), "every action is listed");
     for name in NAMES {
-        assert!(palette_hidden(name, cx), "{name} is hidden by default");
+        assert!(!palette_hidden(name, cx), "{name} shows by default");
+    }
+
+    set_enabled(cx, false);
+    for name in NAMES {
+        assert!(palette_hidden(name, cx), "{name} is hidden while off");
     }
 
     set_enabled(cx, true);

@@ -37,6 +37,7 @@ mod pin;
 pub mod pools;
 pub mod process;
 mod retained;
+mod retention;
 pub mod run;
 mod section_source;
 mod settings;
@@ -155,6 +156,8 @@ mod owed_tests;
 mod pools_tests;
 #[cfg(test)]
 mod process_tests;
+#[cfg(test)]
+mod retention_tests;
 #[cfg(test)]
 mod run_tests;
 #[cfg(test)]

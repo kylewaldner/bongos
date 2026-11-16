@@ -196,7 +196,7 @@ fn proposal(tree: &WorkTree, number: u32, by: &str) -> String {
 
 fn request(tree: &WorkTree, text: &str, number: u32) -> (Request, String) {
     let live = LiveSet::default();
-    let analysis = view::analyze(text, number, "g1", tree, &live, 0, None);
+    let analysis = view::analyze(text, number, "g1", tree, &live, 0, Default::default());
     let choices = Choices::default();
     let diff = diff(&analysis.parsed, tree, &live, &choices);
     assert!(!diff.is_empty(), "{:?}", diff.refusal);

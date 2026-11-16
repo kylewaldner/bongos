@@ -1592,6 +1592,13 @@ async fn task_checks_commands_are_hidden_and_toast_in_the_app_while_off(cx: &mut
         bongos_checks::init(cx);
         bongos_checks::init_palette(cx);
     });
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.task_checks.get_or_insert_default().enabled = Some(false);
+            });
+        });
+    });
     let palette_hidden = |name: &str, cx: &mut TestAppContext| {
         cx.update(|cx| {
             let action = cx.build_action(name, None).unwrap();

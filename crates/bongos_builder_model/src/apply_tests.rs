@@ -1160,3 +1160,35 @@ fn the_proposal_record_stores_the_kind_of_the_author_that_applied_it() {
         ("linear sync".to_string(), Some(ByKind::Workflow))
     );
 }
+
+#[test]
+fn created_tasks_carry_their_check_sets_and_others_nothing() {
+    let fixture = billing_fixture();
+    let proposal = BILLING_PROPOSAL.replace(
+        "  task reporting: reporting\n",
+        "  task reporting: reporting | checks rust, docs\n",
+    );
+    let text = doc("billing", &proposal);
+    let (_, diff, applied) = build(&fixture, &text, &LiveSet::default());
+    write_change(fixture.root(), &applied.change).unwrap();
+    let after = fixture.reload();
+    let mut seen = 0;
+    for op in &diff.ops {
+        let Op::Create { line, label, .. } = op else {
+            continue;
+        };
+        let checks = file(&after, &applied.created[line]).extra.get("checks");
+        if label == "reporting" {
+            let uses = checks
+                .and_then(|checks| checks.get("use"))
+                .and_then(|uses| uses.as_array())
+                .expect("the use list is written");
+            let uses: Vec<&str> = uses.iter().filter_map(|set| set.as_str()).collect();
+            assert_eq!(uses, vec!["rust", "docs"]);
+            seen += 1;
+        } else {
+            assert_eq!(checks, None, "{label} inherits");
+        }
+    }
+    assert_eq!(seen, 1);
+}

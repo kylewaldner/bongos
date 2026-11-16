@@ -599,3 +599,36 @@ fn format_help_leads_a_proposal() {
     );
     assert!(FORMAT.lines().count() <= 35);
 }
+
+#[test]
+fn the_checks_attribute_parses_one_and_several_sets() {
+    let parsed = parse(
+        "proposal 1\ntask a: goal | checks rust\n  task b: other | kind spike | checks rust, docs\n  \
+         task c: third\n",
+    );
+    assert_eq!(parsed.problems, vec![]);
+    assert_eq!(
+        parsed.root.attributes.checks,
+        Some(vec!["rust".to_string()])
+    );
+    assert_eq!(
+        parsed.root.children[0].attributes.checks,
+        Some(vec!["rust".to_string(), "docs".to_string()])
+    );
+    assert_eq!(parsed.root.children[1].attributes.checks, None);
+}
+
+#[test]
+fn a_bad_or_repeated_checks_attribute_is_an_error() {
+    assert_eq!(
+        single("proposal 1\ntask a: goal | checks\n").0,
+        2,
+        "an empty value"
+    );
+    assert_eq!(single("proposal 1\ntask a: goal | checks rust,\n").0, 2);
+    assert_eq!(single("proposal 1\ntask a: goal | checks a b\n").0, 2);
+    assert_eq!(
+        single("proposal 1\ntask a: goal | checks a | checks b\n"),
+        error(2, "task attribute 'checks' is repeated")
+    );
+}

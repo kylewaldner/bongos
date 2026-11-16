@@ -2853,10 +2853,10 @@
     },
   },
   "task_checks": {
-    // Whether task checks are on. It is off by default; while it is off, no check runs,
+    // Whether task checks are on. It is on by default; set it to false and no check runs,
     // no record is written and every task check command is hidden and only says "Task
     // checks are off (task_checks.enabled)".
-    "enabled": false,
+    "enabled": true,
     // The directory that holds the output files of check runs. Null means the task's
     // files folder, `checks/`.
     "output_dir": null,
