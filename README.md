@@ -432,6 +432,135 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   (the shipped `wait` and `merge` programs use `gh` and git). A program node with no declared hosts
   has no network under the sandbox.
 
+## Task checks
+
+A check is a script or command that bongos starts, watches and judges by its exit status, its output
+and an optional result file, so a task is done because a check passed and not because someone
+wrote that it did. It is on by default; `task_checks.enabled` set to `false` runs no check, writes no
+record and hides every task check command (a key still says "Task checks are off
+(task_checks.enabled)"). A check never runs by itself, except as a retry of its own no-verdict result and
+at a landing; a person runs it, or a workflow step does.
+
+```toml
+# definitions/tasks/<task>/task.toml
+[checks]
+inherit = "parent"                 # or "none"; the default is "parent"
+use = ["standard"]                 # named sets, in order
+drop = ["format"]                  # remove an inherited check
+
+[[checks.check]]
+name = "tests"                     # unique in its set
+run = "checks/run-tests"           # a script in definitions/, or: command = ["make", "test"]
+scope = { script = "checks/scope" }   # or scope = "all"
+parts = 8                          # or { plan = "checks/plan-parts" }; default one part
+required = true                    # false: shown, never counted
+or_accepted = "flake-verdict"      # another check's pass on the same tree also satisfies this one
+pinned = ["checks/registry/flaky-tests.md"]   # definitions files the script reads from the pin
+environment = [3]                  # exit codes that mean "environment"; pass defaults to [0], fail to [1]
+
+[[checks.closing]]                 # on a group: checked once, on its last open child
+name = "tests-full"
+run = "checks/tests-full"
+scope = "all"
+```
+
+- **Declaration.** A task's `checks` table lives in its `task.toml` in the project repository.
+  Other keys of a check: `repos`, `pass`, `fail`, `summary` (a regex a passing run needs a matching
+  output line for), `result_file`, `needs` (pool names), `parallel`, `stop_at_first_failure`,
+  `unset`, `key_inputs`, `params` and `budget_minutes`. Exactly one of `run` and `command`. A path
+  in `run`, `scope.script`, `parts.plan` or `pinned` is relative to `definitions/` and cannot leave
+  it. A broken declaration is refused at landing by the check `checks-valid`.
+- **Sets and inheritance.** A task's effective set starts from its parent's (`inherit = "none"`
+  starts empty), adds each `use` set (`definitions/checks/sets/<name>.toml`, holding `[[check]]`
+  and `[[closing]]` entries), then its own entries; a name that is already there is replaced and
+  `drop` removes one. A group's ordinary checks pass down to its children and are judged there. A
+  document or spike task has no checks to apply. A task with no tree to check (it was never started)
+  is held: "not done: no tree to check".
+- **Closing checks.** A group's closing checks are added to the last open child, whose section shows
+  them as "closing check of <group>". If a sibling is still held when that child finishes, the group
+  judges them itself, on that child's tree.
+- **Scope scripts.** A check with a `scope` script is asked first what is in scope. The script gets
+  `BONGOS_CHANGED_FILES` (the changed files of the task against its base branch) and writes JSON to
+  `BONGOS_SCOPE_RESULT`: `{"scope": "items", "items": [...], "reason": "..."}`, or `"all"`, or
+  `"none"`; `reason` is required. The check then gets `BONGOS_CHECK_SCOPE` (`all` or `items`) and
+  `BONGOS_CHECK_ITEMS` (a file). A run on `items` or `none` satisfies the check; `scope = "all"`
+  needs a run on everything.
+- **Parts.** A check with `parts = N` runs its processes one after another (`parallel = true` also
+  uses free pool slots, up to `task_checks.parallel_parts_max`), each with `BONGOS_CHECK_PART` and
+  `BONGOS_CHECK_PARTS`. A run stopped halfway keeps the parts that ended; the next run of the same
+  check on the same tree and scope shows "running part 5 of 8, 4 kept". Any difference (an edit,
+  another scope, a changed script) starts again. Any failing part fails the check; else any no
+  verdict is the check's.
+- **Evidence and the tree key.** Every run is a record in the project's state store: the check's
+  digest (its declaration and the bytes of every definitions file it names), the tree key, the
+  scope, the parts, the verdict, the output file. The tree key is the git tree id of every tracked
+  and untracked file `.gitignore` does not exclude, taken in a private index, so it does not depend
+  on the commit or on your real index; a check with `key_inputs` also keys on those files. A record
+  counts only while its key and digest are the current ones. Scripts are read from a pin: the last
+  verified commit of the definitions (`BONGOS_CHECK_PINNED`), so an edit in a working copy is not
+  seen by a run, and an agent cannot loosen a check by editing its script. The scripts' own channels
+  are the exit status, the output and `BONGOS_CHECK_RESULT` (JSON: `summary`, and optionally
+  `failing` and `counts`; at most `task_checks.result_file_limit_kb`). Nothing else writes records.
+- **No verdict.** A run that does not end as a pass or a fail gives no verdict, with its reason:
+  an environment exit code (`no verdict: environment (exit 3)`), an undeclared exit code, a signal,
+  a missing summary line, an invalid result file, a tool not found, a time budget, a wait for a pool
+  that ran out, a cancel. A no-verdict run is run again after `task_checks.no_verdict_rerun_minutes`,
+  at most `task_checks.no_verdict_reruns` times, keeping parts that ended; then it is reported. It
+  never counts as a pass.
+- **Landing checks.** A project's `[[landing.checks]]` entry whose `run` is a `check` table runs
+  one check on the tree a change would land, with the scripts of master's copy (never the
+  change's own):
+
+  ```toml
+  [[landing.checks]]
+  name = "guard"
+  phase = "before-queue"
+  applies = "always"
+  run = { check = { name = "guard", run = "checks/guard", result_file = true } }
+  ```
+
+  A fail refuses the landing and keeps its summary, failing items and output with the change; a
+  no verdict keeps it waiting. A change that loosens a required check of a task that has started
+  (a removed check, wider pass codes, a narrower scope) needs a person's approval.
+- **The detail view.** `C-c w i` opens a task's details: goal, kind, state, documents, todos,
+  children and edges, then the Checks section: a header ("all required checks pass", "not done: 2
+  checks missing", "checks waiting") and one row per check with where it came from (own,
+  `from set <name>`, `inherited from ...`, `overrides ...`, `closing check of ...`), whether it is
+  required, its result (`not run`, `pass`, `fail (1 item)`, `no verdict: ...`, `stale: ...`,
+  `accepted by <check>`, or what it is doing now), scope, tree key, time and output. Failing items
+  and the output file are listed under a row. In the view, `x` runs the checks, `r` runs one, `k`
+  cancels, `c` completes the task, `s` shows where each row is declared and `g` refreshes.
+- **`task: complete`.** `C-c w c` marks the task done, unless a required check of it is unmet: then
+  a message names the checks and nothing changes. A task whose last todo closed with required
+  checks is held out of Done until its checks pass; the pass writes a done record (the tree key and
+  the evidence it rests on), and reopening the task removes it. `task: close` is the same command
+  with no key.
+- **Keys (Emacs keymap only).** `C-c w x x` runs the task's checks, `C-c w x r` runs one check
+  (you pick it), `C-c w x k` cancels the running checks, `C-c w x s` shows the Checks section,
+  `C-c w x o` shows the output of a check in a read-only buffer that follows a running one,
+  `C-c w x e` edits the task's checks in a new working copy, `C-c w i` shows the details and
+  `C-c w c` completes. The command acts on the task at point (the details tab, the selected Work
+  row or the focused task), else asks. `task: run checks clean` (ignore kept parts) and `task:
+  show check sources` have no key; find them in the command palette.
+- **Settings.** All under `task_checks`, on the Work page of the settings window as "Task Checks":
+  `enabled` (true), `output_dir` (null, the task's files folder `checks/`), `output_retention_days`
+  (30; the record stays after its output file is deleted), `output_limit_mb` (256),
+  `result_file_limit_kb` (256), `default_budget_minutes` (null, no budget), `no_verdict_reruns` (2),
+  `no_verdict_rerun_minutes` (5), `pool_wait_limit_hours` (4), `kill_grace_seconds` (5),
+  `parallel_parts_max` (4), `scratch_dir` (null, `<data dir>/checks-scratch`), `tree_key_debounce_ms`
+  (2000) and `live_write_ms` (1000).
+- **Detached processes.** A check's process runs in its own session. Stopping a check (a cancel,
+  a time budget, quitting) sends a stop signal to that process group and to every process of yours
+  that carries the part's `BONGOS_CHECK_TOKEN` in its environment, then kills what is left after
+  `task_checks.kill_grace_seconds`. On Linux that finds a process that detached from the check
+  (a daemon it started). On macOS bongos cannot read another process's environment, so a process
+  that detached and was reparented is not found; only the group and its live descendants stop.
+  After a crash, the next start stops the processes it finds through the unfinished records.
+- **Not there yet.** The Checks section is computed when a check ends, not when a file changes, so
+  a row does not turn `stale` while you edit; the done decision recomputes the tree key, so
+  `task: complete` still refuses a tree edited after its pass. The `task_checks.tree_key_debounce_ms`
+  setting is not used yet.
+
 ## Emacs keys
 
 Emacs is the default base keymap, so a fresh install has these keys with no setting. They work in
