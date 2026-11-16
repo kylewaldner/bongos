@@ -620,3 +620,255 @@ mod install_state {
         assert!(!dir.path().join("record.json.bad").exists());
     }
 }
+
+mod preflight_tests {
+    use super::*;
+
+    const GOOD: ToolProbe = ToolProbe {
+        git: Probe::Found,
+        cargo: Probe::Found,
+        rustc_sysroot: Probe::Found,
+        wasm_target: Probe::Found,
+        rustup: Probe::Found,
+    };
+
+    fn facts() -> ManifestFacts {
+        ManifestFacts {
+            has_extension_toml: true,
+            schema_version: 1,
+            id: "demo".into(),
+            cargo_toml: Some("[dependencies]\nzed_extension_api = \"0.7.0\"\n".into()),
+            ..Default::default()
+        }
+    }
+
+    fn run(probe: &ToolProbe, facts: &ManifestFacts) -> Result<(), Refusal> {
+        check_after_clone(
+            probe,
+            facts,
+            |host| host == "blocked.example",
+            |id| id == "banned",
+            |id| id == "other",
+            1..=1,
+            ApiVersion::new(0, 7, 0),
+        )
+    }
+
+    fn url(text: &str) -> SourceUrl {
+        SourceUrl::parse(text).unwrap()
+    }
+
+    fn message(result: Result<(), Refusal>) -> String {
+        result.unwrap_err().to_string()
+    }
+
+    #[test]
+    fn preflight_passes_when_everything_is_fine() {
+        assert_eq!(run(&GOOD, &facts()), Ok(()));
+        assert_eq!(
+            check_before_clone(&GOOD, &url("https://github.com/a/b"), |_| false),
+            Ok(())
+        );
+        assert_eq!(ApiVersion::new(0, 7, 0).to_string(), "0.7.0");
+        assert_eq!(ApiVersion::parse("0.7"), Some(ApiVersion::new(0, 7, 0)));
+    }
+
+    #[test]
+    fn preflight_toolchain_messages() {
+        let mut probe = GOOD;
+        probe.cargo = Probe::Missing;
+        assert_eq!(message(run(&probe, &facts())), NO_RUST_MESSAGE);
+
+        let mut probe = GOOD;
+        probe.wasm_target = Probe::Missing;
+        assert_eq!(
+            message(run(&probe, &facts())),
+            "Run `rustup target add wasm32-wasip2`, then install again."
+        );
+        probe.rustup = Probe::Missing;
+        assert_eq!(
+            message(run(&probe, &facts())),
+            "Add the wasm32-wasip2 target to your Rust toolchain."
+        );
+    }
+
+    #[test]
+    fn preflight_timed_out_probe_names_the_tool() {
+        let mut probe = GOOD;
+        probe.git = Probe::TimedOut;
+        assert!(message(run(&probe, &facts())).starts_with("git did not respond"));
+        assert!(
+            message(check_before_clone(
+                &probe,
+                &url("https://github.com/a/b"),
+                |_| false
+            ))
+            .contains("git did not respond")
+        );
+        let mut probe = GOOD;
+        probe.rustc_sysroot = Probe::TimedOut;
+        assert!(message(run(&probe, &facts())).starts_with("rustc did not respond"));
+    }
+
+    #[test]
+    fn preflight_api_refusal_names_both_versions() {
+        let expected =
+            "This extension needs extension API 0.8.0; this bongos supports up to 0.7.0.";
+        for cargo in [
+            "[dependencies]\nzed_extension_api = \"0.8.0\"\n",
+            "[dependencies]\nzed_extension_api = { version = \"^0.8\" }\n",
+        ] {
+            let mut f = facts();
+            f.cargo_toml = Some(cargo.into());
+            assert_eq!(message(run(&GOOD, &f)), expected);
+        }
+        let mut f = facts();
+        f.cargo_toml = Some("[dependencies]\nzed_extension_api = { workspace = true }\n".into());
+        f.workspace_toml =
+            Some("[workspace.dependencies]\nzed_extension_api = \"~0.8.0\"\n".into());
+        assert_eq!(message(run(&GOOD, &f)), expected);
+        assert_eq!(
+            check_built_api(ApiVersion::new(0, 8, 0), ApiVersion::new(0, 7, 0))
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert_eq!(api_requirement("[dependencies]\nfoo = \"1\"\n", None), None);
+        assert_eq!(
+            api_requirement("[dependencies]\nzed_extension_api = \">=0.6\"\n", None),
+            Some(ApiVersion::new(0, 6, 0))
+        );
+    }
+
+    #[test]
+    fn preflight_no_cargo_toml_needs_no_rust() {
+        let mut f = facts();
+        f.cargo_toml = None;
+        let mut probe = ToolProbe::ALL_MISSING;
+        probe.git = Probe::Found;
+        assert_eq!(run(&probe, &f), Ok(()));
+        f.grammar_repositories = vec!["https://github.com/a/b".into()];
+        assert_eq!(run(&probe, &f), Ok(()));
+    }
+
+    #[test]
+    fn preflight_blocked_hosts_refused() {
+        let blocked = |h: &str| h == "blocked.example";
+        assert_eq!(
+            message(check_before_clone(
+                &GOOD,
+                &url("https://blocked.example/a/b"),
+                blocked
+            )),
+            "The repository host blocked.example is not allowed; use a repository on a different host."
+        );
+        for text in [
+            "https://BLOCKED.example/x/y",
+            "https://blocked.example./x/y",
+            "git@Blocked.Example:x/y",
+        ] {
+            assert!(
+                message(check_before_clone(&GOOD, &url(text), blocked)).contains("blocked.example"),
+                "{text}"
+            );
+            let mut f = facts();
+            f.grammar_repositories = vec![text.into()];
+            assert!(
+                message(run(&GOOD, &f)).contains("blocked.example"),
+                "{text}"
+            );
+        }
+        for text in ["http://github.com/a/b", "git://github.com/a/b", "https://"] {
+            let mut f = facts();
+            f.grammar_repositories = vec![text.into()];
+            let refusal = run(&GOOD, &f).unwrap_err();
+            assert_eq!(refusal, Refusal::BadGrammarUrl(text.into()));
+            assert!(refusal.to_string().contains(text));
+        }
+    }
+
+    #[test]
+    fn preflight_git_is_checked_before_the_blocked_host() {
+        let mut probe = GOOD;
+        probe.git = Probe::TimedOut;
+        let result = check_before_clone(&probe, &url("https://blocked.example/a"), |h| {
+            h == "blocked.example"
+        });
+        assert_eq!(result, Err(Refusal::ToolTimedOut(Tool::Git)));
+    }
+
+    #[test]
+    fn preflight_suppressed_wins_over_blocked_grammar_host() {
+        let mut f = facts();
+        f.id = "banned".into();
+        f.grammar_repositories = vec!["https://blocked.example/x".into()];
+        assert_eq!(run(&GOOD, &f), Err(Refusal::Suppressed("banned".into())));
+    }
+
+    #[test]
+    fn preflight_timed_out_rustup_names_rustup() {
+        let mut probe = GOOD;
+        probe.wasm_target = Probe::Missing;
+        probe.rustup = Probe::TimedOut;
+        assert_eq!(
+            run(&probe, &facts()),
+            Err(Refusal::ToolTimedOut(Tool::Rustup))
+        );
+        assert!(message(run(&probe, &facts())).starts_with("rustup did not respond"));
+    }
+
+    #[test]
+    fn preflight_lowest_allowed_handles_requirement_lists() {
+        for (text, want) in [
+            ("<0.8", (0, 0, 0)),
+            ("<=0.8", (0, 0, 0)),
+            (">0.7.0", (0, 7, 1)),
+            ("<0.9, >=0.8", (0, 8, 0)),
+            (">=0.6, <0.8", (0, 6, 0)),
+            ("^0.7", (0, 7, 0)),
+            ("~0.7.1", (0, 7, 1)),
+            ("=0.7.2", (0, 7, 2)),
+            ("0.7", (0, 7, 0)),
+        ] {
+            assert_eq!(
+                ApiVersion::lowest_allowed(text),
+                Some(ApiVersion::new(want.0, want.1, want.2)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_old_manifest_refused() {
+        let mut f = facts();
+        f.has_extension_toml = false;
+        f.has_extension_json = true;
+        let text = message(run(&GOOD, &f));
+        assert!(text.contains("extension.json") && text.contains("extension.toml"));
+        f.has_extension_json = false;
+        assert_eq!(message(run(&GOOD, &f)), MANIFEST_MISSING_MESSAGE);
+    }
+
+    #[test]
+    fn preflight_suppressed_and_installed_elsewhere_refused() {
+        let mut f = facts();
+        f.id = "banned".into();
+        assert!(message(run(&GOOD, &f)).contains("banned"));
+        f.id = "other".into();
+        assert_eq!(
+            message(run(&GOOD, &f)),
+            "other is already installed from another source; remove other first."
+        );
+    }
+
+    #[test]
+    fn preflight_empty_path_gives_exact_no_rust_message() {
+        let mut probe = ToolProbe::ALL_MISSING;
+        probe.git = Probe::Found;
+        assert_eq!(message(run(&probe, &facts())), NO_RUST_MESSAGE);
+        assert_eq!(
+            NO_RUST_MESSAGE,
+            "Building this extension needs Rust: install rustup from https://rustup.rs, then run `rustup target add wasm32-wasip2`. If Rust is installed, start bongos from a shell or add `~/.cargo/bin` to the desktop session's PATH."
+        );
+    }
+}
