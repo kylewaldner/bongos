@@ -16,8 +16,8 @@ use serde::Deserialize;
 use workspace::Workspace;
 
 use crate::actions::{
-    BackwardWord, DigitArgument, ExchangePointAndMark, ForwardWord, KeyboardQuit,
-    NegativeArgument, UniversalArgument,
+    BackwardWord, DigitArgument, ExchangePointAndMark, ForwardWord, KeyboardQuit, NegativeArgument,
+    UniversalArgument,
 };
 use crate::intercept::{Route, decide};
 use crate::prefix_arg::{self, MAX_INSERT, Meaning};
@@ -161,7 +161,10 @@ fn decide_routes_every_rule() {
         Route::Through
     ));
     // A digit inside a chord does not extend the argument.
-    assert!(matches!(route("ctrl-x", "7", universal, true), Route::Cancel));
+    assert!(matches!(
+        route("ctrl-x", "7", universal, true),
+        Route::Cancel
+    ));
 
     // A resolved binding is routed by its action's meaning.
     assert!(matches!(
