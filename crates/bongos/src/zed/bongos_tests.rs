@@ -520,7 +520,7 @@ async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 49] = [
+const EMACS_ACTIONS: [(&str, &str); 52] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -588,6 +588,9 @@ const EMACS_ACTIONS: [(&str, &str); 49] = [
         "emacs::XrefFindImplementations",
         "emacs: xref find implementations",
     ),
+    ("emacs::UniversalArgument", "emacs: universal argument"),
+    ("emacs::DigitArgument", "emacs: digit argument"),
+    ("emacs::NegativeArgument", "emacs: negative argument"),
 ];
 
 #[gpui::test]
