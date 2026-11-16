@@ -723,6 +723,126 @@ async fn a_drain_releases_the_lease_a_group_run_holds_while_its_check_still_runs
     assert_eq!(trees.state().released, ["app"], "released once");
 }
 
+/// Waits on a thread, up to a minute, until `path` exists.
+fn reached(path: PathBuf) -> futures::channel::oneshot::Receiver<()> {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !path.exists() {
+            assert!(std::time::Instant::now() < deadline, "{path:?} never came");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        sender.send(()).ok();
+    });
+    receiver
+}
+
+#[gpui::test]
+async fn a_drain_while_git_writes_the_lent_tree_releases_the_lease_only_after_git_and_reruns_after_undrain(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let (world, _) = finished_group(cx, clock.clone());
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    // Writing out a Rust file in the lent tree waits until `go` exists.
+    let marks = world.root.path().join("filter");
+    std::fs::create_dir_all(&marks).unwrap();
+    let marks_arg = marks.to_str().unwrap();
+    git_in(
+        &world.app,
+        &[
+            "config",
+            "filter.slow.smudge",
+            &format!(
+                "touch {marks_arg}/writing; while [ ! -f {marks_arg}/go ]; do sleep 0.05; done; cat"
+            ),
+        ],
+    );
+    std::fs::write(world.app.join(".git/info/attributes"), "*.rs filter=slow\n").unwrap();
+    world.decide(cx).await;
+    reached(marks.join("writing")).await.unwrap();
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    drain.await;
+
+    // Git still writes in the lent tree: its lease is held there, out of the drain's reach.
+    assert_eq!(trees.state().leased, ["app"]);
+    assert!(trees.state().released.is_empty(), "held while git runs");
+    std::fs::write(marks.join("go"), "").unwrap();
+    world.runs_ended(cx).await;
+    assert_eq!(trees.state().released, ["app"], "released once git ended");
+    assert!(world.records("grp").is_empty(), "nothing ran");
+    let started = world
+        .engine
+        .read_with(cx, |engine, _| engine.decider.started.clone());
+    assert!(started.is_empty(), "{started:?}");
+
+    // After the undrain the group runs its closing check after all.
+    world.engine.update(cx, |engine, _| engine.undrain());
+    world.settle(cx).await;
+    assert_eq!(
+        ran_where(&world, "grp"),
+        (canonical(&second), "lent".to_string())
+    );
+    assert!(world.done("grp").is_some());
+}
+
+#[gpui::test]
+async fn a_drain_while_waiting_for_a_busy_tree_starts_nothing_and_reruns_after_undrain(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let (world, _) = finished_group(cx, clock.clone());
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    let SecondTree::Lease(held) = trees.second_tree("a-lane-job", "app") else {
+        panic!("the lane leases its tree");
+    };
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    world.decide(cx).await;
+    cx.run_until_parked();
+    assert_eq!(world.group_runs(cx), 1, "the run waits");
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    drain.await;
+    drop(held);
+    clock.advance(SECOND_TREE_RETRY);
+    world.runs_ended(cx).await;
+
+    assert!(world.records("grp").is_empty(), "nothing ran");
+    assert_eq!(trees.state().leased, ["app"], "only the lane's own lease");
+    let started = world
+        .engine
+        .read_with(cx, |engine, _| engine.decider.started.clone());
+    assert!(started.is_empty(), "{started:?}");
+
+    world.engine.update(cx, |engine, _| engine.undrain());
+    world.settle(cx).await;
+    assert_eq!(
+        ran_where(&world, "grp"),
+        (canonical(&second), "lent".to_string())
+    );
+    assert!(world.done("grp").is_some());
+}
+
 #[gpui::test]
 async fn a_restart_before_the_last_key_is_filled_keys_the_tree_as_found(cx: &mut TestAppContext) {
     cx.executor().allow_parking();

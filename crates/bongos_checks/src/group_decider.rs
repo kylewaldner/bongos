@@ -746,6 +746,14 @@ pub(crate) async fn decide_group(
     Ok(())
 }
 
+/// Forgets that `started` were started, when their run never began: the group runs them again
+/// once the decider decides it (after an undrain, say).
+fn forget_started(engine: &mut ChecksEngine, started: &[(String, String, String, String)]) {
+    for entry in started {
+        engine.decider.started.remove(entry);
+    }
+}
+
 /// How often a closing run waiting for a busy second tree asks for it again.
 pub(crate) const SECOND_TREE_RETRY: Duration = Duration::from_secs(15);
 
@@ -754,7 +762,7 @@ pub(crate) const SECOND_TREE_RETRY: Duration = Duration::from_secs(15);
 /// question is asked again every [`SECOND_TREE_RETRY`] on the engine's clock, so a lease is
 /// taken only once the lane has released it; past `task_checks.pool_wait_limit_hours` a busy
 /// repository runs cold. With no tree provider, every repository runs cold at once. `Err` when
-/// the engine is drained or gone while waiting: nothing runs.
+/// the engine is drained, no longer deciding or gone while waiting: nothing runs.
 async fn second_trees(
     this: &WeakEntity<ChecksEngine>,
     leaf: &str,
@@ -764,8 +772,11 @@ async fn second_trees(
     let mut deadline: Option<Instant> = None;
     loop {
         let (trees, clock, limit) = this.update(cx, |engine, cx| {
-            if engine.drained {
-                return Err(anyhow::anyhow!("the engine is drained"));
+            // Asked on every retry: a drain or the setting going off while waiting starts nothing.
+            if !engine.deciding(cx) {
+                return Err(anyhow::anyhow!(
+                    "the engine is drained or task checks are off"
+                ));
             }
             let hours = TaskChecksSettings::get_global(cx).pool_wait_limit_hours;
             Ok((
@@ -821,11 +832,11 @@ impl ChecksEngine {
         cx: &mut Context<Self>,
     ) {
         let id = group.task_id.clone();
-        for (name, digest, key) in &checks {
-            self.decider
-                .started
-                .insert((id.clone(), name.clone(), digest.clone(), key.clone()));
-        }
+        let entries: Vec<(String, String, String, String)> = checks
+            .iter()
+            .map(|(name, digest, key)| (id.clone(), name.clone(), digest.clone(), key.clone()))
+            .collect();
+        self.decider.started.extend(entries.iter().cloned());
         self.decider.blocked.remove(&id);
         let names: Vec<String> = checks.into_iter().map(|(name, _, _)| name).collect();
         let scratch = TaskChecksSettings::get_global(cx).scratch_folder();
@@ -875,20 +886,23 @@ impl ChecksEngine {
                     this.update(cx, |engine, _| {
                         engine.decider.group_runs.remove(&id);
                         engine.decider.group_holds.remove(&id);
+                        forget_started(engine, &entries);
                     })
                     .ok();
                     drop(ended);
                     return;
                 }
             };
-            // Registered at once (no await since they were taken), so a drain sees each.
-            let lent: Vec<Option<(PathBuf, EnvBase)>> = lent
+            // Each lease is held here, out of a drain's reach, while git changes its tree, and
+            // registered for the drain only once its checkout returned: a lease is let go only
+            // once no git command runs in it. One not registered is dropped on every path out.
+            let lent: Vec<Option<(Box<dyn SecondTreeLease>, PathBuf, EnvBase)>> = lent
                 .into_iter()
                 .map(|lease| {
                     lease.map(|lease| {
-                        let found = (lease.path().to_path_buf(), EnvBase::for_lease(lease.as_ref()));
-                        leases.borrow_mut().push(lease);
-                        found
+                        let path = lease.path().to_path_buf();
+                        let env = EnvBase::for_lease(lease.as_ref());
+                        (lease, path, env)
                     })
                 })
                 .collect();
@@ -900,11 +914,12 @@ impl ChecksEngine {
                     stopped = true;
                     break;
                 }
-                if let Some((path, env)) = lent {
+                if let Some((lease, path, env)) = lent {
                     match check_out_tree_in_lent_tree(&git, &path, &tree.tree, &protected, &stop)
                         .await
                     {
                         Ok(()) => {
+                            leases.borrow_mut().push(lease);
                             tree.path = path;
                             tree.env = env;
                             continue;
@@ -917,7 +932,7 @@ impl ChecksEngine {
                             log::warn!(
                                 "the closing checks of {id} run cold: the lent tree is not usable ({why})"
                             );
-                            leases.borrow_mut().retain(|lease| lease.path() != path);
+                            drop(lease);
                         }
                     }
                 }
@@ -946,7 +961,10 @@ impl ChecksEngine {
                 stopped = true;
             }
             match failure {
-                _ if stopped => {}
+                _ if stopped => {
+                    this.update(cx, |engine, _| forget_started(engine, &entries))
+                        .ok();
+                }
                 Some(why) => {
                     log::error!("running the closing checks of {id}: {why}");
                     this.update(cx, |engine, _| {
@@ -979,6 +997,8 @@ impl ChecksEngine {
                         }
                         Ok(Err(refusal)) => {
                             log::warn!("the closing checks of {id} did not start: {refusal}");
+                            this.update(cx, |engine, _| forget_started(engine, &entries))
+                                .ok();
                         }
                         Err(_) => {}
                     }

@@ -220,7 +220,7 @@ fn calls_for_decision(event: &StateEvent) -> bool {
 impl ChecksEngine {
     /// Whether this process decides now: the setting is on, the engine is not drained, and no
     /// forwarder sends its commands to another process that holds the writer.
-    fn deciding(&self, cx: &App) -> bool {
+    pub(crate) fn deciding(&self, cx: &App) -> bool {
         TaskChecksSettings::get_global(cx).enabled
             && !self.drained
             && ChecksForwarderRegistry::get(cx).is_none()
