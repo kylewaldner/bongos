@@ -528,7 +528,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::CloseWindowWhenNoItems>(render_dropdown)
         .add_basic_renderer::<settings::TextRenderingMode>(render_dropdown)
         .add_basic_renderer::<settings::FontFamilyName>(render_font_picker)
-        .add_basic_renderer::<settings::BaseKeymapContent>(render_dropdown)
+        .add_basic_renderer::<settings::BaseKeymapContent>(render_base_keymap_dropdown)
         .add_basic_renderer::<settings::MultiCursorModifier>(render_dropdown)
         .add_basic_renderer::<settings::HideMouseMode>(render_dropdown)
         .add_basic_renderer::<settings::CurrentLineHighlight>(render_dropdown)
@@ -4896,6 +4896,41 @@ fn render_dropdown<T>(
     field: SettingField<T>,
     file: SettingsUiFile,
     metadata: Option<&SettingsFieldMetadata>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement
+where
+    T: strum::VariantArray + strum::VariantNames + Copy + PartialEq + Send + Sync + 'static,
+{
+    render_dropdown_with_labels(
+        field,
+        file,
+        metadata,
+        <T as strum::VariantNames>::VARIANTS,
+        window,
+        cx,
+    )
+}
+
+/// The names the Base Keymap dropdown shows, in the order of the variants it offers.
+const BASE_KEYMAP_LABELS: &[&str] = &["Emacs", "Vim", "VS Code", "None"];
+
+/// The Base Keymap dropdown shows "VS Code" where the stored value is `VSCode`.
+fn render_base_keymap_dropdown(
+    field: SettingField<settings::BaseKeymapContent>,
+    file: SettingsUiFile,
+    metadata: Option<&SettingsFieldMetadata>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    render_dropdown_with_labels(field, file, metadata, BASE_KEYMAP_LABELS, window, cx)
+}
+
+fn render_dropdown_with_labels<T>(
+    field: SettingField<T>,
+    file: SettingsUiFile,
+    metadata: Option<&SettingsFieldMetadata>,
+    labels: &'static [&'static str],
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement
@@ -4903,7 +4938,7 @@ where
     T: strum::VariantArray + strum::VariantNames + Copy + PartialEq + Send + Sync + 'static,
 {
     let variants = || -> &'static [T] { <T as strum::VariantArray>::VARIANTS };
-    let labels = || -> &'static [&'static str] { <T as strum::VariantNames>::VARIANTS };
+    let labels = || -> &'static [&'static str] { labels };
     let should_do_titlecase = metadata
         .and_then(|metadata| metadata.should_do_titlecase)
         .unwrap_or(true);
@@ -6342,13 +6377,28 @@ pub mod test {
             .unwrap();
     }
 
+    #[test]
+    fn test_base_keymap_dropdown_offers_exactly_emacs_vim_vscode_and_none() {
+        use settings::BaseKeymapContent;
+        assert_eq!(
+            <BaseKeymapContent as strum::VariantArray>::VARIANTS,
+            [
+                BaseKeymapContent::Emacs,
+                BaseKeymapContent::Vim,
+                BaseKeymapContent::VSCode,
+                BaseKeymapContent::None,
+            ]
+        );
+        assert_eq!(BASE_KEYMAP_LABELS, ["Emacs", "Vim", "VS Code", "None"]);
+    }
+
     struct BaseKeymapDropdownView {
         field: SettingField<settings::BaseKeymapContent>,
     }
 
     impl Render for BaseKeymapDropdownView {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            render_dropdown(self.field, SettingsUiFile::User, None, window, cx)
+            render_base_keymap_dropdown(self.field, SettingsUiFile::User, None, window, cx)
         }
     }
 

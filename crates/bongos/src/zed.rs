@@ -12,6 +12,9 @@ mod emacs_keymap_tests;
 mod isearch_keymap_tests;
 #[cfg(test)]
 mod keybinding_profile_tests;
+pub mod keybindings;
+#[cfg(test)]
+mod keybindings_tests;
 #[cfg(test)]
 mod kill_ring_keymap_tests;
 #[cfg(test)]
@@ -201,6 +204,7 @@ pub fn install_isearch_kill_source(cx: &mut App) {
 }
 
 pub fn init(cx: &mut App) {
+    keybindings::init(cx);
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &Hide, cx| cx.hide());
     #[cfg(target_os = "macos")]
@@ -2240,6 +2244,13 @@ struct RetiredBaseKeymapNoticeShown;
 
 impl gpui::Global for RetiredBaseKeymapNoticeShown {}
 
+/// The button of the retired base keymap notice: opens the keybindings picker and dismisses
+/// the notice.
+fn set_keybindings_from_notice(window: &mut Window, cx: &mut Context<MessageNotification>) {
+    window.dispatch_action(zed_actions::settings::SetKeybindings.boxed_clone(), cx);
+    cx.emit(DismissEvent);
+}
+
 /// Tells the user once per launch that the stored `base_keymap` names a retired keymap
 /// and fell back to Emacs. The settings file is never changed. Returns whether the
 /// notice was shown by this call.
@@ -2264,15 +2275,12 @@ fn notify_retired_base_keymap(cx: &mut App) -> bool {
             cx.new(|cx| {
                 MessageNotification::new(
                     "The base keymap in your settings is no longer available, so bongos \
-                    is using Emacs. Pick another base keymap in settings.",
+                    is using Emacs. Pick another with settings: set keybindings.",
                     cx,
                 )
-                .primary_message("Open Settings")
+                .primary_message("Set Keybindings")
                 .primary_icon(IconName::Settings)
-                .primary_on_click(|window, cx| {
-                    window.dispatch_action(zed_actions::OpenSettings.boxed_clone(), cx);
-                    cx.emit(DismissEvent);
-                })
+                .primary_on_click(set_keybindings_from_notice)
             })
         },
     );
