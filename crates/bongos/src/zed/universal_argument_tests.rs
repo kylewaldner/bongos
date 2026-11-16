@@ -465,8 +465,10 @@ async fn the_starters_of_a_search_run_once_with_an_argument_pending(cx: &mut Tes
 
 #[gpui::test]
 async fn a_counted_motion_between_two_kills_keeps_them_apart(cx: &mut TestAppContext) {
-    let mut cx = editor_with(cx, "ˇab\ncd\nef").await;
+    // Not at column 0, where C-k would take the newline too.
+    let mut cx = editor_with(cx, "xˇab\ncd\nef").await;
     cx.simulate_keystrokes("ctrl-k ctrl-u 2 ctrl-f ctrl-k");
+    cx.assert_editor_state("x\ncˇ\nef");
     assert_eq!(ring_texts(&mut cx), vec!["d".to_string(), "ab".to_string()]);
 }
 
@@ -534,16 +536,17 @@ async fn zap_back_up_to_char_with_a_count_stops_after_the_nth_occurrence(cx: &mu
     assert_eq!(text_of(&editor, &mut cx), "a,b,");
 }
 
-/// Runs `keys` alone and then after C-u, from `marked`, and asserts the argument changed nothing
-/// and none is left pending.
+/// Runs `keys` alone and then after C-u, each from `marked` in a fresh editor (so a key that
+/// reads the scroll position sees the same window both times), and asserts the argument changed
+/// nothing and none is left pending.
 async fn assert_ignores_the_argument(cx: &mut TestAppContext, marked: &str, keys: &str) {
-    let mut cx = editor_with(cx, marked).await;
-    cx.simulate_keystrokes(keys);
-    let plain = cx.editor_state();
-    cx.set_state(marked);
-    cx.simulate_keystrokes(&format!("ctrl-u {keys}"));
-    assert_eq!(cx.editor_state(), plain, "{keys}");
-    assert!(!argument_pending(&mut cx), "{keys}");
+    let mut plain = editor_with(cx, marked).await;
+    plain.simulate_keystrokes(keys);
+    let mut counted = EditorTestContext::new(cx).await;
+    counted.set_state(marked);
+    counted.simulate_keystrokes(&format!("ctrl-u {keys}"));
+    assert_eq!(counted.editor_state(), plain.editor_state(), "{keys}");
+    assert!(!argument_pending(&mut counted), "{keys}");
 }
 
 #[gpui::test]
