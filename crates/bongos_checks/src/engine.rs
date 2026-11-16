@@ -219,7 +219,7 @@ pub struct ChecksStatus {
 }
 
 /// The second trees a run holds now; dropping one releases it.
-type Leases = Rc<RefCell<Vec<Box<dyn SecondTreeLease>>>>;
+pub(crate) type Leases = Rc<RefCell<Vec<Box<dyn SecondTreeLease>>>>;
 
 struct ActiveRun {
     stop: StopHandle,
@@ -591,12 +591,16 @@ impl ChecksEngine {
 
     /// Starts the checks of the request on `recorded` trees instead of `task`'s own (whose
     /// repository is overridden by them): the closing checks of a group on its last child's
-    /// tree. Refused like any run when the task has a live run or the engine is drained.
+    /// tree. Refused like any run when the task has a live run or the engine is drained. The
+    /// run is stopped through `stop` and holds `leases`, the second trees its recorded trees
+    /// are written out in, so a drain releases them.
     pub(crate) fn start_recorded(
         &mut self,
         request: RunChecksRequest,
         task: TaskChecks,
         recorded: RecordedTrees,
+        stop: StopHandle,
+        leases: Leases,
         cx: &mut Context<Self>,
     ) -> Result<Task<RunReport>, Refusal> {
         let rows = plan_rows(&task, request.checks.as_deref())?;
@@ -626,13 +630,13 @@ impl ChecksEngine {
             rows,
             tree,
             writer,
-            stop: StopHandle::default(),
+            stop,
             settings: TaskChecksSettings::get_global(cx).clone(),
             pools: CheckPoolsRegistry::get(cx),
             trees: None,
             clock: self.clock.clone(),
             now: self.now.clone(),
-            leases: Rc::default(),
+            leases,
             recorded: Some(recorded),
         };
         Ok(self.launch(plan, cx))
@@ -695,7 +699,8 @@ impl ChecksEngine {
     /// at quit (SIGTERM, then SIGKILL within `task_checks.kill_grace_seconds`), the parts that
     /// finished staying in each unfinished record so a later run on the same key resumes from
     /// them; every pool lease is dropped with its part; every second tree a base run holds is
-    /// released when its check ends, and at the latest when the drain resolves; and
+    /// released when its check ends, and at the latest when the drain resolves (so is every second
+    /// tree a group's closing run holds, while its trees are made ready or its checks run); and
     /// `checks.live` is cleared at once, with every pending or scheduled live write forgotten.
     ///
     /// Resolves once every run has ended, or once the grace has passed on the engine's clock,
@@ -725,6 +730,11 @@ impl ChecksEngine {
             if let Some(node) = &run.node {
                 stopped.push(node.clone());
             }
+        }
+        // A group run still making its trees ready holds its leases outside any active run.
+        for group in self.decider.group_holds.values() {
+            group.stop.stop();
+            leases.push(group.leases.clone());
         }
         let ended = if self.active.is_empty() {
             None

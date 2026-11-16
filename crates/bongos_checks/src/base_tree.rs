@@ -335,7 +335,7 @@ pub(crate) async fn sweep_scratch(git: &Git, scratch: &Path, index_dir: &Path) -
 /// Why a lent tree was not made ready.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LentTreeError {
-    /// `stop` was stopped after the checkout: the tree is at the commit but not cleaned.
+    /// `stop` was stopped before the tree was made ready: it may be partly written out.
     Stopped,
     Failed(String),
 }
@@ -389,42 +389,64 @@ pub(crate) async fn check_out_lent_tree(
 /// untracked files that are not ignored are removed (build output stays). `HEAD` does not move.
 /// Refused when `path` is not apart from `protected`, not the top of a working tree, or its
 /// repository does not hold the tree. Every git command runs in the canonical `path` with its
-/// arguments passed as they are; nothing outside the lent tree is written.
+/// arguments passed as they are; nothing outside the lent tree is written. Once `stop` is
+/// stopped, no further git command that writes runs in the tree.
 pub(crate) async fn check_out_tree_in_lent_tree(
     git: &Git,
     path: &Path,
     tree: &str,
     protected: &[&Path],
-) -> Result<(), String> {
-    ensure_commit(tree).map_err(|_| format!("{tree:?} is not a tree id"))?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| format!("the lent tree {} is not usable: {error}", path.display()))?;
-    ensure_apart(&canonical, protected)?;
+    stop: &StopHandle,
+) -> Result<(), LentTreeError> {
+    let failed = LentTreeError::Failed;
+    if stop.is_stopped() {
+        return Err(LentTreeError::Stopped);
+    }
+    ensure_commit(tree).map_err(|_| failed(format!("{tree:?} is not a tree id")))?;
+    let canonical = path.canonicalize().map_err(|error| {
+        failed(format!(
+            "the lent tree {} is not usable: {error}",
+            path.display()
+        ))
+    })?;
+    ensure_apart(&canonical, protected).map_err(failed)?;
     ensure_top_level(git, &canonical).await.map_err(|_| {
-        format!(
+        failed(format!(
             "the lent tree {} is not the top of a working tree",
             path.display()
-        )
+        ))
     })?;
     let kind = git
         .run(&canonical, &["cat-file", "-t", tree])
         .await
-        .map_err(|error| format!("the lent tree's repository lacks the tree {tree}: {error}"))?;
+        .map_err(|error| {
+            failed(format!(
+                "the lent tree's repository lacks the tree {tree}: {error}"
+            ))
+        })?;
     if kind != "tree" {
-        return Err(format!(
+        return Err(failed(format!(
             "{tree} is not a tree in the lent tree's repository"
-        ));
+        )));
+    }
+    if stop.is_stopped() {
+        return Err(LentTreeError::Stopped);
     }
     git.run(&canonical, &["read-tree", tree])
         .await
-        .map_err(|error| format!("reading the tree into the lent tree: {error}"))?;
+        .map_err(|error| failed(format!("reading the tree into the lent tree: {error}")))?;
+    if stop.is_stopped() {
+        return Err(LentTreeError::Stopped);
+    }
     git.run(&canonical, &["checkout-index", "--force", "--all"])
         .await
-        .map_err(|error| format!("writing out the tree in the lent tree: {error}"))?;
+        .map_err(|error| failed(format!("writing out the tree in the lent tree: {error}")))?;
+    if stop.is_stopped() {
+        return Err(LentTreeError::Stopped);
+    }
     git.run(&canonical, &["clean", "-f", "-d"])
         .await
-        .map_err(|error| format!("cleaning the lent tree: {error}"))?;
+        .map_err(|error| failed(format!("cleaning the lent tree: {error}")))?;
     Ok(())
 }
 

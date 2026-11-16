@@ -121,6 +121,8 @@ pub(crate) struct Decider {
     /// The automatic runs of groups' closing checks that have not ended, by group id; each
     /// resolves when its run ends and its scratch folder is removed.
     pub(crate) group_runs: BTreeMap<String, futures::future::Shared<oneshot::Receiver<()>>>,
+    /// What a drain stops and releases of each group run in `group_runs`, by group id.
+    pub(crate) group_holds: BTreeMap<String, GroupRunHold>,
     /// The (group, check, digest, tree key) each automatic run was started for: at most one
     /// per key in this process, whatever its records say.
     pub(crate) started: BTreeSet<(String, String, String, String)>,
@@ -134,6 +136,13 @@ pub(crate) struct Decider {
     pub(crate) cleaned: BTreeMap<String, Option<String>>,
     #[cfg(test)]
     decided: Vec<mpsc::UnboundedSender<Option<String>>>,
+}
+
+/// The stop handle and second tree leases of a group's closing run, from before its trees are
+/// made ready until it ends: a drain stops the run and releases the leases.
+pub(crate) struct GroupRunHold {
+    pub(crate) stop: crate::process::StopHandle,
+    pub(crate) leases: crate::engine::Leases,
 }
 
 /// One project whose writer the decider follows.

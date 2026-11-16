@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,14 +43,14 @@ use futures::channel::oneshot;
 use gpui::{AsyncApp, Context, WeakEntity};
 use settings::Settings as _;
 
-use crate::base_tree::{TempTree, check_out_tree_in_lent_tree};
+use crate::base_tree::{LentTreeError, TempTree, check_out_tree_in_lent_tree};
 use crate::decider::{
-    Decision, Judgment, Pinned, TreeKeys, evidence_of, find_chain, leaf_set, missing_reason,
-    still_deciding, write_done_if,
+    Decision, GroupRunHold, Judgment, Pinned, TreeKeys, evidence_of, find_chain, leaf_set,
+    missing_reason, still_deciding, write_done_if,
 };
 use crate::engine::{
-    ChecksEngine, RecordedTree, RecordedTrees, RunChecksRequest, check_digest, recorded_key,
-    repo_trees,
+    ChecksEngine, Leases, RecordedTree, RecordedTrees, RunChecksRequest, check_digest,
+    recorded_key, repo_trees,
 };
 use crate::evidence_store::{
     DONE_NAMESPACE, DoneRecord, LAST_NAMESPACE, OWED_NAMESPACE, done_record_in, scan_records,
@@ -57,6 +58,7 @@ use crate::evidence_store::{
 };
 use crate::live::HoldRow;
 use crate::owed::{LastChild, LastRow, OwedMarker, last_row_in, put_last, uses_unknown_set};
+use crate::process::StopHandle;
 use crate::retained::{KeptTree, delete_ref, has_tree, keep_trees, kept_tree, list_refs};
 use crate::settings::TaskChecksSettings;
 use crate::task_source::{TREE_KEYS_FOLDER, TaskChecks};
@@ -806,7 +808,8 @@ impl ChecksEngine {
     /// checked out in the second tree a lane lends for `leaf` (run with that tree's
     /// environment, waiting for a busy one up to the pool wait limit), else written out cold
     /// under the scratch folder (run with bongos's own environment). When the run ends, however
-    /// it ends, every lease is released and every scratch folder removed. Each (group, check,
+    /// it ends, every lease is released and every scratch folder removed; a drain stops the run
+    /// and releases its leases at the latest when it resolves. Each (group, check,
     /// digest, key) is started at most once here.
     pub(crate) fn start_group_run(
         &mut self,
@@ -848,12 +851,22 @@ impl ChecksEngine {
         self.decider
             .group_runs
             .insert(id.clone(), ended_receiver.shared());
+        // Held until the run has ended, and released on every path out; a drain stops the run
+        // and releases them at the latest when it resolves.
+        let stop = StopHandle::default();
+        let leases: Leases = Rc::default();
+        self.decider.group_holds.insert(
+            id.clone(),
+            GroupRunHold {
+                stop: stop.clone(),
+                leases: leases.clone(),
+            },
+        );
         cx.spawn(async move |this, cx| {
             let mut recorded = recorded;
             let mut temps: Vec<TempTree> = Vec::new();
-            // Held until the run has ended, and dropped (released) on every path out.
-            let mut leases: Vec<Box<dyn SecondTreeLease>> = Vec::new();
             let mut failure = None;
+            let mut stopped = false;
             let repos: Vec<String> = recorded.trees.iter().map(|tree| tree.repo.clone()).collect();
             let lent = match second_trees(&this, &leaf, &repos, cx).await {
                 Ok(lent) => lent,
@@ -861,30 +874,50 @@ impl ChecksEngine {
                     log::info!("the closing checks of {id} did not start: {error:#}");
                     this.update(cx, |engine, _| {
                         engine.decider.group_runs.remove(&id);
+                        engine.decider.group_holds.remove(&id);
                     })
                     .ok();
                     drop(ended);
                     return;
                 }
             };
+            // Registered at once (no await since they were taken), so a drain sees each.
+            let lent: Vec<Option<(PathBuf, EnvBase)>> = lent
+                .into_iter()
+                .map(|lease| {
+                    lease.map(|lease| {
+                        let found = (lease.path().to_path_buf(), EnvBase::for_lease(lease.as_ref()));
+                        leases.borrow_mut().push(lease);
+                        found
+                    })
+                })
+                .collect();
             let protected: Vec<&Path> = protected.iter().map(PathBuf::as_path).collect();
             // The one place a group's recorded trees are made ready: checked out in a lent
             // tree, else written out cold under the scratch folder.
-            for (tree, lease) in recorded.trees.iter_mut().zip(lent) {
-                if let Some(lease) = lease {
-                    let path = lease.path().to_path_buf();
-                    match check_out_tree_in_lent_tree(&git, &path, &tree.tree, &protected).await {
+            for (tree, lent) in recorded.trees.iter_mut().zip(lent) {
+                if stop.is_stopped() {
+                    stopped = true;
+                    break;
+                }
+                if let Some((path, env)) = lent {
+                    match check_out_tree_in_lent_tree(&git, &path, &tree.tree, &protected, &stop)
+                        .await
+                    {
                         Ok(()) => {
                             tree.path = path;
-                            tree.env = EnvBase::for_lease(lease.as_ref());
-                            leases.push(lease);
+                            tree.env = env;
                             continue;
                         }
-                        Err(why) => {
+                        Err(LentTreeError::Stopped) => {
+                            stopped = true;
+                            break;
+                        }
+                        Err(LentTreeError::Failed(why)) => {
                             log::warn!(
                                 "the closing checks of {id} run cold: the lent tree is not usable ({why})"
                             );
-                            drop(lease);
+                            leases.borrow_mut().retain(|lease| lease.path() != path);
                         }
                     }
                 }
@@ -908,7 +941,12 @@ impl ChecksEngine {
                     }
                 }
             }
+            if stopped || stop.is_stopped() {
+                log::info!("the closing checks of {id} did not start: the engine is drained");
+                stopped = true;
+            }
             match failure {
+                _ if stopped => {}
                 Some(why) => {
                     log::error!("running the closing checks of {id}: {why}");
                     this.update(cx, |engine, _| {
@@ -926,7 +964,14 @@ impl ChecksEngine {
                         params: None,
                     };
                     let started = this.update(cx, |engine, cx| {
-                        engine.start_recorded(request, group, recorded, cx)
+                        engine.start_recorded(
+                            request,
+                            group,
+                            recorded,
+                            stop.clone(),
+                            leases.clone(),
+                            cx,
+                        )
                     });
                     match started {
                         Ok(Ok(report)) => {
@@ -939,12 +984,13 @@ impl ChecksEngine {
                     }
                 }
             }
-            drop(leases);
+            leases.borrow_mut().clear();
             for temp in temps {
                 temp.remove().await;
             }
             this.update(cx, |engine, _| {
                 engine.decider.group_runs.remove(&id);
+                engine.decider.group_holds.remove(&id);
                 if let Some(followed) = engine.decider.followed_poke(&project) {
                     followed.unbounded_send(()).ok();
                 }

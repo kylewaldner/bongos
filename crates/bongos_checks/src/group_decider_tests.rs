@@ -22,6 +22,7 @@ use tempfile::TempDir;
 
 use crate::definitions::named_sets;
 use crate::engine::{ChecksEngine, RunChecksRequest};
+use crate::engine_tests::set_kill_grace;
 use crate::evidence_store::{DoneRecord, done_record, put_done, scan_records, task_prefix};
 use crate::group_decider::{CHILDREN_HELD, SECOND_TREE_RETRY, as_found, tree_gone};
 use crate::live::HoldRow;
@@ -623,6 +624,103 @@ async fn an_unavailable_second_tree_runs_cold_at_once(cx: &mut TestAppContext) {
     assert_eq!(trees.state().asked, ["app"]);
     assert!(clock.sleeps().is_empty(), "no wait");
     assert_eq!(world.scratch_left(), Vec::<String>::new());
+}
+
+#[gpui::test]
+async fn a_lent_tree_that_is_not_usable_runs_cold_and_is_released(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (world, _) = finished_group(cx, FakeClock::automatic());
+    // A folder that is no working tree fails the lent tree's checks.
+    let plain = world.root.path().join("not-a-tree");
+    std::fs::create_dir_all(&plain).unwrap();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: plain.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+
+    world.settle(cx).await;
+
+    let (pwd, mark) = ran_where(&world, "grp");
+    assert!(pwd.starts_with(&canonical(&world.scratch)), "{pwd}");
+    assert_eq!(mark, "own", "no lane variables");
+    assert!(world.done("grp").is_some());
+    let state = trees.state();
+    assert_eq!(state.leased, ["app"]);
+    assert_eq!(state.released, ["app"], "released once");
+    assert!(state.held.is_empty());
+    drop(state);
+    assert_eq!(
+        std::fs::read_dir(&plain).unwrap().count(),
+        0,
+        "nothing written"
+    );
+    assert_eq!(world.scratch_left(), Vec::<String>::new());
+}
+
+/// A closing check that ignores SIGTERM, marks `ignored/blocked` in the tree it runs in and
+/// waits there until `ignored/go` exists.
+const BLOCKING_CLOSING: &str = "\n[[checks.closing]]\nname = \"full\"\ncommand = [\"sh\", \"-c\", \"trap '' TERM; touch ignored/blocked; while [ ! -f ignored/go ]; do sleep 0.05; done\"]\n";
+
+#[gpui::test]
+async fn a_drain_releases_the_lease_a_group_run_holds_while_its_check_still_runs(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let clock = FakeClock::manual();
+    let world = World::with_clock(cx, &group(BLOCKING_CLOSING, ""), clock.clone());
+    world.worktree("c1", "pub fn c1() {}\n");
+    world.worktree("c2", "pub fn c2() {}\n");
+    // SIGKILL comes in real time after the stop: the check outlives SIGTERM, so only the
+    // engine's clock can end the drain first.
+    set_kill_grace(cx, 5);
+    let second = world.second_tree();
+    let trees = lane_trees(
+        cx,
+        FakeSecond::Lease {
+            path: second.clone(),
+            env: lane_env("lent"),
+        },
+    );
+    let blocked = second.join("ignored/blocked");
+    let (reached, reaching) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !blocked.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the check never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        reached.send(()).ok();
+    });
+    world.decide(cx).await;
+    world.finish(&["c1", "c2"]);
+    world.decide(cx).await;
+    reaching.await.unwrap();
+    assert_eq!(trees.state().leased, ["app"]);
+    assert!(
+        trees.state().released.is_empty(),
+        "held while the check runs"
+    );
+
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    clock.advance(std::time::Duration::from_secs(5));
+    drain.await;
+
+    // The grace won: the group run has not ended, and the drain itself let the lease go.
+    assert_eq!(world.group_runs(cx), 1);
+    assert_eq!(trees.state().released, ["app"]);
+    assert!(trees.state().held.is_empty());
+    std::fs::write(second.join("ignored/go"), "").unwrap();
+    world.runs_ended(cx).await;
+    assert_eq!(world.group_runs(cx), 0);
+    assert_eq!(trees.state().released, ["app"], "released once");
 }
 
 #[gpui::test]
