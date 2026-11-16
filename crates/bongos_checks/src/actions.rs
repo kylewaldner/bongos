@@ -4,13 +4,18 @@
 //! checks and dump checks act on a task (the task at point, else the focused one, else a pick)
 //! through the checks engine; they start no agent and call no model. The others still say that
 //! they are not available yet.
+//!
+//! Run checks, run checks clean, run check and cancel checks reach the engine through
+//! [`checks_access`]: the engine of this process while it holds the state writer, else the
+//! process that holds it, through the registered forwarder; then nothing starts here.
 
 use std::any::TypeId;
 
+use anyhow::Result;
 use command_palette_hooks::CommandPaletteFilter;
 #[cfg(test)]
 use gpui::Global;
-use gpui::{App, Context, Entity, Window};
+use gpui::{App, Context, Entity, Task, Window};
 use settings::{Settings as _, SettingsStore};
 use workspace::Toast;
 use workspace::Workspace;
@@ -18,7 +23,8 @@ use workspace::notifications::NotificationId;
 
 use crate::TaskChecksSettings;
 use crate::command_logic::{NO_TASK_MESSAGE, Target, choose_target, report_message, write_dump};
-use crate::engine::{ChecksEngine, RunChecksRequest};
+use crate::engine::{ChecksEngine, RunChecksRequest, plan_rows};
+use crate::host::{ChecksAccess, ChecksCommand, ChecksReply, checks_access};
 
 /// New actions in the `task` namespace, shared with the work tree's, the builder's, Linear's and
 /// Zed's task runner; no name collides.
@@ -195,20 +201,66 @@ fn tasks_with_checks(engine: &Entity<ChecksEngine>, cx: &App) -> Vec<String> {
         .collect()
 }
 
-/// Starts a run of `request` and toasts how it ended, or why it was refused.
+/// How messages name the task `task_id`.
+fn task_name(task_id: &str, cx: &App) -> String {
+    ChecksEngine::global(cx)
+        .and_then(|engine| engine.read(cx).task(task_id, cx))
+        .map_or_else(|| task_id.to_string(), |task| task.name)
+}
+
+/// What a command says when the process that holds the writer answered.
+pub(crate) fn reply_message(name: &str, reply: &Result<ChecksReply>) -> String {
+    match reply {
+        Ok(ChecksReply::Started) => format!("Running the checks of {name}"),
+        Ok(ChecksReply::Refused { reason }) => reason.clone(),
+        Ok(ChecksReply::Cancelled { stopped: true }) => format!("Stopping the checks of {name}"),
+        Ok(ChecksReply::Cancelled { stopped: false }) => format!("{name} has no checks running"),
+        Ok(ChecksReply::Hold { .. }) => format!("Unexpected answer about the checks of {name}"),
+        Err(error) => format!("Could not reach the checks of {name}: {error:#}"),
+    }
+}
+
+/// Toasts the answer of the process that holds the writer once it comes.
+fn toast_reply(name: String, reply: Task<Result<ChecksReply>>, cx: &mut Context<Workspace>) {
+    cx.spawn(async move |workspace, cx| {
+        let reply = reply.await;
+        workspace
+            .update(cx, |workspace, cx| {
+                show_toast(workspace, reply_message(&name, &reply), cx)
+            })
+            .ok();
+    })
+    .detach();
+}
+
+/// Starts a run of `request` and toasts how it ended, or why it was refused. Without the state
+/// writer the request goes to the process that holds it and only its answer is toasted.
 fn start_run(request: RunChecksRequest, workspace: &mut Workspace, cx: &mut Context<Workspace>) {
-    let Some(engine) = ChecksEngine::global(cx) else {
+    let Some(access) = checks_access(cx) else {
         return;
     };
-    let name = engine
-        .read(cx)
-        .task(&request.task_id, cx)
-        .map_or_else(|| request.task_id.clone(), |task| task.name);
-    let task_id = request.task_id.clone();
-    let report = engine.update(cx, |engine, cx| engine.run(request, cx));
-    if engine.read(cx).is_running(&task_id) {
-        show_toast(workspace, format!("Running the checks of {name}"), cx);
-    }
+    let name = task_name(&request.task_id, cx);
+    let engine = match access {
+        ChecksAccess::Local(engine) => engine,
+        forwarded @ ChecksAccess::Forwarded(_) => {
+            let command = ChecksCommand::RunChecks {
+                task_id: request.task_id,
+                checks: request.checks,
+                clean: request.clean,
+            };
+            let reply = forwarded.send(&command, cx);
+            toast_reply(name, reply, cx);
+            return;
+        }
+    };
+    let report = match engine.update(cx, |engine, cx| engine.start(request, cx)) {
+        Ok(report) => report,
+        Err(refusal) => {
+            show_toast(workspace, refusal.to_string(), cx);
+            return;
+        }
+    };
+    show_toast(workspace, format!("Running the checks of {name}"), cx);
     cx.spawn(async move |workspace, cx| {
         let report = report.await;
         workspace
@@ -220,7 +272,12 @@ fn start_run(request: RunChecksRequest, workspace: &mut Workspace, cx: &mut Cont
     .detach();
 }
 
-fn run_checks(id: String, workspace: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>) {
+pub(crate) fn run_checks(
+    id: String,
+    workspace: &mut Workspace,
+    _: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     start_run(RunChecksRequest::person(id), workspace, cx);
 }
 
@@ -247,9 +304,21 @@ fn run_check(
     let Some(engine) = ChecksEngine::global(cx) else {
         return;
     };
-    let names = match engine.read(cx).preflight(&id, None, cx) {
-        Ok(preflight) => preflight
-            .rows
+    // Without the writer only the task's checks are known here; the process that holds the
+    // writer checks the rest when the run arrives.
+    let rows = if matches!(checks_access(cx), Some(ChecksAccess::Forwarded(_))) {
+        match engine.read(cx).task(&id, cx) {
+            Some(task) => plan_rows(&task, None),
+            None => Err(crate::engine::Refusal::NoChecks { task: id.clone() }),
+        }
+    } else {
+        engine
+            .read(cx)
+            .preflight(&id, None, cx)
+            .map(|preflight| preflight.rows)
+    };
+    let names = match rows {
+        Ok(rows) => rows
             .iter()
             .map(|row| row.decl.name.clone())
             .collect::<Vec<_>>(),
@@ -276,19 +345,24 @@ fn run_check(
     );
 }
 
-fn cancel_checks(
+pub(crate) fn cancel_checks(
     id: String,
     workspace: &mut Workspace,
     _: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let Some(engine) = ChecksEngine::global(cx) else {
+    let Some(access) = checks_access(cx) else {
         return;
     };
-    let name = engine
-        .read(cx)
-        .task(&id, cx)
-        .map_or_else(|| id.clone(), |task| task.name);
+    let name = task_name(&id, cx);
+    let engine = match access {
+        ChecksAccess::Local(engine) => engine,
+        forwarded @ ChecksAccess::Forwarded(_) => {
+            let reply = forwarded.send(&ChecksCommand::CancelChecks { task_id: id }, cx);
+            toast_reply(name, reply, cx);
+            return;
+        }
+    };
     let message = if engine.update(cx, |engine, _| engine.cancel(&id)) {
         format!("Stopping the checks of {name}")
     } else {

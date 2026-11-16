@@ -11,10 +11,17 @@
 //!
 //! Cancel stops the part that runs and runs no further check. The parts that finished stay in
 //! the check's finished record, so the next run on the same key resumes after them.
+//!
+//! What runs now is also written to the project's state store as live rows (see
+//! [`crate::live`]), throttled per task by `task_checks.live_write_ms` on the engine's clock.
+//!
+//! [`ChecksEngine::drain`] stops everything when the state writer moves to another process, and
+//! [`ChecksEngine::undrain`] takes runs again when that move is abandoned.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bongos_checks_model::decl;
 use bongos_checks_model::evidence::{CheckState, Current, EvidenceRecord, StartedBy, TreeKind};
@@ -22,6 +29,8 @@ use bongos_checks_model::section::{Live, TaskSection, TreeState, section};
 use bongos_checks_model::verdict::{NoVerdictReason, Verdict};
 use bongos_checks_model::{Applicability, Row};
 use bongos_project_repo::{MAIN_BRANCH, StateWriter};
+use bongos_workflow::RunId;
+use bongos_workflow_model::NodeKey;
 use futures::StreamExt as _;
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt as _, select_biased};
@@ -32,6 +41,7 @@ use settings::Settings as _;
 
 use crate::command_logic::dump_text;
 use crate::evidence_store::{scan_records, task_prefix};
+use crate::live::{Flush, LiveRow, LiveRows};
 use crate::pin::{Pin, master_definitions};
 use crate::pools::{CheckClock, CheckPoolsRegistry, ExecutorClock};
 use crate::process::StopHandle;
@@ -51,6 +61,8 @@ pub struct RunChecksRequest {
     /// Close the matching unfinished records as superseded and keep no earlier part.
     pub clean: bool,
     pub started_by: StartedBy,
+    /// The workflow node (a `use = "checks"` node) the run is for; `None` for a manual run.
+    pub node: Option<(RunId, NodeKey)>,
 }
 
 impl RunChecksRequest {
@@ -61,6 +73,7 @@ impl RunChecksRequest {
             checks: None,
             clean: false,
             started_by: StartedBy::Person,
+            node: None,
         }
     }
 }
@@ -78,6 +91,8 @@ pub enum Refusal {
     Running { task: String },
     #[error("{task} belongs to a project with no state store; checks need one")]
     NoState { task: String },
+    #[error("checks of {task} cannot start while the engine moves to the host")]
+    Draining { task: String },
 }
 
 impl Refusal {
@@ -181,6 +196,7 @@ struct ActiveRun {
     stop: StopHandle,
     live: BTreeMap<String, Live>,
     writer: Arc<StateWriter>,
+    node: Option<(RunId, NodeKey)>,
 }
 
 /// Everything a run needs, gathered before it starts.
@@ -276,6 +292,14 @@ pub struct ChecksEngine {
     active: BTreeMap<String, ActiveRun>,
     /// What each task's checks are now, from the last run's keys.
     current: BTreeMap<String, Current>,
+    /// The live rows in the state store, throttled.
+    live_rows: LiveRows,
+    /// Counts drains, so a write scheduled before one is dropped.
+    live_epoch: u64,
+    /// While true no run starts and no live row is written.
+    drained: bool,
+    /// Told when the last active run has ended.
+    idle: Vec<oneshot::Sender<()>>,
 }
 
 impl EventEmitter<ChecksEvent> for ChecksEngine {}
@@ -299,6 +323,10 @@ impl ChecksEngine {
             now,
             active: BTreeMap::new(),
             current: BTreeMap::new(),
+            live_rows: LiveRows::default(),
+            live_epoch: 0,
+            drained: false,
+            idle: Vec::new(),
         }
     }
 
@@ -432,16 +460,29 @@ impl ChecksEngine {
     /// on if it is dropped.
     pub fn run(&mut self, request: RunChecksRequest, cx: &mut Context<Self>) -> Task<RunReport> {
         let task_id = request.task_id.clone();
-        let plan = match self.plan(request, cx) {
-            Ok(plan) => plan,
-            Err(refusal) => return Task::ready(RunReport::refused(&task_id, refusal)),
-        };
+        match self.start(request, cx) {
+            Ok(report) => report,
+            Err(refusal) => Task::ready(RunReport::refused(&task_id, refusal)),
+        }
+    }
+
+    /// Starts the checks of the request, or says why not. The returned task resolves with the
+    /// report; the run goes on if it is dropped.
+    pub fn start(
+        &mut self,
+        request: RunChecksRequest,
+        cx: &mut Context<Self>,
+    ) -> Result<Task<RunReport>, Refusal> {
+        let task_id = request.task_id.clone();
+        let plan = self.plan(request, cx)?;
+        self.live_rows.adopt(&plan.writer);
         self.active.insert(
             task_id.clone(),
             ActiveRun {
                 stop: plan.stop.clone(),
                 live: BTreeMap::new(),
                 writer: plan.writer.clone(),
+                node: plan.request.node.clone(),
             },
         );
         cx.emit(ChecksEvent::Changed {
@@ -453,6 +494,12 @@ impl ChecksEngine {
             let outcome = execute(plan, &this, cx).await;
             this.update(cx, |engine, cx| {
                 engine.active.remove(&id);
+                engine.live_rows.release(&id);
+                if engine.active.is_empty() {
+                    for idle in engine.idle.drain(..) {
+                        idle.send(()).ok();
+                    }
+                }
                 cx.emit(ChecksEvent::Changed {
                     task_id: id.clone(),
                 });
@@ -466,7 +513,7 @@ impl ChecksEngine {
                 .ok();
         })
         .detach();
-        cx.background_spawn(async move {
+        Ok(cx.background_spawn(async move {
             report.await.unwrap_or(RunReport {
                 task_id,
                 outcome: RunOutcome::Ran {
@@ -474,7 +521,133 @@ impl ChecksEngine {
                     cancelled: true,
                 },
             })
+        }))
+    }
+
+    /// Stops everything before the state writer moves to another process: no part or check
+    /// starts and new runs are refused until [`Self::undrain`]; every running part is stopped as
+    /// at quit (SIGTERM, then SIGKILL within `task_checks.kill_grace_seconds`), the parts that
+    /// finished staying in each unfinished record so a later run on the same key resumes from
+    /// them; every pool lease is dropped with its part; and `checks.live` is cleared at once,
+    /// with every pending or scheduled live write forgotten.
+    ///
+    /// Resolves once every run has ended, or once the grace has passed on the engine's clock,
+    /// whichever comes first, with the workflow nodes whose runs it stopped (none for manual
+    /// runs). The engine leases no second tree and answers no landing job yet, so there is
+    /// nothing more to let go.
+    ///
+    /// Guaranteed at resolution: every run was told to stop, no run or part starts while
+    /// drained, and `checks.live` is empty and stays so while drained (no live row is written).
+    /// Not guaranteed when the grace wins: a run that has not ended yet is still active
+    /// ([`Self::is_running`]), its process may still be exiting, its pool lease may still be
+    /// held and its record may not yet hold the stopped part; those settle when the run ends.
+    pub fn drain(&mut self, cx: &mut Context<Self>) -> Task<Vec<(RunId, NodeKey)>> {
+        self.drained = true;
+        self.live_epoch += 1;
+        // At once, so an undrain before this resolves starts from no stale row and no write
+        // left scheduled for a dropped timer.
+        self.live_rows.clear_all();
+        let mut stopped = Vec::new();
+        for run in self.active.values() {
+            run.stop.stop();
+            if let Some(node) = &run.node {
+                stopped.push(node.clone());
+            }
+        }
+        let ended = if self.active.is_empty() {
+            None
+        } else {
+            let (sender, receiver) = oneshot::channel();
+            self.idle.push(sender);
+            Some(receiver)
+        };
+        let grace = Duration::from_secs(u64::from(
+            TaskChecksSettings::get_global(cx).kill_grace_seconds,
+        ));
+        let bound = self.clock.sleep(grace);
+        cx.spawn(async move |_, _| {
+            if let Some(ended) = ended {
+                let mut ended = ended.fuse();
+                let mut bound = bound.fuse();
+                select_biased! {
+                    _ = ended => {},
+                    _ = bound => {},
+                }
+            }
+            stopped
         })
+    }
+
+    /// Takes runs again after [`Self::drain`], when the writer stays in this process.
+    pub fn undrain(&mut self) {
+        self.drained = false;
+    }
+
+    /// Whether the engine is drained.
+    pub fn is_drained(&self) -> bool {
+        self.drained
+    }
+
+    /// Writes `row` as the live row of `check` of `task_id`, at most once per task per
+    /// `task_checks.live_write_ms`; a later row of the same task waits and replaces earlier
+    /// ones.
+    fn write_live(&mut self, task_id: &str, check: &str, row: LiveRow, cx: &mut Context<Self>) {
+        if self.drained {
+            return;
+        }
+        let Some(writer) = self.active.get(task_id).map(|run| run.writer.clone()) else {
+            return;
+        };
+        let interval =
+            Duration::from_millis(u64::from(TaskChecksSettings::get_global(cx).live_write_ms));
+        let row = self.live_rows.next_row(task_id, check, row);
+        let now = self.clock.now();
+        match self
+            .live_rows
+            .update(&writer, task_id, check, row, now, interval)
+        {
+            Flush::Now => self.flush_live(task_id),
+            Flush::After(wait) => {
+                let wait = self.clock.sleep(wait);
+                let epoch = self.live_epoch;
+                let task_id = task_id.to_string();
+                cx.spawn(async move |this, cx| {
+                    wait.await;
+                    this.update(cx, |engine, _| {
+                        if engine.live_epoch == epoch {
+                            engine.flush_live(&task_id);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Flush::Scheduled | Flush::Unchanged => {}
+        }
+    }
+
+    fn flush_live(&mut self, task_id: &str) {
+        if self.drained {
+            return;
+        }
+        if let Err(error) = self.live_rows.flush(task_id, self.clock.now()) {
+            log::error!("writing the live rows of checks: {error:#}");
+        }
+        if !self.active.contains_key(task_id) {
+            self.live_rows.release(task_id);
+        }
+    }
+
+    /// Whether the live rows keep anything of the task, for tests.
+    #[cfg(test)]
+    pub(crate) fn keeps_live_task(&self, task_id: &str) -> bool {
+        self.live_rows.has_task(task_id)
+    }
+
+    /// The live rows written so far, for tests.
+    #[cfg(test)]
+    pub(crate) fn live_writes(&self) -> Vec<crate::live::LiveWrite> {
+        self.live_rows.writes.clone()
     }
 
     fn plan(&self, request: RunChecksRequest, cx: &App) -> Result<Plan, Refusal> {
@@ -484,6 +657,9 @@ impl ChecksEngine {
             tree,
             writer,
         } = self.preflight(&request.task_id, request.checks.as_deref(), cx)?;
+        if self.drained {
+            return Err(Refusal::Draining { task: task.name });
+        }
         if self.active.contains_key(&request.task_id) {
             return Err(Refusal::Running { task: task.name });
         }
@@ -522,11 +698,28 @@ impl ChecksEngine {
                 }),
                 LiveState::Rerun { .. } => None,
             };
+            let row = match &live {
+                Some(Live::Waiting { pool, place, .. }) => Some(LiveRow::Waiting {
+                    pool: pool.clone(),
+                    place: *place,
+                    since: (self.now)(),
+                }),
+                Some(Live::Running { part, of, kept }) => Some(LiveRow::Running {
+                    part: *part,
+                    of: *of,
+                    kept: *kept,
+                    since: (self.now)(),
+                }),
+                None => None,
+            };
             if let Some(run) = self.active.get_mut(task_id) {
                 match live {
                     Some(live) => run.live.insert(check.to_string(), live),
                     None => run.live.remove(check),
                 };
+            }
+            if let Some(row) = row {
+                self.write_live(task_id, check, row, cx);
             }
             if let LiveState::Waiting { status, .. } = state {
                 cx.emit(ChecksEvent::Waiting {
@@ -576,6 +769,11 @@ impl ChecksEngine {
         if let Some(run) = self.active.get_mut(task_id) {
             run.live.remove(check);
         }
+        let row = LiveRow::Ended {
+            verdict: verdict.clone(),
+            since: (self.now)(),
+        };
+        self.write_live(task_id, check, row, cx);
         if let Some(state) = state {
             self.current
                 .entry(task_id.to_string())
@@ -743,8 +941,7 @@ async fn prepare(
             changed.unbounded_send(Message::Changed).ok();
         })),
         project_id: task.project.location().id.clone(),
-        // A run's worktree is only a tree here; no workflow node asked for the check.
-        node: None,
+        node: plan.request.node.clone(),
         pools: plan.pools.clone(),
         clock: plan.clock.clone(),
         on_live: Some(Rc::new(move |state: &LiveState| {
