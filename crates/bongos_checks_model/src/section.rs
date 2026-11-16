@@ -44,6 +44,20 @@ pub enum Live {
     Running { part: u32, of: u32, kept: u32 },
 }
 
+impl Live {
+    /// What a running check is doing, as one line: "waiting: test-slots, place 2, 4m 0s" or
+    /// "running part 5 of 8, 4 kept".
+    pub fn text(&self) -> String {
+        match self {
+            Self::Waiting { pool, place, secs } => format!(
+                "waiting: {pool}, place {place}, {}",
+                duration_text(secs * 1000)
+            ),
+            Self::Running { part, of, kept } => format!("running part {part} of {of}, {kept} kept"),
+        }
+    }
+}
+
 /// Whether the task has a tree to check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeState {
@@ -182,17 +196,8 @@ fn row_line(
     };
 
     let (result, tone) = match (&status, live) {
-        (_, Some(Live::Waiting { pool, place, secs })) => (
-            format!(
-                "waiting: {pool}, place {place}, {}",
-                duration_text(secs * 1000)
-            ),
-            Tone::Muted,
-        ),
-        (_, Some(Live::Running { part, of, kept })) => (
-            format!("running part {part} of {of}, {kept} kept"),
-            Tone::Normal,
-        ),
+        (_, Some(live @ Live::Waiting { .. })) => (live.text(), Tone::Muted),
+        (_, Some(live @ Live::Running { .. })) => (live.text(), Tone::Normal),
         (RowStatus::Satisfied { accepted_by, .. }, None) => (
             match (accepted_by, shown) {
                 (Some(by), _) => format!("accepted by {by}"),

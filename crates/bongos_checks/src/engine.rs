@@ -207,6 +207,8 @@ pub enum ChecksEvent {
         check: String,
         verdict: Verdict,
     },
+    /// The engine takes runs again after a drain ([`ChecksEngine::undrain`]).
+    Undrained,
 }
 
 /// The Checks section of a task and what is live in it now.
@@ -579,6 +581,92 @@ impl ChecksEngine {
         self.active.contains_key(task_id)
     }
 
+    /// The task workflow run `run` works on, as the workflow engine knows it.
+    pub fn task_of_run(&self, run: &str, cx: &App) -> Option<String> {
+        self.runs.task_of(run, cx)
+    }
+
+    /// The workflow node (a `use = "checks"` node) the task's live run is for; `None` when no
+    /// run is live or it is a manual one.
+    pub fn node_of(&self, task_id: &str) -> Option<&(RunId, NodeKey)> {
+        self.active.get(task_id)?.node.as_ref()
+    }
+
+    /// The live run for workflow node `key` of run `run`: its task, and what each of its checks
+    /// is doing now.
+    pub fn node_live(&self, run: &str, key: &NodeKey) -> Option<(&str, &BTreeMap<String, Live>)> {
+        self.active.iter().find_map(|(task_id, active)| {
+            let (node_run, node_key) = active.node.as_ref()?;
+            (node_run == run && node_key == key).then_some((task_id.as_str(), &active.live))
+        })
+    }
+
+    /// After a relaunch: stops the processes an earlier bongos left running for the parts of
+    /// workflow node `key` of run `run` (on `task_id`), found through their unfinished records.
+    /// The records stay unfinished, so the node's next try resumes them with their finished
+    /// parts. Nothing is stopped while this engine runs that node itself. Resolves with one
+    /// outcome per part of each such record.
+    pub fn kill_node_orphans(
+        &self,
+        task_id: &str,
+        run: &str,
+        key: &NodeKey,
+        cx: &App,
+    ) -> Task<Vec<bongos_workflow::process::OrphanOutcome>> {
+        if self.node_live(run, key).is_some() {
+            return Task::ready(Vec::new());
+        }
+        let Some(task) = self.task(task_id, cx) else {
+            return Task::ready(Vec::new());
+        };
+        let node_key = key.to_string();
+        let parts: Vec<_> = task_records(&task)
+            .into_iter()
+            .filter(|record| {
+                !record.is_finished()
+                    && matches!(&record.started_by, StartedBy::Run { run_id, node_key: started }
+                        if run_id == run && *started == node_key)
+            })
+            .flat_map(|record| record.parts)
+            .collect();
+        if parts.is_empty() {
+            return Task::ready(Vec::new());
+        }
+        cx.background_spawn(async move { crate::process::kill_orphan_parts(&parts) })
+    }
+
+    /// At load: stops the processes an earlier bongos left running for the parts of every
+    /// unfinished task record in the store of `writer` (a person's run or a workflow node's), but
+    /// those of a task this engine runs now. The records stay unfinished, so the next run on the
+    /// same key resumes from their finished parts. Resolves with one outcome per part of each
+    /// such record.
+    pub fn kill_store_orphans(
+        &self,
+        writer: &StateWriter,
+        cx: &App,
+    ) -> Task<Vec<bongos_workflow::process::OrphanOutcome>> {
+        let records = match writer.read(|read| scan_records(read, "")) {
+            Ok(records) => records,
+            Err(error) => {
+                log::error!("reading the checks records to stop orphan parts: {error:#}");
+                return Task::ready(Vec::new());
+            }
+        };
+        let parts: Vec<_> = records
+            .into_iter()
+            .filter(|record| {
+                !record.is_finished()
+                    && !matches!(record.started_by, StartedBy::Landing { .. })
+                    && !self.active.contains_key(&record.task_id)
+            })
+            .flat_map(|record| record.parts)
+            .collect();
+        if parts.is_empty() {
+            return Task::ready(Vec::new());
+        }
+        cx.background_spawn(async move { crate::process::kill_orphan_parts(&parts) })
+    }
+
     /// Stops the run of the task: the part that runs is stopped and no further check starts.
     /// False when no run is live.
     pub fn cancel(&mut self, task_id: &str) -> bool {
@@ -808,11 +896,14 @@ impl ChecksEngine {
         }
     }
 
-    /// Takes runs again after [`Self::drain`], when the writer stays in this process.
-    pub fn undrain(&mut self) {
+    /// Takes runs again after [`Self::drain`], when the writer stays in this process, and says so
+    /// with [`ChecksEvent::Undrained`]: a workflow checks node the drain stopped starts again
+    /// from its kept parts.
+    pub fn undrain(&mut self, cx: &mut Context<Self>) {
         self.drained = false;
         // The drain cleared the hold rows: the decider writes them again.
         self.decider.poke_all();
+        cx.emit(ChecksEvent::Undrained);
     }
 
     /// Whether the engine is drained.
@@ -894,6 +985,12 @@ impl ChecksEngine {
             tree,
             writer,
         } = self.preflight(&request.task_id, request.checks.as_deref(), cx)?;
+        let tree = match self.node_branch_tree(&request, cx) {
+            None => tree,
+            Some(Some(branch)) => branch,
+            // Never the run's own worktree in its stead.
+            Some(None) => return Err(Refusal::NoTree { task: task.name }),
+        };
         if self.drained {
             return Err(Refusal::Draining { task: task.name });
         }
@@ -915,6 +1012,23 @@ impl ChecksEngine {
             leases: Rc::default(),
             recorded: None,
         })
+    }
+
+    /// For a workflow node in a fan-out branch: `Some` with the worktree of that branch, or
+    /// `Some(None)` when it is not there. `None` for any other request, which runs on the task's
+    /// tree.
+    fn node_branch_tree(&self, request: &RunChecksRequest, cx: &App) -> Option<Option<TaskTree>> {
+        let (run, key) = request.node.as_ref()?;
+        let (fan, index) = key.branch.last()?;
+        Some(
+            self.runs
+                .branch_worktree(run, fan, *index, cx)
+                .filter(|path| path.is_dir())
+                .map(|path| TaskTree {
+                    path,
+                    run: Some(run.clone()),
+                }),
+        )
     }
 
     /// Applies what a check run said.

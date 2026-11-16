@@ -1,7 +1,8 @@
 //! Which tree a task's checks run in. The first of these that exists wins: the worktree of the
 //! task's active workflow run, the tree a lane serves ([`TaskTrees::tip`]), the worktree of the
 //! task's last ended run, and the `worktree` of the task's file. A task with none has no tree to
-//! check.
+//! check. A workflow checks node in a fan-out branch runs in that branch's worktree instead, and
+//! is refused when it is not there.
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,15 @@ pub trait RunWorktrees: 'static {
     fn active(&self, task_id: &str, cx: &App) -> Option<(RunId, PathBuf)>;
     /// The run of the task that ended last and its worktree; the caller checks it still exists.
     fn last_ended(&self, task_id: &str, cx: &App) -> Option<(RunId, PathBuf)>;
+    /// The task workflow run `run` works on.
+    fn task_of(&self, _run: &str, _cx: &App) -> Option<String> {
+        None
+    }
+    /// The worktree of fan-out branch `index` of node `fan` in run `run`, whether or not it
+    /// exists now.
+    fn branch_worktree(&self, _run: &str, _fan: &str, _index: u32, _cx: &App) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// [`RunWorktrees`] over the app's workflow engine; nothing while there is none.
@@ -49,6 +59,21 @@ impl RunWorktrees for WorkflowRunWorktrees {
                 let path = lifecycle.worktree(&run)?.path.clone();
                 Some((run, path))
             })
+    }
+
+    fn task_of(&self, run: &str, cx: &App) -> Option<String> {
+        let engine = cx.try_global::<WorkflowEngine>()?;
+        let lifecycle = engine.lifecycle();
+        lifecycle.task_of(run).map(str::to_string)
+    }
+
+    fn branch_worktree(&self, run: &str, fan: &str, index: u32, cx: &App) -> Option<PathBuf> {
+        let engine = cx.try_global::<WorkflowEngine>()?;
+        let lifecycle = engine.lifecycle();
+        let run_dir = &lifecycle.worktree(run)?.run_dir;
+        Some(bongos_workflow::worktrees::branch_worktree_path(
+            run_dir, fan, index,
+        ))
     }
 }
 
