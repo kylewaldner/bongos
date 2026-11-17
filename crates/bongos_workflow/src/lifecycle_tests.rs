@@ -1536,6 +1536,70 @@ fn load_runs_skips_a_record_without_an_event_log() {
 }
 
 #[test]
+fn load_runs_skips_a_damaged_log_and_loads_the_rest() {
+    let world = World::new();
+    let damaged = seed(&world, "single", mid_node);
+    let good = seed(&world, "single", mid_node);
+    fs::write(events_of(&world, &damaged), "not json\n").unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![good]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(report.skipped[0].0.ends_with(&damaged));
+    assert!(lifecycle.state(&damaged).is_none());
+}
+
+#[test]
+fn load_runs_skips_a_run_id_repeated_in_another_task_directory() {
+    let mut world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let other = world.root.join("work/app/tasks/other");
+    fs::create_dir_all(other.join("runs")).unwrap();
+    let copy = other.join("runs").join(&run);
+    fs::create_dir_all(&copy).unwrap();
+    let source = run_dir_of(&world, &run);
+    let mut stack = vec![source.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let target = copy.join(path.strip_prefix(&source).unwrap());
+            if path.is_dir() {
+                fs::create_dir_all(&target).unwrap();
+                stack.push(path);
+            } else {
+                fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+    let mut file = TaskFile::new("Other", Kind::PrShip);
+    file.id = "other".to_string();
+    let other_task = task(other, file, Vec::new());
+    world.tree.projects[0].task.children.push(other_task);
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![run.clone()]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert_eq!(lifecycle.all_runs(), vec![run]);
+}
+
+#[test]
+fn load_runs_takes_the_revision_from_the_log_not_from_a_stray_directory() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let attempt = attempt_dir(&run_dir_of(&world, &run), 1);
+    let copy = attempt.join("definition/1");
+    fs::create_dir_all(&copy).unwrap();
+    fs::write(copy.join(DEFINITION_FILE), "broken").unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![run.clone()], "{report:?}");
+    assert_eq!(lifecycle.state(&run).unwrap().definition_rev, None);
+}
+
+#[test]
 fn load_runs_with_no_runs_directory_loads_and_writes_nothing() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();

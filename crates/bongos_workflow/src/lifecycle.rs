@@ -339,8 +339,8 @@ pub struct HaltWorktrees {
     pub branches: Vec<PathBuf>,
 }
 
-/// The marker file `workflow: clear finished` leaves in a run directory it cleared; a run with it
-/// is never loaded.
+/// The marker file the `workflow: clear finished` action will leave in a run directory it
+/// clears; a run with it is never loaded.
 pub const CLEARED_FILE: &str = "cleared";
 
 /// What [`Lifecycle::load_runs`] did.
@@ -708,8 +708,9 @@ impl<R: Runner> Lifecycle<R> {
 
     /// Loads the runs a relaunch finds: `runs/<id>/run.toml` under every task directory of `tree`.
     /// A run whose directory holds the `cleared` marker, whose `run.toml` does not parse, that has
-    /// no `events.jsonl`, or whose task directory or record cannot be read is logged and skipped;
-    /// the others still load. All loaded runs go to [`Runtime::load_all`] in one call, so orphan
+    /// no `events.jsonl` (or one that cannot be read or parsed), whose id repeats one already
+    /// read in this batch, or whose task directory or record cannot be read is logged and skipped;
+    /// the others still load. The definition revision comes from the log's last `DefinitionReloaded`. All loaded runs go to [`Runtime::load_all`] in one call, so orphan
     /// processes die in one grace period and a run with a started key and no finish comes back
     /// interrupted; each is bound to its attempt's worktree. Nothing resumes by itself. With no
     /// `runs/` directory this loads nothing and writes nothing. Takes no lock. A run already
@@ -718,6 +719,7 @@ impl<R: Runner> Lifecycle<R> {
         let mut report = LoadReport::default();
         let mut entries: Vec<RunEntry> = Vec::new();
         let mut specs: Vec<RunSpec> = Vec::new();
+        let mut seen: std::collections::BTreeSet<RunId> = std::collections::BTreeSet::new();
         for task in tree.tasks() {
             let runs = bongos_work_model::layout::runs_dir(&task.dir);
             let listing = match fs::read_dir(&runs) {
@@ -745,7 +747,16 @@ impl<R: Runner> Lifecycle<R> {
             dirs.sort();
             for dir in dirs {
                 match self.read_run(task, &dir) {
+                    Ok(Some((entry, _))) if seen.contains(&entry.id) => skip(
+                        &mut report,
+                        &dir,
+                        format!(
+                            "run {} is already loaded from another task directory",
+                            entry.id
+                        ),
+                    ),
                     Ok(Some((entry, spec))) => {
+                        seen.insert(entry.id.clone());
                         entries.push(entry);
                         specs.push(spec);
                     }
@@ -793,11 +804,16 @@ impl<R: Runner> Lifecycle<R> {
                 attempt.n
             ));
         }
-        let rev = fs::read_dir(attempt_dir.join("definition"))
-            .map_err(|error| format!("no definition copy: {error}"))?
-            .filter_map(Result::ok)
-            .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
-            .max()
+        // The log is authoritative for the revision: a `definition/<n>` directory with no
+        // `DefinitionReloaded` is a reload that did not finish. This parse only reads; the
+        // runtime's own open repairs a cut tail later.
+        let events_path = attempt_dir.join(crate::runtime::EVENTS_FILE);
+        let bytes = fs::read(&events_path)
+            .map_err(|error| format!("{}: {error}", crate::runtime::EVENTS_FILE))?;
+        let parsed =
+            bongos_workflow_model::record::parse_log(&bytes).map_err(|error| error.to_string())?;
+        let rev = bongos_workflow_model::record::replay(&parsed.events)
+            .definition_rev
             .unwrap_or(0);
         let definition = read_definition(&definition_copy_dir(&attempt_dir, rev))?;
         let worktree_path = PathBuf::from(&attempt.worktree);
