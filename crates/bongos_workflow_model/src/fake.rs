@@ -121,7 +121,7 @@ impl FakeRunner {
         self.started.iter().filter(|key| key.node == node).count()
     }
 
-    /// Runs until the run ends or waits for Kyle (an interruption, a halt, a failed end).
+    /// Runs until the run ends or waits for Kyle (an interruption, a halt, a hold, a failed end).
     pub fn run(&mut self) -> RunState {
         for _ in 0..10_000 {
             if self.apply_step() || self.finish_oldest() || self.wake_sleeping() {
@@ -135,7 +135,18 @@ impl FakeRunner {
     /// Applies one [`scheduler::step`]; whether it gave any command.
     pub fn apply_step(&mut self) -> bool {
         let state = self.state();
-        let running = state.running.len() + self.other_sessions;
+        // A checks node's key holds no session slot.
+        let sessions = state
+            .running
+            .keys()
+            .filter(|key| {
+                !self
+                    .definition
+                    .node(&key.node)
+                    .is_some_and(crate::definition::Node::is_checks)
+            })
+            .count();
+        let running = sessions + self.other_sessions;
         let free = self.limits.free_sessions(running);
         let commands = scheduler::step(&self.definition, &state, &self.limits, free);
         if commands.is_empty() {
@@ -151,7 +162,7 @@ impl FakeRunner {
         true
     }
 
-    /// Resumes after a halt or an interruption: `Resumed`, then a new try of every key of
+    /// Resumes after a halt, an interruption or a hold: `Resumed`, then a new try of every key of
     /// [`scheduler::resume_set`].
     pub fn resume(&mut self) {
         let keys = scheduler::resume_set(&self.state());
@@ -199,6 +210,10 @@ impl FakeRunner {
                 sha: "0000000".to_string(),
             }),
             Command::CancelBranch { branch, .. } => self.cancel(branch),
+            Command::Hold { key, failure } => self.events.push(Event::Held {
+                key: key.clone(),
+                failure: failure.clone(),
+            }),
             Command::End { state, failure } => self.events.push(Event::Ended {
                 state: *state,
                 failure: failure.clone(),

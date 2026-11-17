@@ -2874,6 +2874,40 @@
       "max_output_mb": 10,
     },
   },
+  "task_checks": {
+    // Whether task checks are on. It is on by default; set it to false and no check runs,
+    // no record is written and every task check command is hidden and only says "Task
+    // checks are off (task_checks.enabled)".
+    "enabled": true,
+    // The directory that holds the output files of check runs. Null means the task's
+    // files folder, `checks/`.
+    "output_dir": null,
+    // Days a run's output file is kept; the record stays after the file is deleted.
+    "output_retention_days": 30,
+    // Most MB of output kept per run; past it the middle is cut and marked.
+    "output_limit_mb": 256,
+    // The largest result file, in KB, a check may write.
+    "result_file_limit_kb": 256,
+    // Minutes a check may run when it sets no `budget_minutes`. Null means no time budget.
+    "default_budget_minutes": null,
+    // Times a run that gave no verdict is run again by itself.
+    "no_verdict_reruns": 2,
+    // Minutes between a no-verdict run and its rerun.
+    "no_verdict_rerun_minutes": 5,
+    // Hours a check waits for a pool slot before it gives no verdict.
+    "pool_wait_limit_hours": 4,
+    // Seconds a stopped check has to end after its first signal before it is killed.
+    "kill_grace_seconds": 5,
+    // The most parts of one check that run at the same time.
+    "parallel_parts_max": 4,
+    // Where scratch trees for runs on a base tree are made. Null means
+    // `<data dir>/checks-scratch`.
+    "scratch_dir": null,
+    // Milliseconds the tree key waits for edits to settle before it is computed again.
+    "tree_key_debounce_ms": 2000,
+    // At most one live-state write per task per this many milliseconds.
+    "live_write_ms": 1000,
+  },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
   "server_url": "https://bongos.invalid",

@@ -18,7 +18,10 @@ pub mod task {
             /// Picks a task and completes its ships todo although the task it is stacked on is
             /// not Done, leaving a marker.
             AdvanceOverride,
-            /// Picks a task and marks it done, whatever its todos.
+            /// Picks a task and marks it done, whatever its todos, unless a done hold source
+            /// refuses.
+            Complete,
+            /// The same as `task: complete`, kept as an alias.
             Close,
             /// Picks a task and cancels it. A group with open tasks asks first.
             #[action(name = "Drop")]
@@ -91,6 +94,28 @@ pub mod task {
             /// or thinking (`task: think`). Chat and run say which feature provides them when
             /// it is not there yet.
             Mode,
+            /// Shows everything about a task in a tab: goal, state, documents, todos, children,
+            /// edges and the sections other features add. Acts on the task at point, else the
+            /// focused task, else asks.
+            ShowDetails,
+            /// Debug builds only: writes the lines of the details of a task to
+            /// `task-details.txt` in the logs directory.
+            DumpDetails,
+        ]
+    );
+}
+
+/// Actions of the task details tab.
+pub mod task_detail {
+    use gpui::actions;
+
+    actions!(
+        task_detail,
+        [
+            /// Reads the task again and rebuilds the lines.
+            Refresh,
+            /// Shows or hides the sources behind the rows of the sections that have them.
+            ToggleSources,
         ]
     );
 }

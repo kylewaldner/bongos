@@ -1,0 +1,71 @@
+[[check]]
+name = "dup"
+run = "checks/a"
+
+[[check]]
+name = "dup"
+run = "checks/a"
+
+[[check]]
+name = "both"
+run = "checks/a"
+command = ["x"]
+
+[[check]]
+name = "neither"
+
+[[check]]
+name = "codes"
+command = ["x"]
+pass = [0, 2]
+fail = [1, 2]
+
+[[check]]
+name = "regex"
+command = ["x"]
+summary = "("
+
+[[check]]
+name = "zero-parts"
+command = ["x"]
+parts = 0
+
+[[check]]
+name = "self"
+command = ["x"]
+or_accepted = "self"
+
+[[check]]
+name = "escape"
+run = "../outside"
+
+[[check]]
+name = "absolute"
+run = "/bin/sh"
+
+[[check]]
+name = "gone"
+run = "checks/gone"
+
+[[check]]
+name = "bad-scope"
+command = ["x"]
+scope = "some"
+
+[[check]]
+name = "bad-scope-type"
+command = ["x"]
+scope = 3
+
+[[check]]
+name = "bad-needs"
+command = ["x"]
+needs = [3, { mode = "shared" }]
+
+[[check]]
+name = "unknown-key"
+command = ["x"]
+retries = 2
+
+[[check]]
+command = ["x"]

@@ -48,10 +48,13 @@ pub enum FailureReason {
     /// The run reached a failure end of its definition (the workflow itself chose to fail). Not
     /// in the product's list: the engine names it so a failed run always records why.
     FailureEndReached,
+    /// A checks node gave no verdict and the definition has no route for that. The run is held
+    /// on the node rather than failed, so a resume reruns just that node.
+    CheckNoVerdict,
 }
 
 impl FailureReason {
-    pub const ALL: [FailureReason; 22] = [
+    pub const ALL: [FailureReason; 23] = [
         Self::NodeOutputInvalid,
         Self::AgentExitedNonzero,
         Self::ProgramExitedNonzero,
@@ -74,6 +77,7 @@ impl FailureReason {
         Self::OutcomePromisedNotDelivered,
         Self::InterruptedNotResumed,
         Self::FailureEndReached,
+        Self::CheckNoVerdict,
     ];
 
     /// The text the run view and the run record show.
@@ -101,6 +105,7 @@ impl FailureReason {
             Self::OutcomePromisedNotDelivered => "outcome promised but not delivered",
             Self::InterruptedNotResumed => "interrupted and not resumed",
             Self::FailureEndReached => "failure end reached",
+            Self::CheckNoVerdict => "check had no verdict",
         }
     }
 
@@ -134,7 +139,8 @@ impl FailureReason {
             | Self::WaitTimedOut
             | Self::GateCancelled
             | Self::InterruptedNotResumed
-            | Self::FailureEndReached => FailureClass::Task,
+            | Self::FailureEndReached
+            | Self::CheckNoVerdict => FailureClass::Task,
         }
     }
 

@@ -277,6 +277,9 @@ pub struct SettingsContent {
     /// Settings for workflows: runs of node graphs on a task.
     pub workflows: Option<WorkflowsSettingsContent>,
 
+    /// Settings for task checks: scripts and commands that must pass before a task is done.
+    pub task_checks: Option<TaskChecksSettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -1654,6 +1657,72 @@ pub struct WorkflowProgramsSettingsContent {
     ///
     /// Default: 10
     pub max_output_mb: Option<u64>,
+}
+
+/// Settings for task checks.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct TaskChecksSettingsContent {
+    /// Whether task checks are on. It is on by default; set it to false and no check runs, no
+    /// record is written and every task check command is hidden and only says "Task checks are
+    /// off (task_checks.enabled)".
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// The directory that holds the output files of check runs. Null means the task's files
+    /// folder, `checks/`.
+    ///
+    /// Default: null
+    pub output_dir: Option<String>,
+    /// Days a run's output file is kept; the record stays after the file is deleted.
+    ///
+    /// Default: 30
+    pub output_retention_days: Option<u32>,
+    /// Most MB of output kept per run; past it the middle is cut and marked.
+    ///
+    /// Default: 256
+    pub output_limit_mb: Option<u64>,
+    /// The largest result file, in KB, a check may write.
+    ///
+    /// Default: 256
+    pub result_file_limit_kb: Option<u64>,
+    /// Minutes a check may run when it sets no `budget_minutes`. Null means no time budget.
+    ///
+    /// Default: null
+    pub default_budget_minutes: Option<u32>,
+    /// Times a run that gave no verdict is run again by itself.
+    ///
+    /// Default: 2
+    pub no_verdict_reruns: Option<u32>,
+    /// Minutes between a no-verdict run and its rerun.
+    ///
+    /// Default: 5
+    pub no_verdict_rerun_minutes: Option<u32>,
+    /// Hours a check waits for a pool slot before it gives no verdict.
+    ///
+    /// Default: 4
+    pub pool_wait_limit_hours: Option<u32>,
+    /// Seconds a stopped check has to end after its first signal before it is killed.
+    ///
+    /// Default: 5
+    pub kill_grace_seconds: Option<u32>,
+    /// The most parts of one check that run at the same time.
+    ///
+    /// Default: 4
+    pub parallel_parts_max: Option<u32>,
+    /// Where scratch trees for runs on a base tree are made. Null means
+    /// `<data dir>/checks-scratch`.
+    ///
+    /// Default: null
+    pub scratch_dir: Option<String>,
+    /// Milliseconds the tree key waits for edits to settle before it is computed again.
+    ///
+    /// Default: 2000
+    pub tree_key_debounce_ms: Option<u32>,
+    /// At most one live-state write per task per this many milliseconds.
+    ///
+    /// Default: 1000
+    pub live_write_ms: Option<u32>,
 }
 
 /// Settings for chat sessions.

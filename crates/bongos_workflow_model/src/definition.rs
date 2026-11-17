@@ -48,6 +48,35 @@ const NODE_KEYS: &[&str] = &[
 ];
 const END_KEYS: &[&str] = &["kind", "outcomes", "reason"];
 
+/// The shipped program node that runs a task's checks, named by `use`.
+pub const CHECKS_PROGRAM: &str = "checks";
+/// The `verdict` values of a checks node's fixed output.
+pub const CHECKS_VERDICTS: [&str; 3] = ["pass", "fail", "no_verdict"];
+/// The verdict of a checks node that could not decide; unrouted, it holds the run.
+pub const NO_VERDICT: &str = "no_verdict";
+
+/// The fixed output of a checks node, every field on `line`. A checks node that declares no
+/// `output` gets this one when parsed; a declared one must equal it.
+pub fn checks_output(line: usize) -> Vec<OutputField> {
+    let field = |name: &str, field_type: FieldType| OutputField {
+        name: name.to_string(),
+        line,
+        field_type,
+        optional: false,
+        outcome: None,
+    };
+    vec![
+        field(
+            "verdict",
+            FieldType::Choice(CHECKS_VERDICTS.map(String::from).to_vec()),
+        ),
+        field("failing", FieldType::List(ItemType::Text)),
+        field("scope", FieldType::Text),
+        field("evidence", FieldType::List(ItemType::Text)),
+        field("summary", FieldType::Text),
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("line {line}: {message}")]
 pub struct ParseError {
@@ -194,6 +223,17 @@ pub struct Node {
     pub gate: Option<Gate>,
     pub polls: Option<Polls>,
     pub settings: Settings,
+}
+
+impl Node {
+    /// Whether this is a program node running the shipped checks program.
+    pub fn is_checks(&self) -> bool {
+        self.kind.value == NodeKind::Program
+            && self
+                .use_node
+                .as_ref()
+                .is_some_and(|use_node| use_node.value == CHECKS_PROGRAM)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -654,6 +694,16 @@ fn convert_node(
         })
         .collect();
 
+    let mut output: Vec<OutputField> = output.into_iter().map(|(_, field)| field).collect();
+    let is_checks = raw.kind.get_ref() == &NodeKind::Program
+        && raw
+            .use_node
+            .as_ref()
+            .is_some_and(|use_node| use_node.get_ref() == CHECKS_PROGRAM);
+    if is_checks && output.is_empty() {
+        output = checks_output(line);
+    }
+
     Ok(Node {
         name,
         line,
@@ -671,7 +721,7 @@ fn convert_node(
                 ..permissions.into_inner()
             }
         }),
-        output: output.into_iter().map(|(_, field)| field).collect(),
+        output,
         routes,
         join: raw.join.map(|join| {
             let line = lines.line_of(&join);

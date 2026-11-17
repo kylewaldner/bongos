@@ -693,6 +693,7 @@ fn fixture_task(dir: &str) -> Task {
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         broken_edges: Vec::new(),
         files: BTreeMap::new(),
         hashes: BTreeMap::new(),

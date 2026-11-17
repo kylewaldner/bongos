@@ -11,11 +11,17 @@ use std::fmt;
 use std::path::{Component, Path};
 
 use crate::definition::{
-    AgentKind, Definition, EndKind, FieldType, Node, NodeKind, Outcome, Route, Target,
+    AgentKind, CHECKS_PROGRAM, Definition, EndKind, FieldType, NO_VERDICT, Node, NodeKind, Outcome,
+    OutputField, Route, Target, checks_output,
 };
 
-/// The program nodes bongos ships, named by `use` (D10).
-pub const SHIPPED_PROGRAMS: &[&str] = &["merge", "wait"];
+/// The program nodes bongos ships, named by `use`.
+pub const SHIPPED_PROGRAMS: &[&str] = &["merge", "wait", CHECKS_PROGRAM];
+
+/// The `with` keys a checks node takes.
+const CHECKS_WITH_KEYS: &[&str] = &["checks", "items", "items_from", "item", "repeat", "tree"];
+/// The trees a checks node may run on.
+const CHECKS_TREES: &[&str] = &["tip", "base"];
 
 /// The permission modes an agent node may declare: the modes Claude Code accepts (checked on
 /// 2.1.322, where `manual` replaced `default`) and `default`, which stays accepted and means
@@ -325,6 +331,11 @@ impl<'a> Validator<'a> {
 
         let graph = self.graph();
         self.check_graph(&graph);
+        for node in &definition.nodes {
+            if node.is_checks() {
+                self.check_items_from(node, &graph);
+            }
+        }
     }
 
     fn check_node(&mut self, node: &'a Node) {
@@ -673,6 +684,9 @@ impl<'a> Validator<'a> {
                 ),
             );
         }
+        if node.is_checks() {
+            self.check_checks_node(node);
+        }
         if let Some(language) = &node.language
             && language != PROGRAM_LANGUAGE
         {
@@ -713,6 +727,132 @@ impl<'a> Validator<'a> {
                 ceiling_key: "program_max_minutes",
             };
             self.check_cap(name, line, cap);
+        }
+    }
+
+    /// A checks node's output is fixed (parsing gives it to a node that declares none) and its
+    /// `with` takes only the keys the checks program reads, each of its type.
+    fn check_checks_node(&mut self, node: &'a Node) {
+        let name = node.name.as_str();
+        if !same_output(&node.output, &checks_output(node.line)) {
+            let line = node.output.first().map_or(node.line, |field| field.line);
+            self.error(
+                Some(name),
+                line,
+                "a checks node's output is fixed: verdict (choice: pass, fail, no_verdict), \
+                 failing (list of text), scope (text), evidence (list of text), summary (text); \
+                 leave `output` out or declare exactly these fields",
+            );
+        }
+        let line = node
+            .use_node
+            .as_ref()
+            .map_or(node.line, |use_node| use_node.line);
+        for (key, value) in &node.with {
+            let problem = match key.as_str() {
+                "checks" => (!is_text_list(value)).then_some("must be a list of check names"),
+                "items" => (!is_text_list(value)).then_some("must be a list of text"),
+                "items_from" => match value.as_str() {
+                    Some(reference) if reference.split_once('.').is_some() => None,
+                    _ => Some("must be \"<node>.<list field>\""),
+                },
+                "item" => (!value.is_str()).then_some("must be text"),
+                "repeat" => match value.as_integer() {
+                    Some(count) if count >= 1 => None,
+                    _ => Some("must be a positive integer"),
+                },
+                "tree" => match value.as_str() {
+                    Some(tree) if CHECKS_TREES.contains(&tree) => None,
+                    _ => Some("must be \"tip\" or \"base\""),
+                },
+                _ => {
+                    self.error(
+                        Some(name),
+                        line,
+                        format!(
+                            "unknown `with` key '{key}' for a checks node (allowed: {})",
+                            CHECKS_WITH_KEYS.join(", ")
+                        ),
+                    );
+                    continue;
+                }
+            };
+            if let Some(problem) = problem {
+                self.error(Some(name), line, format!("`with.{key}` {problem}"));
+            }
+        }
+        if node.with.contains_key("items") && node.with.contains_key("items_from") {
+            self.error(
+                Some(name),
+                line,
+                "a checks node takes `with.items` or `with.items_from`, not both",
+            );
+        }
+    }
+
+    /// `with.items_from = "<node>.<field>"` names a list field of a node that runs before this one.
+    fn check_items_from(&mut self, node: &'a Node, graph: &Graph<'a>) {
+        let Some((source, field)) = node
+            .with
+            .get("items_from")
+            .and_then(|value| value.as_str())
+            .and_then(|reference| reference.split_once('.'))
+        else {
+            return;
+        };
+        let name = node.name.as_str();
+        let line = node
+            .use_node
+            .as_ref()
+            .map_or(node.line, |use_node| use_node.line);
+        let Some(source_node) = self.definition.node(source) else {
+            self.error(
+                Some(name),
+                line,
+                format!("`with.items_from` names unknown node '{source}'"),
+            );
+            return;
+        };
+        match source_node
+            .output
+            .iter()
+            .find(|output| output.name == field)
+        {
+            None => self.error(
+                Some(name),
+                line,
+                format!("`with.items_from` names undeclared field '{field}' of '{source}'"),
+            ),
+            Some(output) if !matches!(output.field_type, FieldType::List(_)) => self.error(
+                Some(name),
+                line,
+                format!("`with.items_from` field '{field}' of '{source}' is not a list"),
+            ),
+            Some(_) => {}
+        }
+        let (Some(&from), Some(&to)) = (graph.index.get(source), graph.index.get(name)) else {
+            return;
+        };
+        let mut seen = vec![false; graph.edges.len()];
+        let mut queue = VecDeque::from([from]);
+        let mut runs_before = false;
+        while let Some(at) = queue.pop_front() {
+            for edge in &graph.edges[at] {
+                if edge.to == to {
+                    runs_before = true;
+                }
+                if !seen[edge.to] {
+                    seen[edge.to] = true;
+                    queue.push_back(edge.to);
+                }
+            }
+        }
+        if !runs_before || from == to {
+            self.error(
+                Some(name),
+                line,
+                format!("`with.items_from` names '{source}', which does not run before '{name}'"),
+            );
         }
     }
 
@@ -886,7 +1026,9 @@ impl<'a> Validator<'a> {
             return;
         }
 
-        let mut fields: Vec<(&str, &[String], usize)> = Vec::new();
+        // A checks node's `no_verdict` needs no route: unrouted, it holds the run.
+        let checks = node.is_checks();
+        let mut fields: Vec<(&str, Vec<&str>, usize)> = Vec::new();
         for field in &node.output {
             if let FieldType::Choice(values) = &field.field_type
                 && node.routes.iter().any(|route| {
@@ -896,7 +1038,12 @@ impl<'a> Validator<'a> {
                         .any(|condition| condition.field == field.name)
                 })
             {
-                fields.push((field.name.as_str(), values.as_slice(), field.line));
+                let values = values
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|value| !(checks && field.name == "verdict" && *value == NO_VERDICT))
+                    .collect();
+                fields.push((field.name.as_str(), values, field.line));
             }
         }
         if fields.is_empty() {
@@ -970,7 +1117,7 @@ impl<'a> Validator<'a> {
                     for value in values.iter() {
                         let mentioned = routes.iter().any(|route| {
                             route.when.iter().any(|condition| {
-                                condition.field == *field && &condition.value == value
+                                condition.field == *field && condition.value == *value
                             })
                         });
                         if !mentioned {
@@ -1306,6 +1453,26 @@ impl<'a> Validator<'a> {
             }
         }
     }
+}
+
+/// Whether two outputs declare the same fields, in any order and on any line.
+fn same_output(declared: &[OutputField], fixed: &[OutputField]) -> bool {
+    declared.len() == fixed.len()
+        && fixed.iter().all(|want| {
+            declared.iter().any(|field| {
+                field.name == want.name
+                    && field.field_type == want.field_type
+                    && field.optional == want.optional
+                    && field.outcome == want.outcome
+            })
+        })
+}
+
+/// Whether a `with` value is a list of strings.
+fn is_text_list(value: &toml::Value) -> bool {
+    value
+        .as_array()
+        .is_some_and(|items| items.iter().all(toml::Value::is_str))
 }
 
 /// A declared cap and the ceiling it must stay within.

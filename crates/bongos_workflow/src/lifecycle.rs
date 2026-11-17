@@ -182,7 +182,7 @@ pub enum RunStatus {
     Pausing,
     Paused,
     Halted,
-    /// At an open gate, or interrupted by a quit.
+    /// At an open gate, interrupted by a quit, or held on a check that gave no verdict.
     WaitingOnYou,
     Failed,
     Succeeded,
@@ -201,7 +201,10 @@ impl RunStatus {
         }
         if state.halted {
             Self::Halted
-        } else if !state.interrupted.is_empty() || !state.open_gates.is_empty() {
+        } else if !state.interrupted.is_empty()
+            || !state.open_gates.is_empty()
+            || !state.held.is_empty()
+        {
             Self::WaitingOnYou
         } else if state.paused {
             if state.running.is_empty() {
@@ -698,13 +701,14 @@ impl<R: Runner> Lifecycle<R> {
         })
     }
 
-    /// Resumes a paused, halted or interrupted run. Each key a halt stopped or a quit interrupted
-    /// reruns from its start in the same worktree, as a new try that does not count against
-    /// `retries`; completed keys are not rerun.
+    /// Resumes a paused, halted, interrupted or held run. Each key a halt stopped, a quit
+    /// interrupted or a check without a verdict held reruns from its start in the same worktree,
+    /// as a new try that does not count against `retries`; completed keys are not rerun.
     pub fn resume(&mut self, run: &str) -> Result<(), Refusal> {
         let state = self.entry(run).and_then(|_| self.state_of(run))?;
         let status = RunStatus::of(&state);
-        let resumable = state.paused || state.halted || !state.interrupted.is_empty();
+        let resumable =
+            state.paused || state.halted || !state.interrupted.is_empty() || !state.held.is_empty();
         if !resumable || !status.is_active() {
             return Err(wrong_state(status, "resume"));
         }

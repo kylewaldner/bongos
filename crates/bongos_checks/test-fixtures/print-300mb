@@ -1,0 +1,5 @@
+#!/bin/sh
+# Prints 300 MB of short lines, then a last line.
+yes "a line of check output that repeats" | head -c 314572800
+echo "the end"
+exit 0

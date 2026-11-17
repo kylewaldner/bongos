@@ -26,17 +26,30 @@ use crate::ref_watch::{REF_WATCH_LATENCY, RefDirs};
 use crate::seams::{DefinitionWriter, DefinitionWriters, ProjectSource, ProjectSources};
 use crate::{WorkStore, WriteError, WriteOutcome};
 
-/// The project repositories open in this process, which the commands on working copies and the
-/// handling of master files serve.
-#[derive(Default)]
-struct OpenRepos(Vec<Arc<LoadedProject>>);
+/// The project repositories open in this process, which the commands on working copies, the
+/// handling of master files and the readers of run state on other threads serve. Cloning shares
+/// the list.
+#[derive(Clone, Default)]
+pub struct OpenProjectRepos(Arc<parking_lot::Mutex<Vec<Arc<LoadedProject>>>>);
 
-impl gpui::Global for OpenRepos {}
+impl gpui::Global for OpenProjectRepos {}
+
+impl OpenProjectRepos {
+    /// The app's list, shared: it sees every repository registered later.
+    pub fn global(cx: &mut App) -> Self {
+        cx.default_global::<Self>().clone()
+    }
+
+    /// Every project repository registered with [`register_project_repo`], now.
+    pub fn list(&self) -> Vec<Arc<LoadedProject>> {
+        self.0.lock().clone()
+    }
+}
 
 /// Every project repository registered with [`register_project_repo`].
 pub(crate) fn open_repos(cx: &App) -> Vec<Arc<LoadedProject>> {
-    cx.try_global::<OpenRepos>()
-        .map(|repos| repos.0.clone())
+    cx.try_global::<OpenProjectRepos>()
+        .map(OpenProjectRepos::list)
         .unwrap_or_default()
 }
 
@@ -89,11 +102,10 @@ pub(crate) fn master_warning_of(task: &WorkTask, cx: &App) -> Option<String> {
 
 /// Makes `loaded` known to the commands on working copies and to the handling of master files.
 pub(crate) fn note_open_repo(loaded: &Arc<LoadedProject>, cx: &mut App) {
-    let repos = cx.default_global::<OpenRepos>();
-    repos
-        .0
-        .retain(|known| known.repo().location().id != loaded.repo().location().id);
-    repos.0.push(loaded.clone());
+    let repos = OpenProjectRepos::global(cx);
+    let mut list = repos.0.lock();
+    list.retain(|known| known.repo().location().id != loaded.repo().location().id);
+    list.push(loaded.clone());
 }
 
 /// `project: approve` of the change `change_id` in whichever open repository holds it, by the
@@ -404,7 +416,8 @@ impl DefinitionWriter for RepoWriter {
 
 /// Serves `loaded` in the Work view and routes writes to its tasks. First a landing a crash
 /// interrupted is completed, then its definitions are loaded; then every committed state
-/// transaction refreshes the store, after loading the definitions again when the verified commit
+/// transaction that names a task or a namespace in the tree refreshes the store (a write to
+/// `checks.live` alone does not), after loading the definitions again when the verified commit
 /// moved, and every change of the repository's refs compares master with the verified commit.
 /// The returned task does that until dropped.
 pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<()> {
@@ -466,7 +479,16 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
             return;
         };
         let refresh = async {
-            while let Some(StateEvent::Changed { .. }) = events.next().await {
+            while let Some(StateEvent::Changed {
+                task_ids,
+                namespaces,
+                ..
+            }) = events.next().await
+            {
+                // A write to a namespace outside the tree (`checks.live`) reads nothing again.
+                if !crate::store::state_change_refreshes_tree(&task_ids, &namespaces) {
+                    continue;
+                }
                 let reload = loaded.clone();
                 cx.background_spawn(async move {
                     let loaded = reload.load().await;
