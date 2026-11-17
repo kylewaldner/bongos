@@ -153,3 +153,34 @@ async fn test_perf_typing_through_a_session(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-g");
     cx.run_until_parked();
 }
+
+/// Typing 20 characters one by one into a session on the 100 MB buffer: no `on_input` takes over
+/// 2 ms on the main thread.
+#[gpui::test]
+async fn test_perf_large_file_typing_stays_responsive(cx: &mut TestAppContext) {
+    use crate::large_file_tests::{TYPED, large_text};
+    use crate::session_tests::type_slowly;
+    let text = large_text();
+    let (workspace, _editor, mut cx) = workspace_with(false, cx, move |project, window, cx| {
+        let buffer = cx.new(|cx| Buffer::local(text, cx));
+        let multibuffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        cx.new(|cx| Editor::for_multibuffer(multibuffer, Some(project.clone()), window, cx))
+    })
+    .await;
+    let cx = &mut cx;
+
+    start(Forward, &workspace, cx);
+    type_slowly(TYPED, cx);
+    cx.run_until_parked();
+
+    let state = test_session(&workspace, cx).expect("the session is open");
+    let stats = state.borrow().stats.clone();
+    assert_eq!(stats.inputs.len(), TYPED.len());
+    let slowest = stats.inputs.iter().max().copied().unwrap_or_default();
+    assert!(
+        slowest < Duration::from_millis(2),
+        "on_input took {slowest:?}"
+    );
+    cx.simulate_keystrokes("ctrl-g");
+    cx.run_until_parked();
+}
