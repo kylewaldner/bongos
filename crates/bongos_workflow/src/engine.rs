@@ -378,10 +378,17 @@ impl WorkflowEngine {
 
     /// One tick of the runs: the runner's snapshot is refreshed, then the lifecycle ticks under
     /// the current settings. Does nothing (and reads nothing) while no run is loaded, after a
-    /// quit or while workflows are off. Whether anything changed; the caller publishes.
+    /// quit, while workflows are off or while the runner is not connected (a queued run on disk
+    /// must not start a real node). Whether anything changed; the caller publishes.
     fn tick_runs(&self, cx: &App) -> bool {
-        if self.ticker.stopped() || self.lifecycle().all_runs().is_empty() {
+        if self.ticker.stopped() {
             return false;
+        }
+        {
+            let lifecycle = self.lifecycle();
+            if lifecycle.all_runs().is_empty() || !lifecycle.runtime().runner().is_connected() {
+                return false;
+            }
         }
         self.ticker.ticks.fetch_add(1, Ordering::SeqCst);
         self.refresh_runner_inputs(cx);

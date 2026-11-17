@@ -193,6 +193,33 @@ fn with_no_runs_the_one_loop_of_an_engine_does_no_io(cx: &mut TestAppContext) {
     assert!(!world.root.join("runs").exists());
 }
 
+#[gpui::test]
+fn a_queued_run_on_disk_starts_nothing_while_the_runner_is_not_connected(cx: &mut TestAppContext) {
+    let world = World::new();
+    let run = seed(&world, "single", |_, _| {});
+    cx.update(|cx| {
+        if !cx.has_global::<SettingsStore>() {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            WorkflowsSettings::register(cx);
+        }
+    });
+    let engine =
+        WorkflowEngine::new(world.dirs.clone()).with_task_writes(MemoryWrites::new(world.tree));
+    cx.update(|cx| engine.attach(cx));
+    cx.run_until_parked();
+
+    advance(cx, 4);
+
+    assert_eq!(engine.lifecycle().all_runs(), vec![run.clone()], "loaded");
+    assert_eq!(engine.lifecycle().status(&run), Some(RunStatus::Queued));
+    assert_eq!(engine.ticker().ticks.load(Ordering::SeqCst), 0, "no tick");
+    assert!(
+        engine.lifecycle().state(&run).unwrap().running.is_empty(),
+        "no node started"
+    );
+}
+
 #[test]
 fn a_failed_health_or_mcp_refresh_keeps_the_last_snapshot() {
     // A `PATH` with nothing on it, so the checks find no program and run none.
