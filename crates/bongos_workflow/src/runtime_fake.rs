@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey};
 use serde_json::{Value, json};
 
-use super::{Finish, Runner};
+use super::{Finish, NodeStart, Runner};
 use crate::process::{NodeProcess, ProcessRecord, stop_all};
 use bongos_workflow_model::scheduler::Branch;
 
@@ -36,7 +36,11 @@ pub struct FakeRunner {
     pub clean_merges: usize,
     /// Every merge asked for, as `(run, join, branch)`.
     pub merges: Vec<(String, String, Branch)>,
+    /// The `budget_left_usd` of every start, in order.
+    pub budgets: Vec<Option<f64>>,
     results: BTreeMap<String, Value>,
+    /// The cost each node's tries report.
+    costs: BTreeMap<String, f64>,
     /// Tries of each node still to fail, `agent exited nonzero`.
     failures: BTreeMap<String, u32>,
     /// The session id each node's tries report.
@@ -52,6 +56,12 @@ impl FakeRunner {
     /// The result every try of `node` finishes with.
     pub fn script(&mut self, node: &str, result: Value) -> &mut Self {
         self.results.insert(node.to_string(), result);
+        self
+    }
+
+    /// The cost every try of `node` reports when it finishes.
+    pub fn cost(&mut self, node: &str, usd: f64) -> &mut Self {
+        self.costs.insert(node.to_string(), usd);
         self
     }
 
@@ -86,6 +96,15 @@ impl FakeRunner {
     pub fn release_all(&mut self) {
         for running in &mut self.running {
             running.released = true;
+        }
+    }
+
+    /// Lets the tries of node `node` of run `run` finish at the next poll.
+    pub fn release_node(&mut self, run: &str, node: &str) {
+        for running in &mut self.running {
+            if running.run == run && running.key.node == node {
+                running.released = true;
+            }
         }
     }
 
@@ -132,6 +151,11 @@ impl Runner for FakeRunner {
         Ok(record)
     }
 
+    fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
+        self.budgets.push(node.budget_left_usd);
+        self.start(node.run, node.definition, node.key, node.try_number)
+    }
+
     fn poll(&mut self) -> Vec<Finish> {
         let auto_finish = self.auto_finish;
         let (done, running): (Vec<Try>, Vec<Try>) = std::mem::take(&mut self.running)
@@ -143,6 +167,7 @@ impl Runner for FakeRunner {
                 if let Some(process) = done.process.as_mut() {
                     process.stop();
                 }
+                let cost_usd = self.costs.get(&done.key.node).copied().unwrap_or(0.0);
                 if let Some(left) = self.failures.get_mut(&done.key.node)
                     && *left > 0
                 {
@@ -154,6 +179,7 @@ impl Runner for FakeRunner {
                     );
                     return Finish {
                         outcome: Err(failure),
+                        cost_usd,
                         ..Finish::ok(done.run, done.key, done.try_number, Value::Null)
                     };
                 }
@@ -165,6 +191,7 @@ impl Runner for FakeRunner {
                 let session_id = self.sessions.get(&done.key.node).cloned();
                 Finish {
                     session_id,
+                    cost_usd,
                     ..Finish::ok(done.run, done.key, done.try_number, result)
                 }
             })

@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use bongos_workflow_model::record::CapReached;
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Pixels, Render, Styled as _, Subscription, WeakEntity,
@@ -44,6 +45,8 @@ pub struct RunRow {
     pub nodes: Vec<String>,
     pub elapsed_ms: u64,
     pub cost_usd: f64,
+    /// Why the cost cap halted the run, naming the node that crossed it.
+    pub cap_reason: Option<String>,
     /// One chip per outcome the run reported, such as `pr`.
     pub outcomes: Vec<String>,
 }
@@ -92,6 +95,7 @@ impl RunRow {
             nodes,
             elapsed_ms: state.finished.iter().map(|f| f.elapsed_ms).sum(),
             cost_usd: state.cost_usd,
+            cap_reason: state.cap_reached.as_ref().map(CapReached::reason),
             outcomes,
         })
     }
@@ -113,6 +117,9 @@ impl RunRow {
         );
         for chip in &self.outcomes {
             line.push_str(&format!(" [{chip}]"));
+        }
+        if let Some(reason) = &self.cap_reason {
+            line.push_str(&format!(" | {reason}"));
         }
         line
     }

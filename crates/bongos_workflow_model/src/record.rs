@@ -175,6 +175,13 @@ pub enum Event {
     },
     Paused,
     Halted,
+    /// The run's cost reached the cap: `key` is the node whose finish crossed it. Replay treats it
+    /// as a halt, so a crash before the `Halted` that follows it still leaves the run halted.
+    CapReached {
+        cap_usd: f64,
+        cost_usd: f64,
+        key: NodeKey,
+    },
     Resumed,
     /// The run is held on `key` for a person, without failing: a check gave no verdict and the
     /// definition has no route for that. A resume reruns just the held key.
@@ -498,6 +505,24 @@ pub enum Lifecycle {
     Cancelled,
 }
 
+/// A run halted by the cost cap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapReached {
+    pub cap_usd: f64,
+    pub cost_usd: f64,
+    pub key: NodeKey,
+}
+
+impl CapReached {
+    /// The reason shown in the run view, the Runs panel and the needs-you text.
+    pub fn reason(&self) -> String {
+        format!(
+            "cost cap of ${:.2} reached at node {}",
+            self.cap_usd, self.key.node
+        )
+    }
+}
+
 /// The state of one attempt, rebuilt from its events by [`replay`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunState {
@@ -518,6 +543,8 @@ pub struct RunState {
     pub passes: BTreeMap<String, u32>,
     pub paused: bool,
     pub halted: bool,
+    /// Set by `CapReached`, cleared by `Resumed`: the cap, the cost and the node that crossed it.
+    pub cap_reached: Option<CapReached>,
     /// Keys the log marked interrupted and that have not started again. The value is the try that
     /// was running, `None` when the key was not running when interrupted.
     pub interrupted: BTreeMap<NodeKey, Option<RunningNode>>,
@@ -709,9 +736,22 @@ fn apply(state: &mut RunState, event: &Event) {
         }
         Event::Paused => state.paused = true,
         Event::Halted => state.halted = true,
+        Event::CapReached {
+            cap_usd,
+            cost_usd,
+            key,
+        } => {
+            state.halted = true;
+            state.cap_reached = Some(CapReached {
+                cap_usd: *cap_usd,
+                cost_usd: *cost_usd,
+                key: key.clone(),
+            });
+        }
         Event::Resumed => {
             state.paused = false;
             state.halted = false;
+            state.cap_reached = None;
             state.held.clear();
         }
         Event::Held { key, failure } => {
