@@ -315,6 +315,7 @@ impl Parser {
         let repeated = match key {
             "id" => attributes.id.is_some(),
             "kind" => attributes.kind.is_some(),
+            "checks" => attributes.checks.is_some(),
             "state" => attributes.state.is_some(),
             "keeps" => attributes.keeps_work,
             "drop" => attributes.drop,
@@ -337,6 +338,24 @@ impl Parser {
                     format!("unknown kind '{value}': expected {}", names(&KIND_NAMES)),
                 ),
             },
+            ("checks", value) => {
+                let sets: Vec<String> =
+                    value.split(',').map(|set| set.trim().to_string()).collect();
+                if sets
+                    .iter()
+                    .any(|set| set.is_empty() || set.contains(char::is_whitespace))
+                {
+                    self.error(
+                        number,
+                        format!(
+                            "bad checks '{value}': expected check set names separated by commas, \
+                             as in '| checks rust, docs'"
+                        ),
+                    );
+                } else {
+                    attributes.checks = Some(sets);
+                }
+            }
             ("state", "") => self.error(number, "'state' needs a value, as in '| state done'"),
             ("state", value) if value.contains(char::is_whitespace) => {
                 self.error(number, format!("bad state '{value}': a state is one word"))

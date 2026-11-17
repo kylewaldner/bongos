@@ -242,6 +242,32 @@ async fn digit_and_negative_arguments_start_and_echo(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn meta_minus_twice_leaves_no_argument_and_no_echo(cx: &mut TestAppContext) {
+    let (_editor, mut cx) = echo_window(cx).await;
+    cx.dispatch_action(NegativeArgument);
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u -"));
+    cx.dispatch_action(NegativeArgument);
+    assert_eq!(echo(&mut cx), None);
+    // The raw state is kept, but it has no value: the next command gets no count.
+    assert_eq!(pending_in(&mut cx).map(|arg| arg.has_value()), Some(false));
+    cx.update(|window, cx| {
+        prefix_arg::hand_off(window, cx);
+        assert_eq!(prefix_arg::take(window, cx), None);
+    });
+    assert_eq!(echo(&mut cx), None);
+
+    // A third minus is a bare minus again; a C-u on no value spends the key and leaves nothing.
+    cx.dispatch_action(NegativeArgument);
+    cx.dispatch_action(NegativeArgument);
+    cx.dispatch_action(NegativeArgument);
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u -"));
+    cx.dispatch_action(NegativeArgument);
+    cx.dispatch_action(UniversalArgument);
+    assert_eq!(pending_in(&mut cx), None);
+    assert_eq!(echo(&mut cx), None);
+}
+
+#[gpui::test]
 async fn quit_clears_the_argument_and_the_echo_and_edits_nothing(cx: &mut TestAppContext) {
     let (editor, mut cx) = echo_window(cx).await;
     cx.dispatch_action(UniversalArgument);

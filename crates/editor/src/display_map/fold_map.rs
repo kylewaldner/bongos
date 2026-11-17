@@ -973,8 +973,13 @@ impl FoldSnapshot {
 
     #[ztracing::instrument(skip_all)]
     pub fn chunks_at(&self, start: FoldPoint) -> FoldChunks<'_> {
+        self.chunks_at_offset(start.to_offset(self))
+    }
+
+    #[ztracing::instrument(skip_all)]
+    pub(crate) fn chunks_at_offset(&self, start: FoldOffset) -> FoldChunks<'_> {
         self.chunks(
-            start.to_offset(self)..self.len(),
+            start..self.len(),
             LanguageAwareStyling {
                 tree_sitter: false,
                 diagnostics: false,

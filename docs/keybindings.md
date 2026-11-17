@@ -81,8 +81,10 @@ Each cell reads `Linux / macOS`. Every command is also in the command palette an
 | `task::AddEdge` (`w e`) | `ctrl-c w e` / `ctrl-c w e` | `ctrl-k b w e`, `space w e` / `cmd-k b w e`, `space w e` | `ctrl-k b w e` / `cmd-k b w e` |
 | `task::Advance` (`w a`) | `ctrl-c w a` / `ctrl-c w a` | `ctrl-k b w a`, `space w a` / `cmd-k b w a`, `space w a` | `ctrl-k b w a` / `cmd-k b w a` |
 | `task::ApplyProposal` (`w shift-a`) | `ctrl-c w shift-a` / `ctrl-c w shift-a` | `ctrl-k b w shift-a`, `space w shift-a` / `cmd-k b w shift-a`, `space w shift-a` | `ctrl-k b w shift-a` / `cmd-k b w shift-a` |
-| `task::Close` (`w c`) | `ctrl-c w c` / `ctrl-c w c` | `ctrl-k b w c`, `space w c` / `cmd-k b w c`, `space w c` | `ctrl-k b w c` / `cmd-k b w c` |
+| `task::CancelChecks` (`w x k`) | `ctrl-c w x k` / `ctrl-c w x k` | `ctrl-k b w x k`, `space w x k` / `cmd-k b w x k`, `space w x k` | `ctrl-k b w x k` / `cmd-k b w x k` |
+| `task::Complete` (`w c`) | `ctrl-c w c` / `ctrl-c w c` | `ctrl-k b w c`, `space w c` / `cmd-k b w c`, `space w c` | `ctrl-k b w c` / `cmd-k b w c` |
 | `task::CreateMissingSubtickets` (`w shift-l shift-c`) | `ctrl-c w shift-l shift-c` / `ctrl-c w shift-l shift-c` | `ctrl-k b w shift-l shift-c`, `space w shift-l shift-c` / `cmd-k b w shift-l shift-c`, `space w shift-l shift-c` | `ctrl-k b w shift-l shift-c` / `cmd-k b w shift-l shift-c` |
+| `task::EditChecks` (`w x e`) | `ctrl-c w x e` / `ctrl-c w x e` | `ctrl-k b w x e`, `space w x e` / `cmd-k b w x e`, `space w x e` | `ctrl-k b w x e` / `cmd-k b w x e` |
 | `task::EditProposal` (`w shift-v`) | `ctrl-c w shift-v` / `ctrl-c w shift-v` | `ctrl-k b w shift-v`, `space w shift-v` / `cmd-k b w shift-v`, `space w shift-v` | `ctrl-k b w shift-v` / `cmd-k b w shift-v` |
 | `task::Focus` (`w f`) | `ctrl-c w f` / `ctrl-c w f` | `ctrl-k b w f`, `space w f` / `cmd-k b w f`, `space w f` | `ctrl-k b w f` / `cmd-k b w f` |
 | `task::LinkToLinear` (`w shift-l l`) | `ctrl-c w shift-l l` / `ctrl-c w shift-l l` | `ctrl-k b w shift-l l`, `space w shift-l l` / `cmd-k b w shift-l l`, `space w shift-l l` | `ctrl-k b w shift-l l` / `cmd-k b w shift-l l` |
@@ -98,6 +100,11 @@ Each cell reads `Linux / macOS`. Every command is also in the command palette an
 | `task::RefreshFromLinear` (`w shift-l shift-r`) | `ctrl-c w shift-l shift-r` / `ctrl-c w shift-l shift-r` | `ctrl-k b w shift-l shift-r`, `space w shift-l shift-r` / `cmd-k b w shift-l shift-r`, `space w shift-l shift-r` | `ctrl-k b w shift-l shift-r` / `cmd-k b w shift-l shift-r` |
 | `task::RejectProposal` (`w shift-x`) | `ctrl-c w shift-x` / `ctrl-c w shift-x` | `ctrl-k b w shift-x`, `space w shift-x` / `cmd-k b w shift-x`, `space w shift-x` | `ctrl-k b w shift-x` / `cmd-k b w shift-x` |
 | `task::RemoveEdge` (`w shift-e`) | `ctrl-c w shift-e` / `ctrl-c w shift-e` | `ctrl-k b w shift-e`, `space w shift-e` / `cmd-k b w shift-e`, `space w shift-e` | `ctrl-k b w shift-e` / `cmd-k b w shift-e` |
+| `task::RunCheck` (`w x r`) | `ctrl-c w x r` / `ctrl-c w x r` | `ctrl-k b w x r`, `space w x r` / `cmd-k b w x r`, `space w x r` | `ctrl-k b w x r` / `cmd-k b w x r` |
+| `task::RunChecks` (`w x x`) | `ctrl-c w x x` / `ctrl-c w x x` | `ctrl-k b w x x`, `space w x x` / `cmd-k b w x x`, `space w x x` | `ctrl-k b w x x` / `cmd-k b w x x` |
+| `task::ShowCheckOutput` (`w x o`) | `ctrl-c w x o` / `ctrl-c w x o` | `ctrl-k b w x o`, `space w x o` / `cmd-k b w x o`, `space w x o` | `ctrl-k b w x o` / `cmd-k b w x o` |
+| `task::ShowChecks` (`w x s`) | `ctrl-c w x s` / `ctrl-c w x s` | `ctrl-k b w x s`, `space w x s` / `cmd-k b w x s`, `space w x s` | `ctrl-k b w x s` / `cmd-k b w x s` |
+| `task::ShowDetails` (`w i`) | `ctrl-c w i` / `ctrl-c w i` | `ctrl-k b w i`, `space w i` / `cmd-k b w i`, `space w i` | `ctrl-k b w i` / `cmd-k b w i` |
 | `task::ShowLinearSuggestions` (`w shift-l s`) | `ctrl-c w shift-l s` / `ctrl-c w shift-l s` | `ctrl-k b w shift-l s`, `space w shift-l s` / `cmd-k b w shift-l s`, `space w shift-l s` | `ctrl-k b w shift-l s` / `cmd-k b w shift-l s` |
 | `task::ShowProposal` (`w v`) | `ctrl-c w v` / `ctrl-c w v` | `ctrl-k b w v`, `space w v` / `cmd-k b w v`, `space w v` | `ctrl-k b w v` / `cmd-k b w v` |
 | `task::Start` (`w s`) | `ctrl-c w s` / `ctrl-c w s` | `ctrl-k b w s`, `space w s` / `cmd-k b w s`, `space w s` | `ctrl-k b w s` / `cmd-k b w s` |
@@ -175,6 +182,12 @@ Each cell reads `Linux / macOS`. Every command is also in the command palette an
 | `RunsPanel` | `enter` | `workflow::OpenLogs` |
 | `RunsPanel` | `l` | `workflow::OpenLogs` |
 | `RunsPanel` | `v` | `workflow::Revise` |
+| `TaskDetailView` | `c` | `task::Complete` |
+| `TaskDetailView` | `g` | `task_detail::Refresh` |
+| `TaskDetailView` | `k` | `task::CancelChecks` |
+| `TaskDetailView` | `r` | `task::RunCheck` |
+| `TaskDetailView` | `s` | `task_detail::ToggleSources` |
+| `TaskDetailView` | `x` | `task::RunChecks` |
 | `WorkPanel` | `^` | `work::Up` |
 | `WorkPanel` | `tab` | `work::ToggleRow` |
 

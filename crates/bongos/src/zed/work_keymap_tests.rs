@@ -18,7 +18,7 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w o", "task::NewOneOff"),
     ("ctrl-c w s", "task::Start"),
     ("ctrl-c w a", "task::Advance"),
-    ("ctrl-c w c", "task::Close"),
+    ("ctrl-c w c", "task::Complete"),
     ("ctrl-c w t", "task::Think"),
     ("ctrl-c w m", "task::Mode"),
     ("ctrl-c w f", "task::Focus"),
@@ -55,7 +55,17 @@ const WORK_KEYS: &[(&str, &str)] = &[
     ("ctrl-c w H", "artifact::HideAll"),
     ("ctrl-c w U", "artifact::ShareAll"),
     ("ctrl-c w l", "artifact::Link"),
+    ("ctrl-c w i", "task::ShowDetails"),
+    ("ctrl-c w x s", "task::ShowChecks"),
+    ("ctrl-c w x o", "task::ShowCheckOutput"),
+    ("ctrl-c w x e", "task::EditChecks"),
+    ("ctrl-c w x x", "task::RunChecks"),
+    ("ctrl-c w x r", "task::RunCheck"),
+    ("ctrl-c w x k", "task::CancelChecks"),
 ];
+
+/// The checks actions that stay in the palette with no key.
+const UNBOUND_CHECKS: &[&str] = &["task::RunChecksClean", "task::ShowCheckSources"];
 
 /// Commands that stay in the palette with no key.
 const UNBOUND: &[&str] = &[
@@ -165,6 +175,7 @@ async fn emacs_binds_every_work_key(cx: &mut TestAppContext) {
             "ctrl-c w d",
             "ctrl-c w p",
             "ctrl-c w g",
+            "ctrl-c w x",
         ] {
             assert!(
                 resolve(&keymap, prefix, &["Workspace", "Pane"]).1,
@@ -179,6 +190,30 @@ async fn emacs_binds_every_work_key(cx: &mut TestAppContext) {
             Some(&"task::New"),
             "{emacs}"
         );
+    }
+}
+
+#[gpui::test]
+async fn checks_keys_are_emacs_only_and_two_actions_stay_unbound(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for (default, emacs) in [LINUX, MACOS] {
+        let (emacs_keymap, all) = load(&[default, emacs], cx);
+        let (default_keymap, _) = load(&[default], cx);
+        let checks_keys: Vec<_> = WORK_KEYS
+            .iter()
+            .filter(|(input, _)| input.starts_with("ctrl-c w x "))
+            .collect();
+        assert_eq!(checks_keys.len(), 6, "{emacs}");
+        for (input, action) in checks_keys {
+            let (names, _) = resolve(&emacs_keymap, input, &["Workspace", "Pane"]);
+            assert_eq!(names.first(), Some(action), "{emacs}: {input}");
+            let (names, _) = resolve(&default_keymap, input, &["Workspace", "Pane"]);
+            assert!(!names.contains(action), "{default}: {input}");
+        }
+        for binding in &all {
+            let name = binding.action().name();
+            assert!(!UNBOUND_CHECKS.contains(&name), "{emacs}: {name} is bound");
+        }
     }
 }
 
@@ -439,5 +474,31 @@ async fn resolve_split_is_bound_only_in_the_landing_view(cx: &mut TestAppContext
                 "{emacs}: {contexts:?}"
             );
         }
+    }
+}
+
+#[gpui::test]
+async fn task_detail_view_keys(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    for (default, emacs) in [LINUX, MACOS] {
+        let (keymap, _) = load(&[default, emacs], cx);
+        let view = ["Workspace", "Pane", "TaskDetailView"];
+        for (input, action) in [
+            ("g", "task_detail::Refresh"),
+            ("s", "task_detail::ToggleSources"),
+            ("x", "task::RunChecks"),
+            ("r", "task::RunCheck"),
+            ("k", "task::CancelChecks"),
+            ("c", "task::Complete"),
+        ] {
+            let (names, pending) = resolve(&keymap, input, &view);
+            assert_eq!(names.first(), Some(&action), "{emacs}: {input}");
+            assert!(!pending, "{emacs}: {input}");
+        }
+        // Outside the view they bind nothing.
+        assert_ne!(
+            resolve(&keymap, "x", &["Workspace", "Pane"]).0.first(),
+            Some(&"task::RunChecks")
+        );
     }
 }

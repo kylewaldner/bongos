@@ -24,7 +24,7 @@
 //! that waited never applies on its own later. Files present at the first scan (at start, or when
 //! the builder or the store is turned on) are only classified, never applied on their own.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -47,6 +47,7 @@ use crate::actions::show_toast;
 use crate::apply::apply_command;
 use crate::auto_apply::switch_on;
 use crate::choose::proposal_number;
+use crate::live::KnownNames;
 use crate::{TaskBuilderSettings, live, view};
 
 /// Who runs an auto-apply, in the history and the writer's context.
@@ -249,7 +250,7 @@ fn scan(cx: &mut App) {
     };
     let fs = store.read(cx).fs();
     let live = live::collect(&tree, cx);
-    let workflow_names = live::workflow_names(cx);
+    let workflow_names = live::known_names(cx);
     let chats = chats(cx);
     let later = cx.global_mut::<Later>();
     later.scanning = true;
@@ -323,7 +324,7 @@ fn classify(
     hash: &str,
     tree: &WorkTree,
     live: &LiveSet,
-    workflow_names: Option<Arc<BTreeSet<String>>>,
+    workflow_names: KnownNames,
     chats: &Chats,
     switch: Switch,
 ) -> (Status, bool) {
@@ -485,7 +486,7 @@ pub(crate) fn auto_apply_command(
     tree: &WorkTree,
     ctx: &WorkContext,
     live: &LiveSet,
-    workflow_names: Option<Arc<BTreeSet<String>>>,
+    workflow_names: KnownNames,
 ) -> Outcome {
     let text =
         std::str::from_utf8(bytes).map_err(|_| format!("proposal {number} is not UTF-8 text"))?;
@@ -643,7 +644,7 @@ fn run_queue(cx: &mut App) {
                         .snapshot()
                         .map(|now| live::collect(&now, cx))
                         .unwrap_or_default();
-                    let workflow_names = live::workflow_names(cx);
+                    let workflow_names = live::known_names(cx);
                     let chats = chats(cx);
                     let switch = Switch::read(cx);
                     let holder = entry.task_id.clone();

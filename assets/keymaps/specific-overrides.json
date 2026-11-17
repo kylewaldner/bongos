@@ -214,6 +214,17 @@
     },
   },
   {
+    "context": "TaskDetailView",
+    "bindings": {
+      "g": "task_detail::Refresh",
+      "s": "task_detail::ToggleSources",
+      "x": "task::RunChecks",
+      "r": "task::RunCheck",
+      "k": "task::CancelChecks",
+      "c": "task::Complete",
+    },
+  },
+  {
     "context": "ProposalView",
     "bindings": {
       "enter": "proposal::Descend",

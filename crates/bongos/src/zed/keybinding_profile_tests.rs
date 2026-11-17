@@ -665,6 +665,8 @@ const PANEL_KEYS: &[(&str, &[&str], &str)] = &[
     ("g", &["Workspace", "RunView"], "workflow::ToggleGraph"),
     ("v", &["Workspace", "RunView"], "workflow::Revise"),
     ("r", &["Workspace", "LandingView"], "project::ResolveSplit"),
+    ("s", &["Workspace", "TaskDetailView"], "task_detail::ToggleSources"),
+    ("x", &["Workspace", "TaskDetailView"], "task::RunChecks"),
     ("enter", &["Workspace", "ProposalView"], "proposal::Descend"),
     ("^", &["Workspace", "ProposalView"], "proposal::Up"),
 ];

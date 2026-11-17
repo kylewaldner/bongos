@@ -53,6 +53,9 @@ mod commands_tests;
 mod derive_tests;
 
 #[cfg(test)]
+mod done_hold_tests;
+
+#[cfg(test)]
 mod graph_tests;
 
 #[cfg(test)]

@@ -13,7 +13,8 @@
 //!   ([`crate::runtime::Runtime::hold_success`]), which walks [`next`]: the final merge gate when
 //!   the definition has no merge node, the deploy confirmation for a ship todo whose merge is not
 //!   its ship, the outcomes, then the todo. A wait is a gate on a key of no node, so Kyle approves
-//!   it from the run like any other gate.
+//!   it from the run like any other gate. Once the todo is completed, the run ends only after
+//!   every [`crate::CompletionHooks`] hook resolved, while its worktree still exists.
 
 use std::fmt::Write as _;
 use std::sync::Arc;

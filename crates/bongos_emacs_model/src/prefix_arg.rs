@@ -13,64 +13,86 @@ pub enum ArgKind {
     Negative,
 }
 
+/// Emacs's raw prefix argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PrefixArg {
-    kind: ArgKind,
-    negative: bool,
-    digits: Option<u32>,
-    open: bool,
+enum Raw {
+    /// `(n)`: C-u pressed, n a power of four (negative after a minus).
+    Multiple(i32),
+    /// `-`: a bare minus.
+    Minus,
+    /// An integer typed with digits (or negated by M--).
+    Number(i32),
+    /// No argument: a minus pressed twice.
+    Nil,
 }
 
-const MAX: u32 = i32::MAX as u32;
+/// The argument as Emacs's `simple.el` keeps it (`universal-argument-more`, `negative-argument`
+/// and `digit-argument`), so each key press follows Emacs. `open` says the digit and minus keys
+/// are still taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrefixArg {
+    raw: Raw,
+    open: bool,
+    kind: ArgKind,
+}
+
+const MAX: i32 = i32::MAX;
 
 impl PrefixArg {
     /// C-u from nothing: 4.
     pub fn universal() -> Self {
         Self {
-            kind: ArgKind::Universal { presses: 1 },
-            negative: false,
-            digits: None,
+            raw: Raw::Multiple(4),
             open: true,
+            kind: ArgKind::Universal { presses: 1 },
         }
     }
 
     /// M-digit from nothing.
     pub fn digit(d: u8) -> Self {
         Self {
-            kind: ArgKind::Numeric,
-            negative: false,
-            digits: Some(u32::from(d.min(9))),
+            raw: Raw::Number(i32::from(d.min(9))),
             open: true,
+            kind: ArgKind::Numeric,
         }
     }
 
     /// M-- from nothing: -1.
     pub fn negative() -> Self {
         Self {
-            kind: ArgKind::Negative,
-            negative: true,
-            digits: None,
+            raw: Raw::Minus,
             open: true,
+            kind: ArgKind::Negative,
         }
     }
 
-    /// A further C-u. Multiplies by 4 while no digit was typed, otherwise ends
-    /// the number. Returns false (state unchanged) when the number already ended.
+    /// A further C-u. Multiplies a multiple of four by 4 (a bare minus becomes -4); on a number or
+    /// no argument it ends the argument. Returns false (state unchanged) when it already ended.
     pub fn press_universal(&mut self) -> bool {
         if !self.open {
             return false;
         }
-        if self.digits.is_some() {
-            self.open = false;
-            return true;
+        match self.raw {
+            Raw::Multiple(n) => {
+                self.raw = Raw::Multiple(n.saturating_mul(4).clamp(-MAX, MAX));
+                self.add_press();
+            }
+            Raw::Minus => {
+                self.raw = Raw::Multiple(-4);
+                self.kind = ArgKind::Universal { presses: 1 };
+            }
+            Raw::Number(_) | Raw::Nil => self.open = false,
         }
+        true
+    }
+
+    fn add_press(&mut self) {
         self.kind = match self.kind {
             ArgKind::Universal { presses } => ArgKind::Universal {
                 presses: presses.saturating_add(1),
             },
             _ => ArgKind::Universal { presses: 1 },
         };
-        true
     }
 
     /// A digit. Returns false (state unchanged) when digits are not accepted.
@@ -78,32 +100,67 @@ impl PrefixArg {
         if !self.accepts_digits() || d > 9 {
             return false;
         }
-        let n = self.digits.unwrap_or(0);
-        self.digits = Some(n.saturating_mul(10).saturating_add(u32::from(d)).min(MAX));
+        let d = i32::from(d);
+        self.raw = match self.raw {
+            Raw::Number(n) => {
+                let tens = n.saturating_mul(10);
+                let next = if n < 0 {
+                    tens.saturating_sub(d)
+                } else {
+                    tens.saturating_add(d)
+                };
+                Raw::Number(next.clamp(-MAX, MAX))
+            }
+            // A zero keeps the bare minus, so that -01 works as in Emacs.
+            Raw::Minus if d == 0 => Raw::Minus,
+            Raw::Minus => Raw::Number(-d),
+            Raw::Multiple(_) | Raw::Nil => Raw::Number(d),
+        };
         true
     }
 
-    /// A `-`. Returns false (state unchanged) when not accepted.
+    /// A bare `-` key. Returns false (state unchanged) when not accepted.
     pub fn press_minus(&mut self) -> bool {
         if !self.accepts_minus() {
             return false;
         }
-        self.negative = true;
+        self.negative_argument();
         true
+    }
+
+    /// M--, never refused: negates a number, turns a bare minus into no argument, and makes
+    /// anything else a bare minus. The digit and minus keys are taken again afterwards.
+    pub fn negative_argument(&mut self) {
+        self.raw = match self.raw {
+            Raw::Number(n) => Raw::Number(-n),
+            Raw::Minus => Raw::Nil,
+            Raw::Multiple(_) | Raw::Nil => Raw::Minus,
+        };
+        self.open = true;
     }
 
     pub fn accepts_digits(&self) -> bool {
         self.open
     }
 
-    /// `-` is accepted only before any digit and while not already negative.
+    /// The bare `-` key is accepted while the argument is open and not a typed number (after
+    /// digits it is an ordinary character).
     pub fn accepts_minus(&self) -> bool {
-        self.open && self.digits.is_none() && !self.negative
+        self.open && !matches!(self.raw, Raw::Number(_))
     }
 
+    /// False only for no argument (a minus pressed twice).
+    pub fn has_value(&self) -> bool {
+        self.raw != Raw::Nil
+    }
+
+    /// Emacs's numeric value: a bare minus is -1, no argument is 1.
     pub fn value(&self) -> i32 {
-        let magnitude = self.magnitude() as i32;
-        if self.negative { -magnitude } else { magnitude }
+        match self.raw {
+            Raw::Multiple(n) | Raw::Number(n) => n,
+            Raw::Minus => -1,
+            Raw::Nil => 1,
+        }
     }
 
     pub fn kind(&self) -> ArgKind {
@@ -111,24 +168,11 @@ impl PrefixArg {
     }
 
     pub fn echo(&self) -> String {
-        if self.digits.is_none() && self.negative && self.magnitude() <= 4 {
-            return "C-u -".to_string();
+        match self.raw {
+            Raw::Multiple(n) if n < 0 => format!("C-u ({n})"),
+            Raw::Multiple(n) | Raw::Number(n) => format!("C-u {n}"),
+            Raw::Minus => "C-u -".to_string(),
+            Raw::Nil => String::new(),
         }
-        format!("C-u {}", self.value())
-    }
-
-    fn magnitude(&self) -> u32 {
-        if let Some(digits) = self.digits {
-            return digits;
-        }
-        let presses = match self.kind {
-            ArgKind::Universal { presses } => presses,
-            ArgKind::Numeric | ArgKind::Negative => 0,
-        };
-        let mut magnitude: u32 = 1;
-        for _ in 0..presses {
-            magnitude = magnitude.saturating_mul(4).min(MAX);
-        }
-        magnitude
     }
 }

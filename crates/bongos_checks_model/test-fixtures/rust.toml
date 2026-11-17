@@ -1,0 +1,11 @@
+[[check]]
+name = "format"
+run = "checks/format"
+
+[[check]]
+name = "tests"
+command = ["make", "test"]
+
+[[closing]]
+name = "tests-full"
+command = ["make", "test-all"]

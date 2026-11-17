@@ -2048,6 +2048,7 @@ dependencies = [
  "bongos_app",
  "bongos_builder",
  "bongos_chat",
+ "bongos_checks",
  "bongos_emacs",
  "bongos_isearch",
  "bongos_java",
@@ -2264,6 +2265,7 @@ dependencies = [
  "bongos_work_model",
  "sha2",
  "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -2312,6 +2314,59 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "bongos_checks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-task",
+ "bongos_checks_model",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_work",
+ "bongos_work_model",
+ "bongos_workflow",
+ "bongos_workflow_model",
+ "chrono",
+ "command_palette_hooks",
+ "futures 0.3.32",
+ "gpui",
+ "libc",
+ "log",
+ "paths",
+ "project",
+ "regex",
+ "release_channel",
+ "semver",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "smol",
+ "sysinfo 0.37.2",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "util",
+ "uuid",
+ "which 6.0.3",
+ "workspace",
+]
+
+[[package]]
+name = "bongos_checks_model"
+version = "0.1.0"
+dependencies = [
+ "bongos_project_repo_model",
+ "bongos_work_model",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.17",
  "toml 0.8.23",
 ]

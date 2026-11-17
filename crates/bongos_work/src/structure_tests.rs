@@ -16,6 +16,7 @@ fn task(id: &str, children: Vec<Task>) -> Task {
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         file: Some(file),
         artifacts: None,
         errors: Vec::new(),
