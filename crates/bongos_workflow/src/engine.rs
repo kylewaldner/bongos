@@ -200,19 +200,6 @@ pub struct EngineRoots {
 
 impl Global for EngineRoots {}
 
-/// Why a node cannot start while no runner is connected.
-pub(crate) const UNWIRED_DETAIL: &str =
-    "the node runners are not connected to the engine in this build";
-
-/// The failure of a node start while no runner is connected.
-pub(crate) fn unwired_failure(key: &NodeKey) -> Failure {
-    Failure::new(
-        FailureReason::AgentNotInstalledOrLoggedOut,
-        Some(key.clone()),
-        UNWIRED_DETAIL,
-    )
-}
-
 /// What the app knows now that the runner snapshot is built from, read on the main thread. A
 /// part that could not be read leaves the snapshot's last value in place.
 pub(crate) struct AppReading {
@@ -317,8 +304,7 @@ impl Global for Observers {}
 
 impl WorkflowEngine {
     /// An engine over `dirs` with no runs, running nodes through the app's [`AppRunner`]; nothing
-    /// is read or written. The runner is not connected in this build, so a command that would
-    /// start a node refuses.
+    /// is read or written.
     pub fn new(dirs: LayerDirs) -> Self {
         let inputs = RunnerInputs::default();
         let lifecycle = Lifecycle::new(
@@ -379,15 +365,14 @@ impl WorkflowEngine {
 
     /// One tick of the runs: the runner's snapshot is refreshed, then the lifecycle ticks under
     /// the current settings. Does nothing (and reads nothing) while no run is loaded, after a
-    /// quit, while workflows are off or while the runner is not connected (a queued run on disk
-    /// must not start a real node). Whether anything changed; the caller publishes.
+    /// quit, or while workflows are off. Whether anything changed; the caller publishes.
     fn tick_runs(&self, cx: &App) -> bool {
         if self.ticker.stopped() {
             return false;
         }
         {
             let lifecycle = self.lifecycle();
-            if lifecycle.all_runs().is_empty() || !lifecycle.runtime().runner().is_connected() {
+            if lifecycle.all_runs().is_empty() {
                 return false;
             }
         }
@@ -827,18 +812,6 @@ impl WorkflowEngine {
         self.start_with_waiter(request, tree, &mut None, cx)
     }
 
-    /// Refuses a command that would start a node while no runner is connected.
-    fn refuse_unconnected(&self) -> Result<(), Refusal> {
-        if self.lifecycle().runtime().runner().is_connected() {
-            return Ok(());
-        }
-        Err(Refusal::new(
-            RefusalKind::RunnerNotConnected,
-            "Workflow runs are not connected to an agent runner yet.",
-            "Nothing was started.",
-        ))
-    }
-
     fn start_with_waiter(
         &self,
         request: StartRequest,
@@ -846,7 +819,6 @@ impl WorkflowEngine {
         reply: &mut Option<futures::channel::oneshot::Sender<LandingRunEnd>>,
         cx: &mut App,
     ) -> Result<RunId, Refusal> {
-        self.refuse_unconnected()?;
         // The runs on disk are loaded before any new one exists, so the load never meets it.
         self.load_runs_once(cx);
         let start = LiveModesRegistry::can_start_run(&request.task_id, cx);
@@ -980,7 +952,6 @@ impl WorkflowEngine {
     }
 
     pub fn resume(&self, run: &RunId, cx: &mut App) -> Result<(), Refusal> {
-        self.refuse_unconnected()?;
         self.refuse_held_run(run)?;
         self.act(cx, |lifecycle, _| lifecycle.resume(run))
     }
@@ -997,7 +968,6 @@ impl WorkflowEngine {
         fresh_definition: bool,
         cx: &mut App,
     ) -> Result<(), Refusal> {
-        self.refuse_unconnected()?;
         self.refuse_held_run(run)?;
         // A retry that reads the definition again, and a restart, read the project's verified
         // commit now; any other retry reads nothing and keeps its attempt's commit.
@@ -1016,7 +986,6 @@ impl WorkflowEngine {
     }
 
     pub fn restart(&self, run: &RunId, cx: &mut App) -> Result<RunId, Refusal> {
-        self.refuse_unconnected()?;
         self.refuse_held_run(run)?;
         let task_dirs = self.run_dirs(run, cx)?;
         let (dirs, commit) = match &task_dirs {

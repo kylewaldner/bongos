@@ -248,8 +248,9 @@ impl MergeNode {
 /// The merge's outcome as a try's result or failure.
 async fn run_merge(git: &Git, request: &MergeRequest, key: &NodeKey) -> Result<Value, Failure> {
     match builtin_merge::merge(git, request).await {
-        Ok(Merged::FastForward { head } | Merged::MergeCommit { head }) => {
-            Ok(json!({ "result": "merged", "head": head }))
+        // Only the declared field: a definition's output schema rejects any other.
+        Ok(Merged::FastForward { .. } | Merged::MergeCommit { .. }) => {
+            Ok(json!({ "result": "merged" }))
         }
         Err(MergeRefusal::Conflict(files)) => Err(failure(
             FailureReason::MergeConflict,
