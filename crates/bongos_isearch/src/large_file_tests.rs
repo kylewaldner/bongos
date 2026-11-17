@@ -1,6 +1,7 @@
 //! The large-file gate: typing a search string one character at a time into a session on a
-//! 100 MB buffer. The synchronous handler of the input is what the main thread pays for, so it
-//! is measured on its own; the search runs on the background executor and is only awaited.
+//! 100 MB buffer. The synchronous handler of the input is what the main thread pays for; the
+//! search runs on the background executor and is only awaited. The timing budget for typing
+//! lives in `perf_tests::test_perf_large_file_typing_stays_responsive`.
 
 use crate::actions::Forward;
 use crate::session::test_session;
@@ -37,8 +38,8 @@ pub(crate) fn large_text() -> String {
     text
 }
 
-/// Twenty characters typed one by one into a session on 100 MB: every character is kept, and once the background search is done the view is on the only match, at the
-/// end of the buffer.
+/// Twenty characters typed one by one into a session on 100 MB: every character is kept, and
+/// once the background search is done the view is on the only match, at the end of the buffer.
 #[gpui::test]
 async fn test_large_file_typing_stays_responsive(cx: &mut TestAppContext) {
     assert_eq!(TYPED.len(), 20);

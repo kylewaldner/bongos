@@ -1,5 +1,5 @@
-//! Performance gates on a 64 MB buffer of random 80-column lines: the engine's find and cancel,
-//! and typing through a session.
+//! Performance gates: the engine's find and cancel and typing through a session, on a 64 MB
+//! buffer of random 80-column lines, and the large-file typing gate, on a 100 MB buffer.
 
 use crate::actions::Forward;
 use crate::engine::{Cancel, Engine, count, find};
