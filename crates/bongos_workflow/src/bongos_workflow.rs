@@ -42,7 +42,7 @@ use gpui::App;
 pub use actions::{WorkflowToast, action_types, init_palette, register, workflow};
 pub use builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 pub use completion::{CompletionHook, CompletionHooks};
-pub use engine::{EngineRoots, EngineRunner,SharedLifecycle, WorkflowEngine};
+pub use engine::{EngineRoots, EngineRunner, SharedLifecycle, WorkflowEngine};
 pub use lifecycle::{Refusal, RefusalKind, RunId, RunStatus, StartRequest, WorkflowEvent};
 pub use node_status::{NodeStatus, NodeStatusSource, NodeStatusSources};
 pub use runs_panel::{RunsPanel, init_panel};
