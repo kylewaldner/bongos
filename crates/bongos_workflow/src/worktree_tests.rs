@@ -915,3 +915,107 @@ async fn clear_finished_keeps_a_run_whose_recorded_dir_is_not_the_one_the_app_ma
     assert!(run.path.exists());
     assert!(branch_exists(git, &fixture.repository, &run.branch).await);
 }
+
+#[gpui::test]
+async fn clear_finished_keeps_a_run_whose_recorded_branch_is_not_the_run_branch(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let run = fixture.create_run(RUN_ID).await;
+    // An unrelated branch with work on it that is merged nowhere.
+    git_out(git, fixture.task_worktree(), &["branch", "feature/x"]).await;
+    let other = fixture.root.join("feature-x");
+    git_out(
+        git,
+        &fixture.repository,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &other.to_string_lossy(),
+            "feature/x",
+        ],
+    )
+    .await;
+    commit_file(git, &other, "x.txt", "x\n").await;
+    git_out(
+        git,
+        &fixture.repository,
+        &["worktree", "remove", &other.to_string_lossy()],
+    )
+    .await;
+    // The record has the run directory the app made but names that branch.
+    let forged = RunWorktree {
+        branch: "feature/x".to_string(),
+        ..run.clone()
+    };
+    let finished = vec![fixture.finished(
+        RUN_ID,
+        Lifecycle::Ended(EndState::Succeeded),
+        day(1),
+        &forged,
+    )];
+    let plan = plan_clear(git, &finished, None, &fixture.home(), 14, day(100))
+        .await
+        .unwrap();
+    assert_eq!(plan.runs.len(), 1);
+    assert!(plan.runs[0].remove.is_empty(), "{}", plan.summary());
+    assert_eq!(plan.runs[0].repository, None);
+    let skipped: Vec<&ClearItem> = plan.skipped().collect();
+    assert_eq!(skipped.len(), 1);
+    assert!(
+        skipped[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("branch feature/x is not the run branch")),
+        "{skipped:?}"
+    );
+
+    let report = apply_clear(git, &fixture.repository, &plan).await;
+    assert!(report.removed.is_empty(), "{report}");
+    assert!(branch_exists(git, &fixture.repository, "feature/x").await);
+    assert!(run.path.exists());
+    assert!(branch_exists(git, &fixture.repository, &run.branch).await);
+}
+
+#[gpui::test]
+async fn clear_finished_refuses_a_run_dir_swapped_for_a_symlink_after_the_plan(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let run = fixture.create_run(RUN_ID).await;
+    let finished =
+        vec![fixture.finished(RUN_ID, Lifecycle::Ended(EndState::Succeeded), day(1), &run)];
+    let plan = plan_clear(git, &finished, None, &fixture.home(), 14, day(100))
+        .await
+        .unwrap();
+    assert_eq!(plan.runs.len(), 1);
+    assert_eq!(plan.runs[0].remove.len(), 1, "{}", plan.summary());
+
+    // Between the question and the answer the run directory becomes a symlink elsewhere.
+    let elsewhere = fixture.root.join("elsewhere");
+    fs::rename(&run.run_dir, &elsewhere).unwrap();
+    fs::write(elsewhere.join("keep.txt"), "keep\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &run.run_dir).unwrap();
+
+    let report = apply_clear(git, &fixture.repository, &plan).await;
+    assert!(report.removed.is_empty(), "{report}");
+    assert_eq!(report.skipped.len(), 1, "{report}");
+    assert!(report.skipped[0].1.contains("symlink"), "{report}");
+    assert!(
+        fs::symlink_metadata(&run.run_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(elsewhere.join("run").join("README.md").exists());
+    assert!(branch_exists(git, &fixture.repository, &run.branch).await);
+}

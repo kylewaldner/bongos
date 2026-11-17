@@ -338,6 +338,32 @@ pub fn check_run_dir(
     }
 }
 
+/// Checks that `recorded`'s branch, as a run.toml recorded it, is exactly the run branch
+/// [`create_run`] made for attempt `attempt` of run `run_id` from the task branch `task_branch`
+/// ([`run_branch_name`]), so `clear finished` never deletes a branch the app did not make.
+pub fn check_run_branch(
+    recorded: &RunWorktree,
+    task_branch: Option<&str>,
+    run_id: &str,
+    attempt: u32,
+) -> Result<(), String> {
+    let Some(task_branch) = task_branch else {
+        return Err(format!(
+            "the task has no branch, so {} is not known to be the run branch this app made",
+            recorded.branch
+        ));
+    };
+    let expected = run_branch_name(task_branch, run_id, attempt);
+    if recorded.branch == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "branch {} is not the run branch this app made: expected {expected}",
+            recorded.branch
+        ))
+    }
+}
+
 /// `<runs dir>/<task slug>-<short>-<attempt>`.
 pub fn run_dir(runs_dir: &Path, task_slug: &str, run_id: &str, attempt: u32) -> PathBuf {
     runs_dir.join(format!("{task_slug}-{}-{attempt}", short_id(run_id)))
@@ -586,6 +612,79 @@ pub struct ClearRun {
     pub remove: Vec<ClearItem>,
     /// Worktrees with uncommitted changes, which are kept.
     pub skipped: Vec<ClearItem>,
+    /// What [`apply_clear`] checks again right before it removes anything; `None` when the run
+    /// was refused, and then nothing is removed.
+    pub check: Option<ClearCheck>,
+}
+
+/// The record of a run and what it was checked against when the plan was made, so
+/// [`apply_clear`] can check it again after the confirmation, right before removing anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClearCheck {
+    pub worktree: RunWorktree,
+    pub worktrees_dir: Option<PathBuf>,
+    pub home: PathBuf,
+    pub task_slug: String,
+    pub task_branch: Option<String>,
+    pub run_id: String,
+    pub attempt: u32,
+}
+
+impl ClearCheck {
+    fn new(run: &FinishedRun, worktrees_dir: Option<&Path>, home: &Path) -> Self {
+        Self {
+            worktree: run.worktree.clone(),
+            worktrees_dir: worktrees_dir.map(Path::to_path_buf),
+            home: home.to_path_buf(),
+            task_slug: run.checkout.slug.clone(),
+            task_branch: run.checkout.branch.clone(),
+            run_id: run.run_id.clone(),
+            attempt: run.attempt,
+        }
+    }
+
+    /// [`check_run_dir`] and [`check_run_branch`] against `repository`.
+    pub fn check(&self, repository: &Path) -> Result<(), String> {
+        check_run_dir(
+            &self.worktree,
+            repository,
+            self.worktrees_dir.as_deref(),
+            &self.home,
+            &self.task_slug,
+            &self.run_id,
+            self.attempt,
+        )?;
+        check_run_branch(
+            &self.worktree,
+            self.task_branch.as_deref(),
+            &self.run_id,
+            self.attempt,
+        )
+    }
+
+    /// Why `item` is not a worktree and branch of this run: its worktree must sit directly in the
+    /// run directory, and its branch must be the run branch or a fan-out branch of it.
+    fn refuse_item(&self, item: &ClearItem) -> Option<String> {
+        let run_branch = &self.worktree.branch;
+        if item.path.parent() != Some(self.worktree.run_dir.as_path()) {
+            return Some(format!(
+                "{} is not in the run directory {}",
+                item.path.display(),
+                self.worktree.run_dir.display()
+            ));
+        }
+        let ours = item.branch == *run_branch
+            || item
+                .branch
+                .strip_prefix(run_branch.as_str())
+                .is_some_and(|rest| rest.len() > 1 && rest.starts_with('-'));
+        (!ours).then(|| {
+            format!(
+                "branch {} is not the run branch {run_branch} or one of its fan-out branches",
+                item.branch
+            )
+        })
+    }
 }
 
 /// What `clear finished` would do, listed for the confirmation.
@@ -657,9 +756,13 @@ pub async fn plan_clear(
             repository: None,
             remove: Vec::new(),
             skipped: Vec::new(),
+            check: None,
         };
         match task_repository(git, run, worktrees_dir, home).await {
-            Ok(repository) => clear.repository = Some(repository),
+            Ok(repository) => {
+                clear.repository = Some(repository);
+                clear.check = Some(ClearCheck::new(run, worktrees_dir, home));
+            }
             Err(reason) => {
                 clear.skipped.push(ClearItem {
                     path: run.worktree.path.clone(),
@@ -691,7 +794,8 @@ pub async fn plan_clear(
 }
 
 /// The main checkout of the repository of `run`'s task, from the task's own worktree, once the
-/// recorded run directory is checked against it ([`check_run_dir`]).
+/// recorded run directory and run branch are checked against it ([`check_run_dir`],
+/// [`check_run_branch`]).
 async fn task_repository(
     git: &Git,
     run: &FinishedRun,
@@ -705,15 +809,7 @@ async fn task_repository(
     let repository = repository_root(git, task_worktree)
         .await
         .map_err(|error| format!("git failed: {}", error.message))?;
-    check_run_dir(
-        &run.worktree,
-        &repository,
-        worktrees_dir,
-        home,
-        &run.checkout.slug,
-        &run.run_id,
-        run.attempt,
-    )?;
+    ClearCheck::new(run, worktrees_dir, home).check(&repository)?;
     Ok(repository)
 }
 
@@ -764,10 +860,24 @@ async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<ClearItem> {
             unmerged,
         });
     }
+    // Only a run worktree still on the run branch is removed with it. When the worktree is gone,
+    // its branch name was checked against the record ([`check_run_branch`]) and goes alone.
+    let reason = if run.path.is_dir() {
+        match git
+            .run(&run.path, &["symbolic-ref", "--short", "HEAD"])
+            .await
+        {
+            Ok(head) if head == run.branch => None,
+            Ok(head) => Some(format!("on branch {head}, not {}", run.branch)),
+            Err(_) => Some("HEAD is detached or unreadable".to_string()),
+        }
+    } else {
+        None
+    };
     items.push(ClearItem {
         path: run.path.clone(),
         branch: run.branch.clone(),
-        reason: None,
+        reason,
         unmerged: None,
     });
     items
@@ -794,7 +904,10 @@ impl fmt::Display for ClearReport {
 /// Applies a confirmed [`ClearPlan`]: `git worktree remove` (never forced) and `git branch -D`
 /// for each worktree, from `repository`, then, once all its worktrees are gone, the run directory
 /// with [`remove_run_dir`], which never deletes recursively. A run directory that is not empty
-/// after that is kept and reported.
+/// after that is kept and reported. Each run is checked again first ([`ClearCheck`]), since the
+/// disk may have changed since the plan: a run that no longer passes, or that has no check, is
+/// kept whole, and an item whose worktree is not in the run directory or whose branch is not the
+/// run branch or one of its fan-out branches is kept.
 pub async fn apply_clear(git: &Git, repository: &Path, plan: &ClearPlan) -> ClearReport {
     let mut report = ClearReport::default();
     for run in &plan.runs {
@@ -807,7 +920,29 @@ pub async fn apply_clear(git: &Git, repository: &Path, plan: &ClearPlan) -> Clea
                     .unwrap_or_else(|| "uncommitted changes".to_string()),
             ));
         }
+        let checked = match &run.check {
+            Some(check) if check.worktree.run_dir != run.run_dir => Err(format!(
+                "{} is not the run directory that was checked",
+                run.run_dir.display()
+            )),
+            Some(check) => check.check(repository).map(|()| check),
+            None => Err("the run was not checked, so nothing in it is removed".to_string()),
+        };
+        let check = match checked {
+            Ok(check) => check,
+            Err(reason) => {
+                for item in &run.remove {
+                    report.skipped.push((item.clone(), reason.clone()));
+                }
+                continue;
+            }
+        };
         for item in &run.remove {
+            if let Some(reason) = check.refuse_item(item) {
+                all_removed = false;
+                report.skipped.push((item.clone(), reason));
+                continue;
+            }
             if item.path.exists() {
                 let path = item.path.to_string_lossy();
                 if let Err(error) = git
