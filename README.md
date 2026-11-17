@@ -612,9 +612,10 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | C-x C-c | quit |
 | C-h e | show the echo-area messages |
 
-To switch it off, set another base keymap, for example `"base_keymap": "VSCode"`. Any value other
-than `"Emacs"` removes every Emacs key and brings back Zed's keys, and the cursor goes back to a
-bar. The change applies as soon as the settings file is saved.
+To switch it off, set another base keymap, for example `"base_keymap": "VSCode"`. `"VSCode"` and
+`"Vim"` remove every Emacs key, and the cursor goes back to a bar under VS Code (a block in Vim's
+normal mode). The change applies as soon as the settings file is saved. See
+[Keybinding profiles](#keybinding-profiles).
 
 `emacs.cursor_style` picks the cursor: `"auto"` (the default) is a block while the base keymap is
 Emacs and your `cursor_shape` otherwise, `"emacs"` is always a block and `"modern"` is always a
@@ -738,6 +739,29 @@ another way in: the variants above are commands in the command palette (`task: a
 `chat: new with options`, `chat: open any`, `chat: fork to task as`, `task: new without plan`,
 `prompts: send without marking`, `workflow: retry step fresh`), and C-x C-SPC stands in for
 C-u C-SPC.
+
+## Keybinding profiles
+
+bongos has three keybinding profiles, set with `base_keymap` in settings: `"Emacs"` (the default),
+`"VSCode"` and `"Vim"`; `"None"` loads no base keymap. Every bongos command is bound under all three, and every command is also in
+the command palette and in M-x. The old values `"JetBrains"`, `"Atom"`, `"SublimeText"`, `"TextMate"`
+and `"Cursor"` are retired: bongos shows a notice, uses Emacs, and leaves your setting as it is.
+
+To switch, edit `base_keymap` in `settings.json` (it applies when saved) or run `settings: set
+keybindings` from the command palette and pick a profile.
+
+- **Leaders.** Emacs binds the bongos commands under C-c. VS Code binds them under `ctrl-k b`
+  (`cmd-k b` on macOS). Vim binds `ctrl-k b` and also `space` in normal and visual mode. A lone
+  `space` waits for the chord timeout before it moves the cursor right.
+- **Terminals.** Under VS Code and Vim a terminal sends its keys to the shell, so the leaders are
+  not bound there. The way out is `alt-1` (`cmd-1` on macOS), which focuses the first editor pane;
+  commands from a terminal go through the command palette.
+- **Cursor.** With `emacs.cursor_style` at `"auto"`, the cursor is a block under Emacs and your
+  `cursor_shape` otherwise. Under Vim the cursor follows the mode: a block in normal mode and a
+  bar in insert mode.
+- **Your keymap.** `keymap.json` loads last, so a binding of yours wins under every profile.
+
+The keys of every command under each profile are in [docs/keybindings.md](docs/keybindings.md).
 
 ## Incremental search
 
@@ -1067,6 +1091,7 @@ JetBrains and stay under JetBrains' terms.
 | Path | What |
 |---|---|
 | `script/bongos/` | Build, test and smoke scripts, and the workspace environment. |
+| `docs/` | Generated reference pages, such as the keybindings of each profile. |
 
 ## References
 

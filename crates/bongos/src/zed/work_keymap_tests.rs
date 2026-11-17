@@ -110,6 +110,19 @@ fn load(paths: &[&str], cx: &TestAppContext) -> (Keymap, Vec<KeyBinding>) {
                 KeymapFile::load_asset(path, None, cx)
                     .unwrap_or_else(|error| panic!("{path}: {error}")),
             );
+            // The panel keys live in the specific overrides, which every profile loads after
+            // its base keymap.
+            let overrides = match *path {
+                "keymaps/linux/emacs.json" => Some("keymaps/specific-overrides.json"),
+                "keymaps/macos/emacs.json" => Some("keymaps/specific-overrides-macos.json"),
+                _ => None,
+            };
+            if let Some(overrides) = overrides {
+                all.extend(
+                    KeymapFile::load_asset(overrides, None, cx)
+                        .unwrap_or_else(|error| panic!("{overrides}: {error}")),
+                );
+            }
         }
         (Keymap::new(all.clone()), all)
     })
@@ -312,29 +325,60 @@ async fn work_panel_keys(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn other_base_keymaps_have_no_work_keys(cx: &mut TestAppContext) {
+async fn vscode_binds_the_work_keys_only_under_its_leader(cx: &mut TestAppContext) {
     init_keymap_test(cx);
-    let bases: &[(&str, &[&str])] = &[
-        (
-            LINUX.0,
-            &[
-                "keymaps/linux/atom.json",
-                "keymaps/linux/cursor.json",
-                "keymaps/linux/jetbrains.json",
-                "keymaps/linux/sublime_text.json",
-            ],
-        ),
-        (
-            MACOS.0,
-            &[
-                "keymaps/macos/atom.json",
-                "keymaps/macos/cursor.json",
-                "keymaps/macos/jetbrains.json",
-                "keymaps/macos/sublime_text.json",
-                "keymaps/macos/textmate.json",
-            ],
-        ),
-    ];
+    for (macos, leader) in [(false, "ctrl-k b"), (true, "cmd-k b")] {
+        let bindings = cx.update(|cx| {
+            super::profile_key_bindings(settings::BaseKeymap::VSCode, false, macos, cx)
+        });
+        let keymap = Keymap::new(bindings.clone());
+        let unparse = |keystrokes: Vec<String>| keystrokes.join(" ");
+        for (input, action) in WORK_KEYS {
+            let derived = format!("{leader}{}", input.strip_prefix("ctrl-c").unwrap());
+            let expected = unparse(keys(&derived).iter().map(|key| key.unparse()).collect());
+            // The work keys under VS Code are exactly the leader forms of the Emacs keys.
+            let bound: Vec<String> = bindings
+                .iter()
+                .filter(|binding| binding.action().name() == *action)
+                // Single-key bindings are panel keys from the overrides every profile loads.
+                .filter(|binding| binding.keystrokes().len() > 1)
+                .map(|binding| {
+                    unparse(
+                        binding
+                            .keystrokes()
+                            .iter()
+                            .map(|key| key.inner().unparse())
+                            .collect(),
+                    )
+                })
+                .collect();
+            assert_eq!(bound, vec![expected], "macos={macos}: {action}");
+            let (names, pending) = resolve(&keymap, &derived, &workspace());
+            assert_eq!(names.first(), Some(action), "macos={macos}: {derived}");
+            assert!(!pending, "macos={macos}: {derived}");
+        }
+        for binding in &bindings {
+            // The panel keys are in the overrides every profile loads.
+            if binding.action().name() == "project::ResolveSplit" {
+                continue;
+            }
+            assert!(
+                !UNBOUND.contains(&binding.action().name()),
+                "macos={macos}: {}",
+                binding.action().name()
+            );
+        }
+        assert!(
+            resolve(&keymap, "ctrl-c w", &workspace()).0.is_empty(),
+            "macos={macos}"
+        );
+    }
+}
+
+#[gpui::test]
+async fn the_default_keymap_has_no_work_keys(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    let bases: &[(&str, &[&str])] = &[(LINUX.0, &[]), (MACOS.0, &[])];
     for (default, others) in bases {
         // The first key of each pair is the base; its set is the default keymap alone.
         let mut sets: Vec<Vec<&str>> = vec![vec![default]];

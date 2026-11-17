@@ -145,3 +145,27 @@ async fn the_editor_override_beats_the_toggle(cx: &mut TestAppContext) {
     first.update_editor(|editor, _, cx| editor.set_cursor_shape_override(None, cx));
     assert_eq!(shape(&mut first), CursorShape::Block);
 }
+
+#[gpui::test]
+async fn the_mode_shape_beats_only_the_settings(cx: &mut TestAppContext) {
+    init_test(cx);
+    let mut cx = EditorTestContext::new(cx).await;
+    set_keymap(&mut cx, BaseKeymapContent::VSCode);
+    cx.update_editor(|editor, _, cx| {
+        editor.set_mode_cursor_shape(Some(CursorShape::Underline), cx);
+    });
+    assert_eq!(shape(&mut cx), CursorShape::Underline);
+
+    set_style(&mut cx, EmacsCursorStyle::Emacs);
+    assert_eq!(shape(&mut cx), CursorShape::Block);
+    set_style(&mut cx, EmacsCursorStyle::Auto);
+    assert_eq!(shape(&mut cx), CursorShape::Underline);
+
+    cx.dispatch_action(ToggleStyle);
+    assert_eq!(shape(&mut cx), CursorShape::Block);
+
+    cx.update_editor(|editor, _, cx| {
+        editor.set_cursor_shape_override(Some(CursorShape::Hollow), cx);
+    });
+    assert_eq!(shape(&mut cx), CursorShape::Hollow);
+}

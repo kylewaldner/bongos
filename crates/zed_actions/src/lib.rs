@@ -523,7 +523,9 @@ pub mod settings {
         [
             /// Opens the settings profile picker.
             #[action(deprecated_aliases = ["settings_profile_selector::Toggle"])]
-            SwitchProfile
+            SwitchProfile,
+            /// Opens the base keymap picker.
+            SetKeybindings
         ]
     );
 }

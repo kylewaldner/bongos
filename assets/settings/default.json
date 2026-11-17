@@ -13,17 +13,15 @@
   },
   "icon_theme": "Zed (Default)",
   // The name of a base set of key bindings to use.
-  // This setting can take these values, most named after another
-  // text editor:
+  // This setting can take these values:
   //
   // 1. "Emacs" (the default)
-  // 2. "VSCode"
-  // 3. "Atom"
-  // 4. "JetBrains"
-  // 5. "Cursor"
-  // 6. "None"
-  // 7. "SublimeText"
-  // 8. "TextMate"
+  // 2. "Vim"
+  // 3. "VSCode"
+  // 4. "None"
+  //
+  // The retired values "JetBrains", "Atom", "Cursor", "SublimeText" and "TextMate"
+  // still load and fall back to "Emacs".
   "base_keymap": "Emacs",
   // Settings of the Emacs mode.
   "emacs": {
@@ -2676,7 +2674,8 @@
   "minibuffer": {
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
-    // "goto_line", "zap", "isearch", "kill_ring", "query_replace".
+    // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
+    // "project_symbols".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2690,7 +2689,10 @@
       "zap",
       "isearch",
       "kill_ring",
-      "query_replace"
+      "query_replace",
+      "set_keybindings",
+      "outline",
+      "project_symbols"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,

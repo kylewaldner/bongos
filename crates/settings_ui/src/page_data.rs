@@ -2972,7 +2972,17 @@ fn keymap_page() -> SettingsPage {
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("base_keymap"),
-                    pick: |settings_content| settings_content.base_keymap.as_ref(),
+                    // A retired stored value is shown as Emacs (what it falls back to);
+                    // nothing is written unless the user picks another value.
+                    pick: |settings_content| {
+                        settings_content.base_keymap.as_ref().map(|keymap| {
+                            if keymap.is_retired() {
+                                &settings::BaseKeymapContent::Emacs
+                            } else {
+                                keymap
+                            }
+                        })
+                    },
                     write: |settings_content, value, _| {
                         settings_content.base_keymap = value;
                     },
@@ -2986,41 +2996,8 @@ fn keymap_page() -> SettingsPage {
         ]
     }
 
-    fn modal_editing_section() -> [SettingsPageItem; 3] {
-        [
-            SettingsPageItem::SectionHeader("Modal Editing"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Vim Mode",
-                description: "Enable Vim mode and key bindings.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("vim_mode"),
-                    pick: |settings_content| settings_content.vim_mode.as_ref(),
-                    write: write_vim_mode,
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Helix Mode",
-                description: "Enable Helix mode and key bindings.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("helix_mode"),
-                    pick: |settings_content| settings_content.helix_mode.as_ref(),
-                    write: write_helix_mode,
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    let items: Box<[SettingsPageItem]> = concat_sections!(
-        keybindings_section(),
-        base_keymap_section(),
-        modal_editing_section(),
-    );
+    let items: Box<[SettingsPageItem]> =
+        concat_sections!(keybindings_section(), base_keymap_section(),);
 
     SettingsPage {
         title: "Keymap",
@@ -11667,75 +11644,26 @@ where
     <<T as strum::IntoDiscriminant>::Discriminant as strum::VariantArray>::VARIANTS
 }
 
-/// Updates the `vim_mode` setting, disabling `helix_mode` if present and
-/// `vim_mode` is being enabled.
-fn write_vim_mode(settings: &mut SettingsContent, value: Option<bool>, _: &App) {
-    write_vim_mode_inner(settings, value);
-}
-
-fn write_vim_mode_inner(settings: &mut SettingsContent, value: Option<bool>) {
-    if value == Some(true) && settings.helix_mode == Some(true) {
-        settings.helix_mode = Some(false);
-    }
-    settings.vim_mode = value;
-}
-
-/// Updates the `helix_mode` setting, disabling `vim_mode` if present and
-/// `helix_mode` is being enabled.
-fn write_helix_mode(settings: &mut SettingsContent, value: Option<bool>, _: &App) {
-    write_helix_mode_inner(settings, value);
-}
-
-fn write_helix_mode_inner(settings: &mut SettingsContent, value: Option<bool>) {
-    if value == Some(true) && settings.vim_mode == Some(true) {
-        settings.vim_mode = Some(false);
-    }
-    settings.helix_mode = value;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Vim and Helix are chosen through the Base Keymap, never through their own toggles.
     #[test]
-    fn test_write_vim_helix_mode() {
-        // Enabling vim mode while `vim_mode` and `helix_mode` are not yet set
-        // should only update the `vim_mode` setting.
-        let mut settings = SettingsContent::default();
-        write_vim_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.vim_mode, Some(true));
-        assert_eq!(settings.helix_mode, None);
-
-        // Enabling helix mode while `vim_mode` and `helix_mode` are not yet set
-        // should only update the `helix_mode` setting.
-        let mut settings = SettingsContent::default();
-        write_helix_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.helix_mode, Some(true));
-        assert_eq!(settings.vim_mode, None);
-
-        // Disabling helix mode should only touch `helix_mode` setting when
-        // `vim_mode` is not set.
-        write_helix_mode_inner(&mut settings, Some(false));
-        assert_eq!(settings.helix_mode, Some(false));
-        assert_eq!(settings.vim_mode, None);
-
-        // Enabling vim mode should update `vim_mode` but leave `helix_mode`
-        // untouched.
-        write_vim_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.vim_mode, Some(true));
-        assert_eq!(settings.helix_mode, Some(false));
-
-        // Enabling helix mode should update `helix_mode` and disable
-        // `vim_mode`.
-        write_helix_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.helix_mode, Some(true));
-        assert_eq!(settings.vim_mode, Some(false));
-
-        // Enabling vim mode should update `vim_mode` and disable
-        // `helix_mode`.
-        write_vim_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.vim_mode, Some(true));
-        assert_eq!(settings.helix_mode, Some(false));
+    fn test_keymap_page_has_no_vim_or_helix_mode_item() {
+        let page = keymap_page();
+        for item in page.items.iter() {
+            match item {
+                SettingsPageItem::SettingItem(item) => {
+                    assert_ne!(item.title, "Vim Mode");
+                    assert_ne!(item.title, "Helix Mode");
+                    assert_ne!(item.field.json_path(), Some("vim_mode"));
+                    assert_ne!(item.field.json_path(), Some("helix_mode"));
+                }
+                SettingsPageItem::SectionHeader(title) => assert_ne!(*title, "Modal Editing"),
+                _ => {}
+            }
+        }
     }
 
     /// Every key of the `work` block of `default.json` has an item on the Work page.

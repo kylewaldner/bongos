@@ -1,8 +1,9 @@
 use editor::{Bias, Editor, SelectionEffects, scroll::Autoscroll, styled_runs_for_code_label};
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
-    App, Context, DismissEvent, Entity, HighlightStyle, ParentElement, StyledText, Task, TaskExt,
-    TextStyle, WeakEntity, Window, relative,
+    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle,
+    ParentElement, Render, StyledText, Subscription, Task, TaskExt, TextStyle, WeakEntity, Window,
+    relative,
 };
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
@@ -13,9 +14,47 @@ use theme::ActiveTheme;
 use theme_settings::ThemeSettings;
 use util::ResultExt;
 use workspace::{
-    Workspace,
+    ModalView, Workspace,
     ui::{LabelLike, ListItem, ListItemSpacing, prelude::*},
 };
+
+/// The name the symbol picker is routed by in `minibuffer.enabled_for`.
+pub const MINIBUFFER_NAME: &str = "project_symbols";
+
+/// The modal that hosts the symbol picker, centered or in the minibuffer strip.
+pub struct ProjectSymbolsModal {
+    picker: Entity<Picker<ProjectSymbolsDelegate>>,
+    _dismiss: Subscription,
+}
+
+impl ProjectSymbolsModal {
+    fn new(delegate: ProjectSymbolsDelegate, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let picker =
+            cx.new(|cx| Picker::uniform_list(delegate, window, cx).minibuffer(MINIBUFFER_NAME, cx));
+        let _dismiss = cx.subscribe(&picker, |_, _, _: &DismissEvent, cx| cx.emit(DismissEvent));
+        Self { picker, _dismiss }
+    }
+}
+
+impl ModalView for ProjectSymbolsModal {
+    fn minibuffer_name(&self) -> Option<&'static str> {
+        Some(MINIBUFFER_NAME)
+    }
+}
+
+impl EventEmitter<DismissEvent> for ProjectSymbolsModal {}
+
+impl Focusable for ProjectSymbolsModal {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.picker.focus_handle(cx)
+    }
+}
+
+impl Render for ProjectSymbolsModal {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.picker.clone()
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(
@@ -26,7 +65,7 @@ pub fn init(cx: &mut App) {
                     let handle = cx.entity().downgrade();
                     workspace.toggle_modal(window, cx, move |window, cx| {
                         let delegate = ProjectSymbolsDelegate::new(handle, project);
-                        Picker::uniform_list(delegate, window, cx)
+                        ProjectSymbolsModal::new(delegate, window, cx)
                     })
                 },
             );
@@ -588,6 +627,39 @@ mod tests {
         symbols.update_in(cx, |p, window, cx| {
             assert!(p.delegate.render_match(0, false, window, cx).is_some());
         });
+    }
+
+    /// Opens the symbol picker the way `ctrl-t` does under the VS Code base keymap (which binds
+    /// it to `project_symbols::Toggle`), with the given names routed to the minibuffer, and says
+    /// whether it opened in the strip.
+    async fn symbols_open_in_strip(routes: Vec<String>, cx: &mut TestAppContext) -> bool {
+        init_test(cx);
+        cx.update(|cx| {
+            init(cx);
+            cx.default_global::<workspace::MinibufferRouting>()
+                .set_routes(routes);
+        });
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        cx.dispatch_action(workspace::ToggleProjectSymbols);
+        cx.run_until_parked();
+        workspace.update(cx, |workspace, cx| {
+            assert!(workspace.active_modal::<ProjectSymbolsModal>(cx).is_some());
+            workspace.modal_layer().read(cx).bottom_modal().is_some()
+        })
+    }
+
+    #[gpui::test]
+    async fn test_project_symbols_open_in_the_minibuffer_when_routed(cx: &mut TestAppContext) {
+        assert!(symbols_open_in_strip(vec![MINIBUFFER_NAME.to_string()], cx).await);
+    }
+
+    #[gpui::test]
+    async fn test_project_symbols_open_centered_when_not_routed(cx: &mut TestAppContext) {
+        assert!(!symbols_open_in_strip(vec!["file_finder".to_string()], cx).await);
     }
 
     fn init_test(cx: &mut TestAppContext) {
