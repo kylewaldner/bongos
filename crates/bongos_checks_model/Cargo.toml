@@ -24,4 +24,3 @@ toml.workspace = true
 
 [dev-dependencies]
 bongos_work_model = { workspace = true, features = ["test-support"] }
-tempfile.workspace = true

@@ -28,7 +28,7 @@
 #      reads the definitions file `checks/registry/flaky-tests.md` from the pin, not the same-named
 #      file of the task's tree; the row reads "accepted by flake-verdict".
 #   5. A check that exits 3 (declared an environment code) is run again twice (the interval is 0
-#      minutes in the scenario settings: the setting is whole minutes) and ends
+#      minutes in the scenario settings: the setting is whole minutes, 0 means no pause) and ends
 #      `no verdict: environment (exit 3)`; the script ran three times.
 #   6. `project: land` of a working copy that adds a file the landing check `guard` rejects, and
 #      rewrites `checks/guard` to pass: the landing is refused by `guard` with the script's own
@@ -44,7 +44,7 @@
 #   are out of reach: `rerun-alone` twice at tip and twice at base, the run Waiting on you and
 #   no fix node running are not driven. Part 4 drives `or_accepted` and the pinned read; part 5 the
 #   reruns and the verdict text.
-# - The rerun interval is `task_checks.no_verdict_rerun_minutes`, whole minutes; 0 stands for 1 s.
+# - The rerun interval is `task_checks.no_verdict_rerun_minutes`, whole minutes; 0 means no pause.
 # The scenario leaves the app quit, restores settings.json and never writes final.png.
 
 if [ -n "${stock:-}" ]; then
