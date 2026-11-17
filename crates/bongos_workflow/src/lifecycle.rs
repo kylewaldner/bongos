@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::WorkflowsSettings;
 use crate::definitions::{self, DefinitionError};
 use crate::mcp;
-use crate::runtime::{RunSpec, Runner, Runtime, RuntimeError, Settlement};
+use crate::runtime::{RunBinding, RunSpec, Runner, Runtime, RuntimeError, Settlement};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError, branch_worktree_path};
 
 /// A run's id: a UUID v7, the same for every attempt.
@@ -260,6 +260,10 @@ pub trait StartChecks {
     /// The MCP servers installed for `kind`; `None` when not discovered yet, which skips the
     /// check.
     fn mcp_servers(&self, kind: AgentKind) -> Option<BTreeSet<String>>;
+    /// The settings validation reads (ceilings, fan-out width, network, shipped programs).
+    fn validation(&self) -> bongos_workflow_model::validate::ValidationContext {
+        bongos_workflow_model::validate::ValidationContext::default()
+    }
     /// `workflows.mcp_exclude`.
     fn mcp_exclude(&self) -> Vec<String> {
         Vec::new()
@@ -355,6 +359,36 @@ impl RunEntry {
 
     fn attempt_dir(&self) -> PathBuf {
         attempt_dir(&self.dir, self.attempt())
+    }
+
+    /// The context a runner gets for this run's current attempt.
+    fn binding(&self) -> RunBinding {
+        let task_dir = self
+            .dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&self.dir)
+            .to_path_buf();
+        RunBinding {
+            workflow: self.record.workflow.clone(),
+            task_id: self.task_id.clone(),
+            task_dir,
+            run_dir: self.dir.clone(),
+            attempt_dir: self.attempt_dir(),
+            worktree: self.worktree.clone(),
+            checkout: self.task.clone(),
+            inputs: self
+                .record
+                .inputs
+                .iter()
+                .map(|input| bongos_workflow_model::inputs::Input {
+                    name: input.name.clone(),
+                    value: input.value.clone(),
+                    source: input.source.clone(),
+                    missing: false,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -852,6 +886,7 @@ impl<R: Runner> Lifecycle<R> {
                         attempt_dir: old_attempt_dir,
                     })
                     .ok();
+                self.runtime.bind(run, entry.binding());
             }
         }
         self.runs.insert(index, entry);
@@ -1041,7 +1076,9 @@ impl<R: Runner> Lifecycle<R> {
                 definition,
                 attempt_dir,
             })
-            .map_err(Refusal::runtime)
+            .map_err(Refusal::runtime)?;
+        self.runtime.bind(&entry.id, entry.binding());
+        Ok(())
     }
 
     /// Copies the latest definition to the next `definition/<rev>/` and continues the run on

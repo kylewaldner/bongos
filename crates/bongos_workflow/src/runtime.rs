@@ -37,6 +37,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_workflow_model::inputs::Input;
 use bongos_workflow_model::record::RunningNode;
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
@@ -113,6 +114,36 @@ impl Finish {
     }
 }
 
+/// Where a run lives and what it was started with: what a runner needs to start its nodes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunBinding {
+    pub workflow: String,
+    pub task_id: String,
+    /// The task's directory.
+    pub task_dir: PathBuf,
+    /// `<task dir>/runs/<id>`.
+    pub run_dir: PathBuf,
+    /// The directory of the current attempt.
+    pub attempt_dir: PathBuf,
+    pub worktree: RunWorktree,
+    pub checkout: TaskCheckout,
+    /// The run's resolved inputs.
+    pub inputs: Vec<Input>,
+}
+
+/// One try a runner is asked to start, with the context of its run.
+pub struct NodeStart<'a> {
+    pub run: &'a str,
+    pub definition: &'a Definition,
+    pub key: &'a NodeKey,
+    pub try_number: u32,
+    pub state: &'a RunState,
+    /// What is left of the run's cost cap; `None` when the run has none.
+    pub budget_left_usd: Option<f64>,
+    /// The run's binding, when the lifecycle bound it.
+    pub binding: Option<&'a RunBinding>,
+}
+
 /// What runs node tries: the agent runners, the program runner and the built-ins, or a fake in
 /// tests. The runtime decides; the runner only starts, reports and stops.
 pub trait Runner {
@@ -130,6 +161,17 @@ pub trait Runner {
         key: &NodeKey,
         try_number: u32,
     ) -> Result<ProcessRecord, Failure>;
+
+    /// Records the context of `run`, when an attempt begins and when a run is loaded.
+    fn bind(&mut self, _run: &str, _binding: RunBinding) {}
+
+    /// Forgets the context of `run`, when the runtime drops it.
+    fn unbind(&mut self, _run: &str) {}
+
+    /// [`Runner::start`] with the run's state and binding; the runtime calls this one.
+    fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
+        self.start(node.run, node.definition, node.key, node.try_number)
+    }
 
     /// The tries that ended since the last call.
     fn poll(&mut self) -> Vec<Finish>;
@@ -156,6 +198,18 @@ impl<R: Runner + ?Sized> Runner for Box<R> {
         try_number: u32,
     ) -> Result<ProcessRecord, Failure> {
         (**self).start(run, definition, key, try_number)
+    }
+
+    fn bind(&mut self, run: &str, binding: RunBinding) {
+        (**self).bind(run, binding)
+    }
+
+    fn unbind(&mut self, run: &str) {
+        (**self).unbind(run)
+    }
+
+    fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
+        (**self).start_node(node)
     }
 
     fn poll(&mut self) -> Vec<Finish> {
@@ -194,6 +248,8 @@ struct LiveRun {
     in_flight: BTreeSet<NodeKey>,
     /// The keys of `in_flight` a built-in runs, with that built-in.
     builtins: BTreeMap<NodeKey, Arc<dyn BuiltinNode>>,
+    /// The run's context, once bound ([`Runtime::bind`]).
+    binding: Option<RunBinding>,
 }
 
 impl LiveRun {
@@ -441,6 +497,15 @@ impl<R: Runner> Runtime<R> {
         Ok(())
     }
 
+    /// Keeps `binding` as the context of run `id`, to hand to its node starts, and gives it to
+    /// the runner.
+    pub fn bind(&mut self, id: &str, binding: RunBinding) {
+        if let Some(index) = self.find(id) {
+            self.runs[index].binding = Some(binding.clone());
+        }
+        self.runner.bind(id, binding);
+    }
+
     /// Loads a run after a relaunch; [`Runtime::load_all`] with one run.
     pub fn load(&mut self, spec: RunSpec) -> Result<Vec<(NodeKey, OrphanOutcome)>, RuntimeError> {
         let mut orphans = self.load_all(vec![spec])?;
@@ -652,6 +717,7 @@ impl<R: Runner> Runtime<R> {
         self.queue.retain(|queued| queued != id);
         self.settling.retain(|settling| settling != id);
         self.runs.remove(index);
+        self.runner.unbind(id);
         true
     }
 
@@ -1021,9 +1087,18 @@ impl<R: Runner> Runtime<R> {
                         start_time: 0,
                     })
             }
-            None => self
-                .runner
-                .start(&run.id, &run.definition, &key, try_number),
+            None => {
+                let state = run.state();
+                self.runner.start_node(NodeStart {
+                    run: &run.id,
+                    definition: &run.definition,
+                    key: &key,
+                    try_number,
+                    state: &state,
+                    budget_left_usd: None,
+                    binding: run.binding.as_ref(),
+                })
+            }
         };
         match started {
             Ok(process) => {
@@ -1130,6 +1205,7 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
         status: Status::Held,
         in_flight: BTreeSet::new(),
         builtins: BTreeMap::new(),
+        binding: None,
     })
 }
 

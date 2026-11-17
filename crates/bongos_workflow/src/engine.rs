@@ -141,6 +141,19 @@ impl Global for EngineRoots {}
 /// every start fails, naming why. Nothing ticks the app's runs before then.
 struct UnwiredRunner;
 
+/// Why a node cannot start while no runner is connected.
+pub(crate) const UNWIRED_DETAIL: &str =
+    "the node runners are not connected to the engine in this build";
+
+/// The failure of a node start while no runner is connected.
+pub(crate) fn unwired_failure(key: &NodeKey) -> Failure {
+    Failure::new(
+        FailureReason::AgentNotInstalledOrLoggedOut,
+        Some(key.clone()),
+        UNWIRED_DETAIL,
+    )
+}
+
 impl Runner for UnwiredRunner {
     fn is_connected(&self) -> bool {
         false
@@ -153,11 +166,7 @@ impl Runner for UnwiredRunner {
         key: &NodeKey,
         _try_number: u32,
     ) -> Result<ProcessRecord, Failure> {
-        Err(Failure::new(
-            FailureReason::AgentNotInstalledOrLoggedOut,
-            Some(key.clone()),
-            "the node runners are not connected to the engine in this build",
-        ))
+        Err(unwired_failure(key))
     }
 
     fn poll(&mut self) -> Vec<Finish> {
@@ -451,6 +460,18 @@ impl WorkflowEngine {
         self.start_with_waiter(request, tree, &mut None, cx)
     }
 
+    /// Refuses a command that would start a node while no runner is connected.
+    fn refuse_unconnected(&self) -> Result<(), Refusal> {
+        if self.lifecycle().runtime().runner().is_connected() {
+            return Ok(());
+        }
+        Err(Refusal::new(
+            RefusalKind::RunnerNotConnected,
+            "Workflow runs are not connected to an agent runner yet.",
+            "Nothing was started.",
+        ))
+    }
+
     fn start_with_waiter(
         &self,
         request: StartRequest,
@@ -458,13 +479,7 @@ impl WorkflowEngine {
         reply: &mut Option<futures::channel::oneshot::Sender<LandingRunEnd>>,
         cx: &mut App,
     ) -> Result<RunId, Refusal> {
-        if !self.lifecycle().runtime().runner().is_connected() {
-            return Err(Refusal::new(
-                RefusalKind::RunnerNotConnected,
-                "Workflow runs are not connected to an agent runner yet.",
-                "Nothing was started.",
-            ));
-        }
+        self.refuse_unconnected()?;
         let start = LiveModesRegistry::can_start_run(&request.task_id, cx);
         let active_run = if start.allowed {
             None
@@ -593,6 +608,7 @@ impl WorkflowEngine {
     }
 
     pub fn resume(&self, run: &RunId, cx: &mut App) -> Result<(), Refusal> {
+        self.refuse_unconnected()?;
         self.refuse_held_run(run)?;
         self.act(cx, |lifecycle, _| lifecycle.resume(run))
     }
@@ -609,6 +625,7 @@ impl WorkflowEngine {
         fresh_definition: bool,
         cx: &mut App,
     ) -> Result<(), Refusal> {
+        self.refuse_unconnected()?;
         self.refuse_held_run(run)?;
         // A retry that reads the definition again, and a restart, read the project's verified
         // commit now; any other retry reads nothing and keeps its attempt's commit.
@@ -627,6 +644,7 @@ impl WorkflowEngine {
     }
 
     pub fn restart(&self, run: &RunId, cx: &mut App) -> Result<RunId, Refusal> {
+        self.refuse_unconnected()?;
         self.refuse_held_run(run)?;
         let task_dirs = self.run_dirs(run, cx)?;
         let (dirs, commit) = match &task_dirs {

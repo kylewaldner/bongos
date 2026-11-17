@@ -12,6 +12,7 @@ pub mod builtin_wait;
 mod commands;
 pub mod completion;
 pub mod definitions;
+pub mod dispatch;
 mod engine;
 pub mod gates;
 pub mod landing;
@@ -65,6 +66,8 @@ mod builtin_wait_tests;
 mod commands_tests;
 #[cfg(test)]
 mod definitions_tests;
+#[cfg(test)]
+mod dispatch_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
