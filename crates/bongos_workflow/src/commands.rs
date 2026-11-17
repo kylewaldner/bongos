@@ -23,7 +23,7 @@ use crate::engine::{EditTarget, WorkflowEngine};
 use crate::lifecycle::{ClearedRun, GateField, Refusal, RunId, RunStatus};
 use crate::shipped::TEMPLATES;
 use crate::worktrees::{
-    ClearPlan, ClearReport, FinishedRun, Git, GitError, apply_clear, plan_clear, repository_root,
+    ClearPlan, ClearReport, FinishedRun, Git, GitError, apply_clear, plan_clear,
 };
 use settings::Settings as _;
 
@@ -487,6 +487,8 @@ pub(crate) fn finished_run(cleared: ClearedRun) -> FinishedRun {
         },
         finished: cleared.finished,
         worktree: cleared.worktree,
+        attempt: cleared.attempt,
+        checkout: cleared.checkout,
     }
 }
 
@@ -505,45 +507,43 @@ pub(crate) fn plan_counts(plan: &ClearPlan) -> (usize, usize) {
 }
 
 /// The plan of `finished`: their worktrees older than `keep_days` before `now`, dirty ones
-/// skipped. Writes nothing.
+/// skipped, and a run whose recorded run directory is not the one the app made under
+/// `worktrees_dir` (with `home` for `~`) kept whole. Writes nothing.
 pub(crate) async fn plan_removal(
     git: &Git,
     finished: &[FinishedRun],
+    worktrees_dir: Option<&Path>,
+    home: &Path,
     keep_days: u64,
     now: std::time::SystemTime,
 ) -> Result<ClearPlan, GitError> {
-    plan_clear(git, finished, keep_days, now).await.map(tidy)
+    plan_clear(git, finished, worktrees_dir, home, keep_days, now)
+        .await
+        .map(tidy)
 }
 
-/// Applies a confirmed plan run by run, each from the main checkout of its own repository. A
-/// removal that fails is reported with its item and the rest go on.
+/// Applies a confirmed plan run by run, each from the main checkout of its task's own repository,
+/// which the plan found from the task's worktree. A removal that fails is reported with its item
+/// and the rest go on.
 pub(crate) async fn apply_plan(git: &Git, plan: &ClearPlan) -> ClearReport {
     let mut report = ClearReport::default();
     for run in &plan.runs {
-        let anchor = run
-            .remove
-            .iter()
-            .chain(&run.skipped)
-            .map(|item| item.path.clone())
-            .find(|path| path.exists());
-        let repository = match anchor {
-            Some(anchor) => repository_root(git, &anchor)
-                .await
-                .map_err(|error| error.message),
-            None => Err("its worktrees are already gone".to_string()),
-        };
-        match repository {
-            Ok(root) => {
+        match &run.repository {
+            Some(root) => {
                 let one = ClearPlan {
                     runs: vec![run.clone()],
                 };
-                let applied = apply_clear(git, &root, &one).await;
+                let applied = apply_clear(git, root, &one).await;
                 report.removed.extend(applied.removed);
                 report.skipped.extend(applied.skipped);
             }
-            Err(reason) => {
+            None => {
                 for item in run.remove.iter().chain(&run.skipped) {
-                    report.skipped.push((item.clone(), reason.clone()));
+                    let reason = item
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "its repository is unknown".to_string());
+                    report.skipped.push((item.clone(), reason));
                 }
             }
         }
@@ -580,10 +580,21 @@ fn clear_finished(
         show_toast(workspace, notes.join(". "), cx);
         return;
     }
-    let keep_days = WorkflowsSettings::get_global(cx).keep_finished_days;
+    let settings = WorkflowsSettings::get_global(cx);
+    let keep_days = settings.keep_finished_days;
+    let worktrees_dir = settings.worktrees_dir.clone();
+    let home = paths::home_dir().clone();
     let now = clear_now(cx);
     let planned = cx.background_spawn(async move {
-        plan_removal(&Git::new("git"), &finished, keep_days, now).await
+        plan_removal(
+            &Git::new("git"),
+            &finished,
+            worktrees_dir.as_deref(),
+            &home,
+            keep_days,
+            now,
+        )
+        .await
     });
     cx.spawn_in(window, async move |workspace, cx| {
         let planned = planned.await;

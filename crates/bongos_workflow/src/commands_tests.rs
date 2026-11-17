@@ -304,7 +304,7 @@ use crate::commands::{
     parse_field, plan_counts, plan_removal,
 };
 use crate::lifecycle::{ClearedRun, GateField, RunStatus};
-use crate::worktrees::{Git, RunWorktree, TaskCheckout, create_run};
+use crate::worktrees::{ClearPlan, FinishedRun, Git, RunWorktree, TaskCheckout, create_run};
 
 const TASK_BRANCH: &str = "task/add-login";
 
@@ -402,13 +402,28 @@ fn day(days: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(days * 24 * 60 * 60)
 }
 
-fn cleared(id: &str, worktree: &RunWorktree, finished: SystemTime) -> ClearedRun {
-    ClearedRun {
-        id: id.to_string(),
-        dir: PathBuf::new(),
-        worktree: worktree.clone(),
-        status: RunStatus::Succeeded,
-        finished,
+impl Repo {
+    /// The isolated home directory the repository's git uses, never the real one.
+    fn home(&self) -> PathBuf {
+        self._temp.path().canonicalize().unwrap().join("home")
+    }
+
+    fn cleared(&self, id: &str, worktree: &RunWorktree, finished: SystemTime) -> ClearedRun {
+        ClearedRun {
+            id: id.to_string(),
+            dir: PathBuf::new(),
+            worktree: worktree.clone(),
+            attempt: 1,
+            checkout: self.task.clone(),
+            status: RunStatus::Succeeded,
+            finished,
+        }
+    }
+
+    async fn plan(&self, finished: &[FinishedRun]) -> ClearPlan {
+        plan_removal(&self.git, finished, None, &self.home(), 14, day(100))
+            .await
+            .unwrap()
     }
 }
 
@@ -427,17 +442,15 @@ async fn the_removal_is_one_plan_that_skips_a_dirty_worktree_and_keeps_a_recent_
     std::fs::write(dirty.path.join("README.md"), "uncommitted\n").unwrap();
     let recent = repo.run(RECENT).await;
     let finished: Vec<_> = [
-        cleared(CLEAN, &clean, day(1)),
-        cleared(DIRTY, &dirty, day(1)),
-        cleared(RECENT, &recent, day(99)),
+        repo.cleared(CLEAN, &clean, day(1)),
+        repo.cleared(DIRTY, &dirty, day(1)),
+        repo.cleared(RECENT, &recent, day(99)),
     ]
     .into_iter()
     .map(finished_run)
     .collect();
 
-    let plan = plan_removal(&repo.git, &finished, 14, day(100))
-        .await
-        .unwrap();
+    let plan = repo.plan(&finished).await;
     let listed: Vec<&str> = plan.runs.iter().map(|run| run.run_id.as_str()).collect();
     assert_eq!(listed, vec![CLEAN, DIRTY], "the recent run is not offered");
     assert_eq!(plan_counts(&plan), (1, 1));
@@ -474,15 +487,13 @@ async fn a_removal_that_fails_is_reported_and_the_rest_go_on(cx: &mut TestAppCon
     )
     .await;
     let finished: Vec<_> = [
-        cleared(CLEAN, &locked, day(1)),
-        cleared(DIRTY, &other, day(1)),
+        repo.cleared(CLEAN, &locked, day(1)),
+        repo.cleared(DIRTY, &other, day(1)),
     ]
     .into_iter()
     .map(finished_run)
     .collect();
-    let plan = plan_removal(&repo.git, &finished, 14, day(100))
-        .await
-        .unwrap();
+    let plan = repo.plan(&finished).await;
     assert_eq!(plan_counts(&plan), (2, 0));
 
     let report = apply_plan(&repo.git, &plan).await;
@@ -502,15 +513,13 @@ async fn declining_the_question_removes_nothing(cx: &mut TestAppContext) {
     let clean = repo.run(CLEAN).await;
     let other = repo.run(DIRTY).await;
     let finished: Vec<_> = [
-        cleared(CLEAN, &clean, day(1)),
-        cleared(DIRTY, &other, day(1)),
+        repo.cleared(CLEAN, &clean, day(1)),
+        repo.cleared(DIRTY, &other, day(1)),
     ]
     .into_iter()
     .map(finished_run)
     .collect();
-    let plan = plan_removal(&repo.git, &finished, 14, day(100))
-        .await
-        .unwrap();
+    let plan = repo.plan(&finished).await;
 
     let (env, cx) = env(cx, true).await;
     env.workspace.update_in(cx, |workspace, window, cx| {

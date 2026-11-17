@@ -1022,7 +1022,10 @@ pub fn launch_env(
     let path = |path: &Path| path.to_string_lossy().into_owned();
     env.insert("BONGOS_STATE".to_string(), path(state_file));
     env.insert("BONGOS_RESULT".to_string(), path(&node.result_path()));
-    env.insert("TMPDIR".to_string(), path(&node.scratch.join("tmp")));
+    env.insert(
+        "TMPDIR".to_string(),
+        path(&node.scratch.join(crate::worktrees::SCRATCH_TMP_DIR)),
+    );
     env
 }
 
@@ -1418,7 +1421,7 @@ impl ProgramRunner {
             ));
         }
         fs::create_dir_all(&dir).map_err(|error| io(&dir, error))?;
-        let tmp = node.scratch.join("tmp");
+        let tmp = node.scratch.join(crate::worktrees::SCRATCH_TMP_DIR);
         fs::create_dir_all(&tmp).map_err(|error| io(&tmp, error))?;
         let result_path = node.result_path();
         match fs::remove_file(&result_path) {

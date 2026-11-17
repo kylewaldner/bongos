@@ -1129,17 +1129,14 @@ impl WorkflowEngine {
 
     /// The cleared runs on disk whose run worktree is still there: what `clear finished` offers
     /// to remove, those it just cleared and those an earlier clear left. Empty while the app has
-    /// no work tree.
+    /// no work tree. Each recorded run directory is checked before anything is removed
+    /// ([`crate::worktrees::plan_clear`]).
     pub fn cleared_runs(&self, cx: &App) -> Vec<ClearedRun> {
         let Some(tree) = self.writes.tree(cx) else {
             return Vec::new();
         };
-        let settings = WorkflowsSettings::get_global(cx);
         find_cleared(&tree)
             .into_iter()
-            .filter(|run| {
-                crate::worktrees::is_run_worktree(&run.worktree, settings.worktrees_dir.as_deref())
-            })
             .filter(|run| run.worktree.path.exists())
             .collect()
     }

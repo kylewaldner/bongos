@@ -359,8 +359,12 @@ pub struct ClearedRun {
     pub id: RunId,
     /// `<task dir>/runs/<id>`.
     pub dir: PathBuf,
-    /// The worktree of the current attempt.
+    /// The worktree of the current attempt, as the record says.
     pub worktree: RunWorktree,
+    /// The number of the current attempt.
+    pub attempt: u32,
+    /// The task the run is on, from its own task file: its worktree names the repository.
+    pub checkout: TaskCheckout,
     pub status: RunStatus,
     /// When the attempt ended or was cancelled: the modification time of its event log.
     pub finished: std::time::SystemTime,
@@ -382,8 +386,16 @@ pub fn find_cleared(tree: &WorkTree) -> Vec<ClearedRun> {
             .filter(|path| path.is_dir() && path.join(CLEARED_FILE).exists())
             .collect();
         dirs.sort();
+        let checkout = match &task.file {
+            Some(file) => TaskCheckout::from_task(task.slug.clone(), file),
+            None => TaskCheckout {
+                slug: task.slug.clone(),
+                worktree: None,
+                branch: None,
+            },
+        };
         for dir in dirs {
-            match read_cleared(&dir) {
+            match read_cleared(&dir, &checkout) {
                 Ok(Some(run)) => found.push(run),
                 Ok(None) => {}
                 Err(reason) => log::warn!(
@@ -396,7 +408,7 @@ pub fn find_cleared(tree: &WorkTree) -> Vec<ClearedRun> {
     found
 }
 
-fn read_cleared(dir: &Path) -> Result<Option<ClearedRun>, String> {
+fn read_cleared(dir: &Path, checkout: &TaskCheckout) -> Result<Option<ClearedRun>, String> {
     let text =
         fs::read_to_string(dir.join(RUN_FILE)).map_err(|error| format!("{RUN_FILE}: {error}"))?;
     let record = RunToml::parse(&text).map_err(|error| error.to_string())?;
@@ -419,6 +431,8 @@ fn read_cleared(dir: &Path) -> Result<Option<ClearedRun>, String> {
         id: record.id.clone(),
         dir: dir.to_path_buf(),
         worktree: attempt_worktree(attempt),
+        attempt: attempt.n,
+        checkout: checkout.clone(),
         status,
         finished,
     }))

@@ -222,50 +222,119 @@ pub fn fan_out_branch_name(run_branch: &str, node: &str, index: u32) -> String {
 /// `<repo>/.bongos-worktrees/.runs`. `~` expands to the home directory and a relative path is
 /// resolved against `repository`.
 pub fn runs_dir(repository: &Path, worktrees_dir: Option<&Path>) -> PathBuf {
+    runs_dir_with_home(repository, worktrees_dir, paths::home_dir())
+}
+
+/// [`runs_dir`] with the home directory given, so `clear finished` and its tests choose it.
+fn runs_dir_with_home(repository: &Path, worktrees_dir: Option<&Path>, home: &Path) -> PathBuf {
     match worktrees_dir {
-        Some(dir) => repository.join(expand_configured_dir(dir)),
+        Some(dir) => {
+            let dir = dir.strip_prefix(".").unwrap_or(dir);
+            match dir.strip_prefix("~") {
+                Ok(rest) => home.join(rest),
+                Err(_) => repository.join(dir),
+            }
+        }
         None => repository.join(DEFAULT_RUNS_DIR),
     }
 }
 
-/// A configured `workflows.worktrees_dir` with a leading `./` dropped and a leading `~` expanded to
-/// the home directory. Shared by [`runs_dir`] and [`is_run_worktree`] so they agree.
-fn expand_configured_dir(dir: &Path) -> PathBuf {
-    let dir = dir.strip_prefix(".").unwrap_or(dir);
-    match dir.strip_prefix("~") {
-        Ok(rest) => paths::home_dir().join(rest),
-        Err(_) => dir.to_path_buf(),
+/// The directory under a run directory that holds the scratch directories of program nodes:
+/// `scratch/<node>/<branch>/<pass>-<try>`.
+pub const SCRATCH_DIR: &str = "scratch";
+
+/// The directory in a node's scratch directory that `TMPDIR` points at.
+pub const SCRATCH_TMP_DIR: &str = "tmp";
+
+/// Refuses a runs directory that `clear finished` must never remove from: a relative one, one with
+/// a `..`, the filesystem root, or the home directory or the repository or any directory above
+/// either (an empty `workflows.worktrees_dir`, `.` and `./` resolve to the repository).
+fn refuse_runs_dir(runs: &Path, repository: &Path, home: &Path) -> Result<(), String> {
+    let refused = !runs.is_absolute()
+        || runs
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        || runs.parent().is_none()
+        || home.starts_with(runs)
+        || repository.starts_with(runs);
+    if refused {
+        Err(format!(
+            "the runs directory {} is the filesystem root, the home directory, the repository or \
+             above one of them; check workflows.worktrees_dir",
+            runs.display()
+        ))
+    } else {
+        Ok(())
     }
 }
 
-/// Whether `worktree`, as a run.toml recorded it, has the layout [`create_run`] gives a run
-/// worktree: `<runs dir>/<run dir>/run`, with the run directory directly under the runs
-/// directory of `workflows.worktrees_dir`. A record that points anywhere else is not trusted
-/// enough to have its directory removed. The repository is not known here, so the runs directory
-/// is matched by its tail ([`runs_dir`] joins it onto the repository).
-pub fn is_run_worktree(worktree: &RunWorktree, worktrees_dir: Option<&Path>) -> bool {
-    if worktree.path != run_worktree_path(&worktree.run_dir) {
-        return false;
-    }
-    // Absolute, with no `..` or `.` component, and a plain final name: `.runs/..` must not pass.
-    let run_dir = &worktree.run_dir;
-    if !run_dir.is_absolute()
-        || !run_dir.components().all(|component| {
-            matches!(
-                component,
-                Component::RootDir | Component::Prefix(_) | Component::Normal(_)
-            )
-        })
-        || !matches!(run_dir.components().next_back(), Some(Component::Normal(_)))
-    {
-        return false;
-    }
-    let Some(parent) = run_dir.parent() else {
-        return false;
+/// `path` with every symlink resolved, or `path` itself when it does not exist.
+fn canonical_or_same(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Checks that `recorded`, as a run.toml recorded it, is exactly the run directory [`create_run`]
+/// made for attempt `attempt` of run `run_id` of task `task_slug`: `run_dir(runs_dir(repository,
+/// worktrees_dir), ...)`. `repository` is the main checkout of the task's own worktree, never one
+/// derived from the record. The runs directory is refused when it is the filesystem root, the home
+/// directory, the repository or above one of them, both as configured and with symlinks resolved;
+/// the run directory may not be a symlink, and resolved it must sit directly in the resolved runs
+/// directory, so neither a `..` nor a symlink leads elsewhere.
+pub fn check_run_dir(
+    recorded: &RunWorktree,
+    repository: &Path,
+    worktrees_dir: Option<&Path>,
+    home: &Path,
+    task_slug: &str,
+    run_id: &str,
+    attempt: u32,
+) -> Result<(), String> {
+    let refuse = |why: &str| {
+        Err(format!(
+            "{} is not the run directory this app made: {why}",
+            recorded.run_dir.display()
+        ))
     };
-    match worktrees_dir {
-        None => parent.ends_with(DEFAULT_RUNS_DIR),
-        Some(dir) => parent.ends_with(expand_configured_dir(dir)),
+    let runs = runs_dir_with_home(repository, worktrees_dir, home);
+    refuse_runs_dir(&runs, repository, home)?;
+    let expected = run_dir(&runs, task_slug, run_id, attempt);
+    let plain = recorded.run_dir.components().all(|component| {
+        matches!(
+            component,
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_)
+        )
+    });
+    if !plain || !recorded.run_dir.is_absolute() {
+        return refuse("it has a `.` or `..` or is relative");
+    }
+    if recorded.run_dir != expected {
+        return refuse(&format!("expected {}", expected.display()));
+    }
+    if recorded.path != run_worktree_path(&recorded.run_dir) {
+        return refuse("its run worktree is not in it");
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(&recorded.run_dir) else {
+        // Nothing on disk to remove.
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return refuse("it is a symlink or not a directory");
+    }
+    let canonical_runs = runs
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", runs.display()))?;
+    refuse_runs_dir(
+        &canonical_runs,
+        &canonical_or_same(repository),
+        &canonical_or_same(home),
+    )?;
+    let canonical = recorded
+        .run_dir
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", recorded.run_dir.display()))?;
+    match expected.file_name() {
+        Some(name) if canonical == canonical_runs.join(name) => Ok(()),
+        _ => refuse("with symlinks resolved it is outside the runs directory"),
     }
 }
 
@@ -485,8 +554,13 @@ pub struct FinishedRun {
     pub lifecycle: Lifecycle,
     /// When the attempt ended or was cancelled.
     pub finished: SystemTime,
-    /// The attempt's run worktree; its fan-out worktrees are found beside it.
+    /// The attempt's run worktree as its record says; its fan-out worktrees are found beside it.
+    /// Checked against [`check_run_dir`] before anything in it is removed.
     pub worktree: RunWorktree,
+    /// The attempt number, which the run directory's name carries.
+    pub attempt: u32,
+    /// The task the run is on, with its own worktree: the repository comes from there.
+    pub checkout: TaskCheckout,
 }
 
 /// One worktree and branch to remove.
@@ -505,6 +579,9 @@ pub struct ClearItem {
 pub struct ClearRun {
     pub run_id: String,
     pub run_dir: PathBuf,
+    /// The main checkout of the task's own worktree, which git removes the worktrees from; `None`
+    /// when the run directory was refused, and then nothing is removed.
+    pub repository: Option<PathBuf>,
     /// Fan-out worktrees first, then the run worktree, so the run branch goes last.
     pub remove: Vec<ClearItem>,
     /// Worktrees with uncommitted changes, which are kept.
@@ -552,10 +629,14 @@ impl ClearPlan {
 
 /// Plans `workflow: clear finished`: the succeeded and cancelled runs that finished more than
 /// `keep_finished_days` before `now`, with each of their worktrees to remove, and those with
-/// uncommitted changes skipped. Writes nothing.
+/// uncommitted changes skipped. A run whose recorded run directory is not exactly the one the app
+/// made in the task's own repository ([`check_run_dir`], with `workflows.worktrees_dir` and the
+/// home directory `home`) is kept whole, with the reason. Writes nothing.
 pub async fn plan_clear(
     git: &Git,
     runs: &[FinishedRun],
+    worktrees_dir: Option<&Path>,
+    home: &Path,
     keep_finished_days: u64,
     now: SystemTime,
 ) -> Result<ClearPlan, GitError> {
@@ -573,9 +654,23 @@ pub async fn plan_clear(
         let mut clear = ClearRun {
             run_id: run.run_id.clone(),
             run_dir: run.worktree.run_dir.clone(),
+            repository: None,
             remove: Vec::new(),
             skipped: Vec::new(),
         };
+        match task_repository(git, run, worktrees_dir, home).await {
+            Ok(repository) => clear.repository = Some(repository),
+            Err(reason) => {
+                clear.skipped.push(ClearItem {
+                    path: run.worktree.path.clone(),
+                    branch: run.worktree.branch.clone(),
+                    reason: Some(reason),
+                    unmerged: None,
+                });
+                plan.runs.push(clear);
+                continue;
+            }
+        }
         for mut item in run_worktrees(git, &run.worktree).await {
             if item.reason.is_none() && item.path.is_dir() {
                 match git.is_dirty(&item.path).await {
@@ -593,6 +688,33 @@ pub async fn plan_clear(
         plan.runs.push(clear);
     }
     Ok(plan)
+}
+
+/// The main checkout of the repository of `run`'s task, from the task's own worktree, once the
+/// recorded run directory is checked against it ([`check_run_dir`]).
+async fn task_repository(
+    git: &Git,
+    run: &FinishedRun,
+    worktrees_dir: Option<&Path>,
+    home: &Path,
+) -> Result<PathBuf, String> {
+    let task_worktree = match &run.checkout.worktree {
+        Some(worktree) if worktree.is_dir() => worktree,
+        _ => return Err("the task worktree is gone, so its repository is unknown".to_string()),
+    };
+    let repository = repository_root(git, task_worktree)
+        .await
+        .map_err(|error| format!("git failed: {}", error.message))?;
+    check_run_dir(
+        &run.worktree,
+        &repository,
+        worktrees_dir,
+        home,
+        &run.checkout.slug,
+        &run.run_id,
+        run.attempt,
+    )?;
+    Ok(repository)
 }
 
 /// The run worktree and its fan-out worktrees (`b-*` beside it), with their branches.
@@ -670,7 +792,9 @@ impl fmt::Display for ClearReport {
 }
 
 /// Applies a confirmed [`ClearPlan`]: `git worktree remove` (never forced) and `git branch -D`
-/// for each worktree, from `repository`, then the run directory once all its worktrees are gone.
+/// for each worktree, from `repository`, then, once all its worktrees are gone, the run directory
+/// with [`remove_run_dir`], which never deletes recursively. A run directory that is not empty
+/// after that is kept and reported.
 pub async fn apply_clear(git: &Git, repository: &Path, plan: &ClearPlan) -> ClearReport {
     let mut report = ClearReport::default();
     for run in &plan.runs {
@@ -710,11 +834,68 @@ pub async fn apply_clear(git: &Git, repository: &Path, plan: &ClearPlan) -> Clea
             report.removed.push(item.clone());
         }
         if all_removed
-            && run.run_dir.exists()
-            && let Err(error) = std::fs::remove_dir_all(&run.run_dir)
+            && std::fs::symlink_metadata(&run.run_dir).is_ok()
+            && let Err(error) = remove_run_dir(&run.run_dir)
         {
             log::warn!("removing {}: {error}", run.run_dir.display());
+            report.skipped.push((
+                ClearItem {
+                    path: run.run_dir.clone(),
+                    branch: String::new(),
+                    reason: None,
+                    unmerged: None,
+                },
+                format!("kept the run directory: {error}"),
+            ));
         }
     }
     report
+}
+
+/// Removes a run directory whose worktrees git has removed, without ever deleting recursively:
+/// only what the app itself leaves there goes, then the directory with the non-recursive
+/// `remove_dir`, which fails when anything else is left. What the app leaves, beside the
+/// worktrees, is the scratch tree of its program nodes:
+/// `scratch/<node>/<branch>/<pass>-<try>/` with the file `result.json` and the directory `tmp/`.
+/// Only a regular file of that name is deleted and only directories that are not symlinks are
+/// entered; every directory is removed with `remove_dir`, so one with anything else in it stays.
+pub fn remove_run_dir(run_dir: &Path) -> std::io::Result<()> {
+    fn real_dir(path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+    }
+    fn subdirs(path: &Path) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default();
+        dirs.sort();
+        dirs
+    }
+    // Failures below leave a directory that is not empty, which the final `remove_dir` reports.
+    let scratch = run_dir.join(SCRATCH_DIR);
+    if real_dir(&scratch) {
+        for node in subdirs(&scratch) {
+            for branch in subdirs(&node) {
+                for attempt in subdirs(&branch) {
+                    let result = attempt.join(crate::runner_program::SCRATCH_RESULT_FILE);
+                    if std::fs::symlink_metadata(&result)
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                    {
+                        std::fs::remove_file(&result).ok();
+                    }
+                    std::fs::remove_dir(attempt.join(SCRATCH_TMP_DIR)).ok();
+                    std::fs::remove_dir(&attempt).ok();
+                }
+                std::fs::remove_dir(&branch).ok();
+            }
+            std::fs::remove_dir(&node).ok();
+        }
+        std::fs::remove_dir(&scratch).ok();
+    }
+    std::fs::remove_dir(run_dir)
 }
