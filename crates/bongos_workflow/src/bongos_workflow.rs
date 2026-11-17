@@ -13,6 +13,7 @@ mod commands;
 pub mod completion;
 pub mod definitions;
 pub mod dispatch;
+mod dispatch_agent;
 mod engine;
 pub mod gates;
 pub mod landing;
