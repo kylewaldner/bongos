@@ -290,7 +290,10 @@ fn kinds_not_plugged_in_fail_agent_and_program_nodes() {
     let mut runner = AppRunner::default();
     for node in ["claude", "script"] {
         let failure = start(&mut runner, &definition, node).unwrap_err();
-        assert_eq!(failure.detail, "no runner is plugged in for this kind of node");
+        assert_eq!(
+            failure.detail,
+            "no runner is plugged in for this kind of node"
+        );
         assert_eq!(failure.node, Some(NodeKey::new(node, 1)));
     }
 }
