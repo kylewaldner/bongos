@@ -113,6 +113,13 @@ impl KeymapSection {
 #[serde(transparent)]
 pub struct KeymapAction(Value);
 
+impl KeymapAction {
+    /// The action as written: `null`, a name, or a name and its arguments.
+    pub(crate) fn value(&self) -> &Value {
+        &self.0
+    }
+}
+
 impl std::fmt::Display for KeymapAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {

@@ -1028,6 +1028,9 @@ pub struct Editor {
     cursor_shape: CursorShape,
     /// A shape that beats the session toggle and the settings, for this editor alone.
     cursor_shape_override: Option<CursorShape>,
+    /// The shape of the editing mode this editor is in (such as a vim mode); it beats only the
+    /// settings shape.
+    mode_cursor_shape: Option<CursorShape>,
     /// Whether the cursor is offset one character to the left when something is
     /// selected (needed for vim visual mode)
     cursor_offset_on_selection: bool,
@@ -2244,8 +2247,9 @@ impl Editor {
             linked_editing_range_task: None,
             pending_rename: None,
             searchable: !is_minimap,
-            cursor_shape: editor_settings::effective_cursor_shape(None, cx),
+            cursor_shape: editor_settings::effective_cursor_shape(None, None, cx),
             cursor_shape_override: None,
+            mode_cursor_shape: None,
             cursor_offset_on_selection: false,
             current_line_highlight: None,
             autoindent_mode: Some(AutoindentMode::EachLine),
@@ -3055,8 +3059,8 @@ impl Editor {
         cx.notify();
     }
 
-    /// Forces a cursor shape on this editor, above the session toggle and the settings; `None`
-    /// gives the decision back to them.
+    /// Forces a cursor shape on this editor, above the session toggle, `emacs.cursor_style`, the
+    /// mode shape and the settings; `None` gives the decision back to them.
     pub fn set_cursor_shape_override(
         &mut self,
         cursor_shape: Option<CursorShape>,
@@ -3066,9 +3070,35 @@ impl Editor {
         self.refresh_cursor_shape(cx);
     }
 
-    /// Recomputes the shape from the override, the session toggle and the settings.
+    /// Sets the shape of the editing mode this editor is in (such as a vim mode). It beats only
+    /// the settings shape; `None` drops it. The cursor is shown and the editor redrawn even when
+    /// the drawn shape stays the same, as a mode change needs both.
+    pub fn set_mode_cursor_shape(
+        &mut self,
+        cursor_shape: Option<CursorShape>,
+        cx: &mut Context<Self>,
+    ) {
+        self.mode_cursor_shape = cursor_shape;
+        let previous = self.cursor_shape;
+        let cursor_shape = editor_settings::effective_cursor_shape(
+            self.cursor_shape_override,
+            self.mode_cursor_shape,
+            cx,
+        );
+        self.set_cursor_shape(cursor_shape, cx);
+        if cursor_shape != previous {
+            cx.emit(EditorEvent::CursorShapeChanged);
+        }
+    }
+
+    /// Recomputes the shape from the override, the session toggle, `emacs.cursor_style`, the
+    /// mode shape and the settings.
     fn refresh_cursor_shape(&mut self, cx: &mut Context<Self>) {
-        let cursor_shape = editor_settings::effective_cursor_shape(self.cursor_shape_override, cx);
+        let cursor_shape = editor_settings::effective_cursor_shape(
+            self.cursor_shape_override,
+            self.mode_cursor_shape,
+            cx,
+        );
         if cursor_shape != self.cursor_shape {
             self.set_cursor_shape(cursor_shape, cx);
             cx.emit(EditorEvent::CursorShapeChanged);

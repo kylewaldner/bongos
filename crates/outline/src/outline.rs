@@ -127,7 +127,14 @@ impl Focusable for OutlineView {
 }
 
 impl EventEmitter<DismissEvent> for OutlineView {}
+/// The name the outline is routed by in `minibuffer.enabled_for`.
+pub const MINIBUFFER_NAME: &str = "outline";
+
 impl ModalView for OutlineView {
+    fn minibuffer_name(&self) -> Option<&'static str> {
+        Some(MINIBUFFER_NAME)
+    }
+
     fn on_before_dismiss(
         &mut self,
         window: &mut Window,
@@ -184,6 +191,7 @@ impl OutlineView {
                     window,
                 ))
                 .show_scrollbar(true)
+                .minibuffer(MINIBUFFER_NAME, cx)
         });
         OutlineView { picker }
     }
@@ -919,6 +927,55 @@ mod tests {
             selected_id, last_scored_id,
             "Selection should not default to the last scored match"
         );
+    }
+
+    /// Opens the outline the way `ctrl-shift-o` does under the VS Code base keymap (which binds
+    /// it to `outline::Toggle`), with the given names routed to the minibuffer, and says whether
+    /// it opened in the strip.
+    async fn outline_opens_in_strip(routes: Vec<String>, cx: &mut TestAppContext) -> bool {
+        init_test(cx);
+        cx.update(|cx| {
+            cx.default_global::<workspace::MinibufferRouting>()
+                .set_routes(routes);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/dir"),
+            json!({ "a.rs": "struct One;\nstruct Two;\n" }),
+        )
+        .await;
+        let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+        project.read_with(cx, |project, _| {
+            project.languages().add(language::rust_lang())
+        });
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = cx.read(|cx| workspace.read(cx).workspace().clone());
+        let worktree_id = workspace.update(cx, |workspace, cx| {
+            workspace.project().update(cx, |project, cx| {
+                project.worktrees(cx).next().unwrap().read(cx).id()
+            })
+        });
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path((worktree_id, rel_path("a.rs")), None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        open_outline_view(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.modal_layer().read(cx).bottom_modal().is_some()
+        })
+    }
+
+    #[gpui::test]
+    async fn test_outline_opens_in_the_minibuffer_when_routed(cx: &mut TestAppContext) {
+        assert!(outline_opens_in_strip(vec![MINIBUFFER_NAME.to_string()], cx).await);
+    }
+
+    #[gpui::test]
+    async fn test_outline_opens_centered_when_not_routed(cx: &mut TestAppContext) {
+        assert!(!outline_opens_in_strip(vec!["file_finder".to_string()], cx).await);
     }
 
     fn open_outline_view(

@@ -610,9 +610,10 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | C-x C-c | quit |
 | C-h e | show the echo-area messages |
 
-To switch it off, set another base keymap, for example `"base_keymap": "VSCode"`. Any value other
-than `"Emacs"` removes every Emacs key and brings back Zed's keys, and the cursor goes back to a
-bar. The change applies as soon as the settings file is saved.
+To switch it off, set another base keymap, for example `"base_keymap": "VSCode"`. `"VSCode"` and
+`"Vim"` remove every Emacs key, and the cursor goes back to a bar under VS Code (a block in Vim's
+normal mode). The change applies as soon as the settings file is saved. See
+[Keybinding profiles](#keybinding-profiles).
 
 `emacs.cursor_style` picks the cursor: `"auto"` (the default) is a block while the base keymap is
 Emacs and your `cursor_shape` otherwise, `"emacs"` is always a block and `"modern"` is always a
@@ -677,12 +678,14 @@ keep the meaning they have there, and where M-1 to M-9 switch tabs (outside edit
 - **Digits** after C-u, or M-0 to M-9 from the start, build the number: C-u 1 0 and M-1 0 are 10.
   A C-u typed after digits ends the number, so C-u 3 C-u 7 is a 7 typed with the count 3, which
   inserts 777; a digit typed with no argument pending is only a digit.
-- **Minus** makes the count negative: M-- is -1 and C-u - is -4 (Emacs reads C-u - as -1). Most
-  commands run the opposite way with a negative count; C-u - M-f goes four words back, M-- C-f
-  one character back. The minus is only taken before the digits.
-- **The echo.** While an argument is pending the echo area shows it: `C-u 4`, `C-u 10`, `C-u -`.
-  It goes when the next command takes the argument. The argument belongs to the editor it was
-  started in: moving focus to a picker or the minibuffer drops it.
+- **Minus** makes the count negative, as in Emacs: M-- and C-u - are -1, and digits after a minus
+  give their negative (C-u - 2 is -2). C-u after a minus multiplies by four: C-u - C-u is -4,
+  C-u - C-u C-u is -16. A second minus cancels the argument, and a minus after digits is a typed
+  character. Most commands run the opposite way with a negative count; C-u - M-f goes one word
+  back, C-u - 2 M-f two, C-u - C-u M-f four, M-- C-f one character back.
+- **The echo.** While an argument is pending the echo area shows it: `C-u 4`, `C-u 10`, `C-u -`,
+  `C-u (-4)`. It goes when the next command takes the argument. The argument belongs to the editor
+  it was started in: moving focus to a picker or the minibuffer drops it.
 - **C-g** cancels a pending argument and its echo, so C-u 7 C-g changes nothing and the next
   key is typed as usual. C-g also stops a long repeat after the repeat in progress, keeping what
   was done.
@@ -734,6 +737,29 @@ another way in: the variants above are commands in the command palette (`task: a
 `chat: new with options`, `chat: open any`, `chat: fork to task as`, `task: new without plan`,
 `prompts: send without marking`, `workflow: retry step fresh`), and C-x C-SPC stands in for
 C-u C-SPC.
+
+## Keybinding profiles
+
+bongos has three keybinding profiles, set with `base_keymap` in settings: `"Emacs"` (the default),
+`"VSCode"` and `"Vim"`; `"None"` loads no base keymap. Every bongos command is bound under all three, and every command is also in
+the command palette and in M-x. The old values `"JetBrains"`, `"Atom"`, `"SublimeText"`, `"TextMate"`
+and `"Cursor"` are retired: bongos shows a notice, uses Emacs, and leaves your setting as it is.
+
+To switch, edit `base_keymap` in `settings.json` (it applies when saved) or run `settings: set
+keybindings` from the command palette and pick a profile.
+
+- **Leaders.** Emacs binds the bongos commands under C-c. VS Code binds them under `ctrl-k b`
+  (`cmd-k b` on macOS). Vim binds `ctrl-k b` and also `space` in normal and visual mode. A lone
+  `space` waits for the chord timeout before it moves the cursor right.
+- **Terminals.** Under VS Code and Vim a terminal sends its keys to the shell, so the leaders are
+  not bound there. The way out is `alt-1` (`cmd-1` on macOS), which focuses the first editor pane;
+  commands from a terminal go through the command palette.
+- **Cursor.** With `emacs.cursor_style` at `"auto"`, the cursor is a block under Emacs and your
+  `cursor_shape` otherwise. Under Vim the cursor follows the mode: a block in normal mode and a
+  bar in insert mode.
+- **Your keymap.** `keymap.json` loads last, so a binding of yours wins under every profile.
+
+The keys of every command under each profile are in [docs/keybindings.md](docs/keybindings.md).
 
 ## Incremental search
 
@@ -1063,6 +1089,7 @@ JetBrains and stay under JetBrains' terms.
 | Path | What |
 |---|---|
 | `script/bongos/` | Build, test and smoke scripts, and the workspace environment. |
+| `docs/` | Generated reference pages, such as the keybindings of each profile. |
 
 ## References
 

@@ -459,43 +459,66 @@ pub struct ExtensionsSettingsContent {
 
 /// Base key bindings scheme. Base keymaps can be overridden with user keymaps.
 ///
-/// Default: VSCode
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    PartialEq,
-    Eq,
-    Default,
-    strum::VariantArray,
-)]
+/// The JetBrains, Atom, SublimeText, TextMate and Cursor values are retired: they
+/// still deserialize (so a stored value never breaks settings) and fall back to
+/// Emacs, but they are not offered in the settings UI or the JSON schema.
+///
+/// Default: Emacs
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, MergeFrom, PartialEq, Eq, Default)]
 pub enum BaseKeymapContent {
+    #[serde(alias = "vscode")]
     VSCode,
+    #[serde(alias = "vim")]
+    Vim,
+    #[doc(hidden)]
     JetBrains,
+    #[doc(hidden)]
     SublimeText,
+    #[doc(hidden)]
     Atom,
+    #[doc(hidden)]
     TextMate,
     #[default]
+    #[serde(alias = "emacs")]
     Emacs,
+    #[doc(hidden)]
     Cursor,
+    #[serde(alias = "none")]
     None,
 }
 
+impl BaseKeymapContent {
+    /// Whether this value names a keymap that no longer exists.
+    pub fn is_retired(self) -> bool {
+        matches!(
+            self,
+            Self::JetBrains | Self::SublimeText | Self::Atom | Self::TextMate | Self::Cursor
+        )
+    }
+}
+
+impl strum::VariantArray for BaseKeymapContent {
+    const VARIANTS: &'static [Self] = &[Self::Emacs, Self::Vim, Self::VSCode, Self::None];
+}
+
 impl strum::VariantNames for BaseKeymapContent {
-    const VARIANTS: &'static [&'static str] = &[
-        "VSCode",
-        "JetBrains",
-        "Sublime Text",
-        "Atom",
-        "TextMate",
-        "Emacs",
-        "Cursor",
-        "None",
-    ];
+    const VARIANTS: &'static [&'static str] = &["Emacs", "Vim", "VSCode", "None"];
+}
+
+impl JsonSchema for BaseKeymapContent {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "BaseKeymapContent".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "Base key bindings scheme. Base keymaps can be overridden with user keymaps.\n\nDefault: Emacs",
+            "type": "string",
+            "enum": [
+                "Emacs", "Vim", "VSCode", "None", "emacs", "vim", "vscode", "none"
+            ]
+        })
+    }
 }
 
 /// Configuration of audio in bongos.
@@ -1986,5 +2009,61 @@ impl From<u64> for DelayMs {
 impl std::fmt::Display for DelayMs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}ms", self.0)
+    }
+}
+
+#[cfg(test)]
+mod base_keymap_tests {
+    use super::*;
+
+    const RETIRED: [&str; 5] = ["JetBrains", "Atom", "SublimeText", "TextMate", "Cursor"];
+
+    #[test]
+    fn retired_values_deserialize_but_are_not_offered() {
+        for name in RETIRED {
+            let parsed: BaseKeymapContent = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert!(parsed.is_retired(), "{name}");
+        }
+        let variants = <BaseKeymapContent as strum::VariantArray>::VARIANTS;
+        assert!(variants.iter().all(|variant| !variant.is_retired()));
+        let names = <BaseKeymapContent as strum::VariantNames>::VARIANTS;
+        assert_eq!(variants.len(), names.len());
+        for name in RETIRED {
+            assert!(!names.contains(&name), "{name}");
+        }
+        // Every offered value is a name that deserializes back to the same variant.
+        for (variant, name) in variants.iter().zip(names) {
+            let parsed: BaseKeymapContent = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(parsed, *variant);
+        }
+
+        let schema = schemars::schema_for!(BaseKeymapContent)
+            .to_value()
+            .to_string();
+        for name in RETIRED {
+            assert!(!schema.contains(name), "{name} in {schema}");
+        }
+        for name in names {
+            assert!(schema.contains(name), "{name} missing from {schema}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod base_keymap_variant_tests {
+    use super::BaseKeymapContent;
+
+    #[test]
+    fn the_kept_variant_list_is_exactly_four_in_order() {
+        use strum::VariantArray as _;
+        assert_eq!(
+            BaseKeymapContent::VARIANTS,
+            &[
+                BaseKeymapContent::Emacs,
+                BaseKeymapContent::Vim,
+                BaseKeymapContent::VSCode,
+                BaseKeymapContent::None
+            ]
+        );
     }
 }

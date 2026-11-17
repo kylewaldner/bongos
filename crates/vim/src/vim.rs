@@ -1,6 +1,8 @@
 //! Vim support for Zed.
 
 #[cfg(test)]
+mod cursor_tests;
+#[cfg(test)]
 mod test;
 
 mod change_list;
@@ -166,6 +168,8 @@ struct PushLiteral {
 actions!(
     vim,
     [
+        /// Opens the minibuffer with a `:` prompt for entering a vim command.
+        CommandLine,
         /// Switches to normal mode.
         SwitchToNormalMode,
         /// Switches to insert mode.
@@ -282,6 +286,30 @@ actions!(
     ]
 );
 
+/// Decides what `ToggleVimMode` writes to `base_keymap`. Returns the new base keymap and the
+/// non-Vim keymap to remember for the next toggle.
+pub fn toggled_base_keymap(
+    current: settings::BaseKeymap,
+    vim_on: bool,
+    previous: settings::BaseKeymap,
+) -> (settings::BaseKeymap, settings::BaseKeymap) {
+    use settings::BaseKeymap;
+    if vim_on {
+        if current != BaseKeymap::Vim {
+            // Only `vim_mode` made Vim active; the base keymap is already the non-Vim one.
+            return (current, current);
+        }
+        let restored = if previous == BaseKeymap::Vim {
+            BaseKeymap::Emacs
+        } else {
+            previous
+        };
+        (restored, restored)
+    } else {
+        (BaseKeymap::Vim, current)
+    }
+}
+
 /// Initializes the `vim` crate.
 pub fn init(cx: &mut App) {
     VimGlobals::register(cx);
@@ -289,11 +317,20 @@ pub fn init(cx: &mut App) {
     cx.observe_new(Vim::register).detach();
 
     cx.observe_new(|workspace: &mut Workspace, _, _| {
+        workspace.register_action(|workspace, _: &CommandLine, window, cx| {
+            command_palette::CommandPalette::toggle_with_prompt(workspace, "", ":", window, cx);
+        });
+
         workspace.register_action(|workspace, _: &ToggleVimMode, _, cx| {
             let fs = workspace.app_state().fs.clone();
-            let currently_enabled = VimModeSetting::get_global(cx).0;
+            let current = *settings::BaseKeymap::get_global(cx);
+            let vim_on = VimModeSetting::get_global(cx).0;
+            let previous = cx.global::<VimGlobals>().previous_base_keymap;
+            let (next, next_previous) = toggled_base_keymap(current, vim_on, previous);
+            cx.global_mut::<VimGlobals>().previous_base_keymap = next_previous;
             update_settings_file(fs, cx, move |setting, _| {
-                setting.vim_mode = Some(!currently_enabled);
+                setting.base_keymap = Some(next.into());
+                setting.vim_mode = Some(false);
                 if let Some(helix_mode) = &mut setting.helix_mode {
                     *helix_mode = false;
                 }
@@ -1004,12 +1041,7 @@ impl Vim {
     }
 
     fn deactivate(editor: &mut Editor, cx: &mut Context<Editor>) {
-        editor.set_cursor_shape(
-            EditorSettings::get_global(cx)
-                .cursor_shape
-                .unwrap_or_default(),
-            cx,
-        );
+        editor.set_mode_cursor_shape(None, cx);
         editor.set_clip_at_line_ends(false, cx);
         editor.set_collapse_matches(false);
         editor.set_input_enabled(true);
@@ -1143,7 +1175,6 @@ impl Vim {
             }
             EditorEvent::Edited { .. } => self.push_to_change_list(window, cx),
             EditorEvent::FocusedIn => self.sync_vim_settings(window, cx),
-            EditorEvent::CursorShapeChanged => self.cursor_shape_changed(window, cx),
             EditorEvent::PushedToNavHistory {
                 anchor,
                 is_deactivate,
@@ -1356,9 +1387,21 @@ impl Vim {
         forced_motion
     }
 
+    /// The shape the current mode draws, falling back to the editor's settings shape when the
+    /// mode inherits it.
     pub fn cursor_shape(&self, cx: &App) -> CursorShape {
+        self.mode_cursor_shape(cx).unwrap_or_else(|| {
+            EditorSettings::get_global(cx)
+                .cursor_shape
+                .unwrap_or_default()
+        })
+    }
+
+    /// The shape the current mode asks the editor for, or `None` when insert mode inherits the
+    /// editor's own shape.
+    fn mode_cursor_shape(&self, cx: &App) -> Option<CursorShape> {
         let cursor_shape = VimSettings::get_global(cx).cursor_shape;
-        match self.mode {
+        Some(match self.mode {
             Mode::Normal => {
                 if let Some(operator) = self.operator_stack.last() {
                     match operator {
@@ -1389,12 +1432,9 @@ impl Vim {
             }
             Mode::Insert => match cursor_shape.insert {
                 InsertModeCursorShape::Explicit(shape) => shape,
-                InsertModeCursorShape::Inherit => {
-                    let editor_settings = EditorSettings::get_global(cx);
-                    editor_settings.cursor_shape.unwrap_or_default()
-                }
+                InsertModeCursorShape::Inherit => return None,
             },
-        }
+        })
     }
 
     fn expects_character_input(&self) -> bool {
@@ -1570,14 +1610,8 @@ impl Vim {
         self.clear_operator(window, cx);
         self.update_editor(cx, |vim, editor, cx| {
             if vim.cursor_shape(cx) == CursorShape::Block {
-                editor.set_cursor_shape(CursorShape::Hollow, cx);
+                editor.set_mode_cursor_shape(Some(CursorShape::Hollow), cx);
             }
-        });
-    }
-
-    fn cursor_shape_changed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.update_editor(cx, |vim, editor, cx| {
-            editor.set_cursor_shape(vim.cursor_shape(cx), cx);
         });
     }
 
@@ -2227,7 +2261,7 @@ impl Vim {
 
     fn state_for_editor_settings(&self, cx: &App) -> VimEditorSettingsState {
         VimEditorSettingsState {
-            cursor_shape: self.cursor_shape(cx),
+            cursor_shape: self.mode_cursor_shape(cx),
             clip_at_line_ends: self.clip_at_line_ends(),
             collapse_matches: !HelixModeSetting::get_global(cx).0 && !self.search.cmd_f_search,
             input_enabled: self.editor_input_enabled(),
@@ -2247,7 +2281,7 @@ impl Vim {
         window: &mut Window,
         cx: &mut Context<Editor>,
     ) {
-        editor.set_cursor_shape(state.cursor_shape, cx);
+        editor.set_mode_cursor_shape(state.cursor_shape, cx);
         editor.set_clip_at_line_ends(state.clip_at_line_ends, cx);
         editor.set_collapse_matches(state.collapse_matches);
         editor.set_input_enabled(state.input_enabled);
@@ -2265,7 +2299,7 @@ impl Vim {
 }
 
 struct VimEditorSettingsState {
-    cursor_shape: CursorShape,
+    cursor_shape: Option<CursorShape>,
     clip_at_line_ends: bool,
     collapse_matches: bool,
     input_enabled: bool,
@@ -2377,5 +2411,35 @@ impl Settings for VimSettings {
             cursor_shape: vim.cursor_shape.unwrap().into(),
             show_edit_predictions_in_normal_mode: vim.show_edit_predictions_in_normal_mode.unwrap(),
         }
+    }
+}
+
+#[cfg(test)]
+mod toggle_base_keymap_tests {
+    use super::toggled_base_keymap;
+    use settings::BaseKeymap;
+
+    #[test]
+    fn toggling_twice_from_vscode_ends_on_vscode() {
+        let (first, previous) =
+            toggled_base_keymap(BaseKeymap::VSCode, false, BaseKeymap::default());
+        assert_eq!(first, BaseKeymap::Vim);
+        assert_eq!(previous, BaseKeymap::VSCode);
+        let (second, _) = toggled_base_keymap(first, true, previous);
+        assert_eq!(second, BaseKeymap::VSCode);
+    }
+
+    #[test]
+    fn toggling_off_without_a_remembered_keymap_returns_to_emacs() {
+        let (next, _) = toggled_base_keymap(BaseKeymap::Vim, true, BaseKeymap::Vim);
+        assert_eq!(next, BaseKeymap::Emacs);
+        let (next, _) = toggled_base_keymap(BaseKeymap::Vim, true, BaseKeymap::default());
+        assert_eq!(next, BaseKeymap::Emacs);
+    }
+
+    #[test]
+    fn vim_mode_alone_keeps_the_base_keymap() {
+        let (next, _) = toggled_base_keymap(BaseKeymap::VSCode, true, BaseKeymap::Emacs);
+        assert_eq!(next, BaseKeymap::VSCode);
     }
 }

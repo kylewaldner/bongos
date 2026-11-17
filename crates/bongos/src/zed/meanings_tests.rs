@@ -297,12 +297,12 @@ async fn the_prompt_moves_read_the_count(cx: &mut TestAppContext) {
     assert_eq!(*previous.borrow(), vec![Some(3)]);
     // A negative argument swaps to the other action.
     cx.simulate_keystrokes(&format!("ctrl-u - {back}"));
-    assert_eq!(*nexts.borrow(), vec![Some(2), Some(4)]);
+    assert_eq!(*nexts.borrow(), vec![Some(2), Some(1)]);
     cx.simulate_keystrokes(&format!("ctrl-u - 2 {next}"));
     assert_eq!(*previous.borrow(), vec![Some(3), Some(2)]);
     // Without an argument the key runs as it is.
     cx.simulate_keystrokes(&next);
-    assert_eq!(*nexts.borrow(), vec![Some(2), Some(4), None]);
+    assert_eq!(*nexts.borrow(), vec![Some(2), Some(1), None]);
     assert!(!pending(cx));
 }
 
