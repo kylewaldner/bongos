@@ -321,3 +321,20 @@ fn the_engine_tells_the_sources_and_toasts_once(cx: &mut TestAppContext) {
     let delivered = cx.update(|cx| cx.default_global::<Delivered>().0.clone());
     assert_eq!(delivered.len(), 1, "{delivered:?}");
 }
+
+#[test]
+fn a_run_halted_by_the_cost_cap_needs_you_with_the_reason() {
+    use bongos_workflow_model::{Event, NodeKey, replay};
+    let state = replay(&[
+        Event::Created,
+        Event::CapReached {
+            cap_usd: 5.0,
+            cost_usd: 5.12,
+            key: NodeKey::new("implement", 1),
+        },
+    ]);
+    assert_eq!(
+        gates::reasons(&state),
+        ["cost cap of $5.00 reached at node implement"]
+    );
+}
