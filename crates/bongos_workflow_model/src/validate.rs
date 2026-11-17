@@ -125,6 +125,9 @@ pub struct ValidationContext {
     pub ceilings: Ceilings,
     /// `workflows.fan_out_width`: the widest per-item fan-out a route may declare.
     pub fan_out_width: u32,
+    /// `workflows.loop_bound`: when set, a cycle whose routes set no `max_passes` is bounded by it
+    /// instead of being an error.
+    pub loop_bound: Option<u32>,
     /// `workflows.programs.allow_network`.
     pub allow_network: bool,
     /// The MCP servers installed for each agent CLI, after `workflows.mcp_exclude` (D8).
@@ -142,6 +145,7 @@ impl Default for ValidationContext {
         Self {
             ceilings: Ceilings::default(),
             fan_out_width: 8,
+            loop_bound: None,
             allow_network: true,
             mcp_servers: BTreeMap::new(),
             programs: SHIPPED_PROGRAMS
@@ -1318,7 +1322,12 @@ impl<'a> Validator<'a> {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        for component in strongly_connected(&unbounded) {
+        let components = if self.context.loop_bound.is_some() {
+            Vec::new()
+        } else {
+            strongly_connected(&unbounded)
+        };
+        for component in components {
             let is_cycle = component.len() > 1 || unbounded[component[0]].contains(&component[0]);
             if !is_cycle {
                 continue;

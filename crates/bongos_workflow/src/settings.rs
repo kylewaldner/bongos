@@ -44,6 +44,7 @@ impl WorkflowsSettings {
         ValidationContext {
             ceilings: self.ceilings.clone(),
             fan_out_width: self.limits.fan_out_width,
+            loop_bound: Some(self.limits.loop_bound),
             allow_network: self.programs.allow_network,
             ..ValidationContext::default()
         }

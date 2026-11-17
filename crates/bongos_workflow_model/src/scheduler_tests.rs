@@ -1102,3 +1102,49 @@ kind = "success"
         .collect();
     assert_eq!(started, ["check"]);
 }
+
+fn unbounded_loop() -> String {
+    LOOP.replace(", max_passes = 3", "")
+}
+
+fn with_loop_bound(text: &str, loop_bound: u32) -> FakeRunner {
+    FakeRunner::new(
+        definition(text),
+        Limits {
+            loop_bound,
+            ..Limits::default()
+        },
+    )
+}
+
+#[test]
+fn a_loop_without_max_passes_fails_after_the_loop_bound() {
+    let mut run = with_loop_bound(&unbounded_loop(), 2);
+    run.script("test", [ok(json!({ "status": "fail" }))])
+        .script("fix", [ok(json!({ "summary": "tried" }))]);
+    let state = run.run();
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert!(
+        failure.detail.contains("bound of 2 passes"),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(run.starts_of("test"), 2);
+    assert_eq!(run.starts_of("fix"), 2);
+}
+
+#[test]
+fn an_explicit_max_passes_wins_over_the_loop_bound() {
+    let mut run = with_loop_bound(LOOP, 1);
+    run.script("test", [ok(json!({ "status": "fail" }))])
+        .script("fix", [ok(json!({ "summary": "tried" }))]);
+    let failure = failure_of(&run.run());
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert!(
+        failure.detail.contains("bound of 3 passes"),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(run.starts_of("fix"), 3);
+}

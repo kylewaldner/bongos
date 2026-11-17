@@ -780,6 +780,7 @@ fn run_toml() -> RunToml {
                 definition_commit: Some(COMMIT.to_string()),
                 worktree: "/w/1".to_string(),
                 branch: "run/1".to_string(),
+                loop_bound: Some(7),
             },
             Attempt {
                 n: 2,
@@ -788,6 +789,7 @@ fn run_toml() -> RunToml {
                 definition_commit: None,
                 worktree: "/w/2".to_string(),
                 branch: "run/2".to_string(),
+                loop_bound: None,
             },
         ],
     }
@@ -900,4 +902,18 @@ fn run_toml_refuses_a_definition_commit_that_is_not_a_commit_id() {
     }
     assert!(is_commit_id(COMMIT));
     assert!(is_commit_id(&"a".repeat(64)));
+}
+
+#[test]
+fn the_loop_bound_is_written_only_when_there_is_one_and_old_records_load() {
+    let text = run_toml().to_toml();
+    assert_eq!(text.matches("loop_bound").count(), 1, "{text}");
+    assert!(text.contains("loop_bound = 7"), "{text}");
+    let old = text.replace("loop_bound = 7\n", "");
+    let parsed = RunToml::parse(&old).unwrap();
+    assert!(parsed.attempts.iter().all(|a| a.loop_bound.is_none()));
+    assert_eq!(
+        RunToml::parse(&text).unwrap().attempts[0].loop_bound,
+        Some(7)
+    );
 }
