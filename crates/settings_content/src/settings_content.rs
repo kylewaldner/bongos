@@ -1636,8 +1636,93 @@ pub struct WorkflowsSettingsContent {
     ///
     /// Default: 7
     pub wait_give_up_days: Option<u32>,
+    /// The most a single run may cost, in US dollars. Null means no cap; a value at or below 0
+    /// also means no cap.
+    ///
+    /// Default: null
+    pub run_max_cost_usd: Option<f64>,
+    /// Passes of a loop whose route sets no `max_passes`.
+    ///
+    /// Default: 5
+    pub loop_bound: Option<u32>,
+    /// The directory that holds workflow definitions. Null means `~/.bongos/workflows`.
+    ///
+    /// Default: null
+    pub definitions_dir: Option<String>,
+    /// MCP servers that agent nodes never get, by name.
+    ///
+    /// Default: []
+    pub mcp_exclude: Option<Vec<String>>,
+    /// The caps an agent node falls back to when neither it nor its definition sets one.
+    pub agents: Option<WorkflowAgentsSettingsContent>,
+    /// The most a definition may declare; a definition above a ceiling is invalid.
+    pub ceilings: Option<WorkflowCeilingsSettingsContent>,
     /// How program nodes run.
     pub programs: Option<WorkflowProgramsSettingsContent>,
+}
+
+/// The agent defaults of workflow nodes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowAgentsSettingsContent {
+    /// Turns an agent node may take when it sets no `max_turns`.
+    ///
+    /// Default: 40
+    pub max_turns: Option<u32>,
+    /// Dollars an agent node may spend when it sets no `max_cost_usd`.
+    ///
+    /// Default: 5.0
+    pub max_cost_usd: Option<f64>,
+    /// Minutes an agent node may run when it sets no `max_minutes`.
+    ///
+    /// Default: 30
+    pub max_minutes: Option<u32>,
+    /// Settings for Claude agent nodes.
+    pub claude: Option<WorkflowClaudeSettingsContent>,
+}
+
+/// Settings of Claude agent nodes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowClaudeSettingsContent {
+    /// The model a Claude node uses when it sets none.
+    ///
+    /// Default: "sonnet"
+    pub model: Option<String>,
+}
+
+/// The most a workflow definition may declare.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowCeilingsSettingsContent {
+    /// The most turns a node may declare.
+    ///
+    /// Default: 200
+    pub max_turns: Option<u32>,
+    /// The most dollars a node may declare.
+    ///
+    /// Default: 25.0
+    pub max_cost_usd: Option<f64>,
+    /// The most minutes a node may declare.
+    ///
+    /// Default: 240
+    pub max_minutes: Option<u32>,
+    /// The most passes a loop may declare.
+    ///
+    /// Default: 20
+    pub max_passes: Option<u32>,
+    /// The most retries a node may declare.
+    ///
+    /// Default: 5
+    pub retries: Option<u32>,
+    /// The most minutes a program node may declare.
+    ///
+    /// Default: 120
+    pub program_max_minutes: Option<u32>,
+    /// Whether a node may declare the bypassPermissions mode.
+    ///
+    /// Default: false
+    pub allow_bypass_permissions: Option<bool>,
 }
 
 /// How workflow program nodes run.
@@ -1657,6 +1742,10 @@ pub struct WorkflowProgramsSettingsContent {
     ///
     /// Default: 10
     pub max_output_mb: Option<u64>,
+    /// Whether a program node may use the network.
+    ///
+    /// Default: true
+    pub allow_network: Option<bool>,
 }
 
 /// Settings for task checks.

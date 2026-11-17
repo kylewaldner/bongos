@@ -64,7 +64,7 @@ pub type Branch = Vec<(String, u32)>;
 const ON_BOUND_FAIL: &str = "fail";
 
 /// The engine's limits, all settings (D19).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Limits {
     /// `workflows.max_concurrent_runs`: runs executing at once; the rest are Queued.
     pub max_concurrent_runs: u32,
@@ -77,6 +77,10 @@ pub struct Limits {
     pub fan_out_width: u32,
     /// `workflows.retries`: automatic retries of a node that sets none.
     pub retries: u32,
+    /// `workflows.loop_bound`: passes of a loop whose route sets no `max_passes`.
+    pub loop_bound: u32,
+    /// `workflows.run_max_cost_usd`: the cost cap of one run; `None` is no cap.
+    pub run_max_cost_usd: Option<f64>,
 }
 
 impl Default for Limits {
@@ -87,6 +91,8 @@ impl Default for Limits {
             max_parallel_branches: 3,
             fan_out_width: 8,
             retries: 2,
+            loop_bound: 5,
+            run_max_cost_usd: None,
         }
     }
 }
