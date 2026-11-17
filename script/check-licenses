@@ -75,7 +75,7 @@ check_license () {
 
 check_no_agpl_license_file
 
-git ls-files -z -- "Cargo.toml" "**/Cargo.toml" | while IFS= read -r -d '' cargo_toml; do
+git ls-files -z -- "Cargo.toml" "**/Cargo.toml" ":!:script/bongos/fixtures/**" | while IFS= read -r -d '' cargo_toml; do
     check_manifest_for_agpl "$cargo_toml"
 
     if [[ "$cargo_toml" == */Cargo.toml ]]; then

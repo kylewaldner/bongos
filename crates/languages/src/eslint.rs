@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use gpui::AsyncApp;
 use http_client::{
     github::{AssetKind, GitHubLspBinaryVersion, build_asset_url},
-    github_download::download_server_binary,
+    github_download::download_server_binary_with_progress,
 };
 use language::{LspAdapter, LspAdapterDelegate, LspInstaller, Toolchain};
 use lsp::{CodeActionKind, LanguageServerBinary, LanguageServerName, Uri};
@@ -46,13 +46,22 @@ impl EsLintLspAdapter {
     #[cfg(windows)]
     const GITHUB_ASSET_KIND: AssetKind = AssetKind::Zip;
 
+    /// SHA-256 of the pinned `release/3.0.24` source archive from GitHub (the tarball, or the zip
+    /// on Windows). Bumping the version requires recomputing it.
+    #[cfg(not(windows))]
+    const ARCHIVE_SHA256: &'static str =
+        "5c2de7910c929aa096a0547a80b13a2eb8652007ccd3543ec000329ebd54ab69";
+    #[cfg(windows)]
+    const ARCHIVE_SHA256: &'static str =
+        "3a5b144b14765ed475babe8b3a7810d02a8ca4cd99365eda2568fd1f464d99e5";
+
     const SERVER_PATH: &'static str = "vscode-eslint/server/out/eslintServer.js";
     const SERVER_NAME: LanguageServerName = LanguageServerName::new_static("eslint");
 
     const FLAT_CONFIG_FILE_NAMES_V8_21: &'static [&'static str] = &["eslint.config.js"];
     const FLAT_CONFIG_FILE_NAMES_V8_57: &'static [&'static str] =
         &["eslint.config.js", "eslint.config.mjs", "eslint.config.cjs"];
-    const FLAT_CONFIG_FILE_NAMES_V10: &'static [&'static str] = &[
+    pub(crate) const FLAT_CONFIG_FILE_NAMES_V10: &'static [&'static str] = &[
         "eslint.config.js",
         "eslint.config.mjs",
         "eslint.config.cjs",
@@ -60,7 +69,7 @@ impl EsLintLspAdapter {
         "eslint.config.cts",
         "eslint.config.mts",
     ];
-    const LEGACY_CONFIG_FILE_NAMES: &'static [&'static str] = &[
+    pub(crate) const LEGACY_CONFIG_FILE_NAMES: &'static [&'static str] = &[
         ".eslintrc",
         ".eslintrc.js",
         ".eslintrc.cjs",
@@ -95,7 +104,7 @@ impl LspInstaller for EsLintLspAdapter {
 
         Ok(GitHubLspBinaryVersion {
             name: Self::CURRENT_VERSION.into(),
-            digest: None,
+            digest: Some(Self::ARCHIVE_SHA256.into()),
             url,
         })
     }
@@ -107,6 +116,7 @@ impl LspInstaller for EsLintLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
+        let server_name = self.name();
         let node = self.node.clone();
 
         async move {
@@ -116,12 +126,16 @@ impl LspInstaller for EsLintLspAdapter {
             if fs::metadata(&server_path).await.is_err() {
                 remove_matching(&container_dir, |_| true).await;
 
-                download_server_binary(
+                download_server_binary_with_progress(
                     &*delegate.http_client(),
                     &version.url,
-                    None,
+                    // Always the pinned digest, whatever the caller's version carries.
+                    Some(Self::ARCHIVE_SHA256),
                     &destination_path,
                     Self::GITHUB_ASSET_KIND,
+                    &|done, total| {
+                        delegate.report_download_progress(server_name.clone(), done, total)
+                    },
                 )
                 .await?;
 
@@ -644,6 +658,46 @@ enum ResultWorkingDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tampered_eslint_archive_is_refused_and_nothing_is_extracted() {
+        futures::executor::block_on(async {
+            let container = tempfile::tempdir().unwrap();
+            let destination = container.path().join("vscode-eslint-3.0.24");
+            let client = http_client::FakeHttpClient::create(|_| async {
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(b"tampered archive bytes".to_vec().into())
+                    .unwrap())
+            });
+            let error = download_server_binary_with_progress(
+                client.as_ref(),
+                "https://github.com/microsoft/vscode-eslint/archive/refs/tags/release/3.0.24.tar.gz",
+                Some(EsLintLspAdapter::ARCHIVE_SHA256),
+                &destination,
+                EsLintLspAdapter::GITHUB_ASSET_KIND,
+                &|_, _| {},
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("SHA-256 mismatch"),
+                "{error:#}"
+            );
+            assert_eq!(std::fs::read_dir(container.path()).unwrap().count(), 0);
+        });
+    }
+
+    #[test]
+    fn eslint_archive_digest_is_a_sha256_hex_string() {
+        let digest = EsLintLspAdapter::ARCHIVE_SHA256;
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+    }
 
     mod glob_patterns {
         use super::*;

@@ -35,6 +35,7 @@ use crate::{
     PulledDiagnostics, ResolveState, Symbol,
     buffer_store::{BufferStore, BufferStoreEvent},
     environment::ProjectEnvironment,
+    language_server_policy::{policy_allows, policy_formatter_for_buffer, with_policy_worktree},
     lsp_command::{self, *},
     lsp_store::{
         self,
@@ -131,7 +132,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{self, AtomicUsize},
+        atomic::{self, AtomicBool, AtomicUsize},
     },
     time::{Duration, Instant},
     vec,
@@ -172,7 +173,6 @@ pub use worktree::{
 const SERVER_LAUNCHING_BEFORE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 pub const SERVER_PROGRESS_THROTTLE_TIMEOUT: Duration = Duration::from_millis(100);
 const WORKSPACE_DIAGNOSTICS_TOKEN_START: &str = "id:";
-const SERVER_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10);
 static NEXT_PROMPT_REQUEST_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -341,6 +341,12 @@ pub struct LocalLspStore {
     restricted_worktrees_tasks: HashMap<WorktreeId, (Subscription, watch::Receiver<bool>)>,
     all_language_servers_stopped: bool,
     stopped_language_servers: HashSet<LanguageServerName>,
+    /// Number of `reapply_server_policy` calls still waiting for refused servers to stop.
+    /// While nonzero, no server is started, so a policy switch never runs two servers at once.
+    policy_switches_in_flight: usize,
+    /// Progress and cancel flags of the language server downloads, shared with the delegates.
+    server_downloads: Arc<ServerDownloads>,
+    _forward_download_progress: Task<()>,
 
     buffers_to_refresh_hash_set: HashSet<BufferId>,
     buffers_to_refresh_queue: VecDeque<BufferId>,
@@ -757,6 +763,7 @@ impl LocalLspStore {
                 }
                 let mut env = delegate.shell_env().await;
                 env.extend(settings.env.unwrap_or_default());
+                env.extend(adapter.adapter.forced_env());
 
                 Ok(LanguageServerBinary {
                     path: delegate.resolve_relative_path(path),
@@ -855,28 +862,8 @@ impl LocalLspStore {
 
             delegate.update_status(adapter.name.clone(), BinaryStatus::None);
 
-            let mut binary = match (existing_binary, maybe_download_binary) {
-                (binary, None) => binary?,
-                (Err(_), Some(downloader)) => downloader.await?,
-                (Ok(existing_binary), Some(downloader)) => {
-                    let mut download_timeout = cx
-                        .background_executor()
-                        .timer(SERVER_DOWNLOAD_TIMEOUT)
-                        .fuse();
-                    let mut downloader = downloader.fuse();
-                    futures::select! {
-                        _ = download_timeout => {
-                            // Return existing binary and kick the existing work to the background.
-                            cx.spawn(async move |_| downloader.await).detach();
-                            Ok(existing_binary)
-                        },
-                        downloaded_or_existing_binary = downloader => {
-                            // If download fails, this results in the existing binary.
-                            downloaded_or_existing_binary
-                        }
-                    }?
-                }
-            };
+            let mut binary =
+                language::binary_to_start((existing_binary, maybe_download_binary), cx).await?;
             let mut shell_env = delegate.shell_env().await;
 
             shell_env.extend(binary.env.unwrap_or_default());
@@ -889,6 +876,8 @@ impl LocalLspStore {
                     shell_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
             }
+
+            shell_env.extend(adapter.adapter.forced_env());
 
             binary.env = Some(shell_env);
             Ok(binary)
@@ -1673,8 +1662,8 @@ impl LocalLspStore {
         logger: zlog::Logger,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        let (adapters_and_servers, settings, request_timeout) =
-            lsp_store.update(cx, |lsp_store, cx| {
+        let (adapters_and_servers, settings, request_timeout, policy_formatter) = lsp_store
+            .update(cx, |lsp_store, cx| {
                 buffer.handle.update(cx, |buffer, cx| {
                     let adapters_and_servers = lsp_store
                         .as_local()
@@ -1686,7 +1675,28 @@ impl LocalLspStore {
                     let request_timeout = ProjectSettings::get_global(cx)
                         .global_lsp_settings
                         .get_request_timeout();
-                    (adapters_and_servers, settings, request_timeout)
+                    // A policy formatter that is not running for this buffer falls back to the
+                    // usual "auto" choice. `supports_range_formatting` does not fall back: with a
+                    // policy formatter it asks only that server.
+                    let policy_formatter = policy_formatter_for_buffer(buffer, cx)
+                        .filter(|name| {
+                            adapters_and_servers
+                                .iter()
+                                .any(|(_, server)| server.name() == *name)
+                        })
+                        .map(|name| {
+                            Formatter::LanguageServer(
+                                settings::LanguageServerFormatterSpecifier::Specific {
+                                    name: name.0.to_string(),
+                                },
+                            )
+                        });
+                    (
+                        adapters_and_servers,
+                        settings,
+                        request_timeout,
+                        policy_formatter,
+                    )
                 })
             })?;
         let had_existing_line_endings = buffer
@@ -1776,7 +1786,10 @@ impl LocalLspStore {
 
         for formatter in formatters {
             let formatter = if formatter == &Formatter::Auto {
-                if settings.prettier.allowed {
+                if let Some(policy_formatter) = &policy_formatter {
+                    zlog::trace!(logger => "Formatter set to auto: using the language server policy's formatter");
+                    policy_formatter
+                } else if settings.prettier.allowed {
                     zlog::trace!(logger => "Formatter set to auto: defaulting to prettier");
                     &Formatter::Prettier
                 } else {
@@ -2866,6 +2879,10 @@ impl LocalLspStore {
         if self.all_language_servers_stopped {
             return;
         }
+        // During a policy switch the buffer is still opened in servers that are already running,
+        // but no server starts: the `refresh_server_tree` that ends the switch starts them, and a
+        // starting server opens every registered buffer it serves.
+        let policy_switch_in_flight = self.policy_switches_in_flight > 0;
         let buffer = buffer_handle.read(cx);
         let buffer_id = buffer.remote_id();
 
@@ -2922,7 +2939,7 @@ impl LocalLspStore {
         let servers_and_adapters = servers
             .into_iter()
             .filter_map(|server_node| {
-                if reused && server_node.server_id().is_none() {
+                if (reused || policy_switch_in_flight) && server_node.server_id().is_none() {
                     return None;
                 }
                 if let Some(name) = server_node.name()
@@ -3083,6 +3100,17 @@ impl LocalLspStore {
             })
             .into_values()
             .max_by_key(|servers| servers.len())?;
+        // A reused server still has to pass the language server policy for this worktree.
+        let servers = with_policy_worktree(worktree.read(cx), |policy_worktree| {
+            servers
+                .into_iter()
+                .filter(|server_node| {
+                    server_node.name().is_some_and(|name| {
+                        policy_allows(policy_worktree, language_name, &name, cx)
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
 
         let worktree_id = worktree.read(cx).id();
         let apply = move |tree: &mut LanguageServerTree| {
@@ -4188,6 +4216,13 @@ pub enum LspStoreEvent {
         worktree_id: WorktreeId,
         error: String,
     },
+    /// How far a language server's download got: `done` bytes of `total`, when the size is known.
+    LanguageServerDownloadProgress {
+        name: LanguageServerName,
+        worktree_id: WorktreeId,
+        done: u64,
+        total: Option<u64>,
+    },
     LanguageServerPrompt(LanguageServerPromptRequest),
     LanguageDetected {
         buffer: Entity<Buffer>,
@@ -4390,6 +4425,22 @@ impl LspStore {
             let (sender, receiver) = watch::channel();
             (Self::maintain_workspace_config(receiver, cx), sender)
         };
+        let (server_downloads, mut download_progress) = ServerDownloads::new();
+        let _forward_download_progress = cx.spawn(async move |this, cx| {
+            while let Some(progress) = download_progress.next().await {
+                let emitted = this.update(cx, |_, cx| {
+                    cx.emit(LspStoreEvent::LanguageServerDownloadProgress {
+                        name: progress.name,
+                        worktree_id: progress.worktree_id,
+                        done: progress.done,
+                        total: progress.total,
+                    })
+                });
+                if emitted.is_err() {
+                    break;
+                }
+            }
+        });
 
         Self {
             mode: LspStoreMode::Local(LocalLspStore {
@@ -4434,6 +4485,9 @@ impl LspStore {
                 restricted_worktrees_tasks: HashMap::default(),
                 all_language_servers_stopped: false,
                 stopped_language_servers: HashSet::default(),
+                policy_switches_in_flight: 0,
+                server_downloads,
+                _forward_download_progress,
                 watched_manifest_filenames: ManifestProvidersStore::global(cx)
                     .manifest_file_names(),
             }),
@@ -5252,14 +5306,27 @@ impl LspStore {
         settings.formatter.as_ref().iter().any(|formatter| {
             match formatter {
                 Formatter::None => false,
-                Formatter::Auto => {
-                    settings.prettier.allowed
-                        || self.check_if_capable_for_proto_request(
-                            buffer,
-                            server_capabilities_support_range_formatting,
-                            cx,
-                        )
-                }
+                Formatter::Auto => match self
+                    .as_local()
+                    .and_then(|_| policy_formatter_for_buffer(buffer.read(cx), cx))
+                {
+                    Some(name) => self.check_if_any_relevant_server_matches(
+                        buffer,
+                        |server_status, capabilities| {
+                            server_status.name == name
+                                && server_capabilities_support_range_formatting(capabilities)
+                        },
+                        cx,
+                    ),
+                    None => {
+                        settings.prettier.allowed
+                            || self.check_if_capable_for_proto_request(
+                                buffer,
+                                server_capabilities_support_range_formatting,
+                                cx,
+                            )
+                    }
+                },
                 Formatter::Prettier => true,
                 Formatter::External { .. } => false,
                 Formatter::LanguageServer(settings::LanguageServerFormatterSpecifier::Current) => {
@@ -5511,7 +5578,7 @@ impl LspStore {
         let Some(local) = self.as_local_mut() else {
             return;
         };
-        if local.all_language_servers_stopped {
+        if local.all_language_servers_stopped || local.policy_switches_in_flight > 0 {
             return;
         }
         let stopped_language_servers = local.stopped_language_servers.clone();
@@ -5523,6 +5590,7 @@ impl LspStore {
             let worktree_store = local.worktree_store.clone();
             let http_client = local.http_client.clone();
             let fs = local.fs.clone();
+            let server_downloads = local.server_downloads.clone();
             move |worktree_id, cx: &mut App| {
                 let worktree = worktree_store.read(cx).worktree_for_id(worktree_id, cx)?;
                 Some(LocalLspAdapterDelegate::new(
@@ -5532,6 +5600,7 @@ impl LspStore {
                     &worktree,
                     http_client.clone(),
                     fs.clone(),
+                    server_downloads.clone(),
                     cx,
                 ))
             }
@@ -5667,6 +5736,69 @@ impl LspStore {
         for (id, _) in to_stop {
             self.stop_local_language_server(id, cx).detach();
         }
+    }
+
+    /// Applies the registered [`crate::LanguageServerPolicy`] list to running servers.
+    ///
+    /// Stops every running server that a policy now refuses for one of its languages, waits for
+    /// those stops, then refreshes the server tree, which starts the servers the policy now
+    /// allows. No server starts while the stops are in flight, so switching servers never runs
+    /// the old and the new one at once. Call this in the same main-thread turn as the change
+    /// that makes a policy answer differently.
+    pub fn reapply_server_policy(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        let Some(local) = self.as_local_mut() else {
+            return Task::ready(());
+        };
+        let mut refused = BTreeSet::new();
+        for (worktree_id, servers) in &local.lsp_tree.instances {
+            let Some(worktree) = local
+                .worktree_store
+                .read(cx)
+                .worktree_for_id(*worktree_id, cx)
+            else {
+                continue;
+            };
+            with_policy_worktree(worktree.read(cx), |policy_worktree| {
+                for (name, (node, languages)) in servers.roots.values().flatten() {
+                    if let Some(id) = node.id()
+                        && languages
+                            .iter()
+                            .any(|language| !policy_allows(policy_worktree, language, name, cx))
+                    {
+                        refused.insert(id);
+                    }
+                }
+            });
+        }
+        if refused.is_empty() {
+            self.refresh_server_tree(cx);
+            return Task::ready(());
+        }
+
+        local.lsp_tree.remove_nodes(&refused);
+        local.policy_switches_in_flight += 1;
+        let stops = refused
+            .into_iter()
+            .map(|id| self.stop_local_language_server(id, cx))
+            .collect::<Vec<_>>();
+        // The switch runs detached so that dropping the returned task cannot leave
+        // `policy_switches_in_flight` raised.
+        let (done_tx, done_rx) = oneshot::channel();
+        cx.spawn(async move |this, cx| {
+            join_all(stops).await;
+            this.update(cx, |this, cx| {
+                if let Some(local) = this.as_local_mut() {
+                    local.policy_switches_in_flight -= 1;
+                }
+                this.refresh_server_tree(cx);
+            })
+            .ok();
+            done_tx.send(()).ok();
+        })
+        .detach();
+        cx.background_spawn(async move {
+            done_rx.await.ok();
+        })
     }
 
     pub fn apply_code_action(
@@ -8457,6 +8589,7 @@ impl LspStore {
                                         &worktree,
                                         local.http_client.clone(),
                                         local.fs.clone(),
+                                        local.server_downloads.clone(),
                                         cx,
                                     )
                                 })?;
@@ -11501,6 +11634,13 @@ impl LspStore {
         self.restart_language_servers_for_buffers(buffers, HashSet::default(), true, cx);
     }
 
+    /// Cancels the running download of `name`: it stops, removes what it wrote, and its status
+    /// becomes `Failed` with "download cancelled". False when no download of `name` runs here.
+    pub fn cancel_server_download(&self, name: &LanguageServerName) -> bool {
+        self.as_local()
+            .is_some_and(|local| local.server_downloads.cancel(name))
+    }
+
     pub fn restart_language_servers_for_buffers(
         &mut self,
         buffers: Vec<Entity<Buffer>>,
@@ -12146,6 +12286,14 @@ impl LspStore {
                         .iter()
                         .any(|a| a.name == key.name)
                 {
+                    continue;
+                }
+                // An adapter registered for several languages serves only those the policy
+                // allows it for in this worktree.
+                let refused = with_policy_worktree(file.worktree.read(cx), |policy_worktree| {
+                    !policy_allows(policy_worktree, &language.name(), &key.name, cx)
+                });
+                if refused {
                     continue;
                 }
                 // didOpen
@@ -14921,6 +15069,60 @@ pub fn language_server_settings_for<'a>(
     ProjectSettings::get(Some(location), cx).lsp.get(language)
 }
 
+/// One language server download's progress, on its way to `LspStoreEvent::LanguageServerDownloadProgress`.
+struct ServerDownloadProgress {
+    name: LanguageServerName,
+    worktree_id: WorktreeId,
+    done: u64,
+    total: Option<u64>,
+}
+
+/// What the delegates of a local `LspStore` share about language server downloads: where progress
+/// goes, and one cancel flag per server. A flag is held only by its download, so it is gone once
+/// the download ends.
+pub struct ServerDownloads {
+    progress: futures::channel::mpsc::UnboundedSender<ServerDownloadProgress>,
+    cancel_flags: parking_lot::Mutex<HashMap<LanguageServerName, std::sync::Weak<AtomicBool>>>,
+}
+
+impl ServerDownloads {
+    fn new() -> (
+        Arc<Self>,
+        futures::channel::mpsc::UnboundedReceiver<ServerDownloadProgress>,
+    ) {
+        let (progress, receiver) = futures::channel::mpsc::unbounded();
+        let downloads = Arc::new(Self {
+            progress,
+            cancel_flags: Default::default(),
+        });
+        (downloads, receiver)
+    }
+
+    /// A fresh flag for a download of `server` that starts now.
+    fn start(&self, server: LanguageServerName) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut flags = self.cancel_flags.lock();
+        flags.retain(|_, flag| flag.strong_count() > 0);
+        flags.insert(server, Arc::downgrade(&flag));
+        flag
+    }
+
+    /// Cancels `server`'s running download; false when none runs.
+    fn cancel(&self, server: &LanguageServerName) -> bool {
+        let mut flags = self.cancel_flags.lock();
+        match flags.get(server).and_then(std::sync::Weak::upgrade) {
+            Some(flag) => {
+                flag.store(true, atomic::Ordering::SeqCst);
+                true
+            }
+            None => {
+                flags.remove(server);
+                false
+            }
+        }
+    }
+}
+
 pub struct LocalLspAdapterDelegate {
     lsp_store: WeakEntity<LspStore>,
     worktree: worktree::Snapshot,
@@ -14928,6 +15130,7 @@ pub struct LocalLspAdapterDelegate {
     http_client: Arc<dyn HttpClient>,
     language_registry: Arc<LanguageRegistry>,
     load_shell_env_task: Shared<Task<Option<HashMap<String, String>>>>,
+    server_downloads: Arc<ServerDownloads>,
 }
 
 impl LocalLspAdapterDelegate {
@@ -14938,6 +15141,7 @@ impl LocalLspAdapterDelegate {
         worktree: &Entity<Worktree>,
         http_client: Arc<dyn HttpClient>,
         fs: Arc<dyn Fs>,
+        server_downloads: Arc<ServerDownloads>,
         cx: &mut App,
     ) -> Arc<Self> {
         let load_shell_env_task =
@@ -14950,6 +15154,7 @@ impl LocalLspAdapterDelegate {
             http_client,
             language_registry,
             load_shell_env_task,
+            server_downloads,
         })
     }
 
@@ -14965,6 +15170,7 @@ impl LocalLspAdapterDelegate {
             worktree,
             local.http_client.clone(),
             local.fs.clone(),
+            local.server_downloads.clone(),
             cx,
         )
     }
@@ -15077,6 +15283,22 @@ impl LspAdapterDelegate for LocalLspAdapterDelegate {
     fn update_status(&self, server_name: LanguageServerName, status: language::BinaryStatus) {
         self.language_registry
             .update_lsp_binary_status(server_name, status);
+    }
+
+    fn report_download_progress(&self, server: LanguageServerName, done: u64, total: Option<u64>) {
+        self.server_downloads
+            .progress
+            .unbounded_send(ServerDownloadProgress {
+                name: server,
+                worktree_id: self.worktree.id(),
+                done,
+                total,
+            })
+            .ok();
+    }
+
+    fn download_cancel_flag(&self, server: LanguageServerName) -> Arc<AtomicBool> {
+        self.server_downloads.start(server)
     }
 
     fn registered_lsp_adapters(&self) -> Vec<Arc<dyn LspAdapter>> {

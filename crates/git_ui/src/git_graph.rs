@@ -5311,7 +5311,10 @@ mod tests {
         let commits = generate_random_commit_dag(&mut rng, 10, false);
         fs.set_graph_commits(Path::new("/project/.git"), commits.clone());
 
-        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        // Subscribe before the worktree is added: `Project::test` awaits the worktree scan, and
+        // whether the repository's initial HeadChanged lands during that await depends on the
+        // scheduler seed, so subscribing afterwards can miss it.
+        let project = Project::test(fs.clone(), None::<&Path>, cx).await;
         let observed_repository_events = Arc::new(Mutex::new(Vec::new()));
         project.update(cx, |project, cx| {
             let observed_repository_events = observed_repository_events.clone();
@@ -5325,6 +5328,20 @@ mod tests {
             })
             .detach();
         });
+        let (worktree, _) = project
+            .update(cx, |project, cx| {
+                project.find_or_create_worktree(Path::new("/project"), true, cx)
+            })
+            .await
+            .expect("worktree should be created");
+        worktree
+            .read_with(cx, |worktree, _| {
+                worktree
+                    .as_local()
+                    .expect("worktree should be local")
+                    .scan_complete()
+            })
+            .await;
 
         let repository = project.read_with(cx, |project, cx| {
             project

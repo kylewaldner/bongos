@@ -150,6 +150,21 @@ async fn kotlin_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn java_show_jdk_dispatches_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let show_jdk = cx
+            .build_action("java::ShowJdk", None)
+            .expect("java::ShowJdk is registered");
+        assert!(show_jdk.partial_eq(&bongos_java::ShowJdk));
+        assert_eq!(
+            command_palette::humanize_action_name("java::ShowJdk"),
+            "java: show jdk"
+        );
+    });
+}
+
+#[gpui::test]
 async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
     init_keymap_test(cx);
     cx.update(|cx| {
@@ -214,6 +229,37 @@ async fn kotlin_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
         }
         // The menu's "Open protocol log" entry builds this action by name.
         assert!(cx.build_action("dev::OpenLanguageServerLogs", None).is_ok());
+    });
+}
+
+#[gpui::test]
+async fn language_status_actions_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        let cases: [(&str, Box<dyn gpui::Action>, &str); 3] = [
+            (
+                "languages::ShowLogs",
+                Box::new(bongos_language_status::ShowLogs),
+                "languages: show logs",
+            ),
+            (
+                "languages::RetryServer",
+                Box::new(bongos_language_status::RetryServer),
+                "languages: retry server",
+            ),
+            (
+                "languages::CancelDownload",
+                Box::new(bongos_language_status::CancelDownload),
+                "languages: cancel download",
+            ),
+        ];
+        for (name, expected, humanized) in cases {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert!(action.partial_eq(expected.as_ref()), "{name}");
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
     });
 }
 
@@ -455,8 +501,73 @@ async fn isearch_commands_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+/// The `query_replace` commands, with the palette text of each.
+const QUERY_REPLACE_ACTIONS: [(&str, &str); 18] = [
+    (
+        "query_replace::QueryReplace",
+        "query replace: query replace",
+    ),
+    (
+        "query_replace::QueryReplaceRegexp",
+        "query replace: query replace regexp",
+    ),
+    (
+        "query_replace::ReplaceString",
+        "query replace: replace string",
+    ),
+    (
+        "query_replace::ReplaceRegexp",
+        "query replace: replace regexp",
+    ),
+    ("query_replace::ToggleCase", "query replace: toggle case"),
+    (
+        "query_replace::QuotedInsert",
+        "query replace: quoted insert",
+    ),
+    ("query_replace::Abort", "query replace: abort"),
+    ("query_replace::Yes", "query replace: yes"),
+    ("query_replace::No", "query replace: no"),
+    ("query_replace::All", "query replace: all"),
+    ("query_replace::ThisAndExit", "query replace: this and exit"),
+    ("query_replace::ThisAndWait", "query replace: this and wait"),
+    ("query_replace::Previous", "query replace: previous"),
+    ("query_replace::Undo", "query replace: undo"),
+    (
+        "query_replace::EditReplacement",
+        "query replace: edit replacement",
+    ),
+    ("query_replace::Exit", "query replace: exit"),
+    ("query_replace::Recenter", "query replace: recenter"),
+    ("query_replace::Help", "query replace: help"),
+];
+
+#[gpui::test]
+async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in QUERY_REPLACE_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        let names = cx
+            .all_action_names()
+            .iter()
+            .filter(|name| name.starts_with("query_replace::"))
+            .count();
+        assert_eq!(names, QUERY_REPLACE_ACTIONS.len());
+        assert!(
+            cx.build_action("query_replace::ToggleCase", None)
+                .unwrap()
+                .partial_eq(&bongos_query_replace::actions::ToggleCase)
+        );
+    });
+}
+
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 49] = [
+const EMACS_ACTIONS: [(&str, &str); 53] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -524,6 +635,10 @@ const EMACS_ACTIONS: [(&str, &str); 49] = [
         "emacs::XrefFindImplementations",
         "emacs: xref find implementations",
     ),
+    ("emacs::UniversalArgument", "emacs: universal argument"),
+    ("emacs::DigitArgument", "emacs: digit argument"),
+    ("emacs::NegativeArgument", "emacs: negative argument"),
+    ("emacs::OpenLine", "emacs: open line"),
 ];
 
 #[gpui::test]

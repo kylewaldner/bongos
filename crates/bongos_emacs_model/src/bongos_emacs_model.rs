@@ -8,6 +8,7 @@ mod kill;
 pub mod kill_ring;
 mod lines;
 pub mod mark_ring;
+pub mod prefix_arg;
 pub mod recenter;
 mod space;
 mod text;
@@ -30,6 +31,8 @@ mod lines_tests;
 #[cfg(test)]
 mod mark_ring_tests;
 #[cfg(test)]
+mod prefix_arg_tests;
+#[cfg(test)]
 mod recenter_tests;
 #[cfg(test)]
 mod space_tests;
@@ -45,7 +48,7 @@ pub use case::{
     upcase_previous_word, upcase_word,
 };
 pub use kill::{copy_region_or_line, kill_line, kill_region_or_line, kill_whole_line};
-pub use lines::{copy_from_above, duplicate_line, whole_line_span};
+pub use lines::{copy_from_above, duplicate_line, open_line, whole_line_span};
 pub use space::{delete_blank_lines, delete_horizontal_space, just_one_space};
 pub use text::{
     Caret, KilledPiece, Place, Plan, Target, TextSource, apply, build_plan, merge_targets,

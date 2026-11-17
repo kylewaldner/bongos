@@ -43,6 +43,7 @@ impl SessionView {
         core: Rc<Core>,
         source: Source,
         initial_input: String,
+        select_initial: bool,
         key_context: Option<KeyContext>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -61,6 +62,9 @@ impl SessionView {
             picker.update(cx, |picker, cx| {
                 picker.set_query(&initial_input, window, cx)
             });
+            if select_initial {
+                picker.update(cx, |picker, cx| picker.select_query(window, cx));
+            }
         }
         picker.update(cx, |picker, cx| picker.delegate.highlight(window, cx));
         let dismiss = cx.subscribe(&picker, |_, _, _: &DismissEvent, cx| cx.emit(DismissEvent));

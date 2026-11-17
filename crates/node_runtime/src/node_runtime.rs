@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_compression::futures::bufread::GzipDecoder;
 use async_tar::Archive;
 use chrono::{DateTime, Utc};
@@ -7,6 +7,7 @@ use http_client::{Host, HttpClient, Url};
 use log::Level;
 use semver::Version;
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use smol::io::BufReader;
 use smol::{fs, lock::Mutex};
 use std::collections::HashMap;
@@ -301,6 +302,7 @@ impl NodeRuntime {
             directory.display()
         );
 
+        let names: Vec<_> = packages.iter().map(|(name, _)| *name).collect();
         let packages: Vec<_> = packages
             .iter()
             .map(|(name, version)| format!("{name}@{version}"))
@@ -321,8 +323,12 @@ impl NodeRuntime {
             .collect();
 
         // This is also wrong because the directory is wrong.
-        self.run_npm_subcommand(Some(directory), "install", &arguments)
-            .await?;
+        install_removing_partial_updates(
+            directory,
+            &names,
+            self.run_npm_subcommand(Some(directory), "install", &arguments),
+        )
+        .await?;
         Ok(())
     }
 
@@ -384,6 +390,146 @@ impl NodeRuntime {
             "npm package cache check package={package_name:?} installed={installed_version} strategy={version_strategy_label} should_install={should_install}"
         );
         should_install
+    }
+}
+
+/// Runs `install`, an `npm install` of `packages` into `directory`, so that it never leaves a
+/// half-updated package behind.
+///
+/// npm updates packages in place, so an install that stops partway over an existing one can
+/// leave a mix of old and new files that still looks installed. Copying the old install aside
+/// first would cost a full copy on every update, so instead an install that does not succeed
+/// (failed, or dropped by a cancel or a stopped start, which kills npm) is checked when it ends:
+/// each of `packages` that is new, or whose installed version changed or can no longer be read,
+/// is removed, and the next start installs it again. A package npm had not touched yet, the
+/// other packages of `directory` (an extension's servers share it) and its `package.json` are
+/// left as they are, so a running server keeps its install.
+async fn install_removing_partial_updates<T>(
+    directory: &Path,
+    packages: &[&str],
+    install: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let mut guard = RemoveChangedPackagesOnDrop {
+        directory,
+        packages_before: packages
+            .iter()
+            .map(|name| {
+                let path = directory.join("node_modules").join(name);
+                (*name, path.exists(), installed_version_now(directory, name))
+            })
+            .collect(),
+        armed: true,
+    };
+    let result = install.await;
+    guard.armed = result.is_err();
+    result
+}
+
+/// The version of package `name` installed in `directory`, read synchronously.
+fn installed_version_now(directory: &Path, name: &str) -> Option<Version> {
+    #[derive(Deserialize)]
+    struct PackageJson {
+        version: Version,
+    }
+    let path = directory
+        .join("node_modules")
+        .join(name)
+        .join("package.json");
+    let contents = std::fs::read_to_string(path).ok()?;
+    Some(serde_json::from_str::<PackageJson>(&contents).ok()?.version)
+}
+
+struct RemoveChangedPackagesOnDrop<'a> {
+    directory: &'a Path,
+    /// Each package's name, whether its directory existed and its version, before the install.
+    packages_before: Vec<(&'a str, bool, Option<Version>)>,
+    armed: bool,
+}
+
+impl Drop for RemoveChangedPackagesOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for (name, existed, version_before) in &self.packages_before {
+            let path = self.directory.join("node_modules").join(name);
+            let untouched = *existed
+                && version_before.is_some()
+                && *version_before == installed_version_now(self.directory, name);
+            if untouched || !path.exists() {
+                continue;
+            }
+            log::info!("removing the unfinished npm install of {}", path.display());
+            if let Err(error) = std::fs::remove_dir_all(&path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                log::warn!("removing the unfinished npm install {path:?}: {error}");
+            }
+        }
+    }
+}
+
+/// Runs `npm_command` in `directory` to its end and returns its output. npm runs in a process
+/// group of its own, and dropping the run (a cancelled download) kills the whole group: npm and
+/// whatever it started, such as a package's install script.
+async fn run_npm_command(npm_command: NpmCommand, directory: Option<&Path>) -> Result<Output> {
+    let mut command = util::command::new_std_command(npm_command.path);
+    command.args(npm_command.args);
+    command.envs(npm_command.env);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    let child = util::process::Child::spawn(
+        command,
+        std::process::Stdio::null(),
+        std::process::Stdio::piped(),
+        std::process::Stdio::piped(),
+    )?;
+    let mut running = KillProcessGroupOnDrop {
+        child,
+        exited: false,
+    };
+    let mut stdout_pipe = running.child.stdout.take();
+    let mut stderr_pipe = running.child.stderr.take();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let (stdout_read, stderr_read, status) = futures::join!(
+        async {
+            match stdout_pipe.as_mut() {
+                Some(pipe) => pipe.read_to_end(&mut stdout).await.map(drop),
+                None => Ok(()),
+            }
+        },
+        async {
+            match stderr_pipe.as_mut() {
+                Some(pipe) => pipe.read_to_end(&mut stderr).await.map(drop),
+                None => Ok(()),
+            }
+        },
+        running.child.status(),
+    );
+    let status = status?;
+    running.exited = true;
+    stdout_read?;
+    stderr_read?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Kills the process group of `child` when dropped before it exited.
+struct KillProcessGroupOnDrop {
+    child: util::process::Child,
+    exited: bool,
+}
+
+impl Drop for KillProcessGroupOnDrop {
+    fn drop(&mut self) {
+        if !self.exited {
+            self.child.kill().log_err();
+        }
     }
 }
 
@@ -654,21 +800,25 @@ impl ManagedNodeRuntime {
             );
 
             let url = format!("https://nodejs.org/dist/{version}/{file_name}");
+            let Some(expected_sha256) = expected_archive_sha256(version, os, arch) else {
+                _ = fs::remove_dir_all(&node_containing_dir).await;
+                bail!(
+                    "no pinned SHA-256 for Node.js {version} on {os}-{arch}; refusing to run unverified code"
+                );
+            };
             log::info!("Downloading Node.js binary from {url}");
-            let mut response = http
-                .get(&url, Default::default(), true)
-                .await
-                .context("error downloading Node binary tarball")?;
-            log::info!("Download of Node.js complete, extracting...");
-
-            let body = response.body_mut();
-            match archive_type {
-                ArchiveType::TarGz => {
-                    let decompressed_bytes = GzipDecoder::new(BufReader::new(response.body_mut()));
-                    let archive = Archive::new(decompressed_bytes);
-                    archive.unpack(&node_containing_dir).await?;
-                }
-                ArchiveType::Zip => extract_zip(&node_containing_dir, body).await?,
+            if let Err(error) = download_verify_and_extract(
+                http.as_ref(),
+                &url,
+                expected_sha256,
+                archive_type,
+                &node_containing_dir,
+            )
+            .await
+            {
+                // Leave no partial state behind.
+                _ = fs::remove_dir_all(&node_containing_dir).await;
+                return Err(error);
             }
             log::info!("Extracted Node.js to {}", node_containing_dir.display())
         }
@@ -682,6 +832,102 @@ impl ManagedNodeRuntime {
             installation_path: node_dir,
         })
     }
+}
+
+/// SHA-256 digests of the official Node.js archives, copied from
+/// `https://nodejs.org/dist/<version>/SHASUMS256.txt`: `(version, os, arch, digest)`.
+/// Bumping `ManagedNodeRuntime::VERSION` requires adding its rows here.
+const NODE_ARCHIVE_SHA256: &[(&str, &str, &str, &str)] = &[
+    (
+        "v24.11.0",
+        "linux",
+        "x64",
+        "b3c071cdf47aab867c3b2aa287257df12ec5d7c962bf922b32fd33226c4295fd",
+    ),
+    (
+        "v24.11.0",
+        "linux",
+        "arm64",
+        "4786d00c4d259d3ff0b2328307f764ef3ced65f2d6e9502d433e68d66238509d",
+    ),
+    (
+        "v24.11.0",
+        "darwin",
+        "x64",
+        "3884671e87f46f773832d98a0a6cabcc5ec4f637084f0f3515b69e66ea27f2f1",
+    ),
+    (
+        "v24.11.0",
+        "darwin",
+        "arm64",
+        "0be2ab2816a4fa02d1acff014a434f29f56d8d956f5af6a98b70ced6c5f4d201",
+    ),
+    (
+        "v24.11.0",
+        "win",
+        "x64",
+        "1054540bce22b54ec7e50ebc078ec5d090700a77657607a58f6a64df21f49fdd",
+    ),
+    (
+        "v24.11.0",
+        "win",
+        "arm64",
+        "12d3b1aa9696b7411e115a4fa2aef57f95560b5ee16bb62cd69843e535ec72be",
+    ),
+];
+
+fn expected_archive_sha256(version: &str, os: &str, arch: &str) -> Option<&'static str> {
+    NODE_ARCHIVE_SHA256
+        .iter()
+        .find(|(v, o, a, _)| *v == version && *o == os && *a == arch)
+        .map(|(_, _, _, digest)| *digest)
+}
+
+/// Fails unless the SHA-256 of `bytes` equals `expected_sha256` (lowercase hex).
+fn verify_sha256(bytes: &[u8], expected_sha256: &str) -> Result<()> {
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    ensure!(
+        actual.eq_ignore_ascii_case(expected_sha256),
+        "Node.js archive SHA-256 mismatch. Expected: {expected_sha256}, Got: {actual}"
+    );
+    Ok(())
+}
+
+/// Downloads the whole archive into memory, verifies its SHA-256, and only then extracts it.
+/// Nothing is extracted when the digest does not match.
+async fn download_verify_and_extract(
+    http: &dyn HttpClient,
+    url: &str,
+    expected_sha256: &str,
+    archive_type: ArchiveType,
+    destination: &Path,
+) -> Result<()> {
+    let mut response = http
+        .get(url, Default::default(), true)
+        .await
+        .context("error downloading Node binary tarball")?;
+    ensure!(
+        response.status().is_success(),
+        "downloading {url}: the server answered {}",
+        response.status()
+    );
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut bytes)
+        .await
+        .with_context(|| format!("reading {url}"))?;
+    verify_sha256(&bytes, expected_sha256).with_context(|| format!("verifying {url}"))?;
+    log::info!("Download of Node.js verified, extracting...");
+    match archive_type {
+        ArchiveType::TarGz => {
+            let decompressed_bytes =
+                GzipDecoder::new(BufReader::new(futures::io::Cursor::new(bytes)));
+            Archive::new(decompressed_bytes).unpack(destination).await?;
+        }
+        ArchiveType::Zip => extract_zip(destination, futures::io::Cursor::new(bytes)).await?,
+    }
+    Ok(())
 }
 
 fn path_with_node_binary_prepended(node_binary: &Path) -> Option<OsString> {
@@ -724,13 +970,7 @@ impl NodeRuntimeTrait for ManagedNodeRuntime {
     ) -> Result<Output> {
         let attempt = || async {
             let npm_command = self.npm_command(directory, proxy, subcommand, args).await?;
-            let mut command = util::command::new_command(npm_command.path);
-            command.args(npm_command.args);
-            command.envs(npm_command.env);
-            if let Some(directory) = directory {
-                command.current_dir(directory);
-            }
-            command.output().await.map_err(|e| anyhow!("{e}"))
+            run_npm_command(npm_command, directory).await
         };
 
         let mut output = attempt().await;
@@ -889,13 +1129,7 @@ impl NodeRuntimeTrait for SystemNodeRuntime {
         args: &[&str],
     ) -> anyhow::Result<Output> {
         let npm_command = self.npm_command(directory, proxy, subcommand, args).await?;
-        let mut command = util::command::new_command(npm_command.path);
-        command.args(npm_command.args);
-        command.envs(npm_command.env);
-        if let Some(directory) = directory {
-            command.current_dir(directory);
-        }
-        let output = command.output().await?;
+        let output = run_npm_command(npm_command, directory).await?;
         anyhow::ensure!(
             output.status.success(),
             "failed to execute npm {subcommand} subcommand:\nstdout: {:?}\nstderr: {:?}",
@@ -1012,6 +1246,152 @@ impl NodeRuntimeTrait for UnavailableNodeRuntime {
     }
 }
 
+/// One npm command a fake runtime was asked to run.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug)]
+pub struct FakeNpmCall {
+    pub directory: Option<PathBuf>,
+    pub subcommand: String,
+    /// The arguments npm would get, after its entrypoint, as the real runtimes build them.
+    pub args: Vec<String>,
+    /// The environment npm would get, as the real runtimes build it.
+    pub env: HashMap<String, String>,
+}
+
+/// The npm commands a fake runtime was asked to run, in order.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Default)]
+pub struct FakeNpmLog(Arc<std::sync::Mutex<Vec<FakeNpmCall>>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl FakeNpmLog {
+    pub fn calls(&self) -> Vec<FakeNpmCall> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Returns the calls so far and forgets them.
+    pub fn take(&self) -> Vec<FakeNpmCall> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn push(&self, call: FakeNpmCall) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(call);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl NodeRuntime {
+    /// A runtime that runs nothing: it records every npm command in `log`, answers `npm info`
+    /// with version 1.0.0 and every other command with empty success, and finds no package
+    /// installed. Node.js itself is said to be at `/fake-node/bin/node`.
+    pub fn fake(http: Arc<dyn HttpClient>, log: FakeNpmLog) -> Self {
+        let options = NodeBinaryOptions::default();
+        NodeRuntime(Arc::new(Mutex::new(NodeRuntimeState {
+            http,
+            instance: Some(Box::new(FakeNodeRuntime { log })),
+            last_options: Some(options.clone()),
+            options: watch::channel(Some(options)).1,
+            shell_env_loaded: oneshot::channel().1.shared(),
+        })))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+struct FakeNodeRuntime {
+    log: FakeNpmLog,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FakeNodeRuntime {
+    const NODE: &str = "/fake-node/bin/node";
+    const NPM: &str = "/fake-node/bin/npm";
+
+    fn record(
+        &self,
+        directory: Option<&Path>,
+        proxy: Option<&Url>,
+        subcommand: &str,
+        args: &[&str],
+    ) -> NpmCommand {
+        let command = NpmCommand {
+            path: PathBuf::from(Self::NPM),
+            args: build_npm_command_args(
+                None,
+                directory,
+                Path::new("/fake-node/cache"),
+                None,
+                None,
+                proxy,
+                subcommand,
+                args,
+            ),
+            env: npm_command_env(Some(Path::new(Self::NODE))),
+        };
+        self.log.push(FakeNpmCall {
+            directory: directory.map(Path::to_path_buf),
+            subcommand: subcommand.to_string(),
+            args: command.args.clone(),
+            env: command.env.clone(),
+        });
+        command
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait::async_trait]
+impl NodeRuntimeTrait for FakeNodeRuntime {
+    fn boxed_clone(&self) -> Box<dyn NodeRuntimeTrait> {
+        Box::new(self.clone())
+    }
+
+    fn binary_path(&self) -> Result<PathBuf> {
+        Ok(PathBuf::from(Self::NODE))
+    }
+
+    async fn run_npm_subcommand(
+        &self,
+        directory: Option<&Path>,
+        proxy: Option<&Url>,
+        subcommand: &str,
+        args: &[&str],
+    ) -> Result<Output> {
+        self.record(directory, proxy, subcommand, args);
+        let stdout = match subcommand {
+            "info" => br#"{"dist-tags":{"latest":"1.0.0"},"versions":["1.0.0"]}"#.to_vec(),
+            "config" => b"{}".to_vec(),
+            _ => Vec::new(),
+        };
+        #[cfg(unix)]
+        let status = std::os::unix::process::ExitStatusExt::from_raw(0);
+        #[cfg(windows)]
+        let status = std::os::windows::process::ExitStatusExt::from_raw(0);
+        Ok(Output {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        })
+    }
+
+    async fn npm_command(
+        &self,
+        prefix_dir: Option<&Path>,
+        proxy: Option<&Url>,
+        subcommand: &str,
+        args: &[&str],
+    ) -> Result<NpmCommand> {
+        Ok(self.record(prefix_dir, proxy, subcommand, args))
+    }
+
+    async fn npm_package_installed_version(
+        &self,
+        _local_package_directory: &Path,
+        _name: &str,
+    ) -> Result<Option<Version>> {
+        Ok(None)
+    }
+}
+
 fn proxy_argument(proxy: Option<&Url>) -> Option<String> {
     let mut proxy = proxy.cloned()?;
     // Map proxy settings from `http://localhost:10809` to `http://127.0.0.1:10809`
@@ -1063,8 +1443,19 @@ fn build_npm_command_args(
     command_args
 }
 
+/// npm settings, given as `npm_config_*` variables to every npm command, that keep npm from
+/// contacting the registry for anything but the packages it was asked about: no check for a newer
+/// npm, and no audit report of the installed packages.
+pub const NPM_PRIVACY_ENV: [(&str, &str); 2] = [
+    ("npm_config_update_notifier", "false"),
+    ("npm_config_audit", "false"),
+];
+
 fn npm_command_env(node_binary: Option<&Path>) -> HashMap<String, String> {
     let mut command_env = HashMap::new();
+    for (name, value) in NPM_PRIVACY_ENV {
+        command_env.insert(name.to_string(), value.to_string());
+    }
     if let Some(node_binary) = node_binary {
         let env_path = path_with_node_binary_prepended(node_binary).unwrap_or_default();
         command_env.insert("PATH".into(), env_path.to_string_lossy().into_owned());
@@ -1097,15 +1488,18 @@ fn npm_command_env(node_binary: Option<&Path>) -> HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use anyhow::{Result, bail};
     use http_client::Url;
     use semver::Version;
+    use sha2::Digest as _;
 
     use super::{
-        NpmInfo, VersionStrategy, build_npm_command_args, proxy_argument,
-        select_npm_package_version, should_install_npm_package_version,
+        ArchiveType, ManagedNodeRuntime, NODE_ARCHIVE_SHA256, NpmInfo, VersionStrategy,
+        build_npm_command_args, download_verify_and_extract, expected_archive_sha256,
+        proxy_argument, select_npm_package_version, should_install_npm_package_version,
+        verify_sha256,
     };
 
     // Map localhost to 127.0.0.1
@@ -1383,5 +1777,281 @@ mod tests {
             "no version found for npm package test-package before 2023-12-01T00:00:00.000Z"
         );
         Ok(())
+    }
+
+    /// A fake npm that announces its pid on a FIFO, starts a child (as a package's install
+    /// script would) and then sleeps, both with the FIFO still open, so the FIFO reaches
+    /// end-of-file exactly when npm and its child have both died.
+    #[cfg(unix)]
+    #[test]
+    fn test_dropping_an_npm_install_kills_npm_and_its_children() {
+        use super::{NodeRuntimeTrait, SystemNodeRuntime};
+        use std::io::{BufRead, Read};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("announce");
+        let status =
+            smol::block_on(util::command::new_command("mkfifo").arg(&fifo).status()).unwrap();
+        assert!(status.success());
+        let npm = dir.path().join("npm");
+        std::fs::write(
+            &npm,
+            format!(
+                "#!/bin/sh\nexec 3>'{}'\nsleep 60 &\necho $$ >&3\nexec sleep 60\n",
+                fifo.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (started_tx, started_rx) = futures::channel::oneshot::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut announce = std::io::BufReader::new(std::fs::File::open(fifo).unwrap());
+            let mut pid = String::new();
+            announce.read_line(&mut pid).unwrap();
+            started_tx.send(pid).ok();
+            let mut rest = Vec::new();
+            announce.read_to_end(&mut rest).ok();
+            closed_tx.send(()).ok();
+        });
+
+        let runtime = SystemNodeRuntime {
+            node: PathBuf::from("node"),
+            npm,
+            scratch_dir: dir.path().to_path_buf(),
+        };
+        smol::block_on(async {
+            let install =
+                runtime.run_npm_subcommand(Some(dir.path()), None, "install", &["some-package"]);
+            futures::select! {
+                _ = futures::FutureExt::fuse(install) => panic!("the fake npm finished"),
+                pid = futures::FutureExt::fuse(started_rx) => {
+                    assert!(!pid.unwrap().trim().is_empty());
+                }
+            }
+        });
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("npm or its child kept running after the install was dropped");
+        reader.join().unwrap();
+    }
+
+    /// An installed `pkg` 1.0.0 beside a sibling package `other`, in a temporary directory,
+    /// the way an npm install leaves them.
+    fn existing_install() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write_package_version(dir.path(), "pkg", "1.0.0");
+        write_package_version(dir.path(), "other", "3.0.0");
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+        dir
+    }
+
+    fn write_package_version(directory: &Path, name: &str, version: &str) {
+        let package = directory.join("node_modules").join(name);
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            format!(r#"{{"name": "{name}", "version": "{version}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(package.join("index.js"), "").unwrap();
+    }
+
+    fn installed(directory: &Path, name: &str) -> Option<Version> {
+        super::installed_version_now(directory, name)
+    }
+
+    /// The old `pkg` is gone, and everything else is as it was.
+    fn assert_only_pkg_removed(directory: &Path) {
+        assert!(!directory.join("node_modules").join("pkg").exists());
+        assert_rest_intact(directory);
+    }
+
+    fn assert_rest_intact(directory: &Path) {
+        assert_eq!(installed(directory, "other"), Some(Version::new(3, 0, 0)));
+        assert!(directory.join("package.json").exists());
+        assert!(directory.join("package-lock.json").exists());
+    }
+
+    /// Runs `install` over `directory` until it first waits, then drops it, the way a cancel
+    /// drops a running update.
+    fn drop_mid_install(directory: &Path, packages: &[&str], install: impl Fn()) {
+        let update = super::install_removing_partial_updates(directory, packages, async {
+            install();
+            futures::future::pending::<Result<()>>().await
+        });
+        assert!(futures::FutureExt::now_or_never(update).is_none());
+    }
+
+    #[test]
+    fn test_an_update_dropped_before_npm_wrote_anything_keeps_the_old_install() {
+        let dir = existing_install();
+        drop_mid_install(dir.path(), &["pkg"], || {});
+        assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(1, 0, 0)));
+        assert!(dir.path().join("node_modules/pkg/index.js").exists());
+        assert_rest_intact(dir.path());
+    }
+
+    #[test]
+    fn test_a_dropped_update_removes_only_the_half_updated_package() {
+        let dir = existing_install();
+        drop_mid_install(dir.path(), &["pkg"], || {
+            write_package_version(dir.path(), "pkg", "2.0.0");
+        });
+        assert_only_pkg_removed(dir.path());
+    }
+
+    #[test]
+    fn test_a_dropped_update_removes_a_package_whose_version_became_unreadable() {
+        let dir = existing_install();
+        drop_mid_install(dir.path(), &["pkg"], || {
+            std::fs::remove_file(dir.path().join("node_modules/pkg/package.json")).unwrap();
+        });
+        assert_only_pkg_removed(dir.path());
+    }
+
+    #[test]
+    fn test_a_dropped_first_install_removes_the_new_package_only() {
+        let dir = existing_install();
+        drop_mid_install(dir.path(), &["new-pkg"], || {
+            std::fs::create_dir_all(dir.path().join("node_modules/new-pkg")).unwrap();
+            std::fs::write(dir.path().join("node_modules/new-pkg/half.js"), "").unwrap();
+        });
+        assert!(!dir.path().join("node_modules/new-pkg").exists());
+        assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(1, 0, 0)));
+        assert_rest_intact(dir.path());
+    }
+
+    #[test]
+    fn test_a_failed_update_that_npm_rolled_back_keeps_the_old_install() {
+        let dir = existing_install();
+        let result = smol::block_on(super::install_removing_partial_updates(
+            dir.path(),
+            &["pkg"],
+            async { Err::<(), _>(anyhow::anyhow!("network is unreachable")) },
+        ));
+        assert!(result.is_err());
+        assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(1, 0, 0)));
+        assert_rest_intact(dir.path());
+    }
+
+    #[test]
+    fn test_a_failed_update_that_changed_the_package_removes_only_it() {
+        let dir = existing_install();
+        let result = smol::block_on(super::install_removing_partial_updates(
+            dir.path(),
+            &["pkg"],
+            async {
+                write_package_version(dir.path(), "pkg", "2.0.0");
+                Err::<(), _>(anyhow::anyhow!("npm failed"))
+            },
+        ));
+        assert!(result.is_err());
+        assert_only_pkg_removed(dir.path());
+    }
+
+    #[test]
+    fn test_a_finished_update_is_kept() {
+        let dir = existing_install();
+        smol::block_on(super::install_removing_partial_updates(
+            dir.path(),
+            &["pkg"],
+            async {
+                write_package_version(dir.path(), "pkg", "2.0.0");
+                Ok(())
+            },
+        ))
+        .unwrap();
+        assert_eq!(installed(dir.path(), "pkg"), Some(Version::new(2, 0, 0)));
+        assert_rest_intact(dir.path());
+    }
+
+    #[test]
+    fn test_every_npm_command_turns_off_the_update_check_and_audit() {
+        let log = super::FakeNpmLog::default();
+        let node = super::NodeRuntime::fake(
+            std::sync::Arc::new(http_client::BlockedHttpClient),
+            log.clone(),
+        );
+        let version = smol::block_on(node.npm_package_latest_version("some-package")).unwrap();
+        assert_eq!(version, Version::new(1, 0, 0));
+        smol::block_on(node.npm_install_latest_packages(Path::new("/nowhere"), &["some-package"]))
+            .unwrap();
+        smol::block_on(node.npm_command(None, "exec", &["--yes"])).unwrap();
+
+        let calls = log.take();
+        let subcommands: Vec<_> = calls.iter().map(|call| call.subcommand.as_str()).collect();
+        assert_eq!(subcommands, ["info", "config", "install", "exec"]);
+        for call in &calls {
+            for (name, value) in super::NPM_PRIVACY_ENV {
+                assert_eq!(
+                    call.env.get(name).map(String::as_str),
+                    Some(value),
+                    "{call:?}"
+                );
+            }
+        }
+        assert!(log.calls().is_empty());
+    }
+
+    #[test]
+    fn every_supported_platform_has_a_digest_for_the_pinned_version() {
+        let version = ManagedNodeRuntime::VERSION;
+        for (os, arch) in [
+            ("linux", "x64"),
+            ("linux", "arm64"),
+            ("darwin", "x64"),
+            ("darwin", "arm64"),
+        ] {
+            let digest = expected_archive_sha256(version, os, arch)
+                .unwrap_or_else(|| panic!("no digest for {version} {os}-{arch}"));
+            assert_eq!(digest.len(), 64);
+            assert!(
+                digest
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
+        }
+        assert!(NODE_ARCHIVE_SHA256.iter().all(|row| row.0 == version));
+    }
+
+    #[test]
+    fn verify_sha256_accepts_only_the_matching_digest() {
+        let digest = format!("{:x}", sha2::Sha256::digest(b"abc"));
+        assert!(verify_sha256(b"abc", &digest).is_ok());
+        let error = verify_sha256(b"abd", &digest).unwrap_err();
+        assert!(error.to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn tampered_node_archive_is_refused_and_nothing_is_extracted() {
+        futures::executor::block_on(async {
+            let destination = tempfile::tempdir().unwrap();
+            let genuine = b"genuine archive bytes".to_vec();
+            let expected = format!("{:x}", sha2::Sha256::digest(&genuine));
+            let client = http_client::FakeHttpClient::create(|_| async {
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(b"tampered archive bytes".to_vec().into())
+                    .unwrap())
+            });
+            let error = download_verify_and_extract(
+                client.as_ref(),
+                "https://nodejs.org/dist/test/node.tar.gz",
+                &expected,
+                ArchiveType::TarGz,
+                destination.path(),
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("mismatch"), "{error:#}");
+            assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+        });
     }
 }

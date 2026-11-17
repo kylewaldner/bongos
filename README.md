@@ -578,6 +578,7 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-g | goto-line (a prompt in the minibuffer, with a preview) |
 | C-l, M-r | recenter, reposition |
 | C-s, C-r | isearch |
+| M-%, C-M-% | query-replace, query-replace-regexp |
 | C-x h | mark the whole buffer |
 | C-SPC, C-x C-SPC, C-x C-x | set the mark, pop the mark ring, exchange point and mark |
 | C-g | keyboard-quit (cancels a prompt, a mark or a search) |
@@ -590,6 +591,7 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-Y | browse-kill-ring: pick an entry from the kill ring in the minibuffer strip |
 | C-M-k | kill-whole-line |
 | C-M-w | append-next-kill: the next kill is added to the last entry |
+| C-o | open line: insert a newline after the cursor and stay before it |
 | C-/, C-_, C-x u | undo |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
@@ -630,8 +632,7 @@ three C-M-k in a row followed by C-y brings all three lines back; C-M-w makes th
 the last entry even after other commands. M-y, right after a yank, swaps the yanked text for the
 next older entry, and again for the one before it. M-Y opens the ring in the minibuffer strip,
 newest first, narrowed as you type, with the highlighted entry previewed under the list; Enter
-inserts it. A C-u prefix will change how many lines these commands take once the prefix-argument
-feature lands.
+inserts it. A prefix argument changes how many lines these commands take; see Universal argument.
 
 Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` is `true`
 (default `false`); then a copy in a terminal goes into the ring and a paste there reads it.
@@ -653,8 +654,8 @@ Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` i
 | M-. | push the mark, then go to the definition |
 | M-t, C-x C-t | with a mark away from point, swap the word or line at point with the one at the mark |
 
-C-SPC pressed right after a pop keeps popping, as in Emacs. C-u is not a prefix key yet, so
-C-x C-SPC stands in for C-u C-SPC. Inside editors C-. sets the mark instead of opening code
+C-SPC pressed right after a pop keeps popping, as in Emacs. C-u C-SPC does the same as C-x C-SPC
+(one entry per press, whatever the count). Inside editors C-. sets the mark instead of opening code
 actions, which stay in the command palette.
 
 The mark and its ring belong to the buffer, so two panes showing one file share them, and edits
@@ -667,6 +668,74 @@ deactivated; set it to `true` to have typing replace the region, as in other edi
 ```json
 { "emacs": { "delete_selection": true } }
 ```
+
+### Universal argument
+
+C-u, M-0 to M-9 and M-- give the next command a count, as in Emacs. The keys work in a full
+editor (a file you edit); in a picker's query editor, the minibuffer and other small editors they
+keep the meaning they have there, and where M-1 to M-9 switch tabs (outside editors, on Linux) they keep doing that.
+
+- **C-u** alone is 4, and each further C-u multiplies by 4: C-u C-u is 16, C-u C-u C-u is 64.
+- **Digits** after C-u, or M-0 to M-9 from the start, build the number: C-u 1 0 and M-1 0 are 10.
+  A C-u typed after digits ends the number, so C-u 3 C-u 7 is a 7 typed with the count 3, which
+  inserts 777; a digit typed with no argument pending is only a digit.
+- **Minus** makes the count negative: M-- is -1 and C-u - is -4 (Emacs reads C-u - as -1). Most
+  commands run the opposite way with a negative count; C-u - M-f goes four words back, M-- C-f
+  one character back. The minus is only taken before the digits.
+- **The echo.** While an argument is pending the echo area shows it: `C-u 4`, `C-u 10`, `C-u -`.
+  It goes when the next command takes the argument. The argument belongs to the editor it was
+  started in: moving focus to a picker or the minibuffer drops it.
+- **C-g** cancels a pending argument and its echo, so C-u 7 C-g changes nothing and the next
+  key is typed as usual. C-g also stops a long repeat after the repeat in progress, keeping what
+  was done.
+- **Typed characters.** C-u 5 and then a character inserts it 5 times. The count is limited to
+  65536, and the echo then says "Count limited to 65536".
+
+Commands that read the count themselves:
+
+| Command | With a count N |
+|---|---|
+| C-f, C-b, C-n, C-p | move N characters or lines (a negative count goes the other way) |
+| M-f, M-b, M-d, M-DEL, M-u, M-l, M-c | move over, kill or change the case of N words |
+| C-k, C-w, M-w, C-M-k | kill or copy N lines as one entry (C-k from the cursor, with a region C-w ignores N) |
+| C-y | yank the Nth newest entry of the kill ring (it wraps round); C-u C-y is the 4th |
+| M-y | step N entries older in the kill ring |
+| C-SPC | pop one entry of the mark ring and go to the mark, whatever N is |
+| M-g | go to line N |
+| M-z, M-Z, C-M-z, C-M-Z | the Nth occurrence of the character |
+| C-l | put the cursor line at row N of the window, with no cycling |
+| C-t, M-t, C-x C-t | move the character, word or line N places |
+| C-o | insert N newlines |
+| C-c y, C-c a | duplicate the line N times, copy N characters from the line above |
+| M-SPC | leave N spaces (0 leaves none) |
+| C-BS | any argument deletes only the space before the cursor |
+| M-up, M-down | move the line N lines |
+
+Commands that give the argument another meaning (the plain command runs with no argument):
+
+| Command | With C-u or any argument |
+|---|---|
+| C-c w a (advance) | advance even when the task it is stacked on is not Done, leaving a marker |
+| C-c w n (new task) | create the task without the plan todo |
+| C-c c n (new chat) | ask also for the name, model and layout |
+| C-c c o (open chat) | pick from the chats of any task |
+| C-c c f (fork to task) | ask for the session type |
+| C-c C-c in the prompts file (send) | send without marking the prompt as sent |
+| C-c f t (retry step) | read the workflow definition again before the retry |
+| C-c C-p, C-c C-f in the prompts file | move N prompts; a negative count goes the other way |
+
+Commands that have no use for a count (C-x C-x, C-s, C-r, C-M-s, C-M-r, M-%, C-M-%, C-x C-.)
+clear it and run once; C-u C-x C-x swaps point and mark once, not four times.
+
+Any other command is repeated: C-u 3 on a command with no count of its own runs it three times
+(a negative count runs it |N| times (the sign means nothing to it), and 0 runs nothing). The whole repeat is one undo step, so
+one C-/ takes it all back. It runs in slices so the window keeps drawing, and C-g ends it early.
+
+Where C-u is not the prefix, such as a picker's query editor, a command that takes an argument has
+another way in: the variants above are commands in the command palette (`task: advance override`,
+`chat: new with options`, `chat: open any`, `chat: fork to task as`, `task: new without plan`,
+`prompts: send without marking`, `workflow: retry step fresh`), and C-x C-SPC stands in for
+C-u C-SPC.
 
 ## Incremental search
 
@@ -728,6 +797,60 @@ The match count runs apart from it, in 1 MB windows on every core. While it is s
 counter is blank, or shows an ellipsis while a search is pending, and it stops at 10,000 matches
 and reads `3/10000+`.
 
+## Query replace
+
+M-% replaces a string, asking about each match, as in Emacs. The prompts and the questions show in
+the minibuffer strip. Under the Emacs base keymap (the default) these keys start it in an editor:
+
+| Key | Command |
+|---|---|
+| M-% | query-replace: ask for a string, then its replacement, then ask at each match |
+| C-M-% | query-replace-regexp: the same, with a regexp; `\1` to `\9` in the replacement name its groups, `\&` the whole match and `\#` the count |
+| M-% in a search | end the incremental search and replace its string and settings from the match on, asking only for the replacement (C-M-% does the same with a regexp) |
+
+`replace-string` and `replace-regexp` have no key. Run them from the command palette (M-x): they
+ask for the strings, then replace every match without asking. All four refuse a read-only buffer.
+
+The first prompt starts from the region, else the symbol at the cursor, else the last string; the
+second starts from the last replacement when the string is the last one. M-p and M-n walk the
+history. C-q makes the next key literal, so `C-q C-j` puts a newline in the string. At the
+second prompt RET asks at each match; with no match the message reads `Nothing to replace`.
+
+At each match the strip asks `Query replacing X with Y:` and these keys answer (`?` lists them):
+
+| Key | Answer |
+|---|---|
+| y, SPC | replace this match and go on |
+| n, DEL | skip it and go on |
+| ! | replace this and every remaining match without asking; C-g stops it and keeps what was replaced |
+| . | replace this match and end |
+| , | replace this match and wait, showing the result; the next key goes on |
+| ^ | go back to the previous replaced match and show it, one older each time |
+| u | undo the last replacement and ask about that match again |
+| e | edit the replacement; RET resumes with the new text |
+| q, RET | end; the cursor stays at the current match |
+| C-g | end like q; the replacements made stay |
+| C-l | recenter the match (middle, top, bottom) |
+| ? | show this list of keys |
+
+Any other key ends the replace and then runs as it does in the editor.
+
+Case is smart. A string with an uppercase letter is matched case-sensitively and any other
+case-insensitively; M-c at a prompt switches it. When the match ignores case and the string has no
+uppercase letter, the replacement takes the case of each match: `foo` to `bar` turns `Foo` into
+`Bar` and `FOO` into `BAR`.
+
+With a region, only the region is searched. Without one the search runs from the cursor to the end
+of the buffer (in a multibuffer, to the end of the excerpt at the cursor). The mark is pushed where
+the command started, so C-x C-SPC goes back, and the cursor ends after the last replacement.
+
+The whole replace is one undo step: after it, undo (C-/) puts back every replacement of the batch,
+the answered ones, the `!` ones and the ones of `replace-string` alike. The echo area says what
+happened, such as `Replaced 12 occurrences` or `Replaced 12, skipped 3`.
+
+`minibuffer.enabled_for` names `query_replace` by default, so the prompts and the questions are in
+the strip. Remove it from that list to get them as a centered modal; the keys are the same.
+
 ## Minibuffer
 
 As in Emacs, prompts open in a one-line strip at the bottom of the window, below the status bar,
@@ -737,7 +860,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
@@ -748,6 +871,53 @@ An empty list turns the minibuffer off: there is no strip and every prompt is a 
 the `minibuffer` settings are `max_rows` (candidate rows shown, 15), `show_count` (the match count
 before the prompt, true), `message_timeout` (how long a message stays, 4000 ms) and
 `key_hint_delay` (how long a pending key sequence waits before its keys are shown, 500 ms).
+
+## Languages
+
+Each language below gets highlighting, a language server and formatting with no setup. A server
+is downloaded the first time a file of its language opens (see Privacy for the hosts), unless
+`lsp.<server>.binary.path` points at one you installed. The status line names a language whose
+server cannot be downloaded or started ("Java server unavailable: could not download jdtls"), or
+a tool it is missing, and shows download progress. Its menu has Show logs (`languages.log` in the
+logs directory, with the full cause), Retry, Cancel download and Dismiss; the same are in the
+palette as `languages: show logs`, `languages: retry server` and `languages: cancel download`.
+
+| Language | Server | Formatting | Tasks and tests |
+|---|---|---|---|
+| Rust | rust-analyzer, building into `<target>/rust-analyzer` so it never blocks your `cargo build` | rust-analyzer (rustfmt) | cargo tasks, gutter test runs |
+| Python | basedpyright and ruff | ruff | pytest and unittest; the project's venv, uv, poetry or conda environment is picked with no setting |
+| JavaScript, TypeScript, TSX | vtsls, ESLint, Tailwind | Prettier, or Biome | `package.json` scripts and test runners with the project's package manager |
+| Java | jdtls, or the IntelliJ server where `kotlin.server` runs it (one server for Kotlin and Java) | jdtls | `java: show jdk` reports the JDKs |
+| Terraform, OpenTofu (`.tf`, `.tofu`, `.tfvars`) | terraform-ls | `terraform fmt` through terraform-ls | |
+| HTML, XML (`pom.xml`), HCL, TOML | none (highlighting only) | | |
+
+Go, C, C++, CSS, JSON, YAML and Bash keep the servers bongos inherited.
+
+- JavaScript package manager: `packageManager` in `package.json`, else the nearest lockfile
+  (`bun.lock` or `bun.lockb`, `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`), else npm.
+  Tasks run that manager only: a Bun project's scripts run as `bun run <script>`, its tests with
+  `bun test` (or `bun x <runner>` for Jest and Vitest), and bongos never runs `npm`, `npx` or
+  `node` for them. The language servers themselves still run on Node.js.
+- Biome: with `biome.json` or `biome.jsonc` in the project, bongos runs the project's own
+  `node_modules/@biomejs/biome` (it never downloads Biome) and formats with it instead of
+  Prettier; ESLint stays off there unless the project also has an ESLint config.
+- Java: jdtls runs on a JDK of its own, chosen apart from the JDK that imports the project. The
+  server JDK is `java.server_jdk`, else the newest JDK 25 or newer found (`JAVA_HOME`, then the
+  usual install locations). The import JDK is `java.jdk_home`, else the Gradle toolchain, the
+  Maven `release` or `source` level, then `JAVA_HOME`. jdtls keeps its workspace in the data
+  directory, never in the project.
+- Terraform: the binary terraform-ls runs is `terraform.binary`, else `terraform` on the
+  project's `PATH`, else `tofu`. With none, the server still gives completion and syntax and the
+  status line says formatting and validation need one.
+
+Tools bongos uses but does not install:
+
+- A JDK 25 or newer for jdtls (and the JDK your project builds with).
+- `terraform` or `tofu` for Terraform formatting and validation.
+- Node.js 22 or later for the Node-based servers and Prettier; without one, bongos downloads
+  Node.js from `nodejs.org`.
+- `bun` for Bun projects, `uv` or `poetry` for those projects' environments (bongos finds the
+  environments they made; it does not create them), and the project's own Biome.
 
 ## Privacy
 
@@ -771,6 +941,47 @@ bongos never contacts bongos.rocks. The list of kotlin-lsp builds is compiled in
 kotlin-lsp builds are early access and expire about 29 days after build, so bongos pins one
 build per release and releases roughly monthly. A new Kotlin build needs a new bongos release. If
 the pinned build has expired, update bongos.
+
+### Language server and debugger downloads
+
+bongos downloads a language server or debug adapter when it first installs it and when it checks
+for an update, never while you edit. It sends no telemetry to these hosts, and a server already on
+your `PATH` is used without a download. Each one comes from:
+
+- GitHub (`api.github.com` for the latest release, `github.com` for the download, which redirects
+  to GitHub's release CDN, `objects.githubusercontent.com` or `release-assets.githubusercontent.com`,
+  or for the ESLint source archive, `codeload.github.com`):
+  rust-analyzer, ruff, ty, clangd, package-version-server, the ESLint server's source (pinned
+  version), CodeLLDB, js-debug and delve-shim-dap (Delve's adapter shim).
+- The npm registry that npm's own configuration names (`registry.npmjs.org` unless you set
+  another): vtsls, typescript-language-server, basedpyright, pyright, the Tailwind servers, and
+  the YAML, Bash, CSS and JSON servers, the ESLint server's dependencies, and Prettier. Every npm
+  command runs with `npm_config_update_notifier=false` and `npm_config_audit=false`, so npm does
+  not check for a newer npm or send an audit report.
+- `nodejs.org`: Node.js itself, only when no suitable system Node.js (22 or later) is found.
+- `pypi.org`: the latest debugpy version. The debugpy wheel is then fetched by your Python's pip,
+  from the index pip's configuration names, as is pylsp.
+- Go's module proxy, as Go's configuration names it (`proxy.golang.org` by default): gopls and
+  Delve, built with your `go install`. The latest gopls version is read from `api.github.com`.
+
+- `download.eclipse.org`: jdtls, the Java server (pinned build, checked against its SHA-256).
+- `releases.hashicorp.com`: terraform-ls, the Terraform server (pinned build, checked against its
+  SHA-256).
+
+The YAML server is started with `redhat.telemetry.enabled` set to `false`. terraform-ls, and every
+`terraform` it runs, get `CHECKPOINT_DISABLE=1`, which turns off HashiCorp's version check; no
+setting turns it back on. jdtls and terraform-ls are installed once and then start from the cache
+with no request, also offline.
+
+A running server may still fetch what your files ask for: the YAML server reads its schema
+catalog from `www.schemastore.org` (turn it off with `yaml.schemaStore.enable: false` in the
+server's settings), the JSON and YAML servers fetch the schemas a file names, and the TypeScript
+servers may fetch type packages from the npm registry. terraform-ls itself
+always asks `registry.terraform.io` about every Terraform module with a registry source; no setting
+turns that off. When you complete a `source` or `version` in a Terraform `module` block,
+terraform-ls asks its module search service (Algolia) for suggestions. When jdtls imports a Maven
+or Gradle project it downloads what the build asks for, from Maven Central and the project's other
+repositories, and Buildship from the Gradle distribution host.
 
 ### Kotlin server manifest file
 

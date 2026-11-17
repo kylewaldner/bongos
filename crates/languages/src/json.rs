@@ -36,11 +36,64 @@ use util::{
 };
 
 use crate::PackageJsonData;
+use crate::package_json::detect_lockfiles;
 
 const SERVER_PATH: &str =
     "node_modules/vscode-langservers-extracted/bin/vscode-json-language-server";
 
-pub(crate) struct JsonTaskProvider;
+pub(crate) struct JsonTaskProvider {
+    fs: Arc<dyn project::Fs>,
+}
+
+impl JsonTaskProvider {
+    pub(crate) fn new(fs: Arc<dyn project::Fs>) -> Self {
+        Self { fs }
+    }
+
+    /// The `run <script>` and `package script` templates for a `package.json`, using the
+    /// package manager the project declares or the lockfile beside it or above it.
+    async fn package_json_templates(
+        fs: &dyn project::Fs,
+        worktree_root: &Path,
+        path: Arc<Path>,
+        package_json: HashMap<String, serde_json_lenient::Value>,
+    ) -> Vec<TaskTemplate> {
+        let mut package_json = PackageJsonData::new(path.clone(), package_json);
+        let mut directories = Vec::new();
+        let mut directory = path.parent();
+        while let Some(current) = directory {
+            directories.push(current.to_path_buf());
+            if current == worktree_root {
+                break;
+            }
+            directory = current.parent();
+        }
+        package_json.lockfiles = detect_lockfiles(fs, &directories).await;
+        let command = package_json.resolved_package_manager().to_owned();
+        package_json
+            .scripts
+            .into_iter()
+            .map(|(_, key)| TaskTemplate {
+                label: format!("run {key}"),
+                command: command.clone(),
+                args: vec!["run".into(), key],
+                cwd: Some(VariableName::Dirname.template_value()),
+                ..TaskTemplate::default()
+            })
+            .chain([TaskTemplate {
+                label: "package script $ZED_CUSTOM_script".to_owned(),
+                command: command.clone(),
+                args: vec![
+                    "run".into(),
+                    VariableName::Custom("script".into()).template_value(),
+                ],
+                cwd: Some(VariableName::Dirname.template_value()),
+                tags: vec!["package-script".into()],
+                ..TaskTemplate::default()
+            }])
+            .collect()
+    }
+}
 
 impl ContextProvider for JsonTaskProvider {
     fn associated_tasks(
@@ -58,6 +111,7 @@ impl ContextProvider for JsonTaskProvider {
             return Task::ready(None);
         }
 
+        let fs = self.fs.clone();
         cx.spawn(async move |cx| {
             let contents = file
                 .worktree
@@ -65,36 +119,16 @@ impl ContextProvider for JsonTaskProvider {
                 .await
                 .ok()?;
             let path = cx.update(|cx| file.abs_path(cx)).as_path().into();
+            let worktree_root = file
+                .worktree
+                .read_with(cx, |worktree, _| worktree.abs_path());
 
             let task_templates = if is_package_json {
                 let package_json = serde_json_lenient::from_str::<
                     HashMap<String, serde_json_lenient::Value>,
                 >(&contents.text)
                 .ok()?;
-                let package_json = PackageJsonData::new(path, package_json);
-                let command = package_json.package_manager.unwrap_or("npm").to_owned();
-                package_json
-                    .scripts
-                    .into_iter()
-                    .map(|(_, key)| TaskTemplate {
-                        label: format!("run {key}"),
-                        command: command.clone(),
-                        args: vec!["run".into(), key],
-                        cwd: Some(VariableName::Dirname.template_value()),
-                        ..TaskTemplate::default()
-                    })
-                    .chain([TaskTemplate {
-                        label: "package script $ZED_CUSTOM_script".to_owned(),
-                        command: command.clone(),
-                        args: vec![
-                            "run".into(),
-                            VariableName::Custom("script".into()).template_value(),
-                        ],
-                        cwd: Some(VariableName::Dirname.template_value()),
-                        tags: vec!["package-script".into()],
-                        ..TaskTemplate::default()
-                    }])
-                    .collect()
+                Self::package_json_templates(fs.as_ref(), &worktree_root, path, package_json).await
             } else if is_composer_json {
                 serde_json_lenient::Value::from_str(&contents.text)
                     .ok()?
@@ -400,9 +434,78 @@ async fn get_cached_server_binary(
 
 #[cfg(test)]
 mod tests {
+    use super::{JsonTaskProvider, json_schema_proxy_settings};
+    use collections::HashMap;
+    use gpui::TestAppContext;
+    use project::{FakeFs, Fs as _};
     use serde_json::json;
+    use std::path::Path;
+    use util::path;
 
-    use super::json_schema_proxy_settings;
+    async fn templates_for(
+        executor: gpui::BackgroundExecutor,
+        tree: serde_json::Value,
+        package_json_path: &str,
+    ) -> Vec<task::TaskTemplate> {
+        let fs = FakeFs::new(executor);
+        fs.insert_tree(path!("/root"), tree).await;
+        let contents = fs.load(Path::new(package_json_path)).await.unwrap();
+        let package_json =
+            serde_json_lenient::from_str::<HashMap<String, serde_json_lenient::Value>>(&contents)
+                .unwrap();
+        JsonTaskProvider::package_json_templates(
+            fs.as_ref(),
+            Path::new(path!("/root")),
+            Path::new(package_json_path).into(),
+            package_json,
+        )
+        .await
+    }
+
+    #[gpui::test]
+    async fn test_package_json_tasks_follow_lockfile(cx: &mut TestAppContext) {
+        let package_json = json!({"scripts": {"build": "x"}}).to_string();
+        for (lockfile, expected) in [
+            ("bun.lock", "bun"),
+            ("bun.lockb", "bun"),
+            ("pnpm-lock.yaml", "pnpm"),
+            ("yarn.lock", "yarn"),
+        ] {
+            let templates = templates_for(
+                cx.executor(),
+                json!({lockfile: "", "package.json": package_json}),
+                path!("/root/package.json"),
+            )
+            .await;
+            assert_eq!(templates.len(), 2, "{lockfile}");
+            for template in &templates {
+                assert_eq!(template.command, expected, "{lockfile}");
+                assert!(!["npm", "npx", "node"].contains(&template.command.as_str()));
+                assert_eq!(template.args[0], "run");
+            }
+        }
+        let templates = templates_for(
+            cx.executor(),
+            json!({"package.json": package_json}),
+            path!("/root/package.json"),
+        )
+        .await;
+        assert!(templates.iter().all(|template| template.command == "npm"));
+    }
+
+    #[gpui::test]
+    async fn test_package_json_tasks_find_lockfile_above(cx: &mut TestAppContext) {
+        let templates = templates_for(
+            cx.executor(),
+            json!({
+                "bun.lock": "",
+                "sub": {"package.json": json!({"scripts": {"dev": "x"}}).to_string()},
+            }),
+            path!("/root/sub/package.json"),
+        )
+        .await;
+        assert!(templates.iter().all(|template| template.command == "bun"));
+    }
 
     #[test]
     fn test_json_schema_proxy_settings_includes_proxy() {

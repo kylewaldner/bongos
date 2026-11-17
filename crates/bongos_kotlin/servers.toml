@@ -1,6 +1,7 @@
-# Pinned Kotlin language servers, embedded in the binary. Refresh with script/bongos/pin-kotlin-servers
+# Pinned language servers, embedded in the binary. Refresh kotlin-lsp and intellij with
+# script/bongos/pin-kotlin-servers, jdtls or terraform-ls with `pin-kotlin-servers --server <name>`
 # (needs the network; never run by a gate). Every download is checked against `sha256` before it is
-# extracted, and bongos never asks a server what the newest version is.
+# extracted, and bongos never asks a server what the newest version is. Only kotlin-lsp expires.
 #
 # kotlin-lsp builds are early access and expire about 29 days after `built`; `expires` is the last
 # day the build runs (`license status` prints it). Pin a newer build before then.
@@ -86,3 +87,74 @@ archive = "zip"
 strip_components = 1
 launcher = "bin/intellij-server"
 runtime = "jbr/Contents/Home/bin/java"
+
+# Eclipse JDT Language Server (Java), a stable release with no expiry. One archive serves every
+# platform; `bin/jdtls` is a Python 3 wrapper around
+# plugins/org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar and needs a JDK 25 or newer.
+[jdtls]
+version = "1.63.0"
+
+[jdtls.platform.linux-x64]
+url = "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz"
+sha256 = "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
+archive = "tar.gz"
+strip_components = 0
+launcher = "bin/jdtls"
+
+[jdtls.platform.linux-arm64]
+url = "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz"
+sha256 = "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
+archive = "tar.gz"
+strip_components = 0
+launcher = "bin/jdtls"
+
+[jdtls.platform.macos-x64]
+url = "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz"
+sha256 = "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
+archive = "tar.gz"
+strip_components = 0
+launcher = "bin/jdtls"
+
+[jdtls.platform.macos-arm64]
+url = "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz"
+sha256 = "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
+archive = "tar.gz"
+strip_components = 0
+launcher = "bin/jdtls"
+
+# HashiCorp terraform-ls, a stable release with no expiry. CHECKPOINT_DISABLE stops its
+# version-check call home.
+[terraform-ls]
+version = "0.39.1"
+args = ["serve"]
+
+[terraform-ls.env]
+CHECKPOINT_DISABLE = "1"
+
+[terraform-ls.platform.linux-x64]
+url = "https://releases.hashicorp.com/terraform-ls/0.39.1/terraform-ls_0.39.1_linux_amd64.zip"
+sha256 = "fe2a158e4a1a8ec8047dae9e06c439b468412aa579929ba28b2e1258cedef9c0"
+archive = "zip"
+strip_components = 0
+launcher = "terraform-ls"
+
+[terraform-ls.platform.linux-arm64]
+url = "https://releases.hashicorp.com/terraform-ls/0.39.1/terraform-ls_0.39.1_linux_arm64.zip"
+sha256 = "a72a6d9f72580cfc30cc06d3c973fd5f55790f62e3ddb195998435070d9af36d"
+archive = "zip"
+strip_components = 0
+launcher = "terraform-ls"
+
+[terraform-ls.platform.macos-x64]
+url = "https://releases.hashicorp.com/terraform-ls/0.39.1/terraform-ls_0.39.1_darwin_amd64.zip"
+sha256 = "25814afdbec9163de4ad8db58960195b9fc65ddc5405a5df7163bbdbd08b5325"
+archive = "zip"
+strip_components = 0
+launcher = "terraform-ls"
+
+[terraform-ls.platform.macos-arm64]
+url = "https://releases.hashicorp.com/terraform-ls/0.39.1/terraform-ls_0.39.1_darwin_arm64.zip"
+sha256 = "07748aa989fc3b9f6e4538ff83bc2e607ebc20c7587ce6556ae555d631e70b1b"
+archive = "zip"
+strip_components = 0
+launcher = "terraform-ls"

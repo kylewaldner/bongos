@@ -526,6 +526,23 @@ fn main() {
             },
             cx,
         );
+        bongos_java::init(
+            &languages,
+            bongos_java::JavaDirs {
+                languages_dir: paths::languages_dir().clone(),
+                config_dir: paths::config_dir().clone(),
+            },
+            cx,
+        );
+        bongos_terraform::init(
+            &languages,
+            bongos_terraform::TerraformDirs {
+                languages_dir: paths::languages_dir().clone(),
+                config_dir: paths::config_dir().clone(),
+            },
+            cx,
+        );
+        bongos_language_status::init(paths::logs_dir(), cx);
         bongos_work::init(
             fs.clone(),
             bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir()),
@@ -741,6 +758,7 @@ fn main() {
         bongos_minibuffer::init(cx);
         bongos_emacs::init(cx);
         bongos_isearch::init(cx);
+        bongos_query_replace::init(cx);
         zed::install_isearch_kill_source(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use gpui::{App, AsyncApp};
 use http_client::github::{AssetKind, GitHubLspBinaryVersion, latest_github_release};
-use http_client::github_download::{GithubBinaryMetadata, download_server_binary};
+use http_client::github_download::{GithubBinaryMetadata, download_server_binary_with_progress};
 pub use language::*;
 use lsp::{InitializeParams, LanguageServerBinary, LanguageServerName};
 use project::lsp_store::clangd_ext;
@@ -73,6 +73,7 @@ impl LspInstaller for CLspAdapter {
         delegate: &Arc<dyn LspAdapterDelegate>,
     ) -> impl Send + Future<Output = Result<LanguageServerBinary>> + use<> {
         let delegate = delegate.clone();
+        let server_name = self.name();
 
         async move {
             ensure_arch_compatibility()?;
@@ -128,12 +129,13 @@ impl LspInstaller for CLspAdapter {
                     return Ok(binary);
                 }
             }
-            download_server_binary(
+            download_server_binary_with_progress(
                 &*delegate.http_client(),
                 &url,
                 expected_digest.as_deref(),
                 &container_dir,
                 AssetKind::Zip,
+                &|done, total| delegate.report_download_progress(server_name.clone(), done, total),
             )
             .await?;
             remove_matching(&container_dir, |entry| entry != version_dir).await;

@@ -65,10 +65,18 @@ url.workspace = true
 util.workspace = true
 
 [dev-dependencies]
+bongos_languages.workspace = true
+dap.workspace = true
+dap_adapters.workspace = true
 fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+node_runtime = { workspace = true, features = ["test-support"] }
+paths.workspace = true
 pretty_assertions.workspace = true
 tempfile = { workspace = true}
 settings = { workspace = true, features = ["test-support"] }
+sha2.workspace = true
 theme = { workspace = true, features = ["test-support"] }
 tree-sitter-bash.workspace = true
 tree-sitter-c.workspace = true
@@ -79,4 +87,6 @@ tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-typescript.workspace = true
 tree-sitter.workspace = true
+toml.workspace = true
 unindent.workspace = true
+watch.workspace = true

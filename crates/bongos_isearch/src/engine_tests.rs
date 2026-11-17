@@ -1,5 +1,5 @@
 use crate::engine::{
-    COUNT_WINDOW, Cancel, Count, Engine, FindOutcome, count, count_with_threads, find,
+    COUNT_WINDOW, Cancel, Count, Engine, FindOutcome, count, count_in, count_with_threads, find,
     find_outcome, find_with_hook, in_range, split,
 };
 use bongos_isearch_model::{Direction, Isearch, Request, SearchSpec, escape, window};
@@ -514,6 +514,74 @@ fn test_count_cap_and_cancel(cx: &mut TestAppContext) {
     let cancel = Cancel::new();
     cancel.cancel();
     assert_eq!(count(&snapshot, &query, 100, &cancel), None);
+}
+
+#[gpui::test]
+fn test_count_in_a_range(cx: &mut TestAppContext) {
+    let text = "ab ab ab\nab ab\n";
+    let snapshot = singleton(cx, text);
+    let query = query("ab");
+    let all = count(&snapshot, &query, 100, &Cancel::new()).expect("not canceled");
+    assert_eq!(
+        count_in(
+            &snapshot,
+            &query,
+            offsets(0..text.len()),
+            100,
+            &Cancel::new()
+        ),
+        Some(all.clone())
+    );
+    assert_eq!(all.starts.len(), 5);
+
+    // Only matches wholly inside the range count: the one straddling each end does not.
+    let inside =
+        count_in(&snapshot, &query, offsets(4..13), 100, &Cancel::new()).expect("not canceled");
+    assert_eq!(
+        inside.starts,
+        [6, 9].map(MultiBufferOffset).to_vec(),
+        "{text:?}"
+    );
+    assert!(!inside.capped);
+    let capped =
+        count_in(&snapshot, &query, offsets(3..text.len()), 2, &Cancel::new()).expect("counted");
+    assert_eq!(
+        capped,
+        Count {
+            starts: [3, 6].map(MultiBufferOffset).to_vec(),
+            capped: true
+        }
+    );
+    assert_eq!(
+        count_in(&snapshot, &query, offsets(4..4), 100, &Cancel::new()),
+        Some(Count::default())
+    );
+
+    // A multiline pattern never runs past the end of the range.
+    let lines = regexp("ab\\nab");
+    assert_eq!(
+        count_in(
+            &snapshot,
+            &lines,
+            offsets(0..text.len()),
+            100,
+            &Cancel::new()
+        )
+        .map(|counted| counted.starts),
+        Some(vec![MultiBufferOffset(6)])
+    );
+    assert_eq!(
+        count_in(&snapshot, &lines, offsets(0..10), 100, &Cancel::new())
+            .map(|counted| counted.starts),
+        Some(Vec::new())
+    );
+
+    let cancel = Cancel::new();
+    cancel.cancel();
+    assert_eq!(
+        count_in(&snapshot, &query, offsets(0..text.len()), 100, &cancel),
+        None
+    );
 }
 
 #[gpui::test]

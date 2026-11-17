@@ -2051,12 +2051,16 @@ dependencies = [
  "bongos_checks",
  "bongos_emacs",
  "bongos_isearch",
+ "bongos_java",
  "bongos_kotlin",
+ "bongos_language_status",
  "bongos_languages",
  "bongos_linear",
  "bongos_minibuffer",
  "bongos_net",
  "bongos_prompts",
+ "bongos_query_replace",
+ "bongos_terraform",
  "bongos_version",
  "bongos_work",
  "bongos_workflow",
@@ -2387,6 +2391,7 @@ dependencies = [
  "project",
  "schemars 1.0.4",
  "serde",
+ "serde_json",
  "settings",
  "text",
  "theme",
@@ -2431,6 +2436,30 @@ name = "bongos_isearch_model"
 version = "0.1.0"
 
 [[package]]
+name = "bongos_java"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-tar",
+ "async-trait",
+ "bongos_kotlin",
+ "bongos_language_status",
+ "collections",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "language",
+ "lsp",
+ "semver",
+ "serde_json",
+ "settings",
+ "sha2",
+ "tempfile",
+ "util",
+]
+
+[[package]]
 name = "bongos_kotlin"
 version = "0.1.0"
 dependencies = [
@@ -2441,6 +2470,7 @@ dependencies = [
  "async-trait",
  "async_zip",
  "base64 0.22.1",
+ "bongos_language_status",
  "chrono",
  "collections",
  "editor",
@@ -2474,6 +2504,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_language_status"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "log",
+ "lsp",
+ "project",
+ "proto",
+ "serde_json",
+ "settings",
+ "tempfile",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "bongos_languages"
 version = "0.1.0"
 dependencies = [
@@ -2483,9 +2537,12 @@ dependencies = [
  "streaming-iterator",
  "toml 0.8.23",
  "tree-sitter",
+ "tree-sitter-hcl",
+ "tree-sitter-html",
  "tree-sitter-java",
  "tree-sitter-kotlin",
  "tree-sitter-toml-ng",
+ "tree-sitter-xml",
 ]
 
 [[package]]
@@ -2662,6 +2719,65 @@ name = "bongos_prompts_model"
 version = "0.1.0"
 dependencies = [
  "chrono",
+]
+
+[[package]]
+name = "bongos_query_replace"
+version = "0.1.0"
+dependencies = [
+ "bongos_emacs",
+ "bongos_emacs_model",
+ "bongos_isearch",
+ "bongos_isearch_model",
+ "bongos_minibuffer",
+ "bongos_query_replace_model",
+ "buffer_diff",
+ "command_palette_hooks",
+ "editor",
+ "fancy-regex 0.17.0",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "multi_buffer",
+ "project",
+ "regex",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
+name = "bongos_query_replace_model"
+version = "0.1.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
+name = "bongos_terraform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "async_zip",
+ "bongos_kotlin",
+ "bongos_language_status",
+ "bongos_net",
+ "collections",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "language",
+ "lsp",
+ "semver",
+ "serde_json",
+ "settings",
+ "sha2",
+ "tempfile",
+ "util",
 ]
 
 [[package]]
@@ -8866,6 +8982,7 @@ dependencies = [
  "strsim 0.11.1",
  "sum_tree",
  "task",
+ "tempfile",
  "text",
  "theme",
  "theme_settings",
@@ -9109,8 +9226,11 @@ dependencies = [
  "async-fs",
  "async-tar",
  "async-trait",
+ "bongos_languages",
  "chrono",
  "collections",
+ "dap",
+ "dap_adapters",
  "fs",
  "futures 0.3.32",
  "globset",
@@ -9124,6 +9244,7 @@ dependencies = [
  "lsp",
  "node_runtime",
  "parking_lot",
+ "paths",
  "pet",
  "pet-conda",
  "pet-core",
@@ -9140,6 +9261,7 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "settings",
+ "sha2",
  "smallvec",
  "smol",
  "snippet",
@@ -9147,6 +9269,7 @@ dependencies = [
  "tempfile",
  "terminal",
  "theme",
+ "toml 0.8.23",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
@@ -9160,6 +9283,7 @@ dependencies = [
  "unindent",
  "url",
  "util",
+ "watch",
 ]
 
 [[package]]
@@ -10329,7 +10453,9 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "smol",
+ "tempfile",
  "util",
  "watch",
  "which 6.0.3",
@@ -16923,6 +17049,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-hcl"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a7b2cc3d7121553b84309fab9d11b3ff3d420403eef9ae50f9fd1cd9d9cf012"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-heex"
 version = "0.0.1"
 source = "git+https://github.com/zed-industries/tree-sitter-heex?rev=1dd45142fbb05562e35b2040c6129c9bca346592#1dd45142fbb05562e35b2040c6129c9bca346592"
@@ -17049,6 +17185,16 @@ dependencies = [
 name = "tree-sitter-typescript"
 version = "0.23.2"
 source = "git+https://github.com/zed-industries/tree-sitter-typescript?rev=e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899#e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-xml"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e670041f591d994f54d597ddcd8f4ebc930e282c4c76a42268743b71f0c8b6b3"
 dependencies = [
  "cc",
  "tree-sitter-language",

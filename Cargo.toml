@@ -209,7 +209,9 @@ members = [
     "crates/bongos_chat_model",
     "crates/bongos_checks",
     "crates/bongos_checks_model",
+    "crates/bongos_java",
     "crates/bongos_kotlin",
+    "crates/bongos_language_status",
     "crates/bongos_languages",
     "crates/bongos_linear",
     "crates/bongos_linear_model",
@@ -217,6 +219,8 @@ members = [
     "crates/bongos_emacs_model",
     "crates/bongos_isearch",
     "crates/bongos_isearch_model",
+    "crates/bongos_query_replace",
+    "crates/bongos_query_replace_model",
     "crates/bongos_minibuffer",
     "crates/bongos_minibuffer_model",
     "crates/bongos_net",
@@ -224,6 +228,7 @@ members = [
     "crates/bongos_project_repo_model",
     "crates/bongos_prompts",
     "crates/bongos_prompts_model",
+    "crates/bongos_terraform",
     "crates/bongos_version",
     "crates/bongos_work",
     "crates/bongos_work_model",
@@ -475,7 +480,9 @@ bongos_chat = { path = "crates/bongos_chat" }
 bongos_chat_model = { path = "crates/bongos_chat_model" }
 bongos_checks = { path = "crates/bongos_checks" }
 bongos_checks_model = { path = "crates/bongos_checks_model" }
+bongos_java = { path = "crates/bongos_java" }
 bongos_kotlin = { path = "crates/bongos_kotlin" }
+bongos_language_status = { path = "crates/bongos_language_status" }
 bongos_linear = { path = "crates/bongos_linear" }
 bongos_linear_model = { path = "crates/bongos_linear_model" }
 bongos_languages = { path = "crates/bongos_languages" }
@@ -483,6 +490,8 @@ bongos_emacs = { path = "crates/bongos_emacs" }
 bongos_emacs_model = { path = "crates/bongos_emacs_model" }
 bongos_isearch = { path = "crates/bongos_isearch" }
 bongos_isearch_model = { path = "crates/bongos_isearch_model" }
+bongos_query_replace = { path = "crates/bongos_query_replace" }
+bongos_query_replace_model = { path = "crates/bongos_query_replace_model" }
 bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
 bongos_net = { path = "crates/bongos_net" }
@@ -490,6 +499,7 @@ bongos_project_repo = { path = "crates/bongos_project_repo" }
 bongos_project_repo_model = { path = "crates/bongos_project_repo_model" }
 bongos_prompts = { path = "crates/bongos_prompts" }
 bongos_prompts_model = { path = "crates/bongos_prompts_model" }
+bongos_terraform = { path = "crates/bongos_terraform" }
 bongos_version = { path = "crates/bongos_version" }
 bongos_work = { path = "crates/bongos_work" }
 bongos_work_model = { path = "crates/bongos_work_model" }
@@ -811,6 +821,7 @@ tree-sitter-go = "0.25"
 tree-sitter-go-mod = { git = "https://github.com/camdencheek/tree-sitter-go-mod", rev = "2e886870578eeba1927a2dc4bd2e2b3f598c5f9a", package = "tree-sitter-gomod" }
 tree-sitter-gowork = { git = "https://github.com/zed-industries/tree-sitter-go-work", rev = "acb0617bf7f4fda02c6217676cc64acb89536dc7" }
 tree-sitter-heex = { git = "https://github.com/zed-industries/tree-sitter-heex", rev = "1dd45142fbb05562e35b2040c6129c9bca346592" }
+tree-sitter-hcl = "1.1.0"
 tree-sitter-html = "0.23"
 tree-sitter-java = "0.23.5"
 tree-sitter-jsdoc = "0.23"
@@ -823,6 +834,7 @@ tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24.2"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = { git = "https://github.com/zed-industries/tree-sitter-typescript", rev = "e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899" } # https://github.com/tree-sitter/tree-sitter-typescript/pull/347
+tree-sitter-xml = "0.7.0"
 tree-sitter-yaml = { git = "https://github.com/zed-industries/tree-sitter-yaml", rev = "baff0b51c64ef6a1fb1f8390f3ad6015b83ec13a" }
 tracing = "0.1.40"
 unicase = "2.6"
@@ -981,6 +993,11 @@ aho-corasick = { opt-level = 3 }
 regex-automata = { opt-level = 3 }
 fancy-regex = { opt-level = 3 }
 rope = { opt-level = 3 }
+# The query replace perf test (bongos_query_replace perf_tests, 50,000 edits) runs in about 8 s
+# in the dev profile with these optimized, about 35 s without.
+text = { opt-level = 3 }
+sum_tree = { opt-level = 3 }
+multi_buffer = { opt-level = 3 }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 activity_indicator = { codegen-units = 1 }
 assets = { codegen-units = 1 }
