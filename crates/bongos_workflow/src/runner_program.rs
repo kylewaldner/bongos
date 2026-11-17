@@ -1026,8 +1026,8 @@ pub fn launch_env(
     env
 }
 
-/// The runner's clock; tests advance their own.
-pub trait Clock {
+/// The runner's clock; tests advance their own. `Send + Sync`, since the engine's runner is sent.
+pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
 }
 
@@ -1040,7 +1040,7 @@ impl Clock for SystemClock {
 }
 
 /// Whether the OS sandbox can be created for a policy in a working directory, or why not.
-pub type SandboxProbe = Arc<dyn Fn(&SandboxPolicy, &Path) -> Result<(), String>>;
+pub type SandboxProbe = Arc<dyn Fn(&SandboxPolicy, &Path) -> Result<(), String> + Send + Sync>;
 
 /// The real probe ([`Sandbox::can_create`]; on Linux a brief `bwrap` run).
 pub fn os_sandbox_probe() -> SandboxProbe {

@@ -1260,13 +1260,21 @@ fn a_second_start_is_refused_through_can_start_run(cx: &mut TestAppContext) {
     let run = cx
         .update(|cx| engine.start_in(StartRequest::new(LEAF), &world.tree, cx))
         .unwrap();
+    // The start ticks once, so its first node is already running.
     assert_eq!(
         seen.borrow().as_slice(),
-        [WorkflowEvent::Changed {
-            run: run.clone(),
-            task_id: LEAF.to_string(),
-            state: RunStatus::Queued,
-        }]
+        [
+            WorkflowEvent::Changed {
+                run: run.clone(),
+                task_id: LEAF.to_string(),
+                state: RunStatus::Queued,
+            },
+            WorkflowEvent::Changed {
+                run: run.clone(),
+                task_id: LEAF.to_string(),
+                state: RunStatus::Running,
+            }
+        ]
     );
     engine.lifecycle().tick();
 
@@ -1331,6 +1339,8 @@ fn the_engine_reports_the_worktree_of_the_active_run(cx: &mut TestAppContext) {
 mod completion_tests;
 #[path = "enable_tests.rs"]
 mod enable_tests;
+#[path = "engine_tests.rs"]
+mod engine_tests;
 #[path = "gates_tests.rs"]
 mod gates_tests;
 #[path = "outcomes_tests.rs"]
