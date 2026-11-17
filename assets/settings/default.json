@@ -16,8 +16,9 @@
   // This setting can take these values:
   //
   // 1. "Emacs" (the default)
-  // 2. "VSCode"
-  // 3. "None"
+  // 2. "Vim"
+  // 3. "VSCode"
+  // 4. "None"
   //
   // The retired values "JetBrains", "Atom", "Cursor", "SublimeText" and "TextMate"
   // still load and fall back to "Emacs".

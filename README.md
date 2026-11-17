@@ -743,7 +743,7 @@ C-u C-SPC.
 ## Keybinding profiles
 
 bongos has three keybinding profiles, set with `base_keymap` in settings: `"Emacs"` (the default),
-`"VSCode"` and `"Vim"`. Every bongos command is bound under all three, and every command is also in
+`"VSCode"` and `"Vim"`; `"None"` loads no base keymap. Every bongos command is bound under all three, and every command is also in
 the command palette and in M-x. The old values `"JetBrains"`, `"Atom"`, `"SublimeText"`, `"TextMate"`
 and `"Cursor"` are retired: bongos shows a notice, uses Emacs, and leaves your setting as it is.
 

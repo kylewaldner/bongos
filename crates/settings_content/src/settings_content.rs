@@ -514,7 +514,9 @@ impl JsonSchema for BaseKeymapContent {
         schemars::json_schema!({
             "description": "Base key bindings scheme. Base keymaps can be overridden with user keymaps.\n\nDefault: Emacs",
             "type": "string",
-            "enum": ["Emacs", "Vim", "VSCode", "None"]
+            "enum": [
+                "Emacs", "Vim", "VSCode", "None", "emacs", "vim", "vscode", "none"
+            ]
         })
     }
 }
