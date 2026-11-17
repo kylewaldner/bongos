@@ -339,6 +339,26 @@ pub struct HaltWorktrees {
     pub branches: Vec<PathBuf>,
 }
 
+/// The marker file `workflow: clear finished` leaves in a run directory it cleared; a run with it
+/// is never loaded.
+pub const CLEARED_FILE: &str = "cleared";
+
+/// What [`Lifecycle::load_runs`] did.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LoadReport {
+    /// The runs loaded, in load order.
+    pub loaded: Vec<RunId>,
+    /// Each loaded run's orphan processes and what became of them.
+    pub orphans: Vec<(RunId, Vec<(NodeKey, crate::process::OrphanOutcome)>)>,
+    /// Run directories (or task `runs/` directories) skipped, each with the reason.
+    pub skipped: Vec<(PathBuf, String)>,
+}
+
+fn skip(report: &mut LoadReport, path: &Path, reason: String) {
+    log::warn!("workflows: skipped {}: {reason}", path.display());
+    report.skipped.push((path.to_path_buf(), reason));
+}
+
 /// A run the lifecycle knows.
 struct RunEntry {
     id: RunId,
@@ -684,6 +704,143 @@ impl<R: Runner> Lifecycle<R> {
         self.runs.push(entry);
         self.note(&id);
         Ok(id)
+    }
+
+    /// Loads the runs a relaunch finds: `runs/<id>/run.toml` under every task directory of `tree`.
+    /// A run whose directory holds the `cleared` marker, whose `run.toml` does not parse, that has
+    /// no `events.jsonl`, or whose task directory or record cannot be read is logged and skipped;
+    /// the others still load. All loaded runs go to [`Runtime::load_all`] in one call, so orphan
+    /// processes die in one grace period and a run with a started key and no finish comes back
+    /// interrupted; each is bound to its attempt's worktree. Nothing resumes by itself. With no
+    /// `runs/` directory this loads nothing and writes nothing. Takes no lock. A run already
+    /// loaded is [`RuntimeError::Duplicate`] and none of these load.
+    pub fn load_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
+        let mut report = LoadReport::default();
+        let mut entries: Vec<RunEntry> = Vec::new();
+        let mut specs: Vec<RunSpec> = Vec::new();
+        for task in tree.tasks() {
+            let runs = bongos_work_model::layout::runs_dir(&task.dir);
+            let listing = match fs::read_dir(&runs) {
+                Ok(listing) => listing,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    skip(
+                        &mut report,
+                        &runs,
+                        format!("cannot read the runs directory: {error}"),
+                    );
+                    continue;
+                }
+            };
+            let mut dirs: Vec<PathBuf> = Vec::new();
+            for entry in listing {
+                match entry {
+                    Ok(entry) if entry.path().is_dir() => dirs.push(entry.path()),
+                    Ok(_) => {}
+                    Err(error) => {
+                        skip(&mut report, &runs, format!("cannot read an entry: {error}"))
+                    }
+                }
+            }
+            dirs.sort();
+            for dir in dirs {
+                match self.read_run(task, &dir) {
+                    Ok(Some((entry, spec))) => {
+                        entries.push(entry);
+                        specs.push(spec);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => skip(&mut report, &dir, reason),
+                }
+            }
+        }
+        let orphans = self.runtime.load_all(specs)?;
+        for (entry, orphans) in entries.into_iter().zip(orphans) {
+            self.runtime.bind(&entry.id, entry.binding());
+            report.loaded.push(entry.id.clone());
+            report.orphans.push((entry.id.clone(), orphans));
+            self.runs.push(entry);
+        }
+        self.note_all();
+        Ok(report)
+    }
+
+    /// One run directory: `Ok(None)` for a cleared run.
+    fn read_run(&self, task: &Task, dir: &Path) -> Result<Option<(RunEntry, RunSpec)>, String> {
+        if dir.join(CLEARED_FILE).exists() {
+            return Ok(None);
+        }
+        let file = dir.join(RUN_FILE);
+        let text = fs::read_to_string(&file).map_err(|error| format!("{RUN_FILE}: {error}"))?;
+        let record = RunToml::parse(&text).map_err(|error| error.to_string())?;
+        if dir
+            .file_name()
+            .is_none_or(|name| name.to_string_lossy() != record.id)
+        {
+            return Err(format!(
+                "{RUN_FILE} names run {}, not this directory",
+                record.id
+            ));
+        }
+        let attempt = record
+            .current_attempt()
+            .ok_or_else(|| format!("{RUN_FILE} has no attempt"))?;
+        let attempt_dir = attempt_dir(dir, attempt.n);
+        if !attempt_dir.join(crate::runtime::EVENTS_FILE).is_file() {
+            return Err(format!(
+                "no {} in attempt {}",
+                crate::runtime::EVENTS_FILE,
+                attempt.n
+            ));
+        }
+        let rev = fs::read_dir(attempt_dir.join("definition"))
+            .map_err(|error| format!("no definition copy: {error}"))?
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        let definition = read_definition(&definition_copy_dir(&attempt_dir, rev))?;
+        let worktree_path = PathBuf::from(&attempt.worktree);
+        let worktree = RunWorktree {
+            run_dir: worktree_path
+                .parent()
+                .map_or_else(|| worktree_path.clone(), Path::to_path_buf),
+            path: worktree_path,
+            branch: attempt.branch.clone(),
+        };
+        let checkout = match &task.file {
+            Some(file) => TaskCheckout::from_task(task.slug.clone(), file),
+            None => TaskCheckout {
+                slug: task.slug.clone(),
+                worktree: None,
+                branch: None,
+            },
+        };
+        let spec = RunSpec {
+            id: record.id.clone(),
+            definition,
+            attempt_dir,
+            loop_bound: attempt
+                .loop_bound
+                .unwrap_or(self.settings.limits.loop_bound),
+        };
+        let entry = RunEntry {
+            id: record.id.clone(),
+            task_id: record.task_id.clone(),
+            task: checkout,
+            dir: dir.to_path_buf(),
+            record,
+            worktree,
+            rev,
+        };
+        Ok(Some((entry, spec)))
+    }
+
+    /// Quit: stops every process of every run (within 5 s) and records `Interrupted` with the
+    /// keys in flight. Nothing starts afterwards.
+    pub fn quit(&mut self) {
+        self.runtime.quit();
+        self.note_all();
     }
 
     /// Pauses `run`: no new node starts, the running ones finish, then it reads Paused.
