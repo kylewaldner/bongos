@@ -315,6 +315,7 @@ pub(crate) fn run_picker(
         );
         return;
     }
+    engine.refresh_mcp(cx).detach();
     let choices: Vec<(String, Option<String>)> = picker
         .candidates
         .iter()
@@ -371,8 +372,12 @@ fn probe_then_review(
 ) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     let probe = cx.background_spawn(async move { probe_sandbox(cwd) });
+    // One MCP discovery (capped at `mcp::LIST_TIMEOUT`) before the summary, so a server the
+    // definition allows but the CLI lacks is named by the start that follows.
+    let discovery = engine.refresh_mcp(cx);
     cx.spawn_in(window, async move |workspace, cx| {
         let sandbox = probe.await;
+        discovery.await;
         workspace
             .update_in(cx, |workspace, window, cx| {
                 review_step(engine, review, sandbox, show_summary, workspace, window, cx)
