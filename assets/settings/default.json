@@ -2862,8 +2862,50 @@
     // Days after which a polling node whose `polls` sets no `give_up_days` fails "wait
     // timed out".
     "wait_give_up_days": 7,
+    // The most a single run may cost, in US dollars. Null means no cap; a value at or
+    // below 0 also means no cap.
+    "run_max_cost_usd": null,
+    // Passes of a loop whose route sets no `max_passes`.
+    "loop_bound": 5,
+    // The directory that holds workflow definitions. Null means `~/.bongos/workflows`.
+    "definitions_dir": null,
+    // MCP servers that agent nodes never get, by name.
+    "mcp_exclude": [],
+    // The caps an agent node falls back to when neither it nor its definition sets one.
+    "agents": {
+      // Turns an agent node may take when it sets no `max_turns`.
+      "max_turns": 40,
+      // Dollars an agent node may spend when it sets no `max_cost_usd`.
+      "max_cost_usd": 5.0,
+      // Minutes an agent node may run when it sets no `max_minutes`.
+      "max_minutes": 30,
+      // Settings for Claude agent nodes.
+      "claude": {
+        // The model a Claude node uses when it sets none.
+        "model": "sonnet",
+      },
+    },
+    // The most a definition may declare; a definition above a ceiling is invalid.
+    "ceilings": {
+      // The most turns a node may declare.
+      "max_turns": 200,
+      // The most dollars a node may declare.
+      "max_cost_usd": 25.0,
+      // The most minutes a node may declare.
+      "max_minutes": 240,
+      // The most passes a loop may declare.
+      "max_passes": 20,
+      // The most retries a node may declare.
+      "retries": 5,
+      // The most minutes a program node may declare.
+      "program_max_minutes": 120,
+      // Whether a node may declare the bypassPermissions mode.
+      "allow_bypass_permissions": false,
+    },
     // How program nodes run.
     "programs": {
+      // Whether a program node may use the network.
+      "allow_network": true,
       // The Python interpreter, 3.8 or newer. Null looks up `python3`, then `python`, on
       // `PATH`.
       "python": null,

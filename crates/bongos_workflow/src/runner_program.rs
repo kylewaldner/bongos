@@ -165,11 +165,14 @@ pub struct ProgramSettings {
     pub max_output_mb: u64,
     pub poll_interval_minutes: u32,
     pub wait_give_up_days: u32,
+    /// `workflows.programs.allow_network`.
+    pub allow_network: bool,
 }
 
 impl Default for ProgramSettings {
     fn default() -> Self {
         Self {
+            allow_network: true,
             python: None,
             max_minutes: 10,
             max_output_mb: 10,

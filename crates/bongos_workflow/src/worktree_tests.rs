@@ -114,6 +114,7 @@ fn settings() -> WorkflowsSettings {
         keep_finished_days: 14,
         limits: Default::default(),
         programs: Default::default(),
+        ..WorkflowsSettings::default()
     }
 }
 
