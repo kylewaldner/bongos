@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -27,7 +27,7 @@ use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{StartedBy, TodoRef};
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
-    Definition, Failure, FailureReason, Layer, LayerDirs, NodeKey, RunState,
+    Definition, Failure, FailureReason, Layer, LayerDirs, NodeKey, RunState, ValidationContext,
 };
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, AsyncApp, Global};
@@ -40,7 +40,7 @@ use crate::builtin_nodes::BuiltinNodes;
 use crate::completion::CompletionHooks;
 use crate::definitions::{
     self, DefinitionError, NewDefinition, ProjectLayer, Report, SHIPPED_FILES, materialize,
-    profile_dir, project_layer_in, shipped_dir,
+    profile_layer_dir, project_layer_dir, project_layer_in, shipped_dir,
 };
 use crate::landing::{LandingRunEnd, LandingRuns, set_landing_runs};
 use crate::lifecycle::{
@@ -252,7 +252,10 @@ impl WorkflowEngine {
         }
         Self::new(LayerDirs {
             shipped: Some(shipped),
-            profile: Some(profile_dir(&home)),
+            profile: Some(profile_layer_dir(
+                &home,
+                WorkflowsSettings::get_global(cx).definitions_dir.as_deref(),
+            )),
             project: None,
         })
     }
@@ -317,6 +320,18 @@ impl WorkflowEngine {
         };
         if let Some(layer) = &layer {
             dirs.project = Some(layer.dir.clone());
+        } else if let Some(task) = task {
+            // An old-format task reads its project's folder under the work root.
+            let root = bongos_work::WorkStore::global(cx)
+                .and_then(|store| store.read(cx).snapshot())
+                .map(|tree| tree.root.clone());
+            if let Some(dir) = root.and_then(|root| old_format_layer(&root, task)) {
+                dirs.project = Some(dir);
+            }
+        }
+        // The setting is live: a changed `definitions_dir` applies to the next command.
+        if let Some(definitions_dir) = WorkflowsSettings::get_global(cx).definitions_dir.clone() {
+            dirs.profile = Some(definitions_dir);
         }
         Ok(TaskDirs {
             commit: layer.as_ref().map(|layer| layer.commit.0.clone()),
@@ -343,13 +358,15 @@ impl WorkflowEngine {
         definitions::validate_definitions(&self.dirs, name)
     }
 
-    /// [`Self::validate`] over `dirs`, such as the layers [`Self::dirs_for`] built.
+    /// [`Self::validate`] over `dirs`, such as the layers [`Self::dirs_for`] built, under
+    /// `context`, such as `WorkflowsSettings::validation_context`.
     pub fn validate_in(
         &self,
         dirs: &LayerDirs,
         name: Option<&str>,
+        context: &ValidationContext,
     ) -> Result<Report, DefinitionError> {
-        definitions::validate_definitions(dirs, name)
+        definitions::validate_definitions_in(dirs, name, context)
     }
 
     /// Creates a definition in the profile layer from the minimal template, or with `template`
@@ -1283,6 +1300,7 @@ fn merge_request(context: &SettleContext) -> Option<MergeRequest> {
 /// The start checks of the app: 04's agent health, the program interpreter lookup. MCP discovery
 /// is not read yet, so the MCP check is skipped until the runners take their servers from it.
 struct AppChecks {
+    validation: ValidationContext,
     agents: BTreeMap<AgentKind, Result<(), String>>,
     python: Option<String>,
     env: BTreeMap<String, String>,
@@ -1308,6 +1326,7 @@ impl AppChecks {
             }
         }
         Self {
+            validation: WorkflowsSettings::get_global(cx).validation_context(),
             agents,
             python: WorkflowsSettings::get_global(cx).programs.python.clone(),
             env,
@@ -1329,6 +1348,22 @@ impl StartChecks for AppChecks {
     fn mcp_servers(&self, _kind: AgentKind) -> Option<BTreeSet<String>> {
         None
     }
+
+    fn validation(&self) -> ValidationContext {
+        self.validation.clone()
+    }
+}
+
+/// The project layer of an old-format `task`: `<root>/projects/<project>/workflows`, where the
+/// project is the first folder of the task's directory under the projects folder. `None` for a
+/// new-format task or a task outside the work root.
+pub(crate) fn old_format_layer(root: &Path, task: &Task) -> Option<PathBuf> {
+    if task.definition.is_some() {
+        return None;
+    }
+    let projects = bongos_work_model::layout::projects_dir(root);
+    let slug = task.dir.strip_prefix(projects).ok()?.components().next()?;
+    Some(project_layer_dir(root, &slug.as_os_str().to_string_lossy()))
 }
 
 /// Creates the global engine when `workflows.enabled` is true. Call after [`crate::init`].

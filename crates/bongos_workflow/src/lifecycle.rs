@@ -1269,7 +1269,8 @@ fn load_definition(
         ),
         other => Refusal::io(other),
     })?;
-    let report = definitions::check_definition_with(&resolved, |definition, context| {
+    let base = checks.map(|checks| checks.validation()).unwrap_or_default();
+    let report = definitions::check_definition_in(&resolved, base, |definition, context| {
         let Some(checks) = checks else {
             return;
         };
@@ -1289,13 +1290,7 @@ fn load_definition(
     });
     let errors = report.error_count();
     if errors > 0 {
-        let first = report.load_error.clone().or_else(|| {
-            report
-                .diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.severity == bongos_workflow_model::Severity::Error)
-                .map(|diagnostic| diagnostic.message.clone())
-        });
+        let first = report.first_error();
         let plural = if errors == 1 { "error" } else { "errors" };
         return Err(Refusal::new(
             RefusalKind::Invalid,

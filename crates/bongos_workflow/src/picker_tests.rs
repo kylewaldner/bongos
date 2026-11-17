@@ -65,15 +65,15 @@ use crate::summary::Summary;
 fn the_todos_workflow_is_preselected() {
     let world = World::new();
     let picker = Picker::new(
-        candidates(&world.dirs),
+        candidates(&world.dirs, &Default::default()),
         todo_workflow(&world.tree, LEAF).as_deref(),
     );
     assert_eq!(picker.chosen(), Some("single"));
     assert_eq!(picker.labels()[picker.selected()], "single (profile)");
     // A todo that names nothing, or a definition that is gone, selects the first.
-    assert_eq!(Picker::new(candidates(&world.dirs), None).selected(), 0);
+    assert_eq!(Picker::new(candidates(&world.dirs, &Default::default()), None).selected(), 0);
     assert_eq!(
-        Picker::new(candidates(&world.dirs), Some("gone")).selected(),
+        Picker::new(candidates(&world.dirs, &Default::default()), Some("gone")).selected(),
         0
     );
 }
@@ -84,7 +84,7 @@ fn layers_are_shown_with_what_they_shadow() {
     let project = world.root.join("project-layer");
     write_definition(&project, "single", SINGLE);
     world.dirs.project = Some(project);
-    let labels: Vec<String> = candidates(&world.dirs)
+    let labels: Vec<String> = candidates(&world.dirs, &Default::default())
         .into_iter()
         .map(|found| found.label)
         .collect();
@@ -103,7 +103,7 @@ fn a_different_pick_leaves_the_task_as_it_is(cx: &mut TestAppContext) {
     let linked = linked(&world, FakeRunner::new(), cx);
     let todos_before = linked.writes.leaf().file.unwrap().todos;
 
-    let mut picker = Picker::new(candidates(&world.dirs), Some("single"));
+    let mut picker = Picker::new(candidates(&world.dirs, &Default::default()), Some("single"));
     let other = picker
         .candidates
         .iter()
@@ -225,4 +225,42 @@ fn the_summary_dump_lists_permissions_sandbox_caps_and_inputs() {
             .join(DEFINITION_FILE)
             .exists()
     );
+}
+
+#[test]
+fn a_broken_definition_is_a_row_with_its_first_error_and_its_diagnostics() {
+    let world = World::new();
+    write_definition(
+        world.profile(),
+        "broken",
+        &SINGLE.replace("name = \"single\"", "name = \"broken\"").replace(
+            "routes = [{ to = \"done\" }]",
+            "routes = [{ to = \"nowhere\" }]",
+        ),
+    );
+    let found = candidates(&world.dirs, &Default::default());
+    let broken = found.iter().find(|found| found.name == "broken").unwrap();
+    assert!(broken.label.starts_with("broken (profile): error: "), "{}", broken.label);
+    let diagnostics = broken.diagnostics.as_deref().unwrap();
+    assert!(diagnostics.contains("nowhere"), "{diagnostics}");
+    let single = found.iter().find(|found| found.name == "single").unwrap();
+    assert_eq!(single.diagnostics, None);
+}
+
+#[test]
+fn an_old_format_task_reads_its_projects_folder() {
+    let root = Path::new("/work");
+    let world = World::new();
+    let base = world.tree.projects[0].task.children[0].clone();
+    let at = |dir: &str| Task {
+        dir: PathBuf::from(dir),
+        ..base.clone()
+    };
+    let inside = at("/work/projects/web/tasks/login");
+    assert_eq!(
+        crate::engine::old_format_layer(root, &inside),
+        Some(PathBuf::from("/work/projects/web/workflows"))
+    );
+    let outside = at("/elsewhere/login");
+    assert_eq!(crate::engine::old_format_layer(root, &outside), None);
 }

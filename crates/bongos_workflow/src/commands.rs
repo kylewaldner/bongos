@@ -45,11 +45,12 @@ pub(crate) fn register(workspace: &mut Workspace) {
                     return;
                 }
             };
+            let context = WorkflowsSettings::get_global(cx).validation_context();
             run(
                 workspace,
                 window,
                 cx,
-                move |engine| engine.validate_in(&task_dirs.dirs, None),
+                move |engine| engine.validate_in(&task_dirs.dirs, None, &context),
                 |report, workspace, window, cx| {
                     open_report(
                         VALIDATE_TITLE.to_string(),
