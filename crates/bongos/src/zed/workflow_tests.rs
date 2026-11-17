@@ -233,7 +233,10 @@ async fn every_workflow_action_is_covered(cx: &mut TestAppContext) {
     registered.sort_unstable();
     let mut listed: Vec<&str> = ANSWERS.iter().map(|(name, _)| *name).collect();
     listed.sort_unstable();
-    assert_eq!(registered, listed, "the workflow actions and ANSWERS differ");
+    assert_eq!(
+        registered, listed,
+        "the workflow actions and ANSWERS differ"
+    );
     assert_eq!(
         bongos_workflow::action_types().len(),
         ANSWERS.len(),
@@ -281,7 +284,9 @@ async fn every_workflow_action_answers_with_no_task_and_no_run(cx: &mut TestAppC
                     (
                         workspace.notification_ids().contains(&id),
                         workspace.has_active_modal(window, cx),
-                        workspace.active_item(cx).map(|item| item.tab_content_text(0, cx)),
+                        workspace
+                            .active_item(cx)
+                            .map(|item| item.tab_content_text(0, cx)),
                         workspace
                             .panel::<bongos_workflow::RunsPanel>(cx)
                             .map(|panel| panel.focus_handle(cx).contains_focused(window, cx)),
@@ -305,9 +310,15 @@ async fn every_workflow_action_answers_with_no_task_and_no_run(cx: &mut TestAppC
 fn load_app_keymap(cx: &mut gpui::App) {
     let mut all = Vec::new();
     for (path, source) in [
-        ("keymaps/default-linux.json", settings::KeybindSource::Default),
+        (
+            "keymaps/default-linux.json",
+            settings::KeybindSource::Default,
+        ),
         ("keymaps/linux/emacs.json", settings::KeybindSource::Base),
-        ("keymaps/specific-overrides.json", settings::KeybindSource::Default),
+        (
+            "keymaps/specific-overrides.json",
+            settings::KeybindSource::Default,
+        ),
     ] {
         all.extend(
             settings::KeymapFile::load_asset(path, Some(source), cx)
@@ -358,14 +369,20 @@ async fn type_retry_keys(keys: &str, cx: &mut TestAppContext) -> (usize, usize, 
     cx.simulate_keystrokes(keys);
     cx.run_until_parked();
     let id = NotificationId::unique::<bongos_workflow::WorkflowToast>();
-    let toast = workspace.read_with(&cx, |workspace, _| workspace.notification_ids().contains(&id));
+    let toast = workspace.read_with(&cx, |workspace, _| {
+        workspace.notification_ids().contains(&id)
+    });
     (plain.get(), fresh.get(), toast)
 }
 
 #[gpui::test]
 async fn c_u_c_c_f_t_reaches_retry_step_fresh(cx: &mut TestAppContext) {
     let (plain, fresh, toast) = type_retry_keys("ctrl-u ctrl-c f t", cx).await;
-    assert_eq!((plain, fresh), (0, 1), "C-u C-c f t runs RetryStepFresh only");
+    assert_eq!(
+        (plain, fresh),
+        (0, 1),
+        "C-u C-c f t runs RetryStepFresh only"
+    );
     assert!(toast, "the handler of RetryStepFresh answered");
 }
 
