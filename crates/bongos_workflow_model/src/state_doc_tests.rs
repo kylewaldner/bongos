@@ -119,6 +119,70 @@ fn the_state_document_has_every_field() {
     );
 }
 
+fn doc_of(events: &[Event]) -> Value {
+    let state = replay(events);
+    let settings = toml::Table::new();
+    let doc = build(
+        &[],
+        &state,
+        RunIdentity {
+            id: "run".to_string(),
+            workflow: "w".to_string(),
+            todo: TodoRef {
+                index: 0,
+                name: "implement".to_string(),
+            },
+            task_id: "task-1".to_string(),
+            task_dir: PathBuf::from(TASK_DIR),
+            branch: "b".to_string(),
+            run_branch: "rb".to_string(),
+        },
+        &settings,
+        Paths {
+            worktree: PathBuf::from("/worktrees/run-1"),
+            scratch: PathBuf::from("/scratch/node"),
+        },
+    );
+    serde_json::from_str(&doc.to_json()).unwrap()
+}
+
+#[test]
+fn a_gate_edit_is_what_the_next_node_reads() {
+    let key = NodeKey::new("work", 1);
+    let close = |edit: Option<Value>, comment: Option<&str>| Event::GateClosed {
+        key: key.clone(),
+        by: "person".to_string(),
+        edit,
+        comment: comment.map(str::to_string),
+    };
+    let base = vec![
+        Event::Created,
+        finished(
+            key.clone(),
+            1,
+            Some(json!({ "summary": "draft", "verdict": "hold" })),
+        ),
+    ];
+    let with = |close: Event| {
+        let mut events = base.clone();
+        events.push(close);
+        doc_of(&events)["results"]["work"].clone()
+    };
+    assert_eq!(
+        with(close(Some(json!({ "verdict": "ship" })), None)),
+        json!({ "summary": "draft", "verdict": "ship" })
+    );
+    assert_eq!(
+        with(close(None, None)),
+        json!({ "summary": "draft", "verdict": "hold" })
+    );
+    // A gate sent back carries no edit into the result.
+    assert_eq!(
+        with(close(Some(json!({ "verdict": "ship" })), Some("redo"))),
+        json!({ "summary": "draft", "verdict": "hold" })
+    );
+}
+
 /// The document has no run record field. The record's path is still derivable from `task_dir`
 /// and the run id; what protects it is that it is never among the writable paths.
 #[test]

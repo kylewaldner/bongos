@@ -322,6 +322,43 @@ fn the_engine_tells_the_sources_and_toasts_once(cx: &mut TestAppContext) {
     assert_eq!(delivered.len(), 1, "{delivered:?}");
 }
 
+#[gpui::test]
+fn clear_finished_tells_the_runs_panel(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        WorkflowsSettings::register(cx);
+    });
+    let world = world();
+    let worktrees = DirWorktrees {
+        root: world.root.join("runs"),
+        error: world.worktree_error.clone(),
+    };
+    let lifecycle = Lifecycle::new(
+        Box::new(FakeRunner::new()) as EngineRunner,
+        Box::new(worktrees),
+        world.settings(),
+    );
+    let engine = WorkflowEngine::with_lifecycle(world.dirs.clone(), lifecycle);
+    let run = cx
+        .update(|cx| engine.start_in(with_workflow("single"), &world.tree, cx))
+        .unwrap();
+    settle(&mut engine.lifecycle());
+    engine.lifecycle().cancel(&run).unwrap();
+
+    let before = cx.update(|cx| crate::status_item::revision(cx));
+    let outcome = cx.update(|cx| engine.clear_finished(cx));
+    assert_eq!(outcome.cleared, vec![run.clone()]);
+    let after = cx.update(|cx| crate::status_item::revision(cx));
+    assert!(after > before, "the panel is told: {before} then {after}");
+    assert!(engine.lifecycle().state(&run).is_none());
+
+    // Nothing cleared, nothing to redraw.
+    let outcome = cx.update(|cx| engine.clear_finished(cx));
+    assert!(outcome.cleared.is_empty());
+    assert_eq!(cx.update(|cx| crate::status_item::revision(cx)), after);
+}
+
 #[test]
 fn a_run_halted_by_the_cost_cap_needs_you_with_the_reason() {
     use bongos_workflow_model::{Event, NodeKey, replay};

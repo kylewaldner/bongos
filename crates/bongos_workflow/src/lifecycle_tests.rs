@@ -1760,5 +1760,236 @@ fn quit_stops_in_flight_work_and_records_interrupted() {
     assert!(!lifecycle.tick(), "nothing starts after a quit");
 }
 
+fn seed_succeeded(world: &World) -> String {
+    seed(world, "single", |lifecycle, _| {
+        settle(lifecycle);
+        finish_all(lifecycle);
+    })
+}
+
+fn seed_cancelled(world: &World) -> String {
+    seed(world, "single", |lifecycle, run| {
+        settle(lifecycle);
+        lifecycle.cancel(run).unwrap();
+    })
+}
+
+fn seed_failed(world: &World) -> String {
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("work", 1);
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    run
+}
+
+fn sorted(mut runs: Vec<String>) -> Vec<String> {
+    runs.sort();
+    runs
+}
+
+#[test]
+fn clear_finished_hides_succeeded_and_cancelled_runs_and_survives_a_reload() {
+    let world = World::new();
+    let succeeded = seed_succeeded(&world);
+    let cancelled = seed_cancelled(&world);
+    let failed = seed_failed(&world);
+    let active = seed(&world, "single", mid_node);
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded.len(), 4, "{report:?}");
+    assert_eq!(lifecycle.status(&failed), Some(RunStatus::Failed));
+
+    let outcome = lifecycle.clear_finished();
+    assert_eq!(
+        sorted(outcome.cleared.clone()),
+        sorted(vec![succeeded.clone(), cancelled.clone()])
+    );
+    assert!(outcome.failed.is_empty());
+    assert_eq!(
+        sorted(lifecycle.all_runs()),
+        sorted(vec![failed.clone(), active.clone()])
+    );
+    assert!(lifecycle.state(&succeeded).is_none());
+    assert!(lifecycle.state(&cancelled).is_none());
+    for run in [&succeeded, &cancelled] {
+        assert!(run_dir_of(&world, run).join("cleared").is_file());
+    }
+    for run in [&failed, &active] {
+        assert!(!run_dir_of(&world, run).join("cleared").exists());
+    }
+
+    // Twice is a no-op.
+    assert_eq!(lifecycle.clear_finished(), Default::default());
+
+    // A relaunch does not bring them back.
+    let mut fresh = world.lifecycle();
+    let report = fresh.load_runs(&world.tree).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(sorted(report.loaded), sorted(vec![failed, active]));
+}
+
+#[test]
+fn clear_finished_with_nothing_to_clear_writes_nothing() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    assert_eq!(lifecycle.clear_finished(), Default::default());
+    assert!(!world.root.join("work/app/tasks/login/runs").exists());
+
+    let active = seed(&world, "single", mid_node);
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(lifecycle.clear_finished(), Default::default());
+    assert!(!run_dir_of(&world, &active).join("cleared").exists());
+    assert_eq!(lifecycle.all_runs(), vec![active]);
+}
+
+#[test]
+fn a_failed_marker_write_leaves_the_run_listed() {
+    let world = World::new();
+    let blocked = seed_succeeded(&world);
+    let fine = seed_cancelled(&world);
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    // A directory where the marker goes: the write fails.
+    fs::create_dir(run_dir_of(&world, &blocked).join("cleared")).unwrap();
+
+    let outcome = lifecycle.clear_finished();
+    assert_eq!(outcome.cleared, vec![fine.clone()]);
+    assert_eq!(outcome.failed.len(), 1);
+    assert_eq!(outcome.failed[0].0, blocked);
+    assert_eq!(lifecycle.status(&blocked), Some(RunStatus::Succeeded));
+    assert!(lifecycle.state(&fine).is_none());
+}
+
+#[test]
+fn find_cleared_lists_the_finished_cleared_runs_with_their_worktrees() {
+    let world = World::new();
+    let succeeded = seed_succeeded(&world);
+    let active = seed(&world, "single", mid_node);
+    // Nothing is cleared yet.
+    assert!(crate::lifecycle::find_cleared(&world.tree).is_empty());
+
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    let worktree = lifecycle.worktree(&succeeded).unwrap().clone();
+    assert_eq!(lifecycle.clear_finished().cleared, vec![succeeded.clone()]);
+    // A marker on a run that is not finished never offers its worktree.
+    fs::write(run_dir_of(&world, &active).join("cleared"), "").unwrap();
+
+    let found = crate::lifecycle::find_cleared(&world.tree);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].id, succeeded);
+    assert_eq!(found[0].status, RunStatus::Succeeded);
+    assert_eq!(found[0].worktree, worktree);
+    assert_eq!(found[0].dir, run_dir_of(&world, &succeeded));
+    assert_eq!(
+        found[0].finished,
+        fs::metadata(events_of(&world, &succeeded))
+            .unwrap()
+            .modified()
+            .unwrap()
+    );
+}
+
+#[test]
+fn the_engine_dump_names_each_run_with_its_state_and_work_in_flight() {
+    let world = World::new();
+    let ended = seed_succeeded(&world);
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    let mut settings = world.settings();
+    settings.limits.run_max_cost_usd = Some(5.0);
+    lifecycle.set_settings(settings);
+    let running = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+
+    // Started, not yet ticked: queued first.
+    let text = lifecycle.dump_text();
+    assert!(text.contains("runs: 2"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "run {running} task {LEAF} workflow single: queued;"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("queue position 1"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "run {ended} task {LEAF} workflow single: succeeded;"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("tries in flight: none"), "{text}");
+
+    settle(&mut lifecycle);
+    let text = lifecycle.dump_text();
+    assert!(
+        text.contains(&format!("run {running} task {LEAF} workflow single: running; in flight: work#1; not queued; cost $0.00, cap $5.00")),
+        "{text}"
+    );
+    assert!(text.contains("agent (claude): 1"), "{text}");
+}
+
+#[test]
+fn an_edited_gate_field_is_what_the_next_node_state_holds() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    lifecycle
+        .runtime_mut()
+        .runner_mut()
+        .script("work", json!({ "summary": "done", "verdict": "hold" }));
+    let run = world
+        .start(&mut lifecycle, with_workflow("reviewed"))
+        .unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    let key = NodeKey::new("work", 1);
+
+    let fields = lifecycle.gate_fields(&run, &key);
+    let named: Vec<(&str, &serde_json::Value)> = fields
+        .iter()
+        .map(|field| (field.name.as_str(), &field.value))
+        .collect();
+    assert_eq!(
+        named,
+        vec![("summary", &json!("done")), ("verdict", &json!("hold"))]
+    );
+
+    lifecycle
+        .approve(&run, &key, Some(("verdict".to_string(), json!("ship"))))
+        .unwrap();
+    let state = lifecycle.state(&run).unwrap();
+    let doc = bongos_workflow_model::state_doc::build(
+        &[],
+        &state,
+        bongos_workflow_model::state_doc::RunIdentity {
+            id: run.clone(),
+            workflow: "reviewed".to_string(),
+            todo: bongos_workflow_model::record::TodoRef {
+                index: 1,
+                name: "implement".to_string(),
+            },
+            task_id: LEAF.to_string(),
+            task_dir: world.root.clone(),
+            branch: TASK_BRANCH.to_string(),
+            run_branch: "run".to_string(),
+        },
+        &toml::Table::new(),
+        bongos_workflow_model::state_doc::Paths {
+            worktree: world.root.clone(),
+            scratch: world.root.clone(),
+        },
+    );
+    let value: serde_json::Value = serde_json::from_str(&doc.to_json()).unwrap();
+    assert_eq!(
+        value["results"]["work"],
+        json!({ "summary": "done", "verdict": "ship" })
+    );
+}
+
 #[path = "landing_tests.rs"]
 mod landing_tests;

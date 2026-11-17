@@ -53,8 +53,9 @@ use crate::definitions::{
 use crate::dispatch::{AppRunner, RunnerInputs, RunnerSnapshot};
 use crate::landing::{LandingRunEnd, LandingRuns, set_landing_runs};
 use crate::lifecycle::{
-    GitWorktrees, HaltWorktrees, Lifecycle, Refusal, RefusalKind, RunId, RunStatus, StartChecks,
-    StartContext, StartRequest, WorkflowEvent,
+    ClearOutcome, ClearedRun, GateField, GitWorktrees, HaltWorktrees, Lifecycle, Refusal,
+    RefusalKind, RunId, RunStatus, StartChecks, StartContext, StartRequest, WorkflowEvent,
+    find_cleared,
 };
 use crate::mcp::{self, McpCache};
 use crate::outcomes::{self, Delivered, Reported, RunOutcome};
@@ -1093,6 +1094,51 @@ impl WorkflowEngine {
     /// The open gates of `run`.
     pub fn open_gates(&self, run: &RunId) -> Vec<NodeKey> {
         self.lifecycle().open_gates(run)
+    }
+
+    /// The fields of the held result of the gate at `key`, which `workflow: approve` may edit.
+    pub fn gate_fields(&self, run: &RunId, key: &NodeKey) -> Vec<GateField> {
+        self.lifecycle().gate_fields(run, key)
+    }
+
+    /// The text of `workflow: dump engine`.
+    pub fn dump_text(&self) -> String {
+        self.lifecycle().dump_text()
+    }
+
+    /// `workflow: clear finished`, the part that needs no question: the runs that ended succeeded
+    /// or were cancelled leave the Runs panel ([`Lifecycle::clear_finished`]). The runs on disk
+    /// are loaded first when they are not yet; the panel and the live-modes registry are told.
+    pub fn clear_finished(&self, cx: &mut App) -> ClearOutcome {
+        self.load_runs_once(cx);
+        let outcome = self.lifecycle().clear_finished();
+        if !outcome.cleared.is_empty() {
+            {
+                let mut projects = self.projects.lock().unwrap_or_else(PoisonError::into_inner);
+                for run in &outcome.cleared {
+                    projects.remove(run);
+                }
+            }
+            LiveModesRegistry::changed(cx);
+            NeedsYouRegistry::changed(cx);
+            // The Runs panel and the status chip redraw on this.
+            crate::status_item::changed(cx);
+        }
+        outcome
+    }
+
+    /// The cleared runs on disk whose run worktree is still there: what `clear finished` offers
+    /// to remove, those it just cleared and those an earlier clear left. Empty while the app has
+    /// no work tree. Each recorded run directory is checked before anything is removed
+    /// ([`crate::worktrees::plan_clear`]).
+    pub fn cleared_runs(&self, cx: &App) -> Vec<ClearedRun> {
+        let Some(tree) = self.writes.tree(cx) else {
+            return Vec::new();
+        };
+        find_cleared(&tree)
+            .into_iter()
+            .filter(|run| run.worktree.path.exists())
+            .collect()
     }
 
     /// The active runs, in start order.

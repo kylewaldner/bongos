@@ -200,7 +200,7 @@ fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) -> PathBuf 
     binding
         .worktree
         .run_dir
-        .join("scratch")
+        .join(crate::worktrees::SCRATCH_DIR)
         .join(&key.node)
         .join(key.branch_label())
         .join(format!("{}-{try_number}", key.pass))

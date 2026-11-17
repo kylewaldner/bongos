@@ -5,11 +5,14 @@
 //! background task and the result comes back to the workspace. The run commands act on the active
 //! run of the task at point and are thin: the decisions are the engine's.
 
+use bongos_workflow_model::definition::{FieldType, ItemType};
 use bongos_workflow_model::layers::DEFINITION_FILE;
+use bongos_workflow_model::record::{EndState, Lifecycle as RunLifecycle};
 use editor::{Editor, MultiBuffer};
 use gpui::{Action, AppContext as _, ClipboardItem, Context, Window};
 use language::Capability;
-use std::path::PathBuf;
+use serde_json::{Number, Value};
+use std::path::{Path, PathBuf};
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, OpenMode, OpenOptions, OpenVisible, Workspace};
 
@@ -17,8 +20,11 @@ use crate::WorkflowsSettings;
 use crate::actions::{OFF_MESSAGE, show_toast, workflow};
 use crate::definitions::DefinitionError;
 use crate::engine::{EditTarget, WorkflowEngine};
-use crate::lifecycle::{Refusal, RunId};
+use crate::lifecycle::{ClearedRun, GateField, Refusal, RunId, RunStatus};
 use crate::shipped::TEMPLATES;
+use crate::worktrees::{
+    ClearPlan, ClearReport, FinishedRun, Git, GitError, apply_clear, plan_clear,
+};
 use settings::Settings as _;
 
 /// The first choice of `workflow: new`: the minimal template.
@@ -211,7 +217,7 @@ fn register_run_commands(workspace: &mut Workspace) {
         let cancelled = engine.cancel(&run, cx);
         report(workspace, cancelled.map(|()| "Workflow run cancelled"), cx);
     });
-    on_run::<workflow::Approve>(workspace, |engine, run, workspace, _, cx| {
+    on_run::<workflow::Approve>(workspace, |engine, run, workspace, window, cx| {
         let Some(key) = engine.open_gates(&run).into_iter().next() else {
             show_toast(
                 workspace,
@@ -220,8 +226,66 @@ fn register_run_commands(workspace: &mut Workspace) {
             );
             return;
         };
-        let approved = engine.approve(&run, &key, None, cx);
-        report(workspace, approved.map(|()| "Approved"), cx);
+        let fields = engine.gate_fields(&run, &key);
+        if fields.is_empty() {
+            let approved = engine.approve(&run, &key, None, cx);
+            report(workspace, approved.map(|()| "Approved"), cx);
+            return;
+        }
+        bongos_work::pick(
+            workspace,
+            EDIT_FIRST,
+            approve_choices(&fields),
+            0,
+            Box::new(move |index, workspace, window, cx| {
+                let Some(field) = index.checked_sub(1).and_then(|index| fields.get(index)) else {
+                    let approved = engine.approve(&run, &key, None, cx);
+                    report(workspace, approved.map(|()| "Approved"), cx);
+                    return;
+                };
+                let field = field.clone();
+                let initial = field_text(&field.value);
+                bongos_work::ask(
+                    workspace,
+                    format!("New value of {}", field.name),
+                    &initial,
+                    false,
+                    Box::new(move |text, workspace, _, cx| {
+                        match parse_field(&field.field_type, &text) {
+                            Ok(value) => {
+                                let edit = Some((field.name.clone(), value));
+                                let approved = engine.approve(&run, &key, edit, cx);
+                                report(workspace, approved.map(|()| "Approved with the edit"), cx);
+                            }
+                            Err(message) => show_toast(workspace, message, cx),
+                        }
+                    }),
+                    window,
+                    cx,
+                );
+            }),
+            window,
+            cx,
+        );
+    });
+    on::<workflow::ClearFinished>(workspace, clear_finished);
+    on::<workflow::DumpEngine>(workspace, |engine, _, window, cx| {
+        let text = engine.dump_text();
+        let dir = logs_dir(cx);
+        let written = cx.background_spawn(async move { write_dump(&dir, &text) });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let result = written.await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    let message = match result {
+                        Ok(path) => format!("Wrote {}", path.display()),
+                        Err(error) => format!("Could not write the engine dump: {error}"),
+                    };
+                    show_toast(workspace, message, cx)
+                })
+                .ok();
+        })
+        .detach();
     });
     on_run::<workflow::Revise>(workspace, |engine, run, workspace, window, cx| {
         let Some(key) = engine.open_gates(&run).into_iter().next() else {
@@ -310,6 +374,294 @@ fn report(workspace: &mut Workspace, result: Result<&str, Refusal>, cx: &mut Con
         }
     };
     show_toast(workspace, message, cx);
+}
+
+/// The question of `workflow: approve` over a gate with a held result.
+pub const EDIT_FIRST: &str = "Edit a field first?";
+/// The choice that approves without an edit.
+pub const APPROVE_AS_IS: &str = "Approve as is";
+
+/// "Approve as is", then one row per field of the held result.
+pub(crate) fn approve_choices(fields: &[GateField]) -> Vec<String> {
+    let mut choices = vec![APPROVE_AS_IS.to_string()];
+    choices.extend(
+        fields
+            .iter()
+            .map(|field| format!("{}: {}", field.name, field_text(&field.value))),
+    );
+    choices
+}
+
+/// A field value as the line the value prompt starts with.
+pub(crate) fn field_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items.iter().map(field_text).collect::<Vec<_>>().join(", "),
+        other => other.to_string(),
+    }
+}
+
+fn parse_number(text: &str) -> Result<Number, String> {
+    let text = text.trim();
+    if let Ok(whole) = text.parse::<i64>() {
+        return Ok(Number::from(whole));
+    }
+    text.parse::<f64>()
+        .ok()
+        .and_then(Number::from_f64)
+        .ok_or_else(|| format!("'{text}' is not a number"))
+}
+
+/// The value a typed line stands for in a field of `field_type`: text and paths and choices are
+/// the line itself, a number is parsed, a list is its comma-separated items, each parsed as its
+/// item type. A line that does not parse is the error to show.
+pub(crate) fn parse_field(field_type: &FieldType, text: &str) -> Result<Value, String> {
+    match field_type {
+        FieldType::Text | FieldType::Path | FieldType::Choice(_) => {
+            Ok(Value::String(text.to_string()))
+        }
+        FieldType::Number => parse_number(text).map(Value::Number),
+        FieldType::List(item) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|part| match item {
+                ItemType::Text | ItemType::Path => Ok(Value::String(part.to_string())),
+                ItemType::Number => parse_number(part).map(Value::Number),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+    }
+}
+
+/// The file `workflow: dump engine` writes in the logs directory.
+pub const ENGINE_DUMP_FILE: &str = "workflow-engine.txt";
+
+/// Writes `text` to [`ENGINE_DUMP_FILE`] in `dir` and returns the path.
+pub(crate) fn write_dump(dir: &Path, text: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(ENGINE_DUMP_FILE);
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// Where the logs go: tests install their own directory.
+#[cfg(test)]
+pub(crate) struct LogsDir(pub PathBuf);
+
+#[cfg(test)]
+impl gpui::Global for LogsDir {}
+
+fn logs_dir(cx: &gpui::App) -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = cx.try_global::<LogsDir>() {
+        return dir.0.clone();
+    }
+    let _ = cx;
+    paths::logs_dir().clone()
+}
+
+/// The moment `clear finished` measures ages from: tests pin it.
+#[cfg(test)]
+pub(crate) struct ClearNow(pub std::time::SystemTime);
+
+#[cfg(test)]
+impl gpui::Global for ClearNow {}
+
+fn clear_now(cx: &gpui::App) -> std::time::SystemTime {
+    #[cfg(test)]
+    if let Some(now) = cx.try_global::<ClearNow>() {
+        return now.0;
+    }
+    let _ = cx;
+    std::time::SystemTime::now()
+}
+
+/// A cleared run as [`plan_clear`] reads it.
+pub(crate) fn finished_run(cleared: ClearedRun) -> FinishedRun {
+    FinishedRun {
+        run_id: cleared.id,
+        lifecycle: match cleared.status {
+            RunStatus::Succeeded => RunLifecycle::Ended(EndState::Succeeded),
+            _ => RunLifecycle::Cancelled,
+        },
+        finished: cleared.finished,
+        worktree: cleared.worktree,
+        attempt: cleared.attempt,
+        checkout: cleared.checkout,
+    }
+}
+
+/// The plan without the runs that have nothing to remove and nothing to skip.
+pub(crate) fn tidy(mut plan: ClearPlan) -> ClearPlan {
+    plan.runs
+        .retain(|run| !run.remove.is_empty() || !run.skipped.is_empty());
+    plan
+}
+
+/// How many worktrees the plan removes and how many it keeps.
+pub(crate) fn plan_counts(plan: &ClearPlan) -> (usize, usize) {
+    let remove = plan.runs.iter().map(|run| run.remove.len()).sum();
+    let skipped = plan.runs.iter().map(|run| run.skipped.len()).sum();
+    (remove, skipped)
+}
+
+/// The plan of `finished`: their worktrees older than `keep_days` before `now`, dirty ones
+/// skipped, and a run whose recorded run directory is not the one the app made under
+/// `worktrees_dir` (with `home` for `~`) kept whole. Writes nothing.
+pub(crate) async fn plan_removal(
+    git: &Git,
+    finished: &[FinishedRun],
+    worktrees_dir: Option<&Path>,
+    home: &Path,
+    keep_days: u64,
+    now: std::time::SystemTime,
+) -> Result<ClearPlan, GitError> {
+    plan_clear(git, finished, worktrees_dir, home, keep_days, now)
+        .await
+        .map(tidy)
+}
+
+/// Applies a confirmed plan run by run, each from the main checkout of its task's own repository,
+/// which the plan found from the task's worktree. A removal that fails is reported with its item
+/// and the rest go on.
+pub(crate) async fn apply_plan(git: &Git, plan: &ClearPlan) -> ClearReport {
+    let mut report = ClearReport::default();
+    for run in &plan.runs {
+        match &run.repository {
+            Some(root) => {
+                let one = ClearPlan {
+                    runs: vec![run.clone()],
+                };
+                let applied = apply_clear(git, root, &one).await;
+                report.removed.extend(applied.removed);
+                report.skipped.extend(applied.skipped);
+            }
+            None => {
+                for item in run.remove.iter().chain(&run.skipped) {
+                    let reason = item
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "its repository is unknown".to_string());
+                    report.skipped.push((item.clone(), reason));
+                }
+            }
+        }
+    }
+    report
+}
+
+/// `workflow: clear finished`: the runs that ended succeeded or were cancelled leave the Runs
+/// panel at once; their worktrees and branches older than `workflows.keep_finished_days` are
+/// listed and removed after one yes-or-no question.
+fn clear_finished(
+    engine: WorkflowEngine,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let outcome = engine.clear_finished(cx);
+    let mut notes = Vec::new();
+    if !outcome.cleared.is_empty() {
+        notes.push(format!("Cleared {} finished runs", outcome.cleared.len()));
+    }
+    for (run, error) in &outcome.failed {
+        notes.push(format!("Could not clear run {run}: {error}"));
+    }
+    let finished: Vec<FinishedRun> = engine
+        .cleared_runs(cx)
+        .into_iter()
+        .map(finished_run)
+        .collect();
+    if finished.is_empty() {
+        if notes.is_empty() {
+            notes.push("No finished runs to clear".to_string());
+        }
+        show_toast(workspace, notes.join(". "), cx);
+        return;
+    }
+    let settings = WorkflowsSettings::get_global(cx);
+    let keep_days = settings.keep_finished_days;
+    let worktrees_dir = settings.worktrees_dir.clone();
+    let home = paths::home_dir().clone();
+    let now = clear_now(cx);
+    let planned = cx.background_spawn(async move {
+        plan_removal(
+            &Git::new("git"),
+            &finished,
+            worktrees_dir.as_deref(),
+            &home,
+            keep_days,
+            now,
+        )
+        .await
+    });
+    cx.spawn_in(window, async move |workspace, cx| {
+        let planned = planned.await;
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                offer_removal(notes, planned, workspace, window, cx)
+            })
+            .ok();
+    })
+    .detach();
+}
+
+/// The second half of `workflow: clear finished`: shows the plan and asks once.
+pub(crate) fn offer_removal(
+    mut notes: Vec<String>,
+    planned: Result<ClearPlan, GitError>,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let plan = match planned {
+        Ok(plan) => plan,
+        Err(error) => {
+            notes.push(format!("Could not list the worktrees: {error}"));
+            show_toast(workspace, notes.join(". "), cx);
+            return;
+        }
+    };
+    let (remove, skipped) = plan_counts(&plan);
+    if remove == 0 {
+        if skipped > 0 {
+            notes.push(format!("Kept:\n{}", plan.summary()));
+        } else if notes.is_empty() {
+            notes.push("No finished runs to clear".to_string());
+        }
+        show_toast(workspace, notes.join(". "), cx);
+        return;
+    }
+    log::info!("workflows: clear finished would\n{}", plan.summary());
+    notes.push(plan.summary());
+    show_toast(workspace, notes.join("\n"), cx);
+    let weak = cx.entity().downgrade();
+    bongos_minibuffer::yes_or_no(
+        workspace,
+        bongos_work::MINIBUFFER_NAME,
+        format!(
+            "Remove {remove} worktrees and branches of finished runs ({skipped} kept)? (y or n) "
+        ),
+        false,
+        move |yes, _, cx| {
+            if !yes {
+                return;
+            }
+            let applied =
+                cx.background_spawn(async move { apply_plan(&Git::new("git"), &plan).await });
+            cx.spawn(async move |cx| {
+                let report = applied.await;
+                weak.update(cx, |workspace, cx| {
+                    show_toast(workspace, report.to_string(), cx)
+                })
+                .ok();
+            })
+            .detach();
+        },
+        window,
+        cx,
+    );
 }
 
 /// Opens `path` as a workspace of this window and activates it.

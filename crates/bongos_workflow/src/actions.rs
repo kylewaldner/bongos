@@ -6,7 +6,7 @@ use std::any::TypeId;
 use command_palette_hooks::CommandPaletteFilter;
 #[cfg(test)]
 use gpui::Global;
-use gpui::{Action, App, Context, Window};
+use gpui::{App, Context};
 use settings::{Settings as _, SettingsStore};
 use workspace::Toast;
 use workspace::Workspace;
@@ -141,22 +141,9 @@ pub(crate) fn show_toast(workspace: &mut Workspace, message: String, cx: &mut Co
     );
 }
 
-/// Registers the handler of `A`: it shows the off toast while `workflows.enabled` is false. The
-/// engine's handlers replace the body when it is true in later steps (`validate`, `new`, `edit
-/// definition` and the run commands have theirs in `commands`).
-fn register_action<A: Action>(workspace: &mut Workspace) {
-    workspace.register_action(move |workspace, _: &A, _: &mut Window, cx| {
-        if !WorkflowsSettings::get_global(cx).enabled {
-            show_toast(workspace, OFF_MESSAGE.to_string(), cx);
-        }
-    });
-}
-
 /// Registers the handlers of the workflow actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
     crate::runs_panel::register(workspace);
-    register_action::<workflow::ClearFinished>(workspace);
-    register_action::<workflow::DumpEngine>(workspace);
     crate::commands::register(workspace);
     crate::run_view::register(workspace);
 }
