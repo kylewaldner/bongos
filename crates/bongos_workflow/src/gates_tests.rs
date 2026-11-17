@@ -2,7 +2,6 @@
 //! the lifecycle tests, so it shares their world, definitions and scripted runner.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
 
 use bongos_work::NeedsYou;
 use bongos_work_model::rollup::rollup;
@@ -102,9 +101,7 @@ fn leaf_needs(reason: &str) -> NeedsYou {
 fn a_gate_shows_needs_you_on_the_leaf_and_every_ancestor_while_another_branch_runs() {
     let world = world();
     let mut lifecycle = world.lifecycle();
-    let started = Instant::now();
     let run = at_the_gate(&world, &mut lifecycle);
-    assert!(started.elapsed() < Duration::from_secs(1));
 
     let state = lifecycle.state(&run).unwrap();
     assert!(

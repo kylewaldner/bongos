@@ -1,0 +1,204 @@
+use std::collections::BTreeMap;
+use std::process::{Command, Stdio};
+
+use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey};
+use serde_json::{Value, json};
+
+use super::{Finish, Runner};
+use crate::process::{NodeProcess, ProcessRecord, stop_all};
+use bongos_workflow_model::scheduler::Branch;
+
+struct Try {
+    run: String,
+    key: NodeKey,
+    try_number: u32,
+    process: Option<NodeProcess>,
+    released: bool,
+}
+
+#[derive(Default)]
+pub struct FakeRunner {
+    /// Finish every try at the next poll.
+    pub auto_finish: bool,
+    /// A command each start spawns as a real process.
+    pub command: Option<Vec<String>>,
+    /// Every try started, in order, as `(run, key)`.
+    pub started: Vec<(String, NodeKey)>,
+    /// Every try stopped, in order.
+    pub stopped: Vec<(String, NodeKey)>,
+    /// The processes stopped, kept so a test can check they are gone.
+    pub stopped_processes: Vec<NodeProcess>,
+    /// The most tries in flight at once, across runs.
+    pub max_in_flight: usize,
+    /// Every merge fails `merge conflict` when set, after the first `clean_merges` merges.
+    pub merge_conflicts: bool,
+    /// How many merges succeed before `merge_conflicts` takes effect.
+    pub clean_merges: usize,
+    /// Every merge asked for, as `(run, join, branch)`.
+    pub merges: Vec<(String, String, Branch)>,
+    results: BTreeMap<String, Value>,
+    /// Tries of each node still to fail, `agent exited nonzero`.
+    failures: BTreeMap<String, u32>,
+    /// The session id each node's tries report.
+    sessions: BTreeMap<String, String>,
+    running: Vec<Try>,
+}
+
+impl FakeRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The result every try of `node` finishes with.
+    pub fn script(&mut self, node: &str, result: Value) -> &mut Self {
+        self.results.insert(node.to_string(), result);
+        self
+    }
+
+    /// The session id every try of `node` reports when it finishes.
+    pub fn session(&mut self, node: &str, id: &str) -> &mut Self {
+        self.sessions.insert(node.to_string(), id.to_string());
+        self
+    }
+
+    /// The next `times` tries of `node` fail `agent exited nonzero`.
+    pub fn fail(&mut self, node: &str, times: u32) -> &mut Self {
+        self.failures.insert(node.to_string(), times);
+        self
+    }
+
+    /// The tries in flight, as `(run, key)`.
+    pub fn in_flight(&self) -> Vec<(String, NodeKey)> {
+        self.running
+            .iter()
+            .map(|running| (running.run.clone(), running.key.clone()))
+            .collect()
+    }
+
+    /// The processes of the tries in flight.
+    pub fn processes(&mut self) -> impl Iterator<Item = &mut NodeProcess> {
+        self.running
+            .iter_mut()
+            .filter_map(|running| running.process.as_mut())
+    }
+
+    /// Lets every try in flight finish at the next poll.
+    pub fn release_all(&mut self) {
+        for running in &mut self.running {
+            running.released = true;
+        }
+    }
+
+    /// Lets the tries of run `run` finish at the next poll.
+    pub fn release(&mut self, run: &str) {
+        for running in &mut self.running {
+            if running.run == run {
+                running.released = true;
+            }
+        }
+    }
+}
+
+impl Runner for FakeRunner {
+    fn start(
+        &mut self,
+        run: &str,
+        _definition: &Definition,
+        key: &NodeKey,
+        try_number: u32,
+    ) -> Result<ProcessRecord, Failure> {
+        let process = self.command.as_ref().map(|argv| {
+            let mut command = Command::new(&argv[0]);
+            command.args(&argv[1..]);
+            NodeProcess::spawn(command, Stdio::null(), Stdio::null(), Stdio::null())
+                .expect("the fake command starts")
+        });
+        let record = process.as_ref().map_or(
+            ProcessRecord {
+                pid: 4000 + self.started.len() as u32,
+                start_time: 0,
+            },
+            NodeProcess::record,
+        );
+        self.started.push((run.to_string(), key.clone()));
+        self.running.push(Try {
+            run: run.to_string(),
+            key: key.clone(),
+            try_number,
+            process,
+            released: false,
+        });
+        self.max_in_flight = self.max_in_flight.max(self.running.len());
+        Ok(record)
+    }
+
+    fn poll(&mut self) -> Vec<Finish> {
+        let auto_finish = self.auto_finish;
+        let (done, running): (Vec<Try>, Vec<Try>) = std::mem::take(&mut self.running)
+            .into_iter()
+            .partition(|running| auto_finish || running.released);
+        self.running = running;
+        done.into_iter()
+            .map(|mut done| {
+                if let Some(process) = done.process.as_mut() {
+                    process.stop();
+                }
+                if let Some(left) = self.failures.get_mut(&done.key.node)
+                    && *left > 0
+                {
+                    *left -= 1;
+                    let failure = Failure::new(
+                        FailureReason::AgentExitedNonzero,
+                        Some(done.key.clone()),
+                        "scripted failure",
+                    );
+                    return Finish {
+                        outcome: Err(failure),
+                        ..Finish::ok(done.run, done.key, done.try_number, Value::Null)
+                    };
+                }
+                let result = self
+                    .results
+                    .get(&done.key.node)
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "summary": "ok" }));
+                let session_id = self.sessions.get(&done.key.node).cloned();
+                Finish {
+                    session_id,
+                    ..Finish::ok(done.run, done.key, done.try_number, result)
+                }
+            })
+            .collect()
+    }
+
+    fn stop(&mut self, tries: &[(String, NodeKey)]) {
+        let (stopped, running): (Vec<Try>, Vec<Try>) = std::mem::take(&mut self.running)
+            .into_iter()
+            .partition(|running| {
+                tries
+                    .iter()
+                    .any(|(run, key)| *run == running.run && *key == running.key)
+            });
+        self.running = running;
+        let mut processes = Vec::new();
+        for stopped in stopped {
+            self.stopped.push((stopped.run, stopped.key));
+            processes.extend(stopped.process);
+        }
+        stop_all(&mut processes);
+        self.stopped_processes.extend(processes);
+    }
+
+    fn merge_branch(&mut self, run: &str, join: &str, branch: &Branch) -> Result<String, Failure> {
+        self.merges
+            .push((run.to_string(), join.to_string(), branch.clone()));
+        if self.merge_conflicts && self.merges.len() > self.clean_merges {
+            return Err(Failure::new(
+                FailureReason::MergeConflict,
+                None,
+                "conflict in src/lib.rs",
+            ));
+        }
+        Ok("0000000".to_string())
+    }
+}

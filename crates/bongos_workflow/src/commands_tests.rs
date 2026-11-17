@@ -14,7 +14,7 @@ use workspace::Workspace;
 
 use crate::actions::{LastToast, OFF_MESSAGE};
 use crate::commands::VALIDATE_TITLE;
-use crate::engine::WorkflowEngine;
+use crate::engine::{EngineRoots, WorkflowEngine};
 
 const BROKEN: &str = "schema = 1\n\
 name = \"broken\"\n\
@@ -262,20 +262,29 @@ async fn no_engine_exists_while_off_and_one_is_made_on_demand_when_on(cx: &mut T
     });
 
     set_enabled(cx, true);
+    let roots = TempDir::new().unwrap();
+    let data_dir = roots.path().join("data");
+    let home = roots.path().join("home");
     cx.update(|_, cx| {
+        cx.set_global(EngineRoots {
+            data_dir: data_dir.clone(),
+            home: home.clone(),
+        });
         let engine = WorkflowEngine::ensure(cx).expect("an engine while on");
         let dirs = engine.dirs();
+        let profile = dirs.profile.as_ref().unwrap();
+        assert!(profile.ends_with(".bongos/workflows"));
+        assert!(profile.starts_with(&home));
+        let shipped = dirs.shipped.as_ref().unwrap();
+        assert!(shipped.ends_with("workflows/shipped/0.0.0"));
+        assert!(shipped.starts_with(&data_dir), "{shipped:?}");
         assert!(
-            dirs.profile
-                .as_ref()
-                .unwrap()
-                .ends_with(".bongos/workflows")
+            shipped.is_dir(),
+            "the shipped files land in the temp data dir"
         );
         assert!(
-            dirs.shipped
-                .as_ref()
-                .unwrap()
-                .ends_with("workflows/shipped/0.0.0")
+            std::fs::read_dir(shipped).unwrap().next().is_some(),
+            "shipped definitions were written"
         );
         assert!(dirs.project.is_none());
         assert!(cx.try_global::<WorkflowEngine>().is_some());

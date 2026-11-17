@@ -127,6 +127,16 @@ impl fmt::Debug for WorkflowEngine {
 
 impl Global for WorkflowEngine {}
 
+/// The directories the engine of the running app is rooted at. Unset, it uses the real data and
+/// home directories; tests set it to temporary directories before the engine is created.
+#[derive(Clone, Debug)]
+pub struct EngineRoots {
+    pub data_dir: PathBuf,
+    pub home: PathBuf,
+}
+
+impl Global for EngineRoots {}
+
 /// Stands in for the node runners until the engine dispatches each node kind to its runner:
 /// every start fails, naming why. Nothing ticks the app's runs before then.
 struct UnwiredRunner;
@@ -216,19 +226,24 @@ impl WorkflowEngine {
     }
 
     /// The engine of the running app: the shipped directory of this version (written when
-    /// missing, empty set for now), the profile directory under the home directory. The project
+    /// missing), the profile directory under the home directory. The roots come from
+    /// [`EngineRoots`] when it is set, else from the real data and home directories. The project
     /// layer of a new-format task is read per command ([`WorkflowEngine::dirs_for`]); the one set
     /// with [`WorkflowEngine::with_project`] is that of an old-format project.
     fn open(cx: &App) -> Self {
         let version = release_channel::AppVersion::global(cx);
         let version = format!("{}.{}.{}", version.major, version.minor, version.patch);
-        let shipped = shipped_dir(paths::data_dir(), &version);
+        let (data_dir, home) = match cx.try_global::<EngineRoots>() {
+            Some(roots) => (roots.data_dir.clone(), roots.home.clone()),
+            None => (paths::data_dir().clone(), util::paths::home_dir().clone()),
+        };
+        let shipped = shipped_dir(&data_dir, &version);
         if let Err(error) = materialize(&shipped, SHIPPED_FILES) {
             log::warn!("workflows: could not write the shipped definitions: {error}");
         }
         Self::new(LayerDirs {
             shipped: Some(shipped),
-            profile: Some(profile_dir(util::paths::home_dir())),
+            profile: Some(profile_dir(&home)),
             project: None,
         })
     }

@@ -1407,7 +1407,7 @@ fn open_for_focus(engine: &WorkflowEngine, task: &str, cx: &mut App) {
     });
 }
 
-/// Makes `task: focus` on a leaf with an active run open its run view (PRD 8): observes the focus
+/// Makes `task: focus` on a leaf with an active run open its run view: observes the focus
 /// of `bongos_work`, which exists once that crate is initialized, and shows the run when the
 /// focused task changes. Quietly does nothing when the focus is not there.
 pub(crate) fn observe_focus(engine: &WorkflowEngine, cx: &mut App) {
