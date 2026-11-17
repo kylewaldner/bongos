@@ -39,6 +39,8 @@ pub const PERMISSION_MODES: &[&str] = &[
 const BYPASS_PERMISSIONS: &str = "bypassPermissions";
 const ON_BOUND_FAIL: &str = "fail";
 const PROGRAM_LANGUAGE: &str = "python";
+/// The network entry that means the remote host, resolved when the program runs.
+pub const REMOTE_HOST: &str = "@remote";
 /// Above this many combinations of routed choice values, route coverage is checked value by value.
 const MAX_COVERAGE_COMBINATIONS: usize = 1024;
 /// At most this many "no route" errors are listed for one node.
@@ -708,6 +710,18 @@ impl<'a> Validator<'a> {
                         permissions.network.join(", ")
                     ),
                 );
+            }
+            for entry in &permissions.network {
+                if entry.starts_with('@') && entry != REMOTE_HOST {
+                    self.error(
+                        Some(name),
+                        permissions.line,
+                        format!(
+                            "network entry '{entry}' is not known; the only placeholder is \
+                             {REMOTE_HOST} (the remote host, resolved at runtime)"
+                        ),
+                    );
+                }
             }
             if !permissions.mcp.is_empty() {
                 self.error(
