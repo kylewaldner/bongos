@@ -400,7 +400,7 @@ async fn a_proposal_never_approved_leaves_master_unchanged_with_its_working_copy
     let before = fixture.main();
     let probe = cx.update(|cx| bongos_work::watch_landings(cx));
     let (change_id, _) = write_without_approving(cx, &fixture, 1).await;
-    // The person's marker approves nothing by itself: the landing waits.
+    // The person's marker approves nothing by itself: the landing waits for approval.
     let LandingVerdict::Held(reason) = within(cx, probe.verdict(&change_id)).await else {
         panic!("expected the landing to wait");
     };
