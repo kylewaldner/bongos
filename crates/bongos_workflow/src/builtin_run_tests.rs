@@ -148,6 +148,8 @@ fn merge_fast_forwards_the_task_branch() {
     let finished = node.wait_finished(1);
     let result = finished[0].outcome.as_ref().unwrap();
     assert_eq!(result["result"], "merged");
+    // The shipped definitions declare only `result`, and a schema rejects any other field.
+    assert_eq!(result.as_object().unwrap().len(), 1, "{result}");
     assert_eq!(
         git(&repo.home, &repo.dir, &["rev-parse", "task"]),
         git(&repo.home, &repo.dir, &["rev-parse", "run"])
