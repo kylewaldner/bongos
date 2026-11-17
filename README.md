@@ -365,8 +365,7 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   `name` (the key in the file, not the directory name): the project's
   (`~/.bongos/projects/<project>/workflows`) over yours (`~/.bongos/workflows`) over the ones bongos
   ships (`implement PR`, `implement tasks`, `ship PR` and `babysit PR`, written to the data directory
-  under `workflows/shipped/<version>/` and never edited). In this build the app reads the shipped and
-  your layers; the project layer is not connected yet. `workflow: new` makes a definition in your
+  under `workflows/shipped/<version>/` and never edited). `workflow: new` makes a definition in your
   layer, from a minimal one-agent template or as a copy of a shipped one to edit; `workflow: edit
   definition` opens one; `workflow: validate` checks them all and lists each finding with its line in
   a read-only buffer. A key bongos does not know is a warning, not an error.
@@ -413,13 +412,12 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   `C-c f k` cancels, `C-c f a` approves a gate and `C-c f v` sends it back with notes. `C-c f w`
   shows the Runs panel (the runs of every task, filtered with `t`, `p` and `s`; `enter` and `l` open the
   selected run's logs); `C-c f l` opens a run's logs, `C-c f s` its run view, `C-c f
-  o` its worktree, `C-c f d` its diff and `C-c f x` is meant to clear finished runs (the
-  worktrees of those older than `workflows.keep_finished_days`; not connected yet). `C-c f n`, `C-c f e` and `C-c f V`
+  o` its worktree, `C-c f d` its diff and `C-c f x` clears finished runs (the
+  worktrees of those older than `workflows.keep_finished_days`). `C-c f n`, `C-c f e` and `C-c f V`
   are `workflow: new`, `edit definition` and `validate`. A run waiting at a gate or failed marks its
   task as needing you. A run survives a restart of bongos; a run that was running comes back
-  interrupted and waits for `resume`. Runs do not execute yet: the node runners are not
-  connected to the engine in this build, so `workflow: run` refuses with "Workflow runs are not
-  connected to an agent runner yet" and starts nothing.
+  interrupted and waits for `resume`. Runs execute: `workflow: run` starts the agent, program and
+  built-in nodes of the definition you pick, in the run's own worktree.
 - **Settings.** All under `workflows`, the main ones also on the Work page of the settings window:
   `enabled` (true), `worktrees_dir` (null), `min_free_disk_mb` (2048), `keep_finished_days` (14),
   `max_concurrent_runs` (3), `max_concurrent_sessions` (null, twice the runs), `max_parallel_branches`
