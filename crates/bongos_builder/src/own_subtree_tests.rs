@@ -426,7 +426,8 @@ async fn a_reject_abandons_the_working_copy_and_records_the_rejection(cx: &mut T
     let before = fixture.main();
     let probe = cx.update(|cx| bongos_work::watch_landings(cx));
     let (change_id, text) = write_without_approving(cx, &fixture, 1).await;
-    // Let the detached landing finish (it holds the engine) before rejecting.
+    // Let the detached landing reach its approval wait (row marked Requested,
+    // copy checked out) before rejecting, so the abandon cannot race it.
     let LandingVerdict::Held(reason) = within(cx, probe.verdict(&change_id)).await else {
         panic!("expected the landing to wait");
     };
