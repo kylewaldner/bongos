@@ -384,6 +384,7 @@ fn synthetic_task(slug: &str, dir: PathBuf, file: TaskFile, children: Vec<Task>)
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         file: Some(file),
         artifacts: None,
         errors: Vec::new(),

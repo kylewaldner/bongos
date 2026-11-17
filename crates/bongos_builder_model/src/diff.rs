@@ -59,6 +59,8 @@ impl TaskRef {
 pub struct NewTask {
     pub goal: String,
     pub kind: Kind,
+    /// The named check sets to write as the task's `checks.use`; empty writes nothing.
+    pub checks: Vec<String>,
     /// Empty for a new group.
     pub todos: Vec<Todo>,
     pub planned_result: Option<String>,
@@ -543,6 +545,7 @@ struct Fate {
 struct KeeperPlan {
     todos: Vec<Todo>,
     kind: Kind,
+    checks: Vec<String>,
     planned_result: Option<String>,
 }
 
@@ -830,6 +833,7 @@ impl<'a> Differ<'a> {
             Some(plan) => NewTask {
                 goal: node.goal.clone(),
                 kind: plan.kind,
+                checks: plan.checks,
                 todos: plan.todos,
                 planned_result: plan.planned_result,
             },
@@ -838,6 +842,7 @@ impl<'a> Differ<'a> {
                 NewTask {
                     goal: node.goal.clone(),
                     kind,
+                    checks: node.attributes.checks.clone().unwrap_or_default(),
                     todos: if group {
                         Vec::new()
                     } else {
@@ -1410,6 +1415,7 @@ impl<'a> Differ<'a> {
             KeeperPlan {
                 todos,
                 kind,
+                checks: keeper_node.attributes.checks.clone().unwrap_or_default(),
                 planned_result: keeper_node
                     .results
                     .first()

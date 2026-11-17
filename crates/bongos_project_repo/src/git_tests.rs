@@ -95,3 +95,74 @@ fn the_patch_id_sees_whitespace_inside_a_line_and_survives_a_rebase() {
         );
     });
 }
+
+/// Set in the child process of `inherited_git_variables_do_not_redirect_a_command`.
+const CHILD: &str = "BONGOS_TEST_GIT_ENV_CHILD";
+
+#[test]
+fn inherited_git_variables_do_not_redirect_a_command() {
+    if let Some(directory) = std::env::var_os("GIT_TEST_DIRECTORY") {
+        // The child: git variables point at another repository.
+        let top =
+            block_on(git().run(directory.as_ref(), &["rev-parse", "--show-toplevel"])).unwrap();
+        let expected = std::path::Path::new(&directory).canonicalize().unwrap();
+        assert_eq!(std::path::Path::new(&top).canonicalize().unwrap(), expected);
+        assert!(std::env::var_os(CHILD).is_some());
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let work = dir.path().join("work");
+    let decoy = dir.path().join("decoy");
+    for path in [&work, &decoy] {
+        std::fs::create_dir_all(path).unwrap();
+        block_on(git().init_repo(path, "main")).unwrap();
+    }
+    let output = block_on(
+        util::command::new_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "git_tests::inherited_git_variables_do_not_redirect_a_command",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("GIT_TEST_DIRECTORY", &work)
+            .env("GIT_DIR", decoy.join(".git"))
+            .env("GIT_WORK_TREE", &decoy)
+            .env("GIT_INDEX_FILE", decoy.join(".git/index"))
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.bare")
+            .env("GIT_CONFIG_VALUE_0", "true")
+            .output(),
+    )
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "the child run failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_replacement_ref_does_not_change_what_an_object_reads_as() {
+    let dir = TempDir::new().unwrap();
+    let git = git();
+    block_on(async {
+        git.init_repo(dir.path(), "main").await.unwrap();
+        commit_files(
+            &git,
+            dir.path(),
+            &[("a.txt", "the real a\n"), ("b.txt", "an impostor\n")],
+        )
+        .await;
+        let a = git.rev_parse(dir.path(), "main:a.txt").await.unwrap();
+        let b = git.rev_parse(dir.path(), "main:b.txt").await.unwrap();
+        git.run(dir.path(), &["replace", &a, &b]).await.unwrap();
+        assert_eq!(
+            git.run(dir.path(), &["cat-file", "-p", "main:a.txt"])
+                .await
+                .unwrap(),
+            "the real a"
+        );
+    });
+}

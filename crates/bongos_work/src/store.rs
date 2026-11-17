@@ -53,6 +53,7 @@ use crate::changes::ChangedCount;
 use crate::overview::{self, Inputs, RepositoryRow};
 use crate::rebase::{RebaseChecks, RebaseState};
 use crate::ref_watch::{GitDirInfo, RefWatches};
+use crate::registry::{DoneHoldRefreshers, DoneHolds};
 use crate::seams::{DefinitionWriter, DefinitionWriters, ProjectSources, WriteOutcome};
 use crate::settings::Repository;
 use crate::worktrees::Layout;
@@ -136,6 +137,8 @@ pub struct Stats {
     pub rebase_probes: usize,
     /// Ref watcher batches that touched a ref and started a rebase check.
     pub ref_events: usize,
+    /// Reads of the tree because a project source changed.
+    pub source_refreshes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +161,13 @@ pub struct WorkStore {
     dirs: WorkDirs,
     enabled: bool,
     snapshot: Option<Arc<WorkTree>>,
+    /// The tree the session read that [`Self::snapshot`] was made from: the same tree, or a copy
+    /// with other done holds.
+    read_tree: Option<Arc<WorkTree>>,
+    /// The done hold of each held task, by id, as the sources last said ([`DoneHolds`]). Shared
+    /// with the session, which fills every tree it reads from it, so a command applied on the
+    /// writer sees the same holds as the snapshot. Never stored.
+    done_holds: Arc<Mutex<BTreeMap<String, String>>>,
     session: Option<Session>,
     disk_lock: Arc<Mutex<()>>,
     pub(crate) stats: Stats,
@@ -304,6 +314,8 @@ impl WorkStore {
             dirs,
             enabled: false,
             snapshot: None,
+            read_tree: None,
+            done_holds: Arc::new(Mutex::new(BTreeMap::new())),
             session: None,
             disk_lock: Arc::new(Mutex::new(())),
             stats: Stats::default(),
@@ -610,6 +622,7 @@ impl WorkStore {
             self.overview_task = None;
             self.overview_settings = None;
             self.set_rebase(HashMap::new(), cx);
+            self.read_tree = None;
             if self.snapshot.take().is_some() {
                 cx.emit(WorkStoreEvent::Changed);
             }
@@ -628,6 +641,8 @@ impl WorkStore {
             writers: DefinitionWriters::global(cx),
             needs_conversion: self.needs_conversion.clone(),
             locations: self.dirs.locations.clone(),
+            done_holds: self.done_holds.clone(),
+            done_hold_refreshers: DoneHoldRefreshers::global(cx),
         };
         let run = cx.spawn({
             let alive = alive.clone();
@@ -645,7 +660,7 @@ impl WorkStore {
         match done.kind {
             DoneKind::Loaded => self.stats.loads += 1,
             DoneKind::Reloaded => self.stats.event_reloads += 1,
-            DoneKind::Refreshed => {}
+            DoneKind::Refreshed => self.stats.source_refreshes += 1,
             DoneKind::Ignored => self.stats.ignored_batches += 1,
             DoneKind::Wrote { retries } => {
                 self.stats.retries += retries;
@@ -666,15 +681,13 @@ impl WorkStore {
         }
         if let Some(tree) = done.tree
             && !self
-                .snapshot
+                .read_tree
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, &tree))
         {
-            self.snapshot = Some(tree);
-            cx.emit(WorkStoreEvent::Changed);
-            cx.notify();
-            self.refresh_rebase(cx);
-            self.refresh_overview(cx);
+            self.read_tree = Some(tree.clone());
+            let tree = self.fill_done_holds(tree, cx);
+            self.publish(tree, cx);
             self.note_conversion_notice(cx);
         }
         // After the snapshot, so a caller that awaits the write sees its change.
@@ -682,6 +695,76 @@ impl WorkStore {
             reply.send();
         }
     }
+}
+
+impl WorkStore {
+    /// Asks the done hold sources again about every task of the snapshot and publishes it again
+    /// when a hold changed. [`DoneHolds::changed`] calls it.
+    pub fn refresh_done_holds(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
+        let tree = self.fill_done_holds(snapshot.clone(), cx);
+        if !Arc::ptr_eq(&tree, &snapshot) {
+            self.publish(tree, cx);
+        }
+    }
+
+    /// Asks the sources about every task of `tree`, remembers the answers for the session's
+    /// next reads, and returns `tree` with them: the same tree when no hold differs.
+    fn fill_done_holds(
+        &mut self,
+        tree: Arc<WorkTree>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Arc<WorkTree> {
+        let mut holds = BTreeMap::new();
+        if DoneHolds::has_sources(cx) {
+            for id in tree.tasks().into_iter().filter_map(|task| task.id()) {
+                if let Some(hold) = DoneHolds::hold(id, cx) {
+                    holds.insert(id.to_string(), hold);
+                }
+            }
+        }
+        let tree = with_done_holds(tree, &holds);
+        *self.done_holds.lock() = holds;
+        tree
+    }
+
+    fn publish(&mut self, tree: Arc<WorkTree>, cx: &mut gpui::Context<Self>) {
+        self.snapshot = Some(tree);
+        cx.emit(WorkStoreEvent::Changed);
+        cx.notify();
+        self.refresh_rebase(cx);
+        self.refresh_overview(cx);
+    }
+}
+
+/// `tree` with the done hold of every task set from `holds`: the same tree when none differs.
+fn with_done_holds(mut tree: Arc<WorkTree>, holds: &BTreeMap<String, String>) -> Arc<WorkTree> {
+    let differs = tree
+        .tasks()
+        .into_iter()
+        .any(|task| task.done_hold.as_ref() != task.id().and_then(|id| holds.get(id)));
+    if differs {
+        Arc::make_mut(&mut tree).set_done_holds(holds);
+    }
+    tree
+}
+
+/// The `kv` namespaces whose writes never change the Work tree: a write that touches no task and
+/// only these does not read the tree again.
+pub const NAMESPACES_OUTSIDE_THE_TREE: &[&str] = &["checks.live"];
+
+/// Whether a committed state transaction that wrote the tasks `task_ids` and the `kv` namespaces
+/// `namespaces` should read the Work tree again: it names a task, or a namespace other than
+/// [`NAMESPACES_OUTSIDE_THE_TREE`] (`checks.owed` and `checks.done` among them, which decide the
+/// done holds). A write to `checks.live` alone does not.
+pub fn state_change_refreshes_tree(task_ids: &[String], namespaces: &[String]) -> bool {
+    !task_ids.is_empty()
+        || namespaces.is_empty()
+        || namespaces
+            .iter()
+            .any(|namespace| !NAMESPACES_OUTSIDE_THE_TREE.contains(&namespace.as_str()))
 }
 
 /// Whether project repositories are enabled (the `project_repository.enabled` setting), false
@@ -697,6 +780,10 @@ struct Seams {
     writers: DefinitionWriters,
     needs_conversion: Arc<AtomicBool>,
     locations: Option<PathBuf>,
+    /// The done holds the store last collected, set on every tree read.
+    done_holds: Arc<Mutex<BTreeMap<String, String>>>,
+    /// Brought up to date after every tree read, before the store asks the sources.
+    done_hold_refreshers: DoneHoldRefreshers,
 }
 
 /// The session: watch the root, load, then run one job at a time until the store or the session
@@ -933,7 +1020,19 @@ impl Disk {
             }
         }
         tree.projects.extend(self.seams.sources.projects());
+        // After the projects, so what the hold sources know is at least as new as the tree.
+        self.seams.done_hold_refreshers.refresh();
+        tree.set_done_holds(&self.seams.done_holds.lock());
         self.tree = Some(Arc::new(tree));
+    }
+
+    /// Brings the done holds of the tree up to date with what the store last collected, which
+    /// may have changed since the tree was read.
+    fn refresh_done_holds(&mut self) {
+        if let Some(tree) = self.tree.take() {
+            let holds = self.seams.done_holds.lock().clone();
+            self.tree = Some(with_done_holds(tree, &holds));
+        }
     }
 
     /// Whether `events` name anything other than temporary files, journals, echoes of the
@@ -994,6 +1093,7 @@ impl Disk {
         if self.tree.is_none() {
             self.reload();
         }
+        self.refresh_done_holds();
         for attempt in 0..=MAX_RETRIES {
             let Some(tree) = self.tree.clone() else {
                 break;

@@ -46,6 +46,7 @@ fn make(slug: &str, goal: &str, kind: Kind, with_todos: bool) -> Task {
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         broken_edges: Vec::new(),
         files: Default::default(),
         hashes: Default::default(),

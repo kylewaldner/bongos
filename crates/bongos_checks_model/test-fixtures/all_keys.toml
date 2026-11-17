@@ -1,0 +1,33 @@
+[[check]]
+name = "tests"                      # every key of the declaration
+run = "checks/run-tests"
+repos = ["app"]
+pass = [0]
+fail = [1]
+environment = [3]
+summary = "^test result: ok"
+result_file = true
+needs = ["test-slots", { pool = "jobs", mode = "shared" }]
+parts = 8
+parallel = true
+stop_at_first_failure = false
+scope = { script = "checks/scope" }
+unset = ["TEST_FILTER"]
+key_inputs = ["{home}/.config/tool/pin"]
+pinned = ["registry/flaky-tests.md"]
+params = { first_flake_cap = 2 }
+required = true
+or_accepted = "flake-verdict"
+budget_minutes = 90
+
+[[check]]
+name = "flake-verdict"
+command = ["make", "test"]
+parts = { plan = "checks/plan-parts" }
+scope = "all"
+needs = [{ pool = "jobs", count = 2 }]
+required = false
+
+[[closing]]
+name = "tests-full"
+command = ["make", "test-all"]

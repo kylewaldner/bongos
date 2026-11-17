@@ -27,6 +27,9 @@ pub struct Checks {
     /// The known workflow names, once a registry exists (feature 20). `None` makes a workflow
     /// name a warning; `Some` makes an unknown one an error.
     pub workflows: Option<BTreeSet<String>>,
+    /// The named check sets, once they are known. `None` makes a set name in a `checks`
+    /// attribute a warning; `Some` makes an unknown one an error.
+    pub check_sets: Option<BTreeSet<String>>,
     /// A leaf with more todos than this gets a warning (`task_builder.todo_warning`).
     pub todo_warning: usize,
     /// The file's own number and task, for the `proposal N`, `for` and root `id` rules. Without
@@ -38,6 +41,7 @@ impl Default for Checks {
     fn default() -> Self {
         Self {
             workflows: None,
+            check_sets: None,
             todo_warning: 8,
             file: None,
         }
@@ -220,6 +224,7 @@ impl<'a> Validator<'a> {
             self.problems
                 .push(error(second.line, "two results, split or merge"));
         }
+        self.check_sets(node);
         self.check_todos(node, group);
         if !group && node.results.is_empty() && !disk.is_some_and(|task| self.is_closed(task)) {
             self.problems.push(warning(node.line, "no result named"));
@@ -307,6 +312,33 @@ impl<'a> Validator<'a> {
                     parent_node.label
                 ),
             ));
+        }
+    }
+
+    fn check_sets(&mut self, node: &Node) {
+        let Some(sets) = &node.attributes.checks else {
+            return;
+        };
+        for set in sets {
+            match &self.checks.check_sets {
+                None => self.problems.push(warning(
+                    node.line,
+                    format!("check set '{set}' is not checked: the named sets are not known yet"),
+                )),
+                Some(known) if !known.contains(set) => {
+                    let list: Vec<&str> = known.iter().map(String::as_str).collect();
+                    let message = if list.is_empty() {
+                        format!("unknown check set '{set}': no check sets are defined")
+                    } else {
+                        format!(
+                            "unknown check set '{set}': the known check sets are {}",
+                            list.join(", ")
+                        )
+                    };
+                    self.problems.push(error(node.line, message));
+                }
+                Some(_) => {}
+            }
         }
     }
 

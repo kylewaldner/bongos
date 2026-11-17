@@ -533,3 +533,43 @@ fn roles_of_existing_todos_are_read_as_written() {
     let body = "  task schema: schema | id id-schema\n    result r\n  task engine: e\n    stacked on schema\n    result r\n";
     assert_eq!(check(body, &tree), Vec::<String>::new());
 }
+
+#[test]
+fn check_sets_are_a_warning_until_names_are_set() {
+    let body = "  task a: a | checks rust, docs\n    result r\n";
+    assert_eq!(
+        check(body, &empty_tree()),
+        vec![
+            "5 warning: check set 'rust' is not checked: the named sets are not known yet",
+            "5 warning: check set 'docs' is not checked: the named sets are not known yet",
+        ]
+    );
+
+    let checks = Checks {
+        check_sets: Some(["rust".to_string()].into()),
+        ..Checks::default()
+    };
+    assert_eq!(
+        check_with(body, &empty_tree(), &checks),
+        vec!["5 error: unknown check set 'docs': the known check sets are rust"]
+    );
+    let checks = Checks {
+        check_sets: Some(BTreeSet::new()),
+        ..Checks::default()
+    };
+    assert_eq!(
+        check_with(body, &empty_tree(), &checks),
+        vec![
+            "5 error: unknown check set 'rust': no check sets are defined",
+            "5 error: unknown check set 'docs': no check sets are defined",
+        ]
+    );
+    let checks = Checks {
+        check_sets: Some(["rust".to_string(), "docs".to_string()].into()),
+        ..Checks::default()
+    };
+    assert_eq!(
+        check_with(body, &empty_tree(), &checks),
+        Vec::<String>::new()
+    );
+}

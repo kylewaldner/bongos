@@ -458,6 +458,7 @@ impl<'a> Builder<'a> {
                     file.created = self.ctx.at;
                     file.todos = task.todos.clone();
                     file.planned_result = task.planned_result.clone();
+                    write_checks(&mut file, &task.checks);
                     self.created.insert(
                         *line,
                         Created {
@@ -699,6 +700,7 @@ impl<'a> Builder<'a> {
         created.file.todos = created.task.todos.clone();
         created.file.planned_result = created.task.planned_result.clone();
         created.file.kind = created.task.kind;
+        write_checks(&mut created.file, &created.task.checks);
         created.file.default_visibility = edited.file.default_visibility;
         let what = if moved.is_empty() {
             String::new()
@@ -1052,4 +1054,19 @@ pub fn rewritten(diff: &Diff) -> HashSet<TaskId> {
         }
     }
     ids
+}
+
+/// Writes `checks = { use = [..] }` into a created task's definition; no sets writes nothing, so
+/// the task inherits.
+fn write_checks(file: &mut TaskFile, sets: &[String]) {
+    if sets.is_empty() {
+        return;
+    }
+    let mut table = toml::Table::new();
+    table.insert(
+        "use".to_string(),
+        toml::Value::Array(sets.iter().cloned().map(toml::Value::String).collect()),
+    );
+    file.extra
+        .insert("checks".to_string(), toml::Value::Table(table));
 }

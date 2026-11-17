@@ -356,6 +356,7 @@ fn pending_marks_draw_as_landing_and_not_landed_chips() {
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         file: None,
         artifacts: None,
         errors: Vec::new(),

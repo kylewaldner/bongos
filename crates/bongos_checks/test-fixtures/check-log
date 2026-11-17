@@ -1,0 +1,4 @@
+#!/bin/sh
+# One check: appends its name to order in the tree, so a test sees which checks ran and when.
+echo "$BONGOS_CHECK_NAME" >> order
+exit 0

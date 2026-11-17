@@ -82,6 +82,14 @@ fn every_event() -> Vec<Event> {
         Event::Interrupted {
             keys: vec![plan.clone(), branch],
         },
+        Event::Held {
+            key: plan.clone(),
+            failure: Failure::new(
+                FailureReason::CheckNoVerdict,
+                Some(plan.clone()),
+                "tests: the runner crashed",
+            ),
+        },
         Event::DefinitionReloaded { rev: 2 },
         Event::Ended {
             state: EndState::Failed,
@@ -495,6 +503,57 @@ fn replay_of_pause_halt_and_resume() {
     let resumed = replay(&[Event::Created, Event::Halted, Event::Resumed]);
     assert!(!resumed.paused && !resumed.halted);
     assert_eq!(resumed.lifecycle(), Lifecycle::Created);
+}
+
+#[test]
+fn replay_of_held_then_resumed() {
+    let check = key("check");
+    let other = key("other");
+    let failure = Failure::new(
+        FailureReason::CheckNoVerdict,
+        Some(check.clone()),
+        "tests: timed out",
+    );
+    let held = |key: &NodeKey| Event::Held {
+        key: key.clone(),
+        failure: failure.clone(),
+    };
+    let base = vec![
+        Event::Created,
+        started(&check, 1),
+        finished(&check, 1, json!({ "verdict": "no_verdict" }), 0.0),
+        held(&check),
+    ];
+    let state = replay(&base);
+    assert_eq!(state.held.len(), 1);
+    assert_eq!(state.held[&check], failure);
+    assert_eq!(
+        state.lifecycle(),
+        Lifecycle::Running,
+        "a hold is not an end"
+    );
+    assert!(state.ended.is_none());
+
+    let line = held(&check).to_line();
+    assert!(line.contains("\"event\":\"Held\""), "{line}");
+    assert!(line.contains("check_no_verdict"), "{line}");
+
+    let mut resumed = base.clone();
+    resumed.push(Event::Resumed);
+    assert!(
+        replay(&resumed).held.is_empty(),
+        "a resume clears every hold"
+    );
+
+    let mut rerun = base;
+    rerun.push(held(&other));
+    rerun.push(started(&check, 2));
+    let state = replay(&rerun);
+    assert_eq!(
+        state.held.keys().collect::<Vec<_>>(),
+        vec![&other],
+        "a new try of a held key clears only its hold"
+    );
 }
 
 #[test]

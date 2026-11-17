@@ -1,0 +1,5 @@
+#!/bin/sh
+# Prints which version of this script ran and the pinned registry as it reads it.
+echo "script version 1"
+cat "$BONGOS_CHECK_PINNED/registry/flaky-tests.md"
+exit 0

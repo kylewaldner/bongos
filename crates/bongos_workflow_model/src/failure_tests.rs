@@ -7,7 +7,7 @@ use FailureClass::{Definition, Task};
 use FailureReason::*;
 
 /// Every reason with its class when not every retry hit it, from the product's closed list.
-const EXPECTED: [(FailureReason, &str, FailureClass); 22] = [
+const EXPECTED: [(FailureReason, &str, FailureClass); 23] = [
     (NodeOutputInvalid, "node output invalid", Definition),
     (AgentExitedNonzero, "agent exited nonzero", Task),
     (ProgramExitedNonzero, "program exited nonzero", Task),
@@ -42,6 +42,7 @@ const EXPECTED: [(FailureReason, &str, FailureClass); 22] = [
     ),
     (InterruptedNotResumed, "interrupted and not resumed", Task),
     (FailureEndReached, "failure end reached", Task),
+    (CheckNoVerdict, "check had no verdict", Task),
 ];
 
 #[test]
@@ -72,6 +73,7 @@ fn a_cap_is_a_definition_failure_only_when_every_retry_hit_it() {
 
 #[test]
 fn serde_names_are_stable_and_distinct() {
+    assert_eq!(FailureReason::ALL.len(), 23);
     let mut names = HashSet::new();
     for reason in FailureReason::ALL {
         let name = serde_json::to_value(reason).unwrap();
@@ -90,6 +92,7 @@ fn serde_names_are_stable_and_distinct() {
             "outcome_promised_not_delivered",
         ),
         (InterruptedNotResumed, "interrupted_not_resumed"),
+        (CheckNoVerdict, "check_no_verdict"),
     ] {
         assert_eq!(serde_json::to_value(reason).unwrap(), name);
     }

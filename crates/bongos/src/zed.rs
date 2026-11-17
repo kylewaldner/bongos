@@ -750,6 +750,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         bongos_builder::register(workspace);
         bongos_linear::register(workspace);
         bongos_workflow::register(workspace);
+        bongos_checks::register(workspace);
         let work_focus = cx.new(bongos_work::FocusStatus::new);
         let workflow_status = cx.new(bongos_workflow::WorkflowStatus::new);
         let prompts_mode_line = cx.new(|_| bongos_prompts::PromptsModeLine::new());
@@ -5626,6 +5627,7 @@ mod tests {
                 "syntax_tree_view",
                 "tab_switcher",
                 "task",
+                "task_detail",
                 "terminal",
                 "terminal_panel",
                 "text_finder",

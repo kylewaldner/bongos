@@ -429,6 +429,319 @@ fn work_page(token_set: bool) -> SettingsPage {
         ]
     }
 
+    fn task_checks_section() -> [SettingsPageItem; 15] {
+        [
+            SettingsPageItem::SectionHeader("Task Checks"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Task Checks",
+                description: "Whether task checks are on. While they are off, no check runs, no record is written and every task check command is hidden.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.enabled"),
+                    pick: |settings_content| {
+                        settings_content.task_checks.as_ref()?.enabled.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.task_checks.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Output Directory",
+                description: "The directory that holds the output files of check runs. Empty means the task's files folder, `checks/`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.output_dir"),
+                    pick: |settings_content| {
+                        settings_content.task_checks.as_ref()?.output_dir.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .output_dir = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Output Retention Days",
+                description: "Days a run's output file is kept; the record stays after the file is deleted.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.output_retention_days"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .output_retention_days
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .output_retention_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Output Limit (MB)",
+                description: "Most MB of output kept per run; past it the middle is cut and marked.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.output_limit_mb"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .output_limit_mb
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .output_limit_mb = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Result File Limit (KB)",
+                description: "The largest result file, in KB, a check may write.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.result_file_limit_kb"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .result_file_limit_kb
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .result_file_limit_kb = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Default Budget Minutes",
+                description: "Minutes a check may run when it sets no `budget_minutes`. Empty means no time budget.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.default_budget_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .default_budget_minutes
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .default_budget_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "No-Verdict Reruns",
+                description: "Times a run that gave no verdict is run again by itself.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.no_verdict_reruns"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .no_verdict_reruns
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .no_verdict_reruns = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "No-Verdict Rerun Minutes",
+                description: "Minutes between a no-verdict run and its rerun.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.no_verdict_rerun_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .no_verdict_rerun_minutes
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .no_verdict_rerun_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Pool Wait Limit Hours",
+                description: "Hours a check waits for a pool slot before it gives no verdict.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.pool_wait_limit_hours"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .pool_wait_limit_hours
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .pool_wait_limit_hours = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Kill Grace Seconds",
+                description: "Seconds a stopped check has to end after its first signal before it is killed.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.kill_grace_seconds"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .kill_grace_seconds
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .kill_grace_seconds = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Parallel Parts Max",
+                description: "The most parts of one check that run at the same time.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.parallel_parts_max"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .parallel_parts_max
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .parallel_parts_max = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Scratch Directory",
+                description: "Where scratch trees for runs on a base tree are made. Empty means `<data dir>/checks-scratch`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.scratch_dir"),
+                    pick: |settings_content| {
+                        settings_content.task_checks.as_ref()?.scratch_dir.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .scratch_dir = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Tree Key Debounce (ms)",
+                description: "Milliseconds the tree key waits for edits to settle before it is computed again.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.tree_key_debounce_ms"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .tree_key_debounce_ms
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .tree_key_debounce_ms = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Live Write Interval (ms)",
+                description: "At most one live-state write per task per this many milliseconds.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.live_write_ms"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .live_write_ms
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .live_write_ms = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: "Work",
         items: concat_sections![
@@ -436,7 +749,8 @@ fn work_page(token_set: bool) -> SettingsPage {
             thresholds_and_repositories_section(),
             task_builder_section(),
             linear_section(token_set),
-            workflows_section()
+            workflows_section(),
+            task_checks_section()
         ],
     }
 }
@@ -11690,5 +12004,69 @@ mod tests {
                 "prompts.marker_close"
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod task_checks_tests {
+    use super::*;
+    use crate::AnySettingField;
+    use settings::RootUserSettings as _;
+    use std::any::Any;
+
+    /// The default of one `task_checks` field as the page reads it, `null` when unset.
+    fn page_default(field: &dyn AnySettingField, defaults: &SettingsContent) -> String {
+        let any: &dyn Any = field.as_any();
+        if let Some(field) = any.downcast_ref::<SettingField<bool>>() {
+            return format!("{:?}", (field.pick)(defaults));
+        }
+        if let Some(field) = any.downcast_ref::<SettingField<u32>>() {
+            return format!("{:?}", (field.pick)(defaults));
+        }
+        if let Some(field) = any.downcast_ref::<SettingField<u64>>() {
+            return format!("{:?}", (field.pick)(defaults));
+        }
+        if let Some(field) = any.downcast_ref::<SettingField<String>>() {
+            return format!("{:?}", (field.pick)(defaults));
+        }
+        panic!("unexpected field type");
+    }
+
+    #[test]
+    fn work_page_lists_every_task_checks_setting_with_its_default() {
+        let defaults =
+            SettingsContent::parse_json_with_comments(&settings::default_settings()).unwrap();
+        let page = work_page(false);
+        let mut listed = Vec::new();
+        for item in page.items.iter() {
+            if let SettingsPageItem::SettingItem(item) = item {
+                let path = item.field.json_path().unwrap_or_default();
+                if let Some(key) = path.strip_prefix("task_checks.") {
+                    assert!(!item.description.is_empty(), "{path}");
+                    listed.push((key, page_default(item.field.as_ref(), &defaults)));
+                }
+            }
+        }
+        let expected = [
+            ("enabled", "Some(true)"),
+            ("output_dir", "None"),
+            ("output_retention_days", "Some(30)"),
+            ("output_limit_mb", "Some(256)"),
+            ("result_file_limit_kb", "Some(256)"),
+            ("default_budget_minutes", "None"),
+            ("no_verdict_reruns", "Some(2)"),
+            ("no_verdict_rerun_minutes", "Some(5)"),
+            ("pool_wait_limit_hours", "Some(4)"),
+            ("kill_grace_seconds", "Some(5)"),
+            ("parallel_parts_max", "Some(4)"),
+            ("scratch_dir", "None"),
+            ("tree_key_debounce_ms", "Some(2000)"),
+            ("live_write_ms", "Some(1000)"),
+        ];
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|(key, value)| (*key, value.to_string()))
+            .collect();
+        assert_eq!(listed, expected);
     }
 }
