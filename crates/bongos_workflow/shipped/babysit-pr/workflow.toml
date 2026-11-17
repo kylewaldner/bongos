@@ -65,7 +65,7 @@ language = "python"
 permissions = { commands = ["gh", "git"], network = ["@remote"], mcp = [] }
 output = { result = { type = "choice", values = ["pushed", "rejected"] } }
 routes = [
-  { when = { result = "pushed" }, to = "check" },
+  { when = { result = "pushed" }, to = "check", max_passes = 6, on_bound = "red_ci" },
   { when = { result = "rejected" }, to = "rejected" },
 ]
 

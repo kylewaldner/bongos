@@ -80,7 +80,7 @@ kind = "agent"
 purpose = "Fix what the tests or the review found"
 prompt = "fix.md"
 output = { summary = { type = "text" } }
-routes = [{ to = "test" }]
+routes = [{ to = "test", max_passes = 6, on_bound = "stuck_tests" }]
 
 [nodes.review]
 kind = "agent"
