@@ -235,6 +235,30 @@ pub fn runs_dir(repository: &Path, worktrees_dir: Option<&Path>) -> PathBuf {
     }
 }
 
+/// Whether `worktree`, as a run.toml recorded it, has the layout [`create_run`] gives a run
+/// worktree: `<runs dir>/<run dir>/run`, with the run directory directly under the runs
+/// directory of `workflows.worktrees_dir`. A record that points anywhere else is not trusted
+/// enough to have its directory removed. The repository is not known here, so the runs directory
+/// is matched by its tail ([`runs_dir`] joins it onto the repository).
+pub fn is_run_worktree(worktree: &RunWorktree, worktrees_dir: Option<&Path>) -> bool {
+    if worktree.path != run_worktree_path(&worktree.run_dir) {
+        return false;
+    }
+    let Some(parent) = worktree.run_dir.parent() else {
+        return false;
+    };
+    match worktrees_dir {
+        None => parent.ends_with(DEFAULT_RUNS_DIR),
+        Some(dir) => {
+            let expanded = match dir.strip_prefix("~") {
+                Ok(rest) => paths::home_dir().join(rest),
+                Err(_) => dir.to_path_buf(),
+            };
+            parent.ends_with(expanded)
+        }
+    }
+}
+
 /// `<runs dir>/<task slug>-<short>-<attempt>`.
 pub fn run_dir(runs_dir: &Path, task_slug: &str, run_id: &str, attempt: u32) -> PathBuf {
     runs_dir.join(format!("{task_slug}-{}-{attempt}", short_id(run_id)))

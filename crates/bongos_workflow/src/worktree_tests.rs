@@ -17,8 +17,9 @@ use crate::builtin_merge::{
 };
 use crate::worktrees::{
     FinishedRun, Git, NOT_STARTED, RunWorktree, TaskCheckout, WorktreeError, apply_clear,
-    branch_worktree_path, check_free_space, create_branch, create_run, fan_out_branch_name, join,
-    plan_clear, run_branch_name, run_dir, run_worktree_path, runs_dir, short_id,
+    branch_worktree_path, check_free_space, create_branch, create_run, fan_out_branch_name,
+    is_run_worktree, join, plan_clear, run_branch_name, run_dir, run_worktree_path, runs_dir,
+    short_id,
 };
 
 const RUN_ID: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
@@ -212,6 +213,41 @@ fn branch_and_path_names() {
         branch_worktree_path(&dir, "review", 3),
         dir.join("b-review-3")
     );
+}
+
+#[test]
+fn a_recorded_worktree_off_the_run_layout_is_not_a_run_worktree() {
+    let runs = runs_dir(Path::new("/repo"), None);
+    let dir = run_dir(&runs, "add-login", RUN_ID, 2);
+    let real = RunWorktree {
+        path: run_worktree_path(&dir),
+        run_dir: dir.clone(),
+        branch: "b".into(),
+    };
+    assert!(is_run_worktree(&real, None));
+    // An unrelated worktree: its parent would be removed with it.
+    let stray = RunWorktree {
+        path: PathBuf::from("/home/me/project/src"),
+        run_dir: PathBuf::from("/home/me/project"),
+        branch: "b".into(),
+    };
+    assert!(!is_run_worktree(&stray, None));
+    // The right shape in the wrong place.
+    let elsewhere = RunWorktree {
+        path: PathBuf::from("/home/me/stuff/run"),
+        run_dir: PathBuf::from("/home/me/stuff"),
+        branch: "b".into(),
+    };
+    assert!(!is_run_worktree(&elsewhere, None));
+    // A configured runs directory.
+    let custom = Path::new("/elsewhere");
+    let moved = RunWorktree {
+        path: run_worktree_path(&run_dir(custom, "t", RUN_ID, 1)),
+        run_dir: run_dir(custom, "t", RUN_ID, 1),
+        branch: "b".into(),
+    };
+    assert!(is_run_worktree(&moved, Some(custom)));
+    assert!(!is_run_worktree(&moved, None));
 }
 
 #[gpui::test]

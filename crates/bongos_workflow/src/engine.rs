@@ -1121,6 +1121,8 @@ impl WorkflowEngine {
             }
             LiveModesRegistry::changed(cx);
             NeedsYouRegistry::changed(cx);
+            // The Runs panel and the status chip redraw on this.
+            crate::status_item::changed(cx);
         }
         outcome
     }
@@ -1132,8 +1134,12 @@ impl WorkflowEngine {
         let Some(tree) = self.writes.tree(cx) else {
             return Vec::new();
         };
+        let settings = WorkflowsSettings::get_global(cx);
         find_cleared(&tree)
             .into_iter()
+            .filter(|run| {
+                crate::worktrees::is_run_worktree(&run.worktree, settings.worktrees_dir.as_deref())
+            })
             .filter(|run| run.worktree.path.exists())
             .collect()
     }
