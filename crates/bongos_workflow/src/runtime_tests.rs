@@ -973,3 +973,45 @@ fn replay_treats_cap_reached_without_halted_as_halted_and_resumed_clears_it() {
     assert!(!state.halted);
     assert_eq!(state.cap_reached, None);
 }
+
+#[test]
+fn rerun_is_refused_over_the_cap() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.cost("a", 1.5);
+    let mut runtime = fan_in_flight(&temp, Some(1.0), runner);
+    runtime.runner_mut().release_node(&run_id(1), "a");
+    runtime.tick();
+    let key = runtime.state(&run_id(1)).unwrap().finished[0].key.clone();
+    assert_eq!(
+        runtime.rerun(&run_id(1), key).unwrap_err(),
+        RuntimeError::OverCap {
+            run: run_id(1),
+            cost: 1.5
+        }
+    );
+}
+
+#[test]
+fn a_failed_run_is_not_halted_by_a_cap_set_afterwards() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.auto_finish = true;
+    runner.cost("work", 1.0);
+    runner.script("work", json!({ "summary": "w" }));
+    runner.script("again", json!({ "summary": "a" }));
+    let mut runtime = runtime(runner);
+    let mut spec = spec(temp.path(), 1, UNBOUNDED_LOOP);
+    spec.loop_bound = 2;
+    runtime.add(spec).unwrap();
+    for _ in 0..20 {
+        runtime.tick();
+    }
+    assert_eq!(
+        runtime.state(&run_id(1)).unwrap().ended.unwrap().0,
+        EndState::Failed
+    );
+    runtime.set_limits(capped(Some(0.5)));
+    runtime.tick();
+    assert!(cap_events(&runtime).is_empty());
+}

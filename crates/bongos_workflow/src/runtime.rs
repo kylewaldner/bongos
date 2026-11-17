@@ -691,6 +691,14 @@ impl<R: Runner> Runtime<R> {
     /// ([`RunState::retry_floors`]).
     pub fn rerun(&mut self, id: &str, key: NodeKey) -> Result<(), RuntimeError> {
         let index = self.live(id)?;
+        if let Some((_, cost)) =
+            cap_crossing(&self.runs[index].state(), self.limits.run_max_cost_usd)
+        {
+            return Err(RuntimeError::OverCap {
+                run: id.to_string(),
+                cost,
+            });
+        }
         self.start(index, key);
         self.requeue(index);
         Ok(())
@@ -929,7 +937,7 @@ impl<R: Runner> Runtime<R> {
         let mut changed = false;
         for index in 0..self.runs.len() {
             let state = self.runs[index].state();
-            if state.halted || state.is_over() {
+            if state.halted || state.is_over() || state.ended.is_some() {
                 continue;
             }
             let Some((key, cost)) = cap_crossing(&state, Some(cap)) else {

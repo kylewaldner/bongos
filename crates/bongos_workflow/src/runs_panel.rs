@@ -125,6 +125,11 @@ impl RunRow {
     }
 }
 
+/// The cap reason `render_row` draws in the warning color, if the run halted on the cost cap.
+pub(crate) fn cap_label(row: &RunRow) -> Option<String> {
+    row.cap_reason.clone()
+}
+
 fn chip(outcome: &RunOutcome) -> &'static str {
     match outcome {
         RunOutcome::Pr { .. } => "pr",
@@ -401,6 +406,13 @@ impl RunsPanel {
             .child(Label::new(nodes).size(LabelSize::Small))
             .child(Label::new(format_ms(row.elapsed_ms)).size(LabelSize::Small))
             .child(Label::new(format_cost(row.cost_usd)).size(LabelSize::Small));
+        if let Some(reason) = cap_label(row) {
+            line = line.child(
+                Label::new(reason)
+                    .size(LabelSize::Small)
+                    .color(Color::Warning),
+            );
+        }
         for chip in &row.outcomes {
             line = line.child(
                 div()
