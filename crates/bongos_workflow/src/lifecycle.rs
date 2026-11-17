@@ -343,6 +343,107 @@ pub struct HaltWorktrees {
 /// clears; a run with it is never loaded.
 pub const CLEARED_FILE: &str = "cleared";
 
+/// What [`Lifecycle::clear_finished`] did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ClearOutcome {
+    /// The runs that left the lifecycle: their marker is written.
+    pub cleared: Vec<RunId>,
+    /// The runs that stay listed because their marker could not be written, with the error.
+    pub failed: Vec<(RunId, String)>,
+}
+
+/// A run directory that holds the `cleared` marker of a run that ended succeeded or was
+/// cancelled: the worktrees it left are offered for removal by `workflow: clear finished`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClearedRun {
+    pub id: RunId,
+    /// `<task dir>/runs/<id>`.
+    pub dir: PathBuf,
+    /// The worktree of the current attempt.
+    pub worktree: RunWorktree,
+    pub status: RunStatus,
+    /// When the attempt ended or was cancelled: the modification time of its event log.
+    pub finished: std::time::SystemTime,
+}
+
+/// The cleared runs under every task directory of `tree`, with the worktree of their current
+/// attempt. A directory whose record or log cannot be read, and a run that is not succeeded or
+/// cancelled, is skipped (logged): only a finished run is ever offered for removal. Reads only.
+pub fn find_cleared(tree: &WorkTree) -> Vec<ClearedRun> {
+    let mut found = Vec::new();
+    for task in tree.tasks() {
+        let runs = bongos_work_model::layout::runs_dir(&task.dir);
+        let Ok(listing) = fs::read_dir(&runs) else {
+            continue;
+        };
+        let mut dirs: Vec<PathBuf> = listing
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir() && path.join(CLEARED_FILE).exists())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            match read_cleared(&dir) {
+                Ok(Some(run)) => found.push(run),
+                Ok(None) => {}
+                Err(reason) => log::warn!(
+                    "workflows: cannot offer the worktrees of {}: {reason}",
+                    dir.display()
+                ),
+            }
+        }
+    }
+    found
+}
+
+fn read_cleared(dir: &Path) -> Result<Option<ClearedRun>, String> {
+    let text =
+        fs::read_to_string(dir.join(RUN_FILE)).map_err(|error| format!("{RUN_FILE}: {error}"))?;
+    let record = RunToml::parse(&text).map_err(|error| error.to_string())?;
+    let attempt = record
+        .current_attempt()
+        .ok_or_else(|| format!("{RUN_FILE} has no attempt"))?;
+    let events = attempt_dir(dir, attempt.n).join(crate::runtime::EVENTS_FILE);
+    let bytes = fs::read(&events).map_err(|error| format!("{}: {error}", events.display()))?;
+    let parsed =
+        bongos_workflow_model::record::parse_log(&bytes).map_err(|error| error.to_string())?;
+    let status = RunStatus::of(&bongos_workflow_model::record::replay(&parsed.events));
+    if !matches!(status, RunStatus::Succeeded | RunStatus::Cancelled) {
+        return Ok(None);
+    }
+    let finished = fs::metadata(&events)
+        .and_then(|metadata| metadata.modified())
+        // Unknown: never old enough to be offered.
+        .unwrap_or_else(|_| std::time::SystemTime::now());
+    Ok(Some(ClearedRun {
+        id: record.id.clone(),
+        dir: dir.to_path_buf(),
+        worktree: attempt_worktree(attempt),
+        status,
+        finished,
+    }))
+}
+
+fn attempt_worktree(attempt: &Attempt) -> RunWorktree {
+    let path = PathBuf::from(&attempt.worktree);
+    RunWorktree {
+        run_dir: path
+            .parent()
+            .map_or_else(|| path.clone(), Path::to_path_buf),
+        path,
+        branch: attempt.branch.clone(),
+    }
+}
+
+/// One output field of a gate's held result, for `workflow: approve` with an edit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateField {
+    pub name: String,
+    pub field_type: bongos_workflow_model::definition::FieldType,
+    /// The held value.
+    pub value: Value,
+}
+
 /// What [`Lifecycle::load_runs`] did.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct LoadReport {
@@ -824,14 +925,7 @@ impl<R: Runner> Lifecycle<R> {
             .definition_rev
             .unwrap_or(0);
         let definition = read_definition(&definition_copy_dir(&attempt_dir, rev))?;
-        let worktree_path = PathBuf::from(&attempt.worktree);
-        let worktree = RunWorktree {
-            run_dir: worktree_path
-                .parent()
-                .map_or_else(|| worktree_path.clone(), Path::to_path_buf),
-            path: worktree_path,
-            branch: attempt.branch.clone(),
-        };
+        let worktree = attempt_worktree(attempt);
         let checkout = match &task.file {
             Some(file) => TaskCheckout::from_task(task.slug.clone(), file),
             None => TaskCheckout {
@@ -858,6 +952,150 @@ impl<R: Runner> Lifecycle<R> {
             rev,
         };
         Ok(Some((entry, spec)))
+    }
+
+    /// `workflow: clear finished`, the first half: every run that ended succeeded or was
+    /// cancelled leaves the lifecycle. Its `cleared` marker is written first (and synced), then the
+    /// run is dropped from the runtime; a run whose marker cannot be written stays listed and is
+    /// reported in [`ClearOutcome::failed`]. A failed run counts as active and stays, and so does
+    /// every other active run: the status is read again here, so a run that became active again
+    /// is never cleared. A second call finds nothing to do. The caller holds the lifecycle lock,
+    /// which serializes this against a tick or a command. Nothing is written when no run is
+    /// finished.
+    pub fn clear_finished(&mut self) -> ClearOutcome {
+        let finished: Vec<RunId> = self
+            .runs
+            .iter()
+            .filter(|entry| {
+                self.status(&entry.id)
+                    .is_some_and(|status| !status.is_active())
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        let mut outcome = ClearOutcome::default();
+        for id in finished {
+            let Some(index) = self.runs.iter().position(|entry| entry.id == id) else {
+                continue;
+            };
+            if self.status(&id).is_none_or(RunStatus::is_active) {
+                continue;
+            }
+            let marker = self.runs[index].dir.join(CLEARED_FILE);
+            if let Err(error) = fs::File::create(&marker).and_then(|file| file.sync_all()) {
+                log::error!(
+                    "workflows: could not mark run {id} cleared ({}): {error}",
+                    marker.display()
+                );
+                outcome.failed.push((id, error.to_string()));
+                continue;
+            }
+            self.runtime.remove(&id);
+            self.runs.remove(index);
+            self.statuses.remove(&id);
+            outcome.cleared.push(id);
+        }
+        outcome
+    }
+
+    /// The output fields of the held result of `key`, for `workflow: approve` with an edit: the
+    /// fields its node declares that the result has, in declaration order. Empty when the node or
+    /// its result is not there.
+    pub fn gate_fields(&self, run: &str, key: &NodeKey) -> Vec<GateField> {
+        let Some(state) = self.state(run) else {
+            return Vec::new();
+        };
+        let Some(node) = self
+            .runtime
+            .definition(run)
+            .and_then(|definition| definition.node(&key.node))
+        else {
+            return Vec::new();
+        };
+        let Some(Value::Object(result)) = state
+            .last_finish(key)
+            .and_then(|finished| finished.result.clone())
+        else {
+            return Vec::new();
+        };
+        node.output
+            .iter()
+            .filter_map(|field| {
+                Some(GateField {
+                    name: field.name.clone(),
+                    field_type: field.field_type.clone(),
+                    value: result.get(&field.name)?.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// The text of `workflow: dump engine`: every loaded run with its id, status, keys in flight,
+    /// queue position and cost against the cap, then the tries in flight per kind of node.
+    pub fn dump_text(&self) -> String {
+        use std::fmt::Write as _;
+        let cap = self.runtime.limits().run_max_cost_usd;
+        let mut text = String::from("workflow engine\n");
+        let _ = writeln!(text, "runs: {}", self.runs.len());
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for entry in &self.runs {
+            let state = self.state(&entry.id);
+            let status = state
+                .as_ref()
+                .map_or("unknown", |state| RunStatus::of(state).label());
+            let cost = state.as_ref().map_or(0.0, |state| state.cost_usd);
+            let queue = match self.runtime.queue_position(&entry.id) {
+                Some(position) => format!("queue position {position}"),
+                None => "not queued".to_string(),
+            };
+            let cap_text = match cap {
+                Some(cap) => format!("cap ${cap:.2}"),
+                None => "no cap".to_string(),
+            };
+            let in_flight = self.runtime.in_flight(&entry.id);
+            let keys = if in_flight.is_empty() {
+                "none".to_string()
+            } else {
+                in_flight
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let _ = writeln!(
+                text,
+                "run {} task {} workflow {}: {status}; in flight: {keys}; {queue}; cost ${cost:.2}, {cap_text}",
+                entry.id, entry.task_id, entry.record.workflow
+            );
+            let definition = self.runtime.definition(&entry.id);
+            for key in &in_flight {
+                let kind = definition
+                    .and_then(|definition| {
+                        definition.node(&key.node).map(|node| (definition, node))
+                    })
+                    .map_or_else(
+                        || "unknown".to_string(),
+                        |(definition, node)| match node.kind.value {
+                            NodeKind::Agent => {
+                                format!("agent ({:?})", agent_of(definition, node)).to_lowercase()
+                            }
+                            NodeKind::Program => match &node.use_node {
+                                Some(name) => format!("built-in {}", name.value),
+                                None => "program".to_string(),
+                            },
+                        },
+                    );
+                *kinds.entry(kind).or_default() += 1;
+            }
+        }
+        if kinds.is_empty() {
+            text.push_str("tries in flight: none\n");
+        } else {
+            text.push_str("tries in flight by kind:\n");
+            for (kind, count) in &kinds {
+                let _ = writeln!(text, "  {kind}: {count}");
+            }
+        }
+        text
     }
 
     /// Quit: stops every process of every run (within 5 s) and records `Interrupted` with the

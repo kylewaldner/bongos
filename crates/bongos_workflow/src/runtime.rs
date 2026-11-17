@@ -497,6 +497,15 @@ impl<R: Runner> Runtime<R> {
             .map(|index| self.runs[index].events.as_slice())
     }
 
+    /// The place of run `id` among the runs waiting for a run slot (1 is next), `None` when it
+    /// does not wait for one.
+    pub fn queue_position(&self, id: &str) -> Option<usize> {
+        self.queue
+            .iter()
+            .position(|queued| queued == id)
+            .map(|index| index + 1)
+    }
+
     /// Whether run `id` is waiting for a run slot.
     pub fn is_queued(&self, id: &str) -> bool {
         self.queue.iter().any(|queued| queued == id)

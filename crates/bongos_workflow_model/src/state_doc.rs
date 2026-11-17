@@ -107,6 +107,23 @@ pub fn build(
             by_key.insert(finished.key.clone(), result.clone());
         }
     }
+    // A gate approved with an edit hands on the edited result: the last close of a gate that was
+    // approved (not sent back) sets its field in the result of that node.
+    let mut last_close: BTreeMap<&crate::record::NodeKey, &crate::record::ClosedGate> =
+        BTreeMap::new();
+    for gate in &state.closed_gates {
+        last_close.insert(&gate.key, gate);
+    }
+    for (key, gate) in last_close {
+        if gate.comment.is_some() {
+            continue;
+        }
+        if let (Some(serde_json::Value::Object(edit)), Some(serde_json::Value::Object(result))) =
+            (&gate.edit, by_key.get_mut(key))
+        {
+            result.extend(edit.clone());
+        }
+    }
     let mut by_node: BTreeMap<String, Vec<InstanceResult>> = BTreeMap::new();
     for (key, result) in by_key {
         by_node
