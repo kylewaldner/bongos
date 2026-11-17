@@ -10,10 +10,12 @@ use bongos_workflow_model::definition::{AgentKind, NodeKind as DefinitionKind};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
 use crate::dispatch_agent::AgentNodes;
+use crate::dispatch_program::ProgramNodes;
 use crate::engine::{UNWIRED_DETAIL, unwired_failure};
 use crate::lifecycle::agent_of;
 use crate::process::ProcessRecord;
 use crate::runner_claude::{AgentDefaults, ClaudeCli};
+use crate::runner_program::{Interpreter, ProgramSettings};
 use crate::runtime::{Finish, NodeStart, RunBinding, Runner};
 use bongos_workflow_model::scheduler::Branch;
 
@@ -32,6 +34,13 @@ pub struct RunnerSnapshot {
     pub mcp_exclude: Vec<String>,
     /// The environment agent processes take `PATH`, `HOME`, `LANG` and `TMPDIR` from.
     pub base_env: BTreeMap<String, String>,
+    /// The program settings (`workflows.programs.*` and the poll settings).
+    pub programs: ProgramSettings,
+    /// The Python check ([`Interpreter::find`]); `None` until the app has run it.
+    pub interpreter: Option<Result<Interpreter, Failure>>,
+    /// The hosts `@remote` stands for, by run id; a run with no entry takes them from the task
+    /// repository's push remote when its node starts.
+    pub remote_hosts: BTreeMap<String, Vec<String>>,
 }
 
 /// A shared, replaceable [`RunnerSnapshot`]: the app sets it, the runner reads a copy.
@@ -92,7 +101,6 @@ impl Kinds {
         self.agent = Slot::Wired(kind);
     }
 
-    #[allow(dead_code)] // a later step plugs the kinds in
     pub(crate) fn set_program(&mut self, kind: Box<dyn NodeKind>) {
         self.program = Slot::Wired(kind);
     }
@@ -117,13 +125,14 @@ pub struct AppRunner {
 }
 
 impl AppRunner {
-    /// A runner with the agent kind plugged in.
+    /// A runner with the agent and program kinds plugged in.
     pub fn new(inputs: RunnerInputs) -> Self {
         let mut runner = Self {
             inputs,
             ..Self::default()
         };
         runner.kinds.set_agent(Box::new(AgentNodes::default()));
+        runner.kinds.set_program(Box::new(ProgramNodes::default()));
         runner
     }
 

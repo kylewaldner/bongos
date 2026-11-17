@@ -176,7 +176,10 @@ fn system_for(binding: &RunBinding) -> Result<String, String> {
 
 /// Where `key` runs: the run worktree, or for a key inside a fan-out its branch worktree, which
 /// is created from the run branch when it does not exist yet.
-fn node_worktree(key: &NodeKey, binding: &RunBinding) -> Result<std::path::PathBuf, String> {
+pub(crate) fn node_worktree(
+    key: &NodeKey,
+    binding: &RunBinding,
+) -> Result<std::path::PathBuf, String> {
     let Some((fan, index)) = key.branch.last() else {
         return Ok(binding.worktree.path.clone());
     };

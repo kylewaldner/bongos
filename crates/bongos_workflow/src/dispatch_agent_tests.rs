@@ -116,6 +116,7 @@ fn world() -> World {
         )]),
         mcp_exclude: Vec::new(),
         base_env: env(root.path()),
+        ..RunnerSnapshot::default()
     };
     World {
         root,
