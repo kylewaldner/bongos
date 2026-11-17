@@ -315,7 +315,7 @@ impl LiveRun {
 }
 
 /// Why a runtime command was refused.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
     #[error("no run {0} is loaded")]
     UnknownRun(String),
@@ -325,6 +325,10 @@ pub enum RuntimeError {
     Duplicate(String),
     #[error("{0}")]
     Io(String),
+    #[error(
+        "run {run} is over its cost cap: raise workflows.run_max_cost_usd above ${cost:.2} first"
+    )]
+    OverCap { run: String, cost: f64 },
 }
 
 impl RuntimeError {
@@ -605,6 +609,7 @@ impl<R: Runner> Runtime<R> {
             return false;
         }
         let mut changed = self.take_finishes();
+        changed |= self.check_caps();
         for _ in 0..MAX_ROUNDS {
             let woken = self.wake_parked();
             let admitted = self.admit_queued();
@@ -659,6 +664,14 @@ impl<R: Runner> Runtime<R> {
     pub fn resume(&mut self, id: &str) -> Result<Vec<NodeKey>, RuntimeError> {
         let index = self.live(id)?;
         let state = self.runs[index].state();
+        // The cap is whatever the limits say now (`set_limits` follows the settings), never a
+        // value kept from when the run halted.
+        if let Some((_, cost)) = cap_crossing(&state, self.limits.run_max_cost_usd) {
+            return Err(RuntimeError::OverCap {
+                run: id.to_string(),
+                cost,
+            });
+        }
         if state.paused || state.halted || !state.held.is_empty() {
             self.runs[index].append(Event::Resumed);
         }
@@ -678,6 +691,14 @@ impl<R: Runner> Runtime<R> {
     /// ([`RunState::retry_floors`]).
     pub fn rerun(&mut self, id: &str, key: NodeKey) -> Result<(), RuntimeError> {
         let index = self.live(id)?;
+        if let Some((_, cost)) =
+            cap_crossing(&self.runs[index].state(), self.limits.run_max_cost_usd)
+        {
+            return Err(RuntimeError::OverCap {
+                run: id.to_string(),
+                cost,
+            });
+        }
         self.start(index, key);
         self.requeue(index);
         Ok(())
@@ -906,6 +927,36 @@ impl<R: Runner> Runtime<R> {
         changed
     }
 
+    /// Halts each run whose finished tries cost at or above the cap: stops its tries, appends
+    /// `CapReached` (naming the key whose finish crossed it) and then `Halted`. Runs after every
+    /// finish of the tick is appended, so a run halts once however many tries ended together.
+    fn check_caps(&mut self) -> bool {
+        let Some(cap) = self.limits.run_max_cost_usd else {
+            return false;
+        };
+        let mut changed = false;
+        for index in 0..self.runs.len() {
+            let state = self.runs[index].state();
+            if state.halted || state.is_over() || state.ended.is_some() {
+                continue;
+            }
+            let Some((key, cost)) = cap_crossing(&state, Some(cap)) else {
+                continue;
+            };
+            self.stop_in_flight(&[index]);
+            let run = &mut self.runs[index];
+            run.append(Event::CapReached {
+                cap_usd: cap,
+                cost_usd: cost,
+                key,
+            });
+            run.append(Event::Halted);
+            self.hold(index);
+            changed = true;
+        }
+        changed
+    }
+
     /// Moves queued runs to executing, oldest first, while run slots are free, and appends
     /// `Queued` to each run left waiting that does not have it yet.
     fn admit_queued(&mut self) -> bool {
@@ -1123,13 +1174,17 @@ impl<R: Runner> Runtime<R> {
             }
             None => {
                 let state = run.state();
+                let budget_left_usd = self
+                    .limits
+                    .run_max_cost_usd
+                    .map(|cap| (cap - state.cost_usd).max(0.0));
                 self.runner.start_node(NodeStart {
                     run: &run.id,
                     definition: &run.definition,
                     key: &key,
                     try_number,
                     state: &state,
-                    budget_left_usd: None,
+                    budget_left_usd,
                     binding: run.binding.as_ref(),
                 })
             }
@@ -1203,6 +1258,23 @@ impl<R: Runner> Runtime<R> {
             });
         }
     }
+}
+
+/// The key whose finish took the run's cost to `cap` or past it, with the cost then; `None` with
+/// no cap, no finished try, or a cost under the cap.
+fn cap_crossing(state: &RunState, cap: Option<f64>) -> Option<(NodeKey, f64)> {
+    let cap = cap?;
+    if state.cost_usd < cap {
+        return None;
+    }
+    let mut cost = 0.0;
+    for finished in &state.finished {
+        cost += finished.cost_usd;
+        if cost >= cap {
+            return Some((finished.key.clone(), state.cost_usd));
+        }
+    }
+    None
 }
 
 fn process_record(running: &RunningNode) -> ProcessRecord {

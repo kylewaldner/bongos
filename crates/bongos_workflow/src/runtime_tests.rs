@@ -7,14 +7,14 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use bongos_workflow_model::record::{EndState, Lifecycle};
-use bongos_workflow_model::{Definition, Event, FailureReason, Limits, NodeKey, parse};
+use bongos_workflow_model::record::{CapReached, EndState, Lifecycle};
+use bongos_workflow_model::{Definition, Event, FailureReason, Limits, NodeKey, parse, replay};
 use serde_json::json;
 use tempfile::TempDir;
 
 use crate::process::{self, NodeProcess, OrphanOutcome, ProcessRecord, STOP_GRACE};
 use crate::runtime::fake::FakeRunner;
-use crate::runtime::{EVENTS_FILE, RunSpec, Runtime};
+use crate::runtime::{EVENTS_FILE, RunSpec, Runtime, RuntimeError};
 
 const SINGLE: &str = r#"
 schema = 1
@@ -800,4 +800,218 @@ fn a_loaded_attempt_keeps_its_recorded_loop_bound() {
     assert_eq!(end, EndState::Failed);
     assert_eq!(failure.unwrap().reason, FailureReason::LoopBoundReached);
     assert_eq!(state.passes.get("work"), Some(&2));
+}
+
+fn capped(cap: Option<f64>) -> Limits {
+    Limits {
+        run_max_cost_usd: cap,
+        ..Limits::default()
+    }
+}
+
+/// A fan run with `a`, `b` and `c` all in flight, under `cap`.
+fn fan_in_flight(temp: &TempDir, cap: Option<f64>, runner: FakeRunner) -> Runtime<FakeRunner> {
+    let mut runtime = Runtime::new(capped(cap), runner);
+    runtime.add(spec(temp.path(), 1, FAN)).unwrap();
+    runtime.tick();
+    runtime.runner_mut().release_all();
+    runtime.tick();
+    assert_eq!(runtime.runner().in_flight().len(), 3);
+    runtime
+}
+
+fn cap_events(runtime: &Runtime<FakeRunner>) -> Vec<Event> {
+    runtime
+        .events(&run_id(1))
+        .unwrap()
+        .iter()
+        .filter(|event| matches!(event, Event::CapReached { .. } | Event::Halted))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_run_crossing_the_cost_cap_halts_naming_the_node_and_stops_its_sibling() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.cost("split", 0.25).cost("a", 1.5);
+    let mut runtime = fan_in_flight(&temp, Some(1.0), runner);
+    // The branches started with what the cap leaves after the split.
+    assert_eq!(runtime.runner().budgets[1..], [Some(0.75); 3]);
+
+    runtime.runner_mut().release_node(&run_id(1), "a");
+    runtime.tick();
+    let state = runtime.state(&run_id(1)).unwrap();
+    assert_eq!(lifecycle(&runtime, 1), Lifecycle::Halted);
+    let reached = state.cap_reached.clone().unwrap();
+    assert_eq!(reached.key.node, "a");
+    assert_eq!(reached.reason(), "cost cap of $1.00 reached at node a");
+    assert_eq!(reached.cost_usd, 1.75);
+    // The siblings were stopped, and stay recorded as running for a resume.
+    assert!(runtime.runner().in_flight().is_empty());
+    assert_eq!(runtime.runner().stopped.len(), 2);
+    assert_eq!(state.running.len(), 2);
+    assert!(runtime.in_flight(&run_id(1)).is_empty());
+    assert!(!runtime.tick());
+}
+
+#[test]
+fn resume_is_refused_over_the_cap_until_it_is_raised_then_the_run_finishes() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.cost("a", 1.5);
+    let mut runtime = fan_in_flight(&temp, Some(1.0), runner);
+    runtime.runner_mut().release_node(&run_id(1), "a");
+    runtime.tick();
+
+    let refused = runtime.resume(&run_id(1)).unwrap_err();
+    assert_eq!(
+        refused,
+        RuntimeError::OverCap {
+            run: run_id(1),
+            cost: 1.5
+        }
+    );
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "run {} is over its cost cap: raise workflows.run_max_cost_usd above $1.50 first",
+            run_id(1)
+        )
+    );
+    assert_eq!(lifecycle(&runtime, 1), Lifecycle::Halted);
+
+    // Raising it to exactly the cost is still over it.
+    runtime.set_limits(capped(Some(1.5)));
+    assert!(runtime.resume(&run_id(1)).is_err());
+
+    runtime.set_limits(capped(Some(5.0)));
+    let keys = runtime.resume(&run_id(1)).unwrap();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(runtime.state(&run_id(1)).unwrap().cap_reached, None);
+    runtime.runner_mut().auto_finish = true;
+    for _ in 0..10 {
+        runtime.tick();
+    }
+    assert_eq!(
+        lifecycle(&runtime, 1),
+        Lifecycle::Ended(EndState::Succeeded)
+    );
+}
+
+#[test]
+fn no_cap_means_no_limit() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.auto_finish = true;
+    runner.cost("work", 1_000_000.0);
+    let mut runtime = runtime(runner);
+    runtime.add(spec(temp.path(), 1, SINGLE)).unwrap();
+    for _ in 0..5 {
+        runtime.tick();
+    }
+    assert_eq!(
+        lifecycle(&runtime, 1),
+        Lifecycle::Ended(EndState::Succeeded)
+    );
+    assert_eq!(runtime.runner().budgets, [None]);
+    assert_eq!(runtime.state(&run_id(1)).unwrap().cap_reached, None);
+}
+
+#[test]
+fn a_run_with_no_finished_try_is_never_halted_by_the_cap() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = Runtime::new(capped(Some(0.0)), FakeRunner::new());
+    runtime.add(spec(temp.path(), 1, SINGLE)).unwrap();
+    runtime.tick();
+    assert_eq!(lifecycle(&runtime, 1), Lifecycle::Running);
+    assert!(cap_events(&runtime).is_empty());
+}
+
+#[test]
+fn two_tries_finishing_in_one_tick_halt_the_run_once() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.cost("a", 0.75).cost("b", 0.75);
+    let mut runtime = fan_in_flight(&temp, Some(1.0), runner);
+    runtime.runner_mut().release_node(&run_id(1), "a");
+    runtime.runner_mut().release_node(&run_id(1), "b");
+    runtime.tick();
+    let events = cap_events(&runtime);
+    assert_eq!(events.len(), 2);
+    assert!(matches!(&events[0], Event::CapReached { key, cost_usd, .. }
+        if key.node == "b" && *cost_usd == 1.5));
+    assert_eq!(events[1], Event::Halted);
+    runtime.tick();
+    assert_eq!(cap_events(&runtime).len(), 2);
+}
+
+#[test]
+fn replay_treats_cap_reached_without_halted_as_halted_and_resumed_clears_it() {
+    let reached = Event::CapReached {
+        cap_usd: 5.0,
+        cost_usd: 5.12,
+        key: key("implement"),
+    };
+    let mut events = vec![Event::Created, reached];
+    let state = replay(&events);
+    assert_eq!(state.lifecycle(), Lifecycle::Halted);
+    assert_eq!(
+        state.cap_reached,
+        Some(CapReached {
+            cap_usd: 5.0,
+            cost_usd: 5.12,
+            key: key("implement"),
+        })
+    );
+    assert_eq!(
+        state.cap_reached.unwrap().reason(),
+        "cost cap of $5.00 reached at node implement"
+    );
+    events.push(Event::Resumed);
+    let state = replay(&events);
+    assert!(!state.halted);
+    assert_eq!(state.cap_reached, None);
+}
+
+#[test]
+fn rerun_is_refused_over_the_cap() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.cost("a", 1.5);
+    let mut runtime = fan_in_flight(&temp, Some(1.0), runner);
+    runtime.runner_mut().release_node(&run_id(1), "a");
+    runtime.tick();
+    let key = runtime.state(&run_id(1)).unwrap().finished[0].key.clone();
+    assert_eq!(
+        runtime.rerun(&run_id(1), key).unwrap_err(),
+        RuntimeError::OverCap {
+            run: run_id(1),
+            cost: 1.5
+        }
+    );
+}
+
+#[test]
+fn a_failed_run_is_not_halted_by_a_cap_set_afterwards() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.auto_finish = true;
+    runner.cost("work", 1.0);
+    runner.script("work", json!({ "summary": "w" }));
+    runner.script("again", json!({ "summary": "a" }));
+    let mut runtime = runtime(runner);
+    let mut spec = spec(temp.path(), 1, UNBOUNDED_LOOP);
+    spec.loop_bound = 2;
+    runtime.add(spec).unwrap();
+    for _ in 0..20 {
+        runtime.tick();
+    }
+    assert_eq!(
+        runtime.state(&run_id(1)).unwrap().ended.unwrap().0,
+        EndState::Failed
+    );
+    runtime.set_limits(capped(Some(0.5)));
+    runtime.tick();
+    assert!(cap_events(&runtime).is_empty());
 }
