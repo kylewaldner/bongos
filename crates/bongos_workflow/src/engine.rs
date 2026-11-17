@@ -1252,7 +1252,7 @@ impl WorkflowEngine {
     /// success ends promised could not be delivered; an outcome nobody promised that fails is
     /// logged and skipped.
     async fn deliver_all(&self, context: &SettleContext, cx: &mut AsyncApp) -> Option<Failure> {
-        let limits = cx.update(|_| *self.lifecycle().runtime().limits());
+        let limits = cx.update(|_| self.lifecycle().runtime().run_limits(&context.run));
         let promised = outcomes::promised(&context.definition, &context.state, &limits);
         let mut delivered: Vec<Outcome> = Vec::new();
         let mut first_failure: Option<(Reported, String)> = None;

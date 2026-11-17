@@ -1102,3 +1102,98 @@ kind = "success"
         .collect();
     assert_eq!(started, ["check"]);
 }
+
+fn unbounded_loop() -> String {
+    LOOP.replace(", max_passes = 3", "")
+}
+
+fn with_loop_bound(text: &str, loop_bound: u32) -> FakeRunner {
+    FakeRunner::new(
+        definition(text),
+        Limits {
+            loop_bound,
+            ..Limits::default()
+        },
+    )
+}
+
+#[test]
+fn a_loop_without_max_passes_fails_after_the_loop_bound() {
+    let mut run = with_loop_bound(&unbounded_loop(), 2);
+    run.script("test", [ok(json!({ "status": "fail" }))])
+        .script("fix", [ok(json!({ "summary": "tried" }))]);
+    let state = run.run();
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert!(
+        failure.detail.contains("bound of 2 passes"),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(run.starts_of("test"), 2);
+    assert_eq!(run.starts_of("fix"), 2);
+}
+
+#[test]
+fn an_explicit_max_passes_wins_over_the_loop_bound() {
+    let mut run = with_loop_bound(LOOP, 10);
+    run.script("test", [ok(json!({ "status": "fail" }))])
+        .script("fix", [ok(json!({ "summary": "tried" }))]);
+    let failure = failure_of(&run.run());
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert!(
+        failure.detail.contains("bound of 3 passes"),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(run.starts_of("fix"), 3);
+}
+
+const CROSS_EDGE: &str = r#"
+schema = 1
+name = "cross"
+start = "a"
+
+[nodes.a]
+kind = "program"
+output = { status = { type = "choice", values = ["pass", "b", "d"] } }
+routes = [
+  { when = { status = "pass" }, to = "done" },
+  { when = { status = "b" }, to = "b", max_passes = 3 },
+  { when = { status = "d" }, to = "d" },
+]
+
+[nodes.b]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "c" }]
+
+[nodes.c]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "a" }]
+
+[nodes.d]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "c" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+#[test]
+fn a_cycle_reached_by_a_cross_edge_is_bounded_by_the_loop_bound() {
+    let mut run = with_loop_bound(CROSS_EDGE, 2);
+    run.script("a", [ok(json!({ "status": "d" }))])
+        .script("d", [ok(json!({ "summary": "tried" }))])
+        .script("c", [ok(json!({ "summary": "tried" }))]);
+    let failure = failure_of(&run.run());
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert!(
+        failure.detail.contains("bound of 2 passes"),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(run.starts_of("a"), 2);
+}

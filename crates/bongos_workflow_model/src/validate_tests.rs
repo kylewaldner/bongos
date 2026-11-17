@@ -1177,3 +1177,30 @@ fn checks_items_from_must_name_an_earlier_node() {
         "`with.items_from` names 'report', which does not run before 'check'",
     );
 }
+
+#[test]
+fn a_loop_bound_stands_in_for_max_passes_on_a_cycle() {
+    let text = mutate(
+        r#"to = "fix", max_passes = 3, on_bound = "stuck""#,
+        r#"to = "fix""#,
+    );
+    let definition = parse(&text).unwrap();
+    let bounded = ValidationContext {
+        loop_bound: Some(5),
+        ..context()
+    };
+    let diagnostics = validate(&definition, &bounded);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("cycle with no bounded edge")),
+        "{diagnostics:?}"
+    );
+    let unset = validate(&definition, &context());
+    assert!(
+        unset
+            .iter()
+            .any(|d| d.message.contains("cycle with no bounded edge")),
+        "{unset:?}"
+    );
+}

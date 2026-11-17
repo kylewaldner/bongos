@@ -787,7 +787,7 @@ impl<R: Runner> Lifecycle<R> {
             .definition(run)
             .cloned()
             .ok_or_else(|| unknown_run(run))?;
-        let failed = retry_set(&definition, &state, self.runtime.limits());
+        let failed = retry_set(&definition, &state, &self.runtime.run_limits(run));
         let key = match node {
             Some(key) if failed.contains(&key) => key,
             Some(key) => {
@@ -853,6 +853,7 @@ impl<R: Runner> Lifecycle<R> {
         let checkout = self.runs[index].task.clone();
         let worktree = self.create_worktree(&checkout, run, attempt)?;
         let old_definition = self.runtime.definition(run).cloned();
+        let old_loop_bound = self.runtime.run_limits(run).loop_bound;
         let old_attempt_dir = self.runs[index].attempt_dir();
         if status.is_active() {
             self.runtime.cancel(run).map_err(Refusal::runtime)?;
@@ -884,6 +885,7 @@ impl<R: Runner> Lifecycle<R> {
                         id: run.to_string(),
                         definition,
                         attempt_dir: old_attempt_dir,
+                        loop_bound: old_loop_bound,
                     })
                     .ok();
                 self.runtime.bind(run, entry.binding());
@@ -1042,6 +1044,7 @@ impl<R: Runner> Lifecycle<R> {
         definition_commit: Option<String>,
     ) -> Result<(), Refusal> {
         let attempt_dir = attempt_dir(&entry.dir, n);
+        let loop_bound = self.settings.limits.loop_bound;
         let copy = definition_copy_dir(&attempt_dir, 0);
         copy_dir(source, &copy).map_err(Refusal::io)?;
         entry.record.attempts.push(Attempt {
@@ -1051,6 +1054,7 @@ impl<R: Runner> Lifecycle<R> {
             definition_commit,
             worktree: entry.worktree.path.to_string_lossy().into_owned(),
             branch: entry.worktree.branch.clone(),
+            loop_bound: Some(loop_bound),
         });
         entry.rev = 0;
         write_record(&entry.dir, &entry.record).map_err(Refusal::io)?;
@@ -1059,6 +1063,7 @@ impl<R: Runner> Lifecycle<R> {
                 id: entry.id.clone(),
                 definition,
                 attempt_dir,
+                loop_bound,
             })
             .map_err(Refusal::runtime)?;
         self.runtime.bind(&entry.id, entry.binding());

@@ -159,6 +159,7 @@ fn spec(root: &std::path::Path, n: u32, text: &str) -> RunSpec {
         id: run_id(n),
         definition: definition(text),
         attempt_dir: root.join(format!("runs/{}/attempts/1", run_id(n))),
+        loop_bound: 5,
     }
 }
 

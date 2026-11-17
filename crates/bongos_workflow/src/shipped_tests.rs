@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use bongos_workflow_model::definition::{Definition, parse};
+use bongos_workflow_model::definition::{Definition, Target, parse};
 use bongos_workflow_model::fake::{FakeRunner, Scripted};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{EndState, RunState};
@@ -65,6 +65,68 @@ fn shipped_dir_on_disk() -> (TempDir, LayerDirs) {
         ..LayerDirs::default()
     };
     (temp, dirs)
+}
+
+/// Depth-first from the start node: every route that closes a cycle (its target is on the
+/// current path) and sets no `max_passes`.
+fn unbounded_back_edges(definition: &Definition) -> Vec<String> {
+    fn visit<'d>(
+        definition: &'d Definition,
+        name: &'d str,
+        visited: &mut BTreeSet<&'d str>,
+        stack: &mut Vec<&'d str>,
+        out: &mut Vec<String>,
+    ) {
+        if !visited.insert(name) {
+            return;
+        }
+        let Some(node) = definition.node(name) else {
+            return;
+        };
+        for route in &node.routes {
+            let mut targets: Vec<&str> = match &route.to {
+                Some(Target::One(to)) => vec![to.as_str()],
+                Some(Target::Many(many)) => many.iter().map(String::as_str).collect(),
+                None => Vec::new(),
+            };
+            if let Some(fan_out) = &route.fan_out {
+                targets.push(fan_out.to.as_str());
+            }
+            for to in targets {
+                if stack.contains(&to) {
+                    if route.max_passes.is_none() {
+                        out.push(format!("{name} -> {to}"));
+                    }
+                } else {
+                    stack.push(to);
+                    visit(definition, to, visited, stack, out);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let start = definition.start.value.as_str();
+    visit(
+        definition,
+        start,
+        &mut BTreeSet::new(),
+        &mut vec![start],
+        &mut out,
+    );
+    out
+}
+
+#[test]
+fn every_shipped_back_edge_sets_its_own_max_passes() {
+    for shipped in TEMPLATES {
+        let loose = unbounded_back_edges(&definition(shipped.dir));
+        assert!(
+            loose.is_empty(),
+            "{} has back edges without max_passes: {loose:?}",
+            shipped.dir
+        );
+    }
 }
 
 #[test]

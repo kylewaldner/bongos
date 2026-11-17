@@ -134,6 +134,7 @@ fn spec(root: &Path, n: u32, text: &str) -> RunSpec {
         id: run_id(n),
         definition: definition(text),
         attempt_dir: root.join(format!("runs/{}/attempts/1", run_id(n))),
+        loop_bound: 5,
     }
 }
 
@@ -754,4 +755,49 @@ fn checks_without_a_verdict_in_two_branches_hold_the_run_one_at_a_time() {
         .map(|(_, key)| key.node.as_str())
         .collect();
     assert_eq!(started, ["split", "lint", "test", "lint", "test", "gather"]);
+}
+
+const UNBOUNDED_LOOP: &str = r#"
+schema = 1
+name = "loop"
+start = "work"
+
+[nodes.work]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "again" }]
+
+[nodes.again]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "work" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+#[test]
+fn a_loaded_attempt_keeps_its_recorded_loop_bound() {
+    let temp = TempDir::new().unwrap();
+    let mut runner = FakeRunner::new();
+    runner.auto_finish = true;
+    runner.script("work", json!({ "summary": "w" }));
+    runner.script("again", json!({ "summary": "a" }));
+    let mut runtime = runtime(runner);
+    // The settings now say 9; the attempt recorded 2.
+    runtime.set_limits(Limits {
+        loop_bound: 9,
+        ..Limits::default()
+    });
+    let mut spec = spec(temp.path(), 1, UNBOUNDED_LOOP);
+    spec.loop_bound = 2;
+    runtime.add(spec).unwrap();
+    for _ in 0..20 {
+        runtime.tick();
+    }
+    let state = runtime.state(&run_id(1)).unwrap();
+    let (end, failure) = state.ended.unwrap();
+    assert_eq!(end, EndState::Failed);
+    assert_eq!(failure.unwrap().reason, FailureReason::LoopBoundReached);
+    assert_eq!(state.passes.get("work"), Some(&2));
 }
