@@ -34,7 +34,14 @@ fn definition(dir: &str) -> Definition {
 }
 
 fn runner(dir: &str) -> FakeRunner {
-    FakeRunner::new(definition(dir), Limits::default())
+    // The fix loops put their own `max_passes` on the forward route into `fix`, and the back
+    // edge into the check has none, so `loop_bound` bounds it too. Set it above the largest
+    // `max_passes` so the routes' own bounds are what these tests reach.
+    let limits = Limits {
+        loop_bound: 50,
+        ..Limits::default()
+    };
+    FakeRunner::new(definition(dir), limits)
 }
 
 fn ok(value: Value) -> Scripted {
