@@ -679,12 +679,14 @@ keep the meaning they have there, and where M-1 to M-9 switch tabs (outside edit
 - **Digits** after C-u, or M-0 to M-9 from the start, build the number: C-u 1 0 and M-1 0 are 10.
   A C-u typed after digits ends the number, so C-u 3 C-u 7 is a 7 typed with the count 3, which
   inserts 777; a digit typed with no argument pending is only a digit.
-- **Minus** makes the count negative: M-- is -1 and C-u - is -4 (Emacs reads C-u - as -1). Most
-  commands run the opposite way with a negative count; C-u - M-f goes four words back, M-- C-f
-  one character back. The minus is only taken before the digits.
-- **The echo.** While an argument is pending the echo area shows it: `C-u 4`, `C-u 10`, `C-u -`.
-  It goes when the next command takes the argument. The argument belongs to the editor it was
-  started in: moving focus to a picker or the minibuffer drops it.
+- **Minus** makes the count negative, as in Emacs: M-- and C-u - are -1, and digits after a minus
+  give their negative (C-u - 2 is -2). C-u after a minus multiplies by four: C-u - C-u is -4,
+  C-u - C-u C-u is -16. A second minus cancels the argument, and a minus after digits is a typed
+  character. Most commands run the opposite way with a negative count; C-u - M-f goes one word
+  back, C-u - 2 M-f two, C-u - C-u M-f four, M-- C-f one character back.
+- **The echo.** While an argument is pending the echo area shows it: `C-u 4`, `C-u 10`, `C-u -`,
+  `C-u (-4)`. It goes when the next command takes the argument. The argument belongs to the editor
+  it was started in: moving focus to a picker or the minibuffer drops it.
 - **C-g** cancels a pending argument and its echo, so C-u 7 C-g changes nothing and the next
   key is typed as usual. C-g also stops a long repeat after the repeat in progress, keeping what
   was done.

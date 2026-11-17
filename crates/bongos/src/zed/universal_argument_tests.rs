@@ -149,10 +149,55 @@ async fn the_argument_moves_forward_char_by_four_or_by_the_count_and_a_negative_
     cx.simulate_keystrokes("alt-- ctrl-f");
     cx.assert_editor_state("abcˇdefghij");
 
-    // A minus after C-u makes the argument -4 (the model's choice; Emacs reads it as -1).
+    // A minus after C-u is the argument -1, as in Emacs: one character back.
     cx.set_state("abcdˇefghij");
     cx.simulate_keystrokes("ctrl-u - ctrl-f");
-    cx.assert_editor_state("ˇabcdefghij");
+    cx.assert_editor_state("abcˇdefghij");
+}
+
+/// Forty characters with the caret before the character at `caret`.
+fn forty(caret: usize) -> String {
+    let text = "0123456789".repeat(4);
+    format!("{}ˇ{}", &text[..caret], &text[caret..])
+}
+
+#[gpui::test]
+async fn the_negative_key_table_holds(cx: &mut TestAppContext) {
+    let mut cx = editor_with(cx, &forty(20)).await;
+    // Each row types the keys and then C-f from the middle of the line; the caret moves by the
+    // argument, and by one forward when no argument is left.
+    let rows: [(&str, i32); 16] = [
+        ("ctrl-u -", -1),
+        ("ctrl-u - 5", -5),
+        ("ctrl-u - 2", -2),
+        ("alt--", -1),
+        ("alt-- 5", -5),
+        ("ctrl-u - ctrl-u", -4),
+        ("alt-- ctrl-u", -4),
+        ("ctrl-u - ctrl-u ctrl-u", -16),
+        ("ctrl-u ctrl-u -", -1),
+        ("ctrl-u - -", 1),
+        ("alt-- alt--", 1),
+        ("ctrl-u - 0", -1),
+        ("ctrl-u - 0 3", -3),
+        ("ctrl-u - ctrl-u 5", 5),
+        ("alt-- alt-- alt--", -1),
+        ("ctrl-u 3 ctrl-u alt--", -3),
+    ];
+    for (typed, delta) in rows {
+        cx.set_state(&forty(20));
+        cx.simulate_keystrokes(&format!("{typed} ctrl-f"));
+        cx.assert_editor_state(&forty((20 + delta) as usize));
+        assert!(!argument_pending(&mut cx), "{typed}");
+    }
+    // A minus after digits is a typed character, inserted as many times as the argument says.
+    cx.set_state("ˇ");
+    cx.simulate_keystrokes("ctrl-u 5 -");
+    cx.assert_editor_state("-----ˇ");
+    // The digits after a bare minus and a zero are negative.
+    cx.set_state(&forty(20));
+    cx.simulate_keystrokes("ctrl-u - 0 0 4 ctrl-f");
+    cx.assert_editor_state(&forty(16));
 }
 
 #[gpui::test]
@@ -209,10 +254,10 @@ async fn forward_word_goes_sixteen_words_with_two_universal_arguments_and_back_w
     cx.simulate_keystrokes("alt-- alt-f");
     cx.assert_editor_state("a b ˇc d");
 
-    // A minus after C-u makes the argument -4: four words back.
+    // A minus after C-u is the argument -1, as in Emacs: one word back.
     cx.set_state("a b c dˇ e");
     cx.simulate_keystrokes("ctrl-u - alt-f");
-    cx.assert_editor_state("ˇa b c d e");
+    cx.assert_editor_state("a b c ˇd e");
 }
 
 #[gpui::test]

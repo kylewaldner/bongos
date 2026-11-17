@@ -140,7 +140,7 @@ pub fn take(window: &mut Window, cx: &mut App) -> Option<PrefixArg> {
     if taken.is_some() {
         show_echo(window, cx, None);
     }
-    taken
+    taken.filter(PrefixArg::has_value)
 }
 
 fn show_echo(window: &mut Window, cx: &mut App, text: Option<String>) {
@@ -267,7 +267,7 @@ pub(crate) fn show_limited(window: &mut Window, cx: &mut App) {
 pub(crate) fn clear_limited(window: &mut Window, cx: &mut App) {
     let id = window_id(window);
     let shown = cx.has_global::<Limited>() && cx.global_mut::<Limited>().0.remove(&id);
-    if shown && pending(window, cx).is_none() {
+    if shown && pending(window, cx).is_none_or(|arg| !arg.has_value()) {
         show_echo(window, cx, None);
     }
 }
@@ -289,7 +289,7 @@ pub(crate) fn start(arg: PrefixArg, editor: &Entity<Editor>, window: &mut Window
     if cx.has_global::<Limited>() {
         cx.global_mut::<Limited>().0.remove(&window_id(window));
     }
-    show_echo(window, cx, Some(arg.echo()));
+    show_echo(window, cx, arg.has_value().then(|| arg.echo()));
     let args = cx.default_global::<PrefixArgs>();
     let generation = args
         .0
@@ -330,5 +330,10 @@ pub(crate) fn press(
             arg
         }
     };
+    // A C-u on an argument with no value ends it: Emacs leaves no argument and spends the key.
+    if !arg.has_value() && !arg.accepts_digits() {
+        cancel(window, cx);
+        return;
+    }
     start(arg, editor, window, cx);
 }

@@ -42,6 +42,7 @@ pub(crate) fn negative_argument_command(
     cx: &mut App,
 ) {
     prefix_arg::press(editor, window, cx, PrefixArg::negative, |arg| {
-        arg.press_minus()
+        arg.negative_argument();
+        true
     });
 }
