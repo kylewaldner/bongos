@@ -854,6 +854,66 @@ fn retry_fresh_refuses_a_definition_that_drops_a_completed_node() {
 }
 
 #[test]
+fn retry_fresh_replaces_a_stray_next_revision_directory() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("work", 1);
+    let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    // A crash after the copy and before `DefinitionReloaded` left this behind.
+    let attempt = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1);
+    let stray = definition_copy_dir(&attempt, 1);
+    fs::create_dir_all(&stray).unwrap();
+    fs::write(stray.join("leftover.md"), "stale\n").unwrap();
+
+    write_definition(world.profile(), "two", TWO);
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    assert!(!stray.join("leftover.md").exists());
+    assert!(stray.join(DEFINITION_FILE).is_file());
+    let events = lifecycle.runtime().events(&run).unwrap();
+    assert!(events.contains(&Event::DefinitionReloaded { rev: 1 }));
+}
+
+#[test]
+fn retry_fresh_never_removes_a_referenced_revision_directory() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("work", 2);
+    let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    write_definition(world.profile(), "two", TWO);
+    fs::write(world.profile().join("two").join("work.md"), "Second\n").unwrap();
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    fs::write(world.profile().join("two").join("work.md"), "Third\n").unwrap();
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    let attempt = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1);
+    assert_eq!(
+        fs::read_to_string(definition_copy_dir(&attempt, 1).join("work.md")).unwrap(),
+        "Second\n"
+    );
+    assert_eq!(
+        fs::read_to_string(definition_copy_dir(&attempt, 2).join("work.md")).unwrap(),
+        "Third\n"
+    );
+}
+
+#[test]
 fn revise_reruns_the_node_with_the_comment_and_approve_routes_on() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();
@@ -1548,6 +1608,29 @@ fn load_runs_skips_a_damaged_log_and_loads_the_rest() {
     assert_eq!(report.skipped.len(), 1, "{report:?}");
     assert!(report.skipped[0].0.ends_with(&damaged));
     assert!(lifecycle.state(&damaged).is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn load_runs_skips_a_log_that_cannot_be_opened_and_loads_the_rest() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    let locked = seed(&world, "single", mid_node);
+    let good = seed(&world, "single", mid_node);
+    let path = events_of(&world, &locked);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    // Root ignores the mode and opens it anyway; the check below only holds for others.
+    let writable = fs::OpenOptions::new().append(true).open(&path).is_ok();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    if writable {
+        return;
+    }
+    assert_eq!(report.loaded, vec![good]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(lifecycle.state(&locked).is_none());
 }
 
 #[test]

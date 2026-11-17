@@ -535,8 +535,9 @@ impl<R: Runner> Runtime<R> {
 
     /// Loads a run after a relaunch; [`Runtime::load_all`] with one run.
     pub fn load(&mut self, spec: RunSpec) -> Result<Vec<(NodeKey, OrphanOutcome)>, RuntimeError> {
-        let mut orphans = self.load_all(vec![spec])?;
-        Ok(orphans.pop().unwrap_or_default())
+        self.load_all(vec![spec])?
+            .pop()
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
     /// Loads runs after a relaunch. First every process the logs record as running (or
@@ -545,18 +546,31 @@ impl<R: Runner> Runtime<R> {
     /// a different process and is left alone. Then a run with a started key and no finish is
     /// marked interrupted with every such key. An interrupted, halted, ended or cancelled run gets
     /// no command until Kyle acts; any other run (queued, at a gate, with a sleeping poll) waits
-    /// for a run slot like a new one. Nothing starts here. A duplicate id or a log that cannot be
-    /// opened loads none of them. Returns each run's orphan outcomes, in `specs` order.
+    /// for a run slot like a new one. Nothing starts here. A duplicate id loads none of them. A log
+    /// that cannot be opened is logged and skips only that run. Returns one entry per spec, in
+    /// `specs` order: the run's orphan outcomes, or the error that kept it from loading.
     pub fn load_all(
         &mut self,
         specs: Vec<RunSpec>,
-    ) -> Result<Vec<Vec<(NodeKey, OrphanOutcome)>>, RuntimeError> {
+    ) -> Result<Vec<Result<Vec<(NodeKey, OrphanOutcome)>, RuntimeError>>, RuntimeError> {
         let mut runs: Vec<LiveRun> = Vec::with_capacity(specs.len());
+        // Per spec: the failed open's error, or `None` for a run that opened (in `runs` order).
+        let mut failures: Vec<Option<RuntimeError>> = Vec::with_capacity(specs.len());
         for spec in specs {
             if self.find(&spec.id).is_some() || runs.iter().any(|run| run.id == spec.id) {
                 return Err(RuntimeError::Duplicate(spec.id));
             }
-            runs.push(open_run(spec)?);
+            let id = spec.id.clone();
+            match open_run(spec) {
+                Ok(run) => {
+                    runs.push(run);
+                    failures.push(None);
+                }
+                Err(error) => {
+                    log::error!("workflows: run {id} not loaded: {error}");
+                    failures.push(Some(error));
+                }
+            }
         }
         let mut keys: Vec<Vec<NodeKey>> = Vec::with_capacity(runs.len());
         let mut records: Vec<ProcessRecord> = Vec::new();
@@ -598,7 +612,14 @@ impl<R: Runner> Runtime<R> {
             }
             self.runs.push(run);
         }
-        Ok(orphans)
+        let mut orphans = orphans.into_iter();
+        Ok(failures
+            .into_iter()
+            .map(|failure| match failure {
+                Some(error) => Err(error),
+                None => Ok(orphans.next().unwrap_or_default()),
+            })
+            .collect())
     }
 
     /// One pass of the run loop: appends the tries that ended, admits queued runs while run slots

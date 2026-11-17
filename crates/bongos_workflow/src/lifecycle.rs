@@ -714,7 +714,8 @@ impl<R: Runner> Lifecycle<R> {
     /// processes die in one grace period and a run with a started key and no finish comes back
     /// interrupted; each is bound to its attempt's worktree. Nothing resumes by itself. With no
     /// `runs/` directory this loads nothing and writes nothing. Takes no lock. A run already
-    /// loaded is [`RuntimeError::Duplicate`] and none of these load.
+    /// loaded is [`RuntimeError::Duplicate`] and none of these load; a log that cannot be opened
+    /// skips only its run.
     pub fn load_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
         let mut report = LoadReport::default();
         let mut entries: Vec<RunEntry> = Vec::new();
@@ -767,6 +768,13 @@ impl<R: Runner> Lifecycle<R> {
         }
         let orphans = self.runtime.load_all(specs)?;
         for (entry, orphans) in entries.into_iter().zip(orphans) {
+            let orphans = match orphans {
+                Ok(orphans) => orphans,
+                Err(error) => {
+                    skip(&mut report, &entry.dir, error.to_string());
+                    continue;
+                }
+            };
             self.runtime.bind(&entry.id, entry.binding());
             report.loaded.push(entry.id.clone());
             report.orphans.push((entry.id.clone(), orphans));
@@ -1258,6 +1266,11 @@ impl<R: Runner> Lifecycle<R> {
         let (resolved, _) = load_definition(dirs, &name, None)?;
         let rev = self.runs[index].rev + 1;
         let copy = definition_copy_dir(&self.runs[index].attempt_dir(), rev);
+        // `rev` is one past the log's current revision, so a directory here is the leftover of a
+        // reload that crashed before `DefinitionReloaded`; nothing references it.
+        if copy.exists() {
+            fs::remove_dir_all(&copy).map_err(Refusal::io)?;
+        }
         copy_dir(&resolved.dir, &copy).map_err(Refusal::io)?;
         let fresh = read_definition(&copy).map_err(Refusal::io);
         let checked = fresh.and_then(|fresh| {
