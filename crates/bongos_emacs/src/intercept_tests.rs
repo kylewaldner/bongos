@@ -460,7 +460,7 @@ async fn keys_after_no_value_act_without_an_argument(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-u - - |");
     assert_eq!(text(&editor, &mut cx), "|w0 w1 w2 w3 w4");
     assert_eq!(echo(&mut cx), None);
-    assert_eq!(pending(&mut cx).filter(PrefixArg::has_value), None);
+    assert_eq!(pending(&mut cx), None);
 
     // A key bound to an action runs once.
     cx.simulate_keystrokes("alt-- alt-- alt-f |");
@@ -470,7 +470,7 @@ async fn keys_after_no_value_act_without_an_argument(cx: &mut TestAppContext) {
     // A chord runs once and leaves no argument.
     cx.simulate_keystrokes("alt-- alt-- ctrl-x ctrl-x");
     assert_eq!(echo(&mut cx), None);
-    assert_eq!(pending(&mut cx).filter(PrefixArg::has_value), None);
+    assert_eq!(pending(&mut cx), None);
 
     // A digit still builds an argument on it: two words forward.
     editor.update_in(&mut cx, |editor, window, cx| {

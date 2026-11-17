@@ -24,6 +24,17 @@ fn universal_saturates_at_sixteen_presses() {
 }
 
 #[test]
+fn negative_universal_saturates_at_minus_max() {
+    let mut arg = PrefixArg::universal();
+    assert!(arg.press_minus());
+    for _ in 0..40 {
+        assert!(arg.press_universal());
+    }
+    assert_eq!(arg.value(), -i32::MAX);
+    assert_eq!(arg.echo(), format!("C-u ({})", -i32::MAX));
+}
+
+#[test]
 fn digits_replace_the_multiplied_value() {
     let mut arg = universal(3);
     assert!(arg.press_digit(1));
