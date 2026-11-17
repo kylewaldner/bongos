@@ -1678,7 +1678,7 @@ pub struct TaskChecksSettingsContent {
     ///
     /// Default: 30
     pub output_retention_days: Option<u32>,
-    /// The most MB of output files kept in total; the oldest go first.
+    /// Most MB of output kept per run; past it the middle is cut and marked.
     ///
     /// Default: 256
     pub output_limit_mb: Option<u64>,

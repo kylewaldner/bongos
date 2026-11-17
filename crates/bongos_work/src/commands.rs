@@ -28,6 +28,7 @@ use workspace::{Toast, Workspace};
 use crate::actions::{artifact, project, task, todo, work};
 use crate::master_files;
 use crate::modals::{self, Then};
+use crate::task_at_point;
 use crate::registry::{DoneHolds, LiveModesRegistry};
 use crate::repositories::default_kind;
 use crate::{WorkSettings, WorkStore, WriteError};
@@ -807,7 +808,31 @@ fn ship_waits(task: &Task, tree: &WorkTree) -> bool {
 
 /// `task: complete` and its alias `task: close`: marks the task done, unless a done hold source
 /// says it would be held; then a toast gives the reason and nothing is written.
+///
+/// It acts on the open task at point when there is one, and asks which task otherwise.
 fn complete(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let then: Then<String> = Box::new(|id, workspace, window, cx| {
+        if !DoneHolds::has_sources(cx) {
+            submit(workspace, window, cx, move |tree, ctx| {
+                model::close(tree, ctx, &id)
+            });
+            return;
+        }
+        complete_unless_held(workspace, window, cx, id);
+    });
+    let open_at_point = task_at_point(workspace, window, cx).filter(|id| {
+        WorkStore::global(cx)
+            .and_then(|store| store.read(cx).snapshot())
+            .and_then(|tree| {
+                tree.task_by_id(id)
+                    .map(|task| has_status(task, |status| status == Status::Open))
+            })
+            .unwrap_or(false)
+    });
+    if let Some(id) = open_at_point {
+        then(id, workspace, window, cx);
+        return;
+    }
     with_task(
         workspace,
         window,
@@ -815,15 +840,7 @@ fn complete(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         "Complete which task?",
         "There is no open task to complete",
         |task, _| has_status(task, |status| status == Status::Open),
-        Box::new(|id, workspace, window, cx| {
-            if !DoneHolds::has_sources(cx) {
-                submit(workspace, window, cx, move |tree, ctx| {
-                    model::close(tree, ctx, &id)
-                });
-                return;
-            }
-            complete_unless_held(workspace, window, cx, id);
-        }),
+        then,
     );
 }
 

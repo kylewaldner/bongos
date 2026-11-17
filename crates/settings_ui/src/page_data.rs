@@ -492,7 +492,7 @@ fn work_page(token_set: bool) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Output Limit (MB)",
-                description: "The most MB of output files kept in total; the oldest go first.",
+                description: "Most MB of output kept per run; past it the middle is cut and marked.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("task_checks.output_limit_mb"),

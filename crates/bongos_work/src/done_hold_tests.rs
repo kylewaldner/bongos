@@ -224,6 +224,29 @@ async fn complete_of_a_satisfied_task_closes_it_done_with_a_history_entry(cx: &m
 }
 
 #[gpui::test]
+async fn complete_acts_on_the_task_at_point_not_the_first_open_task(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx, true, true).await;
+    cx.update(|_, cx| {
+        cx.set_global(db::AppDatabase::test_new());
+        crate::focus::init(cx);
+        crate::Focus::global(cx)
+            .unwrap()
+            .update(cx, |focus, cx| focus.set(Some("l2".to_string()), cx));
+    });
+    // No picker answer: the focused task, `alpha` (`l2`), is completed, not `backfill`, which
+    // the picker would preselect first.
+    harness.run_and_wait(cx, "task::Complete", &[]).await;
+    assert_eq!(
+        status_of(&harness, cx, &["phase", "alpha"]).await,
+        bongos_work_model::Status::Done
+    );
+    assert_eq!(
+        status_of(&harness, cx, &["backfill"]).await,
+        bongos_work_model::Status::Open
+    );
+}
+
+#[gpui::test]
 async fn a_group_with_closing_checks_and_an_open_child_is_refused_by_both_commands(
     cx: &mut TestAppContext,
 ) {

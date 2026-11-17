@@ -2884,7 +2884,7 @@
     "output_dir": null,
     // Days a run's output file is kept; the record stays after the file is deleted.
     "output_retention_days": 30,
-    // The most MB of output files kept in total; the oldest go first.
+    // Most MB of output kept per run; past it the middle is cut and marked.
     "output_limit_mb": 256,
     // The largest result file, in KB, a check may write.
     "result_file_limit_kb": 256,
