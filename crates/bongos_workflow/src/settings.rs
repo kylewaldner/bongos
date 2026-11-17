@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use bongos_workflow_model::Limits;
+use bongos_workflow_model::{Ceilings, Limits, ValidationContext};
 use settings::{RegisterSetting, Settings, SettingsContent};
 
+use crate::runner_claude::AgentDefaults;
 use crate::runner_program::ProgramSettings;
 
 /// The `workflows` settings (user level only).
@@ -25,12 +26,38 @@ pub struct WorkflowsSettings {
     /// How program nodes run and poll (`workflows.programs`, `workflows.poll_interval_minutes`,
     /// `workflows.wait_give_up_days`).
     pub programs: ProgramSettings,
+    /// The caps an agent node falls back to (`workflows.agents`).
+    pub agents: AgentDefaults,
+    /// What a definition may declare at most (`workflows.ceilings`).
+    pub ceilings: Ceilings,
+    /// MCP servers agent nodes never get (`workflows.mcp_exclude`).
+    pub mcp_exclude: Vec<String>,
+    /// The directory holding workflow definitions; `None` means `~/.bongos/workflows`.
+    pub definitions_dir: Option<PathBuf>,
+}
+
+impl WorkflowsSettings {
+    /// What validation needs from the settings: the ceilings, the widest fan-out and whether
+    /// programs may use the network. The installed MCP servers, the shipped programs and the
+    /// definition directory are the caller's to fill.
+    pub fn validation_context(&self) -> ValidationContext {
+        ValidationContext {
+            ceilings: self.ceilings.clone(),
+            fan_out_width: self.limits.fan_out_width,
+            allow_network: self.programs.allow_network,
+            ..ValidationContext::default()
+        }
+    }
 }
 
 /// The values of `default.json`, for an engine made before the settings are read.
 impl Default for WorkflowsSettings {
     fn default() -> Self {
         Self {
+            agents: AgentDefaults::default(),
+            ceilings: Ceilings::default(),
+            mcp_exclude: Vec::new(),
+            definitions_dir: None,
             enabled: true,
             worktrees_dir: None,
             min_free_disk_mb: 2048,
@@ -50,7 +77,46 @@ impl Settings for WorkflowsSettings {
         let defaults = Limits::default();
         let program_defaults = ProgramSettings::default();
         let programs = workflows.programs.clone().unwrap_or_default();
+        let agents = workflows.agents.clone().unwrap_or_default();
+        let agent_defaults = AgentDefaults::default();
+        let ceilings = workflows.ceilings.clone().unwrap_or_default();
+        let ceiling_defaults = Ceilings::default();
         Self {
+            agents: AgentDefaults {
+                model: agents
+                    .claude
+                    .and_then(|claude| claude.model)
+                    .filter(|model| !model.trim().is_empty())
+                    .unwrap_or(agent_defaults.model),
+                permission_mode: agent_defaults.permission_mode,
+                max_turns: agents.max_turns.unwrap_or(agent_defaults.max_turns).max(1),
+                max_cost_usd: agents.max_cost_usd.unwrap_or(agent_defaults.max_cost_usd),
+                max_minutes: agents
+                    .max_minutes
+                    .unwrap_or(agent_defaults.max_minutes)
+                    .max(1),
+            },
+            ceilings: Ceilings {
+                max_turns: ceilings.max_turns.unwrap_or(ceiling_defaults.max_turns),
+                max_cost_usd: ceilings
+                    .max_cost_usd
+                    .unwrap_or(ceiling_defaults.max_cost_usd),
+                max_minutes: ceilings.max_minutes.unwrap_or(ceiling_defaults.max_minutes),
+                max_passes: ceilings.max_passes.unwrap_or(ceiling_defaults.max_passes),
+                retries: ceilings.retries.unwrap_or(ceiling_defaults.retries),
+                program_max_minutes: ceilings
+                    .program_max_minutes
+                    .unwrap_or(ceiling_defaults.program_max_minutes),
+                allow_bypass_permissions: ceilings
+                    .allow_bypass_permissions
+                    .unwrap_or(ceiling_defaults.allow_bypass_permissions),
+            },
+            mcp_exclude: workflows.mcp_exclude.clone().unwrap_or_default(),
+            definitions_dir: workflows
+                .definitions_dir
+                .clone()
+                .filter(|dir| !dir.trim().is_empty())
+                .map(PathBuf::from),
             enabled: workflows
                 .enabled
                 .expect("default.json defines `workflows.enabled`"),
@@ -81,8 +147,13 @@ impl Settings for WorkflowsSettings {
                     .unwrap_or(defaults.fan_out_width)
                     .max(1),
                 retries: workflows.retries.unwrap_or(defaults.retries),
+                loop_bound: workflows.loop_bound.unwrap_or(defaults.loop_bound),
+                run_max_cost_usd: workflows.run_max_cost_usd.filter(|cap| *cap > 0.0),
             },
             programs: ProgramSettings {
+                allow_network: programs
+                    .allow_network
+                    .unwrap_or(program_defaults.allow_network),
                 python: programs.python.filter(|python| !python.trim().is_empty()),
                 max_minutes: programs
                     .max_minutes
