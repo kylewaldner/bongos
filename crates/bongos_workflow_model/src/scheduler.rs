@@ -98,7 +98,8 @@ impl Default for Limits {
 }
 
 /// Whether `route` (taken from `from` to `target`) is a depth-first back edge from `start`
-/// whose cycle has no route with `max_passes`: the routes `limits.loop_bound` bounds.
+/// (the caller has checked the route sets no `max_passes`): the routes `limits.loop_bound`
+/// bounds.
 fn closes_unbounded_cycle(
     definition: &Definition,
     from: &str,
@@ -136,13 +137,9 @@ fn closes_unbounded_cycle(
             return;
         };
         for (to, route) in successors(node) {
-            if let Some(position) = stack.iter().position(|(entry, _)| *entry == to) {
+            if stack.iter().any(|(entry, _)| *entry == to) {
                 if name == goal.0 && to == goal.1 && route.line == goal.2 {
-                    let bounded = route.max_passes.is_some()
-                        || stack[position + 1..]
-                            .iter()
-                            .any(|(_, via)| via.is_some_and(|via| via.max_passes.is_some()));
-                    *found = Some(!bounded);
+                    *found = Some(true);
                     return;
                 }
             } else {
