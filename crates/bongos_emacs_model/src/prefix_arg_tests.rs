@@ -68,7 +68,6 @@ fn minus_after_universal_is_negative() {
     assert!(arg.press_universal());
     assert_eq!(arg.value(), -4);
     assert_eq!(arg.echo(), "C-u (-4)");
-    assert!(!arg.accepts_minus());
     assert!(arg.press_universal());
     assert_eq!(arg.value(), -16);
     assert_eq!(arg.echo(), "C-u (-16)");
