@@ -814,17 +814,7 @@ impl<R: Runner> Runtime<R> {
     /// with every key in flight to each run that had one. Nothing starts afterwards.
     pub fn quit(&mut self) {
         self.quitting = true;
-        let indices: Vec<usize> = (0..self.runs.len()).collect();
-        self.stop_in_flight(&indices);
-        for run in &mut self.runs {
-            let state = run.state();
-            if state.running.is_empty() || state.halted || state.is_over() {
-                continue;
-            }
-            let keys: Vec<NodeKey> = state.running.keys().cloned().collect();
-            run.append(Event::Interrupted { keys });
-            run.status = Status::Held;
-        }
+        self.interrupt_all();
         self.queue.clear();
     }
 
@@ -972,6 +962,27 @@ impl<R: Runner> Runtime<R> {
                 key,
             });
             run.append(Event::Halted);
+            self.hold(index);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Stops every process of every run together (within 5 s) and appends `Interrupted` with the
+    /// keys in flight to each run that had one, which then waits for a resume. Unlike
+    /// [`Runtime::quit`] later starts still work (workflows were turned off, not the app). Whether
+    /// any run was interrupted.
+    pub fn interrupt_all(&mut self) -> bool {
+        let indices: Vec<usize> = (0..self.runs.len()).collect();
+        self.stop_in_flight(&indices);
+        let mut changed = false;
+        for index in 0..self.runs.len() {
+            let state = self.runs[index].state();
+            if state.running.is_empty() || state.halted || state.is_over() {
+                continue;
+            }
+            let keys: Vec<NodeKey> = state.running.keys().cloned().collect();
+            self.runs[index].append(Event::Interrupted { keys });
             self.hold(index);
             changed = true;
         }

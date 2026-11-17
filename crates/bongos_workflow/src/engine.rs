@@ -7,17 +7,24 @@
 //! what the app knows first (the work tree, the live-modes registry, the agent health), then locks
 //! the [`Lifecycle`], then hands the status changes on: the live-modes registry is told and every
 //! observer gets a [`WorkflowEvent::Changed`].
+//!
+//! Once [`WorkflowEngine::ensure`] made it, one loop per engine ticks the runs every
+//! [`TICK_INTERVAL`]: it loads the runs on disk at the first work tree it sees, refreshes what the
+//! runner reads from the app, ticks the [`Lifecycle`] and hands the changes on. Every command
+//! ticks once too, so a start's first nodes begin at once. The lifecycle lock is never held
+//! across [`WorkflowEngine::publish`] or an await. A quit stops every run's processes before the
+//! app goes; turning `workflows.enabled` off interrupts the live runs and ends the loop.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bongos_chat::model::Agent;
-use bongos_chat::{ChatHealth, HealthState};
+use bongos_chat::{AgentCommand, ChatHealth, Health, HealthState};
 use bongos_project_repo::{ActivitySources, LiveSources, ProjectRepo, SnapshotReason};
 use bongos_work::{ActiveRun, LiveModesRegistry, NeedsYouRegistry};
 use bongos_work_model::commands::Context as WorkContext;
@@ -27,7 +34,6 @@ use bongos_work_model::store::{Task, WorkTree};
 use bongos_workflow_model::definition::{AgentKind, Outcome};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{StartedBy, TodoRef};
-use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
     Definition, Failure, FailureReason, Layer, LayerDirs, NodeKey, RunState, ValidationContext,
 };
@@ -44,6 +50,7 @@ use crate::definitions::{
     self, DefinitionError, NewDefinition, ProjectLayer, Report, SHIPPED_FILES, materialize,
     profile_layer_dir, project_layer_dir, project_layer_in, shipped_dir,
 };
+use crate::dispatch::{AppRunner, RunnerInputs, RunnerSnapshot};
 use crate::landing::{LandingRunEnd, LandingRuns, set_landing_runs};
 use crate::lifecycle::{
     GitWorktrees, HaltWorktrees, Lifecycle, Refusal, RefusalKind, RunId, RunStatus, StartChecks,
@@ -51,10 +58,10 @@ use crate::lifecycle::{
 };
 use crate::mcp::{self, McpCache};
 use crate::outcomes::{self, Delivered, Reported, RunOutcome};
-use crate::process::ProcessRecord;
 use crate::project_sources::{self, RunProjects, WorkHolds, WorkflowActivity, WorkflowLiveSource};
+use crate::runner_claude::ClaudeCli;
 use crate::runner_program::Interpreter;
-use crate::runtime::{Finish, Runner, Settlement};
+use crate::runtime::{Runner, Settlement};
 use crate::shipped::Template;
 use crate::task_link::{self, Completed, Finale, Next, StoreWrites, TaskWrites, WriteCommand};
 use crate::worktrees::{Git, RunWorktree, TaskCheckout, branch_worktree_path};
@@ -107,6 +114,38 @@ pub struct WorkflowEngine {
     landing_waiters: LandingWaiters,
     /// The MCP servers each agent CLI has, discovered in the background for the start checks.
     mcp: McpState,
+    /// What the runner reads from the app, refreshed before every tick.
+    inputs: RunnerInputs,
+    snapshots: Arc<Mutex<SnapshotBuilder>>,
+    /// The state of the engine's tick loop.
+    ticker: Arc<Ticker>,
+}
+
+/// How often the engine's loop ticks the runs.
+pub const TICK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The state of an engine's tick loop, shared by its clones.
+#[derive(Default)]
+pub(crate) struct Ticker {
+    /// Whether a loop runs: there is at most one per engine.
+    looping: AtomicBool,
+    /// Whether the runs on disk are still to be loaded at the first work tree the engine sees
+    /// (set when the app's engine is made).
+    load_pending: AtomicBool,
+    /// `workflows.enabled` was turned off: the live runs were interrupted and nothing ticks.
+    off: AtomicBool,
+    /// The app quit: nothing ticks again.
+    quit: AtomicBool,
+    /// The passes the loop made, for tests.
+    pub(crate) passes: AtomicUsize,
+    /// The lifecycle ticks (each with its snapshot refresh), for tests.
+    pub(crate) ticks: AtomicUsize,
+}
+
+impl Ticker {
+    fn stopped(&self) -> bool {
+        self.off.load(Ordering::SeqCst) || self.quit.load(Ordering::SeqCst)
+    }
 }
 
 /// The discoveries the start checks answer from. A discovery older than twice the refresh
@@ -160,10 +199,6 @@ pub struct EngineRoots {
 
 impl Global for EngineRoots {}
 
-/// Stands in for the node runners until the engine dispatches each node kind to its runner:
-/// every start fails, naming why. Nothing ticks the app's runs before then.
-struct UnwiredRunner;
-
 /// Why a node cannot start while no runner is connected.
 pub(crate) const UNWIRED_DETAIL: &str =
     "the node runners are not connected to the engine in this build";
@@ -177,38 +212,99 @@ pub(crate) fn unwired_failure(key: &NodeKey) -> Failure {
     )
 }
 
-impl Runner for UnwiredRunner {
-    fn is_connected(&self) -> bool {
-        false
-    }
+/// What the app knows now that the runner snapshot is built from, read on the main thread. A
+/// part that could not be read leaves the snapshot's last value in place.
+pub(crate) struct AppReading {
+    pub(crate) settings: WorkflowsSettings,
+    /// The Claude command, its health and the base environment; `None` while there is no agent
+    /// health to read.
+    pub(crate) health: Option<HealthReading>,
+    /// The MCP servers of each CLI with a fresh discovery; a CLI without one is absent.
+    pub(crate) mcp: BTreeMap<AgentKind, BTreeSet<String>>,
+}
 
-    fn start(
+/// The agent health part of an [`AppReading`].
+pub(crate) struct HealthReading {
+    pub(crate) command: AgentCommand,
+    pub(crate) health: Health,
+    pub(crate) env: BTreeMap<String, String>,
+}
+
+impl AppReading {
+    fn read(cache: &Mutex<McpCache>, cx: &App) -> Self {
+        let settings = WorkflowsSettings::get_global(cx).clone();
+        let health = ChatHealth::global(cx).map(|health| {
+            let health = health.read(cx);
+            HealthReading {
+                command: bongos_chat::ChatsSettings::get_global(cx).claude.clone(),
+                health: health.health(Agent::Claude).clone(),
+                env: health.env().clone(),
+            }
+        });
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let now = Instant::now();
+        let cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let mcp = [AgentKind::Claude, AgentKind::Codex]
+            .into_iter()
+            .filter_map(|kind| Some((kind, cache.get(kind, &cwd, now)?.servers.clone())))
+            .collect();
+        Self {
+            settings,
+            health,
+            mcp,
+        }
+    }
+}
+
+/// Builds the runner's snapshots, running the Claude CLI and interpreter checks again only when
+/// what they read changed, so a tick does no IO for them otherwise.
+#[derive(Default)]
+pub(crate) struct SnapshotBuilder {
+    claude: Option<(AgentCommand, Health, BTreeMap<String, String>)>,
+    interpreter: Option<(Option<String>, BTreeMap<String, String>)>,
+}
+
+impl SnapshotBuilder {
+    /// The snapshot after `previous` with what `reading` holds. A failed health refresh (no
+    /// health, or a CLI that did not answer its check) keeps the last Claude check and
+    /// environment, and a CLI with no fresh MCP discovery keeps its last servers: nothing is
+    /// cleared.
+    pub(crate) fn refresh(
         &mut self,
-        _run: &str,
-        _definition: &Definition,
-        key: &NodeKey,
-        _try_number: u32,
-    ) -> Result<ProcessRecord, Failure> {
-        Err(unwired_failure(key))
-    }
-
-    fn poll(&mut self) -> Vec<Finish> {
-        Vec::new()
-    }
-
-    fn stop(&mut self, _tries: &[(String, NodeKey)]) {}
-
-    fn merge_branch(
-        &mut self,
-        _run: &str,
-        _join: &str,
-        _branch: &Branch,
-    ) -> Result<String, Failure> {
-        Err(Failure::new(
-            FailureReason::MergeConflict,
-            None,
-            "the node runners are not connected to the engine in this build",
-        ))
+        previous: &RunnerSnapshot,
+        reading: AppReading,
+    ) -> RunnerSnapshot {
+        let mut next = previous.clone();
+        next.agents = reading.settings.agents.clone();
+        next.mcp_exclude = reading.settings.mcp_exclude.clone();
+        next.programs = reading.settings.programs.clone();
+        match reading.health {
+            Some(found) => {
+                let failed = found.health.state == HealthState::Unchecked;
+                if !(failed && previous.claude.is_some()) {
+                    let key = (found.command, found.health, found.env);
+                    if self.claude.as_ref() != Some(&key) {
+                        next.claude = Some(ClaudeCli::check(&key.0, &key.1, &key.2));
+                        self.claude = Some(key.clone());
+                    }
+                    next.base_env = key.2;
+                }
+            }
+            None if next.base_env.is_empty() => next.base_env = std::env::vars().collect(),
+            None => {}
+        }
+        for (kind, servers) in reading.mcp {
+            next.mcp_installed.insert(kind, servers);
+        }
+        let key = (
+            reading.settings.programs.python.clone(),
+            next.base_env.clone(),
+        );
+        if self.interpreter.as_ref() != Some(&key) {
+            next.interpreter = Some(Interpreter::find(key.0.as_deref(), &key.1));
+            self.interpreter = Some(key);
+        }
+        next
     }
 }
 
@@ -219,14 +315,19 @@ struct Observers(Vec<Rc<dyn Fn(&WorkflowEvent, &mut App)>>);
 impl Global for Observers {}
 
 impl WorkflowEngine {
-    /// An engine over `dirs` with no runs; nothing is read or written.
+    /// An engine over `dirs` with no runs, running nodes through the app's [`AppRunner`]; nothing
+    /// is read or written. The runner is not connected in this build, so a command that would
+    /// start a node refuses.
     pub fn new(dirs: LayerDirs) -> Self {
+        let inputs = RunnerInputs::default();
         let lifecycle = Lifecycle::new(
-            Box::new(UnwiredRunner) as EngineRunner,
+            Box::new(AppRunner::new(inputs.clone())) as EngineRunner,
             Box::new(GitWorktrees::system()),
             WorkflowsSettings::default(),
         );
-        Self::with_lifecycle(dirs, lifecycle)
+        let mut engine = Self::with_lifecycle(dirs, lifecycle);
+        engine.inputs = inputs;
+        engine
     }
 
     /// An engine over `dirs` driving `lifecycle` (tests give it a scripted runner).
@@ -243,6 +344,163 @@ impl WorkflowEngine {
             holds: WorkHolds::default(),
             landing_waiters: Arc::default(),
             mcp: McpState::default(),
+            inputs: RunnerInputs::default(),
+            snapshots: Arc::default(),
+            ticker: Arc::default(),
+        }
+    }
+
+    /// What the runner reads from the app (the [`AppRunner`]'s inputs for an engine made by
+    /// [`WorkflowEngine::new`]).
+    pub fn runner_inputs(&self) -> &RunnerInputs {
+        &self.inputs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ticker(&self) -> &Ticker {
+        &self.ticker
+    }
+
+    /// Refreshes the runner's snapshot from the app; a part that cannot be read keeps its last
+    /// value ([`SnapshotBuilder::refresh`]). No lock is held while another is taken.
+    fn refresh_runner_inputs(&self, cx: &App) {
+        let reading = AppReading::read(&self.mcp.cache, cx);
+        let previous = self.inputs.snapshot();
+        let next = self
+            .snapshots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .refresh(&previous, reading);
+        if next != previous {
+            self.inputs.set(next);
+        }
+    }
+
+    /// One tick of the runs: the runner's snapshot is refreshed, then the lifecycle ticks under
+    /// the current settings. Does nothing (and reads nothing) while no run is loaded, after a
+    /// quit, while workflows are off or while the runner is not connected (a queued run on disk
+    /// must not start a real node). Whether anything changed; the caller publishes.
+    fn tick_runs(&self, cx: &App) -> bool {
+        if self.ticker.stopped() {
+            return false;
+        }
+        {
+            let lifecycle = self.lifecycle();
+            if lifecycle.all_runs().is_empty() || !lifecycle.runtime().runner().is_connected() {
+                return false;
+            }
+        }
+        self.ticker.ticks.fetch_add(1, Ordering::SeqCst);
+        self.refresh_runner_inputs(cx);
+        let settings = WorkflowsSettings::get_global(cx).clone();
+        let mut lifecycle = self.lifecycle();
+        lifecycle.set_settings(settings);
+        lifecycle.tick()
+    }
+
+    /// Loads the runs on disk once, at the first work tree the app's engine sees. A run that
+    /// cannot be loaded is logged and skipped; orphan processes are logged with what became of
+    /// them.
+    fn load_runs_once(&self, cx: &mut App) {
+        if !self.ticker.load_pending.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(tree) = self.writes.tree(cx) else {
+            return;
+        };
+        if !self.ticker.load_pending.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let report = self.lifecycle().load_runs(&tree);
+        match report {
+            Ok(report) => {
+                for (path, reason) in &report.skipped {
+                    log::warn!("workflows: did not load {}: {reason}", path.display());
+                }
+                for (run, orphans) in &report.orphans {
+                    for (key, outcome) in orphans {
+                        log::info!("workflows: run {run}, {key}: leftover process {outcome:?}");
+                    }
+                }
+                if !report.loaded.is_empty() {
+                    log::info!("workflows: loaded {} runs", report.loaded.len());
+                }
+            }
+            Err(error) => log::error!("workflows: could not load the runs: {error}"),
+        }
+        self.publish(cx);
+    }
+
+    /// One pass of the loop; whether the loop goes on.
+    fn loop_pass(&self, cx: &mut App) -> bool {
+        if self.ticker.stopped() || !WorkflowsSettings::get_global(cx).enabled {
+            return false;
+        }
+        self.ticker.passes.fetch_add(1, Ordering::SeqCst);
+        self.load_runs_once(cx);
+        if self.tick_runs(cx) {
+            self.publish(cx);
+        }
+        true
+    }
+
+    /// Starts the engine's tick loop unless one runs already: every [`TICK_INTERVAL`] it loads
+    /// the runs once, ticks and publishes. It ends after a quit or once workflows are off.
+    pub(crate) fn run_loop(&self, cx: &mut App) {
+        if self.ticker.looping.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let engine = self.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(TICK_INTERVAL).await;
+                if !cx.update(|cx| engine.loop_pass(cx)) {
+                    break;
+                }
+            }
+            engine.ticker.looping.store(false, Ordering::SeqCst);
+        })
+        .detach();
+    }
+
+    /// Makes this the app's engine: the global, with its quit hook, its watch on
+    /// `workflows.enabled`, the runs on disk loaded at the first work tree, and its tick loop.
+    pub(crate) fn attach(&self, cx: &mut App) {
+        cx.set_global(self.clone());
+        // The quit closure stops every process before it returns: gpui gives the future it
+        // returns only a short time. Weak, so the hook does not keep the runs alive.
+        let runs = Arc::downgrade(&self.runs);
+        let ticker = self.ticker.clone();
+        cx.on_app_quit(move |_| {
+            ticker.quit.store(true, Ordering::SeqCst);
+            if let Some(runs) = runs.upgrade() {
+                runs.lock().unwrap_or_else(PoisonError::into_inner).quit();
+            }
+            async {}
+        })
+        .detach();
+        let engine = self.clone();
+        cx.observe_global::<settings::SettingsStore>(move |cx| engine.follow_enabled(cx))
+            .detach();
+        self.ticker.load_pending.store(true, Ordering::SeqCst);
+        self.run_loop(cx);
+    }
+
+    /// Follows `workflows.enabled`: turned off, every live run's processes stop and the runs are
+    /// interrupted, and the loop ends; turned on again, the loop starts again.
+    fn follow_enabled(&self, cx: &mut App) {
+        if WorkflowsSettings::get_global(cx).enabled {
+            if self.ticker.off.swap(false, Ordering::SeqCst) {
+                self.run_loop(cx);
+            }
+            return;
+        }
+        if self.ticker.off.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let interrupted = self.lifecycle().interrupt_all();
+        if interrupted {
+            self.publish(cx);
         }
     }
 
@@ -354,8 +612,10 @@ impl WorkflowEngine {
         self
     }
 
-    /// The global engine, created on first use (registering the `workflows` live-modes source).
-    /// `None` while `workflows.enabled` is false, when nothing may be read or written.
+    /// The global engine, created on first use (registering the `workflows` live-modes source and
+    /// starting its tick loop). `None` while `workflows.enabled` is false, when nothing may be
+    /// read or written; an engine made before workflows were turned off stays idle until they
+    /// are turned on again.
     pub fn ensure(cx: &mut App) -> Option<Self> {
         if !WorkflowsSettings::get_global(cx).enabled {
             return None;
@@ -371,6 +631,7 @@ impl WorkflowEngine {
         engine.install_landing_runs(cx);
         crate::gates::register(&engine, cx);
         crate::run_view::observe_focus(&engine, cx);
+        engine.attach(cx);
         Some(engine)
     }
 
@@ -585,6 +846,8 @@ impl WorkflowEngine {
         cx: &mut App,
     ) -> Result<RunId, Refusal> {
         self.refuse_unconnected()?;
+        // The runs on disk are loaded before any new one exists, so the load never meets it.
+        self.load_runs_once(cx);
         let start = LiveModesRegistry::can_start_run(&request.task_id, cx);
         let active_run = if start.allowed {
             None
@@ -642,6 +905,8 @@ impl WorkflowEngine {
         if let Ok(run) = &result {
             self.link_start(run, cx);
             self.keep_mcp_fresh(cx);
+            // The run's first nodes begin now, not at the loop's next pass.
+            self.tick_runs(cx);
         }
         self.publish(cx);
         result
@@ -835,17 +1100,21 @@ impl WorkflowEngine {
         self.lifecycle().active_runs()
     }
 
+    /// Runs `command` on the lifecycle, then ticks once so what it set going begins at once, then
+    /// publishes. The runs on disk are loaded first when they are not yet.
     fn act<T>(
         &self,
         cx: &mut App,
         command: impl FnOnce(&mut Lifecycle<EngineRunner>, &LayerDirs) -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
+        self.load_runs_once(cx);
         let settings = WorkflowsSettings::get_global(cx).clone();
         let result = {
             let mut lifecycle = self.lifecycle();
             lifecycle.set_settings(settings);
             command(&mut lifecycle, &self.dirs)
         };
+        self.tick_runs(cx);
         self.publish(cx);
         result
     }

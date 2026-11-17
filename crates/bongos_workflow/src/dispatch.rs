@@ -1,7 +1,7 @@
 //! The app's node runner: [`AppRunner`] picks the node kind that runs each node (the agent kind,
 //! the program kind, or a built-in) and fans polling and stopping out to every kind. A kind not
-//! plugged in yet is [`Slot::Unwired`] and fails its nodes the way the engine's stand-in runner
-//! does.
+//! plugged in is [`Slot::Unwired`] and fails its nodes as not connected. The engine builds one
+//! and refreshes its [`RunnerInputs`] before every tick.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -64,8 +64,8 @@ impl RunnerInputs {
     }
 }
 
-/// One kind of node: how its tries start, end and stop.
-pub(crate) trait NodeKind {
+/// One kind of node: how its tries start, end and stop. `Send`, since the engine's runner is.
+pub(crate) trait NodeKind: Send {
     fn start(
         &mut self,
         node: &NodeStart<'_>,
@@ -125,7 +125,9 @@ pub struct AppRunner {
 }
 
 impl AppRunner {
-    /// A runner with the agent and program kinds plugged in.
+    /// A runner with the agent and program kinds plugged in (the built-ins run through the
+    /// runtime's [`crate::BuiltinNodes`]). It is not connected until [`AppRunner::set_connected`],
+    /// so the app's commands refuse to start nodes.
     pub fn new(inputs: RunnerInputs) -> Self {
         let mut runner = Self {
             inputs,

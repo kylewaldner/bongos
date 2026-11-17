@@ -867,6 +867,17 @@ impl<R: Runner> Lifecycle<R> {
         self.note_all();
     }
 
+    /// Workflows turned off: stops every process of every run and records `Interrupted` with the
+    /// keys in flight ([`Runtime::interrupt_all`]). Later starts still work. Whether any run was
+    /// interrupted.
+    pub fn interrupt_all(&mut self) -> bool {
+        let changed = self.runtime.interrupt_all();
+        if changed {
+            self.note_all();
+        }
+        changed
+    }
+
     /// Pauses `run`: no new node starts, the running ones finish, then it reads Paused.
     pub fn pause(&mut self, run: &str) -> Result<(), Refusal> {
         let status = self.status_of(run)?;
