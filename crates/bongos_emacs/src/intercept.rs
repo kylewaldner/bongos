@@ -91,6 +91,11 @@ pub(crate) fn decide(
     {
         return Route::Press(pressed);
     }
+    // An argument with no value (a minus pressed twice) only waits for the keys that build one;
+    // any other key clears it and acts as if no argument was typed.
+    if !arg.has_value() {
+        return Route::Cancel;
+    }
     // A digit or `-` the argument no longer accepts (after C-u ended the number) leaves the
     // argument as it was and is an ordinary key: typed, it inserts its character as many times
     // as the argument says, as in Emacs. A key that is the prefix of a longer binding makes gpui

@@ -192,7 +192,7 @@ fn decide_routes_every_rule() {
     ));
     assert!(matches!(
         route("", "-", universal, true),
-        Route::Press(arg) if arg.value() == -4
+        Route::Press(arg) if arg.value() == -1 && arg.echo() == "C-u -"
     ));
     // A `-` after a digit, and a digit after the number ended, are typed characters.
     assert!(matches!(
@@ -434,7 +434,7 @@ async fn a_digit_alone_is_pending_and_types_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn universal_minus_moves_four_words_back(cx: &mut TestAppContext) {
+async fn universal_minus_moves_one_word_back(cx: &mut TestAppContext) {
     let (_workspace, editor, mut cx) = window_with(cx, &words(10)).await;
     editor.update_in(&mut cx, |editor, window, cx| {
         editor.move_to_end(&editor::actions::MoveToEnd, window, cx)
@@ -442,7 +442,43 @@ async fn universal_minus_moves_four_words_back(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-u -");
     assert_eq!(echo(&mut cx).as_deref(), Some("C-u -"));
     cx.simulate_keystrokes("alt-f |");
-    assert_eq!(text(&editor, &mut cx), "w0 w1 w2 w3 w4 w5 |w6 w7 w8 w9");
+    assert_eq!(text(&editor, &mut cx), "w0 w1 w2 w3 w4 w5 w6 w7 w8 |w9");
+}
+
+#[gpui::test]
+async fn universal_minus_then_universal_echoes_the_negative_multiple(cx: &mut TestAppContext) {
+    let (_workspace, _editor, mut cx) = window_with(cx, "one").await;
+    cx.simulate_keystrokes("ctrl-u - ctrl-u");
+    assert_eq!(echo(&mut cx).as_deref(), Some("C-u (-4)"));
+    assert_eq!(pending(&mut cx).map(|arg| arg.value()), Some(-4));
+}
+
+#[gpui::test]
+async fn keys_after_no_value_act_without_an_argument(cx: &mut TestAppContext) {
+    let (_workspace, editor, mut cx) = window_with(cx, &words(5)).await;
+    // Text is typed once, and no echo or argument is left.
+    cx.simulate_keystrokes("ctrl-u - - |");
+    assert_eq!(text(&editor, &mut cx), "|w0 w1 w2 w3 w4");
+    assert_eq!(echo(&mut cx), None);
+    assert_eq!(pending(&mut cx).filter(PrefixArg::has_value), None);
+
+    // A key bound to an action runs once.
+    cx.simulate_keystrokes("alt-- alt-- alt-f |");
+    assert_eq!(text(&editor, &mut cx), "|w0| w1 w2 w3 w4");
+    assert_eq!(echo(&mut cx), None);
+
+    // A chord runs once and leaves no argument.
+    cx.simulate_keystrokes("alt-- alt-- ctrl-x ctrl-x");
+    assert_eq!(echo(&mut cx), None);
+    assert_eq!(pending(&mut cx).filter(PrefixArg::has_value), None);
+
+    // A digit still builds an argument on it: two words forward.
+    editor.update_in(&mut cx, |editor, window, cx| {
+        editor.set_text(words(5), window, cx);
+        editor.move_to_beginning(&editor::actions::MoveToBeginning, window, cx);
+    });
+    cx.simulate_keystrokes("ctrl-u - - 2 alt-f |");
+    assert_eq!(text(&editor, &mut cx), "w0 w1| w2 w3 w4");
 }
 
 #[gpui::test]

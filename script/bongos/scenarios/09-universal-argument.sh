@@ -9,7 +9,7 @@
 #   2. After two kills, C-u C-y yanks the second newest entry (four wraps around a ring of two).
 #   3. C-u 1 0 shows "C-u 10" in the echo area (prefix-echo.png) and C-n then goes down ten rows.
 #   4. M-3 C-k kills three lines as one entry and C-y brings all three back.
-#   5. C-u C-u M-f goes sixteen words forward and C-u - M-f four words back, each shown by a typed
+#   5. C-u C-u M-f goes sixteen words forward and C-u - M-f one word back, each shown by a typed
 #      marker.
 #   6. C-u 3 C-u 7 inserts 777 (the second C-u ends the number, the 7 is a typed character); a 7
 #      alone inserts one; C-u 7 C-g inserts nothing and clears the argument.
@@ -106,7 +106,7 @@ keys ctrl+y
 sleep 0.5
 save_and_expect "${want[@]}"
 
-# 5. C-u C-u M-f: sixteen words forward. C-u - M-f: four words back from there. The caret is at
+# 5. C-u C-u M-f: sixteen words forward. C-u - M-f: one word back from there. The caret is at
 #    the start of the row of words after the yank.
 keys ctrl+u ctrl+u alt+f
 sleep 0.5
@@ -114,7 +114,7 @@ type_text '|'
 keys ctrl+u minus alt+f
 sleep 0.5
 type_text '^'
-want[15]="a b c d e f g h i j k l ^m n o p| q r s t"
+want[15]="a b c d e f g h i j k l m n o ^p| q r s t"
 save_and_expect "${want[@]}"
 
 # 6. Typed characters: C-u 3 C-u 7 is 777, a bare 7 is one 7, and C-u 7 C-g inserts nothing.
