@@ -1322,5 +1322,66 @@ fn the_app_engine_refuses_a_start_while_no_runner_is_connected(cx: &mut TestAppC
         todos_before
     );
 }
+#[gpui::test]
+fn the_app_engine_refuses_resume_retry_and_restart_while_no_runner_is_connected(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        WorkflowsSettings::register(cx);
+    });
+    let world = World::new();
+    let engine = WorkflowEngine::new(world.dirs);
+    let run = "no-such-run".to_string();
+
+    let refusals = cx.update(|cx| {
+        [
+            engine.resume(&run, cx).unwrap_err(),
+            engine.retry(&run, None, false, cx).unwrap_err(),
+            engine.restart(&run, cx).unwrap_err(),
+        ]
+    });
+
+    for refusal in refusals {
+        assert_eq!(refusal.kind, RefusalKind::RunnerNotConnected);
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("Workflow runs are not connected to an agent runner yet.")
+        );
+    }
+}
+
+#[test]
+fn a_lifecycle_binds_each_attempt_to_its_worktree_and_unbinds_at_a_restart() {
+    use crate::dispatch_tests::Recorder;
+    let world = World::new();
+    let recorder = Recorder::default();
+    let worktrees = DirWorktrees {
+        root: world.root.join("runs"),
+        error: world.worktree_error.clone(),
+    };
+    let mut lifecycle = Lifecycle::new(recorder.clone(), Box::new(worktrees), world.settings());
+    let run = world
+        .start_with(&mut lifecycle, StartRequest::new(LEAF), None)
+        .unwrap();
+    let first = lifecycle.worktree(&run).unwrap().clone();
+    assert_eq!(
+        recorder.lines(),
+        vec![format!("bind {run} {}", first.path.display())]
+    );
+
+    lifecycle.restart(&run, &world.dirs, None).unwrap();
+    let second = lifecycle.worktree(&run).unwrap().clone();
+    assert_ne!(first.path, second.path);
+    assert_eq!(
+        recorder.lines()[1..],
+        [
+            format!("unbind {run}"),
+            format!("bind {run} {}", second.path.display())
+        ]
+    );
+}
 #[path = "landing_tests.rs"]
 mod landing_tests;
