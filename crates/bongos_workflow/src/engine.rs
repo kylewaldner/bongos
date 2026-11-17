@@ -10,9 +10,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use bongos_chat::model::Agent;
 use bongos_chat::{ChatHealth, HealthState};
@@ -27,7 +29,7 @@ use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{StartedBy, TodoRef};
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
-    Definition, Failure, FailureReason, Layer, LayerDirs, NodeKey, RunState,
+    Definition, Failure, FailureReason, Layer, LayerDirs, NodeKey, RunState, ValidationContext,
 };
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, AsyncApp, Global};
@@ -40,13 +42,14 @@ use crate::builtin_nodes::BuiltinNodes;
 use crate::completion::CompletionHooks;
 use crate::definitions::{
     self, DefinitionError, NewDefinition, ProjectLayer, Report, SHIPPED_FILES, materialize,
-    profile_dir, project_layer_in, shipped_dir,
+    profile_layer_dir, project_layer_dir, project_layer_in, shipped_dir,
 };
 use crate::landing::{LandingRunEnd, LandingRuns, set_landing_runs};
 use crate::lifecycle::{
     GitWorktrees, HaltWorktrees, Lifecycle, Refusal, RefusalKind, RunId, RunStatus, StartChecks,
     StartContext, StartRequest, WorkflowEvent,
 };
+use crate::mcp::{self, McpCache};
 use crate::outcomes::{self, Delivered, Reported, RunOutcome};
 use crate::process::ProcessRecord;
 use crate::project_sources::{self, RunProjects, WorkHolds, WorkflowActivity, WorkflowLiveSource};
@@ -102,6 +105,26 @@ pub struct WorkflowEngine {
     holds: WorkHolds,
     /// The runs a landing check started and waits for.
     landing_waiters: LandingWaiters,
+    /// The MCP servers each agent CLI has, discovered in the background for the start checks.
+    mcp: McpState,
+}
+
+/// The discoveries the start checks answer from. A discovery older than twice the refresh
+/// interval is dropped, so a CLI that stopped answering goes back to skipping the check.
+#[derive(Clone)]
+struct McpState {
+    cache: Arc<Mutex<McpCache>>,
+    /// Whether the refresh loop of live runs is running.
+    polling: Arc<AtomicBool>,
+}
+
+impl Default for McpState {
+    fn default() -> Self {
+        Self {
+            cache: Arc::new(Mutex::new(McpCache::new(mcp::CACHE_TTL * 2))),
+            polling: Arc::default(),
+        }
+    }
 }
 
 type LandingWaiters = Arc<Mutex<BTreeMap<RunId, futures::channel::oneshot::Sender<LandingRunEnd>>>>;
@@ -219,7 +242,72 @@ impl WorkflowEngine {
             projects: Arc::default(),
             holds: WorkHolds::default(),
             landing_waiters: Arc::default(),
+            mcp: McpState::default(),
         }
+    }
+
+    /// Discovers the MCP servers of the agent CLIs on the background executor, for the start
+    /// checks. Resolves when the discovery has ended; `mcp list` is cut off after
+    /// [`mcp::LIST_TIMEOUT`], and then the checks skip the MCP servers.
+    pub fn refresh_mcp(&self, cx: &mut App) -> gpui::Task<()> {
+        let (home, data_dir) = match cx.try_global::<EngineRoots>() {
+            Some(roots) => (roots.home.clone(), roots.data_dir.clone()),
+            None => (util::paths::home_dir().clone(), paths::data_dir().clone()),
+        };
+        let mut env: BTreeMap<String, String> = std::env::vars().collect();
+        let mut programs = BTreeMap::new();
+        let mut targets = Vec::new();
+        if let Some(health) = ChatHealth::global(cx) {
+            let health = health.read(cx);
+            env = health.env().clone();
+            // Codex nodes are refused before start in this build, so only Claude is discovered.
+            let command = bongos_chat::ChatsSettings::get_global(cx)
+                .claude
+                .command
+                .clone();
+            if let Some(program) = bongos_chat::find_program(&command, &env) {
+                programs.insert(AgentKind::Claude, program);
+            }
+            let has_mcp = health
+                .health(Agent::Claude)
+                .caps
+                .as_ref()
+                .is_some_and(|caps| caps.has_subcommand("mcp"));
+            targets.push((AgentKind::Claude, has_mcp));
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let lister = mcp::ProcessLister {
+            programs,
+            env,
+            scratch: data_dir.join("workflows").join("mcp-scratch"),
+            timeout: mcp::LIST_TIMEOUT,
+        };
+        let location = mcp::Location::new(cwd, home);
+        let cache = self.mcp.cache.clone();
+        cx.background_spawn(async move {
+            mcp::refresh(&cache, Instant::now(), &targets, &lister, &location);
+        })
+    }
+
+    /// Refreshes the MCP discovery every [`mcp::CACHE_TTL`] while runs are live. One loop at a
+    /// time; it ends when no run is live.
+    fn keep_mcp_fresh(&self, cx: &mut App) {
+        if self.mcp.polling.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let engine = self.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(mcp::CACHE_TTL).await;
+                if engine.lifecycle().active_runs().is_empty() {
+                    break;
+                }
+                let refresh = cx.update(|cx| engine.refresh_mcp(cx));
+                refresh.await;
+            }
+            engine.mcp.polling.store(false, Ordering::SeqCst);
+        })
+        .detach();
     }
 
     /// The same engine writing task changes through `writes`.
@@ -252,7 +340,10 @@ impl WorkflowEngine {
         }
         Self::new(LayerDirs {
             shipped: Some(shipped),
-            profile: Some(profile_dir(&home)),
+            profile: Some(profile_layer_dir(
+                &home,
+                WorkflowsSettings::get_global(cx).definitions_dir.as_deref(),
+            )),
             project: None,
         })
     }
@@ -317,6 +408,18 @@ impl WorkflowEngine {
         };
         if let Some(layer) = &layer {
             dirs.project = Some(layer.dir.clone());
+        } else if let Some(task) = task {
+            // An old-format task reads its project's folder under the work root.
+            let root = bongos_work::WorkStore::global(cx)
+                .and_then(|store| store.read(cx).snapshot())
+                .map(|tree| tree.root.clone());
+            if let Some(dir) = root.and_then(|root| old_format_layer(&root, task)) {
+                dirs.project = Some(dir);
+            }
+        }
+        // The setting is live: a changed `definitions_dir` applies to the next command.
+        if let Some(definitions_dir) = WorkflowsSettings::get_global(cx).definitions_dir.clone() {
+            dirs.profile = Some(definitions_dir);
         }
         Ok(TaskDirs {
             commit: layer.as_ref().map(|layer| layer.commit.0.clone()),
@@ -343,13 +446,15 @@ impl WorkflowEngine {
         definitions::validate_definitions(&self.dirs, name)
     }
 
-    /// [`Self::validate`] over `dirs`, such as the layers [`Self::dirs_for`] built.
+    /// [`Self::validate`] over `dirs`, such as the layers [`Self::dirs_for`] built, under
+    /// `context`, such as `WorkflowsSettings::validation_context`.
     pub fn validate_in(
         &self,
         dirs: &LayerDirs,
         name: Option<&str>,
+        context: &ValidationContext,
     ) -> Result<Report, DefinitionError> {
-        definitions::validate_definitions(dirs, name)
+        definitions::validate_definitions_in(dirs, name, context)
     }
 
     /// Creates a definition in the profile layer from the minimal template, or with `template`
@@ -486,7 +591,7 @@ impl WorkflowEngine {
         } else {
             LiveModesRegistry::live_modes(&request.task_id, cx).run
         };
-        let checks = AppChecks::read(cx);
+        let checks = AppChecks::read(&self.mcp.cache, cx);
         let settings = WorkflowsSettings::get_global(cx).clone();
         // The project layer is read from the verified commit and stays materialized until the
         // run's definition has been copied into its first attempt.
@@ -536,6 +641,7 @@ impl WorkflowEngine {
         drop(task_dirs);
         if let Ok(run) = &result {
             self.link_start(run, cx);
+            self.keep_mcp_fresh(cx);
         }
         self.publish(cx);
         result
@@ -1280,16 +1386,51 @@ fn merge_request(context: &SettleContext) -> Option<MergeRequest> {
     })
 }
 
-/// The start checks of the app: 04's agent health, the program interpreter lookup. MCP discovery
-/// is not read yet, so the MCP check is skipped until the runners take their servers from it.
-struct AppChecks {
+/// Why a Codex node cannot start in this build.
+pub(crate) const CODEX_UNSUPPORTED: &str =
+    "Codex nodes need Codex support, which is not in this build";
+
+/// The start checks of the app: 04's agent health, the program interpreter lookup and the MCP
+/// servers the background discovery found (`None`, which skips the check, for a CLI that was
+/// never discovered or whose discovery timed out).
+pub(crate) struct AppChecks {
+    validation: ValidationContext,
     agents: BTreeMap<AgentKind, Result<(), String>>,
     python: Option<String>,
     env: BTreeMap<String, String>,
+    /// The servers each discovered CLI has, less `workflows.mcp_exclude`.
+    mcp: BTreeMap<AgentKind, BTreeSet<String>>,
+    mcp_exclude: Vec<String>,
 }
 
 impl AppChecks {
-    fn read(cx: &App) -> Self {
+    /// The checks over what `cache` holds at `now`, in the directory `cwd`.
+    pub(crate) fn from_cache(
+        validation: ValidationContext,
+        cache: &Mutex<McpCache>,
+        cwd: &Path,
+        now: Instant,
+        mcp_exclude: Vec<String>,
+    ) -> Self {
+        let cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let mcp = [AgentKind::Claude, AgentKind::Codex]
+            .into_iter()
+            .filter_map(|kind| {
+                let found = cache.get(kind, cwd, now)?;
+                Some((kind, mcp::available(found, &mcp_exclude)))
+            })
+            .collect();
+        Self {
+            validation,
+            agents: BTreeMap::new(),
+            python: None,
+            env: BTreeMap::new(),
+            mcp,
+            mcp_exclude,
+        }
+    }
+
+    fn read(cache: &Mutex<McpCache>, cx: &App) -> Self {
         let mut agents = BTreeMap::new();
         let mut env: BTreeMap<String, String> = std::env::vars().collect();
         if let Some(health) = ChatHealth::global(cx) {
@@ -1307,17 +1448,33 @@ impl AppChecks {
                 agents.insert(kind, verdict);
             }
         }
+        let settings = WorkflowsSettings::get_global(cx);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self {
             agents,
-            python: WorkflowsSettings::get_global(cx).programs.python.clone(),
+            python: settings.programs.python.clone(),
             env,
+            ..Self::from_cache(
+                settings.validation_context(),
+                cache,
+                &cwd,
+                Instant::now(),
+                settings.mcp_exclude.clone(),
+            )
         }
     }
 }
 
 impl StartChecks for AppChecks {
     fn agent(&self, kind: AgentKind) -> Result<(), String> {
+        if kind == AgentKind::Codex {
+            return Err(CODEX_UNSUPPORTED.to_string());
+        }
         self.agents.get(&kind).cloned().unwrap_or(Ok(()))
+    }
+
+    fn mcp_exclude(&self) -> Vec<String> {
+        self.mcp_exclude.clone()
     }
 
     fn interpreter(&self) -> Result<(), String> {
@@ -1326,9 +1483,25 @@ impl StartChecks for AppChecks {
             .map_err(|failure| failure.detail)
     }
 
-    fn mcp_servers(&self, _kind: AgentKind) -> Option<BTreeSet<String>> {
-        None
+    fn mcp_servers(&self, kind: AgentKind) -> Option<BTreeSet<String>> {
+        self.mcp.get(&kind).cloned()
     }
+
+    fn validation(&self) -> ValidationContext {
+        self.validation.clone()
+    }
+}
+
+/// The project layer of an old-format `task`: `<root>/projects/<project>/workflows`, where the
+/// project is the first folder of the task's directory under the projects folder. `None` for a
+/// new-format task or a task outside the work root.
+pub(crate) fn old_format_layer(root: &Path, task: &Task) -> Option<PathBuf> {
+    if task.definition.is_some() {
+        return None;
+    }
+    let projects = bongos_work_model::layout::projects_dir(root);
+    let slug = task.dir.strip_prefix(projects).ok()?.components().next()?;
+    Some(project_layer_dir(root, &slug.as_os_str().to_string_lossy()))
 }
 
 /// Creates the global engine when `workflows.enabled` is true. Call after [`crate::init`].

@@ -69,6 +69,12 @@ pub fn profile_dir(home: &Path) -> PathBuf {
     home.join(WORK_DIR).join(WORKFLOWS_DIR)
 }
 
+/// The profile layer directory: `definitions_dir` when the setting names one, else
+/// [`profile_dir`] under `home`.
+pub fn profile_layer_dir(home: &Path, definitions_dir: Option<&Path>) -> PathBuf {
+    definitions_dir.map_or_else(|| profile_dir(home), Path::to_path_buf)
+}
+
 /// `<work root>/projects/<slug>/workflows`, the project layer of the project `slug`.
 pub fn project_layer_dir(work_root: &Path, project_slug: &str) -> PathBuf {
     project_dir(work_root, project_slug).join(WORKFLOWS_DIR)
@@ -196,6 +202,16 @@ impl DefinitionReport {
                 .iter()
                 .filter(|diagnostic| diagnostic.severity == Severity::Warning)
                 .count()
+    }
+
+    /// The first error: the load error, else the first error diagnostic's message.
+    pub fn first_error(&self) -> Option<String> {
+        self.load_error.clone().or_else(|| {
+            self.diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.severity == Severity::Error)
+                .map(|diagnostic| diagnostic.message.clone())
+        })
     }
 }
 
@@ -336,6 +352,17 @@ pub fn check_definition_with(
     resolved: &Resolved,
     adjust: impl FnOnce(&Definition, &mut ValidationContext),
 ) -> DefinitionReport {
+    check_definition_in(resolved, ValidationContext::default(), adjust)
+}
+
+/// [`check_definition_with`] starting from `base` (the settings' ceilings and network switch)
+/// instead of the default context; the files found in the definition's directory replace
+/// `base.files`.
+pub fn check_definition_in(
+    resolved: &Resolved,
+    base: ValidationContext,
+    adjust: impl FnOnce(&Definition, &mut ValidationContext),
+) -> DefinitionReport {
     let mut report = DefinitionReport {
         name: resolved.name.clone(),
         layer: resolved.layer,
@@ -361,7 +388,7 @@ pub fn check_definition_with(
     };
     let mut context = ValidationContext {
         files: list_files(&resolved.dir),
-        ..ValidationContext::default()
+        ..base
     };
     adjust(&definition, &mut context);
     report.warnings = definition.warnings();
@@ -375,6 +402,16 @@ pub fn validate_definitions(
     dirs: &LayerDirs,
     name: Option<&str>,
 ) -> Result<Report, DefinitionError> {
+    validate_definitions_in(dirs, name, &ValidationContext::default())
+}
+
+/// [`validate_definitions`] under `context`, such as the settings' [`ValidationContext`].
+pub fn validate_definitions_in(
+    dirs: &LayerDirs,
+    name: Option<&str>,
+    context: &ValidationContext,
+) -> Result<Report, DefinitionError> {
+    let check = |resolved: &Resolved| check_definition_in(resolved, context.clone(), |_, _| {});
     let resolution = layers::resolve(dirs);
     let mut report = Report::default();
     match name {
@@ -382,7 +419,7 @@ pub fn validate_definitions(
             let resolved = resolution
                 .get(name)
                 .ok_or_else(|| DefinitionError::NotFound(name.to_string()))?;
-            report.definitions.push(check_definition(resolved));
+            report.definitions.push(check(resolved));
         }
         None => {
             report.resolution_errors.extend(
@@ -403,7 +440,7 @@ pub fn validate_definitions(
                 }));
             report
                 .definitions
-                .extend(resolution.resolved.iter().map(check_definition));
+                .extend(resolution.resolved.iter().map(check));
         }
     }
     Ok(report)

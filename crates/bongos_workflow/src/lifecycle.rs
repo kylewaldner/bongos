@@ -937,24 +937,8 @@ impl<R: Runner> Lifecycle<R> {
     /// The prompt the next try of `key` gets from `base`: when the last decision on its gate was
     /// a revision, the comment and the previous result follow under "Revision requested:".
     pub fn prompt_for(&self, run: &str, key: &NodeKey, base: &str) -> String {
-        let Some(state) = self.state(run) else {
-            return base.to_string();
-        };
-        let last_gate = state
-            .closed_gates
-            .iter()
-            .rev()
-            .find(|gate| &gate.key == key);
-        match last_gate.and_then(|gate| gate.comment.as_deref()) {
-            Some(comment) => {
-                let previous = state
-                    .finished
-                    .iter()
-                    .rev()
-                    .find(|finished| &finished.key == key && finished.succeeded())
-                    .and_then(|finished| finished.result.as_ref());
-                revision_prompt(base, comment, previous)
-            }
+        match self.state(run) {
+            Some(state) => prompt_with_revision(&state, key, base),
             None => base.to_string(),
         }
     }
@@ -1285,7 +1269,8 @@ fn load_definition(
         ),
         other => Refusal::io(other),
     })?;
-    let report = definitions::check_definition_with(&resolved, |definition, context| {
+    let base = checks.map(|checks| checks.validation()).unwrap_or_default();
+    let report = definitions::check_definition_in(&resolved, base, |definition, context| {
         let Some(checks) = checks else {
             return;
         };
@@ -1305,13 +1290,7 @@ fn load_definition(
     });
     let errors = report.error_count();
     if errors > 0 {
-        let first = report.load_error.clone().or_else(|| {
-            report
-                .diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.severity == bongos_workflow_model::Severity::Error)
-                .map(|diagnostic| diagnostic.message.clone())
-        });
+        let first = report.first_error();
         let plural = if errors == 1 { "error" } else { "errors" };
         return Err(Refusal::new(
             RefusalKind::Invalid,
@@ -1454,6 +1433,28 @@ pub fn step_names(state: &RunState) -> String {
         }
     }
     names.join(", ")
+}
+
+/// The prompt the next try of `key` gets from `base` in `state`: when the last decision on its
+/// gate was a revision, the comment and the previous result follow under "Revision requested:".
+pub fn prompt_with_revision(state: &RunState, key: &NodeKey, base: &str) -> String {
+    let last_gate = state
+        .closed_gates
+        .iter()
+        .rev()
+        .find(|gate| &gate.key == key);
+    match last_gate.and_then(|gate| gate.comment.as_deref()) {
+        Some(comment) => {
+            let previous = state
+                .finished
+                .iter()
+                .rev()
+                .find(|finished| &finished.key == key && finished.succeeded())
+                .and_then(|finished| finished.result.as_ref());
+            revision_prompt(base, comment, previous)
+        }
+        None => base.to_string(),
+    }
 }
 
 /// `base`, then the comment under "Revision requested:" and the previous result.
