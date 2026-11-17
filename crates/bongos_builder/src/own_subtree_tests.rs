@@ -398,9 +398,13 @@ async fn a_proposal_never_approved_leaves_master_unchanged_with_its_working_copy
 ) {
     let fixture = fixture(cx, &[]).await;
     let before = fixture.main();
+    let probe = cx.update(|cx| bongos_work::watch_landings(cx));
     let (change_id, _) = write_without_approving(cx, &fixture, 1).await;
     // The person's marker approves nothing by itself: the landing waits.
-    cx.executor().timer(Duration::from_millis(500)).await;
+    let LandingVerdict::Held(reason) = within(cx, probe.verdict(&change_id)).await else {
+        panic!("expected the landing to wait");
+    };
+    assert!(reason.starts_with("waiting for approval"), "{reason}");
     assert_eq!(fixture.main(), before);
     assert!(fixture.repo.approvals(&change_id).unwrap().is_empty());
     let row = fixture.repo.change(&change_id).unwrap().unwrap();
@@ -420,7 +424,13 @@ async fn a_proposal_never_approved_leaves_master_unchanged_with_its_working_copy
 async fn a_reject_abandons_the_working_copy_and_records_the_rejection(cx: &mut TestAppContext) {
     let fixture = fixture(cx, &[]).await;
     let before = fixture.main();
+    let probe = cx.update(|cx| bongos_work::watch_landings(cx));
     let (change_id, text) = write_without_approving(cx, &fixture, 1).await;
+    // Let the detached landing finish (it holds the engine) before rejecting.
+    let LandingVerdict::Held(reason) = within(cx, probe.verdict(&change_id)).await else {
+        panic!("expected the landing to wait");
+    };
+    assert!(reason.starts_with("waiting for approval"), "{reason}");
     let row = fixture.repo.change(&change_id).unwrap().unwrap();
     let bytes = text.into_bytes();
     fixture
