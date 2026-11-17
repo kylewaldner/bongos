@@ -340,6 +340,10 @@ pub struct Attempt {
     pub definition_commit: Option<String>,
     pub worktree: String,
     pub branch: String,
+    /// `workflows.loop_bound` as it was when the attempt began: the passes of a loop whose route
+    /// sets no `max_passes`. A relaunch keeps it; `None` for records older than the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_bound: Option<u32>,
 }
 
 /// `runs/<run id>/run.toml`: the run's identity, written at create and when an attempt is added.

@@ -210,6 +210,7 @@ fn gated_spec(root: &std::path::Path) -> RunSpec {
         id: "01890a5d-ac96-774b-bcce-b30200000001".to_string(),
         definition: parse(GATED_FAN).unwrap(),
         attempt_dir: root.join("attempt"),
+        loop_bound: 5,
     }
 }
 

@@ -82,6 +82,9 @@ pub struct RunSpec {
     pub id: String,
     pub definition: Definition,
     pub attempt_dir: PathBuf,
+    /// The loop bound of the attempt (`Attempt::loop_bound`, or the setting for an old record):
+    /// what the scheduler applies to a loop whose route sets no `max_passes`.
+    pub loop_bound: u32,
 }
 
 /// A try that ended, as a [`Runner`] reports it.
@@ -250,6 +253,8 @@ struct LiveRun {
     builtins: BTreeMap<NodeKey, Arc<dyn BuiltinNode>>,
     /// The run's context, once bound ([`Runtime::bind`]).
     binding: Option<RunBinding>,
+    /// The attempt's loop bound; a later settings change reaches only new attempts.
+    loop_bound: u32,
 }
 
 impl LiveRun {
@@ -404,18 +409,22 @@ impl<R: Runner> Runtime<R> {
         let index = self.live(id)?;
         let state = self.runs[index].state();
         let free = self.limits.free_sessions(self.sessions_in_flight());
-        let ends_succeeded =
-            scheduler::step(&self.runs[index].definition, &state, &self.limits, free)
-                .iter()
-                .any(|command| {
-                    matches!(
-                        command,
-                        Command::End {
-                            state: record::EndState::Succeeded,
-                            ..
-                        }
-                    )
-                });
+        let ends_succeeded = scheduler::step(
+            &self.runs[index].definition,
+            &state,
+            &self.limits_for(index),
+            free,
+        )
+        .iter()
+        .any(|command| {
+            matches!(
+                command,
+                Command::End {
+                    state: record::EndState::Succeeded,
+                    ..
+                }
+            )
+        });
         if !ends_succeeded || !state.open_gates.is_empty() || !self.runs[index].in_flight.is_empty()
         {
             return Err(RuntimeError::Io(format!(
@@ -448,6 +457,20 @@ impl<R: Runner> Runtime<R> {
 
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
+    }
+
+    /// The limits for run `index`: the current ones with the loop bound of the run's attempt.
+    fn limits_for(&self, index: usize) -> Limits {
+        Limits {
+            loop_bound: self.runs[index].loop_bound,
+            ..self.limits
+        }
+    }
+
+    /// The limits in force for run `id`: the current ones with its attempt's loop bound.
+    pub fn run_limits(&self, id: &str) -> Limits {
+        self.find(id)
+            .map_or(self.limits, |index| self.limits_for(index))
     }
 
     pub fn limits(&self) -> &Limits {
@@ -933,7 +956,13 @@ impl<R: Runner> Runtime<R> {
                 continue;
             }
             let free = self.limits.free_sessions(self.sessions_in_flight());
-            if !scheduler::step(&self.runs[index].definition, &state, &self.limits, free).is_empty()
+            if !scheduler::step(
+                &self.runs[index].definition,
+                &state,
+                &self.limits_for(index),
+                free,
+            )
+            .is_empty()
             {
                 let run = &mut self.runs[index];
                 run.status = Status::Queued;
@@ -959,8 +988,12 @@ impl<R: Runner> Runtime<R> {
                 continue;
             }
             let free = self.limits.free_sessions(self.sessions_in_flight());
-            let commands =
-                scheduler::step(&self.runs[index].definition, &state, &self.limits, free);
+            let commands = scheduler::step(
+                &self.runs[index].definition,
+                &state,
+                &self.limits_for(index),
+                free,
+            );
             if commands.is_empty() {
                 if state.running.is_empty() && self.runs[index].in_flight.is_empty() {
                     self.runs[index].status = Status::Parked;
@@ -1207,6 +1240,7 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
         in_flight: BTreeSet::new(),
         builtins: BTreeMap::new(),
         binding: None,
+        loop_bound: spec.loop_bound,
     })
 }
 
