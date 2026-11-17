@@ -340,6 +340,8 @@ async fn vscode_binds_the_work_keys_only_under_its_leader(cx: &mut TestAppContex
             let bound: Vec<String> = bindings
                 .iter()
                 .filter(|binding| binding.action().name() == *action)
+                // Single-key bindings are panel keys from the overrides every profile loads.
+                .filter(|binding| binding.keystrokes().len() > 1)
                 .map(|binding| {
                     unparse(
                         binding
