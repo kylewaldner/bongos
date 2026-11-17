@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, SystemTime};
 
@@ -223,15 +223,18 @@ pub fn fan_out_branch_name(run_branch: &str, node: &str, index: u32) -> String {
 /// resolved against `repository`.
 pub fn runs_dir(repository: &Path, worktrees_dir: Option<&Path>) -> PathBuf {
     match worktrees_dir {
-        Some(dir) => {
-            // A leading `~` is the home directory; a relative path is relative to the repository.
-            let expanded = match dir.strip_prefix("~") {
-                Ok(rest) => paths::home_dir().join(rest),
-                Err(_) => dir.to_path_buf(),
-            };
-            repository.join(expanded)
-        }
+        Some(dir) => repository.join(expand_configured_dir(dir)),
         None => repository.join(DEFAULT_RUNS_DIR),
+    }
+}
+
+/// A configured `workflows.worktrees_dir` with a leading `./` dropped and a leading `~` expanded to
+/// the home directory. Shared by [`runs_dir`] and [`is_run_worktree`] so they agree.
+fn expand_configured_dir(dir: &Path) -> PathBuf {
+    let dir = dir.strip_prefix(".").unwrap_or(dir);
+    match dir.strip_prefix("~") {
+        Ok(rest) => paths::home_dir().join(rest),
+        Err(_) => dir.to_path_buf(),
     }
 }
 
@@ -244,18 +247,25 @@ pub fn is_run_worktree(worktree: &RunWorktree, worktrees_dir: Option<&Path>) -> 
     if worktree.path != run_worktree_path(&worktree.run_dir) {
         return false;
     }
-    let Some(parent) = worktree.run_dir.parent() else {
+    // Absolute, with no `..` or `.` component, and a plain final name: `.runs/..` must not pass.
+    let run_dir = &worktree.run_dir;
+    if !run_dir.is_absolute()
+        || !run_dir.components().all(|component| {
+            matches!(
+                component,
+                Component::RootDir | Component::Prefix(_) | Component::Normal(_)
+            )
+        })
+        || !matches!(run_dir.components().next_back(), Some(Component::Normal(_)))
+    {
+        return false;
+    }
+    let Some(parent) = run_dir.parent() else {
         return false;
     };
     match worktrees_dir {
         None => parent.ends_with(DEFAULT_RUNS_DIR),
-        Some(dir) => {
-            let expanded = match dir.strip_prefix("~") {
-                Ok(rest) => paths::home_dir().join(rest),
-                Err(_) => dir.to_path_buf(),
-            };
-            parent.ends_with(expanded)
-        }
+        Some(dir) => parent.ends_with(expand_configured_dir(dir)),
     }
 }
 

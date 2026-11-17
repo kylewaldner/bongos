@@ -248,6 +248,27 @@ fn a_recorded_worktree_off_the_run_layout_is_not_a_run_worktree() {
     };
     assert!(is_run_worktree(&moved, Some(custom)));
     assert!(!is_run_worktree(&moved, None));
+    // A leading `./` in the configured directory is dropped before matching.
+    assert!(is_run_worktree(&moved, Some(Path::new("./elsewhere"))));
+}
+
+#[test]
+fn a_run_dir_with_dot_components_is_not_a_run_worktree() {
+    for run_dir in [
+        "/repo/.bongos-worktrees/.runs/..",
+        "/repo/.bongos-worktrees/.runs/../x",
+        "./repo/.bongos-worktrees/.runs/x",
+        "repo/.bongos-worktrees/.runs/x",
+        "/repo/.bongos-worktrees/.runs/.",
+    ] {
+        let run_dir = PathBuf::from(run_dir);
+        let worktree = RunWorktree {
+            path: run_worktree_path(&run_dir),
+            run_dir,
+            branch: "b".into(),
+        };
+        assert!(!is_run_worktree(&worktree, None), "{worktree:?}");
+    }
 }
 
 #[gpui::test]
