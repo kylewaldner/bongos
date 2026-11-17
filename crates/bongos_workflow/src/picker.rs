@@ -13,14 +13,15 @@ use bongos_work::WorkStore;
 use bongos_work_model::store::WorkTree;
 use bongos_workflow_model::inputs::resolve;
 use bongos_workflow_model::layers::{self, DEFINITION_FILE};
-use bongos_workflow_model::{InputValue, LayerDirs, parse};
+use bongos_workflow_model::{InputValue, LayerDirs, ValidationContext, parse};
 use gpui::{AppContext as _, Context, Window};
 use settings::Settings as _;
 use workspace::Workspace;
 
 use crate::WorkflowsSettings;
 use crate::actions::show_toast;
-use crate::commands::open_report;
+use crate::commands::{VALIDATE_TITLE, open_report};
+use crate::definitions::{Report, check_definition_in};
 use crate::engine::WorkflowEngine;
 use crate::lifecycle::{StartRequest, open_todo};
 use crate::runner_claude::AgentDefaults;
@@ -33,11 +34,14 @@ pub struct Candidate {
     pub name: String,
     /// `name (layer)`, with the layers it shadows.
     pub label: String,
+    /// The rendered diagnostics of a definition that fails to parse or validate; choosing its row
+    /// opens them instead of starting it.
+    pub diagnostics: Option<String>,
 }
 
 /// The definitions of every layer, by name, each labeled with its winning layer and the lower
-/// layers it shadows.
-pub fn candidates(dirs: &LayerDirs) -> Vec<Candidate> {
+/// layers it shadows. A definition with an error is a row with its name and first error.
+pub fn candidates(dirs: &LayerDirs, context: &ValidationContext) -> Vec<Candidate> {
     layers::resolve(dirs)
         .resolved
         .into_iter()
@@ -52,9 +56,19 @@ pub fn candidates(dirs: &LayerDirs) -> Vec<Candidate> {
                 label.push_str(&format!(", shadows {}", shadowed.join(", ")));
             }
             label.push(')');
+            let report = check_definition_in(&resolved, context.clone(), |_, _| {});
+            let diagnostics = report.first_error().map(|first| {
+                label.push_str(&format!(": error: {first}"));
+                let report = Report {
+                    definitions: vec![report],
+                    resolution_errors: Vec::new(),
+                };
+                report.render()
+            });
             Candidate {
                 name: resolved.name,
                 label,
+                diagnostics,
             }
         })
         .collect()
@@ -288,8 +302,9 @@ pub(crate) fn run_picker(
             return;
         }
     };
+    let context = WorkflowsSettings::get_global(cx).validation_context();
     let picker = Picker::new(
-        candidates(&task_dirs.dirs),
+        candidates(&task_dirs.dirs, &context),
         todo_workflow(&tree, &task_id).as_deref(),
     );
     if picker.candidates.is_empty() {
@@ -300,20 +315,30 @@ pub(crate) fn run_picker(
         );
         return;
     }
-    let names: Vec<String> = picker
+    let choices: Vec<(String, Option<String>)> = picker
         .candidates
         .iter()
-        .map(|found| found.name.clone())
+        .map(|found| (found.name.clone(), found.diagnostics.clone()))
         .collect();
     bongos_work::pick(
         workspace,
         "Run workflow",
         picker.labels(),
         picker.selected(),
-        Box::new(move |index, _, window, cx| {
-            let Some(name) = names.get(index).cloned() else {
+        Box::new(move |index, workspace, window, cx| {
+            let Some((name, diagnostics)) = choices.get(index).cloned() else {
                 return;
             };
+            if let Some(diagnostics) = diagnostics {
+                open_report(
+                    VALIDATE_TITLE.to_string(),
+                    diagnostics,
+                    workspace,
+                    window,
+                    cx,
+                );
+                return;
+            }
             probe_then_review(engine, Review::new(task_id, name), true, window, cx);
         }),
         window,
