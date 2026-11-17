@@ -1081,6 +1081,7 @@ impl<R: Runner> Runtime<R> {
                         state: &state,
                         key: &key,
                         try_number,
+                        binding: run.binding.as_ref(),
                     })
                     .map(|()| ProcessRecord {
                         pid: 0,

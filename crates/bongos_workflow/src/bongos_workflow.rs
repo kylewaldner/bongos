@@ -8,6 +8,7 @@
 mod actions;
 pub mod builtin_merge;
 pub mod builtin_nodes;
+pub mod builtin_run;
 pub mod builtin_wait;
 mod commands;
 pub mod completion;
@@ -57,11 +58,14 @@ pub use status_item::WorkflowStatus;
 pub fn init(cx: &mut App) {
     WorkflowsSettings::register(cx);
     landing::register(cx);
+    builtin_run::register(cx);
     engine::init(cx);
 }
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod builtin_run_tests;
 #[cfg(test)]
 mod builtin_wait_tests;
 #[cfg(test)]
