@@ -330,7 +330,13 @@ pub(crate) fn run_picker(
                 return;
             };
             if let Some(diagnostics) = diagnostics {
-                open_report(VALIDATE_TITLE.to_string(), diagnostics, workspace, window, cx);
+                open_report(
+                    VALIDATE_TITLE.to_string(),
+                    diagnostics,
+                    workspace,
+                    window,
+                    cx,
+                );
                 return;
             }
             probe_then_review(engine, Review::new(task_id, name), true, window, cx);

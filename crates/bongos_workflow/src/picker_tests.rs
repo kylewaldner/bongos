@@ -71,7 +71,10 @@ fn the_todos_workflow_is_preselected() {
     assert_eq!(picker.chosen(), Some("single"));
     assert_eq!(picker.labels()[picker.selected()], "single (profile)");
     // A todo that names nothing, or a definition that is gone, selects the first.
-    assert_eq!(Picker::new(candidates(&world.dirs, &Default::default()), None).selected(), 0);
+    assert_eq!(
+        Picker::new(candidates(&world.dirs, &Default::default()), None).selected(),
+        0
+    );
     assert_eq!(
         Picker::new(candidates(&world.dirs, &Default::default()), Some("gone")).selected(),
         0
@@ -233,14 +236,20 @@ fn a_broken_definition_is_a_row_with_its_first_error_and_its_diagnostics() {
     write_definition(
         world.profile(),
         "broken",
-        &SINGLE.replace("name = \"single\"", "name = \"broken\"").replace(
-            "routes = [{ to = \"done\" }]",
-            "routes = [{ to = \"nowhere\" }]",
-        ),
+        &SINGLE
+            .replace("name = \"single\"", "name = \"broken\"")
+            .replace(
+                "routes = [{ to = \"done\" }]",
+                "routes = [{ to = \"nowhere\" }]",
+            ),
     );
     let found = candidates(&world.dirs, &Default::default());
     let broken = found.iter().find(|found| found.name == "broken").unwrap();
-    assert!(broken.label.starts_with("broken (profile): error: "), "{}", broken.label);
+    assert!(
+        broken.label.starts_with("broken (profile): error: "),
+        "{}",
+        broken.label
+    );
     let diagnostics = broken.diagnostics.as_deref().unwrap();
     assert!(diagnostics.contains("nowhere"), "{diagnostics}");
     let single = found.iter().find(|found| found.name == "single").unwrap();
