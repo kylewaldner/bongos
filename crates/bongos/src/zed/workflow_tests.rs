@@ -354,14 +354,18 @@ async fn type_retry_keys(keys: &str, cx: &mut TestAppContext) -> (usize, usize, 
         let (plain, fresh) = (plain.clone(), fresh.clone());
         editor.update(cx, |editor, _| {
             editor
-                .register_action(move |_: &bongos_workflow::workflow::RetryStep, _, _| {
-                    plain.set(plain.get() + 1)
+                .register_action(move |_: &bongos_workflow::workflow::RetryStep, _, cx| {
+                    plain.set(plain.get() + 1);
+                    cx.propagate();
                 })
                 .detach();
             editor
-                .register_action(move |_: &bongos_workflow::workflow::RetryStepFresh, _, _| {
-                    fresh.set(fresh.get() + 1)
-                })
+                .register_action(
+                    move |_: &bongos_workflow::workflow::RetryStepFresh, _, cx| {
+                        fresh.set(fresh.get() + 1);
+                        cx.propagate();
+                    },
+                )
                 .detach();
         });
         window.focus(&editor.focus_handle(cx), cx);
