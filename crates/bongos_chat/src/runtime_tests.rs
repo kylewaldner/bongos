@@ -682,6 +682,9 @@ async fn test_no_output_makes_a_chat_idle(cx: &mut TestAppContext) {
     })
     .await;
     h.type_line(&id, "hello", cx);
+    // The fake answers byte by byte, so its reply can take long under load; wait for it
+    // first, then check only the runtime's promise: output reaches the state within WITHIN.
+    h.wait_content(&id, "got hello", cx).await;
     h.wait_state(&id, ChatState::Running, cx).await;
 }
 
