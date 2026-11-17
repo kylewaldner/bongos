@@ -1332,7 +1332,7 @@ fn the_app_engine_refuses_resume_retry_and_restart_while_no_runner_is_connected(
         WorkflowsSettings::register(cx);
     });
     let world = World::new();
-    let engine = WorkflowEngine::new(world.dirs.clone());
+    let engine = WorkflowEngine::new(world.dirs);
     let run = "no-such-run".to_string();
 
     let refusals = cx.update(|cx| {

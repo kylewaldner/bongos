@@ -362,7 +362,7 @@ fn bind_and_unbind_track_bindings_and_connection_is_off_by_default() {
     let log = KindLog::default();
     runner.kinds_mut().set_agent(Box::new(Plugged {
         name: "agent",
-        log: log.clone(),
+        log,
     }));
     runner.bind("run", binding(temp.path(), "mixed"));
     assert!(start(&mut runner, &definition, "claude").is_ok());
