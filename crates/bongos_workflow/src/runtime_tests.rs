@@ -3,6 +3,7 @@
 //! directories; real processes are `sh` and `sleep` in their own sessions.
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -382,6 +383,38 @@ fn quit_then_reload_shows_interrupted_and_starts_nothing() {
         .filter(|event| matches!(event, Event::Interrupted { .. }))
         .count();
     assert_eq!(interrupted, 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn load_all_skips_a_run_whose_log_cannot_be_opened() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = TempDir::new().unwrap();
+    let mut runtime = runtime(FakeRunner::new());
+    runtime.add(spec(temp.path(), 1, SINGLE)).unwrap();
+    runtime.add(spec(temp.path(), 2, SINGLE)).unwrap();
+    runtime.quit();
+    drop(runtime);
+    let locked = spec(temp.path(), 1, SINGLE).attempt_dir.join(EVENTS_FILE);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o444)).unwrap();
+    let writable = fs::OpenOptions::new().append(true).open(&locked).is_ok();
+
+    let mut relaunched = Runtime::new(Limits::default(), FakeRunner::new());
+    let results = relaunched
+        .load_all(vec![
+            spec(temp.path(), 1, SINGLE),
+            spec(temp.path(), 2, SINGLE),
+        ])
+        .unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+    if writable {
+        return;
+    }
+    assert_eq!(results.len(), 2, "one result per spec");
+    assert!(results[0].is_err());
+    assert!(results[1].is_ok());
+    assert!(relaunched.state(&run_id(1)).is_none());
+    assert!(relaunched.state(&run_id(2)).is_some());
 }
 
 #[test]
