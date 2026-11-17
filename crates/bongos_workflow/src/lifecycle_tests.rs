@@ -1383,5 +1383,289 @@ fn a_lifecycle_binds_each_attempt_to_its_worktree_and_unbinds_at_a_restart() {
         ]
     );
 }
+
+/// Starts `workflow` in a lifecycle of its own, lets `drive` move it, and drops the lifecycle (a
+/// quit without the `Interrupted` record). The run's files stay on disk in the world.
+fn seed(
+    world: &World,
+    workflow: &str,
+    drive: impl FnOnce(&mut Lifecycle<FakeRunner>, &str),
+) -> String {
+    let mut lifecycle = world.lifecycle();
+    let run = world
+        .start(&mut lifecycle, with_workflow(workflow))
+        .unwrap();
+    drive(&mut lifecycle, &run);
+    run
+}
+
+fn mid_node(lifecycle: &mut Lifecycle<FakeRunner>, _run: &str) {
+    settle(lifecycle);
+}
+
+fn run_dir_of(world: &World, run: &str) -> PathBuf {
+    world.root.join("work/app/tasks/login/runs").join(run)
+}
+
+fn events_of(world: &World, run: &str) -> PathBuf {
+    attempt_dir(&run_dir_of(world, run), 1).join("events.jsonl")
+}
+
+fn sleeper() -> crate::process::NodeProcess {
+    let mut command = std::process::Command::new("sleep");
+    command.arg("60");
+    crate::process::NodeProcess::spawn(
+        command,
+        std::process::Stdio::null(),
+        std::process::Stdio::null(),
+        std::process::Stdio::null(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn load_runs_loads_a_gate_a_mid_node_run_and_an_ended_run() {
+    let world = World::new();
+    let gate = seed(&world, "reviewed", |lifecycle, _| {
+        lifecycle
+            .runtime_mut()
+            .runner_mut()
+            .script("work", json!({ "summary": "draft", "verdict": "ship" }));
+        settle(lifecycle);
+        finish_all(lifecycle);
+    });
+    let mid = seed(&world, "single", mid_node);
+    let ended = seed(&world, "single", |lifecycle, _| {
+        settle(lifecycle);
+        finish_all(lifecycle);
+    });
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded.len(), 3, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+
+    let gate_state = lifecycle.state(&gate).unwrap();
+    assert_eq!(gate_state.open_gates.len(), 1);
+    assert!(gate_state.interrupted.is_empty());
+    let mid_state = lifecycle.state(&mid).unwrap();
+    assert_eq!(mid_state.interrupted.len(), 1);
+    assert!(mid_state.running.is_empty());
+    assert_eq!(lifecycle.status(&ended), Some(RunStatus::Succeeded));
+    // Each run is bound to its attempt's worktree, and nothing resumed by itself.
+    assert!(lifecycle.worktree(&mid).unwrap().path.ends_with("run"));
+    assert_eq!(lifecycle.task_of(&mid), Some(LEAF));
+    lifecycle.tick();
+    assert!(lifecycle.runtime().runner().started.is_empty());
+}
+
+#[test]
+fn load_runs_kills_a_leftover_process_with_a_matching_start_time() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let mut process = sleeper();
+    let record = process.record();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::process::start_time(record.pid).is_none() {
+        assert!(std::time::Instant::now() < deadline, "no start time");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let record = process.record();
+    let mut log = Event::Created.to_line();
+    log.push_str(
+        &Event::NodeStarted {
+            key: NodeKey::new("work", 1),
+            try_number: 1,
+            pid: record.pid,
+            pid_start_time: record.start_time,
+        }
+        .to_line(),
+    );
+    fs::write(events_of(&world, &run), log).unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(
+        report.orphans,
+        vec![(
+            run.clone(),
+            vec![(
+                NodeKey::new("work", 1),
+                crate::process::OrphanOutcome::Killed
+            )]
+        )]
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !process.has_exited() {
+        assert!(std::time::Instant::now() < deadline, "not killed");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
+}
+
+#[test]
+fn load_runs_skips_a_cleared_run_and_a_corrupt_record() {
+    let world = World::new();
+    let cleared = seed(&world, "single", mid_node);
+    let corrupt = seed(&world, "single", mid_node);
+    let kept = seed(&world, "single", mid_node);
+    fs::write(run_dir_of(&world, &cleared).join("cleared"), "").unwrap();
+    fs::write(run_dir_of(&world, &corrupt).join("run.toml"), "not = [toml").unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![kept]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(report.skipped[0].0.ends_with(&corrupt));
+    assert!(lifecycle.state(&cleared).is_none());
+    assert!(lifecycle.state(&corrupt).is_none());
+}
+
+#[test]
+fn load_runs_skips_a_record_without_an_event_log() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    fs::remove_file(events_of(&world, &run)).unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert!(report.loaded.is_empty());
+    assert!(report.skipped[0].1.contains("events.jsonl"), "{report:?}");
+    // Nothing was created for it either.
+    assert!(!events_of(&world, &run).exists());
+}
+
+#[test]
+fn load_runs_skips_a_damaged_log_and_loads_the_rest() {
+    let world = World::new();
+    let damaged = seed(&world, "single", mid_node);
+    let good = seed(&world, "single", mid_node);
+    fs::write(events_of(&world, &damaged), "not json\n").unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![good]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(report.skipped[0].0.ends_with(&damaged));
+    assert!(lifecycle.state(&damaged).is_none());
+}
+
+#[test]
+fn load_runs_skips_a_run_id_repeated_in_another_task_directory() {
+    let mut world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let other = world.root.join("work/app/tasks/other");
+    fs::create_dir_all(other.join("runs")).unwrap();
+    let copy = other.join("runs").join(&run);
+    fs::create_dir_all(&copy).unwrap();
+    let source = run_dir_of(&world, &run);
+    let mut stack = vec![source.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let target = copy.join(path.strip_prefix(&source).unwrap());
+            if path.is_dir() {
+                fs::create_dir_all(&target).unwrap();
+                stack.push(path);
+            } else {
+                fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+    let mut file = TaskFile::new("Other", Kind::PrShip);
+    file.id = "other".to_string();
+    let other_task = task(other, file, Vec::new());
+    world.tree.projects[0].task.children.push(other_task);
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![run.clone()]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert_eq!(lifecycle.all_runs(), vec![run]);
+}
+
+#[test]
+fn load_runs_takes_the_revision_from_the_log_not_from_a_stray_directory() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let attempt = attempt_dir(&run_dir_of(&world, &run), 1);
+    let copy = attempt.join("definition/1");
+    fs::create_dir_all(&copy).unwrap();
+    fs::write(copy.join(DEFINITION_FILE), "broken").unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![run.clone()], "{report:?}");
+    assert_eq!(lifecycle.state(&run).unwrap().definition_rev, None);
+}
+
+#[test]
+fn load_runs_with_no_runs_directory_loads_and_writes_nothing() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert!(report.loaded.is_empty() && report.skipped.is_empty());
+    assert!(!world.root.join("work").exists());
+    assert!(!world.root.join("runs").exists());
+}
+
+#[test]
+fn load_runs_twice_is_refused_as_a_duplicate() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    match lifecycle.load_runs(&world.tree) {
+        Err(crate::runtime::RuntimeError::Duplicate(id)) => assert_eq!(id, run),
+        other => panic!("expected Duplicate, got {other:?}"),
+    }
+    assert_eq!(lifecycle.all_runs(), vec![run]);
+}
+
+#[test]
+fn resume_after_load_reruns_only_the_interrupted_key() {
+    let world = World::new();
+    let run = seed(&world, "two", |lifecycle, _| {
+        settle(lifecycle);
+        lifecycle.runtime_mut().runner_mut().release_all();
+        settle(lifecycle);
+        assert_eq!(started_nodes(lifecycle), ["plan", "work"]);
+    });
+
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(
+        lifecycle.state(&run).unwrap().interrupted.keys().next(),
+        Some(&NodeKey::new("work", 1))
+    );
+    settle(&mut lifecycle);
+    assert!(started_nodes(&lifecycle).is_empty());
+    lifecycle.resume(&run).unwrap();
+    settle(&mut lifecycle);
+    assert_eq!(started_nodes(&lifecycle), ["work"]);
+}
+
+#[test]
+fn quit_stops_in_flight_work_and_records_interrupted() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    settle(&mut lifecycle);
+    assert_eq!(started_nodes(&lifecycle), ["work"]);
+
+    lifecycle.quit();
+    let events = lifecycle.runtime().events(&run).unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Interrupted { keys } if keys == &[NodeKey::new("work", 1)]
+        )),
+        "{events:?}"
+    );
+    assert!(!lifecycle.tick(), "nothing starts after a quit");
+}
+
 #[path = "landing_tests.rs"]
 mod landing_tests;
