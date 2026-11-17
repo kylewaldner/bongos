@@ -858,6 +858,32 @@ fn program_permissions_ceiling() {
 }
 
 #[test]
+fn the_remote_placeholder_is_a_network_entry_that_allow_network_governs() {
+    let text = mutate("network = []", r#"network = ["@remote"]"#);
+    assert_no_errors(&text);
+    let closed = ValidationContext {
+        allow_network: false,
+        ..context()
+    };
+    assert_error_with(
+        &text,
+        &closed,
+        Some("test"),
+        "permissions = ",
+        "network permission (@remote) is not allowed: workflows.programs.allow_network is false",
+    );
+    for bad in ["@remotes", "@", "@Remote", "@host"] {
+        let text = mutate("network = []", &format!(r#"network = ["{bad}"]"#));
+        assert_error(
+            &text,
+            Some("test"),
+            "permissions = ",
+            &format!("network entry '{bad}' is not known"),
+        );
+    }
+}
+
+#[test]
 fn node_names_are_branch_and_path_safe() {
     for bad in ["Fix", "fix me", "fix/me", "-fix", "fix.me", "fïx"] {
         let header = format!("[nodes.\"{bad}\"]");

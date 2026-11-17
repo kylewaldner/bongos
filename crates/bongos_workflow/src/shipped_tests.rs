@@ -12,7 +12,7 @@ use bongos_workflow_model::fake::{FakeRunner, Scripted};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{EndState, RunState};
 use bongos_workflow_model::template::references;
-use bongos_workflow_model::{FailureReason, LayerDirs, Limits};
+use bongos_workflow_model::{FailureReason, LayerDirs, Limits, ValidationContext, validate};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -227,6 +227,54 @@ fn programs_declare_the_permissions_they_need_and_no_mcp() {
                 }
             }
         }
+    }
+}
+
+/// The network entries of every program node of a shipped definition.
+fn network_entries(dir: &str) -> Vec<String> {
+    definition(dir)
+        .nodes
+        .iter()
+        .filter_map(|node| node.permissions.as_ref())
+        .flat_map(|permissions| permissions.network.clone())
+        .collect()
+}
+
+#[test]
+fn no_shipped_definition_names_a_dotted_host_in_its_network_entries() {
+    let mut seen = 0;
+    for shipped in TEMPLATES {
+        for entry in network_entries(shipped.dir) {
+            assert!(
+                !entry.contains('.'),
+                "{} names the host '{entry}'",
+                shipped.dir
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "ship-pr and babysit-pr declare network entries");
+}
+
+#[test]
+fn shipped_definitions_with_network_entries_are_refused_when_allow_network_is_off() {
+    let closed = ValidationContext {
+        allow_network: false,
+        files: FILES
+            .iter()
+            .map(|file| file.path.split_once('/').unwrap().1.to_string())
+            .collect(),
+        ..ValidationContext::default()
+    };
+    for dir in ["ship-pr", "babysit-pr"] {
+        assert!(!network_entries(dir).is_empty(), "{dir}");
+        let diagnostics = validate(&definition(dir), &closed);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("allow_network")),
+            "{dir}: {diagnostics:#?}"
+        );
     }
 }
 
