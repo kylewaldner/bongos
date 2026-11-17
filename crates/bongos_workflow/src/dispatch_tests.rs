@@ -7,7 +7,6 @@ use bongos_workflow_model::{Definition, Failure, FailureReason, Limits, NodeKey,
 use tempfile::TempDir;
 
 use crate::dispatch::{AppRunner, NodeKind, RunnerInputs, RunnerSnapshot};
-use crate::engine::UNWIRED_DETAIL;
 use crate::lifecycle::StartChecks;
 use crate::process::ProcessRecord;
 use crate::runtime::{Finish, NodeStart, RunBinding, RunSpec, Runner, Runtime};
@@ -286,12 +285,12 @@ fn start(
 }
 
 #[test]
-fn unwired_kinds_fail_agent_and_program_nodes_with_the_unwired_text() {
+fn kinds_not_plugged_in_fail_agent_and_program_nodes() {
     let definition = definition(MIXED);
     let mut runner = AppRunner::default();
     for node in ["claude", "script"] {
         let failure = start(&mut runner, &definition, node).unwrap_err();
-        assert_eq!(failure.detail, UNWIRED_DETAIL, "{node}");
+        assert_eq!(failure.detail, "no runner is plugged in for this kind of node");
         assert_eq!(failure.node, Some(NodeKey::new(node, 1)));
     }
 }
@@ -332,7 +331,7 @@ fn a_plugged_in_kind_gets_the_start_with_its_binding_and_polls_and_stops_fan_out
     runner.bind("run", binding(temp.path(), "mixed"));
     assert_eq!(start(&mut runner, &definition, "claude").unwrap().pid, 7);
     assert_eq!(start(&mut runner, &definition, "script").unwrap().pid, 7);
-    // The program node's unwired sibling kinds are not touched by a codex node.
+    // The program node's sibling kinds are not touched by a codex node.
     assert!(start(&mut runner, &definition, "codex").is_err());
 
     assert_eq!(runner.poll().len(), 2);
@@ -351,15 +350,10 @@ fn a_plugged_in_kind_gets_the_start_with_its_binding_and_polls_and_stops_fan_out
 }
 
 #[test]
-fn bind_and_unbind_track_bindings_and_connection_is_off_by_default() {
+fn bind_and_unbind_track_bindings() {
     let temp = TempDir::new().unwrap();
     let definition = definition(MIXED);
     let mut runner = AppRunner::default();
-    assert!(!runner.connected());
-    assert!(!Runner::is_connected(&runner));
-    runner.set_connected(true);
-    assert!(runner.connected());
-
     let log = KindLog::default();
     runner
         .kinds_mut()

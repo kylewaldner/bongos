@@ -1,7 +1,6 @@
 //! The app's node runner: [`AppRunner`] picks the node kind that runs each node (the agent kind,
 //! the program kind, or a built-in) and fans polling and stopping out to every kind. A kind not
-//! plugged in is [`Slot::Unwired`] and fails its nodes as not connected. The engine builds one
-//! and refreshes its [`RunnerInputs`] before every tick.
+//! plugged in fails its nodes. The engine builds one and refreshes its [`RunnerInputs`] before every tick.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -11,7 +10,6 @@ use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
 use crate::dispatch_agent::AgentNodes;
 use crate::dispatch_program::ProgramNodes;
-use crate::engine::{UNWIRED_DETAIL, unwired_failure};
 use crate::lifecycle::agent_of;
 use crate::process::ProcessRecord;
 use crate::runner_claude::{AgentDefaults, ClaudeCli};
@@ -79,39 +77,26 @@ pub(crate) trait NodeKind: Send {
     fn stop(&mut self, tries: &[(String, NodeKey)]);
 }
 
-/// A place for a node kind.
-#[derive(Default)]
-pub(crate) enum Slot {
-    /// Nothing plugged in: its nodes fail.
-    #[default]
-    Unwired,
-    #[allow(dead_code)] // a later step plugs the kinds in
-    Wired(Box<dyn NodeKind>),
-}
-
-/// The node kinds an [`AppRunner`] dispatches to.
+/// The node kinds an [`AppRunner`] dispatches to; a kind not plugged in fails its nodes.
 #[derive(Default)]
 pub(crate) struct Kinds {
-    agent: Slot,
-    program: Slot,
+    agent: Option<Box<dyn NodeKind>>,
+    program: Option<Box<dyn NodeKind>>,
 }
 
 impl Kinds {
     pub(crate) fn set_agent(&mut self, kind: Box<dyn NodeKind>) {
-        self.agent = Slot::Wired(kind);
+        self.agent = Some(kind);
     }
 
     pub(crate) fn set_program(&mut self, kind: Box<dyn NodeKind>) {
-        self.program = Slot::Wired(kind);
+        self.program = Some(kind);
     }
 
     fn wired(&mut self) -> impl Iterator<Item = &mut Box<dyn NodeKind>> {
         [&mut self.agent, &mut self.program]
             .into_iter()
-            .filter_map(|slot| match slot {
-                Slot::Wired(kind) => Some(kind),
-                Slot::Unwired => None,
-            })
+            .filter_map(Option::as_mut)
     }
 }
 
@@ -121,13 +106,11 @@ pub struct AppRunner {
     kinds: Kinds,
     bindings: BTreeMap<String, RunBinding>,
     inputs: RunnerInputs,
-    connected: bool,
 }
 
 impl AppRunner {
     /// A runner with the agent and program kinds plugged in (the built-ins run through the
-    /// runtime's [`crate::BuiltinNodes`]). It is not connected until [`AppRunner::set_connected`],
-    /// so the app's commands refuse to start nodes.
+    /// runtime's [`crate::BuiltinNodes`]).
     pub fn new(inputs: RunnerInputs) -> Self {
         let mut runner = Self {
             inputs,
@@ -138,7 +121,7 @@ impl AppRunner {
         runner
     }
 
-    #[allow(dead_code)] // a later step plugs the kinds in
+    #[allow(dead_code)] // only tests plug other kinds in
     pub(crate) fn kinds_mut(&mut self) -> &mut Kinds {
         &mut self.kinds
     }
@@ -147,22 +130,18 @@ impl AppRunner {
         &self.inputs
     }
 
-    pub fn connected(&self) -> bool {
-        self.connected
-    }
-
-    pub fn set_connected(&mut self, connected: bool) {
-        self.connected = connected;
-    }
-
     fn run_in(
-        slot: &mut Slot,
+        slot: &mut Option<Box<dyn NodeKind>>,
         node: &NodeStart<'_>,
         bindings: &BTreeMap<String, RunBinding>,
         inputs: &RunnerInputs,
     ) -> Result<ProcessRecord, Failure> {
-        let Slot::Wired(kind) = slot else {
-            return Err(unwired_failure(node.key));
+        let Some(kind) = slot else {
+            return Err(Failure::new(
+                FailureReason::AgentNotInstalledOrLoggedOut,
+                Some(node.key.clone()),
+                "no runner is plugged in for this kind of node",
+            ));
         };
         let binding = node
             .binding
@@ -179,18 +158,19 @@ impl AppRunner {
 }
 
 impl Runner for AppRunner {
-    fn is_connected(&self) -> bool {
-        self.connected
-    }
-
     fn start(
         &mut self,
-        _run: &str,
+        run: &str,
         _definition: &bongos_workflow_model::Definition,
         key: &NodeKey,
         _try_number: u32,
     ) -> Result<ProcessRecord, Failure> {
-        Err(unwired_failure(key))
+        // The runtime starts every node through `start_node`, which has the run's binding.
+        Err(Failure::new(
+            FailureReason::WorktreeUnavailable,
+            Some(key.clone()),
+            format!("run {run} has no worktree bound"),
+        ))
     }
 
     fn bind(&mut self, run: &str, binding: RunBinding) {
@@ -248,7 +228,7 @@ impl Runner for AppRunner {
         Err(Failure::new(
             FailureReason::MergeConflict,
             None,
-            UNWIRED_DETAIL,
+            "merging fan-out branches is not supported yet",
         ))
     }
 }
