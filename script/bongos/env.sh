@@ -151,6 +151,14 @@ if [ "${BONGOS_RELEASE_BUILD:-}" != 1 ] && [ "${BONGOS_KEEP_SPLIT_DEBUGINFO:-}" 
 elif [ -n "${BONGOS_SET_SPLIT_DEBUGINFO:-}" ]; then
   unset CARGO_PROFILE_DEV_SPLIT_DEBUGINFO CARGO_PROFILE_DEV_BUILD_OVERRIDE_SPLIT_DEBUGINFO BONGOS_SET_SPLIT_DEBUGINFO
 fi
+# Dev builds do not rebuild the app crates on every commit: the build scripts of bongos and cli skip watching
+# git HEAD, so the embedded commit sha is as of the last time they ran for another reason. Release builds
+# (BONGOS_RELEASE_BUILD=1) remove the variable, so their sha is always current.
+if [ "${BONGOS_RELEASE_BUILD:-}" != 1 ]; then
+  export BONGOS_SKIP_GIT_HEAD_WATCH=1
+else
+  unset BONGOS_SKIP_GIT_HEAD_WATCH
+fi
 
 # Unified features, off by default. BONGOS_UNIFIED_FEATURES=1 makes every cargo command use the
 # workspace-wide feature set, so callers that run many differently shaped cargo commands (different
