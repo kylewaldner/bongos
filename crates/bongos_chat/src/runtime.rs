@@ -19,6 +19,15 @@
 //! and claimed, at most [`CAPTURE_WINDOW`].
 //!
 //! Nothing starts while `chats.enabled` is false.
+//!
+//! With `chats.channels` on and the report server running, a Claude launch whose version has hooks
+//! gets a chat channel (design D2, D3, D9): a fresh token, registered with the server before the
+//! terminal starts and forgotten when that launch exits, is closed or loses its channel. A resume
+//! is a new launch with a new token, so the previous process's reports are rejected. A channel is
+//! pending until its first verified report and live after it. A launch with a channel that exits
+//! with an error within [`EARLY_EXIT`] before any report is started once more without it. Turning
+//! `chats.channels` off moves every chat's channel to off. Codex never gets a channel (D7).
+//! Reports do not change the state yet: the terminal still drives it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -26,21 +35,33 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use bongos_chat_model::channel::report::{Report, Token};
 use bongos_chat_model::channel::state::BELL_GRACE;
 pub use bongos_chat_model::channel::state::{ChatState, MID_TURN};
-use bongos_chat_model::{Agent, CaptureQuery, Fallback, NamedBy, adapter_for, from_title};
+use bongos_chat_model::{
+    Agent, Capabilities, CaptureQuery, ChannelOff, ChannelPlan, Fallback, HOOKS, NamedBy,
+    VERSION_TABLE, adapter_for, from_title,
+};
 use bongos_work_model::SharedArtifact;
 use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{self, Shared};
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{
+    App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task, WeakEntity,
+};
 use project::Project;
 use settings::{Settings as _, SettingsStore};
 use terminal::{Event as TerminalEvent, Terminal};
 
+#[cfg(unix)]
+use crate::channel_server::{ChannelServer, Registration};
 use crate::cleanup::{Cleanup, cleanup_verdict};
 use crate::launch::{self, LaunchError, LaunchRequest, Prepared};
 use crate::{ChatHealth, ChatStore, ChatsSettings, find_program, fix_not_found, fix_not_probed};
+
+/// Without a report server there is nothing to register with.
+#[cfg(not(unix))]
+pub(crate) struct Registration;
 
 /// The shortest time between two writes of one chat's `last_active`.
 pub const ACTIVE_DEBOUNCE: Duration = Duration::from_secs(10);
@@ -48,6 +69,50 @@ pub const ACTIVE_DEBOUNCE: Duration = Duration::from_secs(10);
 /// [`CAPTURE_INTERVAL`]; it looks once more when the CLI exits.
 pub const CAPTURE_WINDOW: Duration = Duration::from_secs(60);
 pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(1);
+/// A launch with a channel that exits with an error this soon, before any report, is started once
+/// more without the channel (design D9).
+pub const EARLY_EXIT: Duration = Duration::from_secs(5);
+
+/// Why a chat has no channel while `chats.channels` is false, or since it turned false.
+pub const REPORTS_OFF: &str = "Reports are off (chats.channels)";
+/// Why a chat with a live channel still shows a state from the terminal: reports reach the runtime
+/// but do not change the state yet.
+pub const REPORTS_NOT_APPLIED: &str = "Reports do not set the state yet";
+
+/// Whether a chat reports over the chat channel (design D9, D14). Unlike the model's
+/// `channel::state::ChannelStatus`, the off reason is built at launch (server errors, adapter
+/// reasons), so it is owned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChannelStatus {
+    /// The launch has no channel, for the reason given.
+    Off(String),
+    /// The channel is configured and no verified report came yet.
+    Pending,
+    /// A verified report came.
+    Live,
+}
+
+/// Where a chat's state comes from (design D10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A report said so.
+    Exact,
+    /// Guessed from the terminal, for the reason given.
+    Estimated(String),
+}
+
+/// "No report from <agent> yet".
+fn no_report_yet(agent: Agent) -> String {
+    format!("No report from {} yet", agent.as_str())
+}
+
+/// The first letter in upper case, for a reason shown on its own.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatRuntimeEvent {
@@ -66,6 +131,8 @@ pub struct RuntimeStats {
     pub captures: usize,
     /// Records the never-prompted cleanup deleted.
     pub cleanups: usize,
+    /// Launches started again without their channel after an early exit.
+    pub relaunches: usize,
 }
 
 /// One running (or exited, still shown) chat.
@@ -95,11 +162,52 @@ pub struct LiveChat {
     capture_on_exit: bool,
     /// The never-prompted cleanup already looked at this run of the chat.
     cleanup_checked: bool,
+    channel: ChannelStatus,
+    /// This launch's channel token while it is registered; never written anywhere.
+    token: Option<Token>,
+    /// Keeps the token registered with the report server; dropping it forgets the token.
+    registration: Option<Registration>,
+    state_source: Source,
+    /// The reporter's clock (`at`, in milliseconds) of the newest verified report.
+    last_report_at: Option<u64>,
+    /// When the terminal started, for [`EARLY_EXIT`].
+    launched: Instant,
+    /// What a launch with a channel needs to start again without it after an early exit.
+    relaunch: Option<(LaunchRequest, WeakEntity<Project>)>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl LiveChat {
+    /// Whether the launch reports over the chat channel.
+    pub fn channel(&self) -> &ChannelStatus {
+        &self.channel
+    }
+
+    /// Where the state comes from.
+    pub fn state_source(&self) -> &Source {
+        &self.state_source
+    }
+
+    /// The reporter's time of the newest verified report, in milliseconds.
+    pub fn last_report_at(&self) -> Option<u64> {
+        self.last_report_at
+    }
+
+    /// Whether a channel token of this launch is registered.
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
+    }
+
+    /// Forgets the channel token (the server no longer accepts it) and turns the channel off.
+    fn drop_channel(&mut self, reason: String) {
+        self.registration = None;
+        self.token = None;
+        self.relaunch = None;
+        self.state_source = Source::Estimated(reason.clone());
+        self.channel = ChannelStatus::Off(reason);
+    }
+
     /// Whether the bell rang less than [`BELL_GRACE`] ago.
     fn just_rang(&self) -> bool {
         self.bell_at.is_some_and(|bell| bell.elapsed() < BELL_GRACE)
@@ -226,9 +334,94 @@ impl ChatRuntime {
             next_send: 0,
             last_agent: None,
             stats: RuntimeStats::default(),
-            _subscriptions: vec![
-                cx.observe_global::<SettingsStore>(|this, cx| this.end_when_disabled(cx)),
-            ],
+            _subscriptions: vec![cx.observe_global::<SettingsStore>(|this, cx| {
+                this.end_when_disabled(cx);
+                this.channels_off_when_disabled(cx);
+            })],
+        }
+    }
+
+    /// Moves every chat with a channel to off once `chats.channels` (or `chats.enabled`) is false
+    /// (design D2, "Live to Off"): its token is forgotten, its state is kept but estimated, and it
+    /// does not get a channel back until its next launch.
+    fn channels_off_when_disabled(&mut self, cx: &mut Context<Self>) {
+        let settings = ChatsSettings::get_global(cx);
+        if settings.enabled && settings.channels {
+            return;
+        }
+        let mut changed = Vec::new();
+        for (id, chat) in &mut self.live {
+            if matches!(chat.channel, ChannelStatus::Pending | ChannelStatus::Live) {
+                chat.drop_channel(REPORTS_OFF.to_string());
+                changed.push(id.clone());
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        for id in changed {
+            cx.emit(ChatRuntimeEvent::Changed(id));
+        }
+        cx.notify();
+    }
+
+    /// A verified report from the server (design D3). It counts only when it carries the token of
+    /// the chat's current, still registered launch: a resume registers a new token after the
+    /// server checked an older one, so a late report of the previous process is dropped here. The
+    /// first one moves the channel from pending to live; the state is not changed yet.
+    pub(crate) fn on_report(&mut self, report: Report, cx: &mut Context<Self>) {
+        let chat_id = report.chat.as_str();
+        let Some(chat) = self.live.get_mut(chat_id) else {
+            return;
+        };
+        let current = chat.token.is_some()
+            && registration_is_current(chat.registration.as_ref(), &report.token)
+            && matches!(chat.channel, ChannelStatus::Pending | ChannelStatus::Live);
+        if !current {
+            log::debug!("chats: dropped a report from an earlier launch");
+            return;
+        }
+        chat.last_report_at = Some(
+            chat.last_report_at
+                .map_or(report.at, |at| at.max(report.at)),
+        );
+        if chat.channel == ChannelStatus::Pending {
+            chat.channel = ChannelStatus::Live;
+            chat.state_source = Source::Estimated(REPORTS_NOT_APPLIED.to_string());
+            cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
+            cx.notify();
+        }
+    }
+
+    /// The channel of a launch of `agent` with `caps`, with its token, or why it has none.
+    /// `force` gains [`Fallback::ChannelOff`] when the reporter's path cannot be quoted.
+    fn plan_channel(
+        &self,
+        agent: Agent,
+        caps: &Capabilities,
+        force: &mut Vec<Fallback>,
+        cx: &App,
+    ) -> Result<(ChannelPlan, Token), String> {
+        if !ChatsSettings::get_global(cx).channels {
+            return Err(REPORTS_OFF.to_string());
+        }
+        if agent != Agent::Claude {
+            return Err(format!("{} does not report its state yet", agent.as_str()));
+        }
+        if let Some(off) = forced_off(force) {
+            return Err(sentence(off.reason()));
+        }
+        if !caps.has(HOOKS) {
+            return Err(hooks_missing(agent, caps));
+        }
+        let socket = report_socket(cx)?;
+        let reporter = crate::ChannelConfig::global(cx)
+            .map(|config| config.reporter.clone())
+            .ok_or_else(|| "No reporter command is configured".to_string())?;
+        let token = new_token();
+        match bongos_chat_model::plan_channel(&reporter, socket, token.clone(), force) {
+            Some(plan) => Ok((plan, token)),
+            None => Err(sentence(ChannelOff::UnquotablePath.reason())),
         }
     }
 
@@ -366,7 +559,7 @@ impl ChatRuntime {
 
     fn begin_launch(
         &mut self,
-        request: LaunchRequest,
+        mut request: LaunchRequest,
         projects: &[Entity<Project>],
         cx: &mut Context<Self>,
     ) -> Result<Task<Result<(), LaunchError>>, LaunchError> {
@@ -408,7 +601,38 @@ impl ChatRuntime {
         let program = find_program(&command.command, &base_env)
             .ok_or_else(|| LaunchError::NotFound(fix_not_found(agent, &command.command)))?;
         let runtime_root = self.store.read(cx).dirs().runtime.clone();
-        let prepared = launch::prepare(&request, &runtime_root, &self.home, &command, &caps)?;
+        // Kept before the channel is planned, for the relaunch without it (design D9).
+        let original = request.clone();
+        let (plan, token, off_reason) =
+            match self.plan_channel(agent, &caps, &mut request.force, cx) {
+                Ok((plan, token)) => (Some(plan), Some(token), None),
+                Err(reason) => (None, None, Some(reason)),
+            };
+        let prepared = launch::prepare_with_channel(
+            &request,
+            &runtime_root,
+            &self.home,
+            &command,
+            &caps,
+            plan,
+        )?;
+        // The token is registered before the terminal starts, and only when the launch really
+        // carries it; the registration lives as long as this launch (dropped if the launch fails).
+        let channel = match token.filter(|_| prepared.spec.channel) {
+            Some(token) => match register_launch(&chat_id, &token, cx) {
+                Some(registration) => LaunchChannel {
+                    status: ChannelStatus::Pending,
+                    token: Some(token),
+                    registration: Some(registration),
+                    relaunch: Some((original, project.downgrade())),
+                },
+                None => LaunchChannel::off("report socket unavailable: the report server stopped"),
+            },
+            None => LaunchChannel::off(off_reason.as_deref().unwrap_or_else(|| {
+                forced_off(&prepared.spec.fallbacks)
+                    .map_or("the CLI takes no settings file", ChannelOff::reason)
+            })),
+        };
 
         // A launch that must capture its session id waits for the previous such launch in the
         // same directory to capture (and claim) its own.
@@ -494,6 +718,7 @@ impl ChatRuntime {
                         terminal,
                         started,
                         capture_done,
+                        channel,
                         cx,
                     );
                     if let Some(task_id) = &task_id {
@@ -552,6 +777,7 @@ impl ChatRuntime {
         terminal: Entity<Terminal>,
         started: SystemTime,
         capture_done: Option<oneshot::Sender<()>>,
+        channel: LaunchChannel,
         cx: &mut Context<Self>,
     ) {
         let chat_id = prepared.record.id.clone();
@@ -638,11 +864,23 @@ impl ChatRuntime {
             pending_active_write: None,
             capture_on_exit: false,
             cleanup_checked: false,
+            state_source: Source::Estimated(match &channel.status {
+                ChannelStatus::Off(reason) => reason.clone(),
+                ChannelStatus::Pending | ChannelStatus::Live => no_report_yet(prepared.agent),
+            }),
+            channel: channel.status,
+            token: channel.token,
+            registration: channel.registration,
+            last_report_at: None,
+            launched: Instant::now(),
+            relaunch: channel.relaunch,
             _tasks: tasks,
             _subscriptions: vec![subscription],
         };
         self.live.insert(chat_id.clone(), chat);
         self.stats.launches += 1;
+        // `chats.channels` may have turned off while the launch ran.
+        self.channels_off_when_disabled(cx);
         cx.emit(ChatRuntimeEvent::Changed(chat_id));
         cx.notify();
     }
@@ -803,6 +1041,33 @@ impl ChatRuntime {
             return;
         };
         chat.state = ChatState::Exited { code };
+        let early_error = code.is_some_and(|code| code != 0)
+            && chat.last_report_at.is_none()
+            && chat.launched.elapsed() < EARLY_EXIT;
+        // The launch ended: its token is forgotten whatever happens next.
+        chat.registration = None;
+        chat.token = None;
+        let relaunch = chat.relaunch.take().filter(|_| {
+            early_error && matches!(chat.channel, ChannelStatus::Pending | ChannelStatus::Live)
+        });
+        if let Some(relaunch) = relaunch {
+            // Started once more without the channel, in case the CLI rejected the hooks. The
+            // record stays: the cleanup does not judge a launch that never got going.
+            chat.cleanup_checked = true;
+            log::warn!(
+                "chats: {chat_id} exited with code {code:?} right after a launch with reports; \
+                 starting it again without them"
+            );
+            let id = chat_id.to_string();
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| this.relaunch(&id, relaunch, cx))
+                    .ok();
+            })
+            .detach();
+            cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
+            cx.notify();
+            return;
+        }
         let capture = std::mem::take(&mut chat.capture_on_exit);
         self.write_active_now(chat_id, cx);
         self.clean_up(chat_id, cx);
@@ -815,6 +1080,39 @@ impl ChatRuntime {
         }
         cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
         cx.notify();
+    }
+
+    /// Starts `chat_id`, which exited early with a channel, once more without it (design D9):
+    /// `request` gains [`ChannelOff::ExitedEarly`], so that launch never relaunches. Nothing happens
+    /// when the chat was closed meanwhile or its project is gone.
+    fn relaunch(
+        &mut self,
+        chat_id: &str,
+        (mut request, project): (LaunchRequest, WeakEntity<Project>),
+        cx: &mut Context<Self>,
+    ) {
+        let exited = self
+            .live
+            .get(chat_id)
+            .is_some_and(|chat| matches!(chat.state, ChatState::Exited { .. }));
+        let Some(project) = project.upgrade().filter(|_| exited) else {
+            return;
+        };
+        self.live.remove(chat_id);
+        let off = Fallback::ChannelOff(ChannelOff::ExitedEarly);
+        if !request.force.contains(&off) {
+            request.force.push(off);
+        }
+        self.stats.relaunches += 1;
+        let launch = self.launch(request, &[project], cx);
+        cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
+        cx.notify();
+        cx.spawn(async move |_, _| {
+            if let Err(error) = launch.await {
+                log::warn!("chats: the relaunch without reports failed: {error}");
+            }
+        })
+        .detach();
     }
 
     /// Ends the chat's process (its foreground process group and the process itself). The chat
@@ -1153,6 +1451,116 @@ async fn capture_now(
     this.update(cx, |this, cx| this.set_session_id(chat_id, session_id, cx))
         .ok()?;
     Some(true)
+}
+
+/// The channel side of one launch, from the plan to the live chat.
+struct LaunchChannel {
+    status: ChannelStatus,
+    token: Option<Token>,
+    registration: Option<Registration>,
+    relaunch: Option<(LaunchRequest, WeakEntity<Project>)>,
+}
+
+impl LaunchChannel {
+    fn off(reason: &str) -> Self {
+        Self {
+            status: ChannelStatus::Off(sentence(reason)),
+            token: None,
+            registration: None,
+            relaunch: None,
+        }
+    }
+}
+
+/// The reason of a [`Fallback::ChannelOff`] in `fallbacks`, if one is there.
+fn forced_off(fallbacks: &[Fallback]) -> Option<ChannelOff> {
+    fallbacks.iter().find_map(|fallback| match fallback {
+        Fallback::ChannelOff(off) => Some(*off),
+        _ => None,
+    })
+}
+
+/// Why `caps` give `agent` no hooks: its version is older than the table's first hooks row, or
+/// could not be read.
+fn hooks_missing(agent: Agent, caps: &Capabilities) -> String {
+    let min = VERSION_TABLE
+        .rows
+        .iter()
+        .find(|row| row.name == HOOKS)
+        .map_or("unknown", |row| row.min_version);
+    if caps.version().is_empty() {
+        format!("The {} version could not be read", agent.as_str())
+    } else {
+        format!(
+            "{} {} is older than the first version with hooks bongos knows ({min})",
+            agent.as_str(),
+            caps.version()
+        )
+    }
+}
+
+/// A fresh launch token: 32 random hex digits.
+fn new_token() -> Token {
+    Token::new(&uuid::Uuid::new_v4().simple().to_string()).expect("a simple UUID is a valid token")
+}
+
+/// The socket of the running report server, or why there is none.
+#[cfg(unix)]
+fn report_socket(cx: &App) -> Result<PathBuf, String> {
+    let server = ChannelServer::global(cx)
+        .ok_or_else(|| "Report socket unavailable: no report server".to_string())?;
+    let server = server.read(cx);
+    match server.socket_path() {
+        Some(path) => Ok(path.to_path_buf()),
+        None => Err(sentence(&server.unavailable_reason().unwrap_or_else(
+            || "report socket unavailable: the report server is not running".to_string(),
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn report_socket(_cx: &App) -> Result<PathBuf, String> {
+    Err("Report socket unavailable: reports need a Unix socket".to_string())
+}
+
+/// Registers `token` as `chat_id`'s current launch token with the global server.
+#[cfg(unix)]
+fn register_launch(chat_id: &str, token: &Token, cx: &mut App) -> Option<Registration> {
+    let chat = bongos_chat_model::channel::report::ChatId::new(chat_id)?;
+    ChannelServer::global(cx)?.update(cx, |server, _| server.register_launch(chat, token.clone()))
+}
+
+#[cfg(not(unix))]
+fn register_launch(_chat_id: &str, _token: &Token, _cx: &mut App) -> Option<Registration> {
+    None
+}
+
+/// Whether `token` is the token `registration` still holds registered.
+#[cfg(unix)]
+fn registration_is_current(registration: Option<&Registration>, token: &Token) -> bool {
+    registration.is_some_and(|registration| registration.is_current(token))
+}
+
+#[cfg(not(unix))]
+fn registration_is_current(_registration: Option<&Registration>, _token: &Token) -> bool {
+    false
+}
+
+/// Sends the verified reports of `server` to `runtime`.
+#[cfg(unix)]
+pub(crate) fn deliver_reports(
+    server: &Entity<ChannelServer>,
+    runtime: &Entity<ChatRuntime>,
+    cx: &mut App,
+) {
+    let runtime = runtime.downgrade();
+    server.update(cx, |server, _| {
+        server.set_report_handler(move |report, cx| {
+            runtime
+                .update(cx, |runtime, cx| runtime.on_report(report, cx))
+                .ok();
+        });
+    });
 }
 
 /// The change of a `last_active` write: the time now, and `prompted` once the chat is.

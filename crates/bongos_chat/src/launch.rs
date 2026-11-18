@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use bongos_chat_model::{
-    Agent, Capabilities, ChatRecord, Fallback, GeneratedFiles, HandoffParent, LaunchKind,
-    LaunchPlan, LaunchSpec, RenderInput, ResolvedType, TaskFacts, adapter_for, context_digest,
-    render_codex_instructions, render_context, render_env, render_settings, render_system,
+    Agent, Capabilities, ChannelPlan, ChatRecord, Fallback, GeneratedFiles, HandoffParent,
+    LaunchKind, LaunchPlan, LaunchSpec, RenderInput, ResolvedType, TaskFacts, adapter_for,
+    context_digest, render_codex_instructions, render_context, render_env, render_settings,
+    render_system,
 };
 use bongos_work_model::{SessionContext, SharedArtifact};
 use gpui::{App, Global};
@@ -193,12 +194,27 @@ fn valid_id(id: &str) -> bool {
 
 /// Renders the launch of `request` under `runtime_root` (the chats runtime directory) for an agent
 /// run as `command` with `caps`. `home` is where `~/.bongos` is.
+#[cfg(test)]
 pub(crate) fn prepare(
     request: &LaunchRequest,
     runtime_root: &Path,
     home: &Path,
     command: &AgentCommand,
     caps: &Capabilities,
+) -> Result<Prepared, LaunchError> {
+    prepare_with_channel(request, runtime_root, home, command, caps, None)
+}
+
+/// [`prepare`] with the chat channel `channel`: its hooks go into the settings file and the
+/// adapter puts its socket, chat id and token in the environment. `None`, or a CLI that cannot take
+/// the settings file, gives today's launch.
+pub(crate) fn prepare_with_channel(
+    request: &LaunchRequest,
+    runtime_root: &Path,
+    home: &Path,
+    command: &AgentCommand,
+    caps: &Capabilities,
+    channel: Option<ChannelPlan>,
 ) -> Result<Prepared, LaunchError> {
     let agent = request
         .record
@@ -252,7 +268,7 @@ pub(crate) fn prepare(
                 }
                 text.push_str(&context_text);
             } else {
-                let settings = render_settings(&context_path, None)
+                let settings = render_settings(&context_path, channel.as_ref())
                     .map_err(|error| LaunchError::Files(error.to_string()))?;
                 files.push((PathBuf::from(CLAUDE_SETTINGS_FILE), settings));
                 settings_path = Some(dir.join(CLAUDE_SETTINGS_FILE));
@@ -287,7 +303,8 @@ pub(crate) fn prepare(
         extra_args,
         env,
         force: request.force.clone(),
-        channel: None,
+        // Only a Claude launch writes the settings file that carries the hooks (D7).
+        channel: channel.filter(|_| agent == Agent::Claude),
     };
     let spec = adapter.launch(&plan, caps);
     let given = request.context.artifacts.clone();

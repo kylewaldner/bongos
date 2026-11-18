@@ -32,7 +32,7 @@ fn uid() -> u32 {
     nix::unistd::geteuid().as_raw()
 }
 
-fn inputs(temp_dir: &Path, xdg: Option<&Path>) -> SocketDirInputs {
+pub(super) fn inputs(temp_dir: &Path, xdg: Option<&Path>) -> SocketDirInputs {
     SocketDirInputs {
         xdg_runtime_dir: xdg.map(Path::to_path_buf),
         temp_dir: temp_dir.to_path_buf(),
@@ -43,7 +43,7 @@ fn inputs(temp_dir: &Path, xdg: Option<&Path>) -> SocketDirInputs {
 
 /// A temporary directory short enough for socket paths under it (`sun_path` is about 100 bytes): the
 /// system temp directory when it is short, else `/tmp`. It is removed when dropped.
-fn temp() -> (TempDir, PathBuf) {
+pub(super) fn temp() -> (TempDir, PathBuf) {
     let system = std::env::temp_dir();
     let root = if system.as_os_str().len() <= 32 {
         system
@@ -110,7 +110,7 @@ fn read_reply(stream: &mut UnixStream) -> String {
 
 /// Connects, writes `request` and returns what the server replied before closing ("" when it
 /// closed without a reply), from a helper thread.
-async fn exchange(path: &Path, request: Vec<u8>) -> String {
+pub(super) async fn exchange(path: &Path, request: Vec<u8>) -> String {
     let path = path.to_path_buf();
     let (sender, receiver) = futures::channel::oneshot::channel();
     std::thread::spawn(move || {
@@ -122,9 +122,9 @@ async fn exchange(path: &Path, request: Vec<u8>) -> String {
     receiver.await.unwrap()
 }
 
-const OK: &str = "{\"ok\":true}\n";
+pub(super) const OK: &str = "{\"ok\":true}\n";
 
-fn refused(error: &str) -> String {
+pub(super) fn refused(error: &str) -> String {
     format!("{{\"ok\":false,\"error\":\"{error}\"}}\n")
 }
 

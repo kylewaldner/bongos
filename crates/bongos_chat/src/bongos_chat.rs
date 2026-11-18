@@ -62,8 +62,9 @@ pub use layout::PROMPT_PANE_OFF;
 pub use live_modes::{SOURCE_NAME, start_current_todo};
 pub use panel::{ChatPanel, focus_prompts, init_panel, open_prompts_in_center};
 pub use runtime::{
-    ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChatRuntime, ChatRuntimeEvent, ChatState,
-    LiveChat, MID_TURN, RuntimeStats,
+    ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChannelStatus, ChatRuntime,
+    ChatRuntimeEvent, ChatState, EARLY_EXIT, LiveChat, MID_TURN, REPORTS_NOT_APPLIED, REPORTS_OFF,
+    RuntimeStats, Source,
 };
 pub use scope::{
     ChatScope, CwdSource, IMPLEMENT_TYPE, START_FIRST, project_repositories, resolve_scope,
@@ -117,6 +118,10 @@ impl ChannelConfig {
         cx.try_global::<GlobalChannelConfig>()
             .map(|global| &global.0)
     }
+
+    pub(crate) fn set_global(self, cx: &mut App) {
+        cx.set_global(GlobalChannelConfig(self));
+    }
 }
 
 /// Registers the actions of the `chat` namespace that have handlers on `workspace`.
@@ -137,7 +142,7 @@ impl Global for GlobalChatStore {}
 /// runtime starts nothing, until `chats.enabled` is true. `channel` is kept as a global for the
 /// launches that report over the chat channel.
 pub fn init(dirs: ChatDirs, channel: ChannelConfig, cx: &mut App) {
-    cx.set_global(GlobalChannelConfig(channel));
+    channel.set_global(cx);
     init_in(
         util::paths::home_dir().clone(),
         std::collections::BTreeMap::new(),
@@ -168,7 +173,10 @@ pub fn init_in(
     lifecycle::init(&store, cx);
     // The report server binds nothing until `chats.enabled && chats.channels`.
     #[cfg(unix)]
-    channel_server::init(cx);
+    {
+        let server = channel_server::init(cx);
+        runtime::deliver_reports(&server, &runtime, cx);
+    }
     end_chats_on_quit(&runtime, cx);
     ChatRuntime::set_global(runtime, cx);
 }
@@ -226,6 +234,9 @@ impl ChatStore {
 
 #[cfg(test)]
 mod artifacts_tests;
+
+#[cfg(all(test, unix))]
+mod channel_runtime_tests;
 
 #[cfg(all(test, unix))]
 mod channel_server_tests;
