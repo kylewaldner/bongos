@@ -69,7 +69,9 @@ fn watch_git_head() {
     println!("cargo:rerun-if-env-changed=BONGOS_SKIP_GIT_HEAD_WATCH");
     // Development scripts set this so a commit does not rebuild this crate; the embedded sha
     // then stays as of the last time this script ran. Release builds leave it unset.
-    if std::env::var("BONGOS_SKIP_GIT_HEAD_WATCH").is_ok_and(|value| !value.is_empty() && value != "0") {
+    if std::env::var("BONGOS_SKIP_GIT_HEAD_WATCH")
+        .is_ok_and(|value| !value.is_empty() && value != "0")
+    {
         return;
     }
     let Some(output) = Command::new("git")

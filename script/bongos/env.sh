@@ -155,7 +155,7 @@ fi
 # git HEAD, so the embedded commit sha is as of the last time they ran for another reason. Release builds
 # (BONGOS_RELEASE_BUILD=1) remove the variable, so their sha is always current.
 if [ "${BONGOS_RELEASE_BUILD:-}" != 1 ]; then
-  export BONGOS_SKIP_GIT_HEAD_WATCH=1
+  export BONGOS_SKIP_GIT_HEAD_WATCH="${BONGOS_SKIP_GIT_HEAD_WATCH:-1}"  # an exported 0 opts out
 else
   unset BONGOS_SKIP_GIT_HEAD_WATCH
 fi
