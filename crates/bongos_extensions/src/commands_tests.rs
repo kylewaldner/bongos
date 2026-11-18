@@ -546,6 +546,20 @@ async fn listed_update_moves_to_a_new_pin_without_asking(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+async fn install_from_a_blocked_host_is_refused_before_any_network_call(cx: &mut TestAppContext) {
+    let h = Harness::new(cx);
+    let asker = FakeAsker::answering(&[]);
+    let network_before = h.git.inner.network_ops();
+    let err = h
+        .install_git("https://github.zed.dev/x/y", None, &asker, cx)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("zed.dev"), "{err}");
+    assert_eq!(h.git.inner.network_ops(), network_before);
+    assert!(asker.questions().is_empty());
+}
+
+#[gpui::test]
 async fn missing_url_opens_the_read(cx: &mut TestAppContext) {
     let h = Harness::new(cx);
     let (workspace, mut cx) = window(&h, cx).await;

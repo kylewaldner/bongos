@@ -278,6 +278,10 @@ async fn run_install(
     if cx.background_spawn(async move { lock_held(&lock) }).await {
         return Err(arc(anyhow!("another bongos is installing {}", key.url)));
     }
+    // A blocked host is refused before any network call.
+    installer
+        .read_with(cx, |installer, _| installer.check_host(&key.url))
+        .map_err(arc)?;
     let commit = {
         let url = key.url.clone();
         cx.background_spawn(async move { resolve(git.as_ref(), &url, &rev).await })
@@ -428,6 +432,9 @@ async fn run_update(
         _ => (record.requested_ref.clone(), false),
     };
     let rev = RevSpec::parse(rev_text.as_deref()).map_err(arc)?;
+    installer
+        .read_with(cx, |installer, _| installer.check_host(&url))
+        .map_err(arc)?;
     let commit = {
         let url = url.clone();
         cx.background_spawn(async move { resolve(git.as_ref(), &url, &rev).await })

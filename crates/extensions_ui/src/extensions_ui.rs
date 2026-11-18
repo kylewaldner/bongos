@@ -388,7 +388,7 @@ pub struct ExtensionsPage {
     entries: Vec<(Arc<ExtensionManifest>, bool)>,
     query_editor: Entity<Editor>,
     provides_filter: Option<ExtensionProvides>,
-    _subscriptions: [gpui::Subscription; 2],
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl ExtensionsPage {
@@ -400,7 +400,7 @@ impl ExtensionsPage {
     ) -> Entity<Self> {
         cx.new(|cx| {
             let store = ExtensionStore::global(cx);
-            let subscriptions = [
+            let mut subscriptions = vec![
                 cx.observe(&store, |_: &mut Self, _, cx| cx.notify()),
                 cx.subscribe(&store, |this, _, event, cx| {
                     if let extension_host::Event::ExtensionsUpdated = event {
@@ -408,6 +408,10 @@ impl ExtensionsPage {
                     }
                 }),
             ];
+            // An install, update or rebuild changes the commit shown and the busy buttons.
+            if let Some(installer) = Installer::try_global(cx) {
+                subscriptions.push(cx.observe(&installer, |_: &mut Self, _, cx| cx.notify()));
+            }
 
             let query_editor = cx.new(|cx| {
                 let mut input = Editor::single_line(window, cx);

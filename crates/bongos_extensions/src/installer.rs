@@ -327,6 +327,19 @@ impl Installer {
         &self.deps.list
     }
 
+    /// Refuses a blocked repository host, so a command can say no before any network call.
+    pub fn check_host(&self, url: &SourceUrl) -> Result<(), bongos_extensions_model::Refusal> {
+        if let Some(host) = url.host() {
+            let host = host.trim_end_matches('.');
+            if (self.deps.is_blocked_host)(host) {
+                return Err(bongos_extensions_model::Refusal::BlockedHost(
+                    host.to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The git runner, for resolving a revision before the trust question.
     pub fn git(&self) -> Arc<dyn GitRunner> {
         self.deps.git.clone()

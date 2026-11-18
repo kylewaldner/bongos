@@ -63,10 +63,6 @@ const FS_WATCH_LATENCY: Duration = Duration::from_millis(100);
 /// The current extension [`SchemaVersion`] supported by Zed.
 const CURRENT_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
 
-/// Extensions that should no longer be loaded or downloaded.
-///
-/// These snippets should no longer be downloaded or loaded, because their
-/// functionality has been integrated into the core editor.
 /// Returns whether the extension is suppressed and must not be loaded or installed.
 pub fn is_suppressed_extension(id: &str) -> bool {
     SUPPRESSED_EXTENSIONS.contains(id)
@@ -79,6 +75,10 @@ pub fn supported_api_max(cx: &App) -> semver::Version {
         .clone()
 }
 
+/// Extensions that should no longer be loaded or downloaded.
+///
+/// These snippets should no longer be downloaded or loaded, because their
+/// functionality has been integrated into the core editor.
 static SUPPRESSED_EXTENSIONS: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     FxHashSet::from_iter([
         "snippets",

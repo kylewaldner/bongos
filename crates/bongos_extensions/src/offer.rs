@@ -30,6 +30,7 @@ pub struct LanguageOffer {
     /// List entry ids hidden by "Not now" until restart, in this item only.
     dismissed: HashSet<String>,
     _observation: Option<Subscription>,
+    _installer_observation: Option<Subscription>,
 }
 
 impl LanguageOffer {
@@ -75,6 +76,7 @@ impl LanguageOffer {
 
     /// Installs the language through the `InstallLanguage` action.
     pub fn install(&mut self, entry: &ListEntry, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismissed.insert(entry.id.clone());
         window.dispatch_action(
             Box::new(InstallLanguage {
                 name: Some(entry.name.clone()),
@@ -153,6 +155,8 @@ impl StatusItemView for LanguageOffer {
             .editor
             .as_ref()
             .map(|editor| cx.observe(editor, |_, _, cx| cx.notify()));
+        let installer = Installer::global(cx);
+        self._installer_observation = Some(cx.observe(&installer, |_, _, cx| cx.notify()));
         cx.notify();
     }
 

@@ -884,7 +884,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "language_extensions"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "language_extensions"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
@@ -1041,7 +1041,9 @@ API version. No gate runs it, since it needs the network and a Rust toolchain.
 bongos's own code, and the telemetry and update checks of the language servers it runs, contact
 no host beyond what a feature needs (the JetBrains license check for the IntelliJ server). A
 project's own Gradle build is exempt: it may contact its hosts, such as services.gradle.org,
-plugins.gradle.org, Maven repositories and Artifact Registry.
+plugins.gradle.org, Maven repositories and Artifact Registry. An installed language extension's
+own code may contact hosts when its language server starts, within the capabilities granted to
+extensions.
 
 Linear (`api.linear.app`) is contacted only when `linear.enabled` is on (the default) and a token
 is set, for a linked task or a Linear command. The token is stored in the credential store and
