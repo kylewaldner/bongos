@@ -41,7 +41,7 @@ const SECRETS: [(&str, &str); 3] = [
     ("prompts.txt", "The private prompts Kyle typed"),
 ];
 
-fn fixture(name: &str) -> PathBuf {
+pub(super) fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("test-fixtures")
         .join(name)
@@ -325,7 +325,7 @@ impl Harness {
     }
 
     /// The values of the log lines `<name> <key> <value>`.
-    fn logged(&self, name: &str, key: &str) -> Vec<String> {
+    pub(super) fn logged(&self, name: &str, key: &str) -> Vec<String> {
         let prefix = format!("{key} ");
         self.log_lines(name)
             .iter()
