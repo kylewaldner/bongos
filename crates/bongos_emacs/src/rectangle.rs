@@ -13,7 +13,7 @@ use text::{Point, ToOffset as _};
 
 use crate::actions::{
     ClearRectangle, CopyRectangleAsKill, DeleteRectangle, KeepRectangle, KillRectangle,
-    OpenRectangle, RectangleMarkMode, StringRectangle, YankRectangle,
+    OpenRectangle, RectangleMarkMode, YankRectangle,
 };
 use crate::mark;
 
@@ -107,6 +107,22 @@ pub(crate) fn apply(
     let Some(corners) = corners(editor, window, cx) else {
         return false;
     };
+    apply_to(editor, op, corners, window, cx)
+}
+
+/// [`apply`] on corners captured earlier: the plan is made from their rows, and its edits land
+/// by anchor, so text changed since then moves with them.
+pub(crate) fn apply_to(
+    editor: &Entity<Editor>,
+    op: RectOp,
+    corners: Corners,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if editor.read(cx).read_only(cx) {
+        bongos_minibuffer::message(window, cx, "Buffer is read-only");
+        return false;
+    }
     let Some(top) = corners.rows.first() else {
         return false;
     };
@@ -224,15 +240,6 @@ pub(crate) fn copy_rectangle_as_kill_command(
 
 pub(crate) fn kill_rectangle_command(
     _: &KillRectangle,
-    _: &Entity<Editor>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    not_implemented(window, cx);
-}
-
-pub(crate) fn string_rectangle_command(
-    _: &StringRectangle,
     _: &Entity<Editor>,
     window: &mut Window,
     cx: &mut App,

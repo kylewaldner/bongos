@@ -31,6 +31,7 @@ mod region_commands;
 mod repeat;
 pub mod snapshot_text;
 mod space;
+mod string_rectangle;
 mod transpose;
 mod words;
 mod yank;
@@ -84,6 +85,8 @@ mod region_tests;
 mod repeat_tests;
 #[cfg(test)]
 mod space_tests;
+#[cfg(test)]
+mod string_rectangle_tests;
 #[cfg(test)]
 mod transpose_tests;
 #[cfg(test)]
@@ -179,7 +182,12 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, cx, rectangle::delete_rectangle_command);
         register(editor, &weak, cx, rectangle::open_rectangle_command);
         register(editor, &weak, cx, rectangle::clear_rectangle_command);
-        register(editor, &weak, cx, rectangle::string_rectangle_command);
+        register(
+            editor,
+            &weak,
+            cx,
+            string_rectangle::string_rectangle_command,
+        );
         register(editor, &weak, cx, rectangle::yank_rectangle_command);
         register(editor, &weak, cx, rectangle::keep_rectangle_command);
         register(

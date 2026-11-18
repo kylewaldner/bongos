@@ -39,6 +39,11 @@ impl SessionView {
         self.core.status.borrow().clone()
     }
 
+    /// The prompt in front of the input, as the host last set it.
+    pub fn prompt_text(&self) -> SharedString {
+        self.core.prompt.borrow().clone()
+    }
+
     pub(crate) fn new(
         core: Rc<Core>,
         source: Source,
