@@ -205,20 +205,34 @@ cargo_limited() {
   if [[ $slice =~ ^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,60}\.slice$ ]]; then
     slice_args=(--slice="$slice")
     if [[ $low =~ ^[1-9][0-9]{0,8}[KMG]?$ ]]; then
-      systemctl --user set-property --runtime "$slice" "MemoryLow=$low" >/dev/null 2>&1 || true
+      timeout 10 systemctl --user set-property --runtime "$slice" "MemoryLow=$low" >/dev/null 2>&1 || true
     fi
-    systemctl --user start "$slice" >/dev/null 2>&1 || true
+    timeout 10 systemctl --user start "$slice" >/dev/null 2>&1 || true
   fi
-  if [ ${#slice_args[@]} -gt 0 ] && ! systemd-run --user --scope -q "${slice_args[@]}" -p "MemoryMax=$cap" -p MemorySwapMax=0 true >/dev/null 2>&1; then
+  if [ ${#slice_args[@]} -gt 0 ]; then
+    local sliced=1 started rc
+    systemd-run --user --scope -q "${slice_args[@]}" -p "MemoryMax=$cap" -p MemorySwapMax=0 true >/dev/null 2>&1 || sliced=""
+    if [ -n "$sliced" ]; then
+      # the wrapper touches "$started.s" when cargo's command is about to start: a failure without it
+      # is systemd refusing the scope, never cargo's own exit code, so only that falls back
+      started=$(mktemp 2>/dev/null) || started=""
+      rc=0
+      systemd-run --user --scope -q "${slice_args[@]}" -p "MemoryMax=$cap" -p MemorySwapMax=0 \
+        bash -c 'if [ -n "$1" ]; then : >"$1.s"; fi; shift; exec "$@"' bongos-slice "$started" "${cmd[@]}" "$@" || rc=$?
+      if [ -z "$started" ] || [ -e "$started.s" ] || [ "$rc" -eq 0 ]; then
+        [ -z "$started" ] || rm -f "$started" "$started.s"
+        return "$rc"
+      fi
+      rm -f "$started"
+    fi
     local warned="${BONGOS_TMPDIR:-${TMPDIR:-}}/.cargo-slice-warned"
     if [ "$warned" = "/.cargo-slice-warned" ] || [ ! -e "$warned" ]; then
       echo "bongos: systemd refused slice $slice; running cargo without it" >&2
       [ "$warned" = "/.cargo-slice-warned" ] || : >"$warned" 2>/dev/null || true
     fi
-    slice_args=()
   fi
   if systemd-run --user --scope -q -p "MemoryMax=$cap" -p MemorySwapMax=0 true >/dev/null 2>&1; then
-    systemd-run --user --scope -q ${slice_args[@]+"${slice_args[@]}"} -p "MemoryMax=$cap" -p MemorySwapMax=0 "${cmd[@]}" "$@"
+    systemd-run --user --scope -q -p "MemoryMax=$cap" -p MemorySwapMax=0 "${cmd[@]}" "$@"
   else
     echo "bongos: systemd scope unavailable; running cargo without a memory limit" >&2
     "${cmd[@]}" "$@"
