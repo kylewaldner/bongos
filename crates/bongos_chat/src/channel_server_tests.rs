@@ -583,6 +583,9 @@ async fn stop_removes_the_file_and_drops_every_token(cx: &mut TestAppContext) {
     let token = ChannelServer::new_token();
     setup.register(cx, "chat-a", &token);
     assert_eq!(exchange(&path, report_line("chat-a", &token)).await, OK);
+    // The reply goes out before the report reaches the main thread, and a stop drops reports not
+    // yet delivered, so let this one arrive first.
+    assert_eq!(setup.delivered(cx), ["chat-a"]);
 
     setup.server.update(cx, |server, _| server.stop());
     assert!(!path.exists(), "the socket file is removed");
