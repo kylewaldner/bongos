@@ -297,7 +297,8 @@ impl AgentAdapter for ClaudeAdapter {
     }
 
     fn login_probe(&self, caps: &Capabilities) -> Option<Vec<String>> {
-        caps.has_subcommand("auth")
+        // Table-built capabilities answer `has`, help-derived ones `has_subcommand`.
+        (caps.has_subcommand("auth") || caps.has("auth"))
             .then(|| vec!["auth".to_string(), "status".to_string()])
     }
 

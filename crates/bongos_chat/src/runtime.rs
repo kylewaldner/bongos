@@ -434,7 +434,7 @@ impl ChatRuntime {
             .or_else(|| {
                 health
                     .as_ref()
-                    .and_then(|health| health.read(cx).health(agent).caps.clone())
+                    .and_then(|health| health.read(cx).health(agent).chat_caps.clone())
             })
             .ok_or_else(|| LaunchError::NotProbed(fix_not_probed(agent)))?;
         let program = find_program(&command.command, &base_env)

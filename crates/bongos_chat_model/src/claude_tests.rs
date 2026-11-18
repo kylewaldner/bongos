@@ -258,6 +258,20 @@ fn no_argv_carries_an_artifact_path() {
 }
 
 #[test]
+fn login_probe_reads_the_table_row_for_version_built_capabilities() {
+    let adapter = ClaudeAdapter::new("claude");
+    assert_eq!(
+        adapter.login_probe(&adapter.capabilities(Some("2.1.319 (Claude Code)"))),
+        Some(strings(&["auth", "status"]))
+    );
+    assert_eq!(
+        adapter.login_probe(&adapter.capabilities(Some("2.0.0"))),
+        None
+    );
+    assert_eq!(adapter.login_probe(&adapter.capabilities(None)), None);
+}
+
+#[test]
 fn login_probe_and_parse() {
     let adapter = ClaudeAdapter::new("claude");
     assert_eq!(
