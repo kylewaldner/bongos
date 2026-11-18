@@ -3,12 +3,14 @@
 //! the open and archived lists with their order, fork lookup, chat names, and the digest of the
 //! artifact list a chat was given, the agent adapters (capabilities, launch lines and fallbacks, login
 //! probe, session id capture), the pure renderer of what a launch injects (`context.md`, the
-//! system prompt, the hook settings and the environment), and the session types (directories of plain files, with their
+//! system prompt, the hook settings and the environment), the chat channel's report format and the
+//! translation of agent hook input into reports, and the session types (directories of plain files, with their
 //! shipped defaults, seeding and resolution). It has no UI dependency and never touches the real home
 //! directory: every path function takes the directory it works under.
 
 mod adapter;
 mod capture;
+pub mod channel;
 mod claude;
 mod codex;
 mod digest;
