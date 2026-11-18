@@ -550,6 +550,7 @@ fn main() {
         );
         bongos_chat::init(
             bongos_chat::ChatDirs::new(util::paths::home_dir(), paths::data_dir()),
+            chat_channel_config(),
             cx,
         );
         bongos_prompts::init(cx);
@@ -1541,6 +1542,22 @@ pub(crate) static FORCE_CLI_MODE: LazyLock<bool> = LazyLock::new(|| {
     unsafe { std::env::remove_var(FORCE_CLI_MODE_ENV_VAR_NAME) };
     env_var
 });
+
+/// How chat hooks run the report client: this executable with `--chat-report`. Empty when the
+/// executable's path is unknown, so no chat gets a channel.
+fn chat_channel_config() -> bongos_chat::ChannelConfig {
+    let reporter = match std::env::current_exe() {
+        Ok(exe) => vec![
+            exe.to_string_lossy().into_owned(),
+            "--chat-report".to_string(),
+        ],
+        Err(error) => {
+            log::error!("chats: cannot find the bongos executable for chat reports: {error}");
+            Vec::new()
+        }
+    };
+    bongos_chat::ChannelConfig { reporter }
+}
 
 fn stdout_is_a_pty() -> bool {
     !*FORCE_CLI_MODE && io::stdout().is_terminal()
