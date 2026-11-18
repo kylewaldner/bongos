@@ -148,15 +148,11 @@ fn repo(files: &[(&str, &str)]) -> Repo {
         min_free_disk_mb: 0,
         ..WorkflowsSettings::default()
     };
-    let run = futures::executor::block_on(create_run(
-        &git,
-        &task,
-        RUN,
-        1,
-        &settings,
-        &|_: &Path| Some(u64::MAX),
-    ))
-    .unwrap();
+    let run =
+        futures::executor::block_on(create_run(&git, &task, RUN, 1, &settings, &|_: &Path| {
+            Some(u64::MAX)
+        }))
+        .unwrap();
     Repo {
         _temp: temp,
         root,
@@ -217,21 +213,39 @@ fn merge_branch_joins_each_fan_out_branch_into_the_run_branch() {
     }
     let mut runner = repo.runner();
 
-    let first = runner.merge_branch(RUN, "test", &branch("plan", 0)).unwrap();
-    let second = runner.merge_branch(RUN, "test", &branch("plan", 1)).unwrap();
+    let first = runner
+        .merge_branch(RUN, "test", &branch("plan", 0))
+        .unwrap();
+    let second = runner
+        .merge_branch(RUN, "test", &branch("plan", 1))
+        .unwrap();
     assert_ne!(first, second);
-    assert_eq!(git_run(&repo.git, &repo.run.path, &["rev-parse", "HEAD"]), second);
+    assert_eq!(
+        git_run(&repo.git, &repo.run.path, &["rev-parse", "HEAD"]),
+        second
+    );
     assert!(repo.run.path.join("alpha.txt").is_file());
     assert!(repo.run.path.join("beta.txt").is_file());
     assert_eq!(
-        git_run(&repo.git, &repo.run.path, &["log", "--first-parent", "-2", "--format=%s"]),
+        git_run(
+            &repo.git,
+            &repo.run.path,
+            &["log", "--first-parent", "-2", "--format=%s"]
+        ),
         "Join plan branch 1\nJoin plan branch 0"
     );
 
     // A branch none of whose nodes ran in a worktree has nothing to merge.
-    assert_eq!(runner.merge_branch(RUN, "test", &branch("plan", 7)).unwrap(), second);
+    assert_eq!(
+        runner
+            .merge_branch(RUN, "test", &branch("plan", 7))
+            .unwrap(),
+        second
+    );
     // A run with no binding cannot merge.
-    let unbound = runner.merge_branch("another-run", "test", &branch("plan", 0)).unwrap_err();
+    let unbound = runner
+        .merge_branch("another-run", "test", &branch("plan", 0))
+        .unwrap_err();
     assert_eq!(unbound.reason, FailureReason::WorktreeUnavailable);
 }
 
@@ -246,12 +260,26 @@ fn merge_branch_fails_a_conflict_naming_the_file_and_leaves_the_run_branch() {
     }
     let mut runner = repo.runner();
 
-    let merged = runner.merge_branch(RUN, "test", &branch("plan", 0)).unwrap();
-    let conflict = runner.merge_branch(RUN, "test", &branch("plan", 1)).unwrap_err();
+    let merged = runner
+        .merge_branch(RUN, "test", &branch("plan", 0))
+        .unwrap();
+    let conflict = runner
+        .merge_branch(RUN, "test", &branch("plan", 1))
+        .unwrap_err();
     assert_eq!(conflict.reason, FailureReason::MergeConflict);
-    assert!(conflict.detail.contains("shared.txt"), "{}", conflict.detail);
-    assert_eq!(git_run(&repo.git, &repo.run.path, &["rev-parse", "HEAD"]), merged);
-    assert_eq!(git_run(&repo.git, &repo.run.path, &["status", "--porcelain"]), "");
+    assert!(
+        conflict.detail.contains("shared.txt"),
+        "{}",
+        conflict.detail
+    );
+    assert_eq!(
+        git_run(&repo.git, &repo.run.path, &["rev-parse", "HEAD"]),
+        merged
+    );
+    assert_eq!(
+        git_run(&repo.git, &repo.run.path, &["status", "--porcelain"]),
+        ""
+    );
 }
 
 struct FrozenClock(Mutex<Instant>);
@@ -430,8 +458,14 @@ fn the_shipped_implement_pr_runs_its_planned_path_to_the_merge() {
     assert_eq!(state.closed_gates.len(), 1);
     // Both items reached the task branch through the join and the merge.
     let task_worktree = repo.task.worktree.as_deref().unwrap();
-    assert_eq!(fs::read_to_string(task_worktree.join("alpha.txt")).unwrap(), "alpha\n");
-    assert_eq!(fs::read_to_string(task_worktree.join("beta.txt")).unwrap(), "beta\n");
+    assert_eq!(
+        fs::read_to_string(task_worktree.join("alpha.txt")).unwrap(),
+        "alpha\n"
+    );
+    assert_eq!(
+        fs::read_to_string(task_worktree.join("beta.txt")).unwrap(),
+        "beta\n"
+    );
     assert_eq!(
         git_run(&repo.git, task_worktree, &["rev-parse", "HEAD"]),
         git_run(&repo.git, &repo.run.path, &["rev-parse", "HEAD"])
