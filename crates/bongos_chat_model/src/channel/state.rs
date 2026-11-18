@@ -91,8 +91,8 @@ pub enum Source {
 /// The chat channel of one live chat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelStatus {
-    /// The launch has no channel, for this reason.
-    Off(&'static str),
+    /// The launch has no channel (the runtime keeps the reason, which is built at launch).
+    Off,
     /// The launch has a channel but no report was accepted yet.
     Pending,
     /// A report was accepted from this launch.

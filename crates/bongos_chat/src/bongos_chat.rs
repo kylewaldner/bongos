@@ -63,8 +63,7 @@ pub use live_modes::{SOURCE_NAME, start_current_todo};
 pub use panel::{ChatPanel, focus_prompts, init_panel, open_prompts_in_center};
 pub use runtime::{
     ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChannelStatus, ChatRuntime,
-    ChatRuntimeEvent, ChatState, EARLY_EXIT, LiveChat, MID_TURN, REPORTS_NOT_APPLIED, REPORTS_OFF,
-    RuntimeStats, Source,
+    ChatRuntimeEvent, ChatState, EARLY_EXIT, LiveChat, MID_TURN, REPORTS_OFF, RuntimeStats, Source,
 };
 pub use scope::{
     ChatScope, CwdSource, IMPLEMENT_TYPE, START_FIRST, project_repositories, resolve_scope,

@@ -8,11 +8,15 @@
 //! chat's directory. A remote project would start the CLI on the remote host, where the chat's
 //! files do not exist, so it is never used.
 //!
-//! Live state comes from the terminal: a bell means the CLI waits for input, output means it runs,
-//! no output for `chats.idle_after_secs` means idle, and the end of the process means exited.
-//! Keyboard input is a polled flag of the terminal, read on every wakeup and at close; once seen,
-//! the chat counts as prompted. Every change rewrites `last_active`, at most once per
-//! [`ACTIVE_DEBOUNCE`] per chat.
+//! Live state comes from one reducer (`bongos_chat_model::channel::state`, design D10), fed with the
+//! chat's verified reports and its terminal signals: a bell (waiting), output (running), no output
+//! for `chats.idle_after_secs` (idle), new keyboard input (running) and the end of the process
+//! (exited). A report sets an exact state; a terminal signal sets an estimated one, and only where
+//! the channel cannot answer, except that the idle timer still ends exact running and keyboard input
+//! still ends exact waiting, because an interrupted turn or a denied permission ends without a
+//! report. Keyboard input is a polled counter of the terminal, read on every wakeup and at close;
+//! once seen, the chat counts as prompted. Every state change rewrites `last_active`, at most once
+//! per [`ACTIVE_DEBOUNCE`] per chat.
 //!
 //! Agents that report their session id only in their own files (Codex) are launched one at a time
 //! per directory: the next launch in a directory waits until the previous one's id was captured
@@ -27,17 +31,21 @@
 //! pending until its first verified report and live after it. A launch with a channel that exits
 //! with an error within [`EARLY_EXIT`] before any report is started once more without it. Turning
 //! `chats.channels` off moves every chat's channel to off. Codex never gets a channel (D7).
-//! Reports do not change the state yet: the terminal still drives it.
+//! A report reaches only the chat it names, and only while it carries that chat's current token;
+//! any other report is dropped silently (D4).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use bongos_chat_model::channel::report::{Report, Token};
-use bongos_chat_model::channel::state::BELL_GRACE;
-pub use bongos_chat_model::channel::state::{ChatState, MID_TURN};
+use bongos_chat_model::channel::state::{
+    self as reducer, BELL_GRACE, ChannelCoverage, ChatLive, Input,
+};
+pub use bongos_chat_model::channel::state::{ChannelStatus, ChatState, MID_TURN, Source};
 use bongos_chat_model::{
     Agent, Capabilities, CaptureQuery, ChannelOff, ChannelPlan, Fallback, HOOKS, NamedBy,
     VERSION_TABLE, adapter_for, from_title,
@@ -75,35 +83,27 @@ pub const EARLY_EXIT: Duration = Duration::from_secs(5);
 
 /// Why a chat has no channel while `chats.channels` is false, or since it turned false.
 pub const REPORTS_OFF: &str = "Reports are off (chats.channels)";
-/// Why a chat with a live channel still shows a state from the terminal: reports reach the runtime
-/// but do not change the state yet.
-pub const REPORTS_NOT_APPLIED: &str = "Reports do not set the state yet";
 
-/// Whether a chat reports over the chat channel (design D9, D14). Unlike the model's
-/// `channel::state::ChannelStatus`, the off reason is built at launch (server errors, adapter
-/// reasons), so it is owned.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChannelStatus {
-    /// The launch has no channel, for the reason given.
-    Off(String),
-    /// The channel is configured and no verified report came yet.
-    Pending,
-    /// A verified report came.
-    Live,
+/// The runtime's clock for the reducer: milliseconds since the runtime was made. Tests move it
+/// forward instead of waiting (see [`ChatRuntime::advance_clock`]).
+#[derive(Clone)]
+struct Clock {
+    epoch: Instant,
+    skew_ms: Arc<AtomicU64>,
 }
 
-/// Where a chat's state comes from (design D10).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Source {
-    /// A report said so.
-    Exact,
-    /// Guessed from the terminal, for the reason given.
-    Estimated(String),
-}
+impl Clock {
+    fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            skew_ms: Arc::default(),
+        }
+    }
 
-/// "No report from <agent> yet".
-fn no_report_yet(agent: Agent) -> String {
-    format!("No report from {} yet", agent.as_str())
+    fn now_ms(&self) -> u64 {
+        let elapsed = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        elapsed.saturating_add(self.skew_ms.load(Ordering::Relaxed))
+    }
 }
 
 /// The first letter in upper case, for a reason shown on its own.
@@ -139,7 +139,11 @@ pub struct RuntimeStats {
 pub struct LiveChat {
     terminal: Entity<Terminal>,
     agent: Agent,
-    state: ChatState,
+    /// The reducer's view: state, source, channel status and the times it needs.
+    live: ChatLive,
+    /// Why the launch has no channel, while its channel is off.
+    off_reason: Option<String>,
+    clock: Clock,
     title: Option<String>,
     started: SystemTime,
     given: Vec<SharedArtifact>,
@@ -154,22 +158,21 @@ pub struct LiveChat {
     sent: bool,
     /// The chat has a name other than its default one, or a title already tried to name it.
     auto_named: bool,
-    last_output: Instant,
-    bell_at: Option<Instant>,
+    /// The terminal's keyboard input count already fed to the reducer.
+    seen_inputs: u64,
+    /// When (on the runtime's clock) the last report of the current launch was accepted; the idle
+    /// timer counts quiet time from it as from output.
+    last_report_seen: Option<u64>,
     last_active_write: Option<Instant>,
     pending_active_write: Option<Task<()>>,
     /// The id is still to be read from the CLI's files when it exits.
     capture_on_exit: bool,
     /// The never-prompted cleanup already looked at this run of the chat.
     cleanup_checked: bool,
-    channel: ChannelStatus,
     /// This launch's channel token while it is registered; never written anywhere.
     token: Option<Token>,
     /// Keeps the token registered with the report server; dropping it forgets the token.
     registration: Option<Registration>,
-    state_source: Source,
-    /// The reporter's clock (`at`, in milliseconds) of the newest verified report.
-    last_report_at: Option<u64>,
     /// When the terminal started, for [`EARLY_EXIT`].
     launched: Instant,
     /// What a launch with a channel needs to start again without it after an early exit.
@@ -180,18 +183,23 @@ pub struct LiveChat {
 
 impl LiveChat {
     /// Whether the launch reports over the chat channel.
-    pub fn channel(&self) -> &ChannelStatus {
-        &self.channel
+    pub fn channel(&self) -> ChannelStatus {
+        self.live.channel
+    }
+
+    /// Why the launch has no channel, while its channel is off.
+    pub fn channel_off_reason(&self) -> Option<&str> {
+        self.off_reason.as_deref()
     }
 
     /// Where the state comes from.
-    pub fn state_source(&self) -> &Source {
-        &self.state_source
+    pub fn state_source(&self) -> Source {
+        self.live.source
     }
 
-    /// The reporter's time of the newest verified report, in milliseconds.
+    /// The reporter's time (`at`, in milliseconds) of the newest applied report.
     pub fn last_report_at(&self) -> Option<u64> {
-        self.last_report_at
+        self.live.last_report_at
     }
 
     /// Whether a channel token of this launch is registered.
@@ -199,18 +207,23 @@ impl LiveChat {
         self.token.is_some()
     }
 
-    /// Forgets the channel token (the server no longer accepts it) and turns the channel off.
-    fn drop_channel(&mut self, reason: String) {
+    /// Forgets the channel token (the server no longer accepts it) and turns the channel off because
+    /// `chats.channels` is off. The state is kept, estimated.
+    fn drop_channel(&mut self) {
         self.registration = None;
         self.token = None;
         self.relaunch = None;
-        self.state_source = Source::Estimated(reason.clone());
-        self.channel = ChannelStatus::Off(reason);
+        self.live.source = Source::Estimated(REPORTS_OFF);
+        self.live.channel = ChannelStatus::Off;
+        self.off_reason = Some(REPORTS_OFF.to_string());
     }
 
     /// Whether the bell rang less than [`BELL_GRACE`] ago.
     fn just_rang(&self) -> bool {
-        self.bell_at.is_some_and(|bell| bell.elapsed() < BELL_GRACE)
+        let now = self.clock.now_ms();
+        self.live
+            .last_bell_at
+            .is_some_and(|bell| Duration::from_millis(now.saturating_sub(bell)) < BELL_GRACE)
     }
 
     pub fn terminal(&self) -> &Entity<Terminal> {
@@ -218,7 +231,7 @@ impl LiveChat {
     }
 
     pub fn state(&self) -> ChatState {
-        self.state
+        self.live.state
     }
 
     /// The title the CLI set with an OSC sequence.
@@ -258,9 +271,10 @@ impl LiveChat {
         self.agent
     }
 
-    /// Whether the CLI is working on a turn: running, with output in the last [`MID_TURN`].
+    /// Whether the CLI is working on a turn: exact running on a live channel, else running with
+    /// output in the last [`MID_TURN`].
     pub fn is_mid_turn(&self) -> bool {
-        self.state == ChatState::Running && self.last_output.elapsed() < MID_TURN
+        reducer::is_mid_turn(&self.live, self.clock.now_ms())
     }
 
     pub(crate) fn record_path(&self) -> &PathBuf {
@@ -309,6 +323,8 @@ pub struct ChatRuntime {
     /// The agent of the last chat `chat: new` started, offered first next time.
     last_agent: Option<Agent>,
     stats: RuntimeStats,
+    clock: Clock,
+    early_exit: Duration,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -334,6 +350,8 @@ impl ChatRuntime {
             next_send: 0,
             last_agent: None,
             stats: RuntimeStats::default(),
+            clock: Clock::new(),
+            early_exit: EARLY_EXIT,
             _subscriptions: vec![cx.observe_global::<SettingsStore>(|this, cx| {
                 this.end_when_disabled(cx);
                 this.channels_off_when_disabled(cx);
@@ -351,8 +369,11 @@ impl ChatRuntime {
         }
         let mut changed = Vec::new();
         for (id, chat) in &mut self.live {
-            if matches!(chat.channel, ChannelStatus::Pending | ChannelStatus::Live) {
-                chat.drop_channel(REPORTS_OFF.to_string());
+            if matches!(
+                chat.live.channel,
+                ChannelStatus::Pending | ChannelStatus::Live
+            ) {
+                chat.drop_channel();
                 changed.push(id.clone());
             }
         }
@@ -365,29 +386,51 @@ impl ChatRuntime {
         cx.notify();
     }
 
-    /// A verified report from the server (design D3). It counts only when it carries the token of
-    /// the chat's current, still registered launch: a resume registers a new token after the
-    /// server checked an older one, so a late report of the previous process is dropped here. The
-    /// first one moves the channel from pending to live; the state is not changed yet.
+    /// A verified report from the server (design D3, D4, D10). It reaches only the chat it names,
+    /// and counts only when it carries the token of that chat's current, still registered launch:
+    /// a resume registers a new token after the server checked an older one, so a late report of
+    /// the previous process is dropped here, silently. An accepted report goes to the reducer; the
+    /// first one moves the channel from pending to live.
     pub(crate) fn on_report(&mut self, report: Report, cx: &mut Context<Self>) {
-        let chat_id = report.chat.as_str();
-        let Some(chat) = self.live.get_mut(chat_id) else {
+        let chat_id = report.chat.as_str().to_string();
+        let now = self.clock.now_ms();
+        let Some(chat) = self.live.get_mut(&chat_id) else {
             return;
         };
         let current = chat.token.is_some()
             && registration_is_current(chat.registration.as_ref(), &report.token)
-            && matches!(chat.channel, ChannelStatus::Pending | ChannelStatus::Live);
+            && matches!(
+                chat.live.channel,
+                ChannelStatus::Pending | ChannelStatus::Live
+            );
         if !current {
             log::debug!("chats: dropped a report from an earlier launch");
             return;
         }
-        chat.last_report_at = Some(
-            chat.last_report_at
-                .map_or(report.at, |at| at.max(report.at)),
-        );
-        if chat.channel == ChannelStatus::Pending {
-            chat.channel = ChannelStatus::Live;
-            chat.state_source = Source::Estimated(REPORTS_NOT_APPLIED.to_string());
+        chat.last_report_seen = Some(now);
+        let went_live = chat.live.channel == ChannelStatus::Pending;
+        chat.live.channel = ChannelStatus::Live;
+        self.step(&chat_id, Input::Report(report), went_live, cx);
+    }
+
+    /// Feeds `input` to the reducer of `chat_id`. A change of state or source is told, and a state
+    /// change also touches `last_active`; a change that only advances the last applied report time
+    /// is not told, unless `changed` says something else about the chat changed.
+    fn step(&mut self, chat_id: &str, input: Input, changed: bool, cx: &mut Context<Self>) {
+        let Some(chat) = self.live.get_mut(chat_id) else {
+            return;
+        };
+        let before = (chat.live.state, chat.live.source);
+        chat.live.step(input);
+        let after = (chat.live.state, chat.live.source);
+        if before != after {
+            // Keyboard input from before this change does not end the new state.
+            chat.seen_inputs = chat.terminal.read(cx).keyboard_input_count();
+        }
+        if before.0 != after.0 {
+            self.touch_active(chat_id, cx);
+        }
+        if before != after || changed {
             cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
             cx.notify();
         }
@@ -459,6 +502,23 @@ impl ChatRuntime {
     /// Replaces [`crate::send::BRACKETED_WAIT`] (tests use a short one).
     pub fn set_bracketed_wait(&mut self, wait: Duration) {
         self.bracketed_wait = wait;
+    }
+
+    /// Replaces [`EARLY_EXIT`] (tests use a long one so a slow start still counts as early).
+    pub fn set_early_exit(&mut self, early_exit: Duration) {
+        self.early_exit = early_exit;
+    }
+
+    /// Moves the runtime's clock forward by `by` and runs every chat's idle check, as if that much
+    /// time had passed without output.
+    #[cfg(test)]
+    pub(crate) fn advance_clock(&mut self, by: Duration, cx: &mut Context<Self>) {
+        let by = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+        self.clock.skew_ms.fetch_add(by, Ordering::Relaxed);
+        let ids: Vec<String> = self.live.keys().cloned().collect();
+        for id in ids {
+            self.check_idle(&id, cx);
+        }
     }
 
     pub(crate) fn bracketed_wait(&self) -> Duration {
@@ -538,7 +598,7 @@ impl ChatRuntime {
     pub fn state(&self, chat_id: &str) -> ChatState {
         self.live
             .get(chat_id)
-            .map_or(ChatState::Closed, |chat| chat.state)
+            .map_or(ChatState::Closed, |chat| chat.live.state)
     }
 
     /// Starts the chat of `request` in a terminal of the first local project of `projects` (the
@@ -622,6 +682,7 @@ impl ChatRuntime {
             Some(token) => match register_launch(&chat_id, &token, cx) {
                 Some(registration) => LaunchChannel {
                     status: ChannelStatus::Pending,
+                    off_reason: None,
                     token: Some(token),
                     registration: Some(registration),
                     relaunch: Some((original, project.downgrade())),
@@ -842,10 +903,17 @@ impl ChatRuntime {
 
         // The terminal ran before this subscription: take the title it may already have.
         let title = terminal.read(cx).breadcrumb_text.trim().to_string();
+        let seen_inputs = terminal.read(cx).keyboard_input_count();
+        let coverage = match prepared.agent {
+            Agent::Claude => ChannelCoverage::claude(),
+            Agent::Codex => ChannelCoverage::none(),
+        };
         let chat = LiveChat {
             terminal,
             agent: prepared.agent,
-            state: ChatState::Running,
+            live: ChatLive::start(channel.status, coverage, self.clock.now_ms()),
+            off_reason: channel.off_reason,
+            clock: self.clock.clone(),
             title: (!title.is_empty()).then_some(title),
             started,
             given: prepared.given,
@@ -858,20 +926,14 @@ impl ChatRuntime {
             prompted: prepared.record.prompted,
             sent: false,
             auto_named: prepared.record.named_by != NamedBy::None,
-            last_output: Instant::now(),
-            bell_at: None,
+            seen_inputs,
+            last_report_seen: None,
             last_active_write: Some(Instant::now()),
             pending_active_write: None,
             capture_on_exit: false,
             cleanup_checked: false,
-            state_source: Source::Estimated(match &channel.status {
-                ChannelStatus::Off(reason) => reason.clone(),
-                ChannelStatus::Pending | ChannelStatus::Live => no_report_yet(prepared.agent),
-            }),
-            channel: channel.status,
             token: channel.token,
             registration: channel.registration,
-            last_report_at: None,
             launched: Instant::now(),
             relaunch: channel.relaunch,
             _tasks: tasks,
@@ -894,10 +956,8 @@ impl ChatRuntime {
     ) {
         match event {
             TerminalEvent::Bell => {
-                if let Some(chat) = self.live.get_mut(chat_id) {
-                    chat.bell_at = Some(Instant::now());
-                }
-                self.set_state(chat_id, ChatState::Waiting, cx);
+                let now = self.clock.now_ms();
+                self.step(chat_id, Input::Bell { now }, false, cx);
             }
             TerminalEvent::BreadcrumbsChanged => {
                 let title = terminal.read(cx).breadcrumb_text.trim().to_string();
@@ -915,13 +975,8 @@ impl ChatRuntime {
             }
             TerminalEvent::Wakeup => {
                 self.poll_input(chat_id, cx);
-                let Some(chat) = self.live.get_mut(chat_id) else {
-                    return;
-                };
-                chat.last_output = Instant::now();
-                if matches!(chat.state, ChatState::Waiting | ChatState::Idle) && !chat.just_rang() {
-                    self.set_state(chat_id, ChatState::Running, cx);
-                }
+                let now = self.clock.now_ms();
+                self.step(chat_id, Input::Output { now }, false, cx);
             }
             _ => {}
         }
@@ -985,70 +1040,75 @@ impl ChatRuntime {
         }
     }
 
-    /// Reads the terminal's keyboard input flag; the first time it is set, the chat is prompted.
+    /// Reads the terminal's keyboard input count. New input goes to the reducer, unless a bell just
+    /// came: then the input is older than the bell's question. The first input marks the chat
+    /// prompted.
     fn poll_input(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let Some(chat) = self.live.get_mut(chat_id) else {
             return;
         };
-        if chat.prompted || !chat.terminal.read(cx).keyboard_input_sent() {
+        let count = chat.terminal.read(cx).keyboard_input_count();
+        if count == chat.seen_inputs {
             return;
         }
-        chat.prompted = true;
-        // Input means the CLI works on it, unless a bell just came: then the input is older
-        // than the bell's question.
-        if matches!(chat.state, ChatState::Waiting | ChatState::Idle) && !chat.just_rang() {
-            chat.state = ChatState::Running;
+        chat.seen_inputs = count;
+        let first = !std::mem::replace(&mut chat.prompted, true);
+        let just_rang = chat.just_rang();
+        if first {
+            self.touch_active(chat_id, cx);
         }
-        self.touch_active(chat_id, cx);
-        cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
-        cx.notify();
+        if just_rang {
+            if first {
+                cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
+                cx.notify();
+            }
+        } else {
+            self.step(chat_id, Input::KeyboardInput, first, cx);
+        }
     }
 
-    fn set_state(&mut self, chat_id: &str, state: ChatState, cx: &mut Context<Self>) {
-        let Some(chat) = self.live.get_mut(chat_id) else {
-            return;
-        };
-        if chat.state == state || matches!(chat.state, ChatState::Exited { .. }) {
-            return;
-        }
-        chat.state = state;
-        self.touch_active(chat_id, cx);
-        cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
-        cx.notify();
-    }
-
-    /// Marks the chat idle when it ran without output for `chats.idle_after_secs`. Returns when to
-    /// look again, or `None` once the chat is gone or exited.
+    /// Gives the reducer the idle timer when the chat had no output (and no report) for
+    /// `chats.idle_after_secs`. Returns when to look again, or `None` once the chat is gone or
+    /// exited.
     fn check_idle(&mut self, chat_id: &str, cx: &mut Context<Self>) -> Option<Duration> {
         let idle_after = Duration::from_secs(ChatsSettings::get_global(cx).idle_after_secs.max(1));
+        let now = self.clock.now_ms();
         let chat = self.live.get(chat_id)?;
-        if matches!(chat.state, ChatState::Exited { .. }) {
+        if chat.live.state.is_final() {
             return None;
         }
-        let quiet = chat.last_output.elapsed();
+        let last = chat
+            .live
+            .last_output_at
+            .max(chat.last_report_seen)
+            .unwrap_or(now);
+        let quiet = Duration::from_millis(now.saturating_sub(last));
         if quiet < idle_after {
             return Some(idle_after - quiet);
         }
-        if chat.state == ChatState::Running {
-            self.set_state(chat_id, ChatState::Idle, cx);
-        }
+        self.step(chat_id, Input::IdleTimer, false, cx);
         Some(idle_after)
     }
 
     fn on_exit(&mut self, chat_id: &str, code: Option<i32>, cx: &mut Context<Self>) {
         self.poll_input(chat_id, cx);
+        let early_exit = self.early_exit;
         let Some(chat) = self.live.get_mut(chat_id) else {
             return;
         };
-        chat.state = ChatState::Exited { code };
+        chat.live.step(Input::Exit { code });
         let early_error = code.is_some_and(|code| code != 0)
-            && chat.last_report_at.is_none()
-            && chat.launched.elapsed() < EARLY_EXIT;
+            && chat.live.last_report_at.is_none()
+            && chat.launched.elapsed() < early_exit;
         // The launch ended: its token is forgotten whatever happens next.
         chat.registration = None;
         chat.token = None;
         let relaunch = chat.relaunch.take().filter(|_| {
-            early_error && matches!(chat.channel, ChannelStatus::Pending | ChannelStatus::Live)
+            early_error
+                && matches!(
+                    chat.live.channel,
+                    ChannelStatus::Pending | ChannelStatus::Live
+                )
         });
         if let Some(relaunch) = relaunch {
             // Started once more without the channel, in case the CLI rejected the hooks. The
@@ -1094,7 +1154,7 @@ impl ChatRuntime {
         let exited = self
             .live
             .get(chat_id)
-            .is_some_and(|chat| matches!(chat.state, ChatState::Exited { .. }));
+            .is_some_and(|chat| matches!(chat.live.state, ChatState::Exited { .. }));
         let Some(project) = project.upgrade().filter(|_| exited) else {
             return;
         };
@@ -1224,7 +1284,7 @@ impl ChatRuntime {
         let mut names: Vec<String> = self
             .live
             .iter()
-            .filter(|(_, chat)| !matches!(chat.state, ChatState::Exited { .. }))
+            .filter(|(_, chat)| !matches!(chat.live.state, ChatState::Exited { .. }))
             .map(|(id, _)| {
                 store
                     .find(id)
@@ -1456,6 +1516,7 @@ async fn capture_now(
 /// The channel side of one launch, from the plan to the live chat.
 struct LaunchChannel {
     status: ChannelStatus,
+    off_reason: Option<String>,
     token: Option<Token>,
     registration: Option<Registration>,
     relaunch: Option<(LaunchRequest, WeakEntity<Project>)>,
@@ -1464,7 +1525,8 @@ struct LaunchChannel {
 impl LaunchChannel {
     fn off(reason: &str) -> Self {
         Self {
-            status: ChannelStatus::Off(sentence(reason)),
+            status: ChannelStatus::Off,
+            off_reason: Some(sentence(reason)),
             token: None,
             registration: None,
             relaunch: None,
