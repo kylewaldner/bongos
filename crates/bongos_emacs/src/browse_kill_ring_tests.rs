@@ -199,6 +199,37 @@ async fn rows_are_newest_first_with_duplicates_once(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn a_rectangle_row_has_the_rectangle_kind(cx: &mut TestAppContext) {
+    let (_, _, mut cx) = workspace_editor("", 0, cx).await;
+    let cx = &mut cx;
+    seed(&["ab\ncd"], cx);
+    cx.update(|_, cx| {
+        kill_ring::update(cx, |ring| {
+            ring.push(Entry::rectangle(&["ab".to_string(), "cd".to_string()]))
+        })
+    });
+
+    let kinds = cx.update(|_, cx| {
+        candidates("", cx)
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.primary.to_string(),
+                    candidate.kind.map(|kind| kind.to_string()),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        kinds,
+        [
+            ("ab⏎cd".to_string(), Some("rectangle".to_string())),
+            ("ab⏎cd".to_string(), None),
+        ]
+    );
+}
+
+#[gpui::test]
 async fn typing_narrows_by_substring_regardless_of_case(cx: &mut TestAppContext) {
     let (workspace, editor, mut cx) = workspace_editor("", 0, cx).await;
     let cx = &mut cx;

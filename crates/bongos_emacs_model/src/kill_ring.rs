@@ -47,6 +47,22 @@ impl Piece {
     }
 }
 
+/// What an entry holds: ordinary text, or a rectangle whose rows are the
+/// lines of its text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    #[default]
+    Text,
+    Rectangle,
+}
+
+impl EntryKind {
+    fn is_text(&self) -> bool {
+        *self == EntryKind::Text
+    }
+}
+
 /// A killed text. `text` is the pieces joined with a newline between a piece
 /// and the next unless the earlier piece is a whole line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +70,7 @@ pub struct Entry {
     pub text: String,
     pub pieces: Vec<Piece>,
     pub secret: bool,
+    pub kind: EntryKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +87,8 @@ pub struct PickerRow {
     pub label: String,
     pub preview: String,
     pub secret: bool,
+    /// The entry is a rectangle.
+    pub rectangle: bool,
 }
 
 impl Entry {
@@ -80,7 +99,23 @@ impl Entry {
             text,
             pieces: vec![Piece::plain(len)],
             secret: false,
+            kind: EntryKind::Text,
         }
+    }
+
+    /// A rectangle entry: `rows` joined with a newline, as one plain piece.
+    /// Any list of rows round-trips through [`Entry::rectangle_rows`], even
+    /// all-empty rows; an empty list comes back as one empty row.
+    pub fn rectangle(rows: &[String]) -> Entry {
+        Entry {
+            kind: EntryKind::Rectangle,
+            ..Entry::plain(rows.join("\n"))
+        }
+    }
+
+    /// The rows of a rectangle entry: its text split at each newline.
+    pub fn rectangle_rows(&self) -> Vec<String> {
+        self.text.split('\n').map(str::to_string).collect()
     }
 
     /// Joins `texts` by the entry convention and sets each piece's length from
@@ -104,6 +139,7 @@ impl Entry {
             text,
             pieces: out,
             secret: false,
+            kind: EntryKind::Text,
         }
     }
 
@@ -156,6 +192,7 @@ fn piece_ranges(text: &str, pieces: &[Piece]) -> Option<Vec<std::ops::Range<usiz
     (pos == text.len()).then_some(ranges)
 }
 
+/// The join of two entries, always a text entry.
 fn joined(first: &Entry, second: &Entry) -> Entry {
     let secret = first.secret || second.secret;
     let mut entry = if first.pieces.len() == second.pieces.len() && first.pieces.len() >= 2 {
@@ -187,6 +224,7 @@ fn joined(first: &Entry, second: &Entry) -> Entry {
                 origin: None,
             }],
             secret: false,
+            kind: EntryKind::Text,
         }
     };
     entry.secret = secret;
@@ -255,15 +293,15 @@ impl Ring {
         Some((from as i64 + step).rem_euclid(self.len() as i64) as usize)
     }
 
-    /// Rows newest first. A text that also appears at a newer position is
-    /// hidden. `query` filters by case-insensitive substring of the text; a
+    /// Rows newest first. An entry whose kind and text also appear at a newer
+    /// position is hidden. `query` filters by case-insensitive substring of the text; a
     /// secret entry only shows for an empty query.
     pub fn picker_view(&self, query: &str) -> Vec<PickerRow> {
         let query = query.to_lowercase();
         let mut seen = HashSet::new();
         let mut rows = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
-            if !seen.insert(entry.text.as_str()) {
+            if !seen.insert((entry.kind, entry.text.as_str())) {
                 continue;
             }
             if !query.is_empty() && (entry.secret || !entry.text.to_lowercase().contains(&query)) {
@@ -283,6 +321,7 @@ impl Ring {
                 label,
                 preview,
                 secret: entry.secret,
+                rectangle: entry.kind == EntryKind::Rectangle,
             });
         }
         rows
@@ -308,6 +347,7 @@ impl Ring {
                             first_line_indent: piece.first_line_indent,
                         })
                         .collect(),
+                    kind: entry.kind,
                 })
                 .collect(),
         };
@@ -341,6 +381,7 @@ impl Ring {
                         .collect(),
                     text: entry.text,
                     secret: false,
+                    kind: entry.kind,
                 }
                 .repaired()
             })
@@ -383,6 +424,8 @@ struct PieceJson {
 struct EntryRef<'a> {
     text: &'a str,
     pieces: Vec<PieceJson>,
+    #[serde(skip_serializing_if = "EntryKind::is_text")]
+    kind: EntryKind,
 }
 
 #[derive(Serialize)]
@@ -396,6 +439,8 @@ struct EntryOwned {
     text: String,
     #[serde(default)]
     pieces: Vec<PieceJson>,
+    #[serde(default)]
+    kind: EntryKind,
 }
 
 #[derive(Deserialize)]
