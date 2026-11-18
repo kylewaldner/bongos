@@ -25,6 +25,7 @@ pub mod prefix_arg;
 mod prefix_commands;
 pub mod quit;
 pub mod recenter;
+mod rectangle;
 pub mod region;
 mod region_commands;
 mod repeat;
@@ -75,6 +76,8 @@ mod prefix_arg_tests;
 mod quit_tests;
 #[cfg(test)]
 mod recenter_tests;
+#[cfg(test)]
+mod rectangle_tests;
 #[cfg(test)]
 mod region_tests;
 #[cfg(test)]
@@ -170,6 +173,15 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, cx, jumps::end_of_buffer_command);
         register(editor, &weak, cx, jumps::xref_find_definitions_command);
         register(editor, &weak, cx, jumps::xref_find_implementations_command);
+        register(editor, &weak, cx, rectangle::rectangle_mark_mode_command);
+        register(editor, &weak, cx, rectangle::copy_rectangle_as_kill_command);
+        register(editor, &weak, cx, rectangle::kill_rectangle_command);
+        register(editor, &weak, cx, rectangle::delete_rectangle_command);
+        register(editor, &weak, cx, rectangle::open_rectangle_command);
+        register(editor, &weak, cx, rectangle::clear_rectangle_command);
+        register(editor, &weak, cx, rectangle::string_rectangle_command);
+        register(editor, &weak, cx, rectangle::yank_rectangle_command);
+        register(editor, &weak, cx, rectangle::keep_rectangle_command);
         register(
             editor,
             &weak,
