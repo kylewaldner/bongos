@@ -25,7 +25,8 @@ pub(super) struct Row {
     pub(super) preview: String,
 }
 
-/// The rows for `query`, newest first, a repeated text only once.
+/// The rows for `query`, newest first, a repeated text only once. A rectangle row has the kind
+/// `rectangle`.
 pub(super) fn candidates(query: &str, cx: &App) -> Vec<Candidate> {
     let Some(ring) = kill_ring::read(cx) else {
         return Vec::new();
@@ -34,14 +35,19 @@ pub(super) fn candidates(query: &str, cx: &App) -> Vec<Candidate> {
         .into_iter()
         .filter_map(|row| {
             let entry = ring.get(row.index)?.clone();
-            Some(Candidate::new(
+            let candidate = Candidate::new(
                 row.label,
                 Row {
                     index: row.index,
                     entry,
                     preview: row.preview,
                 },
-            ))
+            );
+            Some(if row.rectangle {
+                candidate.kind("rectangle")
+            } else {
+                candidate
+            })
         })
         .collect()
 }
