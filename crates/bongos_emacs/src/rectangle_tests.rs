@@ -230,4 +230,3 @@ async fn a_zero_width_rectangle_edits_only_with_keep(cx: &mut TestAppContext) {
     cx.dispatch_action(KeepRectangle);
     cx.assert_editor_state("ˇ\n\n\n");
 }
-
