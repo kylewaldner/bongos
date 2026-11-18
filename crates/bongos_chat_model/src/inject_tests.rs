@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use bongos_work_model::{Kind, SessionContext, SharedArtifact, TaskFile, serialize_task};
 use tempfile::TempDir;
 
+use crate::adapter_tests::{TOKEN_MARKER, channel_of};
 use crate::*;
 
 const SKILL_TEXT: &str = "SKILL-TEXT-MARKER route the work to cheaper models";
@@ -317,14 +318,14 @@ fn handoff_note_names_the_parent_and_its_transcript_only() {
 
 #[test]
 fn the_hook_command_quotes_the_path() {
-    let settings = render_settings(Path::new("/home/kyle/my chats/c d/context.md")).unwrap();
+    let settings = render_settings(Path::new("/home/kyle/my chats/c d/context.md"), None).unwrap();
     let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
     let hook = &value["hooks"]["SessionStart"][0]["hooks"][0];
     assert_eq!(hook["type"], "command");
     assert_eq!(hook["command"], "cat '/home/kyle/my chats/c d/context.md'");
 
     // Characters JSON must escape stay valid JSON.
-    let settings = render_settings(Path::new("/tmp/a\"b\\c$d`e/context.md")).unwrap();
+    let settings = render_settings(Path::new("/tmp/a\"b\\c$d`e/context.md"), None).unwrap();
     let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
     assert_eq!(
         value["hooks"]["SessionStart"][0]["hooks"][0]["command"],
@@ -341,7 +342,7 @@ fn the_hook_refuses_a_path_it_cannot_quote() {
         "/tmp/a\rb/context.md",
         "",
     ] {
-        let error = render_settings(Path::new(path)).unwrap_err();
+        let error = render_settings(Path::new(path), None).unwrap_err();
         assert!(matches!(error.kind, ErrorKind::Unquotable(_)), "{path:?}");
         assert!(shell_quote(Path::new(path)).is_err(), "{path:?}");
     }
@@ -487,7 +488,9 @@ fn every_output_with_extra(
         all.push(render_context(&input));
         all.push(render_system(&input));
         all.push(render_codex_instructions(&input));
-        all.push(render_settings(input.context_path).unwrap());
+        all.push(render_settings(input.context_path, None).unwrap());
+        let channel = channel_of("/opt/bongos/bongos");
+        all.push(render_settings(input.context_path, Some(&channel)).unwrap());
         all.extend(render_env(&input).into_values());
         all.push(handoff_note(input.handoff.unwrap()));
     }
@@ -583,10 +586,103 @@ fn facts_carry_no_artifact() {
 
 #[test]
 fn the_settings_turn_on_the_terminal_bell() {
-    let settings = render_settings(Path::new("/tmp/context.md")).unwrap();
+    let settings = render_settings(Path::new("/tmp/context.md"), None).unwrap();
     let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
     assert_eq!(value[BELL_KEY], BELL_VALUE);
     assert_eq!(value["preferredNotifChannel"], "terminal_bell");
+}
+
+fn has_key(value: &serde_json::Value, key: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.contains_key(key) || map.values().any(|value| has_key(value, key))
+        }
+        serde_json::Value::Array(items) => items.iter().any(|value| has_key(value, key)),
+        _ => false,
+    }
+}
+
+#[test]
+fn a_channel_adds_the_reporter_hooks() {
+    let context = Path::new("/rt/chats/0190aaaa/context.md");
+    let channel = channel_of("/opt/my bongos/bongos");
+    let settings = render_settings(context, Some(&channel)).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    let report = serde_json::json!({
+        "type": "command",
+        "command": "'/opt/my bongos/bongos' '--chat-report' claude-hook",
+        "timeout": 5,
+    });
+    let cat = serde_json::json!({
+        "type": "command",
+        "command": "cat '/rt/chats/0190aaaa/context.md'",
+    });
+    let hooks = value["hooks"].as_object().unwrap();
+    assert_eq!(hooks.len(), 5);
+    assert_eq!(
+        value["hooks"]["SessionStart"],
+        serde_json::json!([{ "hooks": [cat, report] }])
+    );
+    for event in ["UserPromptSubmit", "Stop", "Notification", "PostToolUse"] {
+        assert_eq!(
+            value["hooks"][event],
+            serde_json::json!([{ "hooks": [report.clone()] }]),
+            "{event}"
+        );
+    }
+    assert_eq!(value[BELL_KEY], BELL_VALUE);
+    assert!(!has_key(&value, "matcher"));
+    assert!(!settings.contains(TOKEN_MARKER));
+    assert!(!settings.contains("chat.sock"));
+}
+
+#[test]
+fn no_channel_keeps_the_settings_unchanged() {
+    let context = Path::new("/rt/chats/0190aaaa/context.md");
+    let settings = render_settings(context, None).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "preferredNotifChannel": "terminal_bell",
+            "hooks": { "SessionStart": [ { "hooks": [
+                { "type": "command", "command": "cat '/rt/chats/0190aaaa/context.md'" }
+            ] } ] }
+        })
+    );
+    assert!(!has_key(&value, "matcher"));
+}
+
+#[test]
+fn an_unquotable_bongos_path_renders_the_settings_without_a_channel() {
+    let context = Path::new("/rt/chats/0190aaaa/context.md");
+    let mut force = Vec::new();
+    let channel = plan_channel(
+        &["/opt/it's/bongos".to_string(), "--chat-report".to_string()],
+        PathBuf::from("/run/bongos/chat.sock"),
+        channel::report::Token::new(TOKEN_MARKER).unwrap(),
+        &mut force,
+    );
+    assert_eq!(
+        force,
+        vec![Fallback::ChannelOff(ChannelOff::UnquotablePath)]
+    );
+    assert_eq!(
+        render_settings(context, channel.as_ref()).unwrap(),
+        render_settings(context, None).unwrap()
+    );
+}
+
+#[test]
+fn the_token_is_in_no_generated_file() {
+    let temp = TempDir::new().unwrap();
+    let task_dir = task_on_disk(&temp, false);
+    let root = types_root();
+    let context = bongos_work_model::session_context(&task_dir).unwrap();
+    let outputs = every_output_with_extra(&root, &task_dir, context, None);
+    for output in &outputs {
+        assert!(!output.contains(TOKEN_MARKER), "{output}");
+    }
 }
 
 /// The `codex-instructions.md` text for a chat with id `chat_id`, as the renderer writes it.

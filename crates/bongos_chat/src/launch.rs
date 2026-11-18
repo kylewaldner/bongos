@@ -252,7 +252,7 @@ pub(crate) fn prepare(
                 }
                 text.push_str(&context_text);
             } else {
-                let settings = render_settings(&context_path)
+                let settings = render_settings(&context_path, None)
                     .map_err(|error| LaunchError::Files(error.to_string()))?;
                 files.push((PathBuf::from(CLAUDE_SETTINGS_FILE), settings));
                 settings_path = Some(dir.join(CLAUDE_SETTINGS_FILE));
@@ -287,6 +287,7 @@ pub(crate) fn prepare(
         extra_args,
         env,
         force: request.force.clone(),
+        channel: None,
     };
     let spec = adapter.launch(&plan, caps);
     let given = request.context.artifacts.clone();

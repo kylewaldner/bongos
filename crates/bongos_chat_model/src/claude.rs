@@ -16,6 +16,9 @@
 //!   anything but `true`, means not logged in. The logged-out shape was not exercised.
 //! - The transcript of a session is `~/.claude/projects/<cwd slug>/<session id>.jsonl`, the slug
 //!   being the cwd with every `/` and `.` replaced by `-`.
+//! - With a chat channel, the settings file also runs the reporter on `SessionStart`,
+//!   `UserPromptSubmit`, `Stop`, `Notification` and `PostToolUse`, and the session id comes from
+//!   the `session_start` report, so no transcript is scanned.
 //! - The bell setting key is `preferredNotifChannel` = `terminal_bell`, confirmed only by the CLI's
 //!   settings schema; whether a bell reaches a terminal from a `--settings` file is unverified.
 
@@ -105,6 +108,22 @@ pub const VERSION_TABLE: VersionTable = VersionTable::new(&[
 /// The row name of settings hooks, which the chat channel needs.
 pub const HOOKS: &str = "hooks";
 
+/// The reporter mode Claude's hooks run (`bongos --chat-report claude-hook`), which reads the hook
+/// input from stdin.
+pub const HOOK_REPORT_MODE: &str = "claude-hook";
+
+/// The hook events that run the reporter (D6), in settings order.
+pub const REPORT_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "Stop",
+    "Notification",
+    "PostToolUse",
+];
+
+/// Seconds Claude gives one reporter run before it gives up on it.
+pub const REPORT_HOOK_TIMEOUT_SECS: u64 = 5;
+
 /// The settings key and value that turn on the terminal bell.
 pub const BELL_KEY: &str = "preferredNotifChannel";
 pub const BELL_VALUE: &str = "terminal_bell";
@@ -129,13 +148,15 @@ impl ClaudeAdapter {
         Capabilities::from_version(version, &VERSION_TABLE)
     }
 
+    /// Pushes the injection flags; true when the settings file (and so its hooks) is passed.
     fn injection(
         &self,
         plan: &LaunchPlan,
         caps: &Capabilities,
         args: &mut Vec<String>,
         fallbacks: &mut Vec<Fallback>,
-    ) {
+    ) -> bool {
+        let mut settings = false;
         let files = &plan.files;
         if caps.has_flag(SYSTEM_FILE_FLAG) {
             args.push(SYSTEM_FILE_FLAG.to_string());
@@ -153,6 +174,7 @@ impl ClaudeAdapter {
             (Some(path), true) => {
                 args.push("--settings".to_string());
                 args.push(path.to_string_lossy().into_owned());
+                settings = true;
             }
             _ => note(fallbacks, Fallback::ContextInSystemPrompt),
         }
@@ -164,6 +186,7 @@ impl ClaudeAdapter {
         } else if files.has_skills {
             note(fallbacks, Fallback::SkillsAsText);
         }
+        settings
     }
 }
 
@@ -236,7 +259,7 @@ impl AgentAdapter for ClaudeAdapter {
             }
         }
 
-        self.injection(plan, caps, &mut args, &mut fallbacks);
+        let settings = self.injection(plan, caps, &mut args, &mut fallbacks);
 
         if let Some(model) = &plan.model {
             if caps.has_flag("--model") {
@@ -247,13 +270,29 @@ impl AgentAdapter for ClaudeAdapter {
         }
         args.extend(plan.extra_args.iter().cloned());
 
+        // The channel needs its hooks, which only the settings file carries; a forced
+        // `ChannelOff` (such as the relaunch after an early exit) drops it. Its values go only
+        // into the environment, never into `args`.
+        let channel_off = fallbacks
+            .iter()
+            .any(|fallback| matches!(fallback, Fallback::ChannelOff(_)));
+        let channel = plan.channel.as_ref().filter(|_| settings && !channel_off);
+        let mut env = launch_env(&plan.env);
+        if let Some(channel) = channel {
+            env.extend(channel.env(&plan.chat.id));
+            // D11: the session id comes from the channel's `session_start` report, so the
+            // transcript scan never runs.
+            capture = false;
+        }
+
         LaunchSpec {
             program: self.command.clone(),
             args,
-            env: launch_env(&plan.env),
+            env,
             cwd: plan.chat.cwd.clone(),
             fallbacks,
             capture_session_id: capture,
+            channel: channel.is_some(),
         }
     }
 
