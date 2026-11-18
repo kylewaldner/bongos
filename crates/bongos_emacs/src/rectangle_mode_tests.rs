@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use editor::actions::{SelectDown, SelectRight, SelectToEndOfLine};
+use editor::actions::{SelectDown, SelectRight, SelectToEndOfLine, SelectUp};
 use editor::test::editor_test_context::EditorTestContext;
 use gpui::{Action, TestAppContext};
 use multi_buffer::{MultiBufferOffset, ToOffset as _, ToPoint as _};
@@ -147,6 +147,27 @@ async fn counted_motions_move_the_point_corner_and_rebuild(cx: &mut TestAppConte
     cx.assert_editor_state("a«bcdeˇ»fgh\na«bcdeˇ»fgh\na«bcdeˇ»fgh\na«bcdeˇ»fgh");
     assert!(mode_on(&mut cx));
     assert_eq!(newest(&mut cx), (28, 32));
+}
+
+#[gpui::test]
+async fn counted_vertical_motions_rebuild_a_reversed_rectangle_from_the_new_head(
+    cx: &mut TestAppContext,
+) {
+    let mut cx = test_context(cx).await;
+    // The point is on the top row, left of the mark on the second row.
+    start(&mut cx, "aˇbcdefgh\nabcdefgh\nabcdefgh\nabcdefgh", 12);
+    cx.assert_editor_state("a«ˇbc»defgh\na«ˇbc»defgh\nabcdefgh\nabcdefgh");
+    call::<SelectDown>(&mut cx, 2);
+    cx.run_until_parked();
+    cx.assert_editor_state("abcdefgh\na«ˇbc»defgh\na«ˇbc»defgh\nabcdefgh");
+    assert!(mode_on(&mut cx));
+
+    // The point is on the bottom row, left of the mark on the third row.
+    start(&mut cx, "abcdefgh\nabcdefgh\nabcdefgh\naˇbcdefgh", 21);
+    call::<SelectUp>(&mut cx, 2);
+    cx.run_until_parked();
+    cx.assert_editor_state("abcdefgh\na«ˇbc»defgh\na«ˇbc»defgh\nabcdefgh");
+    assert!(mode_on(&mut cx));
 }
 
 #[gpui::test]
