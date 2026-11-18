@@ -155,8 +155,8 @@ impl StatusItemView for LanguageOffer {
             .editor
             .as_ref()
             .map(|editor| cx.observe(editor, |_, _, cx| cx.notify()));
-        let installer = Installer::global(cx);
-        self._installer_observation = Some(cx.observe(&installer, |_, _, cx| cx.notify()));
+        self._installer_observation = Installer::try_global(cx)
+            .map(|installer| cx.observe(&installer, |_, _, cx| cx.notify()));
         cx.notify();
     }
 
