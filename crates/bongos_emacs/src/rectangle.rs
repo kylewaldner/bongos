@@ -16,7 +16,7 @@ use crate::actions::{
     ClearRectangle, CopyRectangleAsKill, DeleteRectangle, KeepRectangle, KillRectangle,
     OpenRectangle, RectangleMarkMode, StringRectangle, YankRectangle,
 };
-use crate::{mark, yank};
+use crate::{mark, rectangle_mode, yank};
 
 /// The rectangle between the mark and the point: its buffer rows, top first, and its columns.
 pub(crate) struct Corners {
@@ -28,11 +28,16 @@ pub(crate) struct Corners {
     pub columns: Columns,
     /// The buffer's tab size.
     pub tab: usize,
+    /// The point, in `buffer`.
+    pub point: Point,
+    /// The mark, in `buffer`.
+    pub mark: Point,
 }
 
-/// The rectangle with the point (the newest selection's head) and the mark at opposite
-/// corners. Rows are buffer lines; columns are display columns. Says why and returns `None`
-/// when there is no mark or the mark is in another excerpt than the point.
+/// The rectangle with the point and the mark at opposite corners. The point is the newest
+/// selection's head, or the rectangle mark mode's point while that mode is on. Rows are buffer
+/// lines; columns are display columns. Says why and returns `None` when there is no mark or the
+/// mark is in another excerpt than the point.
 pub(crate) fn corners(
     editor: &Entity<Editor>,
     window: &mut Window,
@@ -42,24 +47,36 @@ pub(crate) fn corners(
         bongos_minibuffer::message(window, cx, "The mark is not set");
         return None;
     };
-    let (snapshot, point) = {
-        let editor = editor.read(cx);
-        (
-            editor.buffer().read(cx).snapshot(cx),
-            editor.selections.newest_anchor().head(),
-        )
-    };
+    let point = rectangle_mode::point(editor.read(cx));
+    match corners_between(editor.read(cx), point, mark, cx) {
+        Ok(corners) => Some(corners),
+        Err(Some(why)) => {
+            bongos_minibuffer::message(window, cx, why);
+            None
+        }
+        Err(None) => None,
+    }
+}
+
+/// The rectangle with `point` and `mark` at opposite corners. Fails with the reason to show
+/// when they are in different excerpts, and without one when either is not in a buffer.
+pub(crate) fn corners_between(
+    editor: &Editor,
+    point: Anchor,
+    mark: Anchor,
+    cx: &App,
+) -> Result<Corners, Option<&'static str>> {
+    let snapshot = editor.buffer().read(cx).snapshot(cx);
     let point_offset = point.to_offset(&snapshot);
     let mark_offset = mark.to_offset(&snapshot);
     if snapshot
         .excerpt_containing(point_offset.min(mark_offset)..point_offset.max(mark_offset))
         .is_none()
     {
-        bongos_minibuffer::message(window, cx, "The rectangle spans more than one excerpt");
-        return None;
+        return Err(Some("The rectangle spans more than one excerpt"));
     }
-    let (point_anchor, buffer) = snapshot.anchor_to_buffer_anchor(point)?;
-    let (mark_anchor, _) = snapshot.anchor_to_buffer_anchor(mark)?;
+    let (point_anchor, buffer) = snapshot.anchor_to_buffer_anchor(point).ok_or(None)?;
+    let (mark_anchor, _) = snapshot.anchor_to_buffer_anchor(mark).ok_or(None)?;
     let buffer = buffer.clone();
     let point = buffer.offset_to_point(point_anchor.to_offset(&buffer));
     let mark = buffer.offset_to_point(mark_anchor.to_offset(&buffer));
@@ -73,11 +90,13 @@ pub(crate) fn corners(
         line_width(&row.text[..byte], tab)
     };
     let columns = Columns::from_corners(column(point), column(mark));
-    Some(Corners {
+    Ok(Corners {
         buffer,
         rows,
         columns,
         tab,
+        point,
+        mark,
     })
 }
 
@@ -252,6 +271,7 @@ pub(crate) fn delete_rectangle_command(
     cx: &mut App,
 ) {
     apply(editor, RectOp::Delete, window, cx);
+    rectangle_mode::finish(editor, window, cx);
 }
 
 /// `open-rectangle`: inserts blank space over the rectangle, pushing its text right.
@@ -262,6 +282,7 @@ pub(crate) fn open_rectangle_command(
     cx: &mut App,
 ) {
     apply(editor, RectOp::Open, window, cx);
+    rectangle_mode::finish(editor, window, cx);
 }
 
 /// `clear-rectangle`: replaces the rectangle with spaces.
@@ -272,6 +293,7 @@ pub(crate) fn clear_rectangle_command(
     cx: &mut App,
 ) {
     apply(editor, RectOp::Clear, window, cx);
+    rectangle_mode::finish(editor, window, cx);
 }
 
 /// `keep-rectangle`: keeps only the rectangle's text on its rows.
@@ -282,15 +304,17 @@ pub(crate) fn keep_rectangle_command(
     cx: &mut App,
 ) {
     apply(editor, RectOp::Keep, window, cx);
+    rectangle_mode::finish(editor, window, cx);
 }
 
+/// `rectangle-mark-mode`: turns rectangle mark mode on, or off when it is on.
 pub(crate) fn rectangle_mark_mode_command(
     _: &RectangleMarkMode,
-    _: &Entity<Editor>,
+    editor: &Entity<Editor>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    not_implemented(window, cx);
+    rectangle_mode::toggle(editor, window, cx);
 }
 
 /// `copy-rectangle-as-kill`: saves the rectangle to the kill ring as a rectangle entry. The
@@ -302,14 +326,13 @@ pub(crate) fn copy_rectangle_as_kill_command(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if editor.read(cx).is_masked(cx) {
-        return;
+    if !editor.read(cx).is_masked(cx)
+        && let Some((_, plan)) = plan_here(editor, RectOp::Copy, window, cx)
+    {
+        kill_ring::push_rectangle(&plan.extracted.unwrap_or_default(), cx);
+        editor.update(cx, |editor, cx| editor.set_selection_mark_mode(false, cx));
     }
-    let Some((_, plan)) = plan_here(editor, RectOp::Copy, window, cx) else {
-        return;
-    };
-    kill_ring::push_rectangle(&plan.extracted.unwrap_or_default(), cx);
-    editor.update(cx, |editor, cx| editor.set_selection_mark_mode(false, cx));
+    rectangle_mode::finish(editor, window, cx);
 }
 
 /// `kill-rectangle`: saves the rectangle to the kill ring as a rectangle entry, then deletes
@@ -321,6 +344,11 @@ pub(crate) fn kill_rectangle_command(
     window: &mut Window,
     cx: &mut App,
 ) {
+    kill_rectangle(editor, window, cx);
+    rectangle_mode::finish(editor, window, cx);
+}
+
+fn kill_rectangle(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
     if editor.read(cx).is_masked(cx) {
         return;
     }
@@ -342,10 +370,11 @@ pub(crate) fn kill_rectangle_command(
 
 pub(crate) fn string_rectangle_command(
     _: &StringRectangle,
-    _: &Entity<Editor>,
+    editor: &Entity<Editor>,
     window: &mut Window,
     cx: &mut App,
 ) {
+    rectangle_mode::finish(editor, window, cx);
     not_implemented(window, cx);
 }
 
@@ -357,6 +386,7 @@ pub(crate) fn yank_rectangle_command(
     window: &mut Window,
     cx: &mut App,
 ) {
+    rectangle_mode::finish(editor, window, cx);
     if editor.read(cx).read_only(cx) {
         bongos_minibuffer::message(window, cx, "Buffer is read-only");
         return;

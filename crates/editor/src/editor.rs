@@ -9288,6 +9288,11 @@ impl Editor {
         cx.notify();
     }
 
+    /// The past-line-end highlights, as set.
+    pub fn past_line_end_highlights(&self) -> &[(Anchor, Range<u32>)] {
+        &self.past_line_end_highlights
+    }
+
     pub fn clear_past_line_end_highlights(&mut self, cx: &mut Context<Self>) {
         if !self.past_line_end_highlights.is_empty() {
             self.past_line_end_highlights.clear();
