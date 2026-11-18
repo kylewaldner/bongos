@@ -191,13 +191,54 @@ mem_total_kb() { awk '/^MemTotal:/ {print $2}' /proc/meminfo; }
 # 90% of total RAM and swap is 0. Falls back to plain cargo if the scope cannot start.
 # BONGOS_NICE=<n> runs cargo under nice -n <n>. BONGOS_CARGO_NO_NET=1 runs it in a network namespace
 # with loopback only (bwrap brings loopback up), with the real filesystem still writable.
+# BONGOS_CARGO_IO_WEIGHT=<1..10000> and BONGOS_CARGO_CPU_WEIGHT=<1..10000> add IOWeight and CPUWeight to the
+# scope (relative shares against other scopes; IOWeight needs the io controller delegated to the user
+# systemd instance and a BFQ or io.cost disk). A value that is not a number in range is ignored; a scope
+# that does not start with the weights is started without them, with a note.
+# Run inside the scope before cargo: append the weights the scope was asked for and the ones its cgroup
+# reports (io.weight reads "default N", cpu.weight "N"; empty when the controller is not enabled there) to
+# $BONGOS_CGROUP_WEIGHTS_LOG as one JSON line, then exec cargo. A failure to write never stops the build.
+_CARGO_SCOPE_RECORD='io_set=$1 cpu_set=$2; shift 2
+cg=$(sed -n "s/^0:://p" /proc/self/cgroup); d=/sys/fs/cgroup$cg
+io_read=$(cat "$d/io.weight" 2>/dev/null); cpu_read=$(cat "$d/cpu.weight" 2>/dev/null)
+printf "{\"ts\":\"%s\",\"lane\":\"%s\",\"scope\":\"%s\",\"io_set\":\"%s\",\"cpu_set\":\"%s\",\"io_read\":\"%s\",\"cpu_read\":\"%s\"}\n" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BONGOS_LANE:-}" "${cg##*/}" "$io_set" "$cpu_set" "$io_read" "$cpu_read" >>"$BONGOS_CGROUP_WEIGHTS_LOG" 2>/dev/null
+exec "$@"'
+
 cargo_limited() {
   local cmd=(cargo)
   [ -n "${BONGOS_CARGO_NO_NET:-}" ] && cmd=(env CARGO_NET_OFFLINE=true bwrap --unshare-net --dev-bind / / cargo)
   [ -n "${BONGOS_NICE:-}" ] && cmd=(nice -n "$BONGOS_NICE" "${cmd[@]}")
   local cap=$(( $(mem_total_kb) * 9 / 10 ))K
-  if systemd-run --user --scope -q -p "MemoryMax=$cap" -p MemorySwapMax=0 true >/dev/null 2>&1; then
-    systemd-run --user --scope -q -p "MemoryMax=$cap" -p MemorySwapMax=0 "${cmd[@]}" "$@"
+  local props=(-p "MemoryMax=$cap" -p MemorySwapMax=0) weights=()
+  case "${BONGOS_CARGO_IO_WEIGHT:-}" in
+    ''|*[!0-9]*|0*) ;;
+    *) [ "$BONGOS_CARGO_IO_WEIGHT" -le 10000 ] && weights+=(-p "IOWeight=$BONGOS_CARGO_IO_WEIGHT") ;;
+  esac
+  case "${BONGOS_CARGO_CPU_WEIGHT:-}" in
+    ''|*[!0-9]*|0*) ;;
+    *) [ "$BONGOS_CARGO_CPU_WEIGHT" -le 10000 ] && weights+=(-p "CPUWeight=$BONGOS_CARGO_CPU_WEIGHT") ;;
+  esac
+  if [ ${#weights[@]} -gt 0 ]; then
+    if systemd-run --user --scope -q "${props[@]}" "${weights[@]}" true >/dev/null 2>&1; then
+      props+=("${weights[@]}")
+    else
+      echo "bongos: systemd scope rejected the IO/CPU weights; running cargo without them" >&2
+    fi
+  fi
+  if systemd-run --user --scope -q "${props[@]}" true >/dev/null 2>&1; then
+    if [ -n "${BONGOS_CGROUP_WEIGHTS_LOG:-}" ]; then
+      local io_set="" cpu_set="" prop
+      for prop in "${weights[@]}"; do
+        case "$prop" in
+          IOWeight=*) [[ " ${props[*]} " == *" $prop "* ]] && io_set=${prop#IOWeight=} ;;
+          CPUWeight=*) [[ " ${props[*]} " == *" $prop "* ]] && cpu_set=${prop#CPUWeight=} ;;
+        esac
+      done
+      systemd-run --user --scope -q "${props[@]}" bash -c "$_CARGO_SCOPE_RECORD" bongos-scope "$io_set" "$cpu_set" "${cmd[@]}" "$@"
+    else
+      systemd-run --user --scope -q "${props[@]}" "${cmd[@]}" "$@"
+    fi
   else
     echo "bongos: systemd scope unavailable; running cargo without a memory limit" >&2
     "${cmd[@]}" "$@"
