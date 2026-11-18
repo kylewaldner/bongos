@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use bongos_work::Focus;
 use bongos_workflow_model::definition::{Definition, NodeKind};
 use bongos_workflow_model::layout::{GraphLayout, LayoutNode, Status, layout};
-use bongos_workflow_model::record::{NodeKey, RunState, branch_label};
+use bongos_workflow_model::record::{CapReached, NodeKey, RunState, branch_label};
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, Global, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, PathBuilder, Render, SharedString, Styled as _, WeakEntity,
@@ -184,6 +184,8 @@ pub struct Snapshot {
     pub gates: Vec<GateCard>,
     pub outcomes: Vec<String>,
     pub failure: Option<String>,
+    /// Why the run is halted by the cost cap, naming the node that crossed it.
+    pub cap_reason: Option<String>,
     pub detail: Option<Detail>,
     /// The box the detail pane is about.
     pub selected: Option<Selection>,
@@ -246,6 +248,7 @@ impl Snapshot {
             gates,
             outcomes,
             failure,
+            cap_reason: state.cap_reached.as_ref().map(CapReached::reason),
             detail,
             selected,
         }
@@ -281,6 +284,9 @@ impl Snapshot {
         );
         if !self.caps.is_empty() {
             let _ = writeln!(out, "caps: {}", self.caps.join("; "));
+        }
+        if let Some(reason) = &self.cap_reason {
+            let _ = writeln!(out, "halted: {reason}");
         }
         if let Some(failure) = &self.failure {
             let _ = writeln!(out, "failure: {failure}");
@@ -743,6 +749,12 @@ impl RunView {
                 Label::new(format!("caps used: {}", snapshot.caps.join("; ")))
                     .size(LabelSize::Small)
                     .color(Color::Muted),
+            )
+            .children(
+                snapshot
+                    .cap_reason
+                    .as_ref()
+                    .map(|reason| Label::new(reason.clone()).color(Color::Warning)),
             )
             .children(
                 snapshot
@@ -1407,7 +1419,7 @@ fn open_for_focus(engine: &WorkflowEngine, task: &str, cx: &mut App) {
     });
 }
 
-/// Makes `task: focus` on a leaf with an active run open its run view (PRD 8): observes the focus
+/// Makes `task: focus` on a leaf with an active run open its run view: observes the focus
 /// of `bongos_work`, which exists once that crate is initialized, and shows the run when the
 /// focused task changes. Quietly does nothing when the focus is not there.
 pub(crate) fn observe_focus(engine: &WorkflowEngine, cx: &mut App) {

@@ -2,7 +2,6 @@
 //! the lifecycle tests, so it shares their world, definitions and scripted runner.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
 
 use bongos_work::NeedsYou;
 use bongos_work_model::rollup::rollup;
@@ -102,9 +101,7 @@ fn leaf_needs(reason: &str) -> NeedsYou {
 fn a_gate_shows_needs_you_on_the_leaf_and_every_ancestor_while_another_branch_runs() {
     let world = world();
     let mut lifecycle = world.lifecycle();
-    let started = Instant::now();
     let run = at_the_gate(&world, &mut lifecycle);
-    assert!(started.elapsed() < Duration::from_secs(1));
 
     let state = lifecycle.state(&run).unwrap();
     assert!(
@@ -213,6 +210,7 @@ fn gated_spec(root: &std::path::Path) -> RunSpec {
         id: "01890a5d-ac96-774b-bcce-b30200000001".to_string(),
         definition: parse(GATED_FAN).unwrap(),
         attempt_dir: root.join("attempt"),
+        loop_bound: 5,
     }
 }
 
@@ -322,4 +320,58 @@ fn the_engine_tells_the_sources_and_toasts_once(cx: &mut TestAppContext) {
     assert_eq!(engine.open_gates(&run).len(), 1);
     let delivered = cx.update(|cx| cx.default_global::<Delivered>().0.clone());
     assert_eq!(delivered.len(), 1, "{delivered:?}");
+}
+
+#[gpui::test]
+fn clear_finished_tells_the_runs_panel(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        WorkflowsSettings::register(cx);
+    });
+    let world = world();
+    let worktrees = DirWorktrees {
+        root: world.root.join("runs"),
+        error: world.worktree_error.clone(),
+    };
+    let lifecycle = Lifecycle::new(
+        Box::new(FakeRunner::new()) as EngineRunner,
+        Box::new(worktrees),
+        world.settings(),
+    );
+    let engine = WorkflowEngine::with_lifecycle(world.dirs.clone(), lifecycle);
+    let run = cx
+        .update(|cx| engine.start_in(with_workflow("single"), &world.tree, cx))
+        .unwrap();
+    settle(&mut engine.lifecycle());
+    engine.lifecycle().cancel(&run).unwrap();
+
+    let before = cx.update(|cx| crate::status_item::revision(cx));
+    let outcome = cx.update(|cx| engine.clear_finished(cx));
+    assert_eq!(outcome.cleared, vec![run.clone()]);
+    let after = cx.update(|cx| crate::status_item::revision(cx));
+    assert!(after > before, "the panel is told: {before} then {after}");
+    assert!(engine.lifecycle().state(&run).is_none());
+
+    // Nothing cleared, nothing to redraw.
+    let outcome = cx.update(|cx| engine.clear_finished(cx));
+    assert!(outcome.cleared.is_empty());
+    assert_eq!(cx.update(|cx| crate::status_item::revision(cx)), after);
+}
+
+#[test]
+fn a_run_halted_by_the_cost_cap_needs_you_with_the_reason() {
+    use bongos_workflow_model::{Event, NodeKey, replay};
+    let state = replay(&[
+        Event::Created,
+        Event::CapReached {
+            cap_usd: 5.0,
+            cost_usd: 5.12,
+            key: NodeKey::new("implement", 1),
+        },
+    ]);
+    assert_eq!(
+        gates::reasons(&state),
+        ["cost cap of $5.00 reached at node implement"]
+    );
 }

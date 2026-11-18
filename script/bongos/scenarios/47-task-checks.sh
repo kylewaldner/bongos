@@ -40,7 +40,7 @@
 # - Toasts have no log and no dump, so the refusal of `C-c w c` on step 2 is read from its effect
 #   (not Done, no done record), and the landing view (`project: check`) is read from the stored
 #   check result and its output file.
-# - Workflow runs are not connected to an agent runner, so the parts of 4, 5 and 6 that need a run
+# - This scenario starts no workflow run, so the parts of 4, 5 and 6 that need a run
 #   are out of reach: `rerun-alone` twice at tip and twice at base, the run Waiting on you and
 #   no fix node running are not driven. Part 4 drives `or_accepted` and the pinned read; part 5 the
 #   reruns and the verdict text.

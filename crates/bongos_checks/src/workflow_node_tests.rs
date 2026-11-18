@@ -109,6 +109,7 @@ fn spec(root: &Path, n: u32, text: &str) -> RunSpec {
         id: run_id(n),
         definition: parse(text).unwrap(),
         attempt_dir: root.join(format!("runs/{}/attempts/1", run_id(n))),
+        loop_bound: 5,
     }
 }
 

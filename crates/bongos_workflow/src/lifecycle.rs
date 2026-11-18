@@ -28,15 +28,15 @@ use bongos_workflow_model::record::{
     Attempt, EndState, RUN_SCHEMA, RecordedInput, StartedBy, TodoRef,
 };
 use bongos_workflow_model::{
-    Definition, InputValue, Layer, LayerDirs, NodeKey, RunState, RunToml, check_fresh_retry, parse,
-    retry_set, schema,
+    Definition, InputValue, Layer, LayerDirs, NodeKey, RunState, RunToml, ValidationContext,
+    check_fresh_retry, parse, retry_set, schema,
 };
 use serde_json::Value;
 
 use crate::WorkflowsSettings;
 use crate::definitions::{self, DefinitionError};
 use crate::mcp;
-use crate::runtime::{RunSpec, Runner, Runtime, RuntimeError, Settlement};
+use crate::runtime::{RunBinding, RunSpec, Runner, Runtime, RuntimeError, Settlement};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError, branch_worktree_path};
 
 /// A run's id: a UUID v7, the same for every attempt.
@@ -80,8 +80,6 @@ impl StartRequest {
 /// Why a command was refused, in the order start checks them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalKind {
-    /// The node runners are not connected to the engine, so a run could not execute.
-    RunnerNotConnected,
     UnknownTask,
     Group,
     NoOpenTodo,
@@ -260,6 +258,10 @@ pub trait StartChecks {
     /// The MCP servers installed for `kind`; `None` when not discovered yet, which skips the
     /// check.
     fn mcp_servers(&self, kind: AgentKind) -> Option<BTreeSet<String>>;
+    /// The settings validation reads (ceilings, fan-out width, network, shipped programs).
+    fn validation(&self) -> bongos_workflow_model::validate::ValidationContext {
+        bongos_workflow_model::validate::ValidationContext::default()
+    }
     /// `workflows.mcp_exclude`.
     fn mcp_exclude(&self) -> Vec<String> {
         Vec::new()
@@ -335,6 +337,141 @@ pub struct HaltWorktrees {
     pub branches: Vec<PathBuf>,
 }
 
+/// The marker file the `workflow: clear finished` action will leave in a run directory it
+/// clears; a run with it is never loaded.
+pub const CLEARED_FILE: &str = "cleared";
+
+/// What [`Lifecycle::clear_finished`] did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ClearOutcome {
+    /// The runs that left the lifecycle: their marker is written.
+    pub cleared: Vec<RunId>,
+    /// The runs that stay listed because their marker could not be written, with the error.
+    pub failed: Vec<(RunId, String)>,
+}
+
+/// A run directory that holds the `cleared` marker of a run that ended succeeded or was
+/// cancelled: the worktrees it left are offered for removal by `workflow: clear finished`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClearedRun {
+    pub id: RunId,
+    /// `<task dir>/runs/<id>`.
+    pub dir: PathBuf,
+    /// The worktree of the current attempt, as the record says.
+    pub worktree: RunWorktree,
+    /// The number of the current attempt.
+    pub attempt: u32,
+    /// The task the run is on, from its own task file: its worktree names the repository.
+    pub checkout: TaskCheckout,
+    pub status: RunStatus,
+    /// When the attempt ended or was cancelled: the modification time of its event log.
+    pub finished: std::time::SystemTime,
+}
+
+/// The cleared runs under every task directory of `tree`, with the worktree of their current
+/// attempt. A directory whose record or log cannot be read, and a run that is not succeeded or
+/// cancelled, is skipped (logged): only a finished run is ever offered for removal. Reads only.
+pub fn find_cleared(tree: &WorkTree) -> Vec<ClearedRun> {
+    let mut found = Vec::new();
+    for task in tree.tasks() {
+        let runs = bongos_work_model::layout::runs_dir(&task.dir);
+        let Ok(listing) = fs::read_dir(&runs) else {
+            continue;
+        };
+        let mut dirs: Vec<PathBuf> = listing
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir() && path.join(CLEARED_FILE).exists())
+            .collect();
+        dirs.sort();
+        let checkout = match &task.file {
+            Some(file) => TaskCheckout::from_task(task.slug.clone(), file),
+            None => TaskCheckout {
+                slug: task.slug.clone(),
+                worktree: None,
+                branch: None,
+            },
+        };
+        for dir in dirs {
+            match read_cleared(&dir, &checkout) {
+                Ok(Some(run)) => found.push(run),
+                Ok(None) => {}
+                Err(reason) => log::warn!(
+                    "workflows: cannot offer the worktrees of {}: {reason}",
+                    dir.display()
+                ),
+            }
+        }
+    }
+    found
+}
+
+fn read_cleared(dir: &Path, checkout: &TaskCheckout) -> Result<Option<ClearedRun>, String> {
+    let text =
+        fs::read_to_string(dir.join(RUN_FILE)).map_err(|error| format!("{RUN_FILE}: {error}"))?;
+    let record = RunToml::parse(&text).map_err(|error| error.to_string())?;
+    let attempt = record
+        .current_attempt()
+        .ok_or_else(|| format!("{RUN_FILE} has no attempt"))?;
+    let events = attempt_dir(dir, attempt.n).join(crate::runtime::EVENTS_FILE);
+    let bytes = fs::read(&events).map_err(|error| format!("{}: {error}", events.display()))?;
+    let parsed =
+        bongos_workflow_model::record::parse_log(&bytes).map_err(|error| error.to_string())?;
+    let status = RunStatus::of(&bongos_workflow_model::record::replay(&parsed.events));
+    if !matches!(status, RunStatus::Succeeded | RunStatus::Cancelled) {
+        return Ok(None);
+    }
+    let finished = fs::metadata(&events)
+        .and_then(|metadata| metadata.modified())
+        // Unknown: never old enough to be offered.
+        .unwrap_or_else(|_| std::time::SystemTime::now());
+    Ok(Some(ClearedRun {
+        id: record.id.clone(),
+        dir: dir.to_path_buf(),
+        worktree: attempt_worktree(attempt),
+        attempt: attempt.n,
+        checkout: checkout.clone(),
+        status,
+        finished,
+    }))
+}
+
+fn attempt_worktree(attempt: &Attempt) -> RunWorktree {
+    let path = PathBuf::from(&attempt.worktree);
+    RunWorktree {
+        run_dir: path
+            .parent()
+            .map_or_else(|| path.clone(), Path::to_path_buf),
+        path,
+        branch: attempt.branch.clone(),
+    }
+}
+
+/// One output field of a gate's held result, for `workflow: approve` with an edit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateField {
+    pub name: String,
+    pub field_type: bongos_workflow_model::definition::FieldType,
+    /// The held value.
+    pub value: Value,
+}
+
+/// What [`Lifecycle::load_runs`] did.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LoadReport {
+    /// The runs loaded, in load order.
+    pub loaded: Vec<RunId>,
+    /// Each loaded run's orphan processes and what became of them.
+    pub orphans: Vec<(RunId, Vec<(NodeKey, crate::process::OrphanOutcome)>)>,
+    /// Run directories (or task `runs/` directories) skipped, each with the reason.
+    pub skipped: Vec<(PathBuf, String)>,
+}
+
+fn skip(report: &mut LoadReport, path: &Path, reason: String) {
+    log::warn!("workflows: skipped {}: {reason}", path.display());
+    report.skipped.push((path.to_path_buf(), reason));
+}
+
 /// A run the lifecycle knows.
 struct RunEntry {
     id: RunId,
@@ -355,6 +492,36 @@ impl RunEntry {
 
     fn attempt_dir(&self) -> PathBuf {
         attempt_dir(&self.dir, self.attempt())
+    }
+
+    /// The context a runner gets for this run's current attempt.
+    fn binding(&self) -> RunBinding {
+        let task_dir = self
+            .dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&self.dir)
+            .to_path_buf();
+        RunBinding {
+            workflow: self.record.workflow.clone(),
+            task_id: self.task_id.clone(),
+            task_dir,
+            run_dir: self.dir.clone(),
+            attempt_dir: self.attempt_dir(),
+            worktree: self.worktree.clone(),
+            checkout: self.task.clone(),
+            inputs: self
+                .record
+                .inputs
+                .iter()
+                .map(|input| bongos_workflow_model::inputs::Input {
+                    name: input.name.clone(),
+                    value: input.value.clone(),
+                    source: input.source.clone(),
+                    missing: false,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -579,7 +746,12 @@ impl<R: Runner> Lifecycle<R> {
                     "Set its `workflow`, or name one when starting.",
                 )
             })?;
-        let (resolved, definition) = load_definition(dirs, &name, Some(context.checks))?;
+        let (resolved, definition) = load_definition(
+            dirs,
+            &name,
+            context.checks.validation(),
+            Some(context.checks),
+        )?;
         let inputs = bongos_workflow_model::resolve(
             &definition,
             task,
@@ -650,6 +822,315 @@ impl<R: Runner> Lifecycle<R> {
         self.runs.push(entry);
         self.note(&id);
         Ok(id)
+    }
+
+    /// Loads the runs a relaunch finds: `runs/<id>/run.toml` under every task directory of `tree`.
+    /// A run whose directory holds the `cleared` marker, whose `run.toml` does not parse, that has
+    /// no `events.jsonl` (or one that cannot be read or parsed), whose id repeats one already
+    /// read in this batch, or whose task directory or record cannot be read is logged and skipped;
+    /// the others still load. The definition revision comes from the log's last `DefinitionReloaded`. All loaded runs go to [`Runtime::load_all`] in one call, so orphan
+    /// processes die in one grace period and a run with a started key and no finish comes back
+    /// interrupted; each is bound to its attempt's worktree. Nothing resumes by itself. With no
+    /// `runs/` directory this loads nothing and writes nothing. Takes no lock. A run already
+    /// loaded is [`RuntimeError::Duplicate`] and none of these load; a log that cannot be opened
+    /// skips only its run.
+    pub fn load_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
+        let mut report = LoadReport::default();
+        let mut entries: Vec<RunEntry> = Vec::new();
+        let mut specs: Vec<RunSpec> = Vec::new();
+        let mut seen: std::collections::BTreeSet<RunId> = std::collections::BTreeSet::new();
+        for task in tree.tasks() {
+            let runs = bongos_work_model::layout::runs_dir(&task.dir);
+            let listing = match fs::read_dir(&runs) {
+                Ok(listing) => listing,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    skip(
+                        &mut report,
+                        &runs,
+                        format!("cannot read the runs directory: {error}"),
+                    );
+                    continue;
+                }
+            };
+            let mut dirs: Vec<PathBuf> = Vec::new();
+            for entry in listing {
+                match entry {
+                    Ok(entry) if entry.path().is_dir() => dirs.push(entry.path()),
+                    Ok(_) => {}
+                    Err(error) => {
+                        skip(&mut report, &runs, format!("cannot read an entry: {error}"))
+                    }
+                }
+            }
+            dirs.sort();
+            for dir in dirs {
+                match self.read_run(task, &dir) {
+                    Ok(Some((entry, _))) if seen.contains(&entry.id) => skip(
+                        &mut report,
+                        &dir,
+                        format!(
+                            "run {} is already loaded from another task directory",
+                            entry.id
+                        ),
+                    ),
+                    Ok(Some((entry, spec))) => {
+                        seen.insert(entry.id.clone());
+                        entries.push(entry);
+                        specs.push(spec);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => skip(&mut report, &dir, reason),
+                }
+            }
+        }
+        let orphans = self.runtime.load_all(specs)?;
+        for (entry, orphans) in entries.into_iter().zip(orphans) {
+            let orphans = match orphans {
+                Ok(orphans) => orphans,
+                Err(error) => {
+                    skip(&mut report, &entry.dir, error.to_string());
+                    continue;
+                }
+            };
+            self.runtime.bind(&entry.id, entry.binding());
+            report.loaded.push(entry.id.clone());
+            report.orphans.push((entry.id.clone(), orphans));
+            self.runs.push(entry);
+        }
+        self.note_all();
+        Ok(report)
+    }
+
+    /// One run directory: `Ok(None)` for a cleared run.
+    fn read_run(&self, task: &Task, dir: &Path) -> Result<Option<(RunEntry, RunSpec)>, String> {
+        if dir.join(CLEARED_FILE).exists() {
+            return Ok(None);
+        }
+        let file = dir.join(RUN_FILE);
+        let text = fs::read_to_string(&file).map_err(|error| format!("{RUN_FILE}: {error}"))?;
+        let record = RunToml::parse(&text).map_err(|error| error.to_string())?;
+        if dir
+            .file_name()
+            .is_none_or(|name| name.to_string_lossy() != record.id)
+        {
+            return Err(format!(
+                "{RUN_FILE} names run {}, not this directory",
+                record.id
+            ));
+        }
+        let attempt = record
+            .current_attempt()
+            .ok_or_else(|| format!("{RUN_FILE} has no attempt"))?;
+        let attempt_dir = attempt_dir(dir, attempt.n);
+        if !attempt_dir.join(crate::runtime::EVENTS_FILE).is_file() {
+            return Err(format!(
+                "no {} in attempt {}",
+                crate::runtime::EVENTS_FILE,
+                attempt.n
+            ));
+        }
+        // The log is authoritative for the revision: a `definition/<n>` directory with no
+        // `DefinitionReloaded` is a reload that did not finish. This parse only reads; the
+        // runtime's own open repairs a cut tail later.
+        let events_path = attempt_dir.join(crate::runtime::EVENTS_FILE);
+        let bytes = fs::read(&events_path)
+            .map_err(|error| format!("{}: {error}", crate::runtime::EVENTS_FILE))?;
+        let parsed =
+            bongos_workflow_model::record::parse_log(&bytes).map_err(|error| error.to_string())?;
+        let rev = bongos_workflow_model::record::replay(&parsed.events)
+            .definition_rev
+            .unwrap_or(0);
+        let definition = read_definition(&definition_copy_dir(&attempt_dir, rev))?;
+        let worktree = attempt_worktree(attempt);
+        let checkout = match &task.file {
+            Some(file) => TaskCheckout::from_task(task.slug.clone(), file),
+            None => TaskCheckout {
+                slug: task.slug.clone(),
+                worktree: None,
+                branch: None,
+            },
+        };
+        let spec = RunSpec {
+            id: record.id.clone(),
+            definition,
+            attempt_dir,
+            loop_bound: attempt
+                .loop_bound
+                .unwrap_or(self.settings.limits.loop_bound),
+        };
+        let entry = RunEntry {
+            id: record.id.clone(),
+            task_id: record.task_id.clone(),
+            task: checkout,
+            dir: dir.to_path_buf(),
+            record,
+            worktree,
+            rev,
+        };
+        Ok(Some((entry, spec)))
+    }
+
+    /// `workflow: clear finished`, the first half: every run that ended succeeded or was
+    /// cancelled leaves the lifecycle. Its `cleared` marker is written first (and synced), then the
+    /// run is dropped from the runtime; a run whose marker cannot be written stays listed and is
+    /// reported in [`ClearOutcome::failed`]. A failed run counts as active and stays, and so does
+    /// every other active run: the status is read again here, so a run that became active again
+    /// is never cleared. A second call finds nothing to do. The caller holds the lifecycle lock,
+    /// which serializes this against a tick or a command. Nothing is written when no run is
+    /// finished.
+    pub fn clear_finished(&mut self) -> ClearOutcome {
+        let finished: Vec<RunId> = self
+            .runs
+            .iter()
+            .filter(|entry| {
+                self.status(&entry.id)
+                    .is_some_and(|status| !status.is_active())
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        let mut outcome = ClearOutcome::default();
+        for id in finished {
+            let Some(index) = self.runs.iter().position(|entry| entry.id == id) else {
+                continue;
+            };
+            if self.status(&id).is_none_or(RunStatus::is_active) {
+                continue;
+            }
+            let marker = self.runs[index].dir.join(CLEARED_FILE);
+            if let Err(error) = fs::File::create(&marker).and_then(|file| file.sync_all()) {
+                log::error!(
+                    "workflows: could not mark run {id} cleared ({}): {error}",
+                    marker.display()
+                );
+                outcome.failed.push((id, error.to_string()));
+                continue;
+            }
+            self.runtime.remove(&id);
+            self.runs.remove(index);
+            self.statuses.remove(&id);
+            outcome.cleared.push(id);
+        }
+        outcome
+    }
+
+    /// The output fields of the held result of `key`, for `workflow: approve` with an edit: the
+    /// fields its node declares that the result has, in declaration order. Empty when the node or
+    /// its result is not there.
+    pub fn gate_fields(&self, run: &str, key: &NodeKey) -> Vec<GateField> {
+        let Some(state) = self.state(run) else {
+            return Vec::new();
+        };
+        let Some(node) = self
+            .runtime
+            .definition(run)
+            .and_then(|definition| definition.node(&key.node))
+        else {
+            return Vec::new();
+        };
+        let Some(Value::Object(result)) = state
+            .last_finish(key)
+            .and_then(|finished| finished.result.clone())
+        else {
+            return Vec::new();
+        };
+        node.output
+            .iter()
+            .filter_map(|field| {
+                Some(GateField {
+                    name: field.name.clone(),
+                    field_type: field.field_type.clone(),
+                    value: result.get(&field.name)?.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// The text of `workflow: dump engine`: every loaded run with its id, status, keys in flight,
+    /// queue position and cost against the cap, then the tries in flight per kind of node.
+    pub fn dump_text(&self) -> String {
+        use std::fmt::Write as _;
+        let cap = self.runtime.limits().run_max_cost_usd;
+        let mut text = String::from("workflow engine\n");
+        let _ = writeln!(text, "runs: {}", self.runs.len());
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for entry in &self.runs {
+            let state = self.state(&entry.id);
+            let status = state
+                .as_ref()
+                .map_or("unknown", |state| RunStatus::of(state).label());
+            let cost = state.as_ref().map_or(0.0, |state| state.cost_usd);
+            let queue = match self.runtime.queue_position(&entry.id) {
+                Some(position) => format!("queue position {position}"),
+                None => "not queued".to_string(),
+            };
+            let cap_text = match cap {
+                Some(cap) => format!("cap ${cap:.2}"),
+                None => "no cap".to_string(),
+            };
+            let in_flight = self.runtime.in_flight(&entry.id);
+            let keys = if in_flight.is_empty() {
+                "none".to_string()
+            } else {
+                in_flight
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let _ = writeln!(
+                text,
+                "run {} task {} workflow {}: {status}; in flight: {keys}; {queue}; cost ${cost:.2}, {cap_text}",
+                entry.id, entry.task_id, entry.record.workflow
+            );
+            let definition = self.runtime.definition(&entry.id);
+            for key in &in_flight {
+                let kind = definition
+                    .and_then(|definition| {
+                        definition.node(&key.node).map(|node| (definition, node))
+                    })
+                    .map_or_else(
+                        || "unknown".to_string(),
+                        |(definition, node)| match node.kind.value {
+                            NodeKind::Agent => {
+                                format!("agent ({:?})", agent_of(definition, node)).to_lowercase()
+                            }
+                            NodeKind::Program => match &node.use_node {
+                                Some(name) => format!("built-in {}", name.value),
+                                None => "program".to_string(),
+                            },
+                        },
+                    );
+                *kinds.entry(kind).or_default() += 1;
+            }
+        }
+        if kinds.is_empty() {
+            text.push_str("tries in flight: none\n");
+        } else {
+            text.push_str("tries in flight by kind:\n");
+            for (kind, count) in &kinds {
+                let _ = writeln!(text, "  {kind}: {count}");
+            }
+        }
+        text
+    }
+
+    /// Quit: stops every process of every run (within 5 s) and records `Interrupted` with the
+    /// keys in flight. Nothing starts afterwards.
+    pub fn quit(&mut self) {
+        self.runtime.quit();
+        self.note_all();
+    }
+
+    /// Workflows turned off: stops every process of every run and records `Interrupted` with the
+    /// keys in flight ([`Runtime::interrupt_all`]). Later starts still work. Whether any run was
+    /// interrupted.
+    pub fn interrupt_all(&mut self) -> bool {
+        let changed = self.runtime.interrupt_all();
+        if changed {
+            self.note_all();
+        }
+        changed
     }
 
     /// Pauses `run`: no new node starts, the running ones finish, then it reads Paused.
@@ -753,7 +1234,7 @@ impl<R: Runner> Lifecycle<R> {
             .definition(run)
             .cloned()
             .ok_or_else(|| unknown_run(run))?;
-        let failed = retry_set(&definition, &state, self.runtime.limits());
+        let failed = retry_set(&definition, &state, &self.runtime.run_limits(run));
         let key = match node {
             Some(key) if failed.contains(&key) => key,
             Some(key) => {
@@ -814,11 +1295,13 @@ impl<R: Runner> Lifecycle<R> {
             }
         }
         let name = self.runs[index].record.workflow.clone();
-        let (resolved, definition) = load_definition(dirs, &name, None)?;
+        let validation = self.settings.validation_context();
+        let (resolved, definition) = load_definition(dirs, &name, validation, None)?;
         let attempt = self.runs[index].attempt() + 1;
         let checkout = self.runs[index].task.clone();
         let worktree = self.create_worktree(&checkout, run, attempt)?;
         let old_definition = self.runtime.definition(run).cloned();
+        let old_loop_bound = self.runtime.run_limits(run).loop_bound;
         let old_attempt_dir = self.runs[index].attempt_dir();
         if status.is_active() {
             self.runtime.cancel(run).map_err(Refusal::runtime)?;
@@ -850,8 +1333,10 @@ impl<R: Runner> Lifecycle<R> {
                         id: run.to_string(),
                         definition,
                         attempt_dir: old_attempt_dir,
+                        loop_bound: old_loop_bound,
                     })
                     .ok();
+                self.runtime.bind(run, entry.binding());
             }
         }
         self.runs.insert(index, entry);
@@ -902,24 +1387,8 @@ impl<R: Runner> Lifecycle<R> {
     /// The prompt the next try of `key` gets from `base`: when the last decision on its gate was
     /// a revision, the comment and the previous result follow under "Revision requested:".
     pub fn prompt_for(&self, run: &str, key: &NodeKey, base: &str) -> String {
-        let Some(state) = self.state(run) else {
-            return base.to_string();
-        };
-        let last_gate = state
-            .closed_gates
-            .iter()
-            .rev()
-            .find(|gate| &gate.key == key);
-        match last_gate.and_then(|gate| gate.comment.as_deref()) {
-            Some(comment) => {
-                let previous = state
-                    .finished
-                    .iter()
-                    .rev()
-                    .find(|finished| &finished.key == key && finished.succeeded())
-                    .and_then(|finished| finished.result.as_ref());
-                revision_prompt(base, comment, previous)
-            }
+        match self.state(run) {
+            Some(state) => prompt_with_revision(&state, key, base),
             None => base.to_string(),
         }
     }
@@ -1023,6 +1492,7 @@ impl<R: Runner> Lifecycle<R> {
         definition_commit: Option<String>,
     ) -> Result<(), Refusal> {
         let attempt_dir = attempt_dir(&entry.dir, n);
+        let loop_bound = self.settings.limits.loop_bound;
         let copy = definition_copy_dir(&attempt_dir, 0);
         copy_dir(source, &copy).map_err(Refusal::io)?;
         entry.record.attempts.push(Attempt {
@@ -1032,6 +1502,7 @@ impl<R: Runner> Lifecycle<R> {
             definition_commit,
             worktree: entry.worktree.path.to_string_lossy().into_owned(),
             branch: entry.worktree.branch.clone(),
+            loop_bound: Some(loop_bound),
         });
         entry.rev = 0;
         write_record(&entry.dir, &entry.record).map_err(Refusal::io)?;
@@ -1040,8 +1511,11 @@ impl<R: Runner> Lifecycle<R> {
                 id: entry.id.clone(),
                 definition,
                 attempt_dir,
+                loop_bound,
             })
-            .map_err(Refusal::runtime)
+            .map_err(Refusal::runtime)?;
+        self.runtime.bind(&entry.id, entry.binding());
+        Ok(())
     }
 
     /// Copies the latest definition to the next `definition/<rev>/` and continues the run on
@@ -1056,9 +1530,15 @@ impl<R: Runner> Lifecycle<R> {
     ) -> Result<(), Refusal> {
         let index = self.index(run)?;
         let name = self.runs[index].record.workflow.clone();
-        let (resolved, _) = load_definition(dirs, &name, None)?;
+        let validation = self.settings.validation_context();
+        let (resolved, _) = load_definition(dirs, &name, validation, None)?;
         let rev = self.runs[index].rev + 1;
         let copy = definition_copy_dir(&self.runs[index].attempt_dir(), rev);
+        // `rev` is one past the log's current revision, so a directory here is the leftover of a
+        // reload that crashed before `DefinitionReloaded`; nothing references it.
+        if copy.exists() {
+            fs::remove_dir_all(&copy).map_err(Refusal::io)?;
+        }
         copy_dir(&resolved.dir, &copy).map_err(Refusal::io)?;
         let fresh = read_definition(&copy).map_err(Refusal::io);
         let checked = fresh.and_then(|fresh| {
@@ -1232,12 +1712,15 @@ pub(crate) fn open_todo(
     }
 }
 
-/// Resolves and checks the definition `name`: refused when unknown or when it has errors. With
-/// `checks` that know a CLI's MCP servers, validation leaves that CLI's servers to the start's own
-/// MCP check, which comes later in the refusal order; otherwise validation reports them.
+/// Resolves and checks the definition `name` against `base` (the settings' context, so
+/// `programs.allow_network = false` refuses a network entry at every start, restart and fresh
+/// retry): refused when unknown or when it has errors. With `checks` that know a CLI's MCP
+/// servers, validation leaves that CLI's servers to the start's own MCP check, which comes later
+/// in the refusal order; otherwise validation reports them.
 fn load_definition(
     dirs: &LayerDirs,
     name: &str,
+    base: ValidationContext,
     checks: Option<&dyn StartChecks>,
 ) -> Result<(bongos_workflow_model::Resolved, Definition), Refusal> {
     let resolved = definitions::find_definition(dirs, Some(name)).map_err(|error| match error {
@@ -1248,7 +1731,7 @@ fn load_definition(
         ),
         other => Refusal::io(other),
     })?;
-    let report = definitions::check_definition_with(&resolved, |definition, context| {
+    let report = definitions::check_definition_in(&resolved, base, |definition, context| {
         let Some(checks) = checks else {
             return;
         };
@@ -1268,13 +1751,7 @@ fn load_definition(
     });
     let errors = report.error_count();
     if errors > 0 {
-        let first = report.load_error.clone().or_else(|| {
-            report
-                .diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.severity == bongos_workflow_model::Severity::Error)
-                .map(|diagnostic| diagnostic.message.clone())
-        });
+        let first = report.first_error();
         let plural = if errors == 1 { "error" } else { "errors" };
         return Err(Refusal::new(
             RefusalKind::Invalid,
@@ -1417,6 +1894,28 @@ pub fn step_names(state: &RunState) -> String {
         }
     }
     names.join(", ")
+}
+
+/// The prompt the next try of `key` gets from `base` in `state`: when the last decision on its
+/// gate was a revision, the comment and the previous result follow under "Revision requested:".
+pub fn prompt_with_revision(state: &RunState, key: &NodeKey, base: &str) -> String {
+    let last_gate = state
+        .closed_gates
+        .iter()
+        .rev()
+        .find(|gate| &gate.key == key);
+    match last_gate.and_then(|gate| gate.comment.as_deref()) {
+        Some(comment) => {
+            let previous = state
+                .finished
+                .iter()
+                .rev()
+                .find(|finished| &finished.key == key && finished.succeeded())
+                .and_then(|finished| finished.result.as_ref());
+            revision_prompt(base, comment, previous)
+        }
+        None => base.to_string(),
+    }
 }
 
 /// `base`, then the comment under "Revision requested:" and the previous result.

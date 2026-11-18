@@ -321,12 +321,12 @@ fn work_page(token_set: bool) -> SettingsPage {
         ]
     }
 
-    fn workflows_section() -> [SettingsPageItem; 6] {
+    fn workflows_section() -> [SettingsPageItem; 16] {
         [
             SettingsPageItem::SectionHeader("Workflows"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Enable Workflows",
-                description: "Whether workflows are on. While they are off, bongos starts no run, loads no definition and every workflow command is hidden.",
+                description: "Workflows are on by default. Turn this off and bongos starts no run, loads no definition and hides every workflow command.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("workflows.enabled"),
@@ -404,6 +404,251 @@ fn work_page(token_set: bool) -> SettingsPage {
                             .max_parallel_branches = value;
                     },
                 }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Run Cost Cap (USD)",
+                description: "The most a single run may cost, in US dollars. Empty or 0 means no cap.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.run_max_cost_usd"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .run_max_cost_usd
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .run_max_cost_usd = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Loop Bound",
+                description: "Passes of a loop whose route sets no `max_passes`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.loop_bound"),
+                    pick: |settings_content| {
+                        settings_content.workflows.as_ref()?.loop_bound.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .loop_bound = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Definitions Directory",
+                description: "The directory that holds workflow definitions. Empty means `~/.bongos/workflows`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.definitions_dir"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .definitions_dir
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .definitions_dir = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Allow Program Network",
+                description: "Whether a program node may use the network.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.programs.allow_network"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .programs
+                            .as_ref()?
+                            .allow_network
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .programs
+                            .get_or_insert_default()
+                            .allow_network = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Max Turns",
+                description: "Turns an agent node may take when it sets no `max_turns`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.agents.max_turns"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .agents
+                            .as_ref()?
+                            .max_turns
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .agents
+                            .get_or_insert_default()
+                            .max_turns = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Max Cost (USD)",
+                description: "Dollars an agent node may spend when it sets no `max_cost_usd`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.agents.max_cost_usd"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .agents
+                            .as_ref()?
+                            .max_cost_usd
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .agents
+                            .get_or_insert_default()
+                            .max_cost_usd = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Max Minutes",
+                description: "Minutes an agent node may run when it sets no `max_minutes`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.agents.max_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .agents
+                            .as_ref()?
+                            .max_minutes
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .agents
+                            .get_or_insert_default()
+                            .max_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Claude Model",
+                description: "The model a Claude agent node uses when it sets none.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.agents.claude.model"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .agents
+                            .as_ref()?
+                            .claude
+                            .as_ref()?
+                            .model
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .agents
+                            .get_or_insert_default()
+                            .claude
+                            .get_or_insert_default()
+                            .model = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "MCP Exclude",
+                description: "MCP servers that agent nodes never get, by name. Edit in settings.json.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("workflows.mcp_exclude"),
+                        pick: |settings_content| {
+                            settings_content.workflows.as_ref()?.mcp_exclude.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content
+                                .workflows
+                                .get_or_insert_default()
+                                .mcp_exclude = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Ceilings",
+                description: "The most a workflow definition may declare. Edit in settings.json.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("workflows.ceilings"),
+                        pick: |settings_content| {
+                            settings_content.workflows.as_ref()?.ceilings.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.workflows.get_or_insert_default().ceilings = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
                 metadata: None,
                 files: USER,
             }),
@@ -11759,6 +12004,16 @@ mod tests {
                 "workflows.max_concurrent_runs",
                 "workflows.max_concurrent_sessions",
                 "workflows.max_parallel_branches",
+                "workflows.run_max_cost_usd",
+                "workflows.loop_bound",
+                "workflows.definitions_dir",
+                "workflows.programs.allow_network",
+                "workflows.agents.max_turns",
+                "workflows.agents.max_cost_usd",
+                "workflows.agents.max_minutes",
+                "workflows.agents.claude.model",
+                "workflows.mcp_exclude",
+                "workflows.ceilings",
                 "workflows.programs",
             ]
         );

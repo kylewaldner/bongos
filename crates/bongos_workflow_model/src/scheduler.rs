@@ -64,7 +64,7 @@ pub type Branch = Vec<(String, u32)>;
 const ON_BOUND_FAIL: &str = "fail";
 
 /// The engine's limits, all settings (D19).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Limits {
     /// `workflows.max_concurrent_runs`: runs executing at once; the rest are Queued.
     pub max_concurrent_runs: u32,
@@ -77,6 +77,10 @@ pub struct Limits {
     pub fan_out_width: u32,
     /// `workflows.retries`: automatic retries of a node that sets none.
     pub retries: u32,
+    /// `workflows.loop_bound`: passes of a loop whose route sets no `max_passes`.
+    pub loop_bound: u32,
+    /// `workflows.run_max_cost_usd`: the cost cap of one run; `None` is no cap.
+    pub run_max_cost_usd: Option<f64>,
 }
 
 impl Default for Limits {
@@ -87,8 +91,74 @@ impl Default for Limits {
             max_parallel_branches: 3,
             fan_out_width: 8,
             retries: 2,
+            loop_bound: 5,
+            run_max_cost_usd: None,
         }
     }
+}
+
+/// Whether `route` (taken from `from` to `target`) is a depth-first back edge from `start`
+/// (the caller has checked the route sets no `max_passes`): the routes `limits.loop_bound`
+/// bounds.
+fn closes_unbounded_cycle(
+    definition: &Definition,
+    from: &str,
+    route: &Route,
+    target: &str,
+) -> bool {
+    fn successors(node: &Node) -> Vec<(&str, &Route)> {
+        let mut out = Vec::new();
+        for route in &node.routes {
+            match &route.to {
+                Some(Target::One(to)) => out.push((to.as_str(), route)),
+                Some(Target::Many(targets)) => {
+                    out.extend(targets.iter().map(|to| (to.as_str(), route)))
+                }
+                None => {}
+            }
+            if let Some(fan_out) = &route.fan_out {
+                out.push((fan_out.to.as_str(), route));
+            }
+        }
+        out
+    }
+    fn visit<'d>(
+        definition: &'d Definition,
+        name: &'d str,
+        visited: &mut BTreeSet<&'d str>,
+        stack: &mut Vec<(&'d str, Option<&'d Route>)>,
+        found: &mut Option<bool>,
+        goal: (&str, &str, usize),
+    ) {
+        if found.is_some() || !visited.insert(name) {
+            return;
+        }
+        let Some(node) = definition.node(name) else {
+            return;
+        };
+        for (to, route) in successors(node) {
+            if stack.iter().any(|(entry, _)| *entry == to) {
+                if name == goal.0 && to == goal.1 && route.line == goal.2 {
+                    *found = Some(true);
+                    return;
+                }
+            } else {
+                stack.push((to, Some(route)));
+                visit(definition, to, visited, stack, found, goal);
+                stack.pop();
+            }
+        }
+    }
+    let mut found = None;
+    visit(
+        definition,
+        &definition.start.value,
+        &mut BTreeSet::new(),
+        &mut vec![(definition.start.value.as_str(), None)],
+        &mut found,
+        (from, target, route.line),
+    );
+    found.unwrap_or(false)
 }
 
 impl Limits {
@@ -928,8 +998,12 @@ impl<'a> Walk<'a> {
         target: &str,
         time: usize,
     ) -> Option<String> {
-        let Some(max) = route.max_passes else {
-            return Some(target.to_string());
+        let max = match route.max_passes {
+            Some(max) => max,
+            None if closes_unbounded_cycle(self.definition, &chain.key.node, route, target) => {
+                self.limits.loop_bound
+            }
+            None => return Some(target.to_string()),
         };
         if self.definition.end(target).is_some() || self.next_pass(target, &chain.key.branch) <= max
         {

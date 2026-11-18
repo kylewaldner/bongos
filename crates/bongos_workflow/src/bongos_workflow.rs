@@ -8,10 +8,14 @@
 mod actions;
 pub mod builtin_merge;
 pub mod builtin_nodes;
+pub mod builtin_run;
 pub mod builtin_wait;
 mod commands;
 pub mod completion;
 pub mod definitions;
+pub mod dispatch;
+mod dispatch_agent;
+mod dispatch_program;
 mod engine;
 pub mod gates;
 pub mod landing;
@@ -42,7 +46,7 @@ use gpui::App;
 pub use actions::{WorkflowToast, action_types, init_palette, register, workflow};
 pub use builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 pub use completion::{CompletionHook, CompletionHooks};
-pub use engine::{EngineRunner, SharedLifecycle, WorkflowEngine};
+pub use engine::{EngineRoots, EngineRunner, SharedLifecycle, WorkflowEngine};
 pub use lifecycle::{Refusal, RefusalKind, RunId, RunStatus, StartRequest, WorkflowEvent};
 pub use node_status::{NodeStatus, NodeStatusSource, NodeStatusSources};
 pub use runs_panel::{RunsPanel, init_panel};
@@ -54,17 +58,24 @@ pub use status_item::WorkflowStatus;
 pub fn init(cx: &mut App) {
     WorkflowsSettings::register(cx);
     landing::register(cx);
+    builtin_run::register(cx);
     engine::init(cx);
 }
 
 #[cfg(test)]
 mod actions_tests;
 #[cfg(test)]
+mod builtin_run_tests;
+#[cfg(test)]
 mod builtin_wait_tests;
 #[cfg(test)]
 mod commands_tests;
 #[cfg(test)]
 mod definitions_tests;
+#[cfg(test)]
+mod dispatch_flow_tests;
+#[cfg(test)]
+mod dispatch_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
@@ -77,6 +88,8 @@ mod runner_claude_tests;
 mod runner_codex_tests;
 #[cfg(test)]
 mod runtime_tests;
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod shipped_tests;
 #[cfg(test)]

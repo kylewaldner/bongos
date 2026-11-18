@@ -5,12 +5,13 @@ use std::fs;
 use std::path::Path;
 
 use bongos_workflow_model::layers::DEFINITION_FILE;
-use bongos_workflow_model::{Layer, LayerDirs, Severity};
+use bongos_workflow_model::{Ceilings, Layer, LayerDirs, Severity, ValidationContext};
 use tempfile::TempDir;
 
 use crate::definitions::{
     DEFAULT_NAME, DefinitionError, ShippedFile, definition_path, materialize, new_definition,
-    next_free_name, profile_dir, project_layer_dir, shipped_dir, validate_definitions,
+    next_free_name, profile_dir, profile_layer_dir, project_layer_dir, shipped_dir,
+    validate_definitions, validate_definitions_in,
 };
 
 /// A definition whose only node routes to a node that does not exist, so validate reports an
@@ -302,5 +303,70 @@ fn a_project_definition_shadows_a_profile_one_of_the_same_name() {
     assert_eq!(
         definition_path(&dirs, Some("same")).unwrap(),
         project.join("y").join(DEFINITION_FILE)
+    );
+}
+
+/// An agent node asking for 12 turns, which the default ceiling allows.
+const TWELVE_TURNS: &str = "schema = 1\n\
+name = \"turns\"\n\
+start = \"work\"\n\
+\n\
+[nodes.work]\n\
+kind = \"agent\"\n\
+prompt = \"work.md\"\n\
+max_turns = 12\n\
+output = { summary = { type = \"text\" } }\n\
+routes = [{ to = \"done\" }]\n\
+\n\
+[ends.done]\n\
+kind = \"success\"\n";
+
+#[test]
+fn a_lowered_ceiling_setting_changes_the_verdict() {
+    let temp = TempDir::new().unwrap();
+    write_definition(temp.path(), "turns", TWELVE_TURNS);
+    fs::write(temp.path().join("turns").join("work.md"), "Do it\n").unwrap();
+    let dirs = profile_only(temp.path());
+
+    let default = ValidationContext::default();
+    let report = validate_definitions_in(&dirs, None, &default).unwrap();
+    assert_eq!(report.error_count(), 0, "{}", report.render());
+
+    let lowered = ValidationContext {
+        ceilings: Ceilings {
+            max_turns: 5,
+            ..Ceilings::default()
+        },
+        ..ValidationContext::default()
+    };
+    let report = validate_definitions_in(&dirs, None, &lowered).unwrap();
+    assert_eq!(report.error_count(), 1, "{}", report.render());
+    assert!(report.render().contains("max_turns"), "{}", report.render());
+}
+
+#[test]
+fn a_project_definition_overrides_a_shipped_one_of_the_same_name() {
+    let temp = TempDir::new().unwrap();
+    let shipped = temp.path().join("shipped");
+    let project = temp.path().join("project");
+    write_definition(&shipped, "turns", TWELVE_TURNS);
+    write_definition(&project, "turns", TWELVE_TURNS);
+    let dirs = LayerDirs {
+        shipped: Some(shipped),
+        project: Some(project.clone()),
+        ..LayerDirs::default()
+    };
+    let report = validate_definitions(&dirs, Some("turns")).unwrap();
+    assert_eq!(report.definitions[0].layer, Layer::Project);
+    assert_eq!(report.definitions[0].dir, project.join("turns"));
+}
+
+#[test]
+fn the_definitions_dir_setting_replaces_the_default_profile_layer() {
+    let home = Path::new("/home/a");
+    assert_eq!(profile_layer_dir(home, None), profile_dir(home));
+    assert_eq!(
+        profile_layer_dir(home, Some(Path::new("/srv/flows"))),
+        Path::new("/srv/flows")
     );
 }

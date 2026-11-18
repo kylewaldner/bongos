@@ -14,7 +14,7 @@ use workspace::Workspace;
 
 use crate::actions::{LastToast, OFF_MESSAGE};
 use crate::commands::VALIDATE_TITLE;
-use crate::engine::WorkflowEngine;
+use crate::engine::{EngineRoots, WorkflowEngine};
 
 const BROKEN: &str = "schema = 1\n\
 name = \"broken\"\n\
@@ -262,22 +262,394 @@ async fn no_engine_exists_while_off_and_one_is_made_on_demand_when_on(cx: &mut T
     });
 
     set_enabled(cx, true);
+    let roots = TempDir::new().unwrap();
+    let data_dir = roots.path().join("data");
+    let home = roots.path().join("home");
     cx.update(|_, cx| {
+        cx.set_global(EngineRoots {
+            data_dir: data_dir.clone(),
+            home: home.clone(),
+        });
         let engine = WorkflowEngine::ensure(cx).expect("an engine while on");
         let dirs = engine.dirs();
+        let profile = dirs.profile.as_ref().unwrap();
+        assert!(profile.ends_with(".bongos/workflows"));
+        assert!(profile.starts_with(&home));
+        let shipped = dirs.shipped.as_ref().unwrap();
+        assert!(shipped.ends_with("workflows/shipped/0.0.0"));
+        assert!(shipped.starts_with(&data_dir), "{shipped:?}");
         assert!(
-            dirs.profile
-                .as_ref()
-                .unwrap()
-                .ends_with(".bongos/workflows")
+            shipped.is_dir(),
+            "the shipped files land in the temp data dir"
         );
         assert!(
-            dirs.shipped
-                .as_ref()
-                .unwrap()
-                .ends_with("workflows/shipped/0.0.0")
+            std::fs::read_dir(shipped).unwrap().next().is_some(),
+            "shipped definitions were written"
         );
         assert!(dirs.project.is_none());
         assert!(cx.try_global::<WorkflowEngine>().is_some());
     });
+}
+
+// Clear finished, dump engine and approve with an edit.
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use bongos_workflow_model::definition::{FieldType, ItemType};
+use serde_json::json;
+
+use crate::WorkflowsSettings;
+use crate::commands::{
+    ENGINE_DUMP_FILE, LogsDir, apply_plan, approve_choices, finished_run, offer_removal,
+    parse_field, plan_counts, plan_removal,
+};
+use crate::lifecycle::{ClearedRun, GateField, RunStatus};
+use crate::worktrees::{ClearPlan, FinishedRun, Git, RunWorktree, TaskCheckout, create_run};
+
+const TASK_BRANCH: &str = "task/add-login";
+
+/// A real repository with a task worktree to branch the run worktrees from, and a git that reads
+/// no configuration of the machine.
+struct Repo {
+    _temp: TempDir,
+    git: Git,
+    task: TaskCheckout,
+}
+
+fn plenty(_: &Path) -> Option<u64> {
+    Some(u64::MAX)
+}
+
+async fn git_out(git: &Git, directory: &Path, args: &[&str]) -> String {
+    git.run(directory, args).await.unwrap()
+}
+
+impl Repo {
+    async fn new() -> Self {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let git = Git::new("git")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com");
+        let repository = root.join("repo");
+        std::fs::create_dir_all(&repository).unwrap();
+        git_out(&git, &repository, &["init", "-q", "-b", "main"]).await;
+        std::fs::write(repository.join("README.md"), "readme\n").unwrap();
+        git_out(&git, &repository, &["add", "README.md"]).await;
+        git_out(&git, &repository, &["commit", "-q", "-m", "initial"]).await;
+        let task_worktree = repository.join(".bongos-worktrees").join("add-login");
+        git_out(
+            &git,
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                TASK_BRANCH,
+                &task_worktree.to_string_lossy(),
+            ],
+        )
+        .await;
+        Self {
+            _temp: temp,
+            git,
+            task: TaskCheckout {
+                slug: "add-login".to_string(),
+                worktree: Some(task_worktree),
+                branch: Some(TASK_BRANCH.to_string()),
+            },
+        }
+    }
+
+    async fn run(&self, run_id: &str) -> RunWorktree {
+        let settings = WorkflowsSettings {
+            enabled: true,
+            min_free_disk_mb: 0,
+            ..WorkflowsSettings::default()
+        };
+        create_run(&self.git, &self.task, run_id, 1, &settings, &plenty)
+            .await
+            .unwrap()
+    }
+
+    async fn branch_exists(&self, branch: &str) -> bool {
+        self.git
+            .run(
+                self.task.worktree.as_deref().unwrap(),
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "-q",
+                    &format!("refs/heads/{branch}"),
+                ],
+            )
+            .await
+            .is_ok()
+    }
+}
+
+/// Days as an offset from the epoch: no clock and no calendar date.
+fn day(days: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(days * 24 * 60 * 60)
+}
+
+impl Repo {
+    /// The isolated home directory the repository's git uses, never the real one.
+    fn home(&self) -> PathBuf {
+        self._temp.path().canonicalize().unwrap().join("home")
+    }
+
+    fn cleared(&self, id: &str, worktree: &RunWorktree, finished: SystemTime) -> ClearedRun {
+        ClearedRun {
+            id: id.to_string(),
+            dir: PathBuf::new(),
+            worktree: worktree.clone(),
+            attempt: 1,
+            checkout: self.task.clone(),
+            status: RunStatus::Succeeded,
+            finished,
+        }
+    }
+
+    async fn plan(&self, finished: &[FinishedRun]) -> ClearPlan {
+        plan_removal(&self.git, finished, None, &self.home(), 14, day(100))
+            .await
+            .unwrap()
+    }
+}
+
+const CLEAN: &str = "01890a5d-ac96-774b-bcce-b302aaaaaaaa";
+const DIRTY: &str = "01890a5d-ac96-774b-bcce-b302bbbbbbbb";
+const RECENT: &str = "01890a5d-ac96-774b-bcce-b302cccccccc";
+
+#[gpui::test]
+async fn the_removal_is_one_plan_that_skips_a_dirty_worktree_and_keeps_a_recent_run(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let repo = Repo::new().await;
+    let clean = repo.run(CLEAN).await;
+    let dirty = repo.run(DIRTY).await;
+    std::fs::write(dirty.path.join("README.md"), "uncommitted\n").unwrap();
+    let recent = repo.run(RECENT).await;
+    let finished: Vec<_> = [
+        repo.cleared(CLEAN, &clean, day(1)),
+        repo.cleared(DIRTY, &dirty, day(1)),
+        repo.cleared(RECENT, &recent, day(99)),
+    ]
+    .into_iter()
+    .map(finished_run)
+    .collect();
+
+    let plan = repo.plan(&finished).await;
+    let listed: Vec<&str> = plan.runs.iter().map(|run| run.run_id.as_str()).collect();
+    assert_eq!(listed, vec![CLEAN, DIRTY], "the recent run is not offered");
+    assert_eq!(plan_counts(&plan), (1, 1));
+    assert!(plan.summary().contains("uncommitted changes"));
+    // Planning removes nothing.
+    assert!(clean.path.exists() && dirty.path.exists() && recent.path.exists());
+
+    let report = apply_plan(&repo.git, &plan).await;
+    assert_eq!(report.removed.len(), 1);
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].0.path, dirty.path);
+    assert!(!clean.run_dir.exists());
+    assert!(!repo.branch_exists(&clean.branch).await);
+    assert_eq!(
+        std::fs::read_to_string(dirty.path.join("README.md")).unwrap(),
+        "uncommitted\n"
+    );
+    assert!(repo.branch_exists(&dirty.branch).await);
+    assert!(recent.path.exists());
+    assert!(repo.branch_exists(&recent.branch).await);
+}
+
+#[gpui::test]
+async fn a_removal_that_fails_is_reported_and_the_rest_go_on(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = Repo::new().await;
+    let locked = repo.run(CLEAN).await;
+    let other = repo.run(DIRTY).await;
+    // Git refuses to remove a locked worktree.
+    git_out(
+        &repo.git,
+        &locked.path,
+        &["worktree", "lock", &locked.path.to_string_lossy()],
+    )
+    .await;
+    let finished: Vec<_> = [
+        repo.cleared(CLEAN, &locked, day(1)),
+        repo.cleared(DIRTY, &other, day(1)),
+    ]
+    .into_iter()
+    .map(finished_run)
+    .collect();
+    let plan = repo.plan(&finished).await;
+    assert_eq!(plan_counts(&plan), (2, 0));
+
+    let report = apply_plan(&repo.git, &plan).await;
+    assert_eq!(report.removed.len(), 1);
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].0.path, locked.path);
+    assert!(locked.path.exists());
+    assert!(repo.branch_exists(&locked.branch).await);
+    assert!(!other.run_dir.exists());
+    assert!(!repo.branch_exists(&other.branch).await);
+}
+
+#[gpui::test]
+async fn declining_the_question_removes_nothing(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = Repo::new().await;
+    let clean = repo.run(CLEAN).await;
+    let other = repo.run(DIRTY).await;
+    let finished: Vec<_> = [
+        repo.cleared(CLEAN, &clean, day(1)),
+        repo.cleared(DIRTY, &other, day(1)),
+    ]
+    .into_iter()
+    .map(finished_run)
+    .collect();
+    let plan = repo.plan(&finished).await;
+
+    let (env, cx) = env(cx, true).await;
+    env.workspace.update_in(cx, |workspace, window, cx| {
+        offer_removal(vec![], Ok(plan), workspace, window, cx)
+    });
+    cx.run_until_parked();
+    // One question for both runs.
+    let asked = env.workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .active_modal::<bongos_minibuffer::ReadKeyView>(cx)
+            .is_some()
+    });
+    assert!(asked, "the question is open");
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    let still_asked = env.workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .active_modal::<bongos_minibuffer::ReadKeyView>(cx)
+            .is_some()
+    });
+    assert!(!still_asked, "one answer closes it");
+    assert!(clean.path.exists() && other.path.exists());
+    assert!(repo.branch_exists(&clean.branch).await);
+    assert!(repo.branch_exists(&other.branch).await);
+}
+
+#[gpui::test]
+async fn a_plan_with_nothing_to_remove_asks_nothing(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true).await;
+    env.workspace.update_in(cx, |workspace, window, cx| {
+        offer_removal(vec![], Ok(Default::default()), workspace, window, cx)
+    });
+    cx.run_until_parked();
+    let asked = env.workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .active_modal::<bongos_minibuffer::ReadKeyView>(cx)
+            .is_some()
+    });
+    assert!(!asked);
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "No finished runs to clear"));
+}
+
+#[gpui::test]
+async fn clear_finished_with_no_runs_says_so_and_writes_nothing(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true).await;
+    let before = tree(&env.profile);
+    dispatch("workflow::ClearFinished", cx);
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "No finished runs to clear"));
+    assert_eq!(tree(&env.profile), before);
+}
+
+#[gpui::test]
+async fn dump_engine_writes_the_engine_file_in_the_logs_directory(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (_env, cx) = env(cx, true).await;
+    let logs = TempDir::new().unwrap();
+    let dir = logs.path().join("logs");
+    cx.update(|_, cx| cx.set_global(LogsDir(dir.clone())));
+    dispatch("workflow::DumpEngine", cx);
+    cx.executor().run_until_parked();
+
+    let text = std::fs::read_to_string(dir.join(ENGINE_DUMP_FILE)).expect("the dump is written");
+    assert!(text.contains("runs: 0"), "{text}");
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.global::<LastToast>().0,
+            format!("Wrote {}", dir.join(ENGINE_DUMP_FILE).display())
+        )
+    });
+}
+
+#[gpui::test]
+async fn clear_finished_and_dump_engine_only_toast_while_off(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, false).await;
+    let logs = TempDir::new().unwrap();
+    cx.update(|_, cx| cx.set_global(LogsDir(logs.path().join("logs"))));
+    let before = tree(&env.profile);
+    for name in ["workflow::ClearFinished", "workflow::DumpEngine"] {
+        dispatch(name, cx);
+        cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, OFF_MESSAGE, "{name}"));
+    }
+    assert_eq!(tree(&env.profile), before);
+    assert!(!logs.path().join("logs").exists(), "nothing is written");
+}
+
+#[test]
+fn approve_offers_as_is_first_then_each_field_of_the_held_result() {
+    let fields = vec![
+        GateField {
+            name: "summary".to_string(),
+            field_type: FieldType::Text,
+            value: json!("done"),
+        },
+        GateField {
+            name: "files".to_string(),
+            field_type: FieldType::List(ItemType::Path),
+            value: json!(["a.rs", "b.rs"]),
+        },
+    ];
+    assert_eq!(
+        approve_choices(&fields),
+        vec!["Approve as is", "summary: done", "files: a.rs, b.rs"]
+    );
+}
+
+#[test]
+fn an_edited_value_is_parsed_by_the_type_of_its_field() {
+    let text = |type_, line| parse_field(&type_, line);
+    assert_eq!(text(FieldType::Text, "hello"), Ok(json!("hello")));
+    assert_eq!(text(FieldType::Path, "src/a.rs"), Ok(json!("src/a.rs")));
+    assert_eq!(
+        text(FieldType::Choice(vec!["ship".into()]), "ship"),
+        Ok(json!("ship"))
+    );
+    assert_eq!(text(FieldType::Number, " 42 "), Ok(json!(42)));
+    assert_eq!(text(FieldType::Number, "2.5"), Ok(json!(2.5)));
+    assert_eq!(
+        text(FieldType::Number, "many"),
+        Err("'many' is not a number".to_string())
+    );
+    assert_eq!(
+        text(FieldType::List(ItemType::Text), "a, b ,,c"),
+        Ok(json!(["a", "b", "c"]))
+    );
+    assert_eq!(
+        text(FieldType::List(ItemType::Number), "1, 2"),
+        Ok(json!([1, 2]))
+    );
+    assert_eq!(
+        text(FieldType::List(ItemType::Number), "1, x"),
+        Err("'x' is not a number".to_string())
+    );
 }

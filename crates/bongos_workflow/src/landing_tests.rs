@@ -711,7 +711,8 @@ async fn a_run_tells_the_project_its_state_and_holds_back_work_during_a_restore(
         rows.get("workflow").and_then(|v| v.as_str()),
         Some("review")
     );
-    assert_eq!(rows.get("state").and_then(|v| v.as_str()), Some("queued"));
+    // The start ticked once, so the run is already running.
+    assert_eq!(rows.get("state").and_then(|v| v.as_str()), Some("running"));
     assert!(rows.get("outcome").is_none());
 
     // A restore holds new work back: nothing restarts or resumes while it does.
@@ -721,11 +722,14 @@ async fn a_run_tells_the_project_its_state_and_holds_back_work_during_a_restore(
     activity.release_new_work("project-1");
 
     // Stopping at the job boundary pauses the run, which then is no activity.
+    // The started node is still work in flight until it finishes; then nothing more starts.
     activity.stop_at_job_boundary("project-1").unwrap();
-    setup.linked.drive(cx);
-    assert_eq!(setup.linked.status(&run), RunStatus::Paused);
+    assert_eq!(setup.linked.status(&run), RunStatus::Pausing);
+    assert_eq!(activity.activity("project-1").len(), 1);
+    setup.linked.release(cx);
+    assert_eq!(setup.linked.status(&run), RunStatus::WaitingOnYou);
     assert!(activity.activity("project-1").is_empty());
-    assert!(live.started(LEAF), "a paused run still holds its task");
+    assert!(live.started(LEAF), "a stopped run still holds its task");
 
     // The end of the run is written as its outcome.
     cx.update(|cx| engine.cancel(&run, cx)).unwrap();

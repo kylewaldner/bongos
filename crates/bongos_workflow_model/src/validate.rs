@@ -39,6 +39,8 @@ pub const PERMISSION_MODES: &[&str] = &[
 const BYPASS_PERMISSIONS: &str = "bypassPermissions";
 const ON_BOUND_FAIL: &str = "fail";
 const PROGRAM_LANGUAGE: &str = "python";
+/// The network entry that means the remote host, resolved when the program runs.
+pub const REMOTE_HOST: &str = "@remote";
 /// Above this many combinations of routed choice values, route coverage is checked value by value.
 const MAX_COVERAGE_COMBINATIONS: usize = 1024;
 /// At most this many "no route" errors are listed for one node.
@@ -123,6 +125,9 @@ pub struct ValidationContext {
     pub ceilings: Ceilings,
     /// `workflows.fan_out_width`: the widest per-item fan-out a route may declare.
     pub fan_out_width: u32,
+    /// `workflows.loop_bound`: when set, a cycle whose routes set no `max_passes` is bounded by it
+    /// instead of being an error.
+    pub loop_bound: Option<u32>,
     /// `workflows.programs.allow_network`.
     pub allow_network: bool,
     /// The MCP servers installed for each agent CLI, after `workflows.mcp_exclude` (D8).
@@ -140,6 +145,7 @@ impl Default for ValidationContext {
         Self {
             ceilings: Ceilings::default(),
             fan_out_width: 8,
+            loop_bound: None,
             allow_network: true,
             mcp_servers: BTreeMap::new(),
             programs: SHIPPED_PROGRAMS
@@ -708,6 +714,18 @@ impl<'a> Validator<'a> {
                         permissions.network.join(", ")
                     ),
                 );
+            }
+            for entry in &permissions.network {
+                if entry.starts_with('@') && entry != REMOTE_HOST {
+                    self.error(
+                        Some(name),
+                        permissions.line,
+                        format!(
+                            "network entry '{entry}' is not known; the only placeholder is \
+                             {REMOTE_HOST} (the remote host, resolved at runtime)"
+                        ),
+                    );
+                }
             }
             if !permissions.mcp.is_empty() {
                 self.error(
@@ -1304,7 +1322,12 @@ impl<'a> Validator<'a> {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        for component in strongly_connected(&unbounded) {
+        let components = if self.context.loop_bound.is_some() {
+            Vec::new()
+        } else {
+            strongly_connected(&unbounded)
+        };
+        for component in components {
             let is_cycle = component.len() > 1 || unbounded[component[0]].contains(&component[0]);
             if !is_cycle {
                 continue;
