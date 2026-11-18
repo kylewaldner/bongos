@@ -26,8 +26,9 @@ struct Yanked {
     index: usize,
     /// The inserted entry was a rectangle.
     rectangle: bool,
-    /// The undo step that inserted the entry; `None` when nothing was inserted.
-    transaction: Option<TransactionId>,
+    /// The undo steps of the yank and every yank-pop since, oldest first, while each replaced
+    /// the last in place; undoing them all removes everything yanked.
+    transactions: Vec<TransactionId>,
 }
 
 #[derive(Default)]
@@ -115,7 +116,15 @@ pub(crate) fn yank_entry(
     let (mark_at, starts) = starts;
     mark::push_mark(editor, Some(mark_at), false, window, cx);
     if let Some((ranges, transaction)) = insert(editor, entry, starts, None, window, cx) {
-        remember(editor, window, ranges, index, false, transaction, cx);
+        remember(
+            editor,
+            window,
+            ranges,
+            index,
+            false,
+            transaction.into_iter().collect(),
+            cx,
+        );
     }
 }
 
@@ -136,7 +145,7 @@ fn yank_rectangle_at(
             vec![(at, end)],
             index,
             true,
-            transaction,
+            transaction.into_iter().collect(),
             cx,
         ),
         None => cx.set_global(YankState(None)),
@@ -211,15 +220,15 @@ pub(crate) fn replace_yanked(
     cx: &mut App,
 ) -> bool {
     let window_id = window.window_handle().window_id();
-    let (was_rectangle, transaction) = cx
+    let (was_rectangle, mut transactions) = cx
         .try_global::<YankState>()
         .and_then(|state| state.0.as_ref())
         .filter(|yanked| yanked.window == window_id && yanked.editor == editor.entity_id())
-        .map_or((false, None), |yanked| {
-            (yanked.rectangle, yanked.transaction)
+        .map_or((false, Vec::new()), |yanked| {
+            (yanked.rectangle, yanked.transactions.clone())
         });
     if was_rectangle || entry.kind == EntryKind::Rectangle {
-        return reyank(editor, index, entry, &ranges, transaction, window, cx);
+        return reyank(editor, index, entry, &ranges, &transactions, window, cx);
     }
     let starts = ranges.iter().map(|(start, _)| *start).collect();
     let Some((ranges, transaction)) = insert(editor, entry, starts, Some(&ranges), window, cx)
@@ -228,32 +237,38 @@ pub(crate) fn replace_yanked(
         cx.set_global(YankState(None));
         return false;
     };
-    remember(editor, window, ranges, index, false, transaction, cx);
+    transactions.extend(transaction);
+    remember(editor, window, ranges, index, false, transactions, cx);
     true
 }
 
-/// Undoes the last yank's undo step `transaction` and yanks `entry` at the start of the first
+/// Undoes the undo steps `transactions` of the last yank and its yank-pops, newest first, and yanks `entry` at the start of the first
 /// yanked range, as a new undo step, so one undo removes everything yanked.
 fn reyank(
     editor: &Entity<Editor>,
     index: usize,
     entry: &Entry,
     ranges: &[(Anchor, Anchor)],
-    transaction: Option<TransactionId>,
+    transactions: &[TransactionId],
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
     let Some(&(start, _)) = ranges.first() else {
         return false;
     };
-    if let Some(transaction) = transaction {
-        let buffer = editor.read(cx).buffer().clone();
-        if !buffer.read(cx).has_transaction(transaction, cx) {
-            cx.set_global(YankState(None));
-            return false;
-        }
-        buffer.update(cx, |buffer, cx| buffer.undo_transaction(transaction, cx));
+    let buffer = editor.read(cx).buffer().clone();
+    if !transactions
+        .iter()
+        .all(|transaction| buffer.read(cx).has_transaction(*transaction, cx))
+    {
+        cx.set_global(YankState(None));
+        return false;
     }
+    buffer.update(cx, |buffer, cx| {
+        for transaction in transactions.iter().rev() {
+            buffer.undo_transaction(*transaction, cx);
+        }
+    });
     if entry.kind == EntryKind::Rectangle {
         yank_rectangle_at(editor, index, entry, start, window, cx);
         return true;
@@ -264,9 +279,15 @@ fn reyank(
         });
     });
     match insert(editor, entry, vec![start], None, window, cx) {
-        Some((ranges, transaction)) => {
-            remember(editor, window, ranges, index, false, transaction, cx)
-        }
+        Some((ranges, transaction)) => remember(
+            editor,
+            window,
+            ranges,
+            index,
+            false,
+            transaction.into_iter().collect(),
+            cx,
+        ),
         None => cx.set_global(YankState(None)),
     }
     true
@@ -390,7 +411,7 @@ fn remember(
     ranges: Vec<(Anchor, Anchor)>,
     index: usize,
     rectangle: bool,
-    transaction: Option<TransactionId>,
+    transactions: Vec<TransactionId>,
     cx: &mut App,
 ) {
     cx.set_global(YankState(Some(Yanked {
@@ -399,6 +420,6 @@ fn remember(
         ranges,
         index,
         rectangle,
-        transaction,
+        transactions,
     })));
 }

@@ -198,6 +198,45 @@ async fn after_a_yank_and_a_yank_pop_one_undo_removes_all_yanked_text(cx: &mut T
 }
 
 #[gpui::test]
+async fn a_yank_pop_onto_a_rectangle_after_text_pops_removes_every_yanked_text(
+    cx: &mut TestAppContext,
+) {
+    let mut cx = test_context(cx).await;
+    seed(
+        &mut cx,
+        vec![
+            rows(&["bc", "fg"]),
+            Entry::plain("B".into()),
+            Entry::plain("A".into()),
+        ],
+    );
+    cx.set_state("1ˇ23\n456");
+    cx.simulate_keystrokes("ctrl-y");
+    cx.assert_editor_state("1Aˇ23\n456");
+    cx.simulate_keystrokes("alt-y");
+    cx.assert_editor_state("1Bˇ23\n456");
+    cx.simulate_keystrokes("alt-y");
+    cx.assert_editor_state("1bc23\n4fgˇ56");
+    cx.simulate_keystrokes("ctrl-/");
+    assert_eq!(cx.buffer_text(), "123\n456");
+}
+
+#[gpui::test]
+async fn a_read_only_kill_stores_the_rectangle_and_deletes_nothing(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    let messages = echo(&mut cx);
+    set_rectangle(&mut cx, SQUARE, 1);
+    cx.update_editor(|editor, _, _| editor.set_read_only(true));
+    cx.simulate_keystrokes("alt-2");
+    cx.assert_editor_state(SQUARE);
+    assert_eq!(
+        ring(&mut cx),
+        [(EntryKind::Rectangle, "bc\nfg".to_string())]
+    );
+    assert_eq!(*messages.borrow(), ["Buffer is read-only"]);
+}
+
+#[gpui::test]
 async fn browse_kill_ring_yanks_a_rectangle_row_as_a_rectangle(cx: &mut TestAppContext) {
     let (workspace, editor, mut cx) = workspace_editor("123\n456", 1, cx).await;
     let cx = &mut cx;

@@ -313,7 +313,8 @@ pub(crate) fn copy_rectangle_as_kill_command(
 }
 
 /// `kill-rectangle`: saves the rectangle to the kill ring as a rectangle entry, then deletes
-/// it in one undo step. A masked editor neither stores nor deletes anything.
+/// it in one undo step. A masked editor neither stores nor deletes anything; a read-only one
+/// stores the rectangle but deletes nothing.
 pub(crate) fn kill_rectangle_command(
     _: &KillRectangle,
     editor: &Entity<Editor>,
@@ -324,6 +325,10 @@ pub(crate) fn kill_rectangle_command(
         return;
     }
     if editor.read(cx).read_only(cx) {
+        // As in Emacs, the rows still reach the ring before the error.
+        if let Some((_, plan)) = plan_here(editor, RectOp::Copy, window, cx) {
+            kill_ring::push_rectangle(&plan.extracted.unwrap_or_default(), cx);
+        }
         bongos_minibuffer::message(window, cx, "Buffer is read-only");
         return;
     }
