@@ -9,6 +9,7 @@ use gpui::{App, Entity, Focusable as _, Global, Window};
 
 use crate::actions::StringRectangle;
 use crate::rectangle::{apply_to, corners};
+use crate::rectangle_mode;
 
 /// The name the prompt is routed under (`minibuffer.enabled_for`) and keeps its history under.
 const MINIBUFFER_NAME: &str = "string_rectangle";
@@ -35,6 +36,7 @@ pub(crate) fn string_rectangle_command(
     let Some(corners) = corners(editor, window, cx) else {
         return;
     };
+    rectangle_mode::finish(editor, window, cx);
     let last = cx.default_global::<LastString>().0.clone();
     let prompt = if last.is_empty() {
         "String rectangle: ".to_string()

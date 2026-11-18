@@ -26,6 +26,7 @@ mod prefix_commands;
 pub mod quit;
 pub mod recenter;
 mod rectangle;
+mod rectangle_mode;
 pub mod region;
 mod region_commands;
 mod repeat;
@@ -78,6 +79,8 @@ mod quit_tests;
 #[cfg(test)]
 mod recenter_tests;
 #[cfg(test)]
+mod rectangle_mode_tests;
+#[cfg(test)]
 mod rectangle_tests;
 #[cfg(test)]
 mod rectangle_yank_tests;
@@ -117,6 +120,7 @@ pub fn init(cx: &mut App) {
     count_adapters::init(cx);
     cursor::init(cx);
     global_mark::init(cx);
+    rectangle_mode::init(cx);
     cx.observe_new(|editor: &mut Editor, mut window, cx| {
         let weak = cx.entity().downgrade();
         register(editor, &weak, cx, motion::forward_word);
@@ -208,6 +212,7 @@ pub fn init(cx: &mut App) {
         prefix_arg::init_editor(editor, window.as_deref_mut(), cx);
         recenter::init_editor(cx);
         kill_ring_sink::init_editor(cx);
+        rectangle_mode::init_editor(editor, window.as_deref_mut(), cx);
         mark::init_editor(window, cx);
     })
     .detach();

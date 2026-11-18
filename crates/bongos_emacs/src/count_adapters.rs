@@ -14,6 +14,7 @@ use gpui::{Action, App, Entity, Window};
 use text::{Bias, SelectionGoal};
 
 use crate::prefix_arg::{self, MAX_INSERT, Meaning, declare};
+use crate::rectangle_mode;
 
 /// The most undo steps one count takes: beyond this the history has long run out.
 const MAX_UNDO: u32 = 10_000;
@@ -73,6 +74,14 @@ pub(crate) fn init(cx: &mut App) {
     }
 }
 
+/// An adapter runs without dispatching its action, so the rectangle mode's motion listener
+/// never sees it: collapse the column selection to the region here, as that listener does.
+fn leave_rectangle(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+    if rectangle_mode::is_on(editor.read(cx)) {
+        rectangle_mode::to_region(editor, window, cx);
+    }
+}
+
 /// `point` moved `times` characters, stopping where it stops moving.
 fn walk(map: &DisplaySnapshot, mut point: DisplayPoint, forward: bool, times: u32) -> DisplayPoint {
     for _ in 0..times {
@@ -103,6 +112,7 @@ fn horizontal(
     if value == 0 {
         return;
     }
+    leave_rectangle(editor, window, cx);
     let forward = forward == (value > 0);
     let times = value.unsigned_abs();
     editor.update(cx, |editor, cx| {
@@ -152,6 +162,7 @@ fn vertical(
     let Ok(action) = cx.build_action(name, Some(params)) else {
         return;
     };
+    leave_rectangle(editor, window, cx);
     let any = action.as_any();
     editor.update(cx, |editor, cx| {
         if let Some(action) = any.downcast_ref::<MoveDownByLines>() {
@@ -180,6 +191,7 @@ fn page(
     if value == 0 || editor.read(cx).mode().is_single_line() {
         return;
     }
+    leave_rectangle(editor, window, cx);
     let lines = if down { value } else { value.saturating_neg() };
     editor.update(cx, |editor, cx| {
         let Some(visible) = editor.visible_line_count() else {

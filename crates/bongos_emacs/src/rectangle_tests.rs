@@ -10,10 +10,9 @@ use text::{Point, ToOffset as _};
 use workspace::MinibufferRouting;
 
 use crate::actions::{
-    ClearRectangle, DeleteRectangle, KeepRectangle, OpenRectangle, RectangleMarkMode,
-    SetMarkCommand,
+    ClearRectangle, DeleteRectangle, KeepRectangle, OpenRectangle, SetMarkCommand,
 };
-use crate::apply_tests::{capture_kills, init_test};
+use crate::apply_tests::init_test;
 use crate::mark::{mark_for, set_mark};
 
 /// Three short, ending-inside and spanning rows between two full ones.
@@ -230,16 +229,4 @@ async fn a_zero_width_rectangle_edits_only_with_keep(cx: &mut TestAppContext) {
     set_rectangle(&mut cx, marked, 2);
     cx.dispatch_action(KeepRectangle);
     cx.assert_editor_state("ˇ\n\n\n");
-}
-
-#[gpui::test]
-async fn the_other_rectangle_commands_are_not_implemented_yet(cx: &mut TestAppContext) {
-    let mut cx = test_context(cx).await;
-    let messages = echo(&mut cx);
-    let kills = capture_kills(&mut cx);
-    set_rectangle(&mut cx, BLOCK, 2);
-    dispatch(&mut cx, &RectangleMarkMode);
-    cx.assert_editor_state(BLOCK);
-    assert_eq!(*messages.borrow(), vec!["Not implemented yet"]);
-    assert!(kills.borrow().is_empty());
 }
