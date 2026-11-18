@@ -243,7 +243,9 @@ pub fn apply(chat: &ChatLive, input: Input) -> Option<Change> {
         }
         signal => {
             let (state, ends_turn) = signal_target(chat, &signal)?;
-            let source = if ends_turn {
+            let denial_continues =
+                matches!(signal, Input::IdleTimer) && chat.source == Source::Estimated(NO_TURN_END);
+            let source = if ends_turn || denial_continues {
                 Source::Estimated(NO_TURN_END)
             } else if signal_applies(chat, state) {
                 Source::Estimated(FROM_TERMINAL)
@@ -286,7 +288,7 @@ fn report_target(chat: &ChatLive, event: &Event) -> (ChatState, Source) {
             }
         }
         Event::ToolDone => {
-            if chat.state == ChatState::Waiting {
+            if matches!(chat.state, ChatState::Running | ChatState::Waiting) {
                 (ChatState::Running, Source::Exact)
             } else {
                 (chat.state, chat.source)

@@ -176,14 +176,13 @@ fn needs_input_otherwise_goes_waiting() {
 }
 
 #[test]
-fn tool_done_goes_running_only_from_waiting() {
-    assert_eq!(
-        after(
-            live(ChatState::Waiting, Source::Exact),
-            report(1, Event::ToolDone)
-        ),
-        (ChatState::Running, Source::Exact)
-    );
+fn tool_done_goes_exact_running_except_from_idle() {
+    for state in [ChatState::Waiting, ChatState::Running] {
+        assert_eq!(
+            after(live(state, Source::Exact), report(1, Event::ToolDone)),
+            (ChatState::Running, Source::Exact)
+        );
+    }
     assert_eq!(
         after(
             live(ChatState::Idle, Source::Exact),
@@ -476,8 +475,19 @@ fn rule_4_denied_permission_ends_in_estimated_idle() {
     chat.step(Input::KeyboardInput);
     assert_eq!((chat.state, chat.source), (ChatState::Running, NO_END));
     chat.step(Input::IdleTimer);
-    assert_eq!(chat.state, ChatState::Idle);
-    assert!(matches!(chat.source, Source::Estimated(_)));
+    assert_eq!((chat.state, chat.source), (ChatState::Idle, NO_END));
+}
+
+#[test]
+fn rule_4_approval_tool_done_after_keyboard_input_is_exact_running() {
+    let mut chat = live(ChatState::Waiting, Source::Exact);
+    chat.step(Input::KeyboardInput);
+    assert_eq!((chat.state, chat.source), (ChatState::Running, NO_END));
+    chat.step(report(1, Event::ToolDone));
+    assert_eq!(
+        (chat.state, chat.source),
+        (ChatState::Running, Source::Exact)
+    );
 }
 
 #[test]
@@ -541,8 +551,7 @@ fn promise_no_exact_state_sticks_after_an_unreported_turn_end() {
         // The user interrupts or denies; no report follows, only the terminal.
         chat.step(Input::KeyboardInput);
         chat.step(Input::IdleTimer);
-        assert_eq!(chat.state, ChatState::Idle);
-        assert!(matches!(chat.source, Source::Estimated(_)));
+        assert_eq!((chat.state, chat.source), (ChatState::Idle, NO_END));
     }
 }
 
