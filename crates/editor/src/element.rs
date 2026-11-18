@@ -5561,6 +5561,18 @@ impl EditorElement {
                     }
                 }
             }
+            let local_color = layout
+                .selections
+                .iter()
+                .find(|(_, selections)| selections.iter().any(|selection| selection.is_local))
+                .map(|(player_color, _)| player_color.selection)
+                .unwrap_or_else(|| cx.theme().players().local().selection);
+            for bounds in layout
+                .position_map
+                .past_line_end_bounds(layout.content_origin, &layout.past_line_end_highlights)
+            {
+                window.paint_quad(fill(bounds, local_color));
+            }
             invisible_display_ranges
         })
     }
@@ -8257,6 +8269,11 @@ impl Element for EditorElement {
                         cx,
                     );
 
+                    let past_line_end_highlights = self
+                        .editor
+                        .read(cx)
+                        .past_line_end_highlight_rows(&snapshot.display_snapshot);
+
                     let (local_selections, selected_buffer_ids, latest_selection_anchors): (
                         Vec<Selection<Point>>,
                         Vec<BufferId>,
@@ -9331,6 +9348,7 @@ impl Element for EditorElement {
                         highlighted_ranges,
                         highlighted_gutter_ranges,
                         redacted_ranges,
+                        past_line_end_highlights,
                         document_colors,
                         line_elements,
                         line_numbers,
@@ -9558,6 +9576,7 @@ pub struct EditorLayout {
     highlighted_ranges: Vec<(Range<DisplayPoint>, Hsla)>,
     highlighted_gutter_ranges: Vec<(Range<DisplayPoint>, Hsla)>,
     redacted_ranges: Vec<Range<DisplayPoint>>,
+    past_line_end_highlights: Vec<(DisplayRow, Range<u32>)>,
     cursors: Vec<(DisplayPoint, Hsla)>,
     visible_cursors: Vec<CursorLayout>,
     navigation_overlay_paint_commands: Vec<NavigationOverlayPaintCommand>,
@@ -10028,6 +10047,38 @@ pub(crate) struct PositionMap {
     pub inline_blame_bounds: Option<(Bounds<Pixels>, BufferId, BlameEntry)>,
     pub display_hunks: Vec<(DisplayDiffHunk, Option<Hitbox>)>,
     pub diff_hunk_control_bounds: Vec<(DisplayRow, Bounds<Pixels>)>,
+}
+
+impl PositionMap {
+    /// Rects for cells filled past the end of a line, one per highlight whose
+    /// row is visible. The start and end sit at `eol_x + em_layout_width * cells`,
+    /// the same unit columnar selection uses for columns past a line's end.
+    pub(crate) fn past_line_end_bounds(
+        &self,
+        content_origin: gpui::Point<Pixels>,
+        highlights: &[(DisplayRow, Range<u32>)],
+    ) -> Vec<Bounds<Pixels>> {
+        highlights
+            .iter()
+            .filter(|(row, cells)| self.visible_row_range.contains(row) && cells.start < cells.end)
+            .map(|(row, cells)| {
+                let line_layout =
+                    &self.line_layouts[row.minus(self.visible_row_range.start) as usize];
+                let alignment_offset =
+                    line_layout.alignment_offset(self.text_align, self.content_width);
+                let eol_x = content_origin.x + line_layout.width + alignment_offset
+                    - Pixels::from(self.scroll_pixel_position.x);
+                let y = content_origin.y
+                    + Pixels::from(
+                        (row.as_f64() - self.scroll_position.y)
+                            * ScrollOffset::from(self.line_height),
+                    );
+                let start_x = eol_x + self.em_layout_width * cells.start as f32;
+                let end_x = eol_x + self.em_layout_width * cells.end as f32;
+                Bounds::new(point(start_x, y), size(end_x - start_x, self.line_height))
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
