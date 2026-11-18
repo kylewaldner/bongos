@@ -30,13 +30,14 @@
 //! Reports do not change the state yet: the terminal still drives it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use bongos_chat_model::channel::report::{Report, Token};
+use bongos_chat_model::channel::state::BELL_GRACE;
+pub use bongos_chat_model::channel::state::{ChatState, MID_TURN};
 use bongos_chat_model::{
     Agent, Capabilities, CaptureQuery, ChannelOff, ChannelPlan, Fallback, HOOKS, NamedBy,
     VERSION_TABLE, adapter_for, from_title,
@@ -68,11 +69,6 @@ pub const ACTIVE_DEBOUNCE: Duration = Duration::from_secs(10);
 /// [`CAPTURE_INTERVAL`]; it looks once more when the CLI exits.
 pub const CAPTURE_WINDOW: Duration = Duration::from_secs(60);
 pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(1);
-/// Output that arrives this soon after a bell belongs to the bell (the terminal reports the output
-/// of one read after its bell), so it does not end the waiting state.
-const BELL_GRACE: Duration = Duration::from_millis(500);
-/// A running chat with output this recent is mid-turn: `chat: close` asks first.
-pub const MID_TURN: Duration = Duration::from_secs(2);
 /// A launch with a channel that exits with an error this soon, before any report, is started once
 /// more without the channel (design D9).
 pub const EARLY_EXIT: Duration = Duration::from_secs(5);
@@ -83,7 +79,9 @@ pub const REPORTS_OFF: &str = "Reports are off (chats.channels)";
 /// but do not change the state yet.
 pub const REPORTS_NOT_APPLIED: &str = "Reports do not set the state yet";
 
-/// Whether a chat reports over the chat channel (design D9, D14).
+/// Whether a chat reports over the chat channel (design D9, D14). Unlike the model's
+/// `channel::state::ChannelStatus`, the off reason is built at launch (server errors, adapter
+/// reasons), so it is owned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChannelStatus {
     /// The launch has no channel, for the reason given.
@@ -114,34 +112,6 @@ fn sentence(text: &str) -> String {
     chars.next().map_or_else(String::new, |first| {
         first.to_uppercase().chain(chars).collect()
     })
-}
-
-/// What a chat is doing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChatState {
-    /// The CLI is producing output.
-    Running,
-    /// The CLI rang the bell: it wants input.
-    Waiting,
-    /// No output for `chats.idle_after_secs`.
-    Idle,
-    /// The process ended; `code` is its exit code, when it reported one.
-    Exited { code: Option<i32> },
-    /// No live terminal.
-    Closed,
-}
-
-impl fmt::Display for ChatState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ChatState::Running => write!(f, "running"),
-            ChatState::Waiting => write!(f, "waiting"),
-            ChatState::Idle => write!(f, "idle"),
-            ChatState::Exited { code: Some(code) } => write!(f, "exited (code {code})"),
-            ChatState::Exited { code: None } => write!(f, "exited"),
-            ChatState::Closed => write!(f, "closed"),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
