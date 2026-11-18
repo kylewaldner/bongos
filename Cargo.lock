@@ -2048,6 +2048,7 @@ dependencies = [
  "bongos_app",
  "bongos_builder",
  "bongos_chat",
+ "bongos_chat_model",
  "bongos_checks",
  "bongos_emacs",
  "bongos_isearch",
@@ -2312,6 +2313,7 @@ version = "0.1.0"
 dependencies = [
  "bongos_work_model",
  "chrono",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

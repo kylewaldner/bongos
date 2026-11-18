@@ -3,6 +3,9 @@
 
 mod zed;
 
+#[cfg(all(test, not(target_os = "windows")))]
+mod chat_report_args_tests;
+
 // Ensure the binary name stays in sync with APP_NAME so that the paths used
 // at runtime (data dir, config dir, etc.) match what the binary is called.
 const _: () = assert!(
@@ -207,6 +210,16 @@ fn main() {
     if let Some(socket) = &args.askpass {
         askpass::main(socket);
         return;
+    }
+
+    // `bongos --chat-report <mode> ...` is a chat hook's reporter: it sends one report over the
+    // chat channel and exits 0, before any settings, logging, database or UI work.
+    #[cfg(not(target_os = "windows"))]
+    if let Some(words) = &args.chat_report {
+        if let Some((mode, rest)) = words.split_first() {
+            bongos_chat_model::channel::client::main(mode, rest);
+        }
+        process::exit(0);
     }
 
     #[cfg(target_os = "windows")]
@@ -1642,6 +1655,18 @@ struct Args {
     #[cfg(not(target_os = "windows"))]
     #[arg(hide = true)]
     askpass: Option<String>,
+
+    /// Sends one chat report over the chat channel socket, for an agent's hooks: `claude-hook`
+    /// (reads the hook input on stdin) or `state <running|waiting|idle>`. Takes every word after it.
+    #[cfg(not(target_os = "windows"))]
+    #[arg(
+        long,
+        hide = true,
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_names = ["MODE", "ARGS"]
+    )]
+    chat_report: Option<Vec<String>>,
 
     #[arg(long, hide = true)]
     dump_all_actions: bool,
