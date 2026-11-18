@@ -19,6 +19,9 @@ pub struct ChatsSettings {
     /// The directory of session types as written (it may start with `~`); `None` means the
     /// default, `<home>/.bongos/chat-types`.
     pub types_dir: Option<String>,
+    /// Whether running chats report their state over the chat channel socket. The report server
+    /// runs only while this and `enabled` are both true.
+    pub channels: bool,
     pub claude: AgentCommand,
     pub codex: AgentCommand,
 }
@@ -63,6 +66,9 @@ impl Settings for ChatsSettings {
                 .submit_delay_ms
                 .expect("default.json defines `chats.submit_delay_ms`"),
             types_dir: chats.types_dir.filter(|dir| !dir.trim().is_empty()),
+            channels: chats
+                .channels
+                .expect("default.json defines `chats.channels`"),
             claude: AgentCommand::from_content(agents.claude.as_ref(), "claude"),
             codex: AgentCommand::from_content(agents.codex.as_ref(), "codex"),
         }
