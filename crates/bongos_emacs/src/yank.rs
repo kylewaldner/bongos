@@ -2,7 +2,7 @@
 //! remembers, as anchors, the text it inserted; a yank-pop right after replaces exactly that
 //! text with another entry. Neither writes the system clipboard.
 
-use bongos_emacs_model::kill_ring::Entry;
+use bongos_emacs_model::kill_ring::{Entry, EntryKind};
 use bongos_minibuffer::message;
 use editor::{ClipboardSelection, Editor, EditorSettings, SelectionEffects, kill_ring};
 use gpui::{Action as _, App, ClipboardEntry, Context, Entity, EntityId, Global, Window, WindowId};
@@ -12,7 +12,7 @@ use text::{SelectionGoal, TransactionId};
 
 use crate::actions::{Yank, YankPop};
 use crate::last_command::last_command;
-use crate::mark;
+use crate::{mark, rectangle};
 
 /// What the last yank or yank-pop inserted, so a yank-pop directly after it can replace it.
 struct Yanked {
@@ -24,6 +24,10 @@ struct Yanked {
     ranges: Vec<(Anchor, Anchor)>,
     /// The ring index of the inserted entry.
     index: usize,
+    /// The inserted entry was a rectangle.
+    rectangle: bool,
+    /// The undo step that inserted the entry; `None` when nothing was inserted.
+    transaction: Option<TransactionId>,
 }
 
 #[derive(Default)]
@@ -64,7 +68,8 @@ pub(crate) fn yank_command(
 }
 
 /// Inserts `entry` (the ring's `index`th) the way a yank does: at every caret, the mark pushed
-/// at the insert start, the yank remembered so a yank-pop can replace it.
+/// at the insert start, the yank remembered so a yank-pop can replace it. A rectangle entry
+/// goes in at the newest caret only, with the mark pushed at point.
 pub(crate) fn yank_entry(
     editor: &Entity<Editor>,
     index: usize,
@@ -72,6 +77,17 @@ pub(crate) fn yank_entry(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if entry.kind == EntryKind::Rectangle {
+        let at = editor.update(cx, |editor, cx| {
+            editor.set_selection_mark_mode(false, cx);
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let head = editor.selections.newest_anchor().head();
+            snapshot.anchor_before(head.to_offset(&snapshot))
+        });
+        mark::push_mark(editor, Some(at), false, window, cx);
+        yank_rectangle_at(editor, index, entry, at, window, cx);
+        return;
+    }
     let replaces_region = EditorSettings::get_global(cx).typing_replaces_selection;
     let starts = editor.update(cx, |editor, cx| {
         editor.set_selection_mark_mode(false, cx);
@@ -98,8 +114,32 @@ pub(crate) fn yank_entry(
     });
     let (mark_at, starts) = starts;
     mark::push_mark(editor, Some(mark_at), false, window, cx);
-    if let Some(ranges) = insert(editor, entry, starts, None, window, cx) {
-        remember(editor, window, ranges, index, cx);
+    if let Some((ranges, transaction)) = insert(editor, entry, starts, None, window, cx) {
+        remember(editor, window, ranges, index, false, transaction, cx);
+    }
+}
+
+/// Inserts the rectangle `entry` (the ring's `index`th) with its corner at `at` and remembers
+/// the yank.
+fn yank_rectangle_at(
+    editor: &Entity<Editor>,
+    index: usize,
+    entry: &Entry,
+    at: Anchor,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match rectangle::insert_rectangle(editor, &entry.rectangle_rows(), at, window, cx) {
+        Some((end, transaction)) => remember(
+            editor,
+            window,
+            vec![(at, end)],
+            index,
+            true,
+            transaction,
+            cx,
+        ),
+        None => cx.set_global(YankState(None)),
     }
 }
 
@@ -158,6 +198,10 @@ pub(crate) fn yank_state(
 
 /// Replaces the yanked `ranges` with `entry` (the ring's `index`th) and remembers the result.
 /// `false`, with the yank forgotten, when the ranges cannot be replaced one by one.
+///
+/// When the last yank or `entry` is a rectangle, the last yank's undo step is undone instead
+/// and `entry` yanked at its start as a new undo step; `false`, with nothing changed, when that
+/// step is no longer in the undo history.
 pub(crate) fn replace_yanked(
     editor: &Entity<Editor>,
     index: usize,
@@ -166,13 +210,65 @@ pub(crate) fn replace_yanked(
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
+    let window_id = window.window_handle().window_id();
+    let (was_rectangle, transaction) = cx
+        .try_global::<YankState>()
+        .and_then(|state| state.0.as_ref())
+        .filter(|yanked| yanked.window == window_id && yanked.editor == editor.entity_id())
+        .map_or((false, None), |yanked| {
+            (yanked.rectangle, yanked.transaction)
+        });
+    if was_rectangle || entry.kind == EntryKind::Rectangle {
+        return reyank(editor, index, entry, &ranges, transaction, window, cx);
+    }
     let starts = ranges.iter().map(|(start, _)| *start).collect();
-    let Some(ranges) = insert(editor, entry, starts, Some(&ranges), window, cx) else {
+    let Some((ranges, transaction)) = insert(editor, entry, starts, Some(&ranges), window, cx)
+    else {
         // Touching ranges would merge into one selection and misplace the pieces.
         cx.set_global(YankState(None));
         return false;
     };
-    remember(editor, window, ranges, index, cx);
+    remember(editor, window, ranges, index, false, transaction, cx);
+    true
+}
+
+/// Undoes the last yank's undo step `transaction` and yanks `entry` at the start of the first
+/// yanked range, as a new undo step, so one undo removes everything yanked.
+fn reyank(
+    editor: &Entity<Editor>,
+    index: usize,
+    entry: &Entry,
+    ranges: &[(Anchor, Anchor)],
+    transaction: Option<TransactionId>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(&(start, _)) = ranges.first() else {
+        return false;
+    };
+    if let Some(transaction) = transaction {
+        let buffer = editor.read(cx).buffer().clone();
+        if !buffer.read(cx).has_transaction(transaction, cx) {
+            cx.set_global(YankState(None));
+            return false;
+        }
+        buffer.update(cx, |buffer, cx| buffer.undo_transaction(transaction, cx));
+    }
+    if entry.kind == EntryKind::Rectangle {
+        yank_rectangle_at(editor, index, entry, start, window, cx);
+        return true;
+    }
+    editor.update(cx, |editor, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+            s.select_anchor_ranges([start..start])
+        });
+    });
+    match insert(editor, entry, vec![start], None, window, cx) {
+        Some((ranges, transaction)) => {
+            remember(editor, window, ranges, index, false, transaction, cx)
+        }
+        None => cx.set_global(YankState(None)),
+    }
     true
 }
 
@@ -189,8 +285,8 @@ fn entry_at(
 /// Pastes `entry` over every selection (first selecting `replace`, when given) as one undo
 /// step, one piece per caret when the entry has one per caret. Leaves each caret after its
 /// text and returns the inserted ranges, from `starts` (one per selection, in order) to a
-/// left-biased anchor at each caret. `None`, with nothing changed, when `replace` does not
-/// select one range each.
+/// left-biased anchor at each caret, with the undo step. `None`, with nothing changed, when
+/// `replace` does not select one range each.
 fn insert(
     editor: &Entity<Editor>,
     entry: &Entry,
@@ -198,7 +294,7 @@ fn insert(
     replace: Option<&[(Anchor, Anchor)]>,
     window: &mut Window,
     cx: &mut App,
-) -> Option<Vec<(Anchor, Anchor)>> {
+) -> Option<(Vec<(Anchor, Anchor)>, Option<TransactionId>)> {
     let item = kill_ring::clipboard_item(entry);
     let pieces = item.entries().iter().find_map(|entry| match entry {
         ClipboardEntry::String(string) => string.metadata_json::<Vec<ClipboardSelection>>(),
@@ -254,7 +350,7 @@ fn insert(
             group_late_auto_indent(editor, transaction, cx);
         }
         let ends = ends?;
-        Some(starts.into_iter().zip(ends).collect())
+        Some((starts.into_iter().zip(ends).collect(), transaction))
     })
 }
 
@@ -293,6 +389,8 @@ fn remember(
     window: &Window,
     ranges: Vec<(Anchor, Anchor)>,
     index: usize,
+    rectangle: bool,
+    transaction: Option<TransactionId>,
     cx: &mut App,
 ) {
     cx.set_global(YankState(Some(Yanked {
@@ -300,5 +398,7 @@ fn remember(
         editor: editor.entity_id(),
         ranges,
         index,
+        rectangle,
+        transaction,
     })));
 }
