@@ -62,6 +62,7 @@ fn fake_cli(log: &Path, home: &Path) -> Result<ClaudeCli, Failure> {
         },
         fix: String::new(),
         caps: Some(caps),
+        chat_caps: None,
     };
     ClaudeCli::check(
         &AgentCommand {
