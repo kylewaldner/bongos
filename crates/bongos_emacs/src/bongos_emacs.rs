@@ -79,6 +79,8 @@ mod recenter_tests;
 #[cfg(test)]
 mod rectangle_tests;
 #[cfg(test)]
+mod rectangle_yank_tests;
+#[cfg(test)]
 mod region_tests;
 #[cfg(test)]
 mod repeat_tests;
