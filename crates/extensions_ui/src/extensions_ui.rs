@@ -386,6 +386,7 @@ fn extension_provides_label(provides: ExtensionProvides) -> &'static str {
 pub struct ExtensionsPage {
     list: UniformListScrollHandle,
     entries: Vec<(Arc<ExtensionManifest>, bool)>,
+    records: Vec<InstallRecord>,
     query_editor: Entity<Editor>,
     provides_filter: Option<ExtensionProvides>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -410,7 +411,10 @@ impl ExtensionsPage {
             ];
             // An install, update or rebuild changes the commit shown and the busy buttons.
             if let Some(installer) = Installer::try_global(cx) {
-                subscriptions.push(cx.observe(&installer, |_: &mut Self, _, cx| cx.notify()));
+                subscriptions.push(cx.observe(&installer, |this: &mut Self, _, cx| {
+                    this.records = git_records(cx);
+                    cx.notify();
+                }));
             }
 
             let query_editor = cx.new(|cx| {
@@ -426,6 +430,7 @@ impl ExtensionsPage {
             let mut this = Self {
                 list: UniformListScrollHandle::new(),
                 entries: Vec::new(),
+                records: Vec::new(),
                 query_editor,
                 provides_filter,
                 _subscriptions: subscriptions,
@@ -456,6 +461,7 @@ impl ExtensionsPage {
             .map(|entry| (entry.manifest.clone(), entry.dev))
             .collect();
         self.entries = entries;
+        self.records = git_records(cx);
         self.list.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }
@@ -480,9 +486,11 @@ impl ExtensionsPage {
         is_dev: bool,
         cx: &mut Context<Self>,
     ) -> ExtensionCard {
-        let record = git_records(cx)
-            .into_iter()
-            .find(|record| record.id == extension.id.as_ref());
+        let record = self
+            .records
+            .iter()
+            .find(|record| record.id == extension.id.as_ref())
+            .cloned();
         let installer_busy = Installer::try_global(cx).is_some_and(|installer| {
             installer
                 .read(cx)

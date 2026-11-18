@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks the curated language list (crates/bongos_extensions_model/languages.toml): fetches every
+# Checks the curated language list (crates/bongos_extensions_model/src/languages.toml): fetches every
 # entry's pinned commit, runs the install preflight, builds the extension and checks its extension
 # API version against the range a Stable build loads. A developer runs this with network access
 # before a release (it clones, downloads toolchain pieces and compiles); no gate runs it.
