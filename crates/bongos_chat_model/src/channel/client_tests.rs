@@ -248,6 +248,39 @@ fn state_takes_an_optional_agent_name() {
 }
 
 #[test]
+fn state_uses_the_agent_from_the_environment() {
+    let fixture = Fixture::new();
+    let server = serve_one(&fixture.socket);
+    let mut env = fixture.env();
+    env.insert("BONGOS_CHAT_AGENT".to_string(), "codex".to_string());
+    run_reporter("state", &["idle"], &env, b"");
+    let report = received_report(&server.join().unwrap());
+    assert_eq!(report.agent.as_str(), "codex");
+}
+
+#[test]
+fn state_explicit_agent_beats_the_environment() {
+    let fixture = Fixture::new();
+    let server = serve_one(&fixture.socket);
+    let mut env = fixture.env();
+    env.insert("BONGOS_CHAT_AGENT".to_string(), "codex".to_string());
+    run_reporter("state", &["idle", "gemini"], &env, b"");
+    let report = received_report(&server.join().unwrap());
+    assert_eq!(report.agent.as_str(), "gemini");
+}
+
+#[test]
+fn state_invalid_environment_agent_falls_back_to_claude() {
+    let fixture = Fixture::new();
+    let server = serve_one(&fixture.socket);
+    let mut env = fixture.env();
+    env.insert("BONGOS_CHAT_AGENT".to_string(), "not valid!".to_string());
+    run_reporter("state", &["idle"], &env, b"");
+    let report = received_report(&server.join().unwrap());
+    assert_eq!(report.agent, AgentName::claude());
+}
+
+#[test]
 fn bad_mode_state_or_arguments_send_nothing() {
     let cases: [(&str, &[&str]); 7] = [
         ("state", &[]),

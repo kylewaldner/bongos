@@ -11,7 +11,7 @@
 //! - `claude-hook`: reads Claude Code's hook input from stdin (at most 16 MiB is kept, the rest is
 //!   drained) and sends the report [`translate_claude_hook`] gives, if any.
 //! - `state <running|waiting|idle> [agent]`: reads nothing and sends a `state` report. The agent is
-//!   `claude` unless named.
+//!   the named one, else the valid `BONGOS_CHAT_AGENT` from the environment, else `claude`.
 //!
 //! Anything else (an unknown mode, state or agent, a missing argument) sends nothing.
 
@@ -24,6 +24,9 @@ use crate::adapter::{CHANNEL_SOCKET_ENV, CHANNEL_TOKEN_ENV};
 
 /// The environment variable that holds the chat id a report is for.
 pub const CHAT_ID_ENV: &str = "BONGOS_CHAT_ID";
+
+/// The environment variable that names the agent a chat runs; launches export it.
+pub const AGENT_ENV: &str = "BONGOS_CHAT_AGENT";
 
 /// The mode Claude Code's hooks run.
 pub const CLAUDE_HOOK_MODE: &str = "claude-hook";
@@ -110,7 +113,7 @@ pub fn run(mode: &str, args: &[String], process: Process<'_>) {
         return;
     };
     let identity = ReportIdentity { chat, token, at };
-    let Some(report) = build_report(mode, args, identity, process.stdin) else {
+    let Some(report) = build_report(mode, args, identity, process.stdin, env) else {
         return;
     };
     let Ok(line) = render(&report) else {
@@ -124,6 +127,7 @@ fn build_report(
     args: &[String],
     identity: ReportIdentity,
     stdin: &mut dyn Read,
+    env: &dyn Fn(&str) -> Option<String>,
 ) -> Option<Report> {
     match mode {
         CLAUDE_HOOK_MODE => {
@@ -139,8 +143,11 @@ fn build_report(
             };
             let state = ReportedState::from_wire(state)?;
             let agent = match agent {
-                None => AgentName::claude(),
                 Some(agent) => AgentName::new(agent)?,
+                None => env(AGENT_ENV)
+                    .as_deref()
+                    .and_then(AgentName::new)
+                    .unwrap_or_else(AgentName::claude),
             };
             Some(state_report(identity, agent, state))
         }
