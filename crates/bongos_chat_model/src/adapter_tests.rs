@@ -131,6 +131,108 @@ fn versions_compare_by_number() {
     assert!(!version_at_least("", "2.1.319"));
 }
 
+const TABLE: VersionTable = VersionTable::new(&[
+    VersionRow {
+        name: "--old",
+        min_version: "1.2.0",
+        verified: true,
+    },
+    VersionRow {
+        name: "--new",
+        min_version: "1.10.0",
+        verified: false,
+    },
+    VersionRow {
+        name: "thing",
+        min_version: "1.2.0",
+        verified: true,
+    },
+    VersionRow {
+        name: "thing",
+        min_version: "1.5.0",
+        verified: true,
+    },
+]);
+
+fn table_has(version: Option<&str>) -> Vec<&'static str> {
+    let caps = Capabilities::from_version(version, &TABLE);
+    ["--old", "--new", "thing", "absent"]
+        .into_iter()
+        .filter(|name| caps.has(name))
+        .collect()
+}
+
+#[test]
+fn a_version_table_gives_rows_at_or_below_the_version() {
+    assert_eq!(table_has(Some("1.1.9")), Vec::<&str>::new());
+    assert_eq!(table_has(Some("1.2.0")), ["--old", "thing"]);
+    assert_eq!(table_has(Some("1.4.9")), ["--old", "thing"]);
+    assert_eq!(table_has(Some("1.9.9")), ["--old", "thing"]);
+    assert_eq!(table_has(Some("1.10.0")), ["--old", "--new", "thing"]);
+    // Newer than every row keeps every row.
+    assert_eq!(table_has(Some("7.0.0")), ["--old", "--new", "thing"]);
+}
+
+#[test]
+fn a_version_table_reads_the_versions_the_parser_reads() {
+    for version in [
+        "v1.10.0",
+        "1.10.0 (Some Tool)",
+        "  1.10.0\n",
+        "1.10.0.",
+        "1.10.0.4",
+    ] {
+        assert_eq!(
+            table_has(Some(version)),
+            ["--old", "--new", "thing"],
+            "{version}"
+        );
+    }
+    // `1.2` reads as 1.2.0.
+    assert_eq!(table_has(Some("1.2")), ["--old", "thing"]);
+    assert_eq!(table_has(Some("1.1")), Vec::<&str>::new());
+}
+
+#[test]
+fn an_unreadable_version_gives_no_capabilities() {
+    for version in [
+        None,
+        Some(""),
+        Some("   "),
+        Some("abc"),
+        Some("not a version"),
+        Some("1"),
+        Some("1.x.3"),
+        Some("1.10.0-beta"),
+    ] {
+        let caps = Capabilities::from_version(version, &TABLE);
+        assert!(!caps.has("--old") && !caps.has_flag("--old"), "{version:?}");
+        assert!(!caps.has("thing"), "{version:?}");
+    }
+    assert_eq!(
+        Capabilities::from_version(None, &TABLE),
+        Capabilities::default()
+    );
+    assert_eq!(Capabilities::from_version(Some(""), &TABLE).version(), "");
+}
+
+#[test]
+fn flag_rows_answer_has_flag_and_other_rows_do_not() {
+    let caps = Capabilities::from_version(Some("1.10.0"), &TABLE);
+    assert!(caps.has_flag("--old") && caps.has_flag("--new"));
+    assert!(caps.has("thing") && !caps.has_flag("thing") && !caps.has_subcommand("thing"));
+    assert_eq!(caps.version(), "1.10.0");
+    let older = Capabilities::from_version(Some("v1.3.0 (Tool)"), &TABLE);
+    assert_eq!(older.version(), "1.3.0");
+    assert!(older.has_flag("--old") && !older.has_flag("--new"));
+}
+
+#[test]
+fn from_help_capabilities_hold_no_table_rows() {
+    let caps = claude_caps(&[]);
+    assert!(!caps.has("--settings") && caps.has_flag("--settings"));
+}
+
 #[test]
 fn every_fallback_has_a_label() {
     let all = [

@@ -25,9 +25,10 @@ mod types;
 
 pub use adapter::{
     AgentAdapter, Capabilities, CaptureQuery, ENV_NAMES, Fallback, GeneratedFiles, HiddenFlag,
-    LaunchKind, LaunchPlan, LaunchSpec, Login, Shape, adapter_for, version_at_least,
+    LaunchKind, LaunchPlan, LaunchSpec, Login, Shape, VersionRow, VersionTable, adapter_for,
+    version_at_least,
 };
-pub use claude::{BELL_KEY, BELL_VALUE, ClaudeAdapter, project_slug};
+pub use claude::{BELL_KEY, BELL_VALUE, ClaudeAdapter, HOOKS, VERSION_TABLE, project_slug};
 pub use codex::{CODEX_TABLE, CodexAdapter, CodexTable};
 pub use digest::{DIGEST_PREFIX, context_digest};
 pub use error::{Error, ErrorKind, Result};

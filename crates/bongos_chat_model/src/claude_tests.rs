@@ -331,3 +331,94 @@ fn a_fork_id_is_the_newest_unclaimed_transcript_since_launch() {
     let after = SystemTime::now() + Duration::from_secs(3600);
     assert_eq!(adapter.capture_session_id(&query(after, &claimed)), None);
 }
+
+fn table_names() -> Vec<&'static str> {
+    let mut names: Vec<_> = VERSION_TABLE.rows.iter().map(|row| row.name).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+fn claude_table_caps(version: Option<&str>) -> Capabilities {
+    ClaudeAdapter::new("claude").capabilities(version)
+}
+
+#[test]
+fn the_claude_table_has_every_row_at_the_known_good_version() {
+    for version in [
+        "2.1.319",
+        "2.1.319 (Claude Code)",
+        "v2.1.319",
+        "2.1.320",
+        "2.1.326",
+        "2.1.327",
+        "2.1.327 (Claude Code)",
+        "2.2.0",
+        "3.0.0",
+    ] {
+        let caps = claude_table_caps(Some(version));
+        for name in table_names() {
+            assert!(caps.has(name), "{name} at {version}");
+        }
+        assert!(caps.has(HOOKS) && caps.has("auth"), "{version}");
+        for flag in [
+            "--append-system-prompt-file",
+            "--append-system-prompt",
+            "--settings",
+            "--plugin-dir",
+            "--resume",
+            "--fork-session",
+            "--session-id",
+            "--name",
+            "--model",
+        ] {
+            assert!(caps.has_flag(flag), "{flag} at {version}");
+        }
+    }
+}
+
+#[test]
+fn an_older_claude_has_no_row() {
+    for version in ["2.1.318", "2.1.0", "2.1", "2.0.999", "1.0.0"] {
+        let caps = claude_table_caps(Some(version));
+        for name in table_names() {
+            assert!(!caps.has(name), "{name} at {version}");
+        }
+        assert!(!caps.has_flag("--append-system-prompt-file"), "{version}");
+    }
+}
+
+#[test]
+fn an_unreadable_claude_version_gives_no_capabilities() {
+    for version in [None, Some(""), Some("abc"), Some("v"), Some("Claude Code")] {
+        assert_eq!(claude_table_caps(version), Capabilities::default());
+    }
+    assert!(!claude_table_caps(Some("garbage")).has(HOOKS));
+}
+
+#[test]
+fn the_table_agrees_with_the_hidden_flag_list() {
+    let caps = claude_table_caps(Some("2.1.319 (Claude Code)"));
+    for hidden in crate::claude::HIDDEN_FLAGS {
+        assert!(
+            VERSION_TABLE
+                .rows
+                .iter()
+                .any(|row| row.name == hidden.flag && row.min_version == hidden.min_version),
+            "{}",
+            hidden.flag
+        );
+        assert!(caps.has_flag(hidden.flag));
+    }
+}
+
+#[test]
+fn the_table_marks_the_installed_version_row_verified() {
+    let hooks: Vec<_> = VERSION_TABLE
+        .rows
+        .iter()
+        .filter(|row| row.name == HOOKS)
+        .map(|row| (row.min_version, row.verified))
+        .collect();
+    assert_eq!(hooks, [("2.1.319", true), ("2.1.327", true)]);
+}

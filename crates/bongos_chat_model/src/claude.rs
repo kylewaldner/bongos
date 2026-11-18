@@ -23,7 +23,7 @@ use std::path::Path;
 
 use crate::adapter::{
     AgentAdapter, Capabilities, CaptureQuery, Fallback, HiddenFlag, LaunchKind, LaunchPlan,
-    LaunchSpec, Login, Shape, launch_env, note,
+    LaunchSpec, Login, Shape, VersionRow, VersionTable, launch_env, note,
 };
 use crate::capture::{Candidate, created_at, is_uuid, pick_newest};
 use crate::record::Agent;
@@ -33,6 +33,77 @@ pub const HIDDEN_FLAGS: &[HiddenFlag] = &[HiddenFlag {
     flag: "--append-system-prompt-file",
     min_version: "2.1.319",
 }];
+
+/// What Claude Code can do by version, from the step 4 spike on 2.1.319 (every flag and `auth` row
+/// was exercised or read from that binary's `--help`), plus the `hooks` row: `--settings` hooks
+/// (`SessionStart`, the channel's reports) worked on 2.1.319, and a second row records 2.1.327, the
+/// installed version, as verified. Every row sits at 2.1.319 because earlier versions were not tried, so the
+/// first version that has each one is unknown. Nothing reads this table for a launch yet.
+pub const VERSION_TABLE: VersionTable = VersionTable::new(&[
+    VersionRow {
+        name: "--append-system-prompt-file",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "--append-system-prompt",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "--settings",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "--plugin-dir",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "--resume",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "--fork-session",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "--session-id",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "--name",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "--model",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: "auth",
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: HOOKS,
+        min_version: "2.1.319",
+        verified: true,
+    },
+    VersionRow {
+        name: HOOKS,
+        min_version: "2.1.327",
+        verified: true,
+    },
+]);
+
+/// The row name of settings hooks, which the chat channel needs.
+pub const HOOKS: &str = "hooks";
 
 /// The settings key and value that turn on the terminal bell.
 pub const BELL_KEY: &str = "preferredNotifChannel";
@@ -50,6 +121,12 @@ impl ClaudeAdapter {
         Self {
             command: command.to_string(),
         }
+    }
+
+    /// The capabilities of Claude Code `version` (the output of `--version`, if it ran) by
+    /// [`VERSION_TABLE`]. An unreadable version gives none, so every fallback applies.
+    pub fn capabilities(&self, version: Option<&str>) -> Capabilities {
+        Capabilities::from_version(version, &VERSION_TABLE)
     }
 
     fn injection(
