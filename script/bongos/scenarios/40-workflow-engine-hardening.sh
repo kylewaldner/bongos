@@ -13,8 +13,9 @@
 #      branch holds the commit of the fake agent under a merge commit of the run, and the todo of
 #      the task is done.
 #   2. A second leaf task, run while the fake sleeps mid-node: the app is quit while the node
-#      runs, no fake process is left behind, and after the relaunch the run reads interrupted
-#      (and still no fake runs).
+#      runs, no fake process is left behind, the run reads interrupted, the relaunch starts
+#      nothing by itself, and `C-c f c` resumes the run, which ends succeeded with its work node
+#      run once more.
 #   3. The proxy got no request beyond the two kinds every launch makes.
 # Reading a toast is not possible, so a failed start is read from its effect: no run record.
 # The scenario leaves the app quit, restores settings.json and never writes final.png.
@@ -144,13 +145,26 @@ no_fake() { ! pgrep -f 'fake-claude-headless|sleep 600' >/dev/null; }
 
 fake_sleeping() { pgrep -f 'sleep 600' >/dev/null; }
 
+# 0 when a task with the goal <$1> exists; read again at every poll.
+task_exists() { [ -n "$(task_dir_of "$1")" ]; }
+
+# The starts of the `work` node in the run records of the task in <$1>.
+work_starts() {
+  local file n count=0
+  while IFS= read -r file; do
+    n=$(grep -c '"event":"NodeStarted".*"node":"work"' "$file" || true)
+    count=$((count + n))
+  done < <(events_of "$1")
+  echo "$count"
+}
+
 # make_task <goal>: a task in the billing project with a worktree and its task branch started; sets
 # TASK_DIR and WORKTREE.
 make_task() {
   wkeys shift+n
   choose billing
   choose "$1"
-  poll 10 "the task '$1'" test -n "$(task_dir_of "$1")"
+  poll 10 "the task '$1'" task_exists "$1"
   TASK_DIR=$(task_dir_of "$1")
   wkeys s
   choose "${1%% *}"
@@ -312,7 +326,7 @@ no_fake || fail "a fake agent is still running after the first run: $(pgrep -af 
 say "smoke: run 1 succeeded; $FIRST_BRANCH holds the fake agent's commit under a merge of the run; the todo is done"
 
 # ---------------------------------------------------------------------------------------------
-step "Run 2: quit mid-node; no fake is left behind and the run reads interrupted after the relaunch"
+step "Run 2: quit mid-node; no fake is left behind, the run reads interrupted and resumes to its end after the relaunch"
 echo sleep >"$SCENARIO_FILE"
 make_task "Refund customers"
 SECOND_DIR=$TASK_DIR
@@ -325,14 +339,27 @@ frame_has_ui hardening-run-2
 quit_any
 poll 15 "no fake process after the quit" no_fake ||
   fail "a fake agent outlived the app: $(pgrep -af 'fake-claude-headless|sleep 600')"
+poll 15 "the quit to record the second run interrupted" events_has "$SECOND_DIR" '"event":"Interrupted"'
+STARTS_BEFORE=$(work_starts "$SECOND_DIR")
 launch_drawn
-poll 60 "the second run to read interrupted" events_has "$SECOND_DIR" '"event":"Interrupted"'
 ! events_has "$SECOND_DIR" '"event":"Ended"' || fail "the interrupted run ended: $(cat $(events_of "$SECOND_DIR"))"
-sleep 3
 no_fake || fail "a fake agent runs after the relaunch: $(pgrep -af 'fake-claude-headless|sleep 600')"
+[ "$(work_starts "$SECOND_DIR")" -eq "$STARTS_BEFORE" ] ||
+  fail "the work node restarted by itself after the relaunch: $(cat $(events_of "$SECOND_DIR"))"
 shot hardening-run-2-relaunched
 frame_has_ui hardening-run-2-relaunched
-say "smoke: the run quit mid-node came back interrupted; no fake process remained"
+# The relaunch loaded the run interrupted and started nothing by itself: `C-c f c` resumes it, the
+# work node runs exactly once more, and the run ends succeeded with the merge. The fake still
+# plays `sleep` until here, so a node the app had restarted on its own would never end and the
+# resume would be refused: the run would not end.
+echo success >"$SCENARIO_FILE"
+focus_task Refund
+act keys ctrl+c f c
+poll 120 "the resumed run to end succeeded" events_has "$SECOND_DIR" '"event":"Ended".*"state":"succeeded"'
+[ "$(work_starts "$SECOND_DIR")" -eq $((STARTS_BEFORE + 1)) ] ||
+  fail "the work node started $(work_starts "$SECOND_DIR") times, not $((STARTS_BEFORE + 1)): $(cat $(events_of "$SECOND_DIR"))"
+no_fake || fail "a fake agent is still running after the resumed run: $(pgrep -af 'fake-claude-headless|sleep 600')"
+say "smoke: the run quit mid-node came back interrupted, started nothing by itself and finished on resume"
 
 # ---------------------------------------------------------------------------------------------
 step "Privacy: no request beyond the two kinds every launch makes"

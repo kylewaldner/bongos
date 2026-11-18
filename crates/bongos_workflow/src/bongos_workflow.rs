@@ -73,6 +73,8 @@ mod commands_tests;
 #[cfg(test)]
 mod definitions_tests;
 #[cfg(test)]
+mod dispatch_flow_tests;
+#[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]
 mod lifecycle_tests;

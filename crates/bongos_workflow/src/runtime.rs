@@ -1355,12 +1355,7 @@ pub fn holds_session(definition: &Definition, key: &NodeKey) -> bool {
         .is_some_and(bongos_workflow_model::definition::Node::is_checks)
 }
 
-/// A scripted [`Runner`] for tests. Each start takes the node's scripted result (or the default
-/// `{"summary": "ok"}`); a try finishes when the test releases it, or at the next poll with
-/// `auto_finish`. With `command` set, each start spawns that command as a real process in its own
-/// session ([`NodeProcess`](crate::process::NodeProcess)), so halt, cancel and quit stop real
-/// processes.
-#[cfg(test)]
+/// The scripted runner of the tests.
 #[cfg(test)]
 #[path = "runtime_fake.rs"]
 pub(crate) mod fake;

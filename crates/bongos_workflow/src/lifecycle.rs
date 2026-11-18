@@ -28,8 +28,8 @@ use bongos_workflow_model::record::{
     Attempt, EndState, RUN_SCHEMA, RecordedInput, StartedBy, TodoRef,
 };
 use bongos_workflow_model::{
-    Definition, InputValue, Layer, LayerDirs, NodeKey, RunState, RunToml, check_fresh_retry, parse,
-    retry_set, schema,
+    Definition, InputValue, Layer, LayerDirs, NodeKey, RunState, RunToml, ValidationContext,
+    check_fresh_retry, parse, retry_set, schema,
 };
 use serde_json::Value;
 
@@ -746,7 +746,12 @@ impl<R: Runner> Lifecycle<R> {
                     "Set its `workflow`, or name one when starting.",
                 )
             })?;
-        let (resolved, definition) = load_definition(dirs, &name, Some(context.checks))?;
+        let (resolved, definition) = load_definition(
+            dirs,
+            &name,
+            context.checks.validation(),
+            Some(context.checks),
+        )?;
         let inputs = bongos_workflow_model::resolve(
             &definition,
             task,
@@ -1290,7 +1295,8 @@ impl<R: Runner> Lifecycle<R> {
             }
         }
         let name = self.runs[index].record.workflow.clone();
-        let (resolved, definition) = load_definition(dirs, &name, None)?;
+        let validation = self.settings.validation_context();
+        let (resolved, definition) = load_definition(dirs, &name, validation, None)?;
         let attempt = self.runs[index].attempt() + 1;
         let checkout = self.runs[index].task.clone();
         let worktree = self.create_worktree(&checkout, run, attempt)?;
@@ -1524,7 +1530,8 @@ impl<R: Runner> Lifecycle<R> {
     ) -> Result<(), Refusal> {
         let index = self.index(run)?;
         let name = self.runs[index].record.workflow.clone();
-        let (resolved, _) = load_definition(dirs, &name, None)?;
+        let validation = self.settings.validation_context();
+        let (resolved, _) = load_definition(dirs, &name, validation, None)?;
         let rev = self.runs[index].rev + 1;
         let copy = definition_copy_dir(&self.runs[index].attempt_dir(), rev);
         // `rev` is one past the log's current revision, so a directory here is the leftover of a
@@ -1705,12 +1712,15 @@ pub(crate) fn open_todo(
     }
 }
 
-/// Resolves and checks the definition `name`: refused when unknown or when it has errors. With
-/// `checks` that know a CLI's MCP servers, validation leaves that CLI's servers to the start's own
-/// MCP check, which comes later in the refusal order; otherwise validation reports them.
+/// Resolves and checks the definition `name` against `base` (the settings' context, so
+/// `programs.allow_network = false` refuses a network entry at every start, restart and fresh
+/// retry): refused when unknown or when it has errors. With `checks` that know a CLI's MCP
+/// servers, validation leaves that CLI's servers to the start's own MCP check, which comes later
+/// in the refusal order; otherwise validation reports them.
 fn load_definition(
     dirs: &LayerDirs,
     name: &str,
+    base: ValidationContext,
     checks: Option<&dyn StartChecks>,
 ) -> Result<(bongos_workflow_model::Resolved, Definition), Refusal> {
     let resolved = definitions::find_definition(dirs, Some(name)).map_err(|error| match error {
@@ -1721,7 +1731,6 @@ fn load_definition(
         ),
         other => Refusal::io(other),
     })?;
-    let base = checks.map(|checks| checks.validation()).unwrap_or_default();
     let report = definitions::check_definition_in(&resolved, base, |definition, context| {
         let Some(checks) = checks else {
             return;

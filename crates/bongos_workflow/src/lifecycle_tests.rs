@@ -1667,6 +1667,68 @@ fn resume_after_load_reruns_only_the_interrupted_key() {
     lifecycle.resume(&run).unwrap();
     settle(&mut lifecycle);
     assert_eq!(started_nodes(&lifecycle), ["work"]);
+
+    // The resumed run finishes, with `plan`'s result kept from before the relaunch.
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
+    assert_eq!(started_nodes(&lifecycle), ["work"]);
+    let state = lifecycle.state(&run).unwrap();
+    assert!(state.interrupted.is_empty());
+    assert!(
+        state
+            .finished
+            .iter()
+            .any(|finished| finished.key == NodeKey::new("plan", 1) && finished.succeeded())
+    );
+}
+
+const NETTED: &str = r#"
+schema = 1
+name = "netted"
+start = "fetch"
+
+[nodes.fetch]
+kind = "program"
+script = "fetch.py"
+permissions = { network = ["example.org"] }
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+#[test]
+fn restart_and_fresh_retry_refuse_a_network_entry_when_allow_network_is_off() {
+    let world = World::new();
+    write_definition(world.profile(), "netted", NETTED);
+    fs::write(
+        world.profile().join("netted").join("fetch.py"),
+        "print('ok')\n",
+    )
+    .unwrap();
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("fetch", 1);
+    let run = world
+        .start(&mut lifecycle, with_workflow("netted"))
+        .unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    // `programs.allow_network = false` now: neither a restart nor a fresh retry may run it.
+    let mut settings = world.settings();
+    settings.programs.allow_network = false;
+    lifecycle.set_settings(settings);
+    let refusal = lifecycle.restart(&run, &world.dirs, None).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Invalid, "{refusal}");
+    assert!(refusal.to_string().contains("allow_network"), "{refusal}");
+    let refusal = lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Invalid, "{refusal}");
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+    assert_eq!(lifecycle.record(&run).unwrap().attempts.len(), 1);
 }
 
 #[test]

@@ -16,6 +16,10 @@ struct Try {
     released: bool,
 }
 
+/// A scripted [`Runner`] for tests. Each start takes the node's scripted result (or the default
+/// `{"summary": "ok"}`); a try finishes when the test releases it, or at the next poll with
+/// `auto_finish`. With `command` set, each start spawns that command as a real process in its own
+/// session ([`NodeProcess`]), so halt, cancel and quit stop real processes.
 #[derive(Default)]
 pub struct FakeRunner {
     /// Finish every try at the next poll.

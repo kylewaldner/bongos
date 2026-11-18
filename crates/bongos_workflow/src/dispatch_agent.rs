@@ -134,6 +134,7 @@ fn render_node_prompt(node: &NodeStart<'_>, binding: &RunBinding) -> Result<Stri
     let text = fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut scope = prompt_scope(&binding.inputs);
     add_results(&mut scope, node.state);
+    add_item(&mut scope, node);
     let base = render(&text, &scope).map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(prompt_with_revision(node.state, node.key, &base))
 }
@@ -154,6 +155,42 @@ fn add_results(scope: &mut Scope, state: &RunState) {
             };
             scope.set(format!("nodes.{}.{field}", finished.key.node), text);
         }
+    }
+}
+
+/// `item`: for a key inside a fan-out branch, the item of its innermost fan, read from the list
+/// the fan node's last successful result fans out over.
+fn add_item(scope: &mut Scope, node: &NodeStart<'_>) {
+    let Some(((fan, index), outer)) = node.key.branch.split_last() else {
+        return;
+    };
+    let Some(result) = node
+        .state
+        .finished
+        .iter()
+        .rev()
+        .filter(|finished| finished.key.node == *fan && finished.key.branch == outer)
+        .find_map(|finished| finished.result.as_ref().filter(|_| finished.succeeded()))
+    else {
+        return;
+    };
+    let Some(fan_node) = node.definition.node(fan) else {
+        return;
+    };
+    let item = fan_node
+        .routes
+        .iter()
+        .filter_map(|route| route.fan_out.as_ref())
+        .find_map(|fan_out| match result.get(&fan_out.over) {
+            Some(serde_json::Value::Array(items)) => items.get(*index as usize),
+            _ => None,
+        });
+    if let Some(item) = item {
+        let text = match item {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        scope.set("item", text);
     }
 }
 

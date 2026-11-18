@@ -15,6 +15,7 @@ use crate::process::ProcessRecord;
 use crate::runner_claude::{AgentDefaults, ClaudeCli};
 use crate::runner_program::{Interpreter, ProgramSettings};
 use crate::runtime::{Finish, NodeStart, RunBinding, Runner};
+use crate::worktrees::{self, Git, GitError, RunWorktree, branch_worktree_path};
 use bongos_workflow_model::scheduler::Branch;
 
 /// What the app knows that node kinds need, read when a node starts: the agent defaults, the
@@ -101,11 +102,23 @@ impl Kinds {
 }
 
 /// The runner of the app: dispatches each node to its kind.
-#[derive(Default)]
 pub struct AppRunner {
     kinds: Kinds,
     bindings: BTreeMap<String, RunBinding>,
     inputs: RunnerInputs,
+    /// The git that merges fan-out branches at their joins.
+    git: Git,
+}
+
+impl Default for AppRunner {
+    fn default() -> Self {
+        Self {
+            kinds: Kinds::default(),
+            bindings: BTreeMap::new(),
+            inputs: RunnerInputs::default(),
+            git: Git::new("git"),
+        }
+    }
 }
 
 impl AppRunner {
@@ -121,9 +134,15 @@ impl AppRunner {
         runner
     }
 
-    #[allow(dead_code)] // only tests plug other kinds in
+    #[cfg(test)]
     pub(crate) fn kinds_mut(&mut self) -> &mut Kinds {
         &mut self.kinds
+    }
+
+    /// Replaces the git that merges fan-out branches, so tests can isolate it.
+    #[cfg(test)]
+    pub(crate) fn set_git(&mut self, git: Git) {
+        self.git = git;
     }
 
     pub fn inputs(&self) -> &RunnerInputs {
@@ -219,16 +238,43 @@ impl Runner for AppRunner {
         }
     }
 
-    fn merge_branch(
-        &mut self,
-        _run: &str,
-        _join: &str,
-        _branch: &Branch,
-    ) -> Result<String, Failure> {
-        Err(Failure::new(
-            FailureReason::MergeConflict,
-            None,
-            "merging fan-out branches is not supported yet",
-        ))
+    fn merge_branch(&mut self, run: &str, join: &str, branch: &Branch) -> Result<String, Failure> {
+        let Some(binding) = self.bindings.get(run) else {
+            return Err(Failure::new(
+                FailureReason::WorktreeUnavailable,
+                None,
+                format!("run {run} has no worktree bound"),
+            ));
+        };
+        // A branch's worktree is made for its innermost fan (`dispatch_agent::node_worktree`).
+        let Some((fan, index)) = branch.last() else {
+            return Err(Failure::new(
+                FailureReason::MergeConflict,
+                None,
+                format!("join '{join}' was handed an empty branch"),
+            ));
+        };
+        merge_into_run(&self.git, &binding.worktree, fan, *index)
     }
+}
+
+/// Merges fan-out branch `index` of `fan` into the run branch with [`worktrees::join`], in the
+/// run worktree, and returns the run branch's head. A branch that never got a worktree (none of
+/// its nodes ran in one) has nothing to merge. A conflict is aborted, leaving every branch as it
+/// was, and fails naming the files.
+fn merge_into_run(git: &Git, run: &RunWorktree, fan: &str, index: u32) -> Result<String, Failure> {
+    let git_failure =
+        |error: GitError| Failure::new(FailureReason::WorktreeUnavailable, None, error.to_string());
+    if branch_worktree_path(&run.run_dir, fan, index).exists() {
+        let outcome = futures::executor::block_on(worktrees::join(git, run, fan, &[index]))
+            .map_err(git_failure)?;
+        if let Some((_, files)) = outcome.conflict {
+            return Err(Failure::new(
+                FailureReason::MergeConflict,
+                None,
+                format!("merge conflict in {}", files.join(", ")),
+            ));
+        }
+    }
+    futures::executor::block_on(git.run(&run.path, &["rev-parse", "HEAD"])).map_err(git_failure)
 }
