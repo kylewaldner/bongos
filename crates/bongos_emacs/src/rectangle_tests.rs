@@ -12,7 +12,7 @@ use workspace::MinibufferRouting;
 use crate::actions::{
     ClearRectangle, DeleteRectangle, KeepRectangle, OpenRectangle, SetMarkCommand,
 };
-use crate::apply_tests::{capture_kills, init_test};
+use crate::apply_tests::init_test;
 use crate::mark::{mark_for, set_mark};
 
 /// Three short, ending-inside and spanning rows between two full ones.
