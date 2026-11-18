@@ -57,7 +57,7 @@ fn live(state: ChatState, source: Source) -> ChatLive {
 
 fn no_channel(state: ChatState) -> ChatLive {
     chat(
-        ChannelStatus::Off("no channel"),
+        ChannelStatus::Off,
         ChannelCoverage::none(),
         state,
         ESTIMATED,
@@ -420,7 +420,7 @@ fn live_without_running_coverage_estimates_running_and_decays_it() {
 
 #[test]
 fn pending_and_off_behave_as_no_channel() {
-    for channel in [ChannelStatus::Pending, ChannelStatus::Off("no channel")] {
+    for channel in [ChannelStatus::Pending, ChannelStatus::Off] {
         let mut chat = chat(
             channel,
             ChannelCoverage::claude(),
@@ -440,7 +440,7 @@ fn pending_and_off_behave_as_no_channel() {
 
 #[test]
 fn no_channel_results_are_always_estimated() {
-    let mut chat = ChatLive::start(ChannelStatus::Off("no channel"), ChannelCoverage::none(), 0);
+    let mut chat = ChatLive::start(ChannelStatus::Off, ChannelCoverage::none(), 0);
     for input in [
         Input::Bell { now: 0 },
         Input::Output { now: 1_000 },
