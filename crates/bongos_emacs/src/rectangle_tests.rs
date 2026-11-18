@@ -11,7 +11,7 @@ use workspace::MinibufferRouting;
 
 use crate::actions::{
     ClearRectangle, DeleteRectangle, KeepRectangle, OpenRectangle, RectangleMarkMode,
-    SetMarkCommand, StringRectangle,
+    SetMarkCommand,
 };
 use crate::apply_tests::{capture_kills, init_test};
 use crate::mark::{mark_for, set_mark};
@@ -238,11 +238,8 @@ async fn the_other_rectangle_commands_are_not_implemented_yet(cx: &mut TestAppCo
     let messages = echo(&mut cx);
     let kills = capture_kills(&mut cx);
     set_rectangle(&mut cx, BLOCK, 2);
-    let actions: [&dyn Action; 2] = [&RectangleMarkMode, &StringRectangle];
-    for action in actions {
-        dispatch(&mut cx, action);
-    }
+    dispatch(&mut cx, &RectangleMarkMode);
     cx.assert_editor_state(BLOCK);
-    assert_eq!(*messages.borrow(), vec!["Not implemented yet"; 2]);
+    assert_eq!(*messages.borrow(), vec!["Not implemented yet"]);
     assert!(kills.borrow().is_empty());
 }
