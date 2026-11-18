@@ -2789,6 +2789,9 @@
     "submit_delay_ms": 100,
     // The directory of session types; null means ~/.bongos/chat-types.
     "types_dir": null,
+    // Whether running chats report their state to bongos over a private local
+    // socket (agent hooks), instead of bongos estimating it from terminal output.
+    "channels": false,
     // The agent CLIs: the program to run and arguments added to every launch.
     "agents": {
       "claude": { "command": "claude", "extra_args": [] },

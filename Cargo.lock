@@ -2286,6 +2286,7 @@ dependencies = [
  "language",
  "log",
  "menu",
+ "net",
  "nix 0.29.0",
  "paths",
  "project",
@@ -10422,6 +10423,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.1",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
