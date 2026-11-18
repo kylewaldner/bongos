@@ -31,8 +31,6 @@ pub(crate) struct RectangleMode {
     on: bool,
     /// The selection on the point's row, whose head is the point.
     point_selection_id: Option<usize>,
-    /// The buffer's edit count when the selections were last built; an edit since ends the mode.
-    edit_count: usize,
 }
 
 impl Addon for RectangleMode {
@@ -245,17 +243,20 @@ pub(crate) fn toggle(editor: &Entity<Editor>, window: &mut Window, cx: &mut App)
         editor.update(cx, |editor, cx| editor.set_selection_mark_mode(true, cx));
     }
     editor.update(cx, |editor, cx| {
-        let edit_count = editor.buffer().read(cx).snapshot(cx).edit_count();
         if let Some(mode) = editor.addon_mut::<RectangleMode>() {
             mode.on = true;
             mode.point_selection_id = None;
-            mode.edit_count = edit_count;
         }
         cx.notify();
     });
-    let active = &mut cx.default_global::<ActiveEditors>().0;
-    active.retain(|weak| weak.upgrade().is_some());
+    // Only editors still in the mode stay, each once.
+    let mut active = std::mem::take(&mut cx.default_global::<ActiveEditors>().0);
+    active.retain(|weak| {
+        weak.upgrade()
+            .is_some_and(|other| other != *editor && is_on(other.read(cx)))
+    });
     active.push(editor.downgrade());
+    cx.default_global::<ActiveEditors>().0 = active;
     rebuild(editor, window, cx);
 }
 
@@ -295,7 +296,7 @@ fn end(editor: &Entity<Editor>, collapse: Collapse, window: &mut Window, cx: &mu
 
 /// Before a motion: the column selection becomes the single region from the mark to the point,
 /// which the motion extends. The selection change that follows rebuilds the column selection.
-fn to_region(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+pub(crate) fn to_region(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
     if !is_on(editor.read(cx)) {
         return;
     }
@@ -404,18 +405,15 @@ fn build(editor: &Editor, mark: Anchor, cx: &App) -> Option<Build> {
 
 /// Makes the selections the column selection of the rectangle between the mark and the newest
 /// selection's head, unless they already are, and sets the past-line-end highlights. Ends the
-/// mode when mark mode went off, the buffer changed, or there is no rectangle.
+/// mode when mark mode went off or there is no rectangle; an edit ends it through the editor's
+/// edited event.
 fn rebuild(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
     if !is_on(editor.read(cx)) {
         return;
     }
     let mark = mark::mark_for(editor, cx);
     editor.update(cx, |editor, cx| {
-        let edit_count = editor.buffer().read(cx).snapshot(cx).edit_count();
-        let edited = editor
-            .addon::<RectangleMode>()
-            .is_some_and(|mode| mode.edit_count != edit_count);
-        if edited || !editor.selection_mark_mode() {
+        if !editor.selection_mark_mode() {
             turn_off(editor, cx);
             return;
         }

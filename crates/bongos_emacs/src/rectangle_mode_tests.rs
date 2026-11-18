@@ -8,6 +8,7 @@ use multi_buffer::{MultiBufferOffset, ToOffset as _, ToPoint as _};
 
 use crate::actions::{DeleteRectangle, ForwardWord, KeyboardQuit, RectangleMarkMode};
 use crate::apply_tests::init_test;
+use crate::count_adapters_tests::call;
 use crate::mark::ring_for;
 use crate::rectangle_mode::{is_on, motions};
 use crate::rectangle_tests::{mark_offset, set_rectangle};
@@ -132,6 +133,20 @@ async fn motions_move_the_point_corner_and_rebuild(cx: &mut TestAppContext) {
     cx.assert_editor_state("a«bcdefghˇ»\na«bcdefghˇ»\na«bcd efgh ijˇ»");
     assert!(mode_on(&mut cx));
     assert_eq!(newest(&mut cx), (19, 30));
+}
+
+#[gpui::test]
+async fn counted_motions_move_the_point_corner_and_rebuild(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    start(&mut cx, "abcdefgh\nabcˇdefgh\nabcdefgh\nabcdefgh", 1);
+    call::<SelectDown>(&mut cx, 2);
+    cx.run_until_parked();
+    cx.assert_editor_state("a«bcˇ»defgh\na«bcˇ»defgh\na«bcˇ»defgh\na«bcˇ»defgh");
+    call::<SelectRight>(&mut cx, 2);
+    cx.run_until_parked();
+    cx.assert_editor_state("a«bcdeˇ»fgh\na«bcdeˇ»fgh\na«bcdeˇ»fgh\na«bcdeˇ»fgh");
+    assert!(mode_on(&mut cx));
+    assert_eq!(newest(&mut cx), (28, 32));
 }
 
 #[gpui::test]
