@@ -24,11 +24,15 @@ mod shipped;
 mod types;
 
 pub use adapter::{
-    AgentAdapter, Capabilities, CaptureQuery, ENV_NAMES, Fallback, GeneratedFiles, HiddenFlag,
-    LaunchKind, LaunchPlan, LaunchSpec, Login, Shape, VersionRow, VersionTable, adapter_for,
+    AgentAdapter, CHANNEL_SOCKET_ENV, CHANNEL_TOKEN_ENV, Capabilities, CaptureQuery, ChannelOff,
+    ChannelPlan, ENV_NAMES, Fallback, GeneratedFiles, HiddenFlag, LaunchKind, LaunchPlan,
+    LaunchSpec, Login, Shape, VersionRow, VersionTable, adapter_for, plan_channel,
     version_at_least,
 };
-pub use claude::{BELL_KEY, BELL_VALUE, ClaudeAdapter, HOOKS, VERSION_TABLE, project_slug};
+pub use claude::{
+    BELL_KEY, BELL_VALUE, ClaudeAdapter, HOOK_REPORT_MODE, HOOKS, REPORT_HOOK_EVENTS,
+    REPORT_HOOK_TIMEOUT_SECS, VERSION_TABLE, project_slug,
+};
 pub use codex::{CODEX_TABLE, CodexAdapter, CodexTable};
 pub use digest::{DIGEST_PREFIX, context_digest};
 pub use error::{Error, ErrorKind, Result};
