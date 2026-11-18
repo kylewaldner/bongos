@@ -38910,12 +38910,18 @@ async fn test_control_chord_shows_no_pending_text(cx: &mut TestAppContext) {
     });
     let mut cx = EditorTestContext::new(cx).await;
     cx.set_state("abˇc");
+    cx.update_editor(|editor, window, cx| {
+        editor.finalize_last_transaction(cx);
+        editor.insert("Z", window, cx);
+        editor.finalize_last_transaction(cx);
+    });
 
     cx.simulate_keystrokes("ctrl-x r");
-    cx.assert_editor_state("abˇc");
+    cx.assert_editor_state("abZˇc");
 
     cx.simulate_keystrokes("o");
-    cx.assert_editor_state("abcˇ");
+    cx.assert_editor_state("abZcˇ");
+    // The chord left nothing in the history, so undo takes back the insert.
     cx.update_editor(|editor, window, cx| editor.undo(&Undo, window, cx));
-    cx.assert_editor_state("abcˇ");
+    cx.assert_editor_state("abˇc");
 }
