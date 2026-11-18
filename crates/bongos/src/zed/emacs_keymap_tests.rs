@@ -415,10 +415,20 @@ async fn the_key_table_covers_every_emacs_action(cx: &mut gpui::TestAppContext) 
         // Every emacs action has an editor key; the cursor toggle is left unbound on purpose.
         // `pop-global-mark` is a workspace key (`mark_keymap_tests`) and the implementations
         // jump stays in the palette. The digit keys carry an argument, so they are tested apart.
-        const UNBOUND: [&str; 3] = [
+        // The rectangle commands have no keys yet.
+        const UNBOUND: [&str; 12] = [
             "emacs::PopGlobalMark",
             "emacs::XrefFindImplementations",
             "emacs::DigitArgument",
+            "emacs::RectangleMarkMode",
+            "emacs::CopyRectangleAsKill",
+            "emacs::KillRectangle",
+            "emacs::DeleteRectangle",
+            "emacs::OpenRectangle",
+            "emacs::ClearRectangle",
+            "emacs::StringRectangle",
+            "emacs::YankRectangle",
+            "emacs::KeepRectangle",
         ];
         for name in names
             .iter()

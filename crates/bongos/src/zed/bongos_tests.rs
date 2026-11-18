@@ -578,7 +578,7 @@ async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 53] = [
+const EMACS_ACTIONS: [(&str, &str); 62] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -650,6 +650,18 @@ const EMACS_ACTIONS: [(&str, &str); 53] = [
     ("emacs::DigitArgument", "emacs: digit argument"),
     ("emacs::NegativeArgument", "emacs: negative argument"),
     ("emacs::OpenLine", "emacs: open line"),
+    ("emacs::RectangleMarkMode", "emacs: rectangle mark mode"),
+    (
+        "emacs::CopyRectangleAsKill",
+        "emacs: copy rectangle as kill",
+    ),
+    ("emacs::KillRectangle", "emacs: kill rectangle"),
+    ("emacs::DeleteRectangle", "emacs: delete rectangle"),
+    ("emacs::OpenRectangle", "emacs: open rectangle"),
+    ("emacs::ClearRectangle", "emacs: clear rectangle"),
+    ("emacs::StringRectangle", "emacs: string rectangle"),
+    ("emacs::YankRectangle", "emacs: yank rectangle"),
+    ("emacs::KeepRectangle", "emacs: keep rectangle"),
 ];
 
 #[gpui::test]
