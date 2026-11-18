@@ -53,12 +53,16 @@ const CHANNEL_ENV_NAMES: &[&str] = &[CHANNEL_SOCKET_ENV, CHANNEL_TOKEN_ENV];
 pub enum ChannelOff {
     /// A word of the reporter command (the bongos program path) cannot be single-quoted.
     UnquotablePath,
+    /// The launch with the channel exited with an error before any report: the relaunch goes
+    /// without it, in case the CLI rejects the hooks.
+    ExitedEarly,
 }
 
 impl ChannelOff {
     pub fn reason(self) -> &'static str {
         match self {
             ChannelOff::UnquotablePath => "the bongos path cannot be quoted",
+            ChannelOff::ExitedEarly => "started without reports (the CLI exited when given them)",
         }
     }
 }

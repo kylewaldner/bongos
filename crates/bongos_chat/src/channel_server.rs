@@ -24,7 +24,7 @@ use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use bongos_chat_model::channel::report::{
@@ -303,6 +303,58 @@ impl Shared {
     }
 }
 
+/// One launch's registered token, from [`ChannelServer::register_launch`]. Dropping it forgets the
+/// token unless a later launch of the chat replaced it, so a launch that fails, ends or is closed
+/// leaves nothing registered. It holds the registry weakly: after the server stopped (which dropped
+/// every token) it does nothing.
+pub struct Registration {
+    chat: ChatId,
+    token: Token,
+    tokens: Weak<Shared>,
+}
+
+impl Registration {
+    pub fn chat(&self) -> &ChatId {
+        &self.chat
+    }
+
+    /// Whether `token` is this launch's token and is still the chat's current one in the server
+    /// that registered it.
+    pub fn is_current(&self, token: &Token) -> bool {
+        if !tokens_match(self.token.as_str(), token.as_str()) {
+            return false;
+        }
+        self.tokens.upgrade().is_some_and(|shared| {
+            lock(&shared.tokens)
+                .get(&self.chat)
+                .is_some_and(|current| tokens_match(current.as_str(), self.token.as_str()))
+        })
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let Some(shared) = self.tokens.upgrade() else {
+            return;
+        };
+        let mut tokens = lock(&shared.tokens);
+        if tokens
+            .get(&self.chat)
+            .is_some_and(|current| tokens_match(current.as_str(), self.token.as_str()))
+        {
+            tokens.remove(&self.chat);
+        }
+    }
+}
+
+impl std::fmt::Debug for Registration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registration")
+            .field("chat", &self.chat)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Counts a connection as open until it is dropped.
 struct OpenConnection(Arc<Shared>);
 
@@ -447,6 +499,18 @@ impl ChannelServer {
         true
     }
 
+    /// [`Self::register`] for one launch: the token stays registered while the returned
+    /// [`Registration`] lives. `None`, recording nothing, while the server is not running.
+    pub fn register_launch(&mut self, chat: ChatId, token: Token) -> Option<Registration> {
+        let running = self.running.as_ref()?;
+        lock(&running.shared.tokens).insert(chat.clone(), token.clone());
+        Some(Registration {
+            chat,
+            token,
+            tokens: Arc::downgrade(&running.shared),
+        })
+    }
+
     /// Forgets `chat`'s token when it is still `token` (a later launch's token stays).
     pub fn unregister(&mut self, chat: &ChatId, token: &Token) {
         let Some(running) = &self.running else {
@@ -513,10 +577,14 @@ impl ChannelServer {
         cx.try_global::<GlobalChannelServer>()
             .map(|global| global.0.clone())
     }
+
+    pub(crate) fn set_global(server: Entity<ChannelServer>, cx: &mut App) {
+        cx.set_global(GlobalChannelServer(server));
+    }
 }
 
 /// Creates the global server over the process's real directories, stopped on quit.
-pub(crate) fn init(cx: &mut App) {
+pub(crate) fn init(cx: &mut App) -> Entity<ChannelServer> {
     let server = cx.new(|cx| ChannelServer::new(SocketDirInputs::from_env(), cx));
     let weak = server.downgrade();
     cx.on_app_quit(move |cx| {
@@ -524,7 +592,8 @@ pub(crate) fn init(cx: &mut App) {
         async {}
     })
     .detach();
-    cx.set_global(GlobalChannelServer(server));
+    ChannelServer::set_global(server.clone(), cx);
+    server
 }
 
 async fn accept_loop(
