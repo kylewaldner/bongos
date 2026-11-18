@@ -1776,6 +1776,19 @@ impl Editor {
             .filter_map(|keystroke| keystroke.key_char.clone())
             .collect();
 
+        // A chord that starts with a control, alt or platform key (`C-x r o`) is a command, not
+        // text: showing its plain keys in the buffer would leave them in the undo history.
+        let command_chord = window.pending_input_keystrokes().is_some_and(|keystrokes| {
+            keystrokes.iter().any(|keystroke| {
+                keystroke.modifiers.control
+                    || keystroke.modifiers.alt
+                    || keystroke.modifiers.platform
+            })
+        });
+        if command_chord {
+            pending.clear();
+        }
+
         if !self.input_enabled || self.read_only || !self.focus_handle.is_focused(window) {
             pending = "".to_string();
         }

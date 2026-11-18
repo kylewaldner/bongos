@@ -11,7 +11,7 @@
 #   3. C-x r c clears a comment block to spaces; C-x u restores it.
 #   4. C-x r t asks `String rectangle: ` in the minibuffer and puts a prefix on every row; C-x u
 #      removes it.
-#   5. A kill and a yank at the end of a buffer whose rows are uneven: the yank pads the rows it
+#   5. A kill and a yank at the end of the last row, which is shorter: the yank pads the rows it
 #      adds. C-x u undoes the yank, then the kill.
 #   6. A tab row and a CJK row are cut at the displayed column (C-x r d); C-x u restores them.
 #   7. C-x SPC starts rectangle-mark-mode and shows the rectangle (rectangle-mark.png); C-g ends it.
@@ -97,6 +97,8 @@ sleep 0.5
 mark_and_move 1 2 2
 keys ctrl+x r k
 sleep 0.5
+# Save the killed Main.kt so that the next launch does not restore it unsaved.
+save_and_expect "$MAIN" 'ad\neh\nil\n'
 act keys ctrl+x ctrl+f
 type_text 'Other.kt'
 sleep 1
@@ -110,6 +112,9 @@ sleep 0.5
 save_and_expect "$OTHER" 'bcxxxx\nfgyyyy\njkzzzz\n'
 keys ctrl+x u
 save_and_expect "$OTHER" 'xxxx\nyyyy\nzzzz\n'
+# Close Other.kt so the window restores on Main.kt in the next part.
+act keys ctrl+x k
+wait_for_title 'Main\.kt'
 quit_app
 
 # 3. A comment block cleared to spaces.
@@ -136,21 +141,22 @@ keys ctrl+x u
 save_and_expect "$MAIN" 'one\ntwo\nthree\n'
 quit_app
 
-# 5. A yank at the end of the buffer where the rows are uneven: the added row is padded out.
-start 'abcd\nefgh\nij'
+# 5. A yank at the end of the last row where the rows are uneven: the added row is padded out. Saving
+# ends the file with a newline, so the text carries one from the start.
+start 'abcd\nefgh\nij\n'
 mark_and_move 0 1 2
 keys ctrl+x r k
 sleep 0.5
-save_and_expect "$MAIN" 'cd\ngh\nij'
-keys ctrl+End
+save_and_expect "$MAIN" 'cd\ngh\nij\n'
+keys ctrl+End ctrl+p ctrl+e
 sleep 0.5
 keys ctrl+x r y
 sleep 0.5
-save_and_expect "$MAIN" 'cd\ngh\nijab\n  ef'
+save_and_expect "$MAIN" 'cd\ngh\nijab\n  ef\n'
 keys ctrl+x u
-save_and_expect "$MAIN" 'cd\ngh\nij'
+save_and_expect "$MAIN" 'cd\ngh\nij\n'
 keys ctrl+x u
-save_and_expect "$MAIN" 'abcd\nefgh\nij'
+save_and_expect "$MAIN" 'abcd\nefgh\nij\n'
 quit_app
 
 # 6. A tab row and a CJK row are cut at the displayed column: columns 2 to 5 of four rows.
