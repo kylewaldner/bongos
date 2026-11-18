@@ -39,15 +39,65 @@ pub struct HiddenFlag {
     pub min_version: &'static str,
 }
 
+/// One capability of a [`VersionTable`]: present from `min_version` on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VersionRow {
+    /// A flag (starts with `-`, and then also answers `has_flag`) or any other capability name.
+    pub name: &'static str,
+    pub min_version: &'static str,
+    /// Whether the row was checked against a real binary, as opposed to assumed.
+    pub verified: bool,
+}
+
+/// What a CLI can do by version: capability rows, each with the version it first holds. A name may
+/// have several rows; it is present when any of them is satisfied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VersionTable {
+    pub rows: &'static [VersionRow],
+}
+
+impl VersionTable {
+    pub const fn new(rows: &'static [VersionRow]) -> Self {
+        Self { rows }
+    }
+}
+
 /// The flags and subcommands one installed CLI version offers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     flags: BTreeSet<String>,
     subcommands: BTreeSet<String>,
+    /// Capability names from a [`VersionTable`] (empty for the help-derived constructors).
+    names: BTreeSet<String>,
     version: String,
 }
 
 impl Capabilities {
+    /// Capabilities from the version alone, by `table`. A version that cannot be read (absent,
+    /// empty, garbage) gives an empty set, so every fallback applies, quietly. A row holds when the
+    /// version is at least its minimum, so a version newer than the table keeps every row.
+    pub fn from_version(version: Option<&str>, table: &VersionTable) -> Self {
+        let Some(token) = version
+            .and_then(version_token)
+            .filter(|token| version_parts(token).is_some())
+        else {
+            return Self::default();
+        };
+        let mut caps = Self {
+            version: token.clone(),
+            ..Self::default()
+        };
+        for row in table.rows {
+            if version_at_least(&token, row.min_version) {
+                caps.names.insert(row.name.to_string());
+                if row.name.starts_with('-') {
+                    caps.flags.insert(row.name.to_string());
+                }
+            }
+        }
+        caps
+    }
+
     /// Reads capabilities from the output of `<cli> --version` and `<cli> --help`. Only option lines
     /// (a line that starts with `-`, names separated by commas) give flags and only bare command
     /// words (alone, or followed by two spaces or an argument bracket) give subcommands, so a
@@ -73,6 +123,7 @@ impl Capabilities {
         Self {
             flags,
             subcommands,
+            names: BTreeSet::new(),
             version,
         }
     }
@@ -82,8 +133,14 @@ impl Capabilities {
         Self {
             flags: flags.iter().map(|name| name.to_string()).collect(),
             subcommands: subcommands.iter().map(|name| name.to_string()).collect(),
+            names: BTreeSet::new(),
             version: version.to_string(),
         }
+    }
+
+    /// Whether a [`VersionTable`] row of this name holds (only `from_version` sets any).
+    pub fn has(&self, name: &str) -> bool {
+        self.names.contains(name)
     }
 
     pub fn has_flag(&self, flag: &str) -> bool {
