@@ -14,7 +14,7 @@ use text::{Point, ToOffset as _, TransactionId};
 
 use crate::actions::{
     ClearRectangle, CopyRectangleAsKill, DeleteRectangle, KeepRectangle, KillRectangle,
-    OpenRectangle, RectangleMarkMode, StringRectangle, YankRectangle,
+    OpenRectangle, RectangleMarkMode, YankRectangle,
 };
 use crate::{mark, rectangle_mode, yank};
 
@@ -132,9 +132,29 @@ pub(crate) fn apply(
         bongos_minibuffer::message(window, cx, "Buffer is read-only");
         return false;
     }
-    let Some((corners, plan)) = plan_here(editor, op, window, cx) else {
+    let Some(corners) = corners(editor, window, cx) else {
         return false;
     };
+    apply_to(editor, op, corners, window, cx)
+}
+
+/// [`apply`] on corners captured earlier: the plan is made from their rows, and its edits land
+/// by anchor, so text changed since then moves with them.
+pub(crate) fn apply_to(
+    editor: &Entity<Editor>,
+    op: RectOp,
+    corners: Corners,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if editor.read(cx).read_only(cx) {
+        bongos_minibuffer::message(window, cx, "Buffer is read-only");
+        return false;
+    }
+    if corners.rows.is_empty() {
+        return false;
+    }
+    let plan = rectangle_ops::plan(op, &corners.rows, corners.columns, corners.tab);
     apply_plan(editor, &corners, &plan, window, cx);
     true
 }
@@ -259,10 +279,6 @@ pub(crate) fn insert_rectangle(
     })
 }
 
-fn not_implemented(window: &mut Window, cx: &mut App) {
-    bongos_minibuffer::message(window, cx, "Not implemented yet");
-}
-
 /// `delete-rectangle`: deletes the rectangle without saving it.
 pub(crate) fn delete_rectangle_command(
     _: &DeleteRectangle,
@@ -366,16 +382,6 @@ fn kill_rectangle(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
     // The rows reach the ring before the text goes.
     kill_ring::push_rectangle(plan.extracted.as_deref().unwrap_or_default(), cx);
     apply_plan(editor, &corners, &plan, window, cx);
-}
-
-pub(crate) fn string_rectangle_command(
-    _: &StringRectangle,
-    editor: &Entity<Editor>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    rectangle_mode::finish(editor, window, cx);
-    not_implemented(window, cx);
 }
 
 /// `yank-rectangle`: inserts the newest rectangle entry of the kill ring at point. The

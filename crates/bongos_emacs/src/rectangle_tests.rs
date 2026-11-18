@@ -10,7 +10,7 @@ use text::{Point, ToOffset as _};
 use workspace::MinibufferRouting;
 
 use crate::actions::{
-    ClearRectangle, DeleteRectangle, KeepRectangle, OpenRectangle, SetMarkCommand, StringRectangle,
+    ClearRectangle, DeleteRectangle, KeepRectangle, OpenRectangle, SetMarkCommand,
 };
 use crate::apply_tests::{capture_kills, init_test};
 use crate::mark::{mark_for, set_mark};
@@ -231,14 +231,3 @@ async fn a_zero_width_rectangle_edits_only_with_keep(cx: &mut TestAppContext) {
     cx.assert_editor_state("ˇ\n\n\n");
 }
 
-#[gpui::test]
-async fn string_rectangle_is_not_implemented_yet(cx: &mut TestAppContext) {
-    let mut cx = test_context(cx).await;
-    let messages = echo(&mut cx);
-    let kills = capture_kills(&mut cx);
-    set_rectangle(&mut cx, BLOCK, 2);
-    dispatch(&mut cx, &StringRectangle);
-    cx.assert_editor_state(BLOCK);
-    assert_eq!(*messages.borrow(), vec!["Not implemented yet"]);
-    assert!(kills.borrow().is_empty());
-}
