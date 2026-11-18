@@ -3,12 +3,15 @@
 //! server's socket from helper threads with the token the fake logged from its environment, as an
 //! agent's hook would. Parking is allowed; waits poll on the executor's timers.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use bongos_chat_model::channel::report::{
-    self, AgentName, ChatId, Event, Report, SessionSource, Token,
+    self, AgentName, ChatId, Detail, Event, Report, SessionSource, Token,
 };
+use bongos_chat_model::channel::state::{FROM_TERMINAL, NO_TURN_END};
 use bongos_chat_model::{
     Agent, ChannelOff, ClaudeAdapter, Fallback, LaunchKind, read_record, record_path,
 };
@@ -18,10 +21,10 @@ use tempfile::TempDir;
 
 use crate::channel_server::ChannelServer;
 use crate::channel_server_tests::{OK, exchange, inputs, refused, temp};
-use crate::runtime_tests::{Harness, STARTUP, fixture, harness, wait_for, write};
+use crate::runtime_tests::{Harness, STARTUP, WITHIN, fixture, harness, wait_for, write};
 use crate::{
-    CLAUDE_SETTINGS_FILE, ChannelConfig, ChannelStatus, ChatState, LaunchRequest, REPORTS_OFF,
-    Source,
+    CLAUDE_SETTINGS_FILE, ChannelConfig, ChannelStatus, ChatRuntimeEvent, ChatState, LaunchRequest,
+    REPORTS_OFF, Source,
 };
 
 fn set_channels(cx: &mut TestAppContext, channels: bool) {
@@ -132,17 +135,102 @@ impl Channels {
 
     /// Sends a `session_start` report for `chat` with `token` and returns the server's reply.
     async fn report(&self, chat: &str, token: &str, at: u64, cx: &mut TestAppContext) -> String {
-        let line = report_line(chat, token, at);
+        self.send(&report_of(chat, token, at), cx).await
+    }
+
+    /// Sends `report` through the server's socket and returns the server's reply.
+    async fn send(&self, report: &Report, cx: &mut TestAppContext) -> String {
+        let line = report::render(report).unwrap().into_bytes();
         let socket = self.socket(cx);
         let reply = exchange(&socket, line).await;
         cx.run_until_parked();
         reply
     }
 
+    /// Hands `report` to the runtime as the server would after its own checks.
+    fn deliver(&self, report: Report, cx: &mut TestAppContext) {
+        self.h
+            .runtime
+            .update(cx, |runtime, cx| runtime.on_report(report, cx));
+    }
+
     fn channel(&self, id: &str, cx: &mut TestAppContext) -> Option<ChannelStatus> {
+        self.h
+            .runtime
+            .read_with(cx, |runtime, _| runtime.live(id).map(|chat| chat.channel()))
+    }
+
+    fn off_reason(&self, id: &str, cx: &mut TestAppContext) -> Option<String> {
         self.h.runtime.read_with(cx, |runtime, _| {
-            runtime.live(id).map(|chat| chat.channel().clone())
+            runtime
+                .live(id)
+                .and_then(|chat| chat.channel_off_reason().map(str::to_string))
         })
+    }
+
+    /// The chat's state and where it comes from.
+    fn live_state(&self, id: &str, cx: &mut TestAppContext) -> (ChatState, Source) {
+        self.h.runtime.read_with(cx, |runtime, _| {
+            let chat = runtime.live(id).unwrap();
+            (chat.state(), chat.state_source())
+        })
+    }
+
+    /// Waits up to [`WITHIN`] for the chat to be `state` from `source`.
+    async fn wait_live_state(
+        &self,
+        id: &str,
+        state: ChatState,
+        source: Source,
+        cx: &mut TestAppContext,
+    ) {
+        let what = format!("{state} ({source:?})");
+        wait_for(cx, &what, WITHIN, |cx| {
+            self.live_state(id, cx) == (state, source)
+        })
+        .await;
+    }
+
+    /// Starts a Claude chat, makes its channel live with a `session_start` report at `at` 1, and
+    /// returns its id and token.
+    async fn start_live(&self, cx: &mut TestAppContext) -> (String, String) {
+        let id = self.start(self.request(Agent::Claude, "2.1.319"), cx).await;
+        let token = self.env("BONGOS_CHAT_TOKEN").pop().unwrap();
+        assert_eq!(self.report(&id, &token, 1, cx).await, OK);
+        self.wait_live_state(&id, ChatState::Idle, Source::Exact, cx)
+            .await;
+        assert_eq!(self.channel(&id, cx), Some(ChannelStatus::Live));
+        (id, token)
+    }
+
+    fn is_mid_turn(&self, id: &str, cx: &mut TestAppContext) -> bool {
+        self.h
+            .runtime
+            .read_with(cx, |runtime, _| runtime.live(id).unwrap().is_mid_turn())
+    }
+
+    /// Moves the runtime's clock past `chats.idle_after_secs` (60 in this harness).
+    fn pass_idle_time(&self, cx: &mut TestAppContext) {
+        self.h.runtime.update(cx, |runtime, cx| {
+            runtime.advance_clock(Duration::from_secs(61), cx)
+        });
+    }
+
+    /// Counts the runtime's events for `id` from now on.
+    fn count_events(&self, id: &str, cx: &mut TestAppContext) -> Rc<RefCell<usize>> {
+        let count = Rc::new(RefCell::new(0));
+        let id = id.to_string();
+        let counter = count.clone();
+        cx.update(|cx| {
+            cx.subscribe(&self.h.runtime, move |_, event, _| {
+                let ChatRuntimeEvent::Changed(changed) = event;
+                if *changed == id {
+                    *counter.borrow_mut() += 1;
+                }
+            })
+            .detach();
+        });
+        count
     }
 
     fn last_report_at(&self, id: &str, cx: &mut TestAppContext) -> Option<u64> {
@@ -153,22 +241,31 @@ impl Channels {
 }
 
 fn report_of(chat: &str, token: &str, at: u64) -> Report {
+    event_report(
+        chat,
+        token,
+        at,
+        Event::SessionStart {
+            source: SessionSource::Startup,
+        },
+    )
+}
+
+fn event_report(chat: &str, token: &str, at: u64, event: Event) -> Report {
     Report {
         chat: ChatId::new(chat).unwrap(),
         token: Token::new(token).unwrap(),
         at,
         agent: AgentName::claude(),
-        event: Event::SessionStart {
-            source: SessionSource::Startup,
-        },
+        event,
         session: None,
     }
 }
 
-fn report_line(chat: &str, token: &str, at: u64) -> Vec<u8> {
-    report::render(&report_of(chat, token, at))
-        .unwrap()
-        .into_bytes()
+fn needs_input(detail: &str) -> Event {
+    Event::NeedsInput {
+        detail: Some(Detail::new(detail).unwrap()),
+    }
 }
 
 #[gpui::test]
@@ -207,28 +304,23 @@ async fn test_a_claude_launch_with_channels_carries_env_and_hooks_and_registers(
 
     // Pending until a report; the state still comes from the terminal.
     assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Pending));
-    let source = c.h.runtime.read_with(cx, |runtime, _| {
-        runtime.live(&id).unwrap().state_source().clone()
-    });
-    assert_eq!(
-        source,
-        Source::Estimated("No report from claude yet".into())
-    );
+    assert_eq!(c.off_reason(&id, cx), None);
+    let source =
+        c.h.runtime
+            .read_with(cx, |runtime, _| runtime.live(&id).unwrap().state_source());
+    assert_eq!(source, Source::Estimated(FROM_TERMINAL));
 
     // Another token is refused and changes nothing.
     let other = "0".repeat(32);
     assert_eq!(c.report(&id, &other, 5, cx).await, refused("bad token"));
     assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Pending));
 
-    // The launch's own token is accepted, and the report is recorded without changing the state.
-    let state = c.h.state(&id, cx);
+    // The launch's own token is accepted: the channel goes live and the report sets the state.
     assert_eq!(c.report(&id, token, 7, cx).await, OK);
-    wait_for(cx, "the channel to go live", STARTUP, |cx| {
-        c.channel(&id, cx) == Some(ChannelStatus::Live)
-    })
-    .await;
+    c.wait_live_state(&id, ChatState::Idle, Source::Exact, cx)
+        .await;
+    assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Live));
     assert_eq!(c.last_report_at(&id, cx), Some(7));
-    assert_eq!(c.h.state(&id, cx), state);
 }
 
 #[gpui::test]
@@ -352,8 +444,11 @@ async fn test_an_early_error_exit_relaunches_once_without_the_channel(cx: &mut T
         c.env("BONGOS_CHAT_TOKEN").is_empty(),
         "the relaunch has no token"
     );
-    let reason = "Started without reports (the CLI exited when given them)".to_string();
-    assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Off(reason)));
+    assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Off));
+    assert_eq!(
+        c.off_reason(&id, cx).as_deref(),
+        Some("Started without reports (the CLI exited when given them)")
+    );
     let fallbacks = c.h.runtime.read_with(cx, |runtime, _| {
         runtime.live(&id).unwrap().fallbacks().to_vec()
     });
@@ -391,15 +486,13 @@ async fn test_turning_channels_off_moves_a_chat_to_off(cx: &mut TestAppContext) 
 
     set_channels(cx, false);
     cx.run_until_parked();
-    assert_eq!(
-        c.channel(&id, cx),
-        Some(ChannelStatus::Off(REPORTS_OFF.to_string()))
-    );
+    assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Off));
+    assert_eq!(c.off_reason(&id, cx).as_deref(), Some(REPORTS_OFF));
     let (source, has_token) = c.h.runtime.read_with(cx, |runtime, _| {
         let chat = runtime.live(&id).unwrap();
-        (chat.state_source().clone(), chat.has_token())
+        (chat.state_source(), chat.has_token())
     });
-    assert_eq!(source, Source::Estimated(REPORTS_OFF.to_string()));
+    assert_eq!(source, Source::Estimated(REPORTS_OFF));
     assert!(!has_token);
     assert_eq!(c.h.state(&id, cx), state, "the state is kept");
     assert!(!c.server.read_with(cx, |server, _| server.is_running()));
@@ -409,36 +502,32 @@ async fn test_turning_channels_off_moves_a_chat_to_off(cx: &mut TestAppContext) 
     set_channels(cx, true);
     cx.run_until_parked();
     assert_eq!(c.report(&id, &token, 2, cx).await, refused("unknown chat"));
-    assert_eq!(
-        c.channel(&id, cx),
-        Some(ChannelStatus::Off(REPORTS_OFF.to_string()))
-    );
+    assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Off));
+    assert_eq!(c.off_reason(&id, cx).as_deref(), Some(REPORTS_OFF));
+    // A report the server let through before it stopped is dropped too.
+    c.deliver(report_of(&id, &token, 3), cx);
+    assert_eq!(c.live_state(&id, cx).1, Source::Estimated(REPORTS_OFF));
 }
 
 #[gpui::test]
 async fn test_no_channel_for_codex_an_old_claude_or_channels_off(cx: &mut TestAppContext) {
     let c = channels(cx).await;
     let codex = c.start(c.request(Agent::Codex, ""), cx).await;
+    assert_eq!(c.channel(&codex, cx), Some(ChannelStatus::Off));
     assert_eq!(
-        c.channel(&codex, cx),
-        Some(ChannelStatus::Off(
-            "Codex does not report its state yet".to_string()
-        ))
+        c.off_reason(&codex, cx).as_deref(),
+        Some("Codex does not report its state yet")
     );
     let old = c.start(c.request(Agent::Claude, "2.1.300"), cx).await;
+    assert_eq!(c.channel(&old, cx), Some(ChannelStatus::Off));
     assert_eq!(
-        c.channel(&old, cx),
-        Some(ChannelStatus::Off(
-            "Claude 2.1.300 is older than the first version with hooks bongos knows (2.1.319)"
-                .to_string()
-        ))
+        c.off_reason(&old, cx).as_deref(),
+        Some("Claude 2.1.300 is older than the first version with hooks bongos knows (2.1.319)")
     );
     set_channels(cx, false);
     let off = c.start(c.request(Agent::Claude, "2.1.319"), cx).await;
-    assert_eq!(
-        c.channel(&off, cx),
-        Some(ChannelStatus::Off(REPORTS_OFF.to_string()))
-    );
+    assert_eq!(c.channel(&off, cx), Some(ChannelStatus::Off));
+    assert_eq!(c.off_reason(&off, cx).as_deref(), Some(REPORTS_OFF));
     let settings =
         std::fs::read_to_string(c.h.runtime_root.join(&off).join(CLAUDE_SETTINGS_FILE)).unwrap();
     assert!(!settings.contains("claude-hook"), "{settings}");
@@ -452,4 +541,192 @@ async fn test_no_channel_for_codex_an_old_claude_or_channels_off(cx: &mut TestAp
             || line.starts_with("BONGOS_CHAT_SOCKET=")),
         "{env:?}"
     );
+}
+
+#[gpui::test]
+async fn test_reports_set_the_state_and_the_terminal_does_not_while_live(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    let (id, token) = c.start_live(cx).await;
+
+    let steps = [
+        (Event::PromptSubmitted, ChatState::Running),
+        (needs_input("permission_prompt"), ChatState::Waiting),
+        (Event::ToolDone, ChatState::Running),
+        (Event::TurnDone, ChatState::Idle),
+    ];
+    for (at, (event, state)) in (2..).zip(steps) {
+        assert_eq!(c.send(&event_report(&id, &token, at, event), cx).await, OK);
+        c.wait_live_state(&id, state, Source::Exact, cx).await;
+    }
+    assert!(!c.is_mid_turn(&id, cx));
+
+    // A bell, keyboard input and output change nothing while the channel answers.
+    c.h.type_line(&id, "bell", cx);
+    c.h.type_line(&id, "hello", cx);
+    c.h.wait_content(&id, "got hello", cx).await;
+    cx.run_until_parked();
+    assert_eq!(c.live_state(&id, cx), (ChatState::Idle, Source::Exact));
+
+    // Exact running is mid-turn without any output.
+    assert_eq!(
+        c.send(&event_report(&id, &token, 9, Event::PromptSubmitted), cx)
+            .await,
+        OK
+    );
+    c.wait_live_state(&id, ChatState::Running, Source::Exact, cx)
+        .await;
+    assert!(c.is_mid_turn(&id, cx));
+}
+
+#[gpui::test]
+async fn test_an_interrupted_turn_ends_in_estimated_idle_after_the_timer(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    let (id, token) = c.start_live(cx).await;
+
+    // `UserPromptSubmit`, then no `Stop`, and the output stops.
+    c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
+    assert_eq!(c.live_state(&id, cx), (ChatState::Running, Source::Exact));
+    c.pass_idle_time(cx);
+    assert_eq!(
+        c.live_state(&id, cx),
+        (ChatState::Idle, Source::Estimated(NO_TURN_END))
+    );
+    assert!(!c.is_mid_turn(&id, cx));
+
+    // The next report makes the state exact again.
+    c.deliver(event_report(&id, &token, 3, Event::PromptSubmitted), cx);
+    assert_eq!(c.live_state(&id, cx), (ChatState::Running, Source::Exact));
+    c.deliver(event_report(&id, &token, 4, Event::TurnDone), cx);
+    assert_eq!(c.live_state(&id, cx), (ChatState::Idle, Source::Exact));
+}
+
+#[gpui::test]
+async fn test_a_denied_permission_ends_through_keyboard_input_and_the_timer(
+    cx: &mut TestAppContext,
+) {
+    let c = channels(cx).await;
+    let (id, token) = c.start_live(cx).await;
+    c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
+    c.deliver(
+        event_report(&id, &token, 3, needs_input("permission_prompt")),
+        cx,
+    );
+    assert_eq!(c.live_state(&id, cx), (ChatState::Waiting, Source::Exact));
+
+    // The timer never ends exact waiting: a permission prompt waits silently.
+    c.pass_idle_time(cx);
+    assert_eq!(c.live_state(&id, cx), (ChatState::Waiting, Source::Exact));
+
+    // Kyle answers: keyboard input leaves exact waiting for estimated running.
+    c.h.type_line(&id, "no", cx);
+    c.h.wait_content(&id, "got no", cx).await;
+    c.wait_live_state(&id, ChatState::Running, Source::Estimated(NO_TURN_END), cx)
+        .await;
+
+    // The denial ends the turn without a report: the timer ends it.
+    c.pass_idle_time(cx);
+    assert_eq!(
+        c.live_state(&id, cx),
+        (ChatState::Idle, Source::Estimated(NO_TURN_END))
+    );
+}
+
+#[gpui::test]
+async fn test_idle_prompt_ends_running_and_waiting_as_estimated_idle(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    let (id, token) = c.start_live(cx).await;
+
+    c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
+    c.deliver(event_report(&id, &token, 3, needs_input("idle_prompt")), cx);
+    assert_eq!(
+        c.live_state(&id, cx),
+        (ChatState::Idle, Source::Estimated(NO_TURN_END))
+    );
+
+    c.deliver(
+        event_report(&id, &token, 4, needs_input("permission_prompt")),
+        cx,
+    );
+    assert_eq!(c.live_state(&id, cx), (ChatState::Waiting, Source::Exact));
+    c.deliver(event_report(&id, &token, 5, needs_input("idle_prompt")), cx);
+    assert_eq!(
+        c.live_state(&id, cx),
+        (ChatState::Idle, Source::Estimated(NO_TURN_END))
+    );
+
+    // From idle, `idle_prompt` is exact.
+    c.deliver(event_report(&id, &token, 6, needs_input("idle_prompt")), cx);
+    assert_eq!(c.live_state(&id, cx), (ChatState::Idle, Source::Exact));
+}
+
+#[gpui::test]
+async fn test_stale_and_unchanged_reports_change_nothing_and_tell_nothing(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    let (id, token) = c.start_live(cx).await;
+    c.deliver(event_report(&id, &token, 10, Event::PromptSubmitted), cx);
+    assert_eq!(c.live_state(&id, cx), (ChatState::Running, Source::Exact));
+    let events = c.count_events(&id, cx);
+
+    // An older report is dropped silently.
+    c.deliver(event_report(&id, &token, 9, Event::TurnDone), cx);
+    cx.run_until_parked();
+    assert_eq!(c.live_state(&id, cx), (ChatState::Running, Source::Exact));
+    assert_eq!(c.last_report_at(&id, cx), Some(10));
+    assert_eq!(*events.borrow(), 0);
+
+    // A report that only advances the last report time is not a state change.
+    c.deliver(
+        event_report(
+            &id,
+            &token,
+            11,
+            Event::SessionStart {
+                source: SessionSource::Compact,
+            },
+        ),
+        cx,
+    );
+    c.deliver(event_report(&id, &token, 12, Event::ToolDone), cx);
+    c.deliver(event_report(&id, &token, 13, Event::PromptSubmitted), cx);
+    cx.run_until_parked();
+    assert_eq!(c.live_state(&id, cx), (ChatState::Running, Source::Exact));
+    assert_eq!(c.last_report_at(&id, cx), Some(13));
+    assert_eq!(*events.borrow(), 0);
+
+    // A real change is told once.
+    c.deliver(event_report(&id, &token, 14, Event::TurnDone), cx);
+    cx.run_until_parked();
+    assert_eq!(c.live_state(&id, cx), (ChatState::Idle, Source::Exact));
+    assert_eq!(*events.borrow(), 1);
+}
+
+#[gpui::test]
+async fn test_one_chats_report_never_changes_another_chats_state(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    let (a, token_a) = c.start_live(cx).await;
+    let (b, token_b) = c.start_live(cx).await;
+    assert_ne!(token_a, token_b);
+
+    // Through the server, chat A's token is refused for chat B.
+    assert_eq!(
+        c.send(&event_report(&b, &token_a, 2, Event::PromptSubmitted), cx)
+            .await,
+        refused("bad token")
+    );
+    // Delivered to the runtime anyway, it is dropped there too.
+    c.deliver(event_report(&b, &token_a, 3, Event::PromptSubmitted), cx);
+    assert_eq!(c.live_state(&a, cx), (ChatState::Idle, Source::Exact));
+    assert_eq!(c.live_state(&b, cx), (ChatState::Idle, Source::Exact));
+    assert_eq!(c.last_report_at(&b, cx), Some(1));
+
+    // Chat A's own report changes chat A only.
+    c.deliver(event_report(&a, &token_a, 4, Event::PromptSubmitted), cx);
+    assert_eq!(c.live_state(&a, cx), (ChatState::Running, Source::Exact));
+    assert_eq!(c.live_state(&b, cx), (ChatState::Idle, Source::Exact));
+    c.deliver(
+        event_report(&b, &token_b, 5, needs_input("permission_prompt")),
+        cx,
+    );
+    assert_eq!(c.live_state(&a, cx), (ChatState::Running, Source::Exact));
+    assert_eq!(c.live_state(&b, cx), (ChatState::Waiting, Source::Exact));
 }
