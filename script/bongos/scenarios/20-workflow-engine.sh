@@ -2,9 +2,8 @@
 # app is quit, final.png exists), inside the bwrap sandbox, with set -euo pipefail, RUN, HOME,
 # DISPLAY, the proxy and the helpers of lib.sh.
 #
-# Real runs are NOT exercised here: the engine of the app is built with a runner that is not yet
-# connected to the node runners, so no run can execute. What this scenario proves is everything the
-# app does without a run, in a throwaway HOME with the default settings (workflows are on by
+# Real runs are NOT exercised here (scenario 40-workflow-engine-hardening runs them). What this
+# scenario proves is everything the app does without a run, in a throwaway HOME with the default settings (workflows are on by
 # default, so no setting is written to turn them on):
 #   1. The shipped definitions are present under <data dir>/workflows/shipped/<version>/ (all four,
 #      with their prompts and scripts), and neither starting nor validating writes anything under

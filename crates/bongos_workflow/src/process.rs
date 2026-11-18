@@ -75,10 +75,16 @@ impl NodeProcess {
 /// but not once the leader is reaped and the group is empty (its id may be reused); it is never
 /// sent to the leader's pid alone. Many processes stop in the time of one.
 pub fn stop_all(processes: &mut [NodeProcess]) {
+    stop_all_with(processes, STOP_GRACE);
+}
+
+/// [`stop_all`] with `term_grace` between SIGTERM and SIGKILL instead of [`STOP_GRACE`].
+/// Returns within `term_grace` plus about 2 s.
+pub fn stop_all_with(processes: &mut [NodeProcess], term_grace: Duration) {
     for process in processes.iter() {
         signal_group(process.record.pid, Signal::Term);
     }
-    let deadline = Instant::now() + STOP_GRACE;
+    let deadline = Instant::now() + term_grace;
     while Instant::now() < deadline && any_alive(processes) {
         std::thread::sleep(POLL);
     }
@@ -307,16 +313,5 @@ fn signal_group(pgid: u32, signal: Signal) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::parse_stat;
-
-    #[test]
-    fn stat_fields_count_after_the_command_name() {
-        let text = "4242 (a (weird) name) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 \
-                    987654 1000 10 18446744073709551615";
-        let stat = parse_stat(text).unwrap();
-        assert_eq!(stat.state, 'S');
-        assert_eq!(stat.pgrp, 4242);
-        assert_eq!(stat.start_time, 987654);
-    }
-}
+#[path = "process_tests.rs"]
+mod tests;

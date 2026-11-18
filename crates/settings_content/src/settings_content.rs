@@ -277,6 +277,9 @@ pub struct SettingsContent {
     /// Settings for workflows: runs of node graphs on a task.
     pub workflows: Option<WorkflowsSettingsContent>,
 
+    /// Settings for task checks: scripts and commands that must pass before a task is done.
+    pub task_checks: Option<TaskChecksSettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -456,43 +459,66 @@ pub struct ExtensionsSettingsContent {
 
 /// Base key bindings scheme. Base keymaps can be overridden with user keymaps.
 ///
-/// Default: VSCode
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    PartialEq,
-    Eq,
-    Default,
-    strum::VariantArray,
-)]
+/// The JetBrains, Atom, SublimeText, TextMate and Cursor values are retired: they
+/// still deserialize (so a stored value never breaks settings) and fall back to
+/// Emacs, but they are not offered in the settings UI or the JSON schema.
+///
+/// Default: Emacs
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, MergeFrom, PartialEq, Eq, Default)]
 pub enum BaseKeymapContent {
+    #[serde(alias = "vscode")]
     VSCode,
+    #[serde(alias = "vim")]
+    Vim,
+    #[doc(hidden)]
     JetBrains,
+    #[doc(hidden)]
     SublimeText,
+    #[doc(hidden)]
     Atom,
+    #[doc(hidden)]
     TextMate,
     #[default]
+    #[serde(alias = "emacs")]
     Emacs,
+    #[doc(hidden)]
     Cursor,
+    #[serde(alias = "none")]
     None,
 }
 
+impl BaseKeymapContent {
+    /// Whether this value names a keymap that no longer exists.
+    pub fn is_retired(self) -> bool {
+        matches!(
+            self,
+            Self::JetBrains | Self::SublimeText | Self::Atom | Self::TextMate | Self::Cursor
+        )
+    }
+}
+
+impl strum::VariantArray for BaseKeymapContent {
+    const VARIANTS: &'static [Self] = &[Self::Emacs, Self::Vim, Self::VSCode, Self::None];
+}
+
 impl strum::VariantNames for BaseKeymapContent {
-    const VARIANTS: &'static [&'static str] = &[
-        "VSCode",
-        "JetBrains",
-        "Sublime Text",
-        "Atom",
-        "TextMate",
-        "Emacs",
-        "Cursor",
-        "None",
-    ];
+    const VARIANTS: &'static [&'static str] = &["Emacs", "Vim", "VSCode", "None"];
+}
+
+impl JsonSchema for BaseKeymapContent {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "BaseKeymapContent".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "Base key bindings scheme. Base keymaps can be overridden with user keymaps.\n\nDefault: Emacs",
+            "type": "string",
+            "enum": [
+                "Emacs", "Vim", "VSCode", "None", "emacs", "vim", "vscode", "none"
+            ]
+        })
+    }
 }
 
 /// Configuration of audio in bongos.
@@ -1633,8 +1659,93 @@ pub struct WorkflowsSettingsContent {
     ///
     /// Default: 7
     pub wait_give_up_days: Option<u32>,
+    /// The most a single run may cost, in US dollars. Null means no cap; a value at or below 0
+    /// also means no cap.
+    ///
+    /// Default: null
+    pub run_max_cost_usd: Option<f64>,
+    /// Passes of a loop whose route sets no `max_passes`.
+    ///
+    /// Default: 5
+    pub loop_bound: Option<u32>,
+    /// The directory that holds workflow definitions. Null means `~/.bongos/workflows`.
+    ///
+    /// Default: null
+    pub definitions_dir: Option<String>,
+    /// MCP servers that agent nodes never get, by name.
+    ///
+    /// Default: []
+    pub mcp_exclude: Option<Vec<String>>,
+    /// The caps an agent node falls back to when neither it nor its definition sets one.
+    pub agents: Option<WorkflowAgentsSettingsContent>,
+    /// The most a definition may declare; a definition above a ceiling is invalid.
+    pub ceilings: Option<WorkflowCeilingsSettingsContent>,
     /// How program nodes run.
     pub programs: Option<WorkflowProgramsSettingsContent>,
+}
+
+/// The agent defaults of workflow nodes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowAgentsSettingsContent {
+    /// Turns an agent node may take when it sets no `max_turns`.
+    ///
+    /// Default: 40
+    pub max_turns: Option<u32>,
+    /// Dollars an agent node may spend when it sets no `max_cost_usd`.
+    ///
+    /// Default: 5.0
+    pub max_cost_usd: Option<f64>,
+    /// Minutes an agent node may run when it sets no `max_minutes`.
+    ///
+    /// Default: 30
+    pub max_minutes: Option<u32>,
+    /// Settings for Claude agent nodes.
+    pub claude: Option<WorkflowClaudeSettingsContent>,
+}
+
+/// Settings of Claude agent nodes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowClaudeSettingsContent {
+    /// The model a Claude node uses when it sets none.
+    ///
+    /// Default: "sonnet"
+    pub model: Option<String>,
+}
+
+/// The most a workflow definition may declare.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkflowCeilingsSettingsContent {
+    /// The most turns a node may declare.
+    ///
+    /// Default: 200
+    pub max_turns: Option<u32>,
+    /// The most dollars a node may declare.
+    ///
+    /// Default: 25.0
+    pub max_cost_usd: Option<f64>,
+    /// The most minutes a node may declare.
+    ///
+    /// Default: 240
+    pub max_minutes: Option<u32>,
+    /// The most passes a loop may declare.
+    ///
+    /// Default: 20
+    pub max_passes: Option<u32>,
+    /// The most retries a node may declare.
+    ///
+    /// Default: 5
+    pub retries: Option<u32>,
+    /// The most minutes a program node may declare.
+    ///
+    /// Default: 120
+    pub program_max_minutes: Option<u32>,
+    /// Whether a node may declare the bypassPermissions mode.
+    ///
+    /// Default: false
+    pub allow_bypass_permissions: Option<bool>,
 }
 
 /// How workflow program nodes run.
@@ -1654,6 +1765,76 @@ pub struct WorkflowProgramsSettingsContent {
     ///
     /// Default: 10
     pub max_output_mb: Option<u64>,
+    /// Whether a program node may use the network.
+    ///
+    /// Default: true
+    pub allow_network: Option<bool>,
+}
+
+/// Settings for task checks.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct TaskChecksSettingsContent {
+    /// Whether task checks are on. It is on by default; set it to false and no check runs, no
+    /// record is written and every task check command is hidden and only says "Task checks are
+    /// off (task_checks.enabled)".
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// The directory that holds the output files of check runs. Null means the task's files
+    /// folder, `checks/`.
+    ///
+    /// Default: null
+    pub output_dir: Option<String>,
+    /// Days a run's output file is kept; the record stays after the file is deleted.
+    ///
+    /// Default: 30
+    pub output_retention_days: Option<u32>,
+    /// Most MB of output kept per run; past it the middle is cut and marked.
+    ///
+    /// Default: 256
+    pub output_limit_mb: Option<u64>,
+    /// The largest result file, in KB, a check may write.
+    ///
+    /// Default: 256
+    pub result_file_limit_kb: Option<u64>,
+    /// Minutes a check may run when it sets no `budget_minutes`. Null means no time budget.
+    ///
+    /// Default: null
+    pub default_budget_minutes: Option<u32>,
+    /// Times a run that gave no verdict is run again by itself.
+    ///
+    /// Default: 2
+    pub no_verdict_reruns: Option<u32>,
+    /// Minutes between a no-verdict run and its rerun.
+    ///
+    /// Default: 5
+    pub no_verdict_rerun_minutes: Option<u32>,
+    /// Hours a check waits for a pool slot before it gives no verdict.
+    ///
+    /// Default: 4
+    pub pool_wait_limit_hours: Option<u32>,
+    /// Seconds a stopped check has to end after its first signal before it is killed.
+    ///
+    /// Default: 5
+    pub kill_grace_seconds: Option<u32>,
+    /// The most parts of one check that run at the same time.
+    ///
+    /// Default: 4
+    pub parallel_parts_max: Option<u32>,
+    /// Where scratch trees for runs on a base tree are made. Null means
+    /// `<data dir>/checks-scratch`.
+    ///
+    /// Default: null
+    pub scratch_dir: Option<String>,
+    /// Milliseconds the tree key waits for edits to settle before it is computed again.
+    ///
+    /// Default: 2000
+    pub tree_key_debounce_ms: Option<u32>,
+    /// At most one live-state write per task per this many milliseconds.
+    ///
+    /// Default: 1000
+    pub live_write_ms: Option<u32>,
 }
 
 /// Settings for chat sessions.
@@ -1828,5 +2009,61 @@ impl From<u64> for DelayMs {
 impl std::fmt::Display for DelayMs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}ms", self.0)
+    }
+}
+
+#[cfg(test)]
+mod base_keymap_tests {
+    use super::*;
+
+    const RETIRED: [&str; 5] = ["JetBrains", "Atom", "SublimeText", "TextMate", "Cursor"];
+
+    #[test]
+    fn retired_values_deserialize_but_are_not_offered() {
+        for name in RETIRED {
+            let parsed: BaseKeymapContent = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert!(parsed.is_retired(), "{name}");
+        }
+        let variants = <BaseKeymapContent as strum::VariantArray>::VARIANTS;
+        assert!(variants.iter().all(|variant| !variant.is_retired()));
+        let names = <BaseKeymapContent as strum::VariantNames>::VARIANTS;
+        assert_eq!(variants.len(), names.len());
+        for name in RETIRED {
+            assert!(!names.contains(&name), "{name}");
+        }
+        // Every offered value is a name that deserializes back to the same variant.
+        for (variant, name) in variants.iter().zip(names) {
+            let parsed: BaseKeymapContent = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(parsed, *variant);
+        }
+
+        let schema = schemars::schema_for!(BaseKeymapContent)
+            .to_value()
+            .to_string();
+        for name in RETIRED {
+            assert!(!schema.contains(name), "{name} in {schema}");
+        }
+        for name in names {
+            assert!(schema.contains(name), "{name} missing from {schema}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod base_keymap_variant_tests {
+    use super::BaseKeymapContent;
+
+    #[test]
+    fn the_kept_variant_list_is_exactly_four_in_order() {
+        use strum::VariantArray as _;
+        assert_eq!(
+            BaseKeymapContent::VARIANTS,
+            &[
+                BaseKeymapContent::Emacs,
+                BaseKeymapContent::Vim,
+                BaseKeymapContent::VSCode,
+                BaseKeymapContent::None
+            ]
+        );
     }
 }

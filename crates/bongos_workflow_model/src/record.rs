@@ -175,7 +175,20 @@ pub enum Event {
     },
     Paused,
     Halted,
+    /// The run's cost reached the cap: `key` is the node whose finish crossed it. Replay treats it
+    /// as a halt, so a crash before the `Halted` that follows it still leaves the run halted.
+    CapReached {
+        cap_usd: f64,
+        cost_usd: f64,
+        key: NodeKey,
+    },
     Resumed,
+    /// The run is held on `key` for a person, without failing: a check gave no verdict and the
+    /// definition has no route for that. A resume reruns just the held key.
+    Held {
+        key: NodeKey,
+        failure: Failure,
+    },
     Interrupted {
         keys: Vec<NodeKey>,
     },
@@ -334,6 +347,10 @@ pub struct Attempt {
     pub definition_commit: Option<String>,
     pub worktree: String,
     pub branch: String,
+    /// `workflows.loop_bound` as it was when the attempt began: the passes of a loop whose route
+    /// sets no `max_passes`. A relaunch keeps it; `None` for records older than the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_bound: Option<u32>,
 }
 
 /// `runs/<run id>/run.toml`: the run's identity, written at create and when an attempt is added.
@@ -488,6 +505,24 @@ pub enum Lifecycle {
     Cancelled,
 }
 
+/// A run halted by the cost cap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapReached {
+    pub cap_usd: f64,
+    pub cost_usd: f64,
+    pub key: NodeKey,
+}
+
+impl CapReached {
+    /// The reason shown in the run view, the Runs panel and the needs-you text.
+    pub fn reason(&self) -> String {
+        format!(
+            "cost cap of ${:.2} reached at node {}",
+            self.cap_usd, self.key.node
+        )
+    }
+}
+
 /// The state of one attempt, rebuilt from its events by [`replay`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunState {
@@ -508,9 +543,13 @@ pub struct RunState {
     pub passes: BTreeMap<String, u32>,
     pub paused: bool,
     pub halted: bool,
+    /// Set by `CapReached`, cleared by `Resumed`: the cap, the cost and the node that crossed it.
+    pub cap_reached: Option<CapReached>,
     /// Keys the log marked interrupted and that have not started again. The value is the try that
     /// was running, `None` when the key was not running when interrupted.
     pub interrupted: BTreeMap<NodeKey, Option<RunningNode>>,
+    /// Keys the run is held on, with why, until a resume or a new try of the key.
+    pub held: BTreeMap<NodeKey, Failure>,
     /// The definition revision in use: `None` until a `DefinitionReloaded`, meaning revision 0.
     pub definition_rev: Option<u32>,
     /// How the attempt ended. A failed end is not final: retry step reruns the failed key in the
@@ -624,6 +663,7 @@ fn apply(state: &mut RunState, event: &Event) {
             pid_start_time,
         } => {
             state.interrupted.remove(key);
+            state.held.remove(key);
             bump_pass(state, &key.node, key.pass);
             state.running.insert(
                 key.clone(),
@@ -696,9 +736,26 @@ fn apply(state: &mut RunState, event: &Event) {
         }
         Event::Paused => state.paused = true,
         Event::Halted => state.halted = true,
+        Event::CapReached {
+            cap_usd,
+            cost_usd,
+            key,
+        } => {
+            state.halted = true;
+            state.cap_reached = Some(CapReached {
+                cap_usd: *cap_usd,
+                cost_usd: *cost_usd,
+                key: key.clone(),
+            });
+        }
         Event::Resumed => {
             state.paused = false;
             state.halted = false;
+            state.cap_reached = None;
+            state.held.clear();
+        }
+        Event::Held { key, failure } => {
+            state.held.insert(key.clone(), failure.clone());
         }
         Event::Interrupted { keys } => {
             for key in keys {

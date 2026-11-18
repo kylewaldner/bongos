@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use bongos_workflow_model::definition::AgentKind;
@@ -265,6 +266,34 @@ impl McpCache {
     /// Forgets everything (after `mcp add`, or when settings change).
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Keeps `found` as the discovery of `cli` in `cwd`, taken at `now`.
+    pub fn store(&mut self, now: Instant, cli: AgentKind, cwd: &Path, found: Discovery) {
+        self.entries.insert((cli, cwd.to_path_buf()), (now, found));
+    }
+}
+
+/// Discovers each of `targets` (a CLI and whether it has the `mcp` subcommand) and keeps the
+/// answers for the start checks. The lock is not held while the CLI runs. A CLI whose `mcp list`
+/// was to be read but gave no answer (timeout, error) keeps nothing, so its check is skipped
+/// instead of trusting the configuration files.
+pub fn refresh(
+    cache: &Mutex<McpCache>,
+    now: Instant,
+    targets: &[(AgentKind, bool)],
+    lister: &dyn Lister,
+    location: &Location,
+) {
+    for (cli, use_list) in targets {
+        let found = discover(*cli, *use_list, lister, location);
+        if *use_list && found.source != Source::List {
+            continue;
+        }
+        cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .store(now, *cli, &location.cwd, found);
     }
 }
 

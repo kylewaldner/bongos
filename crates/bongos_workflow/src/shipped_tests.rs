@@ -7,12 +7,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use bongos_workflow_model::definition::{Definition, parse};
+use bongos_workflow_model::definition::{Definition, Target, parse};
 use bongos_workflow_model::fake::{FakeRunner, Scripted};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{EndState, RunState};
 use bongos_workflow_model::template::references;
-use bongos_workflow_model::{FailureReason, LayerDirs, Limits};
+use bongos_workflow_model::{FailureReason, LayerDirs, Limits, ValidationContext, validate};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -65,6 +65,68 @@ fn shipped_dir_on_disk() -> (TempDir, LayerDirs) {
         ..LayerDirs::default()
     };
     (temp, dirs)
+}
+
+/// Depth-first from the start node: every route that closes a cycle (its target is on the
+/// current path) and sets no `max_passes`.
+fn unbounded_back_edges(definition: &Definition) -> Vec<String> {
+    fn visit<'d>(
+        definition: &'d Definition,
+        name: &'d str,
+        visited: &mut BTreeSet<&'d str>,
+        stack: &mut Vec<&'d str>,
+        out: &mut Vec<String>,
+    ) {
+        if !visited.insert(name) {
+            return;
+        }
+        let Some(node) = definition.node(name) else {
+            return;
+        };
+        for route in &node.routes {
+            let mut targets: Vec<&str> = match &route.to {
+                Some(Target::One(to)) => vec![to.as_str()],
+                Some(Target::Many(many)) => many.iter().map(String::as_str).collect(),
+                None => Vec::new(),
+            };
+            if let Some(fan_out) = &route.fan_out {
+                targets.push(fan_out.to.as_str());
+            }
+            for to in targets {
+                if stack.contains(&to) {
+                    if route.max_passes.is_none() {
+                        out.push(format!("{name} -> {to}"));
+                    }
+                } else {
+                    stack.push(to);
+                    visit(definition, to, visited, stack, out);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let start = definition.start.value.as_str();
+    visit(
+        definition,
+        start,
+        &mut BTreeSet::new(),
+        &mut vec![start],
+        &mut out,
+    );
+    out
+}
+
+#[test]
+fn every_shipped_back_edge_sets_its_own_max_passes() {
+    for shipped in TEMPLATES {
+        let loose = unbounded_back_edges(&definition(shipped.dir));
+        assert!(
+            loose.is_empty(),
+            "{} has back edges without max_passes: {loose:?}",
+            shipped.dir
+        );
+    }
 }
 
 #[test]
@@ -227,6 +289,54 @@ fn programs_declare_the_permissions_they_need_and_no_mcp() {
                 }
             }
         }
+    }
+}
+
+/// The network entries of every program node of a shipped definition.
+fn network_entries(dir: &str) -> Vec<String> {
+    definition(dir)
+        .nodes
+        .iter()
+        .filter_map(|node| node.permissions.as_ref())
+        .flat_map(|permissions| permissions.network.clone())
+        .collect()
+}
+
+#[test]
+fn no_shipped_definition_names_a_dotted_host_in_its_network_entries() {
+    let mut seen = 0;
+    for shipped in TEMPLATES {
+        for entry in network_entries(shipped.dir) {
+            assert!(
+                !entry.contains('.'),
+                "{} names the host '{entry}'",
+                shipped.dir
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "ship-pr and babysit-pr declare network entries");
+}
+
+#[test]
+fn shipped_definitions_with_network_entries_are_refused_when_allow_network_is_off() {
+    let closed = ValidationContext {
+        allow_network: false,
+        files: FILES
+            .iter()
+            .map(|file| file.path.split_once('/').unwrap().1.to_string())
+            .collect(),
+        ..ValidationContext::default()
+    };
+    for dir in ["ship-pr", "babysit-pr"] {
+        assert!(!network_entries(dir).is_empty(), "{dir}");
+        let diagnostics = validate(&definition(dir), &closed);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("allow_network")),
+            "{dir}: {diagnostics:#?}"
+        );
     }
 }
 

@@ -321,12 +321,12 @@ fn work_page(token_set: bool) -> SettingsPage {
         ]
     }
 
-    fn workflows_section() -> [SettingsPageItem; 6] {
+    fn workflows_section() -> [SettingsPageItem; 16] {
         [
             SettingsPageItem::SectionHeader("Workflows"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Enable Workflows",
-                description: "Whether workflows are on. While they are off, bongos starts no run, loads no definition and every workflow command is hidden.",
+                description: "Workflows are on by default. Turn this off and bongos starts no run, loads no definition and hides every workflow command.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("workflows.enabled"),
@@ -408,6 +408,251 @@ fn work_page(token_set: bool) -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Run Cost Cap (USD)",
+                description: "The most a single run may cost, in US dollars. Empty or 0 means no cap.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.run_max_cost_usd"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .run_max_cost_usd
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .run_max_cost_usd = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Loop Bound",
+                description: "Passes of a loop whose route sets no `max_passes`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.loop_bound"),
+                    pick: |settings_content| {
+                        settings_content.workflows.as_ref()?.loop_bound.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .loop_bound = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Definitions Directory",
+                description: "The directory that holds workflow definitions. Empty means `~/.bongos/workflows`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.definitions_dir"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .definitions_dir
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .definitions_dir = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Allow Program Network",
+                description: "Whether a program node may use the network.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.programs.allow_network"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .programs
+                            .as_ref()?
+                            .allow_network
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .programs
+                            .get_or_insert_default()
+                            .allow_network = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Max Turns",
+                description: "Turns an agent node may take when it sets no `max_turns`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.agents.max_turns"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .agents
+                            .as_ref()?
+                            .max_turns
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .agents
+                            .get_or_insert_default()
+                            .max_turns = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Max Cost (USD)",
+                description: "Dollars an agent node may spend when it sets no `max_cost_usd`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.agents.max_cost_usd"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .agents
+                            .as_ref()?
+                            .max_cost_usd
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .agents
+                            .get_or_insert_default()
+                            .max_cost_usd = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Max Minutes",
+                description: "Minutes an agent node may run when it sets no `max_minutes`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.agents.max_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .agents
+                            .as_ref()?
+                            .max_minutes
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .agents
+                            .get_or_insert_default()
+                            .max_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Claude Model",
+                description: "The model a Claude agent node uses when it sets none.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workflows.agents.claude.model"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workflows
+                            .as_ref()?
+                            .agents
+                            .as_ref()?
+                            .claude
+                            .as_ref()?
+                            .model
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workflows
+                            .get_or_insert_default()
+                            .agents
+                            .get_or_insert_default()
+                            .claude
+                            .get_or_insert_default()
+                            .model = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "MCP Exclude",
+                description: "MCP servers that agent nodes never get, by name. Edit in settings.json.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("workflows.mcp_exclude"),
+                        pick: |settings_content| {
+                            settings_content.workflows.as_ref()?.mcp_exclude.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content
+                                .workflows
+                                .get_or_insert_default()
+                                .mcp_exclude = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Ceilings",
+                description: "The most a workflow definition may declare. Edit in settings.json.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("workflows.ceilings"),
+                        pick: |settings_content| {
+                            settings_content.workflows.as_ref()?.ceilings.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.workflows.get_or_insert_default().ceilings = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Programs",
                 description: "How program nodes run, and every other workflow setting. Edit in settings.json.",
                 field: Box::new(
@@ -429,6 +674,319 @@ fn work_page(token_set: bool) -> SettingsPage {
         ]
     }
 
+    fn task_checks_section() -> [SettingsPageItem; 15] {
+        [
+            SettingsPageItem::SectionHeader("Task Checks"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Task Checks",
+                description: "Whether task checks are on. While they are off, no check runs, no record is written and every task check command is hidden.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.enabled"),
+                    pick: |settings_content| {
+                        settings_content.task_checks.as_ref()?.enabled.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.task_checks.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Output Directory",
+                description: "The directory that holds the output files of check runs. Empty means the task's files folder, `checks/`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.output_dir"),
+                    pick: |settings_content| {
+                        settings_content.task_checks.as_ref()?.output_dir.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .output_dir = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Output Retention Days",
+                description: "Days a run's output file is kept; the record stays after the file is deleted.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.output_retention_days"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .output_retention_days
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .output_retention_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Output Limit (MB)",
+                description: "Most MB of output kept per run; past it the middle is cut and marked.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.output_limit_mb"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .output_limit_mb
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .output_limit_mb = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Result File Limit (KB)",
+                description: "The largest result file, in KB, a check may write.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.result_file_limit_kb"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .result_file_limit_kb
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .result_file_limit_kb = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Default Budget Minutes",
+                description: "Minutes a check may run when it sets no `budget_minutes`. Empty means no time budget.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.default_budget_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .default_budget_minutes
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .default_budget_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "No-Verdict Reruns",
+                description: "Times a run that gave no verdict is run again by itself.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.no_verdict_reruns"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .no_verdict_reruns
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .no_verdict_reruns = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "No-Verdict Rerun Minutes",
+                description: "Minutes between a no-verdict run and its rerun.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.no_verdict_rerun_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .no_verdict_rerun_minutes
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .no_verdict_rerun_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Pool Wait Limit Hours",
+                description: "Hours a check waits for a pool slot before it gives no verdict.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.pool_wait_limit_hours"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .pool_wait_limit_hours
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .pool_wait_limit_hours = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Kill Grace Seconds",
+                description: "Seconds a stopped check has to end after its first signal before it is killed.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.kill_grace_seconds"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .kill_grace_seconds
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .kill_grace_seconds = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Parallel Parts Max",
+                description: "The most parts of one check that run at the same time.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.parallel_parts_max"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .parallel_parts_max
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .parallel_parts_max = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Scratch Directory",
+                description: "Where scratch trees for runs on a base tree are made. Empty means `<data dir>/checks-scratch`.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.scratch_dir"),
+                    pick: |settings_content| {
+                        settings_content.task_checks.as_ref()?.scratch_dir.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .scratch_dir = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Tree Key Debounce (ms)",
+                description: "Milliseconds the tree key waits for edits to settle before it is computed again.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.tree_key_debounce_ms"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .tree_key_debounce_ms
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .tree_key_debounce_ms = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Live Write Interval (ms)",
+                description: "At most one live-state write per task per this many milliseconds.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("task_checks.live_write_ms"),
+                    pick: |settings_content| {
+                        settings_content
+                            .task_checks
+                            .as_ref()?
+                            .live_write_ms
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .task_checks
+                            .get_or_insert_default()
+                            .live_write_ms = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: "Work",
         items: concat_sections![
@@ -436,7 +994,8 @@ fn work_page(token_set: bool) -> SettingsPage {
             thresholds_and_repositories_section(),
             task_builder_section(),
             linear_section(token_set),
-            workflows_section()
+            workflows_section(),
+            task_checks_section()
         ],
     }
 }
@@ -2658,7 +3217,17 @@ fn keymap_page() -> SettingsPage {
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("base_keymap"),
-                    pick: |settings_content| settings_content.base_keymap.as_ref(),
+                    // A retired stored value is shown as Emacs (what it falls back to);
+                    // nothing is written unless the user picks another value.
+                    pick: |settings_content| {
+                        settings_content.base_keymap.as_ref().map(|keymap| {
+                            if keymap.is_retired() {
+                                &settings::BaseKeymapContent::Emacs
+                            } else {
+                                keymap
+                            }
+                        })
+                    },
                     write: |settings_content, value, _| {
                         settings_content.base_keymap = value;
                     },
@@ -2672,41 +3241,8 @@ fn keymap_page() -> SettingsPage {
         ]
     }
 
-    fn modal_editing_section() -> [SettingsPageItem; 3] {
-        [
-            SettingsPageItem::SectionHeader("Modal Editing"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Vim Mode",
-                description: "Enable Vim mode and key bindings.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("vim_mode"),
-                    pick: |settings_content| settings_content.vim_mode.as_ref(),
-                    write: write_vim_mode,
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Helix Mode",
-                description: "Enable Helix mode and key bindings.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("helix_mode"),
-                    pick: |settings_content| settings_content.helix_mode.as_ref(),
-                    write: write_helix_mode,
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    let items: Box<[SettingsPageItem]> = concat_sections!(
-        keybindings_section(),
-        base_keymap_section(),
-        modal_editing_section(),
-    );
+    let items: Box<[SettingsPageItem]> =
+        concat_sections!(keybindings_section(), base_keymap_section(),);
 
     SettingsPage {
         title: "Keymap",
@@ -11353,75 +11889,26 @@ where
     <<T as strum::IntoDiscriminant>::Discriminant as strum::VariantArray>::VARIANTS
 }
 
-/// Updates the `vim_mode` setting, disabling `helix_mode` if present and
-/// `vim_mode` is being enabled.
-fn write_vim_mode(settings: &mut SettingsContent, value: Option<bool>, _: &App) {
-    write_vim_mode_inner(settings, value);
-}
-
-fn write_vim_mode_inner(settings: &mut SettingsContent, value: Option<bool>) {
-    if value == Some(true) && settings.helix_mode == Some(true) {
-        settings.helix_mode = Some(false);
-    }
-    settings.vim_mode = value;
-}
-
-/// Updates the `helix_mode` setting, disabling `vim_mode` if present and
-/// `helix_mode` is being enabled.
-fn write_helix_mode(settings: &mut SettingsContent, value: Option<bool>, _: &App) {
-    write_helix_mode_inner(settings, value);
-}
-
-fn write_helix_mode_inner(settings: &mut SettingsContent, value: Option<bool>) {
-    if value == Some(true) && settings.vim_mode == Some(true) {
-        settings.vim_mode = Some(false);
-    }
-    settings.helix_mode = value;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Vim and Helix are chosen through the Base Keymap, never through their own toggles.
     #[test]
-    fn test_write_vim_helix_mode() {
-        // Enabling vim mode while `vim_mode` and `helix_mode` are not yet set
-        // should only update the `vim_mode` setting.
-        let mut settings = SettingsContent::default();
-        write_vim_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.vim_mode, Some(true));
-        assert_eq!(settings.helix_mode, None);
-
-        // Enabling helix mode while `vim_mode` and `helix_mode` are not yet set
-        // should only update the `helix_mode` setting.
-        let mut settings = SettingsContent::default();
-        write_helix_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.helix_mode, Some(true));
-        assert_eq!(settings.vim_mode, None);
-
-        // Disabling helix mode should only touch `helix_mode` setting when
-        // `vim_mode` is not set.
-        write_helix_mode_inner(&mut settings, Some(false));
-        assert_eq!(settings.helix_mode, Some(false));
-        assert_eq!(settings.vim_mode, None);
-
-        // Enabling vim mode should update `vim_mode` but leave `helix_mode`
-        // untouched.
-        write_vim_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.vim_mode, Some(true));
-        assert_eq!(settings.helix_mode, Some(false));
-
-        // Enabling helix mode should update `helix_mode` and disable
-        // `vim_mode`.
-        write_helix_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.helix_mode, Some(true));
-        assert_eq!(settings.vim_mode, Some(false));
-
-        // Enabling vim mode should update `vim_mode` and disable
-        // `helix_mode`.
-        write_vim_mode_inner(&mut settings, Some(true));
-        assert_eq!(settings.vim_mode, Some(true));
-        assert_eq!(settings.helix_mode, Some(false));
+    fn test_keymap_page_has_no_vim_or_helix_mode_item() {
+        let page = keymap_page();
+        for item in page.items.iter() {
+            match item {
+                SettingsPageItem::SettingItem(item) => {
+                    assert_ne!(item.title, "Vim Mode");
+                    assert_ne!(item.title, "Helix Mode");
+                    assert_ne!(item.field.json_path(), Some("vim_mode"));
+                    assert_ne!(item.field.json_path(), Some("helix_mode"));
+                }
+                SettingsPageItem::SectionHeader(title) => assert_ne!(*title, "Modal Editing"),
+                _ => {}
+            }
+        }
     }
 
     /// Every key of the `work` block of `default.json` has an item on the Work page.
@@ -11517,6 +12004,16 @@ mod tests {
                 "workflows.max_concurrent_runs",
                 "workflows.max_concurrent_sessions",
                 "workflows.max_parallel_branches",
+                "workflows.run_max_cost_usd",
+                "workflows.loop_bound",
+                "workflows.definitions_dir",
+                "workflows.programs.allow_network",
+                "workflows.agents.max_turns",
+                "workflows.agents.max_cost_usd",
+                "workflows.agents.max_minutes",
+                "workflows.agents.claude.model",
+                "workflows.mcp_exclude",
+                "workflows.ceilings",
                 "workflows.programs",
             ]
         );
@@ -11690,5 +12187,69 @@ mod tests {
                 "prompts.marker_close"
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod task_checks_tests {
+    use super::*;
+    use crate::AnySettingField;
+    use settings::RootUserSettings as _;
+    use std::any::Any;
+
+    /// The default of one `task_checks` field as the page reads it, `null` when unset.
+    fn page_default(field: &dyn AnySettingField, defaults: &SettingsContent) -> String {
+        let any: &dyn Any = field.as_any();
+        if let Some(field) = any.downcast_ref::<SettingField<bool>>() {
+            return format!("{:?}", (field.pick)(defaults));
+        }
+        if let Some(field) = any.downcast_ref::<SettingField<u32>>() {
+            return format!("{:?}", (field.pick)(defaults));
+        }
+        if let Some(field) = any.downcast_ref::<SettingField<u64>>() {
+            return format!("{:?}", (field.pick)(defaults));
+        }
+        if let Some(field) = any.downcast_ref::<SettingField<String>>() {
+            return format!("{:?}", (field.pick)(defaults));
+        }
+        panic!("unexpected field type");
+    }
+
+    #[test]
+    fn work_page_lists_every_task_checks_setting_with_its_default() {
+        let defaults =
+            SettingsContent::parse_json_with_comments(&settings::default_settings()).unwrap();
+        let page = work_page(false);
+        let mut listed = Vec::new();
+        for item in page.items.iter() {
+            if let SettingsPageItem::SettingItem(item) = item {
+                let path = item.field.json_path().unwrap_or_default();
+                if let Some(key) = path.strip_prefix("task_checks.") {
+                    assert!(!item.description.is_empty(), "{path}");
+                    listed.push((key, page_default(item.field.as_ref(), &defaults)));
+                }
+            }
+        }
+        let expected = [
+            ("enabled", "Some(true)"),
+            ("output_dir", "None"),
+            ("output_retention_days", "Some(30)"),
+            ("output_limit_mb", "Some(256)"),
+            ("result_file_limit_kb", "Some(256)"),
+            ("default_budget_minutes", "None"),
+            ("no_verdict_reruns", "Some(2)"),
+            ("no_verdict_rerun_minutes", "Some(5)"),
+            ("pool_wait_limit_hours", "Some(4)"),
+            ("kill_grace_seconds", "Some(5)"),
+            ("parallel_parts_max", "Some(4)"),
+            ("scratch_dir", "None"),
+            ("tree_key_debounce_ms", "Some(2000)"),
+            ("live_write_ms", "Some(1000)"),
+        ];
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|(key, value)| (*key, value.to_string()))
+            .collect();
+        assert_eq!(listed, expected);
     }
 }

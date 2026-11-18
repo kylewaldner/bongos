@@ -31,6 +31,7 @@ fn task(dir: &str, file: Option<TaskFile>, files: &[&str], manifest: Option<&str
         definition: None,
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         broken_edges: Vec::new(),
         files: files
             .iter()

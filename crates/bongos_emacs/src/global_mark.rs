@@ -2,11 +2,12 @@
 //! pane's navigation history. Going back puts the location left on the forward stack, so
 //! go-forward returns to it.
 
-use gpui::{App, Context, TaskExt as _, Window};
+use gpui::{Action as _, App, Context, TaskExt as _, Window};
 use workspace::Workspace;
 
 use crate::actions::PopGlobalMark;
 use crate::last_command;
+use crate::prefix_arg;
 
 const NO_EARLIER_LOCATION: &str = "No earlier location in another file";
 
@@ -41,6 +42,11 @@ fn pop_global_mark(
 
 /// Registers the `Workspace` handler on every workspace.
 pub(crate) fn init(cx: &mut App) {
+    prefix_arg::declare(
+        cx,
+        PopGlobalMark::name_for_type(),
+        prefix_arg::Meaning::Ignored,
+    );
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(pop_global_mark);
     })

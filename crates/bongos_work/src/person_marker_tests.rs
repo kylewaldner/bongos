@@ -17,6 +17,8 @@ const ALLOWED: &[&str] = &[
     "bongos_linear/src/link.rs",
     "bongos_project_repo/src/commands.rs",
     "bongos_project_repo/src/landing_view.rs",
+    // `task: edit checks` makes a working copy as the person who pressed the key.
+    "bongos_checks/src/actions.rs",
 ];
 
 /// The one file that defines `from_action`.

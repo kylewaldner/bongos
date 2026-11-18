@@ -32,6 +32,39 @@ pub(crate) fn workflow_names(cx: &App) -> Option<Arc<BTreeSet<String>>> {
     (names.0)(cx).map(Arc::new)
 }
 
+/// Where the named check set names come from.
+struct CheckSetNames(Box<dyn Fn(&App) -> Option<BTreeSet<String>>>);
+
+impl Global for CheckSetNames {}
+
+/// Tells the builder where the named check sets come from. `names` answers `None` while they are
+/// not known (a set name in a `checks` attribute is then a warning) and the set of known names
+/// once they are (an unknown name is then an error). Until this is called they are unknown.
+pub fn set_check_set_names(
+    names: impl Fn(&App) -> Option<BTreeSet<String>> + 'static,
+    cx: &mut App,
+) {
+    cx.set_global(CheckSetNames(Box::new(names)));
+}
+
+/// The names a proposal is checked against, shared so a background task may hold them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct KnownNames {
+    pub workflows: Option<Arc<BTreeSet<String>>>,
+    pub check_sets: Option<Arc<BTreeSet<String>>>,
+}
+
+/// The known workflow and check set names now.
+pub(crate) fn known_names(cx: &App) -> KnownNames {
+    KnownNames {
+        workflows: workflow_names(cx),
+        check_sets: cx
+            .try_global::<CheckSetNames>()
+            .and_then(|names| (names.0)(cx))
+            .map(Arc::new),
+    }
+}
+
 /// The tasks of `tree` with an open chat or an active run.
 pub(crate) fn collect(tree: &WorkTree, cx: &App) -> LiveSet {
     let mut live = LiveSet::default();

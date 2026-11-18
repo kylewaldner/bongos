@@ -67,11 +67,11 @@ pub fn current_todo(task: &Task) -> Option<&Todo> {
         .find(|todo| todo.state == TodoState::Open)
 }
 
-/// A leaf whose todos are all closed. Cancelled and skipped todos never block. A leaf with no
-/// todos at all is not done: it has not been set up yet, and calling it done would also mark the
-/// group around it done.
+/// A leaf whose todos are all closed and that no hold keeps from Done ([`Task::done_hold`]).
+/// Cancelled and skipped todos never block. A leaf with no todos at all is not done: it has not
+/// been set up yet, and calling it done would also mark the group around it done.
 pub fn leaf_done(task: &Task) -> bool {
-    task.file.as_ref().is_some_and(leaf_done_file)
+    task.done_hold.is_none() && task.file.as_ref().is_some_and(leaf_done_file)
 }
 
 /// The derived state of `task` within `tree`.
@@ -81,6 +81,10 @@ pub fn leaf_done(task: &Task) -> bool {
 /// Blocked, Ready, In Progress. A leaf's Blocked includes blocking inherited from its parent
 /// groups. A group takes Cancelled, Done, Blocked (by its own edges only), In Progress, Ready.
 /// A task whose `task.toml` has never parsed is Ready.
+///
+/// A task with a [`Task::done_hold`] is never Done: its closed todos and a `status` of done do
+/// not count, so it keeps the stage it had before Done (In Progress for a leaf that is not a PR
+/// kind), and a group with one is never Done either.
 pub fn state(task: &Task, tree: &WorkTree) -> State {
     let Some(file) = &task.file else {
         return State::Ready;
@@ -88,10 +92,11 @@ pub fn state(task: &Task, tree: &WorkTree) -> State {
     if shape(task, tree) == Shape::Group {
         return group_state(task, file, tree);
     }
+    let held = is_held(task);
     let stage = if is_pr_kind(file.kind) {
-        pr_stage(file)
+        pr_stage(file, held)
     } else {
-        other_stage(file)
+        other_stage(file, held)
     };
     match stage {
         State::Ready | State::InProgress | State::Review | State::Implemented => {
@@ -149,7 +154,12 @@ fn is_pr_kind(kind: Kind) -> bool {
     matches!(kind, Kind::PrShip | Kind::PrMerge)
 }
 
-fn leaf_done_file(file: &TaskFile) -> bool {
+/// Whether a hold keeps the task from Done.
+fn is_held(task: &Task) -> bool {
+    task.done_hold.is_some()
+}
+
+pub(crate) fn leaf_done_file(file: &TaskFile) -> bool {
     !file.todos.is_empty() && file.todos.iter().all(|todo| todo.state != TodoState::Open)
 }
 
@@ -179,13 +189,17 @@ fn result_merged(file: &TaskFile) -> bool {
 }
 
 /// The state of a PR-kind leaf before Blocked is considered: the Blocked step sits between Merged
-/// and Ready in the order, so [`state`] applies it to the four states after it.
-fn pr_stage(file: &TaskFile) -> State {
+/// and Ready in the order, so [`state`] applies it to the four states after it. A `held` task is
+/// never Done: it takes the stage it would have before Done.
+fn pr_stage(file: &TaskFile, held: bool) -> State {
     if file.status == Status::Cancelled {
         return State::Cancelled;
     }
     let merged = result_merged(file);
-    if file.status == Status::Done || leaf_done_file(file) || (file.kind == Kind::PrMerge && merged)
+    if !held
+        && (file.status == Status::Done
+            || leaf_done_file(file)
+            || (file.kind == Kind::PrMerge && merged))
     {
         return State::Done;
     }
@@ -234,12 +248,15 @@ fn pr_stage(file: &TaskFile) -> State {
     }
 }
 
-fn other_stage(file: &TaskFile) -> State {
+/// The state of a leaf of the other kinds before Blocked is considered. A `held` leaf whose files
+/// say it is finished is In Progress.
+fn other_stage(file: &TaskFile, held: bool) -> State {
+    let finished = file.status == Status::Done || leaf_done_file(file);
     if file.status == Status::Cancelled {
         State::Cancelled
-    } else if file.status == Status::Done || leaf_done_file(file) {
+    } else if finished && !held {
         State::Done
-    } else if leaf_started(file) {
+    } else if finished || leaf_started(file) {
         State::InProgress
     } else {
         State::Ready
@@ -250,11 +267,13 @@ fn group_state(task: &Task, file: &TaskFile, tree: &WorkTree) -> State {
     if is_cancelled(task) {
         return State::Cancelled;
     }
-    if file.status == Status::Done {
+    let held = is_held(task);
+    if file.status == Status::Done && !held {
         return State::Done;
     }
     let mut live = task.children.iter().filter(|child| !is_cancelled(child));
-    if live.clone().next().is_some() && live.all(|child| state(child, tree) == State::Done) {
+    if !held && live.clone().next().is_some() && live.all(|child| state(child, tree) == State::Done)
+    {
         return State::Done;
     }
     if let Some(context) = context(tree, task)
@@ -317,10 +336,11 @@ fn reached(target: &Task, point: UnblockPoint) -> bool {
     let Some(file) = &target.file else {
         return false;
     };
+    let held = is_held(target);
     let stage = if is_pr_kind(file.kind) {
-        pr_stage(file)
+        pr_stage(file, held)
     } else {
-        other_stage(file)
+        other_stage(file, held)
     };
     let stage_rank = match stage {
         State::Done => return true,

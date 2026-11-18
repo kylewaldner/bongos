@@ -89,19 +89,32 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        Self::toggle_with_prompt(workspace, query, "M-x ", window, cx)
+    }
+
+    /// Opens the palette with its own prompt label, such as vim's `:`.
+    pub fn toggle_with_prompt(
+        workspace: &mut Workspace,
+        query: &str,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
         let Some(previous_focus_handle) = window.focused(cx) else {
             return;
         };
 
         let entity = cx.weak_entity();
+        let label = SharedString::from(label.to_string());
         workspace.toggle_modal(window, cx, move |window, cx| {
-            CommandPalette::new(previous_focus_handle, query, entity, window, cx)
+            CommandPalette::new(previous_focus_handle, query, label, entity, window, cx)
         });
     }
 
     fn new(
         previous_focus_handle: FocusHandle,
         query: &str,
+        prompt_label: SharedString,
         entity: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -128,6 +141,7 @@ impl CommandPalette {
             entity,
             commands,
             previous_focus_handle,
+            prompt_label,
         );
 
         let picker = cx.new(|cx| {
@@ -180,6 +194,7 @@ pub struct CommandPaletteDelegate {
         postage::dispatch::Receiver<(Vec<Command>, Vec<StringMatch>, CommandInterceptResult)>,
     )>,
     query_history: QueryHistory,
+    prompt_label: SharedString,
 }
 
 struct Command {
@@ -287,8 +302,10 @@ impl CommandPaletteDelegate {
         workspace: WeakEntity<Workspace>,
         commands: Vec<Command>,
         previous_focus_handle: FocusHandle,
+        prompt_label: SharedString,
     ) -> Self {
         Self {
+            prompt_label,
             command_palette,
             workspace,
             all_commands: commands.clone(),
@@ -396,7 +413,7 @@ impl PickerDelegate for CommandPaletteDelegate {
     }
 
     fn prompt_label(&self, _cx: &App) -> Option<SharedString> {
-        Some("M-x ".into())
+        Some(self.prompt_label.clone())
     }
 
     fn match_text(&self, ix: usize) -> Option<String> {

@@ -1,6 +1,7 @@
 //! Gates and what they tell the app (D14, D15): the `workflows` [`NeedsYouSource`] (a leaf with a
-//! branch at a gate, a failed run or an interrupted run needs Kyle, and feature 03 rolls that up
-//! through every ancestor), and one toast with an "Open run" action per gate or failure.
+//! branch at a gate, a failed run, an interrupted run or a run held on a check without a verdict
+//! needs Kyle, and feature 03 rolls that up through every ancestor), and one toast with an
+//! "Open run" action per gate or failure.
 //!
 //! A gate itself is two events in the run log: the runtime appends `GateOpened` the moment the
 //! scheduler offers it, which sets that branch waiting on Kyle (the other branches of a fan-out
@@ -12,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use bongos_work::{NeedsYou, NeedsYouRegistry, NeedsYouSource};
-use bongos_workflow_model::record::EndState;
+use bongos_workflow_model::record::{CapReached, EndState};
 use bongos_workflow_model::{NodeKey, RunState};
 use gpui::{App, Global};
 use workspace::notifications::NotificationId;
@@ -42,14 +43,22 @@ pub fn reasons(state: &RunState) -> Vec<String> {
         Some(_) => return Vec::new(),
         None => {}
     }
-    let mut found: Vec<String> = state
-        .open_gates
-        .values()
-        .map(|question| format!("gate: {question}"))
-        .collect();
+    let mut found: Vec<String> = state.cap_reached.iter().map(CapReached::reason).collect();
+    found.extend(
+        state
+            .open_gates
+            .values()
+            .map(|question| format!("gate: {question}")),
+    );
     if !state.interrupted.is_empty() {
         found.push("run interrupted".to_string());
     }
+    found.extend(
+        state
+            .held
+            .values()
+            .map(|failure| format!("check had no verdict: {}", failure.detail.trim())),
+    );
     found
 }
 

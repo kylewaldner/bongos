@@ -843,3 +843,357 @@ kind = "success"
         vec![wait]
     );
 }
+
+const CHECKED: &str = r#"
+schema = 1
+name = "checked"
+start = "build"
+
+[nodes.build]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "check" }]
+
+[nodes.check]
+kind = "program"
+use = "checks"
+routes = [
+  { when = { verdict = "pass" }, to = "done" },
+  { when = { verdict = "fail" }, to = "fix", max_passes = 2 },
+]
+
+[nodes.fix]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "check" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+fn verdict(verdict: &str, failing: &[&str], summary: &str) -> Scripted {
+    ok(json!({
+        "verdict": verdict,
+        "failing": failing,
+        "scope": "changed files",
+        "evidence": [],
+        "summary": summary,
+    }))
+}
+
+fn no_route_failures(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            let failure = match event {
+                Event::NodeFinished { failure, .. } | Event::Ended { failure, .. } => failure,
+                _ => return false,
+            };
+            failure
+                .as_ref()
+                .is_some_and(|failure| failure.reason == FailureReason::NoRouteForResult)
+        })
+        .count()
+}
+
+fn held_events(events: &[Event]) -> Vec<(NodeKey, Failure)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Held { key, failure } => Some((key.clone(), failure.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_failing_check_routes_to_its_fix_node() {
+    let mut run = runner(CHECKED);
+    run.script("build", [ok(json!({ "summary": "built" }))])
+        .script(
+            "check",
+            [
+                verdict("fail", &["tests"], "2 tests fail"),
+                verdict("pass", &[], "all green"),
+            ],
+        )
+        .script("fix", [ok(json!({ "summary": "fixed" }))]);
+    assert_succeeded(&run.run());
+    assert_eq!(
+        run.started,
+        vec![
+            key("build", 1),
+            key("check", 1),
+            key("fix", 1),
+            key("check", 2)
+        ]
+    );
+    assert!(held_events(&run.events).is_empty());
+}
+
+#[test]
+fn a_check_that_keeps_failing_is_bounded_by_max_passes() {
+    let mut run = runner(CHECKED);
+    run.script("build", [ok(json!({ "summary": "built" }))])
+        .script("check", [verdict("fail", &["tests"], "2 tests fail")])
+        .script("fix", [ok(json!({ "summary": "tried" }))]);
+    let state = run.run();
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert_eq!(failure.node, Some(key("check", 3)));
+    assert_eq!(
+        failure.class,
+        FailureClass::Task,
+        "a fail verdict never heals"
+    );
+    assert_eq!(run.starts_of("fix"), 2);
+    assert_eq!(run.starts_of("check"), 3);
+    assert_eq!(no_route_failures(&run.events), 0);
+    assert!(
+        state.finished.iter().all(|finished| finished.succeeded()),
+        "a fail verdict is a result, not a failed try"
+    );
+}
+
+#[test]
+fn an_unrouted_no_verdict_holds_the_run_on_the_check() {
+    let mut run = runner(CHECKED);
+    run.script("build", [ok(json!({ "summary": "built" }))])
+        .script(
+            "check",
+            [verdict("no_verdict", &["lint"], "the runner crashed")],
+        );
+    let state = run.run();
+    assert_eq!(state.ended, None, "a held run does not end");
+    assert_eq!(no_route_failures(&run.events), 0);
+    let held = held_events(&run.events);
+    assert_eq!(held.len(), 1);
+    let (held_key, failure) = &held[0];
+    assert_eq!(held_key, &key("check", 1));
+    assert_eq!(failure.reason, FailureReason::CheckNoVerdict);
+    assert_eq!(failure.node, Some(key("check", 1)));
+    assert_eq!(failure.detail, "lint: the runner crashed");
+    assert_eq!(
+        state.held.keys().collect::<Vec<_>>(),
+        vec![&key("check", 1)]
+    );
+    assert!(
+        step(&run.definition, &state, &run.limits, 8).is_empty(),
+        "a held run gets no command"
+    );
+    assert_eq!(resume_set(&state), vec![key("check", 1)]);
+}
+
+#[test]
+fn a_resume_after_a_hold_reruns_only_the_held_check() {
+    let mut run = runner(CHECKED);
+    run.script("build", [ok(json!({ "summary": "built" }))])
+        .script(
+            "check",
+            [
+                verdict("no_verdict", &[], ""),
+                verdict("pass", &[], "all green"),
+            ],
+        );
+    let state = run.run();
+    assert_eq!(
+        held_events(&run.events)[0].1.detail,
+        "check: no verdict",
+        "with nothing named, the node and a plain reason"
+    );
+    assert_eq!(state.held.len(), 1);
+    run.resume();
+    let state = run.run();
+    assert_succeeded(&state);
+    assert!(state.held.is_empty());
+    assert_eq!(run.tries(&key("build", 1)), 1, "done keys are not rerun");
+    assert_eq!(run.tries(&key("check", 1)), 2);
+    assert_eq!(
+        run.started,
+        vec![key("build", 1), key("check", 1), key("check", 1)]
+    );
+}
+
+#[test]
+fn a_routed_no_verdict_routes() {
+    let text = CHECKED.replace(
+        r#"{ when = { verdict = "pass" }, to = "done" },"#,
+        r#"{ when = { verdict = "pass" }, to = "done" },
+  { when = { verdict = "no_verdict" }, to = "gave_up" },"#,
+    ) + "\n[ends.gave_up]\nkind = \"failure\"\nreason = \"no verdict\"\n";
+    let mut run = runner(&text);
+    run.script("build", [ok(json!({ "summary": "built" }))])
+        .script("check", [verdict("no_verdict", &[], "timed out")]);
+    let state = run.run();
+    assert!(held_events(&run.events).is_empty());
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::FailureEndReached);
+    assert_eq!(failure.detail, "gave_up: no verdict");
+}
+
+#[test]
+fn a_no_verdict_from_any_other_node_still_has_no_route() {
+    let text = CHECKED.replace(r#"use = "checks""#, r#"script = "check.py""#).replace(
+        "[nodes.fix]",
+        "output = { verdict = { type = \"choice\", values = [\"pass\", \"fail\", \"no_verdict\"] } }\n\n[nodes.fix]",
+    );
+    let mut run = runner(&text);
+    run.script("build", [ok(json!({ "summary": "built" }))])
+        .script("check", [ok(json!({ "verdict": "no_verdict" }))]);
+    let state = run.run();
+    assert_eq!(failure_of(&state).reason, FailureReason::NoRouteForResult);
+    assert!(held_events(&run.events).is_empty());
+    assert!(matches!(run.commands.last(), Some(Command::End { .. })));
+}
+
+#[test]
+fn a_checks_node_starts_with_no_session_free_and_an_agent_does_not() {
+    let text = r#"
+schema = 1
+name = "both"
+start = "split"
+
+[nodes.split]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = ["check", "work"] }]
+
+[nodes.check]
+kind = "program"
+use = "checks"
+routes = [{ when = { verdict = "pass" }, to = "done" }]
+
+[nodes.work]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+    let definition = definition(text);
+    let split = key("split", 1);
+    let events = vec![
+        Event::Created,
+        Event::NodeStarted {
+            key: split.clone(),
+            try_number: 1,
+            pid: 1,
+            pid_start_time: 1,
+        },
+        Event::NodeFinished {
+            key: split,
+            try_number: 1,
+            result: Some(json!({ "summary": "ok" })),
+            failure: None,
+            cost_usd: 0.0,
+            turns: None,
+            elapsed_ms: 0,
+            session_id: None,
+        },
+    ];
+    let commands = step(&definition, &replay(&events), &Limits::default(), 0);
+    let started: Vec<&str> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Start(key) => Some(key.node.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, ["check"]);
+}
+
+fn unbounded_loop() -> String {
+    LOOP.replace(", max_passes = 3", "")
+}
+
+fn with_loop_bound(text: &str, loop_bound: u32) -> FakeRunner {
+    FakeRunner::new(
+        definition(text),
+        Limits {
+            loop_bound,
+            ..Limits::default()
+        },
+    )
+}
+
+#[test]
+fn a_loop_without_max_passes_fails_after_the_loop_bound() {
+    let mut run = with_loop_bound(&unbounded_loop(), 2);
+    run.script("test", [ok(json!({ "status": "fail" }))])
+        .script("fix", [ok(json!({ "summary": "tried" }))]);
+    let state = run.run();
+    let failure = failure_of(&state);
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert!(
+        failure.detail.contains("bound of 2 passes"),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(run.starts_of("test"), 2);
+    assert_eq!(run.starts_of("fix"), 2);
+}
+
+#[test]
+fn an_explicit_max_passes_wins_over_the_loop_bound() {
+    let mut run = with_loop_bound(LOOP, 10);
+    run.script("test", [ok(json!({ "status": "fail" }))])
+        .script("fix", [ok(json!({ "summary": "tried" }))]);
+    let failure = failure_of(&run.run());
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert!(
+        failure.detail.contains("bound of 3 passes"),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(run.starts_of("fix"), 3);
+}
+
+const CROSS_EDGE: &str = r#"
+schema = 1
+name = "cross"
+start = "a"
+
+[nodes.a]
+kind = "program"
+output = { status = { type = "choice", values = ["pass", "b", "d"] } }
+routes = [
+  { when = { status = "pass" }, to = "done" },
+  { when = { status = "b" }, to = "b", max_passes = 3 },
+  { when = { status = "d" }, to = "d" },
+]
+
+[nodes.b]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "c" }]
+
+[nodes.c]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "a" }]
+
+[nodes.d]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "c" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+#[test]
+fn a_cycle_reached_by_a_cross_edge_is_bounded_by_the_loop_bound() {
+    let mut run = with_loop_bound(CROSS_EDGE, 2);
+    run.script("a", [ok(json!({ "status": "d" }))])
+        .script("d", [ok(json!({ "summary": "tried" }))])
+        .script("c", [ok(json!({ "summary": "tried" }))]);
+    let failure = failure_of(&run.run());
+    assert_eq!(failure.reason, FailureReason::LoopBoundReached);
+    assert!(
+        failure.detail.contains("bound of 2 passes"),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(run.starts_of("a"), 2);
+}

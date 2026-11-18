@@ -7,7 +7,11 @@
 //! `workflow: show run diff` or `workflow: open run worktree`, a deliberate step. What a
 //! [`Snapshot`] holds comes from the run's record (state, definition, logs of the nodes), and
 //! [`Snapshot::text`] is the debug dump. Nothing in [`Snapshot`] needs a window.
+//!
+//! A running node whose `use` has a registered [`NodeStatusSource`](crate::node_status) shows that
+//! source's line under it (a check waiting for a pool, or the part it runs).
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,7 +19,7 @@ use std::path::{Path, PathBuf};
 use bongos_work::Focus;
 use bongos_workflow_model::definition::{Definition, NodeKind};
 use bongos_workflow_model::layout::{GraphLayout, LayoutNode, Status, layout};
-use bongos_workflow_model::record::{NodeKey, RunState, branch_label};
+use bongos_workflow_model::record::{CapReached, NodeKey, RunState, branch_label};
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, Global, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, PathBuilder, Render, SharedString, Styled as _, WeakEntity,
@@ -33,6 +37,7 @@ use crate::actions::{show_toast, workflow};
 use crate::commands::{on, on_run, open_report, open_worktree};
 use crate::engine::WorkflowEngine;
 use crate::lifecycle::{RunId, RunStatus, definition_copy_dir};
+use crate::node_status::{NodeStatus, NodeStatusSources};
 use crate::outcomes::{self, RunOutcome};
 use crate::runner_claude::STREAM_FILE;
 use crate::runner_program::{STDERR_FILE, STDOUT_FILE};
@@ -78,6 +83,8 @@ pub struct RunData {
     pub attempt_dir: Option<PathBuf>,
     /// The sessions the settings allow at once.
     pub session_limit: usize,
+    /// The live status of each running key whose node has a status source.
+    pub node_status: BTreeMap<NodeKey, NodeStatus>,
 }
 
 impl RunData {
@@ -99,7 +106,21 @@ impl RunData {
                 .map(|worktree| worktree.path.clone()),
             attempt_dir: lifecycle.current_attempt_dir(run),
             session_limit,
+            node_status: BTreeMap::new(),
         })
+    }
+
+    /// [`Self::of`] with the live status of its keys in flight read from the registered sources.
+    pub fn read(
+        engine: &WorkflowEngine,
+        run: &str,
+        session_limit: usize,
+        cx: &App,
+    ) -> Option<Self> {
+        let mut data = Self::of(engine, run, session_limit)?;
+        let in_flight = engine.lifecycle().runtime().in_flight(run);
+        data.node_status = NodeStatusSources::running(&data.definition, &data.run, &in_flight, cx);
+        Some(data)
     }
 }
 
@@ -112,6 +133,8 @@ pub struct Row {
     pub passes: u32,
     pub tries: u32,
     pub cost_usd: f64,
+    /// What the node's running try is doing now, from its status source.
+    pub live: Option<String>,
 }
 
 impl Row {
@@ -140,6 +163,8 @@ pub struct Detail {
     pub result: Option<String>,
     pub permissions: Vec<String>,
     pub caps: Vec<String>,
+    /// The running try's status line and detail, from its status source.
+    pub live: Vec<String>,
     pub log: Vec<String>,
 }
 
@@ -159,6 +184,8 @@ pub struct Snapshot {
     pub gates: Vec<GateCard>,
     pub outcomes: Vec<String>,
     pub failure: Option<String>,
+    /// Why the run is halted by the cost cap, naming the node that crossed it.
+    pub cap_reason: Option<String>,
     pub detail: Option<Detail>,
     /// The box the detail pane is about.
     pub selected: Option<Selection>,
@@ -170,7 +197,7 @@ impl Snapshot {
     pub fn build(data: &RunData, selected: Option<&Selection>) -> Self {
         let state = &data.state;
         let graph = layout(&data.definition, state);
-        let rows = rows(state, &graph);
+        let rows = rows(state, &graph, &data.node_status);
         let selected = selected
             .filter(|selected| {
                 graph
@@ -221,6 +248,7 @@ impl Snapshot {
             gates,
             outcomes,
             failure,
+            cap_reason: state.cap_reached.as_ref().map(CapReached::reason),
             detail,
             selected,
         }
@@ -257,6 +285,9 @@ impl Snapshot {
         if !self.caps.is_empty() {
             let _ = writeln!(out, "caps: {}", self.caps.join("; "));
         }
+        if let Some(reason) = &self.cap_reason {
+            let _ = writeln!(out, "halted: {reason}");
+        }
         if let Some(failure) = &self.failure {
             let _ = writeln!(out, "failure: {failure}");
         }
@@ -278,6 +309,9 @@ impl Snapshot {
                         row.tries,
                         format_cost(row.cost_usd)
                     );
+                    if let Some(live) = &row.live {
+                        let _ = writeln!(out, "    {live}");
+                    }
                 }
             }
             Mode::Graph => {
@@ -318,6 +352,9 @@ impl Snapshot {
             if !detail.caps.is_empty() {
                 let _ = writeln!(out, "  caps: {}", detail.caps.join("; "));
             }
+            for live in &detail.live {
+                let _ = writeln!(out, "  live: {live}");
+            }
             if !detail.log.is_empty() {
                 let _ = writeln!(out, "  log (last {} lines)", detail.log.len());
                 for line in &detail.log {
@@ -341,8 +378,25 @@ fn pretty(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
+/// The status of the running key of `name` in `branch`, if it has one.
+fn live_status<'a>(
+    statuses: &'a BTreeMap<NodeKey, NodeStatus>,
+    name: &str,
+    branch: &[(String, u32)],
+) -> Option<&'a NodeStatus> {
+    statuses
+        .iter()
+        .filter(|(key, _)| key.node == name && key.branch == branch)
+        .map(|(_, status)| status)
+        .next_back()
+}
+
 /// The nodes that started, in the order they first appeared in the log.
-fn rows(state: &RunState, graph: &GraphLayout) -> Vec<Row> {
+fn rows(
+    state: &RunState,
+    graph: &GraphLayout,
+    statuses: &BTreeMap<NodeKey, NodeStatus>,
+) -> Vec<Row> {
     let mut order: Vec<Selection> = Vec::new();
     let keys = state
         .finished
@@ -369,6 +423,7 @@ fn rows(state: &RunState, graph: &GraphLayout) -> Vec<Row> {
                 tries: finished.clone().count() as u32
                     + state.running.keys().filter(|key| own(key)).count() as u32,
                 cost_usd: finished.map(|finished| finished.cost_usd).sum(),
+                live: live_status(statuses, &name, &branch).map(|status| status.line.clone()),
                 name,
                 branch,
                 status: node.status,
@@ -380,11 +435,13 @@ fn rows(state: &RunState, graph: &GraphLayout) -> Vec<Row> {
 
 fn caps_used(data: &RunData, graph: &GraphLayout) -> Vec<String> {
     let mut caps = vec![format!("cost {}", format_cost(data.state.cost_usd))];
-    caps.push(format!(
-        "sessions {} of {}",
-        data.state.running.len(),
-        data.session_limit
-    ));
+    let sessions = data
+        .state
+        .running
+        .keys()
+        .filter(|key| crate::runtime::holds_session(&data.definition, key))
+        .count();
+    caps.push(format!("sessions {sessions} of {}", data.session_limit));
     for arc in &graph.arcs {
         caps.push(format!("{} -> {} {}", arc.from, arc.to, arc.label));
     }
@@ -481,6 +538,10 @@ fn detail(data: &RunData, graph: &GraphLayout, selected: &Selection) -> Detail {
             .map(|(running, node)| (running.clone(), node.try_number))
             .next_back()
     });
+    if let Some(status) = live_status(&data.node_status, &laid.name, &laid.branch) {
+        detail.live.push(status.line.clone());
+        detail.live.extend(status.detail.clone());
+    }
     let logged = running.or_else(|| last.map(|last| (last.key.clone(), last.try_number)));
     if let (Some(dir), Some((key, try_number))) = (&data.attempt_dir, logged) {
         detail.log = try_log(dir, &key, try_number);
@@ -615,7 +676,7 @@ impl RunView {
         let limit = crate::WorkflowsSettings::get_global(cx)
             .limits
             .session_limit();
-        self.snapshot = RunData::of(&self.engine, &self.run, limit)
+        self.snapshot = RunData::read(&self.engine, &self.run, limit, cx)
             .map(|data| Snapshot::build(&data, self.selected.as_ref()));
         if let Some(snapshot) = &self.snapshot {
             self.selected = snapshot.selected.clone();
@@ -691,6 +752,12 @@ impl RunView {
             )
             .children(
                 snapshot
+                    .cap_reason
+                    .as_ref()
+                    .map(|reason| Label::new(reason.clone()).color(Color::Warning)),
+            )
+            .children(
+                snapshot
                     .failure
                     .as_ref()
                     .map(|failure| Label::new(format!("failed: {failure}")).color(Color::Error)),
@@ -710,18 +777,27 @@ impl RunView {
                 } else {
                     format!(" [{}]", branch_label(&row.branch))
                 };
-                h_flex()
+                v_flex()
                     .id(("run-view-row", index))
-                    .gap_2()
                     .px_2()
                     .py_0p5()
                     .when(is_selected, |row| row.bg(colors.element_selected))
                     .hover(|row| row.bg(colors.element_hover))
                     .on_click(cx.listener(move |this, _, _, cx| this.select(selection.clone(), cx)))
-                    .child(Label::new(format!("{}{branch}", row.name)))
-                    .child(Label::new(row.status.label()).color(box_color(row.status)))
-                    .child(Label::new(format!("pass {}", row.passes.max(1))).color(Color::Muted))
-                    .child(Label::new(format_cost(row.cost_usd)).color(Color::Muted))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Label::new(format!("{}{branch}", row.name)))
+                            .child(Label::new(row.status.label()).color(box_color(row.status)))
+                            .child(
+                                Label::new(format!("pass {}", row.passes.max(1)))
+                                    .color(Color::Muted),
+                            )
+                            .child(Label::new(format_cost(row.cost_usd)).color(Color::Muted)),
+                    )
+                    .when_some(row.live.clone(), |row, live| {
+                        row.child(Label::new(live).size(LabelSize::Small).color(Color::Muted))
+                    })
             }))
     }
 
@@ -1132,14 +1208,20 @@ fn watch_engine<T>(cx: &mut Context<T>) {
         return;
     }
     cx.set_global(RunViews::default());
-    WorkflowEngine::observe(cx, |_, cx| {
-        let views = std::mem::take(&mut cx.default_global::<RunViews>().0);
-        let live: Vec<_> = views
-            .into_iter()
-            .filter(|view| view.update(cx, |view, cx| view.refresh(cx)).is_ok())
-            .collect();
-        cx.default_global::<RunViews>().0.extend(live);
-    });
+    WorkflowEngine::observe(cx, |_, cx| refresh_views(cx));
+}
+
+/// Reads every open run view's run again.
+pub(crate) fn refresh_views(cx: &mut App) {
+    if !cx.has_global::<RunViews>() {
+        return;
+    }
+    let views = std::mem::take(&mut cx.default_global::<RunViews>().0);
+    let live: Vec<_> = views
+        .into_iter()
+        .filter(|view| view.update(cx, |view, cx| view.refresh(cx)).is_ok())
+        .collect();
+    cx.default_global::<RunViews>().0.extend(live);
 }
 
 /// The file `workflow: dump run view` writes in the logs directory.
@@ -1233,7 +1315,7 @@ pub(crate) fn register(workspace: &mut Workspace) {
         }
         let text = match workspace.active_item_as::<RunView>(cx) {
             Some(view) => view.read(cx).text(),
-            None => match RunData::of(&engine, &run, 0) {
+            None => match RunData::read(&engine, &run, 0, cx) {
                 Some(data) => Snapshot::build(&data, None).text(Mode::List),
                 None => "The run is no longer known".to_string(),
             },
@@ -1337,7 +1419,7 @@ fn open_for_focus(engine: &WorkflowEngine, task: &str, cx: &mut App) {
     });
 }
 
-/// Makes `task: focus` on a leaf with an active run open its run view (PRD 8): observes the focus
+/// Makes `task: focus` on a leaf with an active run open its run view: observes the focus
 /// of `bongos_work`, which exists once that crate is initialized, and shows the run when the
 /// focused task changes. Quietly does nothing when the focus is not there.
 pub(crate) fn observe_focus(engine: &WorkflowEngine, cx: &mut App) {

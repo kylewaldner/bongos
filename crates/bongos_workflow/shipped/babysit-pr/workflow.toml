@@ -39,7 +39,7 @@ kind = "program"
 purpose = "Check CI and report green, red, waiting, merged or closed"
 script = "check_ci.py"
 language = "python"
-permissions = { commands = ["gh"], network = ["github.com", "*.github.com"], mcp = [] }
+permissions = { commands = ["gh"], network = ["@remote"], mcp = [] }
 polls = { value = "waiting" }
 output = { result = { type = "choice", values = ["green", "red", "waiting", "merged", "closed"] } }
 routes = [
@@ -62,10 +62,10 @@ kind = "program"
 purpose = "Push the fix to the pull request"
 script = "push.py"
 language = "python"
-permissions = { commands = ["gh", "git"], network = ["github.com", "*.github.com"], mcp = [] }
+permissions = { commands = ["gh", "git"], network = ["@remote"], mcp = [] }
 output = { result = { type = "choice", values = ["pushed", "rejected"] } }
 routes = [
-  { when = { result = "pushed" }, to = "check" },
+  { when = { result = "pushed" }, to = "check", max_passes = 6, on_bound = "red_ci" },
   { when = { result = "rejected" }, to = "rejected" },
 ]
 
@@ -75,7 +75,7 @@ purpose = "Merge the pull request"
 script = "merge_pr.py"
 language = "python"
 gate = { when = "before", question = "CI is green. Merge this pull request?" }
-permissions = { commands = ["gh"], network = ["github.com", "*.github.com"], mcp = [] }
+permissions = { commands = ["gh"], network = ["@remote"], mcp = [] }
 with = { method = "squash" }
 output = { result = { type = "choice", values = ["merged", "blocked"] } }
 routes = [

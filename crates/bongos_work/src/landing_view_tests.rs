@@ -172,6 +172,39 @@ fn a_waiting_row_shows_its_state_its_checks_and_its_move_note() {
 }
 
 #[test]
+fn a_check_result_with_an_output_file_shows_its_path_in_place() {
+    let mut change = listed(row("c1", "fresh", ChangeState::Open, 1), "adds 1 task");
+    change.checks = vec![
+        CheckResult {
+            check: "validate".to_string(),
+            tree: "t".to_string(),
+            stamp: "s".to_string(),
+            outcome: CheckOutcome::Fail {
+                message: "2 broke".to_string(),
+                output: Some("/files/landing/checks/r1/part-1.log".into()),
+            },
+        },
+        CheckResult {
+            check: "slow".to_string(),
+            tree: "t".to_string(),
+            stamp: "s".to_string(),
+            outcome: CheckOutcome::NoVerdict {
+                reason: "time budget reached".to_string(),
+                output: Some("/files/landing/checks/r2/part-1.log".into()),
+            },
+        },
+    ];
+    let line = LandingView::build(&listing(vec![change]), start(), 14).lines()[1].clone();
+    assert!(
+        line.ends_with(
+            "(checks: validate failed: 2 broke, output /files/landing/checks/r1/part-1.log; \
+             slow no verdict: time budget reached, output /files/landing/checks/r2/part-1.log)"
+        ),
+        "{line}"
+    );
+}
+
+#[test]
 fn master_warnings_come_first_and_only_a_split_master_row_resolves() {
     let mut listing = listing(vec![listed(
         row("c1", "fresh", ChangeState::Open, 1),

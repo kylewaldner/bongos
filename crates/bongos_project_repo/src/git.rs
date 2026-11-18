@@ -1,5 +1,6 @@
 //! A runner over the `git` binary. Every call runs with `GIT_TERMINAL_PROMPT=0`, so a missing
-//! credential fails instead of waiting for input.
+//! credential fails instead of waiting for input, and without the inherited variables that point
+//! git at another repository (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and the like).
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -79,6 +80,31 @@ pub struct TreeEntry {
     pub path: String,
 }
 
+/// The environment variables that make git work on another repository, index, object store,
+/// configuration, history or attributes than the one in the directory it runs in, or read
+/// pathspecs differently. They are removed from the inherited environment of every command.
+const REDIRECTING_VARIABLES: [&str; 19] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_ATTR_SOURCE",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+];
+
 /// A located git binary.
 #[derive(Clone, Debug)]
 pub struct Git {
@@ -125,6 +151,13 @@ impl Git {
     async fn run_os(&self, directory: &Path, args: Vec<OsString>) -> Result<String, GitError> {
         let output = self.run_bytes(directory, args, None).await?;
         Ok(String::from_utf8_lossy(&output).trim().to_string())
+    }
+
+    /// Runs git with `args` in `directory` and returns its raw standard output, untrimmed, for
+    /// `-z` listings whose paths may start or end with white space.
+    pub async fn run_raw(&self, directory: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
+        self.run_bytes(directory, args.iter().map(OsString::from).collect(), None)
+            .await
     }
 
     /// Runs git with `args` in `directory`, feeding it `stdin`, and returns its raw output.
@@ -196,7 +229,10 @@ impl Git {
     }
 
     /// A git command with `args` in `directory`, with `GIT_INDEX_FILE` set to `index` when
-    /// given.
+    /// given. The variables that point git at another repository, index or configuration are
+    /// removed from the inherited environment first, so the command works on `directory` and
+    /// nothing else, whatever environment the process runs in (a git hook, for one, sets
+    /// `GIT_DIR` and `GIT_INDEX_FILE`).
     fn command(
         &self,
         directory: &Path,
@@ -204,9 +240,23 @@ impl Git {
         args: Vec<OsString>,
     ) -> util::command::Command {
         let mut command = util::command::new_command(&self.binary);
+        for name in REDIRECTING_VARIABLES {
+            command.env_remove(name);
+        }
+        for (name, _) in std::env::vars_os() {
+            let numbered = name.to_str().is_some_and(|name| {
+                name.starts_with("GIT_CONFIG_KEY_") || name.starts_with("GIT_CONFIG_VALUE_")
+            });
+            if numbered {
+                command.env_remove(name);
+            }
+        }
+        // Replacement refs (`git replace`) would make an object read as another one, so what a
+        // commit holds could differ from what its id names.
         command
             .current_dir(directory)
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(args);
         if let Some(index) = index {
             command.env("GIT_INDEX_FILE", index);

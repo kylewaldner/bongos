@@ -54,7 +54,7 @@ Any other file in a task directory is an artifact, described and made visible or
   again on the fresh state. An agent that moves or renames task files should do the same: reread
   `task.toml` first, and never write from a stale copy.
 - **Keys (Emacs keymap only).** `C-c w w` toggles the panel, `C-c w n` makes a task, `C-c w s`
-  starts one, `C-c w a` advances, `C-c w c` closes, `C-c w G` opens the graph, and the `C-c w d ...`,
+  starts one, `C-c w a` advances, `C-c w c` completes (`task: complete`; `task: close` is its unbound alias), `C-c w G` opens the graph, and the `C-c w d ...`,
   `C-c w p ...`, `C-c w g ...` and artifact keys cover todos, projects, repositories and artifacts; the rest are in the command
   palette (`assets/keymaps/linux/emacs.json`). In the panel, `tab` expands a row inline and `^`
   goes up one level.
@@ -365,8 +365,7 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   `name` (the key in the file, not the directory name): the project's
   (`~/.bongos/projects/<project>/workflows`) over yours (`~/.bongos/workflows`) over the ones bongos
   ships (`implement PR`, `implement tasks`, `ship PR` and `babysit PR`, written to the data directory
-  under `workflows/shipped/<version>/` and never edited). In this build the app reads the shipped and
-  your layers; the project layer is not connected yet. `workflow: new` makes a definition in your
+  under `workflows/shipped/<version>/` and never edited). `workflow: new` makes a definition in your
   layer, from a minimal one-agent template or as a copy of a shipped one to edit; `workflow: edit
   definition` opens one; `workflow: validate` checks them all and lists each finding with its line in
   a read-only buffer. A key bongos does not know is a warning, not an error.
@@ -413,13 +412,12 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   `C-c f k` cancels, `C-c f a` approves a gate and `C-c f v` sends it back with notes. `C-c f w`
   shows the Runs panel (the runs of every task, filtered with `t`, `p` and `s`; `enter` and `l` open the
   selected run's logs); `C-c f l` opens a run's logs, `C-c f s` its run view, `C-c f
-  o` its worktree, `C-c f d` its diff and `C-c f x` is meant to clear finished runs (the
-  worktrees of those older than `workflows.keep_finished_days`; not connected yet). `C-c f n`, `C-c f e` and `C-c f V`
+  o` its worktree, `C-c f d` its diff and `C-c f x` clears finished runs (the
+  worktrees of those older than `workflows.keep_finished_days`). `C-c f n`, `C-c f e` and `C-c f V`
   are `workflow: new`, `edit definition` and `validate`. A run waiting at a gate or failed marks its
   task as needing you. A run survives a restart of bongos; a run that was running comes back
-  interrupted and waits for `resume`. Runs do not execute yet: the node runners are not
-  connected to the engine in this build, so `workflow: run` refuses with "Workflow runs are not
-  connected to an agent runner yet" and starts nothing.
+  interrupted and waits for `resume`. Runs execute: `workflow: run` starts the agent, program and
+  built-in nodes of the definition you pick, in the run's own worktree.
 - **Settings.** All under `workflows`, the main ones also on the Work page of the settings window:
   `enabled` (true), `worktrees_dir` (null), `min_free_disk_mb` (2048), `keep_finished_days` (14),
   `max_concurrent_runs` (3), `max_concurrent_sessions` (null, twice the runs), `max_parallel_branches`
@@ -431,6 +429,135 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   provider of the `claude` or `codex` you run, and `gh` or the network hosts a program node declares
   (the shipped `wait` and `merge` programs use `gh` and git). A program node with no declared hosts
   has no network under the sandbox.
+
+## Task checks
+
+A check is a script or command that bongos starts, watches and judges by its exit status, its output
+and an optional result file, so a task is done because a check passed and not because someone
+wrote that it did. It is on by default; `task_checks.enabled` set to `false` runs no check, writes no
+record and hides every task check command (a key still says "Task checks are off
+(task_checks.enabled)"). A check never runs by itself, except as a retry of its own no-verdict result and
+at a landing; a person runs it, or a workflow step does.
+
+```toml
+# definitions/tasks/<task>/task.toml
+[checks]
+inherit = "parent"                 # or "none"; the default is "parent"
+use = ["standard"]                 # named sets, in order
+drop = ["format"]                  # remove an inherited check
+
+[[checks.check]]
+name = "tests"                     # unique in its set
+run = "checks/run-tests"           # a script in definitions/, or: command = ["make", "test"]
+scope = { script = "checks/scope" }   # or scope = "all"
+parts = 8                          # or { plan = "checks/plan-parts" }; default one part
+required = true                    # false: shown, never counted
+or_accepted = "flake-verdict"      # another check's pass on the same tree also satisfies this one
+pinned = ["checks/registry/flaky-tests.md"]   # definitions files the script reads from the pin
+environment = [3]                  # exit codes that mean "environment"; pass defaults to [0], fail to [1]
+
+[[checks.closing]]                 # on a group: checked once, on its last open child
+name = "tests-full"
+run = "checks/tests-full"
+scope = "all"
+```
+
+- **Declaration.** A task's `checks` table lives in its `task.toml` in the project repository.
+  Other keys of a check: `repos`, `pass`, `fail`, `summary` (a regex a passing run needs a matching
+  output line for), `result_file`, `needs` (pool names), `parallel`, `stop_at_first_failure`,
+  `unset`, `key_inputs`, `params` and `budget_minutes`. Exactly one of `run` and `command`. A path
+  in `run`, `scope.script`, `parts.plan` or `pinned` is relative to `definitions/` and cannot leave
+  it. A broken declaration is refused at landing by the check `checks-valid`.
+- **Sets and inheritance.** A task's effective set starts from its parent's (`inherit = "none"`
+  starts empty), adds each `use` set (`definitions/checks/sets/<name>.toml`, holding `[[check]]`
+  and `[[closing]]` entries), then its own entries; a name that is already there is replaced and
+  `drop` removes one. A group's ordinary checks pass down to its children and are judged there. A
+  document or spike task has no checks to apply. A task with no tree to check (it was never started)
+  is held: "not done: no tree to check".
+- **Closing checks.** A group's closing checks are added to the last open child, whose section shows
+  them as "closing check of <group>". If a sibling is still held when that child finishes, the group
+  judges them itself, on that child's tree.
+- **Scope scripts.** A check with a `scope` script is asked first what is in scope. The script gets
+  `BONGOS_CHANGED_FILES` (the changed files of the task against its base branch) and writes JSON to
+  `BONGOS_SCOPE_RESULT`: `{"scope": "items", "items": [...], "reason": "..."}`, or `"all"`, or
+  `"none"`; `reason` is required. The check then gets `BONGOS_CHECK_SCOPE` (`all` or `items`) and
+  `BONGOS_CHECK_ITEMS` (a file). A run on `items` or `none` satisfies the check; `scope = "all"`
+  needs a run on everything.
+- **Parts.** A check with `parts = N` runs its processes one after another (`parallel = true` also
+  uses free pool slots, up to `task_checks.parallel_parts_max`), each with `BONGOS_CHECK_PART` and
+  `BONGOS_CHECK_PARTS`. A run stopped halfway keeps the parts that ended; the next run of the same
+  check on the same tree and scope shows "running part 5 of 8, 4 kept". Any difference (an edit,
+  another scope, a changed script) starts again. Any failing part fails the check; else any no
+  verdict is the check's.
+- **Evidence and the tree key.** Every run is a record in the project's state store: the check's
+  digest (its declaration and the bytes of every definitions file it names), the tree key, the
+  scope, the parts, the verdict, the output file. The tree key is the git tree id of every tracked
+  and untracked file `.gitignore` does not exclude, taken in a private index, so it does not depend
+  on the commit or on your real index; a check with `key_inputs` also keys on those files. A record
+  counts only while its key and digest are the current ones. Scripts are read from a pin: the last
+  verified commit of the definitions (`BONGOS_CHECK_PINNED`), so an edit in a working copy is not
+  seen by a run, and an agent cannot loosen a check by editing its script. The scripts' own channels
+  are the exit status, the output and `BONGOS_CHECK_RESULT` (JSON: `summary`, and optionally
+  `failing` and `counts`; at most `task_checks.result_file_limit_kb`). Nothing else writes records.
+- **No verdict.** A run that does not end as a pass or a fail gives no verdict, with its reason:
+  an environment exit code (`no verdict: environment (exit 3)`), an undeclared exit code, a signal,
+  a missing summary line, an invalid result file, a tool not found, a time budget, a wait for a pool
+  that ran out, a cancel. A no-verdict run is run again after `task_checks.no_verdict_rerun_minutes`,
+  at most `task_checks.no_verdict_reruns` times, keeping parts that ended; then it is reported. It
+  never counts as a pass.
+- **Landing checks.** A project's `[[landing.checks]]` entry whose `run` is a `check` table runs
+  one check on the tree a change would land, with the scripts of master's copy (never the
+  change's own):
+
+  ```toml
+  [[landing.checks]]
+  name = "guard"
+  phase = "before-queue"
+  applies = "always"
+  run = { check = { name = "guard", run = "checks/guard", result_file = true } }
+  ```
+
+  A fail refuses the landing and keeps its summary, failing items and output with the change; a
+  no verdict keeps it waiting. A change that loosens a required check of a task that has started
+  (a removed check, wider pass codes, a narrower scope) needs a person's approval.
+- **The detail view.** `C-c w i` opens a task's details: goal, kind, state, documents, todos,
+  children and edges, then the Checks section: a header ("all required checks pass", "not done: 2
+  checks missing", "checks waiting") and one row per check with where it came from (own,
+  `from set <name>`, `inherited from ...`, `overrides ...`, `closing check of ...`), whether it is
+  required, its result (`not run`, `pass`, `fail (1 item)`, `no verdict: ...`, `stale: ...`,
+  `accepted by <check>`, or what it is doing now), scope, tree key, time and output. Failing items
+  and the output file are listed under a row. In the view, `x` runs the checks, `r` runs one, `k`
+  cancels, `c` completes the task, `s` shows where each row is declared and `g` refreshes.
+- **`task: complete`.** `C-c w c` marks the task done, unless a required check of it is unmet: then
+  a message names the checks and nothing changes. A task whose last todo closed with required
+  checks is held out of Done until its checks pass; the pass writes a done record (the tree key and
+  the evidence it rests on), and reopening the task removes it. `task: close` is the same command
+  with no key.
+- **Keys (Emacs keymap only).** `C-c w x x` runs the task's checks, `C-c w x r` runs one check
+  (you pick it), `C-c w x k` cancels the running checks, `C-c w x s` shows the Checks section,
+  `C-c w x o` shows the output of a check in a read-only buffer that follows a running one,
+  `C-c w x e` edits the task's checks in a new working copy, `C-c w i` shows the details and
+  `C-c w c` completes. The command acts on the task at point (the details tab, the selected Work
+  row or the focused task), else asks. `task: run checks clean` (ignore kept parts) and `task:
+  show check sources` have no key; find them in the command palette.
+- **Settings.** All under `task_checks`, on the Work page of the settings window as "Task Checks":
+  `enabled` (true), `output_dir` (null, the task's files folder `checks/`), `output_retention_days`
+  (30; the record stays after its output file is deleted), `output_limit_mb` (256),
+  `result_file_limit_kb` (256), `default_budget_minutes` (null, no budget), `no_verdict_reruns` (2),
+  `no_verdict_rerun_minutes` (5), `pool_wait_limit_hours` (4), `kill_grace_seconds` (5),
+  `parallel_parts_max` (4), `scratch_dir` (null, `<data dir>/checks-scratch`), `tree_key_debounce_ms`
+  (2000) and `live_write_ms` (1000).
+- **Detached processes.** A check's process runs in its own session. Stopping a check (a cancel,
+  a time budget, quitting) sends a stop signal to that process group and to every process of yours
+  that carries the part's `BONGOS_CHECK_TOKEN` in its environment, then kills what is left after
+  `task_checks.kill_grace_seconds`. On Linux that finds a process that detached from the check
+  (a daemon it started). On macOS bongos cannot read another process's environment, so a process
+  that detached and was reparented is not found; only the group and its live descendants stop.
+  After a crash, the next start stops the processes it finds through the unfinished records.
+- **Not there yet.** The Checks section is computed when a check ends, not when a file changes, so
+  a row does not turn `stale` while you edit; the done decision recomputes the tree key, so
+  `task: complete` still refuses a tree edited after its pass. The `task_checks.tree_key_debounce_ms`
+  setting is not used yet.
 
 ## Emacs keys
 
@@ -462,6 +589,7 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-Y | browse-kill-ring: pick an entry from the kill ring in the minibuffer strip |
 | C-M-k | kill-whole-line |
 | C-M-w | append-next-kill: the next kill is added to the last entry |
+| C-o | open line: insert a newline after the cursor and stay before it |
 | C-/, C-_, C-x u | undo |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
@@ -482,9 +610,10 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | C-x C-c | quit |
 | C-h e | show the echo-area messages |
 
-To switch it off, set another base keymap, for example `"base_keymap": "VSCode"`. Any value other
-than `"Emacs"` removes every Emacs key and brings back Zed's keys, and the cursor goes back to a
-bar. The change applies as soon as the settings file is saved.
+To switch it off, set another base keymap, for example `"base_keymap": "VSCode"`. `"VSCode"` and
+`"Vim"` remove every Emacs key, and the cursor goes back to a bar under VS Code (a block in Vim's
+normal mode). The change applies as soon as the settings file is saved. See
+[Keybinding profiles](#keybinding-profiles).
 
 `emacs.cursor_style` picks the cursor: `"auto"` (the default) is a block while the base keymap is
 Emacs and your `cursor_shape` otherwise, `"emacs"` is always a block and `"modern"` is always a
@@ -502,8 +631,7 @@ three C-M-k in a row followed by C-y brings all three lines back; C-M-w makes th
 the last entry even after other commands. M-y, right after a yank, swaps the yanked text for the
 next older entry, and again for the one before it. M-Y opens the ring in the minibuffer strip,
 newest first, narrowed as you type, with the highlighted entry previewed under the list; Enter
-inserts it. A C-u prefix will change how many lines these commands take once the prefix-argument
-feature lands.
+inserts it. A prefix argument changes how many lines these commands take; see Universal argument.
 
 Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` is `true`
 (default `false`); then a copy in a terminal goes into the ring and a paste there reads it.
@@ -525,8 +653,8 @@ Terminals keep their own copy and paste unless `emacs.terminal_uses_kill_ring` i
 | M-. | push the mark, then go to the definition |
 | M-t, C-x C-t | with a mark away from point, swap the word or line at point with the one at the mark |
 
-C-SPC pressed right after a pop keeps popping, as in Emacs. C-u is not a prefix key yet, so
-C-x C-SPC stands in for C-u C-SPC. Inside editors C-. sets the mark instead of opening code
+C-SPC pressed right after a pop keeps popping, as in Emacs. C-u C-SPC does the same as C-x C-SPC
+(one entry per press, whatever the count). Inside editors C-. sets the mark instead of opening code
 actions, which stay in the command palette.
 
 The mark and its ring belong to the buffer, so two panes showing one file share them, and edits
@@ -539,6 +667,99 @@ deactivated; set it to `true` to have typing replace the region, as in other edi
 ```json
 { "emacs": { "delete_selection": true } }
 ```
+
+### Universal argument
+
+C-u, M-0 to M-9 and M-- give the next command a count, as in Emacs. The keys work in a full
+editor (a file you edit); in a picker's query editor, the minibuffer and other small editors they
+keep the meaning they have there, and where M-1 to M-9 switch tabs (outside editors, on Linux) they keep doing that.
+
+- **C-u** alone is 4, and each further C-u multiplies by 4: C-u C-u is 16, C-u C-u C-u is 64.
+- **Digits** after C-u, or M-0 to M-9 from the start, build the number: C-u 1 0 and M-1 0 are 10.
+  A C-u typed after digits ends the number, so C-u 3 C-u 7 is a 7 typed with the count 3, which
+  inserts 777; a digit typed with no argument pending is only a digit.
+- **Minus** makes the count negative, as in Emacs: M-- and C-u - are -1, and digits after a minus
+  give their negative (C-u - 2 is -2). C-u after a minus multiplies by four: C-u - C-u is -4,
+  C-u - C-u C-u is -16. A second minus cancels the argument, and a minus after digits is a typed
+  character. Most commands run the opposite way with a negative count; C-u - M-f goes one word
+  back, C-u - 2 M-f two, C-u - C-u M-f four, M-- C-f one character back.
+- **The echo.** While an argument is pending the echo area shows it: `C-u 4`, `C-u 10`, `C-u -`,
+  `C-u (-4)`. It goes when the next command takes the argument. The argument belongs to the editor
+  it was started in: moving focus to a picker or the minibuffer drops it.
+- **C-g** cancels a pending argument and its echo, so C-u 7 C-g changes nothing and the next
+  key is typed as usual. C-g also stops a long repeat after the repeat in progress, keeping what
+  was done.
+- **Typed characters.** C-u 5 and then a character inserts it 5 times. The count is limited to
+  65536, and the echo then says "Count limited to 65536".
+
+Commands that read the count themselves:
+
+| Command | With a count N |
+|---|---|
+| C-f, C-b, C-n, C-p | move N characters or lines (a negative count goes the other way) |
+| M-f, M-b, M-d, M-DEL, M-u, M-l, M-c | move over, kill or change the case of N words |
+| C-k, C-w, M-w, C-M-k | kill or copy N lines as one entry (C-k from the cursor, with a region C-w ignores N) |
+| C-y | yank the Nth newest entry of the kill ring (it wraps round); C-u C-y is the 4th |
+| M-y | step N entries older in the kill ring |
+| C-SPC | pop one entry of the mark ring and go to the mark, whatever N is |
+| M-g | go to line N |
+| M-z, M-Z, C-M-z, C-M-Z | the Nth occurrence of the character |
+| C-l | put the cursor line at row N of the window, with no cycling |
+| C-t, M-t, C-x C-t | move the character, word or line N places |
+| C-o | insert N newlines |
+| C-c y, C-c a | duplicate the line N times, copy N characters from the line above |
+| M-SPC | leave N spaces (0 leaves none) |
+| C-BS | any argument deletes only the space before the cursor |
+| M-up, M-down | move the line N lines |
+
+Commands that give the argument another meaning (the plain command runs with no argument):
+
+| Command | With C-u or any argument |
+|---|---|
+| C-c w a (advance) | advance even when the task it is stacked on is not Done, leaving a marker |
+| C-c w n (new task) | create the task without the plan todo |
+| C-c c n (new chat) | ask also for the name, model and layout |
+| C-c c o (open chat) | pick from the chats of any task |
+| C-c c f (fork to task) | ask for the session type |
+| C-c C-c in the prompts file (send) | send without marking the prompt as sent |
+| C-c f t (retry step) | read the workflow definition again before the retry |
+| C-c C-p, C-c C-f in the prompts file | move N prompts; a negative count goes the other way |
+
+Commands that have no use for a count (C-x C-x, C-s, C-r, C-M-s, C-M-r, M-%, C-M-%, C-x C-.)
+clear it and run once; C-u C-x C-x swaps point and mark once, not four times.
+
+Any other command is repeated: C-u 3 on a command with no count of its own runs it three times
+(a negative count runs it |N| times (the sign means nothing to it), and 0 runs nothing). The whole repeat is one undo step, so
+one C-/ takes it all back. It runs in slices so the window keeps drawing, and C-g ends it early.
+
+Where C-u is not the prefix, such as a picker's query editor, a command that takes an argument has
+another way in: the variants above are commands in the command palette (`task: advance override`,
+`chat: new with options`, `chat: open any`, `chat: fork to task as`, `task: new without plan`,
+`prompts: send without marking`, `workflow: retry step fresh`), and C-x C-SPC stands in for
+C-u C-SPC.
+
+## Keybinding profiles
+
+bongos has three keybinding profiles, set with `base_keymap` in settings: `"Emacs"` (the default),
+`"VSCode"` and `"Vim"`; `"None"` loads no base keymap. Every bongos command is bound under all three, and every command is also in
+the command palette and in M-x. The old values `"JetBrains"`, `"Atom"`, `"SublimeText"`, `"TextMate"`
+and `"Cursor"` are retired: bongos shows a notice, uses Emacs, and leaves your setting as it is.
+
+To switch, edit `base_keymap` in `settings.json` (it applies when saved) or run `settings: set
+keybindings` from the command palette and pick a profile.
+
+- **Leaders.** Emacs binds the bongos commands under C-c. VS Code binds them under `ctrl-k b`
+  (`cmd-k b` on macOS). Vim binds `ctrl-k b` and also `space` in normal and visual mode. A lone
+  `space` waits for the chord timeout before it moves the cursor right.
+- **Terminals.** Under VS Code and Vim a terminal sends its keys to the shell, so the leaders are
+  not bound there. The way out is `alt-1` (`cmd-1` on macOS), which focuses the first editor pane;
+  commands from a terminal go through the command palette.
+- **Cursor.** With `emacs.cursor_style` at `"auto"`, the cursor is a block under Emacs and your
+  `cursor_shape` otherwise. Under Vim the cursor follows the mode: a block in normal mode and a
+  bar in insert mode.
+- **Your keymap.** `keymap.json` loads last, so a binding of yours wins under every profile.
+
+The keys of every command under each profile are in [docs/keybindings.md](docs/keybindings.md).
 
 ## Incremental search
 
@@ -965,6 +1186,7 @@ JetBrains and stay under JetBrains' terms.
 | Path | What |
 |---|---|
 | `script/bongos/` | Build, test and smoke scripts, and the workspace environment. |
+| `docs/` | Generated reference pages, such as the keybindings of each profile. |
 
 ## References
 

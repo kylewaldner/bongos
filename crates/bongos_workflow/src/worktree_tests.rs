@@ -16,9 +16,10 @@ use crate::builtin_merge::{
     DIRTY_TASK_WORKTREE, MergeRefusal, MergeRequest, MergeStyle, Merged, merge,
 };
 use crate::worktrees::{
-    FinishedRun, Git, NOT_STARTED, RunWorktree, TaskCheckout, WorktreeError, apply_clear,
-    branch_worktree_path, check_free_space, create_branch, create_run, fan_out_branch_name, join,
-    plan_clear, run_branch_name, run_dir, run_worktree_path, runs_dir, short_id,
+    ClearItem, FinishedRun, Git, NOT_STARTED, RunWorktree, TaskCheckout, WorktreeError,
+    apply_clear, branch_worktree_path, check_free_space, check_run_dir, create_branch, create_run,
+    fan_out_branch_name, join, plan_clear, run_branch_name, run_dir, run_worktree_path, runs_dir,
+    short_id,
 };
 
 const RUN_ID: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
@@ -87,6 +88,29 @@ impl Fixture {
         self.task.worktree.as_deref().unwrap()
     }
 
+    /// The isolated home directory the fixture's git uses, never the real one.
+    fn home(&self) -> PathBuf {
+        self.root.join("home")
+    }
+
+    /// `run`, attempt 1 of `run_id` on the fixture's task, as `clear finished` reads it.
+    fn finished(
+        &self,
+        run_id: &str,
+        lifecycle: Lifecycle,
+        finished: SystemTime,
+        run: &RunWorktree,
+    ) -> FinishedRun {
+        FinishedRun {
+            run_id: run_id.to_string(),
+            lifecycle,
+            finished,
+            worktree: run.clone(),
+            attempt: 1,
+            checkout: self.task.clone(),
+        }
+    }
+
     async fn create_run(&self, run_id: &str) -> RunWorktree {
         create_run(&self.git, &self.task, run_id, 1, &settings(), &plenty)
             .await
@@ -114,6 +138,7 @@ fn settings() -> WorkflowsSettings {
         keep_finished_days: 14,
         limits: Default::default(),
         programs: Default::default(),
+        ..WorkflowsSettings::default()
     }
 }
 
@@ -210,6 +235,194 @@ fn branch_and_path_names() {
     assert_eq!(
         branch_worktree_path(&dir, "review", 3),
         dir.join("b-review-3")
+    );
+}
+
+/// A home directory that is not the real one and does not exist.
+const FAKE_HOME: &str = "/home/me";
+
+/// Whether `worktree` passes [`check_run_dir`] as attempt `attempt` of [`RUN_ID`] on task `slug`
+/// in the repository `/repo`.
+fn is_run_worktree(
+    worktree: &RunWorktree,
+    worktrees_dir: Option<&Path>,
+    slug: &str,
+    attempt: u32,
+) -> bool {
+    check_run_dir(
+        worktree,
+        Path::new("/repo"),
+        worktrees_dir,
+        Path::new(FAKE_HOME),
+        slug,
+        RUN_ID,
+        attempt,
+    )
+    .is_ok()
+}
+
+fn worktree_in(run_dir: &Path) -> RunWorktree {
+    RunWorktree {
+        path: run_worktree_path(run_dir),
+        run_dir: run_dir.to_path_buf(),
+        branch: "b".into(),
+    }
+}
+
+#[test]
+fn a_recorded_worktree_off_the_run_layout_is_not_a_run_worktree() {
+    let runs = runs_dir(Path::new("/repo"), None);
+    let dir = run_dir(&runs, "add-login", RUN_ID, 2);
+    let real = RunWorktree {
+        path: run_worktree_path(&dir),
+        run_dir: dir.clone(),
+        branch: "b".into(),
+    };
+    assert!(is_run_worktree(&real, None, "add-login", 2));
+    // An unrelated worktree: its parent would be removed with it.
+    let stray = RunWorktree {
+        path: PathBuf::from("/home/me/project/src"),
+        run_dir: PathBuf::from("/home/me/project"),
+        branch: "b".into(),
+    };
+    assert!(!is_run_worktree(&stray, None, "add-login", 2));
+    // The right shape in the wrong place.
+    let elsewhere = RunWorktree {
+        path: PathBuf::from("/home/me/stuff/run"),
+        run_dir: PathBuf::from("/home/me/stuff"),
+        branch: "b".into(),
+    };
+    assert!(!is_run_worktree(&elsewhere, None, "add-login", 2));
+    // A configured runs directory.
+    let custom = Path::new("/elsewhere");
+    let moved = RunWorktree {
+        path: run_worktree_path(&run_dir(custom, "t", RUN_ID, 1)),
+        run_dir: run_dir(custom, "t", RUN_ID, 1),
+        branch: "b".into(),
+    };
+    assert!(is_run_worktree(&moved, Some(custom), "t", 1));
+    assert!(!is_run_worktree(&moved, None, "t", 1));
+    // A leading `./` in the configured directory is dropped before matching; the relative
+    // directory is resolved against the repository, as `runs_dir` does.
+    let relative = worktree_in(&run_dir(Path::new("/repo/elsewhere"), "t", RUN_ID, 1));
+    assert!(!is_run_worktree(
+        &moved,
+        Some(Path::new("./elsewhere")),
+        "t",
+        1
+    ));
+    assert!(is_run_worktree(
+        &relative,
+        Some(Path::new("./elsewhere")),
+        "t",
+        1
+    ));
+}
+
+#[test]
+fn a_run_dir_with_dot_components_is_not_a_run_worktree() {
+    for run_dir in [
+        "/repo/.bongos-worktrees/.runs/..",
+        "/repo/.bongos-worktrees/.runs/../x",
+        "./repo/.bongos-worktrees/.runs/x",
+        "repo/.bongos-worktrees/.runs/x",
+        "/repo/.bongos-worktrees/.runs/.",
+    ] {
+        let worktree = worktree_in(Path::new(run_dir));
+        assert!(
+            !is_run_worktree(&worktree, None, "add-login", 2),
+            "{worktree:?}"
+        );
+    }
+    // Even with `..` leading back to exactly the expected directory.
+    let back = worktree_in(Path::new(
+        "/repo/.bongos-worktrees/.runs/x/../add-login-099a8057-2",
+    ));
+    assert!(!is_run_worktree(&back, None, "add-login", 2), "{back:?}");
+}
+
+#[test]
+fn an_empty_or_dot_worktrees_dir_refuses_any_run_dir() {
+    // The run directory these settings would give: the repository itself, and elsewhere.
+    for configured in ["", ".", "./", "..", "/", "~", "~/"] {
+        let configured = Path::new(configured);
+        for run_dir in [
+            run_dir(
+                &runs_dir(Path::new("/repo"), Some(configured)),
+                "t",
+                RUN_ID,
+                1,
+            ),
+            PathBuf::from("/some/project"),
+            PathBuf::from("/home/me/stuff"),
+        ] {
+            let worktree = worktree_in(&run_dir);
+            assert!(
+                !is_run_worktree(&worktree, Some(configured), "t", 1),
+                "{configured:?} {worktree:?}"
+            );
+        }
+    }
+    // The home directory the check is given counts, not the real one.
+    let runs_in_home = run_dir(Path::new(FAKE_HOME), "t", RUN_ID, 1);
+    assert!(!is_run_worktree(
+        &worktree_in(&runs_in_home),
+        Some(Path::new(FAKE_HOME)),
+        "t",
+        1
+    ));
+    assert!(!is_run_worktree(
+        &worktree_in(&run_dir(Path::new("/"), "t", RUN_ID, 1)),
+        Some(Path::new("/")),
+        "t",
+        1
+    ));
+}
+
+#[test]
+fn a_symlink_out_of_the_runs_dir_is_refused() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let repository = root.join("repo");
+    let home = root.join("home");
+    let outside = root.join("outside");
+    for dir in [&repository, &home, &outside] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(outside.join("keep.txt"), "keep\n").unwrap();
+    let check = |worktree: &RunWorktree, configured: Option<&Path>| {
+        check_run_dir(worktree, &repository, configured, &home, "t", RUN_ID, 1)
+    };
+
+    // The run directory itself is a symlink to a directory elsewhere.
+    let runs = runs_dir(&repository, None);
+    fs::create_dir_all(&runs).unwrap();
+    let linked = run_dir(&runs, "t", RUN_ID, 1);
+    std::os::unix::fs::symlink(&outside, &linked).unwrap();
+    assert!(check(&worktree_in(&linked), None).is_err());
+
+    // The configured runs directory is a symlink to the home directory.
+    let to_home = root.join("runs-to-home");
+    std::os::unix::fs::symlink(&home, &to_home).unwrap();
+    let in_home = run_dir(&to_home, "t", RUN_ID, 1);
+    fs::create_dir_all(&in_home).unwrap();
+    assert!(check(&worktree_in(&in_home), Some(&to_home)).is_err());
+
+    // The configured runs directory is a symlink to the repository.
+    let to_repository = root.join("runs-to-repo");
+    std::os::unix::fs::symlink(&repository, &to_repository).unwrap();
+    let in_repository = run_dir(&to_repository, "t", RUN_ID, 1);
+    fs::create_dir_all(&in_repository).unwrap();
+    assert!(check(&worktree_in(&in_repository), Some(&to_repository)).is_err());
+
+    // A plain runs directory elsewhere is accepted.
+    let plain = root.join("runs");
+    let real = run_dir(&plain, "t", RUN_ID, 1);
+    fs::create_dir_all(&real).unwrap();
+    assert_eq!(check(&worktree_in(&real), Some(&plain)), Ok(()));
+    assert_eq!(
+        fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "keep\n"
     );
 }
 
@@ -538,32 +751,17 @@ async fn clear_finished_skips_a_dirty_worktree(cx: &mut TestAppContext) {
     let failed = fixture.create_run(failed_id).await;
 
     let finished = vec![
-        FinishedRun {
-            run_id: RUN_ID.to_string(),
-            lifecycle: Lifecycle::Ended(EndState::Succeeded),
-            finished: old,
-            worktree: clean.clone(),
-        },
-        FinishedRun {
-            run_id: OTHER_RUN_ID.to_string(),
-            lifecycle: Lifecycle::Cancelled,
-            finished: old,
-            worktree: dirty.clone(),
-        },
-        FinishedRun {
-            run_id: recent_id.to_string(),
-            lifecycle: Lifecycle::Ended(EndState::Succeeded),
-            finished: SystemTime::now(),
-            worktree: recent.clone(),
-        },
-        FinishedRun {
-            run_id: failed_id.to_string(),
-            lifecycle: Lifecycle::Ended(EndState::Failed),
-            finished: old,
-            worktree: failed.clone(),
-        },
+        fixture.finished(RUN_ID, Lifecycle::Ended(EndState::Succeeded), old, &clean),
+        fixture.finished(OTHER_RUN_ID, Lifecycle::Cancelled, old, &dirty),
+        fixture.finished(
+            recent_id,
+            Lifecycle::Ended(EndState::Succeeded),
+            SystemTime::now(),
+            &recent,
+        ),
+        fixture.finished(failed_id, Lifecycle::Ended(EndState::Failed), old, &failed),
     ];
-    let plan = plan_clear(git, &finished, 14, SystemTime::now())
+    let plan = plan_clear(git, &finished, None, &fixture.home(), 14, SystemTime::now())
         .await
         .unwrap();
     let listed: Vec<&str> = plan.runs.iter().map(|run| run.run_id.as_str()).collect();
@@ -604,13 +802,8 @@ async fn clear_finished_keeps_a_worktree_switched_to_a_user_branch(cx: &mut Test
     let branch = create_branch(git, &run, "build", 0).await.unwrap();
     git_out(git, &branch.path, &["switch", "-c", "my-work"]).await;
     commit_file(git, &branch.path, "mine.txt", "mine\n").await;
-    let finished = vec![FinishedRun {
-        run_id: RUN_ID.to_string(),
-        lifecycle: Lifecycle::Ended(EndState::Succeeded),
-        finished: old,
-        worktree: run.clone(),
-    }];
-    let plan = plan_clear(git, &finished, 14, SystemTime::now())
+    let finished = vec![fixture.finished(RUN_ID, Lifecycle::Ended(EndState::Succeeded), old, &run)];
+    let plan = plan_clear(git, &finished, None, &fixture.home(), 14, SystemTime::now())
         .await
         .unwrap();
     let skipped: Vec<&PathBuf> = plan.skipped().map(|item| &item.path).collect();
@@ -625,4 +818,204 @@ async fn clear_finished_keeps_a_worktree_switched_to_a_user_branch(cx: &mut Test
     assert_eq!(report.skipped.len(), 1);
     assert!(branch.path.exists());
     assert!(branch_exists(git, &fixture.repository, "my-work").await);
+}
+
+/// Days as an offset from the epoch: no clock and no calendar date.
+fn day(days: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(days * 24 * 60 * 60)
+}
+
+#[gpui::test]
+async fn clear_finished_removes_only_known_leftovers_and_keeps_a_run_dir_with_more(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let tidy = fixture.create_run(RUN_ID).await;
+    let cluttered = fixture.create_run(OTHER_RUN_ID).await;
+    // What a program node leaves: its result file and its emptied `tmp`.
+    for run in [&tidy, &cluttered] {
+        let attempt = run.run_dir.join("scratch/check/main/0-1");
+        fs::create_dir_all(attempt.join("tmp")).unwrap();
+        fs::write(attempt.join("result.json"), "{}").unwrap();
+    }
+    // Something the app never writes there.
+    let extra = cluttered.run_dir.join("notes.txt");
+    fs::write(&extra, "mine\n").unwrap();
+
+    let finished = vec![
+        fixture.finished(RUN_ID, Lifecycle::Ended(EndState::Succeeded), day(1), &tidy),
+        fixture.finished(OTHER_RUN_ID, Lifecycle::Cancelled, day(1), &cluttered),
+    ];
+    let plan = plan_clear(git, &finished, None, &fixture.home(), 14, day(100))
+        .await
+        .unwrap();
+    assert_eq!(plan.skipped().count(), 0, "{}", plan.summary());
+
+    let report = apply_clear(git, &fixture.repository, &plan).await;
+    assert_eq!(report.removed.len(), 2, "{report}");
+    assert!(!tidy.run_dir.exists(), "only known leftovers were in it");
+    assert!(!branch_exists(git, &fixture.repository, &tidy.branch).await);
+    // The run worktree went, the extra file and so the run directory stay, reported.
+    assert!(!cluttered.path.exists());
+    assert_eq!(fs::read_to_string(&extra).unwrap(), "mine\n");
+    assert!(cluttered.run_dir.is_dir());
+    assert_eq!(report.skipped.len(), 1, "{report}");
+    assert_eq!(report.skipped[0].0.path, cluttered.run_dir);
+}
+
+#[gpui::test]
+async fn clear_finished_keeps_a_run_whose_recorded_dir_is_not_the_one_the_app_made(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let run = fixture.create_run(RUN_ID).await;
+    // A record whose run directory is a directory with other files in it.
+    let elsewhere = fixture.root.join("project");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("keep.txt"), "keep\n").unwrap();
+    let forged = RunWorktree {
+        path: run_worktree_path(&elsewhere),
+        run_dir: elsewhere.clone(),
+        branch: run.branch.clone(),
+    };
+    let finished = vec![fixture.finished(
+        RUN_ID,
+        Lifecycle::Ended(EndState::Succeeded),
+        day(1),
+        &forged,
+    )];
+    for configured in [None, Some(Path::new("")), Some(Path::new("."))] {
+        let plan = plan_clear(git, &finished, configured, &fixture.home(), 14, day(100))
+            .await
+            .unwrap();
+        assert_eq!(plan.runs.len(), 1);
+        assert!(plan.runs[0].remove.is_empty(), "{}", plan.summary());
+        assert_eq!(plan.runs[0].repository, None);
+        let skipped: Vec<&ClearItem> = plan.skipped().collect();
+        assert_eq!(skipped.len(), 1);
+        assert!(
+            skipped[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not the run directory")
+                    || reason.contains("runs directory")),
+            "{skipped:?}"
+        );
+        let report = apply_clear(git, &fixture.repository, &plan).await;
+        assert!(report.removed.is_empty());
+    }
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(run.path.exists());
+    assert!(branch_exists(git, &fixture.repository, &run.branch).await);
+}
+
+#[gpui::test]
+async fn clear_finished_keeps_a_run_whose_recorded_branch_is_not_the_run_branch(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let run = fixture.create_run(RUN_ID).await;
+    // An unrelated branch with work on it that is merged nowhere.
+    git_out(git, fixture.task_worktree(), &["branch", "feature/x"]).await;
+    let other = fixture.root.join("feature-x");
+    git_out(
+        git,
+        &fixture.repository,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &other.to_string_lossy(),
+            "feature/x",
+        ],
+    )
+    .await;
+    commit_file(git, &other, "x.txt", "x\n").await;
+    git_out(
+        git,
+        &fixture.repository,
+        &["worktree", "remove", &other.to_string_lossy()],
+    )
+    .await;
+    // The record has the run directory the app made but names that branch.
+    let forged = RunWorktree {
+        branch: "feature/x".to_string(),
+        ..run.clone()
+    };
+    let finished = vec![fixture.finished(
+        RUN_ID,
+        Lifecycle::Ended(EndState::Succeeded),
+        day(1),
+        &forged,
+    )];
+    let plan = plan_clear(git, &finished, None, &fixture.home(), 14, day(100))
+        .await
+        .unwrap();
+    assert_eq!(plan.runs.len(), 1);
+    assert!(plan.runs[0].remove.is_empty(), "{}", plan.summary());
+    assert_eq!(plan.runs[0].repository, None);
+    let skipped: Vec<&ClearItem> = plan.skipped().collect();
+    assert_eq!(skipped.len(), 1);
+    assert!(
+        skipped[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("branch feature/x is not the run branch")),
+        "{skipped:?}"
+    );
+
+    let report = apply_clear(git, &fixture.repository, &plan).await;
+    assert!(report.removed.is_empty(), "{report}");
+    assert!(branch_exists(git, &fixture.repository, "feature/x").await);
+    assert!(run.path.exists());
+    assert!(branch_exists(git, &fixture.repository, &run.branch).await);
+}
+
+#[gpui::test]
+async fn clear_finished_refuses_a_run_dir_swapped_for_a_symlink_after_the_plan(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let run = fixture.create_run(RUN_ID).await;
+    let finished =
+        vec![fixture.finished(RUN_ID, Lifecycle::Ended(EndState::Succeeded), day(1), &run)];
+    let plan = plan_clear(git, &finished, None, &fixture.home(), 14, day(100))
+        .await
+        .unwrap();
+    assert_eq!(plan.runs.len(), 1);
+    assert_eq!(plan.runs[0].remove.len(), 1, "{}", plan.summary());
+
+    // Between the question and the answer the run directory becomes a symlink elsewhere.
+    let elsewhere = fixture.root.join("elsewhere");
+    fs::rename(&run.run_dir, &elsewhere).unwrap();
+    fs::write(elsewhere.join("keep.txt"), "keep\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &run.run_dir).unwrap();
+
+    let report = apply_clear(git, &fixture.repository, &plan).await;
+    assert!(report.removed.is_empty(), "{report}");
+    assert_eq!(report.skipped.len(), 1, "{report}");
+    assert!(report.skipped[0].1.contains("symlink"), "{report}");
+    assert!(
+        fs::symlink_metadata(&run.run_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(elsewhere.join("run").join("README.md").exists());
+    assert!(branch_exists(git, &fixture.repository, &run.branch).await);
 }

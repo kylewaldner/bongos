@@ -27,7 +27,7 @@ use crate::{
     WorkSettings, WorkStore, WriteError, WriteOutcome,
 };
 
-fn new_store(cx: &mut TestAppContext, root: &Path) -> Entity<WorkStore> {
+pub(crate) fn new_store(cx: &mut TestAppContext, root: &Path) -> Entity<WorkStore> {
     cx.executor().allow_parking();
     cx.update(|cx| {
         let settings = SettingsStore::test(cx);
@@ -43,7 +43,7 @@ fn new_store(cx: &mut TestAppContext, root: &Path) -> Entity<WorkStore> {
     store
 }
 
-async fn wait_until(
+pub(crate) async fn wait_until(
     cx: &mut TestAppContext,
     store: &Entity<WorkStore>,
     what: &str,
@@ -90,6 +90,7 @@ fn memory_project(files: &Path) -> Project {
         definition: Some(PathBuf::from(definition)),
         pending: None,
         needs_conversion: false,
+        done_hold: None,
         file: Some(file),
         artifacts: None,
         errors: Vec::new(),

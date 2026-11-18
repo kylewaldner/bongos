@@ -170,4 +170,65 @@
       "ctrl-g": "query_replace::Abort",
     },
   },
+  {
+    "context": "ChatList",
+    "bindings": {
+      "/": "chat::Filter",
+      "t": "chat::ToggleAllTasks",
+      "f": "chat::ForkToTask",
+      "r": "chat::Rename",
+      "a": "chat::Archive",
+      "u": "chat::Restore",
+    },
+  },
+  {
+    "context": "WorkPanel",
+    "bindings": {
+      "tab": "work::ToggleRow",
+      "^": "work::Up",
+    },
+  },
+  {
+    "context": "RunsPanel",
+    "bindings": {
+      "enter": "workflow::OpenLogs",
+      "a": "workflow::Approve",
+      "v": "workflow::Revise",
+      "l": "workflow::OpenLogs",
+    },
+  },
+  {
+    "context": "RunView",
+    "bindings": {
+      "g": "workflow::ToggleGraph",
+      "enter": "workflow::OpenLogs",
+      "a": "workflow::Approve",
+      "v": "workflow::Revise",
+      "l": "workflow::OpenLogs",
+    },
+  },
+  {
+    "context": "LandingView",
+    "bindings": {
+      "r": "project::ResolveSplit",
+    },
+  },
+  {
+    "context": "TaskDetailView",
+    "bindings": {
+      "g": "task_detail::Refresh",
+      "s": "task_detail::ToggleSources",
+      "x": "task::RunChecks",
+      "r": "task::RunCheck",
+      "k": "task::CancelChecks",
+      "c": "task::Complete",
+    },
+  },
+  {
+    "context": "ProposalView",
+    "bindings": {
+      "enter": "proposal::Descend",
+      "^": "proposal::Up",
+    },
+  },
 ]

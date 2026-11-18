@@ -82,6 +82,14 @@ fn every_event() -> Vec<Event> {
         Event::Interrupted {
             keys: vec![plan.clone(), branch],
         },
+        Event::Held {
+            key: plan.clone(),
+            failure: Failure::new(
+                FailureReason::CheckNoVerdict,
+                Some(plan.clone()),
+                "tests: the runner crashed",
+            ),
+        },
         Event::DefinitionReloaded { rev: 2 },
         Event::Ended {
             state: EndState::Failed,
@@ -498,6 +506,57 @@ fn replay_of_pause_halt_and_resume() {
 }
 
 #[test]
+fn replay_of_held_then_resumed() {
+    let check = key("check");
+    let other = key("other");
+    let failure = Failure::new(
+        FailureReason::CheckNoVerdict,
+        Some(check.clone()),
+        "tests: timed out",
+    );
+    let held = |key: &NodeKey| Event::Held {
+        key: key.clone(),
+        failure: failure.clone(),
+    };
+    let base = vec![
+        Event::Created,
+        started(&check, 1),
+        finished(&check, 1, json!({ "verdict": "no_verdict" }), 0.0),
+        held(&check),
+    ];
+    let state = replay(&base);
+    assert_eq!(state.held.len(), 1);
+    assert_eq!(state.held[&check], failure);
+    assert_eq!(
+        state.lifecycle(),
+        Lifecycle::Running,
+        "a hold is not an end"
+    );
+    assert!(state.ended.is_none());
+
+    let line = held(&check).to_line();
+    assert!(line.contains("\"event\":\"Held\""), "{line}");
+    assert!(line.contains("check_no_verdict"), "{line}");
+
+    let mut resumed = base.clone();
+    resumed.push(Event::Resumed);
+    assert!(
+        replay(&resumed).held.is_empty(),
+        "a resume clears every hold"
+    );
+
+    let mut rerun = base;
+    rerun.push(held(&other));
+    rerun.push(started(&check, 2));
+    let state = replay(&rerun);
+    assert_eq!(
+        state.held.keys().collect::<Vec<_>>(),
+        vec![&other],
+        "a new try of a held key clears only its hold"
+    );
+}
+
+#[test]
 fn replay_of_interrupted_then_resumed() {
     let a = key("a");
     let b = key("b");
@@ -721,6 +780,7 @@ fn run_toml() -> RunToml {
                 definition_commit: Some(COMMIT.to_string()),
                 worktree: "/w/1".to_string(),
                 branch: "run/1".to_string(),
+                loop_bound: Some(7),
             },
             Attempt {
                 n: 2,
@@ -729,6 +789,7 @@ fn run_toml() -> RunToml {
                 definition_commit: None,
                 worktree: "/w/2".to_string(),
                 branch: "run/2".to_string(),
+                loop_bound: None,
             },
         ],
     }
@@ -841,4 +902,18 @@ fn run_toml_refuses_a_definition_commit_that_is_not_a_commit_id() {
     }
     assert!(is_commit_id(COMMIT));
     assert!(is_commit_id(&"a".repeat(64)));
+}
+
+#[test]
+fn the_loop_bound_is_written_only_when_there_is_one_and_old_records_load() {
+    let text = run_toml().to_toml();
+    assert_eq!(text.matches("loop_bound").count(), 1, "{text}");
+    assert!(text.contains("loop_bound = 7"), "{text}");
+    let old = text.replace("loop_bound = 7\n", "");
+    let parsed = RunToml::parse(&old).unwrap();
+    assert!(parsed.attempts.iter().all(|a| a.loop_bound.is_none()));
+    assert_eq!(
+        RunToml::parse(&text).unwrap().attempts[0].loop_bound,
+        Some(7)
+    );
 }

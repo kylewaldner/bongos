@@ -291,7 +291,7 @@ fn use_naming_no_shipped_program() {
         &text,
         Some("merge"),
         "use = ",
-        "'mrege' is not a shipped program node (shipped: merge, wait)",
+        "'mrege' is not a shipped program node (shipped: checks, merge, wait)",
     );
 }
 
@@ -858,6 +858,32 @@ fn program_permissions_ceiling() {
 }
 
 #[test]
+fn the_remote_placeholder_is_a_network_entry_that_allow_network_governs() {
+    let text = mutate("network = []", r#"network = ["@remote"]"#);
+    assert_no_errors(&text);
+    let closed = ValidationContext {
+        allow_network: false,
+        ..context()
+    };
+    assert_error_with(
+        &text,
+        &closed,
+        Some("test"),
+        "permissions = ",
+        "network permission (@remote) is not allowed: workflows.programs.allow_network is false",
+    );
+    for bad in ["@remotes", "@", "@Remote", "@host"] {
+        let text = mutate("network = []", &format!(r#"network = ["{bad}"]"#));
+        assert_error(
+            &text,
+            Some("test"),
+            "permissions = ",
+            &format!("network entry '{bad}' is not known"),
+        );
+    }
+}
+
+#[test]
 fn node_names_are_branch_and_path_safe() {
     for bad in ["Fix", "fix me", "fix/me", "-fix", "fix.me", "fïx"] {
         let header = format!("[nodes.\"{bad}\"]");
@@ -967,4 +993,214 @@ fn permission_modes_are_the_ones_claude_accepts() {
         );
         assert!(!has_errors(&diagnostics(&text)), "{mode}");
     }
+}
+
+const CHECKS: &str = r#"schema = 1
+name = "checked"
+start = "plan"
+
+[nodes.plan]
+kind = "agent"
+prompt = "plan.md"
+output = { items = { type = "list", of = "text" }, note = { type = "text" } }
+routes = [{ to = "check" }]
+
+[nodes.check]
+kind = "program"
+use = "checks"
+with = { checks = ["tests", "lint"], items_from = "plan.items", repeat = 2, tree = "tip" }
+routes = [
+  { when = { verdict = "pass" }, to = "done" },
+  { when = { verdict = "fail" }, to = "fix", max_passes = 3 },
+]
+
+[nodes.fix]
+kind = "agent"
+prompt = "fix.md"
+output = { notes = { type = "text" } }
+routes = [{ to = "check" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+fn checks_with(with: &str) -> String {
+    let from = r#"with = { checks = ["tests", "lint"], items_from = "plan.items", repeat = 2, tree = "tip" }"#;
+    assert_eq!(CHECKS.matches(from).count(), 1);
+    CHECKS.replacen(from, with, 1)
+}
+
+#[test]
+fn a_checks_node_gets_its_fixed_output_and_needs_no_no_verdict_route() {
+    assert_no_errors(CHECKS);
+    let definition = parse(CHECKS).unwrap();
+    let check = definition.node("check").unwrap();
+    assert!(check.is_checks());
+    assert_eq!(
+        check
+            .output
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["verdict", "failing", "scope", "evidence", "summary"]
+    );
+}
+
+#[test]
+fn a_checks_node_may_declare_exactly_its_fixed_output() {
+    let output = r#"output = { summary = { type = "text" }, verdict = { type = "choice", values = ["pass", "fail", "no_verdict"] }, failing = { type = "list", of = "text" }, scope = { type = "text" }, evidence = { type = "list", of = "text" } }"#;
+    assert_no_errors(&CHECKS.replace(r#"use = "checks""#, &format!("use = \"checks\"\n{output}")));
+}
+
+#[test]
+fn a_checks_node_with_another_output_is_refused() {
+    let text = CHECKS.replace(
+        r#"use = "checks""#,
+        "use = \"checks\"\noutput = { verdict = { type = \"choice\", values = [\"pass\", \"fail\"] } }",
+    );
+    assert_error(
+        &text,
+        Some("check"),
+        "output = { verdict",
+        "a checks node's output is fixed",
+    );
+}
+
+#[test]
+fn a_checks_node_still_needs_routes_for_pass_and_fail() {
+    let text = CHECKS.replace(
+        r#"  { when = { verdict = "fail" }, to = "fix", max_passes = 3 },
+"#,
+        "",
+    );
+    let diagnostics = diagnostics(&text);
+    let messages = render(&diagnostics);
+    assert!(
+        messages.contains("no route for 'fail' (field 'verdict')"),
+        "{messages}"
+    );
+    assert!(!messages.contains("no_verdict"), "{messages}");
+}
+
+#[test]
+fn checks_with_keys_are_checked() {
+    assert_no_errors(&checks_with(
+        r#"with = { checks = ["tests"], items = ["a", "b"], item = "{{item}}", repeat = 1, tree = "base" }"#,
+    ));
+    assert_no_errors(&checks_with(""));
+    for (with, message) in [
+        (
+            r#"with = { flavor = "red" }"#,
+            "unknown `with` key 'flavor' for a checks node",
+        ),
+        (
+            r#"with = { checks = "tests" }"#,
+            "`with.checks` must be a list of check names",
+        ),
+        (
+            r#"with = { checks = [1] }"#,
+            "`with.checks` must be a list of check names",
+        ),
+        (
+            r#"with = { items = "a" }"#,
+            "`with.items` must be a list of text",
+        ),
+        (r#"with = { item = 3 }"#, "`with.item` must be text"),
+        (
+            r#"with = { repeat = 0 }"#,
+            "`with.repeat` must be a positive integer",
+        ),
+        (
+            r#"with = { repeat = "2" }"#,
+            "`with.repeat` must be a positive integer",
+        ),
+        (
+            r#"with = { tree = "trunk" }"#,
+            "`with.tree` must be \"tip\" or \"base\"",
+        ),
+        (
+            r#"with = { items_from = "plan" }"#,
+            "`with.items_from` must be \"<node>.<list field>\"",
+        ),
+        (
+            r#"with = { items = ["a"], items_from = "plan.items" }"#,
+            "takes `with.items` or `with.items_from`, not both",
+        ),
+        (
+            r#"with = { items_from = "nobody.items" }"#,
+            "`with.items_from` names unknown node 'nobody'",
+        ),
+        (
+            r#"with = { items_from = "plan.missing" }"#,
+            "`with.items_from` names undeclared field 'missing' of 'plan'",
+        ),
+        (
+            r#"with = { items_from = "plan.note" }"#,
+            "`with.items_from` field 'note' of 'plan' is not a list",
+        ),
+    ] {
+        let text = checks_with(with);
+        assert_error(&text, Some("check"), r#"use = "checks""#, message);
+    }
+}
+
+#[test]
+fn checks_items_from_must_name_an_earlier_node() {
+    // `fix` runs before the check (it routes back to it), so its list fields may feed it.
+    let text = checks_with(r#"with = { items_from = "fix.notes" }"#).replace(
+        r#"output = { notes = { type = "text" } }"#,
+        r#"output = { notes = { type = "list", of = "text" } }"#,
+    );
+    assert_no_errors(&text);
+
+    let text = checks_with(r#"with = { items_from = "check.failing" }"#);
+    assert_error(
+        &text,
+        Some("check"),
+        r#"use = "checks""#,
+        "`with.items_from` names 'check', which does not run before 'check'",
+    );
+
+    let text = checks_with(r#"with = { items_from = "report.items" }"#)
+        .replace(
+            r#"{ when = { verdict = "pass" }, to = "done" },"#,
+            r#"{ when = { verdict = "pass" }, to = "report" },"#,
+        )
+        .replace(
+            "[ends.done]",
+            "[nodes.report]\nkind = \"agent\"\nprompt = \"review.md\"\noutput = { items = { type = \"list\", of = \"text\" } }\nroutes = [{ to = \"done\" }]\n\n[ends.done]",
+        );
+    assert_error(
+        &text,
+        Some("check"),
+        r#"use = "checks""#,
+        "`with.items_from` names 'report', which does not run before 'check'",
+    );
+}
+
+#[test]
+fn a_loop_bound_stands_in_for_max_passes_on_a_cycle() {
+    let text = mutate(
+        r#"to = "fix", max_passes = 3, on_bound = "stuck""#,
+        r#"to = "fix""#,
+    );
+    let definition = parse(&text).unwrap();
+    let bounded = ValidationContext {
+        loop_bound: Some(5),
+        ..context()
+    };
+    let diagnostics = validate(&definition, &bounded);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("cycle with no bounded edge")),
+        "{diagnostics:?}"
+    );
+    let unset = validate(&definition, &context());
+    assert!(
+        unset
+            .iter()
+            .any(|d| d.message.contains("cycle with no bounded edge")),
+        "{unset:?}"
+    );
 }

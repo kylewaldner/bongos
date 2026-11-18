@@ -13,17 +13,15 @@
   },
   "icon_theme": "Zed (Default)",
   // The name of a base set of key bindings to use.
-  // This setting can take these values, most named after another
-  // text editor:
+  // This setting can take these values:
   //
   // 1. "Emacs" (the default)
-  // 2. "VSCode"
-  // 3. "Atom"
-  // 4. "JetBrains"
-  // 5. "Cursor"
-  // 6. "None"
-  // 7. "SublimeText"
-  // 8. "TextMate"
+  // 2. "Vim"
+  // 3. "VSCode"
+  // 4. "None"
+  //
+  // The retired values "JetBrains", "Atom", "Cursor", "SublimeText" and "TextMate"
+  // still load and fall back to "Emacs".
   "base_keymap": "Emacs",
   // Settings of the Emacs mode.
   "emacs": {
@@ -2685,7 +2683,8 @@
   "minibuffer": {
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
-    // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "language_extensions".
+    // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
+    // "project_symbols", "language_extensions".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2700,6 +2699,9 @@
       "isearch",
       "kill_ring",
       "query_replace",
+      "set_keybindings",
+      "outline",
+      "project_symbols",
       "language_extensions"
     ],
     // The most candidate rows the minibuffer shows at once.
@@ -2872,8 +2874,50 @@
     // Days after which a polling node whose `polls` sets no `give_up_days` fails "wait
     // timed out".
     "wait_give_up_days": 7,
+    // The most a single run may cost, in US dollars. Null means no cap; a value at or
+    // below 0 also means no cap.
+    "run_max_cost_usd": null,
+    // Passes of a loop whose route sets no `max_passes`.
+    "loop_bound": 5,
+    // The directory that holds workflow definitions. Null means `~/.bongos/workflows`.
+    "definitions_dir": null,
+    // MCP servers that agent nodes never get, by name.
+    "mcp_exclude": [],
+    // The caps an agent node falls back to when neither it nor its definition sets one.
+    "agents": {
+      // Turns an agent node may take when it sets no `max_turns`.
+      "max_turns": 40,
+      // Dollars an agent node may spend when it sets no `max_cost_usd`.
+      "max_cost_usd": 5.0,
+      // Minutes an agent node may run when it sets no `max_minutes`.
+      "max_minutes": 30,
+      // Settings for Claude agent nodes.
+      "claude": {
+        // The model a Claude node uses when it sets none.
+        "model": "sonnet",
+      },
+    },
+    // The most a definition may declare; a definition above a ceiling is invalid.
+    "ceilings": {
+      // The most turns a node may declare.
+      "max_turns": 200,
+      // The most dollars a node may declare.
+      "max_cost_usd": 25.0,
+      // The most minutes a node may declare.
+      "max_minutes": 240,
+      // The most passes a loop may declare.
+      "max_passes": 20,
+      // The most retries a node may declare.
+      "retries": 5,
+      // The most minutes a program node may declare.
+      "program_max_minutes": 120,
+      // Whether a node may declare the bypassPermissions mode.
+      "allow_bypass_permissions": false,
+    },
     // How program nodes run.
     "programs": {
+      // Whether a program node may use the network.
+      "allow_network": true,
       // The Python interpreter, 3.8 or newer. Null looks up `python3`, then `python`, on
       // `PATH`.
       "python": null,
@@ -2883,6 +2927,40 @@
       // is dropped and the node fails "output cap hit".
       "max_output_mb": 10,
     },
+  },
+  "task_checks": {
+    // Whether task checks are on. It is on by default; set it to false and no check runs,
+    // no record is written and every task check command is hidden and only says "Task
+    // checks are off (task_checks.enabled)".
+    "enabled": true,
+    // The directory that holds the output files of check runs. Null means the task's
+    // files folder, `checks/`.
+    "output_dir": null,
+    // Days a run's output file is kept; the record stays after the file is deleted.
+    "output_retention_days": 30,
+    // Most MB of output kept per run; past it the middle is cut and marked.
+    "output_limit_mb": 256,
+    // The largest result file, in KB, a check may write.
+    "result_file_limit_kb": 256,
+    // Minutes a check may run when it sets no `budget_minutes`. Null means no time budget.
+    "default_budget_minutes": null,
+    // Times a run that gave no verdict is run again by itself.
+    "no_verdict_reruns": 2,
+    // Minutes between a no-verdict run and its rerun.
+    "no_verdict_rerun_minutes": 5,
+    // Hours a check waits for a pool slot before it gives no verdict.
+    "pool_wait_limit_hours": 4,
+    // Seconds a stopped check has to end after its first signal before it is killed.
+    "kill_grace_seconds": 5,
+    // The most parts of one check that run at the same time.
+    "parallel_parts_max": 4,
+    // Where scratch trees for runs on a base tree are made. Null means
+    // `<data dir>/checks-scratch`.
+    "scratch_dir": null,
+    // Milliseconds the tree key waits for edits to settle before it is computed again.
+    "tree_key_debounce_ms": 2000,
+    // At most one live-state write per task per this many milliseconds.
+    "live_write_ms": 1000,
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
