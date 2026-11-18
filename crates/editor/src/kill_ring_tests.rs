@@ -4,7 +4,7 @@ use crate::{
     kill_ring::{self, capture_clipboard, clipboard_item, ignore_clipboard_text},
     test::editor_test_context::EditorTestContext,
 };
-use bongos_emacs_model::kill_ring::{Entry, Piece};
+use bongos_emacs_model::kill_ring::{Entry, EntryKind, Piece};
 use gpui::{ClipboardItem, TestAppContext};
 
 fn ring_texts(cx: &mut EditorTestContext) -> Vec<String> {
@@ -413,4 +413,60 @@ async fn test_yank_text_unless_secret_skips_secret_text(cx: &mut TestAppContext)
     assert_eq!(text(&mut cx).as_deref(), Some("plain"));
     assert!(cx.update(|_, cx| capture_clipboard(cx)));
     assert_eq!(text(&mut cx).as_deref(), Some("plain"));
+}
+
+fn rows(rows: &[&str]) -> Vec<String> {
+    rows.iter().map(|row| row.to_string()).collect()
+}
+
+#[gpui::test]
+async fn test_push_rectangle_captures_the_clipboard_first(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+
+    // No ring and no clipboard yet: the push creates the ring.
+    assert!(cx.update(|_, cx| kill_ring::read(cx).is_none()));
+    cx.update(|_, cx| kill_ring::push_rectangle(&rows(&["", ""]), cx));
+    assert_eq!(ring_texts(&mut cx), ["\n"]);
+    assert_eq!(newest(&mut cx).unwrap().kind, EntryKind::Rectangle);
+
+    // A text copied in another app becomes its own entry, under the rectangle.
+    cx.write_to_clipboard(ClipboardItem::new_string("outside".to_string()));
+    cx.update(|_, cx| kill_ring::push_rectangle(&rows(&["ab", "cd"]), cx));
+    assert_eq!(ring_texts(&mut cx), ["ab\ncd", "outside", "\n"]);
+    let newest = newest(&mut cx).unwrap();
+    assert_eq!(newest.kind, EntryKind::Rectangle);
+    assert_eq!(newest.rectangle_rows(), ["ab", "cd"]);
+    assert_eq!(
+        cx.update(|_, cx| kill_ring::read(cx).unwrap().get(1).unwrap().kind),
+        EntryKind::Text
+    );
+
+    // The clipboard is left as it was.
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("outside".to_string())
+    );
+}
+
+#[gpui::test]
+async fn test_yank_after_push_rectangle_takes_the_rectangle(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.write_to_clipboard(ClipboardItem::new_string("outside".to_string()));
+    cx.update(|_, cx| kill_ring::push_rectangle(&rows(&["ab", "cd"]), cx));
+    assert_eq!(
+        cx.update(|_, cx| kill_ring::yank_text(cx)),
+        Some("ab\ncd".to_string())
+    );
+    assert!(!cx.update(|_, cx| capture_clipboard(cx)));
+    assert_eq!(ring_texts(&mut cx), ["ab\ncd", "outside"]);
+
+    // A later ignore replaces this one, so the clipboard text is offered again.
+    cx.update(|_, cx| ignore_clipboard_text("other", cx));
+    assert_eq!(
+        cx.update(|_, cx| kill_ring::yank_text(cx)),
+        Some("outside".to_string())
+    );
 }

@@ -367,3 +367,84 @@ fn json_caps_the_ring_at_sixty_entries() {
     assert_eq!(ring.len(), KILL_RING_MAX);
     assert_eq!(ring.get(0).unwrap().text, "0");
 }
+
+fn rows(rows: &[&str]) -> Vec<String> {
+    rows.iter().map(|row| row.to_string()).collect()
+}
+
+#[test]
+fn a_rectangle_entry_round_trips_its_rows() {
+    for case in [
+        rows(&["ab", "cd", "ef"]),
+        rows(&["", ""]),
+        rows(&["", "x", ""]),
+        rows(&[""]),
+        rows(&["one"]),
+    ] {
+        let entry = Entry::rectangle(&case);
+        assert_eq!(entry.kind, EntryKind::Rectangle);
+        assert_eq!(entry.text, case.join("\n"));
+        assert_eq!(entry.pieces.len(), 1);
+        assert_eq!(entry.pieces[0].len, entry.text.len());
+        assert!(!entry.pieces[0].is_entire_line);
+        assert_eq!(entry.rectangle_rows(), case, "{case:?}");
+    }
+    assert_eq!(Entry::rectangle(&rows(&["", ""])).text, "\n");
+    assert_eq!(Entry::rectangle(&[]).rectangle_rows(), [""]);
+    assert_eq!(plain("a").kind, EntryKind::Text);
+}
+
+#[test]
+fn joining_a_rectangle_and_text_gives_text() {
+    let mut ring = Ring::default();
+    ring.push(Entry::rectangle(&rows(&["ab", "cd"])));
+    ring.join_newest(plain("x"), JoinSide::Append);
+    let newest = ring.newest().unwrap();
+    assert_eq!(newest.text, "ab\ncdx");
+    assert_eq!(newest.kind, EntryKind::Text);
+    let mut ring = Ring::default();
+    ring.push(plain("x"));
+    ring.join_newest(Entry::rectangle(&rows(&["ab", "cd"])), JoinSide::Prepend);
+    assert_eq!(ring.newest().unwrap().kind, EntryKind::Text);
+}
+
+#[test]
+fn json_keeps_the_kind_and_text_entries_save_as_before() {
+    let mut ring = Ring::default();
+    ring.push(plain("a"));
+    ring.push(Entry::rectangle(&rows(&["b", "c"])));
+    let json = ring.to_json();
+    assert_eq!(
+        json,
+        r#"{"version":1,"entries":[{"text":"b\nc","pieces":[{"len":3,"is_entire_line":false,"first_line_indent":0}],"kind":"rectangle"},{"text":"a","pieces":[{"len":1,"is_entire_line":false,"first_line_indent":0}]}]}"#
+    );
+    let back = Ring::from_json(&json);
+    assert_eq!(back.get(0), ring.get(0));
+    assert_eq!(back.get(1), ring.get(1));
+    assert_eq!(back.get(0).unwrap().rectangle_rows(), ["b", "c"]);
+}
+
+#[test]
+fn json_without_a_kind_loads_as_text() {
+    let ring = Ring::from_json(
+        r#"{"version":1,"entries":[{"text":"a\nb","pieces":[{"len":3,"is_entire_line":false,"first_line_indent":0}]}]}"#,
+    );
+    let entry = ring.get(0).unwrap();
+    assert_eq!(entry.kind, EntryKind::Text);
+    assert_eq!(entry, &plain("a\nb"));
+}
+
+#[test]
+fn the_picker_shows_a_rectangle_and_a_text_with_equal_text() {
+    let mut ring = Ring::default();
+    ring.push(plain("ab\ncd"));
+    ring.push(Entry::rectangle(&rows(&["ab", "cd"])));
+    ring.push(Entry::rectangle(&rows(&["ab", "cd"])));
+    let rows = ring.picker_view("");
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.index, row.label.as_str(), row.rectangle))
+            .collect::<Vec<_>>(),
+        [(0, "ab⏎cd", true), (2, "ab⏎cd", false)]
+    );
+}
