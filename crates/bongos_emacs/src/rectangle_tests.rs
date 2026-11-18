@@ -10,8 +10,8 @@ use text::{Point, ToOffset as _};
 use workspace::MinibufferRouting;
 
 use crate::actions::{
-    ClearRectangle, CopyRectangleAsKill, DeleteRectangle, KeepRectangle, KillRectangle,
-    OpenRectangle, RectangleMarkMode, SetMarkCommand, StringRectangle, YankRectangle,
+    ClearRectangle, DeleteRectangle, KeepRectangle, OpenRectangle, RectangleMarkMode,
+    SetMarkCommand, StringRectangle,
 };
 use crate::apply_tests::{capture_kills, init_test};
 use crate::mark::{mark_for, set_mark};
@@ -25,7 +25,7 @@ async fn test_context(cx: &mut TestAppContext) -> EditorTestContext {
 }
 
 /// Sets the state, then the mark at `mark` (a buffer offset).
-fn set_rectangle(cx: &mut EditorTestContext, marked: &str, mark: usize) {
+pub(crate) fn set_rectangle(cx: &mut EditorTestContext, marked: &str, mark: usize) {
     cx.set_state(marked);
     let editor = cx.editor.clone();
     cx.update(|_, cx| {
@@ -36,7 +36,7 @@ fn set_rectangle(cx: &mut EditorTestContext, marked: &str, mark: usize) {
 }
 
 /// The mark as a buffer offset.
-fn mark_offset(cx: &mut EditorTestContext) -> Option<usize> {
+pub(crate) fn mark_offset(cx: &mut EditorTestContext) -> Option<usize> {
     let editor = cx.editor.clone();
     cx.update(|_, cx| {
         let mark = mark_for(&editor, cx)?;
@@ -46,7 +46,7 @@ fn mark_offset(cx: &mut EditorTestContext) -> Option<usize> {
     })
 }
 
-fn echo(cx: &mut EditorTestContext) -> Rc<RefCell<Vec<String>>> {
+pub(crate) fn echo(cx: &mut EditorTestContext) -> Rc<RefCell<Vec<String>>> {
     let messages = Rc::new(RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let messages = messages.clone();
@@ -60,7 +60,7 @@ fn echo(cx: &mut EditorTestContext) -> Rc<RefCell<Vec<String>>> {
 }
 
 /// The buffer's version and newest undo entry, to see that nothing was recorded.
-fn history(cx: &mut EditorTestContext) -> impl PartialEq + use<> {
+pub(crate) fn history(cx: &mut EditorTestContext) -> impl PartialEq + use<> {
     cx.update_buffer(|buffer, _| {
         (
             buffer.version(),
@@ -238,17 +238,11 @@ async fn the_other_rectangle_commands_are_not_implemented_yet(cx: &mut TestAppCo
     let messages = echo(&mut cx);
     let kills = capture_kills(&mut cx);
     set_rectangle(&mut cx, BLOCK, 2);
-    let actions: [&dyn Action; 5] = [
-        &RectangleMarkMode,
-        &CopyRectangleAsKill,
-        &KillRectangle,
-        &StringRectangle,
-        &YankRectangle,
-    ];
+    let actions: [&dyn Action; 2] = [&RectangleMarkMode, &StringRectangle];
     for action in actions {
         dispatch(&mut cx, action);
     }
     cx.assert_editor_state(BLOCK);
-    assert_eq!(*messages.borrow(), vec!["Not implemented yet"; 5]);
+    assert_eq!(*messages.borrow(), vec!["Not implemented yet"; 2]);
     assert!(kills.borrow().is_empty());
 }
