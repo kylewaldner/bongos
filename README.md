@@ -601,6 +601,13 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-up, M-down | move the line up or down |
 | C-x C-;, C-c ;, C-c y | toggle comment, comment-dwim, duplicate line |
 | C-=, C-- | expand and contract the region |
+| C-x SPC | rectangle-mark-mode: start or end selecting a rectangle |
+| C-x r M-w | copy-rectangle-as-kill |
+| C-x r k, C-x r d | kill rectangle, delete rectangle |
+| C-x r o, C-x r c | open rectangle (blank column), clear rectangle (spaces) |
+| C-x r t | string-rectangle: replace each row of the rectangle with a string (prompts in the minibuffer) |
+| C-x r y | yank-rectangle |
+| C-x r K | keep-rectangle: keep only the rectangle's text on its rows |
 
 | Key | Command |
 |---|---|
@@ -669,6 +676,27 @@ deactivated; set it to `true` to have typing replace the region, as in other edi
 ```json
 { "emacs": { "delete_selection": true } }
 ```
+
+### Rectangles
+
+A rectangle is the block of columns between the mark and the cursor, over every row from one to the
+other. C-x SPC starts rectangle-mark-mode, which shows the block as you move; the `C-x r` commands
+also work on a plain mark and the cursor.
+
+| Key | What it does |
+|---|---|
+| C-x r M-w | copy the rectangle to the kill ring |
+| C-x r k, C-x r d | kill it (to the ring), delete it |
+| C-x r o | open it: insert blank space as wide as the rectangle and push the text right |
+| C-x r c | clear it: replace it with spaces |
+| C-x r t | ask for a string in the minibuffer (`String rectangle: `) and replace each row with it |
+| C-x r y | yank the newest rectangle with its top left at the cursor |
+| C-x r K | keep only the rectangle's text on its rows |
+
+Columns are the displayed ones: a tab or a wide character (such as a Chinese one) that crosses an
+edge of the rectangle is cut there and the rest is filled with spaces. A yank pads short rows with
+spaces and adds lines at the end of the buffer. Each command is one undo step. C-y yanks a killed
+rectangle row by row, as C-x r y does. The rectangle commands never touch the system clipboard.
 
 ### Universal argument
 
@@ -886,7 +914,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "string_rectangle"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
