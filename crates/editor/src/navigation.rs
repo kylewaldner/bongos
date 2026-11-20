@@ -1269,6 +1269,7 @@ impl Editor {
         let workspace = self.workspace()?;
         let project = workspace.read(cx).project().clone();
         let references = project.update(cx, |project, cx| project.references(&buffer, head, cx));
+        let origin = self.navigation_entry(self.selections.newest_anchor().head(), cx);
         Some(cx.spawn_in(window, async move |editor, cx| {
             let _cleanup = cx.on_drop(&editor, move |editor, _| {
                 if let Ok(i) = editor
@@ -1330,6 +1331,9 @@ impl Editor {
                     if Some(&target_buffer) == editor.buffer.read(cx).as_singleton().as_ref() {
                         editor.go_to_singleton_buffer_range(range, window, cx);
                     } else {
+                        if let Some(origin) = origin {
+                            editor.push_goto_origin(origin, cx);
+                        }
                         let pane = workspace.read(cx).active_pane().clone();
                         window.defer(cx, move |window, cx| {
                             let target_editor: Entity<Self> =
@@ -1364,6 +1368,10 @@ impl Editor {
                     }
                     Navigated::No
                 });
+            }
+
+            if let Some(origin) = origin {
+                editor.update(cx, |editor, cx| editor.push_goto_origin(origin, cx))?;
             }
 
             workspace.update_in(cx, |workspace, window, cx| {
@@ -1412,6 +1420,53 @@ impl Editor {
         };
         let data = self.navigation_data(cursor_anchor, cx);
         Some(history.navigation_entry(Some(Arc::new(data) as Arc<dyn Any + Send + Sync>)))
+    }
+
+    /// Pushes the place the user was when a goto command started. The entry's row is set from
+    /// its navigation data so that origins dedupe against other pushes by row, and the push is
+    /// announced like any other same-file nav history push.
+    pub(crate) fn push_goto_origin(&mut self, mut origin: NavigationEntry, cx: &mut Context<Self>) {
+        let Some((anchor, row)) = origin
+            .data
+            .as_ref()
+            .and_then(|data| data.downcast_ref::<NavigationData>())
+            .map(|data| (data.cursor_anchor, data.cursor_position.row))
+        else {
+            return;
+        };
+        let Some(nav_history) = self.nav_history.as_mut() else {
+            return;
+        };
+        origin.row = Some(row);
+        nav_history.push_entry(origin, cx);
+        cx.emit(EditorEvent::PushedToNavHistory {
+            anchor,
+            is_deactivate: false,
+        });
+    }
+
+    /// Like `push_goto_origin`, but does nothing when the cursor is still on the origin's row,
+    /// since a jump within a row is not a navigation worth returning from.
+    fn push_goto_origin_if_moved(&mut self, origin: NavigationEntry, cx: &mut Context<Self>) {
+        let Some(origin_row) = origin
+            .data
+            .as_ref()
+            .and_then(|data| data.downcast_ref::<NavigationData>())
+            .map(|data| data.cursor_position.row)
+        else {
+            return;
+        };
+        let new_row = {
+            let snapshot = self.buffer.read(cx).snapshot(cx);
+            self.selections
+                .newest_anchor()
+                .head()
+                .to_point(&snapshot)
+                .row
+        };
+        if new_row != origin_row {
+            self.push_goto_origin(origin, cx);
+        }
     }
 
     pub(super) fn push_to_nav_history(
@@ -1684,6 +1739,10 @@ impl Editor {
                     return Ok(Navigated::No);
                 };
 
+                if let Some(origin) = origin.clone() {
+                    editor.update(cx, |editor, cx| editor.push_goto_origin(origin, cx))?;
+                }
+
                 let opened = workspace
                     .update_in(cx, |workspace, window, cx| {
                         let allow_preview = PreviewTabsSettings::get_global(cx)
@@ -1734,6 +1793,9 @@ impl Editor {
                         let Some(workspace) = workspace else {
                             return Ok(Navigated::No);
                         };
+                        if let Some(origin) = origin {
+                            editor.update(cx, |editor, cx| editor.push_goto_origin(origin, cx))?;
+                        }
                         let item = workspace
                             .update_in(cx, |workspace, window, cx| {
                                 workspace.open_resolved_path(
@@ -1790,11 +1852,14 @@ impl Editor {
                                 editor.cursor_top_offset(cx),
                                 cx,
                             ))
-                            .nav_history(true),
+                            .nav_history(false),
                             window,
                             cx,
                             |s| s.select_anchor_ranges(target_ranges),
                         );
+                        if let Some(origin) = origin.clone() {
+                            editor.push_goto_origin_if_moved(origin, cx);
+                        }
 
                         let target =
                             editor.navigation_entry(editor.selections.newest_anchor().head(), cx);
@@ -1807,6 +1872,9 @@ impl Editor {
                         };
                         let pane = workspace.read(cx).active_pane().clone();
                         let offset = editor.cursor_top_offset(cx);
+                        if let Some(origin) = origin.clone() {
+                            editor.push_goto_origin(origin, cx);
+                        }
 
                         window.defer(cx, move |window, cx| {
                             let (target_editor, target_pane): (Entity<Self>, Entity<Pane>) =
@@ -1874,7 +1942,7 @@ impl Editor {
                                     SelectionEffects::scroll(Autoscroll::for_go_to_definition(
                                         offset, cx,
                                     ))
-                                    .nav_history(true),
+                                    .nav_history(false),
                                     window,
                                     cx,
                                     |s| s.select_anchor_ranges(target_ranges),
@@ -2315,16 +2383,24 @@ impl Editor {
             return;
         };
         let anchor_range = range.to_anchors(&multibuffer.snapshot(cx));
+        let origin = if record_nav_history {
+            self.navigation_entry(self.selections.newest_anchor().head(), cx)
+        } else {
+            None
+        };
         self.change_selections(
             SelectionEffects::scroll(Autoscroll::for_go_to_definition(
                 self.cursor_top_offset(cx),
                 cx,
             ))
-            .nav_history(record_nav_history),
+            .nav_history(false),
             window,
             cx,
             |s| s.select_anchor_ranges([anchor_range]),
         );
+        if let Some(origin) = origin {
+            self.push_goto_origin_if_moved(origin, cx);
+        }
     }
 
     fn go_to_document_highlight_before_or_after_position(

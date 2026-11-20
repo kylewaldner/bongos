@@ -4598,6 +4598,20 @@ impl ItemNavHistory {
         }
     }
 
+    /// Pushes a prebuilt entry, such as one from `navigation_entry`, onto the history. It emits
+    /// no event of its own.
+    pub fn push_entry(&mut self, entry: NavigationEntry, cx: &mut App) {
+        if entry
+            .item
+            .upgrade()
+            .is_some_and(|item| item.include_in_nav_history())
+        {
+            let is_preview_item = self.history.0.lock().preview_item_id == Some(entry.item.id());
+            self.history
+                .push_shared(entry.data, entry.item, is_preview_item, entry.row, cx);
+        }
+    }
+
     pub fn navigation_entry(&self, data: Option<Arc<dyn Any + Send + Sync>>) -> NavigationEntry {
         let is_preview_item = self.history.0.lock().preview_item_id == Some(self.item.id());
         NavigationEntry {
@@ -4753,6 +4767,24 @@ impl NavHistory {
         row: Option<u32>,
         cx: &mut App,
     ) {
+        self.push_shared(
+            data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+            item,
+            is_preview,
+            row,
+            cx,
+        );
+    }
+
+    /// Like `push`, for data that is already shared, as in a prebuilt `NavigationEntry`.
+    pub fn push_shared(
+        &mut self,
+        data: Option<Arc<dyn Any + Send + Sync>>,
+        item: Arc<dyn WeakItemHandle + Send + Sync>,
+        is_preview: bool,
+        row: Option<u32>,
+        cx: &mut App,
+    ) {
         let state = &mut *self.0.lock();
         let new_item_id = item.id();
 
@@ -4771,7 +4803,7 @@ impl NavHistory {
                 }
                 state.backward_stack.push_back(NavigationEntry {
                     item,
-                    data: data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+                    data,
                     timestamp: state.next_timestamp.fetch_add(1, Ordering::SeqCst),
                     is_preview,
                     row,
@@ -4786,7 +4818,7 @@ impl NavHistory {
                 }
                 state.forward_stack.push_back(NavigationEntry {
                     item,
-                    data: data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+                    data,
                     timestamp: state.next_timestamp.fetch_add(1, Ordering::SeqCst),
                     is_preview,
                     row,
@@ -4802,7 +4834,7 @@ impl NavHistory {
                 }
                 state.backward_stack.push_back(NavigationEntry {
                     item,
-                    data: data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+                    data,
                     timestamp: state.next_timestamp.fetch_add(1, Ordering::SeqCst),
                     is_preview,
                     row,
@@ -4815,7 +4847,7 @@ impl NavHistory {
                 }
                 state.closed_stack.push_back(NavigationEntry {
                     item,
-                    data: data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+                    data,
                     timestamp: state.next_timestamp.fetch_add(1, Ordering::SeqCst),
                     is_preview,
                     row,

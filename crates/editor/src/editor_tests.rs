@@ -38998,3 +38998,496 @@ async fn test_set_kill_ring_text_is_yanked(cx: &mut TestAppContext) {
     cx.update_editor(|e, window, cx| e.kill_ring_yank(&KillRingYank, window, cx));
     cx.assert_editor_state("one sent prompt ˇtwo");
 }
+
+/// `count` lines, `fn f<row>() {}`, with the caret on the name in `caret_row`.
+fn numbered_rows(count: usize, caret_row: Option<usize>) -> String {
+    (0..count)
+        .map(|row| {
+            if Some(row) == caret_row {
+                format!("fn ˇf{row}() {{}}\n")
+            } else {
+                format!("fn f{row}() {{}}\n")
+            }
+        })
+        .collect()
+}
+
+fn range_on_row(row: u32) -> lsp::Range {
+    lsp::Range::new(lsp::Position::new(row, 3), lsp::Position::new(row, 5))
+}
+
+/// Writes another numbered file next to the test file and returns its URI.
+async fn insert_numbered_file(
+    cx: &mut EditorLspTestContext,
+    name: &str,
+    rows: usize,
+) -> lsp::Uri {
+    let fs = cx.update_workspace(|workspace, _, cx| workspace.project().read(cx).fs().clone());
+    let path = EditorLspTestContext::root_path().join("dir").join(name);
+    fs.as_fake()
+        .insert_file(&path, numbered_rows(rows, None).into_bytes())
+        .await;
+    cx.run_until_parked();
+    lsp::Uri::from_file_path(path).unwrap()
+}
+
+/// Every entry of the active pane's history, as (item, row), forward entries first.
+fn nav_entries(cx: &mut EditorLspTestContext) -> Vec<(EntityId, Option<u32>)> {
+    cx.update_workspace(|workspace, _, cx| {
+        let mut entries = Vec::new();
+        workspace
+            .active_pane()
+            .read(cx)
+            .nav_history()
+            .for_each_entry(cx, &mut |entry, _| {
+                entries.push((entry.item.id(), entry.row));
+            });
+        entries
+    })
+}
+
+fn active_editor_and_row(cx: &mut EditorLspTestContext) -> (EntityId, u32) {
+    cx.update_workspace(|workspace, _, cx| {
+        let editor = workspace.active_item_as::<Editor>(cx).unwrap();
+        let row = editor.update(cx, |editor, cx| {
+            editor
+                .selections
+                .newest::<Point>(&editor.display_snapshot(cx))
+                .head()
+                .row
+        });
+        (editor.entity_id(), row)
+    })
+}
+
+fn go_back_in_active_pane(cx: &mut EditorLspTestContext) {
+    cx.update_workspace(|workspace, window, cx| {
+        workspace
+            .go_back(workspace.active_pane().downgrade(), window, cx)
+            .detach_and_log_err(cx);
+    });
+    cx.run_until_parked();
+}
+
+fn go_forward_in_active_pane(cx: &mut EditorLspTestContext) {
+    cx.update_workspace(|workspace, window, cx| {
+        workspace
+            .go_forward(workspace.active_pane().downgrade(), window, cx)
+            .detach_and_log_err(cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Records the `is_deactivate` flag of every `PushedToNavHistory` the test editor emits.
+fn record_nav_history_pushes(
+    cx: &mut EditorLspTestContext,
+) -> (Rc<RefCell<Vec<bool>>>, gpui::Subscription) {
+    let pushes = Rc::new(RefCell::new(Vec::new()));
+    let editor = cx.editor.clone();
+    let subscription = cx.update(|_, cx| {
+        let pushes = pushes.clone();
+        cx.subscribe(&editor, move |_, event: &EditorEvent, _| {
+            if let EditorEvent::PushedToNavHistory { is_deactivate, .. } = event {
+                pushes.borrow_mut().push(*is_deactivate);
+            }
+        })
+    });
+    (pushes, subscription)
+}
+
+async fn go_to_definition_in_active_editor(cx: &mut EditorLspTestContext) {
+    let editor = cx.update_workspace(|workspace, _, cx| workspace.active_item_as::<Editor>(cx));
+    let editor = editor.expect("an editor should be active");
+    let task = editor.update_in(&mut cx.cx.cx, |editor, window, cx| {
+        editor.go_to_definition(&GoToDefinition, window, cx)
+    });
+    task.await.expect("go to definition should succeed");
+    cx.run_until_parked();
+}
+
+fn definition_capabilities() -> lsp::ServerCapabilities {
+    lsp::ServerCapabilities {
+        definition_provider: Some(lsp::OneOf::Left(true)),
+        references_provider: Some(lsp::OneOf::Left(true)),
+        implementation_provider: Some(lsp::ImplementationProviderCapability::Simple(true)),
+        type_definition_provider: Some(lsp::TypeDefinitionProviderCapability::Simple(true)),
+        ..lsp::ServerCapabilities::default()
+    }
+}
+
+#[gpui::test]
+async fn test_goto_in_same_file_pushes_origin_once(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, false);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    let window = cx.window;
+    let line_height = cx.update_editor(|editor, window, cx| {
+        editor
+            .style(cx)
+            .text
+            .line_height_in_pixels(window.rem_size())
+    });
+    cx.simulate_window_resize(window, size(px(1000.), 8. * line_height));
+    cx.set_state(&numbered_rows(60, Some(40)));
+    cx.update_editor(|editor, window, cx| {
+        editor.set_scroll_position(gpui::Point::new(0.0, 38.5), window, cx);
+    });
+    let original = cx.editor.entity_id();
+    cx.set_request_handler::<lsp::request::GotoDefinition, _, _>(|url, _, _| async move {
+        Ok(Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
+            uri: url,
+            range: range_on_row(10),
+        })))
+    });
+    let (pushes, _subscription) = record_nav_history_pushes(&mut cx);
+
+    go_to_definition_in_active_editor(&mut cx).await;
+
+    assert_eq!(active_editor_and_row(&mut cx), (original, 10));
+    assert_eq!(nav_entries(&mut cx), vec![(original, Some(40))]);
+    assert_eq!(*pushes.borrow(), vec![false]);
+
+    go_back_in_active_pane(&mut cx);
+
+    assert_eq!(active_editor_and_row(&mut cx), (original, 40));
+    cx.update_editor(|editor, window, cx| {
+        assert_eq!(
+            editor.snapshot(window, cx).scroll_position(),
+            gpui::Point::new(0.0, 38.5)
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_chained_goto_in_same_file_keeps_every_origin(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, false);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    cx.set_state(&numbered_rows(80, Some(5)));
+    let original = cx.editor.entity_id();
+    cx.set_request_handler::<lsp::request::GotoDefinition, _, _>(|url, params, _| async move {
+        let target = match params.text_document_position_params.position.line {
+            5 => 25,
+            25 => 45,
+            _ => 65,
+        };
+        Ok(Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
+            uri: url,
+            range: range_on_row(target),
+        })))
+    });
+
+    for expected_row in [25, 45, 65] {
+        go_to_definition_in_active_editor(&mut cx).await;
+        assert_eq!(active_editor_and_row(&mut cx), (original, expected_row));
+    }
+    assert_eq!(
+        nav_entries(&mut cx),
+        vec![
+            (original, Some(5)),
+            (original, Some(25)),
+            (original, Some(45))
+        ]
+    );
+
+    for expected_row in [45, 25, 5] {
+        go_back_in_active_pane(&mut cx);
+        assert_eq!(active_editor_and_row(&mut cx), (original, expected_row));
+    }
+    cx.update_workspace(|workspace, _, cx| {
+        assert!(!workspace.active_pane().read(cx).can_navigate_backward());
+    });
+}
+
+#[gpui::test]
+async fn test_goto_in_another_file_pushes_origin_once(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, false);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    cx.set_state(&numbered_rows(40, Some(2)));
+    let original = cx.editor.entity_id();
+    let other_uri = insert_numbered_file(&mut cx, "other.rs", 40).await;
+    cx.lsp
+        .set_request_handler::<lsp::request::GotoDefinition, _, _>(move |_, _| {
+            let uri = other_uri.clone();
+            async move {
+                Ok(Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
+                    uri,
+                    range: range_on_row(10),
+                })))
+            }
+        });
+
+    go_to_definition_in_active_editor(&mut cx).await;
+
+    let (other, row) = active_editor_and_row(&mut cx);
+    assert_ne!(other, original);
+    assert_eq!(row, 10);
+    assert_eq!(nav_entries(&mut cx), vec![(original, Some(2))]);
+
+    go_back_in_active_pane(&mut cx);
+
+    assert_eq!(active_editor_and_row(&mut cx), (original, 2));
+}
+
+#[gpui::test]
+async fn test_chained_goto_across_files_goes_back_and_forward(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, false);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    cx.set_state(&numbered_rows(40, Some(2)));
+    let first = cx.editor.entity_id();
+    let first_uri = cx.buffer_lsp_url.clone();
+    let second_uri = insert_numbered_file(&mut cx, "second.rs", 40).await;
+    let third_uri = insert_numbered_file(&mut cx, "third.rs", 40).await;
+    cx.lsp
+        .set_request_handler::<lsp::request::GotoDefinition, _, _>({
+            let (first_uri, second_uri, third_uri) =
+                (first_uri.clone(), second_uri.clone(), third_uri.clone());
+            move |params, _| {
+                let current = params.text_document_position_params.text_document.uri;
+                let (uri, row) = if current == first_uri {
+                    (second_uri.clone(), 10)
+                } else if current == second_uri {
+                    (third_uri.clone(), 5)
+                } else {
+                    (first_uri.clone(), 30)
+                };
+                async move {
+                    Ok(Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
+                        uri,
+                        range: range_on_row(row),
+                    })))
+                }
+            }
+        });
+
+    go_to_definition_in_active_editor(&mut cx).await;
+    let (second, row) = active_editor_and_row(&mut cx);
+    assert_eq!(row, 10);
+    go_to_definition_in_active_editor(&mut cx).await;
+    let (third, row) = active_editor_and_row(&mut cx);
+    assert_eq!(row, 5);
+    go_to_definition_in_active_editor(&mut cx).await;
+    assert_eq!(active_editor_and_row(&mut cx), (first, 30));
+    assert_ne!(first, second);
+    assert_ne!(second, third);
+    assert_eq!(
+        nav_entries(&mut cx),
+        vec![(first, Some(2)), (second, Some(10)), (third, Some(5))]
+    );
+
+    for expected in [(third, 5), (second, 10), (first, 2)] {
+        go_back_in_active_pane(&mut cx);
+        assert_eq!(active_editor_and_row(&mut cx), expected);
+    }
+
+    go_forward_in_active_pane(&mut cx);
+    assert_eq!(active_editor_and_row(&mut cx), (second, 10));
+}
+
+#[gpui::test]
+async fn test_find_usages_list_pushes_origin_and_back_returns(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, false);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    cx.set_state(&numbered_rows(60, Some(2)));
+    let original = cx.editor.entity_id();
+    cx.set_request_handler::<lsp::request::References, _, _>(|url, _, _| async move {
+        Ok(Some(
+            [10, 25, 40]
+                .into_iter()
+                .map(|row| lsp::Location {
+                    uri: url.clone(),
+                    range: range_on_row(row),
+                })
+                .collect(),
+        ))
+    });
+
+    let navigated = cx
+        .update_editor(|editor, window, cx| {
+            editor.find_all_references(&FindAllReferences::default(), window, cx)
+        })
+        .expect("should have spawned a task")
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(navigated, Navigated::Yes);
+    let (list, _) = active_editor_and_row(&mut cx);
+    assert_ne!(list, original, "the usages list should be active");
+    assert_eq!(nav_entries(&mut cx), vec![(original, Some(2))]);
+
+    // Open the first usage from the list.
+    cx.update_workspace(|workspace, window, cx| {
+        let list = workspace.active_item_as::<Editor>(cx).unwrap();
+        list.update(cx, |list, cx| list.open_excerpts(&OpenExcerpts, window, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(active_editor_and_row(&mut cx), (original, 10));
+    assert_eq!(nav_entries(&mut cx), vec![(original, Some(2))]);
+
+    go_back_in_active_pane(&mut cx);
+    assert_eq!(active_editor_and_row(&mut cx), (original, 2));
+}
+
+#[gpui::test]
+async fn test_find_usages_with_one_result_in_another_file_pushes_origin(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, false);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    cx.set_state(&numbered_rows(40, Some(2)));
+    let original = cx.editor.entity_id();
+    let other_uri = insert_numbered_file(&mut cx, "other.rs", 40).await;
+    cx.lsp
+        .set_request_handler::<lsp::request::References, _, _>(move |_, _| {
+            let uri = other_uri.clone();
+            async move {
+                Ok(Some(vec![lsp::Location {
+                    uri,
+                    range: range_on_row(12),
+                }]))
+            }
+        });
+
+    cx.update_editor(|editor, window, cx| {
+        editor.find_all_references(&FindAllReferences::default(), window, cx)
+    })
+    .expect("should have spawned a task")
+    .await
+    .unwrap();
+    cx.run_until_parked();
+
+    let (other, row) = active_editor_and_row(&mut cx);
+    assert_ne!(other, original);
+    assert_eq!(row, 12);
+    assert_eq!(nav_entries(&mut cx), vec![(original, Some(2))]);
+
+    go_back_in_active_pane(&mut cx);
+    assert_eq!(active_editor_and_row(&mut cx), (original, 2));
+}
+
+#[gpui::test]
+async fn test_implementation_and_type_definition_lists_push_origin_once(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, false);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    cx.set_state(&numbered_rows(60, Some(2)));
+    let original = cx.editor.entity_id();
+    let many_locations = |url: lsp::Uri| {
+        lsp::GotoDefinitionResponse::Array(
+            [20, 45]
+                .into_iter()
+                .map(|row| lsp::Location {
+                    uri: url.clone(),
+                    range: range_on_row(row),
+                })
+                .collect(),
+        )
+    };
+    cx.set_request_handler::<lsp::request::GotoImplementation, _, _>(move |url, _, _| async move {
+        Ok(Some(many_locations(url)))
+    });
+    cx.set_request_handler::<lsp::request::GotoTypeDefinition, _, _>(move |url, _, _| async move {
+        Ok(Some(many_locations(url)))
+    });
+    let (pushes, _subscription) = record_nav_history_pushes(&mut cx);
+
+    let navigated = cx
+        .update_editor(|editor, window, cx| {
+            editor.go_to_implementation(&GoToImplementation, window, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(navigated, Navigated::Yes);
+    assert_ne!(active_editor_and_row(&mut cx).0, original);
+    assert_eq!(nav_entries(&mut cx), vec![(original, Some(2))]);
+    assert_eq!(*pushes.borrow(), vec![false]);
+
+    // Move the caret to another row so the second origin does not dedupe with the first.
+    cx.update_editor(|editor, window, cx| {
+        editor.change_selections(
+            SelectionEffects::no_scroll().nav_history(false),
+            window,
+            cx,
+            |s| s.select_ranges([Point::new(5, 0)..Point::new(5, 0)]),
+        );
+    });
+    let navigated = cx
+        .update_editor(|editor, window, cx| {
+            editor.go_to_type_definition(&GoToTypeDefinition, window, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(navigated, Navigated::Yes);
+    assert_eq!(
+        nav_entries(&mut cx),
+        vec![(original, Some(2)), (original, Some(5))]
+    );
+    assert_eq!(*pushes.borrow(), vec![false, false]);
+}
+
+#[gpui::test]
+async fn test_cmd_click_pushes_origin_for_definition_and_file_but_not_url(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, false);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    let fs = cx.update_workspace(|workspace, _, cx| workspace.project().read(cx).fs().clone());
+    fs.as_fake()
+        .insert_file(path!("/root/dir/file2.rs"), b"This is file2.rs".to_vec())
+        .await;
+
+    let base = "fn test() { do_work(); }\nfn do_work() {}\nSee file2.rs here\nVisit https://zed.dev/docs now\n";
+    cx.set_state(&format!("{base}ˇ"));
+    let original = cx.editor.entity_id();
+    let symbol_range = lsp::Range::new(lsp::Position::new(0, 12), lsp::Position::new(0, 19));
+    let target_range = lsp::Range::new(lsp::Position::new(1, 3), lsp::Position::new(1, 10));
+    cx.set_request_handler::<lsp::request::GotoDefinition, _, _>(move |url, params, _| async move {
+        if params.text_document_position_params.position.line == 0 {
+            Ok(Some(lsp::GotoDefinitionResponse::Link(vec![
+                lsp::LocationLink {
+                    origin_selection_range: Some(symbol_range),
+                    target_uri: url,
+                    target_range,
+                    target_selection_range: target_range,
+                },
+            ])))
+        } else {
+            Ok(Some(lsp::GotoDefinitionResponse::Link(vec![])))
+        }
+    });
+    let secondary = gpui::Modifiers::secondary_key();
+
+    // A URL opens the browser and records nothing.
+    let url_point = cx.pixel_position(&base.replace("zed.dev/docs", "zed.dev/dˇocs"));
+    cx.simulate_mouse_move(url_point, None, secondary);
+    cx.run_until_parked();
+    cx.simulate_click(url_point, secondary);
+    cx.run_until_parked();
+    assert_eq!(cx.opened_url(), Some("https://zed.dev/docs".into()));
+    assert_eq!(nav_entries(&mut cx), vec![]);
+
+    // A definition in the same file records the clicked place once.
+    let definition_point = cx.pixel_position(&base.replace("do_work();", "do_wˇork();"));
+    cx.simulate_mouse_move(definition_point, None, secondary);
+    cx.run_until_parked();
+    cx.simulate_click(definition_point, secondary);
+    cx.run_until_parked();
+    assert_eq!(active_editor_and_row(&mut cx), (original, 1));
+    assert_eq!(nav_entries(&mut cx), vec![(original, Some(0))]);
+
+    // A file link records the clicked place once and opens the file.
+    let file_point = cx.pixel_position(&base.replace("See file2.rs", "See fiˇle2.rs"));
+    cx.simulate_mouse_move(file_point, None, secondary);
+    cx.run_until_parked();
+    cx.simulate_click(file_point, secondary);
+    cx.run_until_parked();
+    assert_ne!(active_editor_and_row(&mut cx).0, original);
+    assert_eq!(
+        nav_entries(&mut cx),
+        vec![(original, Some(0)), (original, Some(2))]
+    );
+}
