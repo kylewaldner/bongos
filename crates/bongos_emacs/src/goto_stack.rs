@@ -3,7 +3,7 @@
 //! so going forward returns to it; a push clears the forward stack.
 
 use editor::Editor;
-use gpui::{Action as _, App, Context, Entity, TaskExt as _, Window};
+use gpui::{Action as _, App, Context, Entity, Window};
 use workspace::Workspace;
 
 use crate::actions::{GotoStackBack, GotoStackForward, GotoStackPush};
@@ -25,9 +25,18 @@ fn goto_stack_back(
         bongos_minibuffer::message(window, cx, NO_EARLIER_LOCATION);
         return;
     }
-    workspace
-        .go_back(pane.downgrade(), window, cx)
-        .detach_and_log_err(cx);
+    let walk = workspace.go_back_reporting(pane.downgrade(), window, cx);
+    cx.spawn_in(window, async move |_, cx| {
+        match walk.await {
+            Ok(false) => {
+                cx.update(|window, cx| bongos_minibuffer::message(window, cx, NO_EARLIER_LOCATION))
+                    .ok();
+            }
+            Ok(true) => {}
+            Err(error) => log::error!("goto stack walk failed: {error:#}"),
+        }
+    })
+    .detach();
 }
 
 fn goto_stack_forward(
@@ -42,9 +51,18 @@ fn goto_stack_forward(
         bongos_minibuffer::message(window, cx, NO_LATER_LOCATION);
         return;
     }
-    workspace
-        .go_forward(pane.downgrade(), window, cx)
-        .detach_and_log_err(cx);
+    let walk = workspace.go_forward_reporting(pane.downgrade(), window, cx);
+    cx.spawn_in(window, async move |_, cx| {
+        match walk.await {
+            Ok(false) => {
+                cx.update(|window, cx| bongos_minibuffer::message(window, cx, NO_LATER_LOCATION))
+                    .ok();
+            }
+            Ok(true) => {}
+            Err(error) => log::error!("goto stack walk failed: {error:#}"),
+        }
+    })
+    .detach();
 }
 
 /// Records the caret's place as the newest entry of the editor's pane history. The caret does

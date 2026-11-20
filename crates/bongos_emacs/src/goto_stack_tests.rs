@@ -320,9 +320,12 @@ async fn a_failed_reopen_never_moves_the_caret(cx: &mut TestAppContext) {
     delete_on_disk(&workspace, "one.txt", &mut cx).await;
     let pane = active_pane(&workspace, &mut cx);
     assert_eq!(backward_rows(&pane, &mut cx).len(), 1);
+    let messages = echo(&mut cx);
 
     back(&mut cx);
     assert_eq!(location(&workspace, &mut cx), here);
+    // A walk that skipped every entry says so, like an empty history.
+    assert_eq!(*messages.borrow(), vec![NO_EARLIER_LOCATION]);
     assert_eq!(pane.read_with(&cx, |pane, _| pane.items_len()), 1);
     // The history records new places as usual afterwards.
     two.update(&mut cx, |editor, cx| editor.create_nav_history_entry(cx));
