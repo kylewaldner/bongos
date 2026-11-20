@@ -5027,7 +5027,8 @@ mod tests {
             (file3.clone(), DisplayPoint::new(DisplayRow(0), 0), 0.)
         );
 
-        // Go back to an item that has been closed and removed from disk
+        // Going back past an item that has been closed and removed from disk skips it rather
+        // than reopening it as a new empty file.
         workspace
             .update_in(cx, |_, window, cx| {
                 pane.update(cx, |pane, cx| {
@@ -5053,8 +5054,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             active_location(&workspace, cx),
-            (file2.clone(), DisplayPoint::new(DisplayRow(0), 0), 0.)
+            (file1.clone(), DisplayPoint::new(DisplayRow(10), 0), 0.)
         );
+        pane.read_with(cx, |pane, cx| {
+            assert!(
+                pane.items()
+                    .all(|item| item.project_path(cx).as_ref() != Some(&file2)),
+                "the deleted file is not reopened"
+            );
+        });
         workspace
             .update_in(cx, |w, window, cx| {
                 w.go_forward(w.active_pane().downgrade(), window, cx)
