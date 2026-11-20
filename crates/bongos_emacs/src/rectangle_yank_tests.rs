@@ -84,6 +84,20 @@ async fn copy_leaves_buffer_point_and_mark_and_never_writes_the_clipboard(cx: &m
 }
 
 #[gpui::test]
+async fn copy_outside_rectangle_mark_mode_ends_the_linear_region(cx: &mut TestAppContext) {
+    let mut cx = test_context(cx).await;
+    set_rectangle(&mut cx, "a«bcd\nefgˇ»h", 1);
+    cx.update_editor(|editor, _, cx| editor.set_selection_mark_mode(true, cx));
+    cx.simulate_keystrokes("alt-1");
+    cx.assert_editor_state(SQUARE);
+    assert_eq!(
+        ring(&mut cx),
+        [(EntryKind::Rectangle, "bc\nfg".to_string())]
+    );
+    assert!(!cx.update_editor(|editor, _, _| editor.selection_mark_mode()));
+}
+
+#[gpui::test]
 async fn one_undo_restores_a_killed_rectangle(cx: &mut TestAppContext) {
     let mut cx = test_context(cx).await;
     set_rectangle(&mut cx, SQUARE, 1);

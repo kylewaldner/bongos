@@ -319,13 +319,17 @@ struct Build {
     highlights: Vec<(Anchor, Range<u32>)>,
 }
 
-/// Byte of the first character at or right of display column `col` that is not inside a
-/// character starting left of it, or the line's length. A wide character or tab that `col`
-/// cuts is included: `left` gives its start.
+/// Byte of the first character that is not left of display column `col`, or the line's
+/// length. A tab that `col` cuts is included; a wide character that `col` cuts is outside,
+/// as in the operations.
 fn left_byte(text: &str, col: usize, tab: usize) -> usize {
     cells(text, tab)
         .into_iter()
-        .find(|cell| cell.width > 0 && cell.start_col + cell.width > col)
+        .find(|cell| {
+            cell.width > 0
+                && cell.start_col + cell.width > col
+                && (cell.start_col >= col || text[cell.byte..].starts_with('\t'))
+        })
         .map_or(text.len(), |cell| cell.byte)
 }
 
@@ -364,7 +368,9 @@ fn build(editor: &Editor, mark: Anchor, cx: &App) -> Option<Build> {
     for (index, row) in corners.rows.iter().enumerate() {
         let width = line_width(&row.text, corners.tab);
         if width < right {
-            let start = lift(row.start)?;
+            // The end of the row's text: a soft-wrapped line paints the fill after its last
+            // wrapped segment.
+            let start = lift(row.start + row.text.len())?;
             highlights.push((
                 start,
                 left.saturating_sub(width) as u32..(right - width) as u32,

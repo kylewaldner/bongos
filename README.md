@@ -691,8 +691,9 @@ also work on a plain mark and the cursor.
 | C-x r y | yank the newest rectangle with its top left at the cursor |
 | C-x r K | keep only the rectangle's text on its rows |
 
-Columns are the displayed ones: a tab or a wide character (such as a Chinese one) that crosses an
-edge of the rectangle is cut there and the rest is filled with spaces. A yank pads short rows with
+Columns are the displayed ones: a tab that crosses an edge of the rectangle is cut there and the
+rest is filled with spaces. A wide character (such as a Chinese one) is never split: it belongs to
+the rectangle when its first column is inside it. A yank pads short rows with
 spaces and adds lines at the end of the buffer. Each command is one undo step. C-y yanks a killed
 rectangle row by row, as C-x r y does. The rectangle commands never touch the system clipboard.
 

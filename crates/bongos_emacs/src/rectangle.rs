@@ -346,9 +346,20 @@ pub(crate) fn copy_rectangle_as_kill_command(
         && let Some((_, plan)) = plan_here(editor, RectOp::Copy, window, cx)
     {
         kill_ring::push_rectangle(&plan.extracted.unwrap_or_default(), cx);
-        editor.update(cx, |editor, cx| editor.set_selection_mark_mode(false, cx));
+        deactivate_region(editor, window, cx);
     }
     rectangle_mode::finish(editor, window, cx);
+}
+
+/// Ends the region: mark mode off and a single caret at the rectangle's point.
+fn deactivate_region(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+    let point = rectangle_mode::point(editor.read(cx));
+    editor.update(cx, |editor, cx| {
+        editor.set_selection_mark_mode(false, cx);
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select_anchor_ranges([point..point])
+        });
+    });
 }
 
 /// `kill-rectangle`: saves the rectangle to the kill ring as a rectangle entry, then deletes
@@ -372,6 +383,7 @@ fn kill_rectangle(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
         // As in Emacs, the rows still reach the ring before the error.
         if let Some((_, plan)) = plan_here(editor, RectOp::Copy, window, cx) {
             kill_ring::push_rectangle(&plan.extracted.unwrap_or_default(), cx);
+            deactivate_region(editor, window, cx);
         }
         bongos_minibuffer::message(window, cx, "Buffer is read-only");
         return;
