@@ -13,11 +13,13 @@
 # bracketed paste and its Enter can be checked exactly. Each line (ended by CR or LF) is logged as `input <line>` and run:
 #   bell            rings the bell (BEL)
 #   title <text>    sets the OSC title
+#   spin <count>    sets <count> different OSC titles, 10 ms apart (a spinner in the title)
 #   exit <code>     logs `exit <code>` and exits with that code
 #   anything else   is answered with `got <line>`
 # End of input (the terminal went away) logs `exit eof`.
 #
 # Knobs (environment variables): FAKE_CLI_LOG, FAKE_CLI_INPUT, FAKE_CLI_TITLE, FAKE_CLI_NO_BRACKETED,
+# FAKE_CLI_SPIN (spin that many titles right after `ready`, then print `spun`),
 # and for fake-codex FAKE_CLI_HOME: when set, a new or forked session writes the session file Codex would,
 # `$FAKE_CLI_HOME/.codex/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl`, whose first line holds
 # the id and the working directory.
@@ -48,6 +50,16 @@ fake_codex_session_file() {
   fake_log "session $fake_id"
 }
 
+fake_spin() {
+  fake_count=0
+  while [ "$fake_count" -lt "$1" ]; do
+    fake_count=$((fake_count + 1))
+    printf '\033]0;spinner %s\007' "$fake_count"
+    sleep 0.01
+  done
+  printf 'spun\r\n'
+}
+
 fake_command() {
   # The line is a run of `\ooo` octal escapes, which printf turns back into bytes.
   fake_text=$(printf "$1")
@@ -55,6 +67,7 @@ fake_command() {
   case $fake_text in
     bell) printf '\007' ;;
     "title "*) printf '\033]0;%s\007' "${fake_text#title }" ;;
+    "spin "*) fake_spin "${fake_text#spin }" ;;
     "exit "*)
       fake_log "exit ${fake_text#exit }"
       exit "${fake_text#exit }"
@@ -86,6 +99,9 @@ fake_session() {
     printf '\033]0;%s\007' "$FAKE_CLI_TITLE"
   fi
   printf 'ready\r\n'
+  if [ -n "${FAKE_CLI_SPIN:-}" ]; then
+    fake_spin "$FAKE_CLI_SPIN"
+  fi
 
   fake_buffer=''
   while :; do

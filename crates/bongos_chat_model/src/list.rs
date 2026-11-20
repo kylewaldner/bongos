@@ -3,10 +3,13 @@
 //! with its error, so it is listed by file name and never rewritten.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::record::{ChatRecord, chats_dir, is_record_file_name, read_record, timestamp_utc};
+use crate::record::{
+    ChatRecord, Timestamp, chats_dir, is_record_file_name, read_record, timestamp_utc,
+};
 
 /// One file of a `chats` directory: its record, or the reason it could not be read.
 #[derive(Debug)]
@@ -80,18 +83,26 @@ pub struct ChatLists<'a> {
 
 /// Splits `entries` into the open and archived lists. Both are sorted by `last_active`, most
 /// recent first, ties by id; an invalid file has no record to sort by, so it comes after the
-/// valid ones, by file name, in the open list where it can be seen.
-pub fn chat_lists(entries: &[ChatEntry]) -> ChatLists<'_> {
+/// valid ones, by file name, in the open list where it can be seen. A live chat sorts by its entry
+/// in `activity` (its in-memory last activity, newer than its record's), a closed one by its record.
+pub fn chat_lists<'a>(
+    entries: &'a [ChatEntry],
+    activity: &HashMap<String, Timestamp>,
+) -> ChatLists<'a> {
     let (mut archived, mut open): (Vec<&ChatEntry>, Vec<&ChatEntry>) = entries
         .iter()
         .partition(|entry| entry.record().is_some_and(|record| record.archived));
-    open.sort_by(|a, b| display_order(a, b));
-    archived.sort_by(|a, b| display_order(a, b));
+    open.sort_by(|a, b| display_order(a, b, activity));
+    archived.sort_by(|a, b| display_order(a, b, activity));
     ChatLists { open, archived }
 }
 
 /// The chats forked from `parent_id`, in display order.
-pub fn forks_of<'a>(entries: &'a [ChatEntry], parent_id: &str) -> Vec<&'a ChatEntry> {
+pub fn forks_of<'a>(
+    entries: &'a [ChatEntry],
+    parent_id: &str,
+    activity: &HashMap<String, Timestamp>,
+) -> Vec<&'a ChatEntry> {
     let mut forks: Vec<&ChatEntry> = entries
         .iter()
         .filter(|entry| {
@@ -100,15 +111,23 @@ pub fn forks_of<'a>(entries: &'a [ChatEntry], parent_id: &str) -> Vec<&'a ChatEn
                 .is_some_and(|record| record.parent.as_deref() == Some(parent_id))
         })
         .collect();
-    forks.sort_by(|a, b| display_order(a, b));
+    forks.sort_by(|a, b| display_order(a, b, activity));
     forks
 }
 
-fn display_order(a: &ChatEntry, b: &ChatEntry) -> Ordering {
+/// Newest last activity first, ties by id; `activity` overrides the record's `last_active` for
+/// live chats. A file that could not be read has no time: it comes after the readable ones, by
+/// file name.
+pub fn display_order(
+    a: &ChatEntry,
+    b: &ChatEntry,
+    activity: &HashMap<String, Timestamp>,
+) -> Ordering {
+    let time = |record: &ChatRecord| {
+        timestamp_utc(activity.get(&record.id).unwrap_or(&record.last_active))
+    };
     match (a.record(), b.record()) {
-        (Some(a), Some(b)) => timestamp_utc(&b.last_active)
-            .cmp(&timestamp_utc(&a.last_active))
-            .then_with(|| a.id.cmp(&b.id)),
+        (Some(a), Some(b)) => time(b).cmp(&time(a)).then_with(|| a.id.cmp(&b.id)),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => a.file_name().cmp(&b.file_name()),
