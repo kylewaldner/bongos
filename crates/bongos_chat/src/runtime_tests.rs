@@ -974,9 +974,12 @@ async fn test_exit_writes_the_exit_time_as_last_active(cx: &mut TestAppContext) 
         .read_with(cx, |runtime, _| runtime.live_activity())[&id];
     let old = age_record(&h, &id);
 
-    h.type_line(&id, "exit 0", cx);
-    h.wait_state(&id, ChatState::Exited { code: Some(0) }, cx)
-        .await;
+    // No keystroke: a keystroke would write the time itself, hiding the exit's own write.
+    h.runtime.update(cx, |runtime, cx| runtime.kill(&id, cx));
+    wait_for(cx, "the chat to exit", WITHIN, |cx| {
+        matches!(h.state(&id, cx), ChatState::Exited { .. })
+    })
+    .await;
     wait_for(cx, "the exit write", WITHIN, |_| {
         record_active(&h, &id) != old
     })
