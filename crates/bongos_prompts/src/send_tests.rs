@@ -287,6 +287,22 @@ async fn not_submitted_still_marks(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn not_confirmed_still_marks(cx: &mut TestAppContext) {
+    let (_workspace, editor, fake, cx) = running(cx, 4).await;
+    let error = SendError::NotConfirmed {
+        name: "chat a".into(),
+    };
+    *fake.reply.borrow_mut() = Err(error.clone());
+    dispatch("prompts::Send", cx);
+    assert_eq!(toasts(), vec![error.to_string()]);
+    assert_eq!(fake.offers.borrow().len(), 0);
+    assert!(is_sent_marker(
+        &row(&text(&editor, cx), 3),
+        "2026-11-05 14:10"
+    ));
+}
+
+#[gpui::test]
 async fn not_submitted_is_still_said_when_a_conflict_follows(cx: &mut TestAppContext) {
     let (workspace, editor, fake, cx) = running(cx, 4).await;
     editor.update(cx, |editor, cx| {

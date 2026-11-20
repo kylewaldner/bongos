@@ -162,6 +162,9 @@ pub struct LiveChat {
     fresh: bool,
     /// A `prompt_submitted` or `turn_done` report of this launch was accepted.
     prompt_reported: bool,
+    /// How many `prompt_submitted` reports of this launch the reducer applied; a send compares it
+    /// before and after its Enter to see the submit confirmed.
+    prompt_submits: u64,
     /// Something was pasted through [`crate::send`]; the send names the chat, not a title.
     sent: bool,
     /// The chat has a name other than its default one, or a title already tried to name it.
@@ -300,6 +303,22 @@ impl LiveChat {
     pub(crate) fn record_path(&self) -> &PathBuf {
         &self.record_path
     }
+
+    /// Whether the state comes from a live channel that reports `running`, so a send can wait for
+    /// the report of its submit.
+    pub(crate) fn reports_submits(&self) -> bool {
+        self.live.channel == ChannelStatus::Live && self.live.coverage.covers(ChatState::Running)
+    }
+
+    /// The number of applied `prompt_submitted` reports of this launch.
+    pub(crate) fn prompt_submits(&self) -> u64 {
+        self.prompt_submits
+    }
+
+    /// When (on the runtime's clock) the terminal last produced output.
+    pub(crate) fn last_output_at(&self) -> Option<u64> {
+        self.live.last_output_at
+    }
 }
 
 /// A launch's place in the per-directory queue of launches that capture their session id.
@@ -336,8 +355,10 @@ pub struct ChatRuntime {
     next_generation: usize,
     active_debounce: Duration,
     bracketed_wait: Duration,
-    /// Per chat, the last send in line and its number: a send waits until the one before it has
-    /// written its Enter, so two pastes never interleave.
+    confirm_wait: Duration,
+    /// Per chat, the last send in line and its number: a send waits until the one before it is
+    /// done with its confirmation (confirmed, unconfirmed or given up), so two pastes never
+    /// interleave.
     send_queues: HashMap<String, (usize, Shared<oneshot::Receiver<()>>)>,
     next_send: usize,
     /// The agent of the last chat `chat: new` started, offered first next time.
@@ -366,6 +387,7 @@ impl ChatRuntime {
             next_generation: 0,
             active_debounce: ACTIVE_DEBOUNCE,
             bracketed_wait: crate::send::BRACKETED_WAIT,
+            confirm_wait: crate::send::CONFIRM_WAIT,
             send_queues: HashMap::new(),
             next_send: 0,
             last_agent: None,
@@ -432,6 +454,15 @@ impl ChatRuntime {
         chat.live.channel = ChannelStatus::Live;
         if matches!(report.event, Event::PromptSubmitted | Event::TurnDone) {
             chat.prompt_reported = true;
+        }
+        // The reducer drops a report older than the last one it applied; only an applied submit
+        // confirms a send.
+        let stale = chat
+            .live
+            .last_report_at
+            .is_some_and(|last| report.at < last);
+        if report.event == Event::PromptSubmitted && !stale && !chat.live.state.is_final() {
+            chat.prompt_submits += 1;
         }
         let reported_session = match (&report.event, &report.session) {
             (Event::SessionStart { .. }, Some(session))
@@ -592,8 +623,23 @@ impl ChatRuntime {
         self.bracketed_wait
     }
 
+    /// Replaces [`crate::send::CONFIRM_WAIT`] (tests use a short one).
+    pub fn set_confirm_wait(&mut self, wait: Duration) {
+        self.confirm_wait = wait;
+    }
+
+    pub(crate) fn confirm_wait(&self) -> Duration {
+        self.confirm_wait
+    }
+
+    /// The runtime's clock, in milliseconds.
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+
     /// Puts a send to `chat_id` in line. Returns what it waits for (the send before it), the
-    /// sender to drop once its Enter is written, and its number for [`Self::leave_send_queue`].
+    /// sender to drop once its confirmation is done (confirmed, unconfirmed or given up), and its
+    /// number for [`Self::leave_send_queue`].
     pub(crate) fn join_send_queue(
         &mut self,
         chat_id: &str,
@@ -1000,6 +1046,7 @@ impl ChatRuntime {
             prompted: prepared.record.prompted,
             fresh,
             prompt_reported: false,
+            prompt_submits: 0,
             sent: false,
             auto_named: prepared.record.named_by != NamedBy::None,
             seen_inputs,
@@ -1113,6 +1160,30 @@ impl ChatRuntime {
             chat.prompted = true;
             cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
             cx.notify();
+        }
+    }
+
+    /// Writes bytes of a send into `terminal`, the chat's. Keyboard input typed before them still
+    /// reaches the reducer first; the send's own bytes do not count as keyboard input (so a paste
+    /// does not end an exact waiting state), and an Enter is told to the reducer as a send's Enter.
+    pub(crate) fn write_send_input(
+        &mut self,
+        chat_id: &str,
+        terminal: &Entity<Terminal>,
+        enter: bool,
+        write: impl FnOnce(&mut Terminal),
+        cx: &mut Context<Self>,
+    ) {
+        self.poll_input(chat_id, cx);
+        terminal.update(cx, |terminal, _| write(terminal));
+        let count = terminal.read(cx).keyboard_input_count();
+        if let Some(chat) = self.live.get_mut(chat_id)
+            && chat.terminal == *terminal
+        {
+            chat.seen_inputs = count;
+            if enter {
+                self.step(chat_id, Input::SendEnter, false, cx);
+            }
         }
     }
 
