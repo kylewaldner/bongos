@@ -34,7 +34,10 @@
 //! with an error within [`EARLY_EXIT`] before any report is started once more without it. Turning
 //! `chats.channels` off moves every chat's channel to off. Codex never gets a channel (D7).
 //! A report reaches only the chat it names, and only while it carries that chat's current token;
-//! any other report is dropped silently (D4).
+//! any other report is dropped silently (D4). A Claude chat's session id is chosen before launch
+//! and needs no capture; a `session_start` report naming another id (a fork launched without
+//! `--session-id`) replaces it (D11). A new chat with a live channel is judged by the cleanup from
+//! its reports, without reading the CLI's files.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -43,14 +46,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use bongos_chat_model::channel::report::{Report, Token};
+use bongos_chat_model::channel::report::{Event, Report, Token};
 use bongos_chat_model::channel::state::{
     self as reducer, BELL_GRACE, ChannelCoverage, ChatLive, Input,
 };
 pub use bongos_chat_model::channel::state::{ChannelStatus, ChatState, MID_TURN, Source};
 use bongos_chat_model::{
-    Agent, Capabilities, CaptureQuery, ChannelOff, ChannelPlan, Fallback, HOOKS, NamedBy,
-    VERSION_TABLE, adapter_for, from_title,
+    Agent, Capabilities, CaptureQuery, ChannelOff, ChannelPlan, Fallback, HOOKS, LaunchKind,
+    NamedBy, VERSION_TABLE, adapter_for, from_title,
 };
 use bongos_work_model::{SharedArtifact, Timestamp};
 use futures::FutureExt as _;
@@ -65,7 +68,7 @@ use terminal::{Event as TerminalEvent, Terminal};
 
 #[cfg(unix)]
 use crate::channel_server::{ChannelServer, Registration};
-use crate::cleanup::{Cleanup, cleanup_verdict};
+use crate::cleanup::{Cleanup, cleanup_verdict_with_reports};
 use crate::launch::{self, LaunchError, LaunchRequest, Prepared};
 use crate::{ChatHealth, ChatStore, ChatsSettings, find_program, fix_not_found, fix_not_probed};
 
@@ -156,6 +159,11 @@ pub struct LiveChat {
     command: String,
     session_id: Option<String>,
     prompted: bool,
+    /// A new chat, never prompted and with no session id before this launch: its conversation, if
+    /// any, starts in this run (design D11, for the cleanup).
+    fresh: bool,
+    /// A `prompt_submitted` or `turn_done` report of this launch was accepted.
+    prompt_reported: bool,
     /// Something was pasted through [`crate::send`]; the send names the chat, not a title.
     sent: bool,
     /// The chat has a name other than its default one, or a title already tried to name it.
@@ -271,6 +279,18 @@ impl LiveChat {
     /// Whether anything was typed or sent into the chat.
     pub fn prompted(&self) -> bool {
         self.prompted
+    }
+
+    /// Whether the channel reported a prompt or a finished turn in this launch.
+    pub fn prompt_reported(&self) -> bool {
+        self.prompt_reported
+    }
+
+    /// What the reports say about a stored conversation, for the cleanup: `Some` only for a new
+    /// Claude chat whose channel is live (it went live in this run and was never turned off).
+    fn reported_conversation(&self) -> Option<bool> {
+        (self.agent == Agent::Claude && self.fresh && self.live.channel == ChannelStatus::Live)
+            .then_some(self.prompt_reported)
     }
 
     pub fn agent(&self) -> Agent {
@@ -416,7 +436,54 @@ impl ChatRuntime {
         chat.last_report_seen = Some(now);
         let went_live = chat.live.channel == ChannelStatus::Pending;
         chat.live.channel = ChannelStatus::Live;
+        if matches!(report.event, Event::PromptSubmitted | Event::TurnDone) {
+            chat.prompt_reported = true;
+        }
+        let reported_session = match (&report.event, &report.session) {
+            (Event::SessionStart { .. }, Some(session))
+                if chat.session_id.as_deref() != Some(session.as_str()) =>
+            {
+                Some(session.as_str().to_string())
+            }
+            _ => None,
+        };
+        if let Some(session) = reported_session {
+            self.write_reported_session(&chat_id, session, cx);
+        }
         self.step(&chat_id, Input::Report(report), went_live, cx);
+    }
+
+    /// The `session_start` report of `chat_id` names `session`, which is not the id the chat has
+    /// (only a fork launched without `--session-id` can do that): the reported id is the one the
+    /// CLI stores the conversation under, so it replaces the chat's id, in the record too (D11).
+    fn write_reported_session(&mut self, chat_id: &str, session: String, cx: &mut Context<Self>) {
+        let Some(chat) = self.live.get_mut(chat_id) else {
+            return;
+        };
+        log::info!(
+            "chats: {chat_id} reported session {session}, not {:?}; recording the reported id",
+            chat.session_id
+        );
+        chat.session_id = Some(session.clone());
+        let path = chat.record_path.clone();
+        let write = self.store.update(cx, |store, cx| {
+            store.update(
+                path,
+                move |record| {
+                    record.session_id = Some(session);
+                    Ok(())
+                },
+                cx,
+            )
+        });
+        cx.background_spawn(async move {
+            if let Err(error) = write.await {
+                log::warn!("chats: could not record the reported session id: {error}");
+            }
+        })
+        .detach();
+        cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
+        cx.notify();
     }
 
     /// Feeds `input` to the reducer of `chat_id`. A change of state or source is told, and a state
@@ -694,6 +761,11 @@ impl ChatRuntime {
         let runtime_root = self.store.read(cx).dirs().runtime.clone();
         // Kept before the channel is planned, for the relaunch without it (design D9).
         let original = request.clone();
+        // Only a chat that never had a conversation lets its reports answer the cleanup (D11): a
+        // resume, a fork or a record with an id may hold one from before.
+        let fresh = request.kind == LaunchKind::New
+            && request.record.session_id.is_none()
+            && !request.record.prompted;
         let (plan, token, off_reason) =
             match self.plan_channel(agent, &caps, &mut request.force, cx) {
                 Ok((plan, token)) => (Some(plan), Some(token), None),
@@ -811,6 +883,7 @@ impl ChatRuntime {
                         started,
                         capture_done,
                         channel,
+                        fresh,
                         cx,
                     );
                     if let Some(task_id) = &task_id {
@@ -870,6 +943,7 @@ impl ChatRuntime {
         started: SystemTime,
         capture_done: Option<oneshot::Sender<()>>,
         channel: LaunchChannel,
+        fresh: bool,
         cx: &mut Context<Self>,
     ) {
         let chat_id = prepared.record.id.clone();
@@ -957,6 +1031,8 @@ impl ChatRuntime {
             command,
             session_id: prepared.record.session_id,
             prompted: prepared.record.prompted,
+            fresh,
+            prompt_reported: false,
             sent: false,
             auto_named: prepared.record.named_by != NamedBy::None,
             seen_inputs,
@@ -1401,14 +1477,16 @@ impl ChatRuntime {
             return;
         }
         let live_session = chat.session_id.clone();
+        let reported = chat.reported_conversation();
         let path = chat.record_path.clone();
         let delete = self.store.update(cx, |store, cx| {
             store.delete_if(
                 path,
                 move |record| {
-                    let verdict = cleanup_verdict(
+                    let verdict = cleanup_verdict_with_reports(
                         record,
                         saw_input,
+                        reported,
                         live_session.as_deref(),
                         &home,
                         &env,
