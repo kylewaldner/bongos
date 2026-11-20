@@ -107,16 +107,28 @@ fn occurrences_respect_within_and_limit() {
     let text = "été naïve été naïve été";
     let all = occurrences(text, "été", 0..text.len(), 10);
     assert_eq!(all, vec![0..5, 13..18, 26..31]);
-    assert_eq!(occurrences(text, "été", 0..text.len(), 2), vec![0..5, 13..18]);
-    assert_eq!(occurrences(text, "été", 6..text.len(), 10), vec![13..18, 26..31]);
+    assert_eq!(
+        occurrences(text, "été", 0..text.len(), 2),
+        vec![0..5, 13..18]
+    );
+    assert_eq!(
+        occurrences(text, "été", 6..text.len(), 10),
+        vec![13..18, 26..31]
+    );
     assert_eq!(occurrences(text, "été", 0..18, 10), vec![0..5, 13..18]);
     assert_eq!(occurrences(text, "été", 0..17, 10), vec![0..5]);
     assert_eq!(occurrences(text, "naïve", 0..1000, 10), vec![6..12, 19..25]);
-    assert_eq!(occurrences(text, "été", 0..text.len(), 0), Vec::<std::ops::Range<usize>>::new());
+    assert_eq!(
+        occurrences(text, "été", 0..text.len(), 0),
+        Vec::<std::ops::Range<usize>>::new()
+    );
 }
 
 #[test]
 fn occurrences_are_whole_words_only() {
     let text = "foo foobar barfoo a.foo foo_x";
-    assert_eq!(occurrences(text, "foo", 0..text.len(), 10), vec![0..3, 20..23]);
+    assert_eq!(
+        occurrences(text, "foo", 0..text.len(), 10),
+        vec![0..3, 20..23]
+    );
 }
