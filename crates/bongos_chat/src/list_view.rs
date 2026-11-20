@@ -18,11 +18,10 @@
 //! The view reads the records, the runtime and the health, and writes nothing to a record; the
 //! commands behind the keys do their own writing.
 
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use bongos_chat_model::{ChatEntry, ChatRecord, Fork, Layout, timestamp_utc};
+use bongos_chat_model::{ChatEntry, ChatRecord, Fork, Layout, display_order, timestamp_utc};
 use bongos_work::{Focus, WorkStore, WorkStoreEvent, ask, focused};
 use bongos_work_model::Timestamp;
 use bongos_work_model::store::WorkTree;
@@ -177,19 +176,6 @@ fn time_text(timestamp: &Timestamp) -> String {
 /// How the list names the task `id`: its goal, with its Linear identifier when it has one.
 pub(crate) fn task_name(tree: &WorkTree, id: &str) -> Option<String> {
     Some(tree.task_by_id(id)?.named_goal())
-}
-
-/// Newest last activity first, ties by id. A file that could not be read has no time: it comes
-/// after the readable ones, by file name.
-fn display_order(a: &ChatEntry, b: &ChatEntry) -> Ordering {
-    match (a.record(), b.record()) {
-        (Some(a), Some(b)) => timestamp_utc(&b.last_active)
-            .cmp(&timestamp_utc(&a.last_active))
-            .then_with(|| a.id.cmp(&b.id)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => a.file_name().cmp(&b.file_name()),
-    }
 }
 
 /// The list of the Chats panel.
@@ -373,7 +359,8 @@ impl ChatListView {
                 name.to_lowercase().contains(&needle)
             })
             .collect();
-        chats.sort_by(|a, b| display_order(&a.entry, &b.entry));
+        let activity = runtime.live_activity();
+        chats.sort_by(|a, b| display_order(&a.entry, &b.entry, &activity));
         for chat in chats {
             let archived = chat.entry.record().is_some_and(|record| record.archived);
             let task_goal = scope_task.is_none().then(|| {

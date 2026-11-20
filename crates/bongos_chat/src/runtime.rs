@@ -15,8 +15,10 @@
 //! the channel cannot answer, except that the idle timer still ends exact running and keyboard input
 //! still ends exact waiting, because an interrupted turn or a denied permission ends without a
 //! report. Keyboard input is a polled counter of the terminal, read on every wakeup and at close;
-//! once seen, the chat counts as prompted. Every state change rewrites `last_active`, at most once
-//! per [`ACTIVE_DEBOUNCE`] per chat.
+//! once seen, the chat counts as prompted. A state change rewrites `last_active`, at most once
+//! per [`ACTIVE_DEBOUNCE`] per chat, except a change caused only by terminal output and a change
+//! back to the state of the last write; a title change never does. The newest change of any kind
+//! is kept in memory ([`ChatRuntime::live_activity`]), which the lists sort live chats by.
 //!
 //! Agents that report their session id only in their own files (Codex) are launched one at a time
 //! per directory: the next launch in a directory waits until the previous one's id was captured
@@ -50,7 +52,7 @@ use bongos_chat_model::{
     Agent, Capabilities, CaptureQuery, ChannelOff, ChannelPlan, Fallback, HOOKS, NamedBy,
     VERSION_TABLE, adapter_for, from_title,
 };
-use bongos_work_model::SharedArtifact;
+use bongos_work_model::{SharedArtifact, Timestamp};
 use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{self, Shared};
@@ -164,6 +166,10 @@ pub struct LiveChat {
     /// timer counts quiet time from it as from output.
     last_report_seen: Option<u64>,
     last_active_write: Option<Instant>,
+    /// The state when `last_active` was last written (or at launch).
+    written_state: ChatState,
+    /// The newest time of any state change, in memory; the record may lag it.
+    last_active: Timestamp,
     pending_active_write: Option<Task<()>>,
     /// The id is still to be read from the CLI's files when it exits.
     capture_on_exit: bool,
@@ -421,6 +427,8 @@ impl ChatRuntime {
             return;
         };
         let before = (chat.live.state, chat.live.source);
+        let noise = matches!(input, Input::Output { .. });
+        let typed = matches!(input, Input::KeyboardInput);
         chat.live.step(input);
         let after = (chat.live.state, chat.live.source);
         if before != after {
@@ -428,6 +436,10 @@ impl ChatRuntime {
             chat.seen_inputs = chat.terminal.read(cx).keyboard_input_count();
         }
         if before.0 != after.0 {
+            chat.last_active = bongos_work_model::now();
+        }
+        // Output alone, and a return to the state of the last write, leave the record alone.
+        if (before.0 != after.0 || typed) && !noise && after.0 != chat.written_state {
             self.touch_active(chat_id, cx);
         }
         if before != after || changed {
@@ -492,6 +504,24 @@ impl ChatRuntime {
 
     pub(crate) fn set_global(runtime: Entity<ChatRuntime>, cx: &mut App) {
         cx.set_global(GlobalChatRuntime(runtime));
+    }
+
+    /// The in-memory last activity of every live chat, newer than its record's `last_active`
+    /// when a write is still debounced. The lists sort live chats by it.
+    pub fn live_activity(&self) -> HashMap<String, Timestamp> {
+        self.live
+            .iter()
+            .map(|(id, chat)| (id.clone(), chat.last_active))
+            .collect()
+    }
+
+    /// A send pressed Enter in `chat_id`: it is active now, and the record says so at once.
+    pub(crate) fn note_submitted(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self.live.get_mut(chat_id) else {
+            return;
+        };
+        chat.last_active = bongos_work_model::now();
+        cx.notify();
     }
 
     /// Replaces [`ACTIVE_DEBOUNCE`] (tests use a short one).
@@ -908,10 +938,12 @@ impl ChatRuntime {
             Agent::Claude => ChannelCoverage::claude(),
             Agent::Codex => ChannelCoverage::none(),
         };
+        let live = ChatLive::start(channel.status, coverage, self.clock.now_ms());
+        let initial_state = live.state;
         let chat = LiveChat {
             terminal,
             agent: prepared.agent,
-            live: ChatLive::start(channel.status, coverage, self.clock.now_ms()),
+            live,
             off_reason: channel.off_reason,
             clock: self.clock.clone(),
             title: (!title.is_empty()).then_some(title),
@@ -929,6 +961,8 @@ impl ChatRuntime {
             seen_inputs,
             last_report_seen: None,
             last_active_write: Some(Instant::now()),
+            written_state: initial_state,
+            last_active: bongos_work_model::now(),
             pending_active_write: None,
             capture_on_exit: false,
             cleanup_checked: false,
@@ -968,7 +1002,6 @@ impl ChatRuntime {
                 if chat.title != title {
                     chat.title = title;
                     self.name_from_title(chat_id, cx);
-                    self.touch_active(chat_id, cx);
                     cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
                     cx.notify();
                 }
@@ -1054,16 +1087,24 @@ impl ChatRuntime {
         chat.seen_inputs = count;
         let first = !std::mem::replace(&mut chat.prompted, true);
         let just_rang = chat.just_rang();
-        if first {
-            self.touch_active(chat_id, cx);
-        }
         if just_rang {
             if first {
+                self.touch_active(chat_id, cx);
                 cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
                 cx.notify();
             }
         } else {
+            let writes = self.stats.active_writes;
             self.step(chat_id, Input::KeyboardInput, first, cx);
+            // The first input says `prompted`: a write the step did not already book.
+            let booked = self.stats.active_writes != writes
+                || self
+                    .live
+                    .get(chat_id)
+                    .is_some_and(|chat| chat.pending_active_write.is_some());
+            if first && !booked {
+                self.touch_active(chat_id, cx);
+            }
         }
     }
 
@@ -1270,6 +1311,7 @@ impl ChatRuntime {
         let chat = self.live.get_mut(chat_id)?;
         chat.pending_active_write = None;
         chat.last_active_write = Some(Instant::now());
+        chat.written_state = chat.live.state;
         self.stats.active_writes += 1;
         Some((chat.record_path.clone(), chat.prompted))
     }

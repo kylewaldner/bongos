@@ -21,7 +21,10 @@ use tempfile::TempDir;
 
 use crate::channel_server::ChannelServer;
 use crate::channel_server_tests::{OK, exchange, inputs, refused, temp};
-use crate::runtime_tests::{Harness, STARTUP, WITHIN, fixture, harness, wait_for, write};
+use crate::runtime_tests::{
+    Harness, STARTUP, WITHIN, active_writes, age_record, fixture, harness, record_active, wait_for,
+    write,
+};
 use crate::{
     CLAUDE_SETTINGS_FILE, ChannelConfig, ChannelStatus, ChatRuntimeEvent, ChatState, LaunchRequest,
     REPORTS_OFF, Source,
@@ -729,4 +732,78 @@ async fn test_one_chats_report_never_changes_another_chats_state(cx: &mut TestAp
     );
     assert_eq!(c.live_state(&a, cx), (ChatState::Running, Source::Exact));
     assert_eq!(c.live_state(&b, cx), (ChatState::Waiting, Source::Exact));
+}
+
+#[gpui::test]
+async fn test_each_exact_change_writes_once_and_a_burst_writes_once(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    c.h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let (id, token) = c.start_live(cx).await;
+    let steps = [
+        (Event::PromptSubmitted, ChatState::Running),
+        (needs_input("permission_prompt"), ChatState::Waiting),
+        (Event::ToolDone, ChatState::Running),
+        (Event::TurnDone, ChatState::Idle),
+    ];
+    // Each change is a write; a report that changes nothing is none.
+    let mut writes = active_writes(&c.h, cx);
+    for (at, (event, state)) in (2..).zip(steps) {
+        c.deliver(event_report(&id, &token, at, event), cx);
+        c.wait_live_state(&id, state, Source::Exact, cx).await;
+        writes += 1;
+        assert_eq!(active_writes(&c.h, cx), writes, "{state}");
+    }
+    c.deliver(event_report(&id, &token, 6, Event::TurnDone), cx);
+    assert_eq!(active_writes(&c.h, cx), writes, "no change, no write");
+
+    // With a debounce, a burst of reports is one write once the window has passed.
+    let debounce = Duration::from_secs(2);
+    c.h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(debounce));
+    cx.executor().timer(debounce).await;
+    let before = active_writes(&c.h, cx);
+    for (at, (event, _)) in (7..).zip([
+        (Event::PromptSubmitted, ()),
+        (Event::ToolDone, ()),
+        (Event::TurnDone, ()),
+    ]) {
+        c.deliver(event_report(&id, &token, at, event), cx);
+    }
+    cx.executor()
+        .timer(debounce + Duration::from_millis(500))
+        .await;
+    cx.run_until_parked();
+    let wrote = active_writes(&c.h, cx) - before;
+    assert!(
+        (1..=2).contains(&wrote),
+        "a burst of reports wrote {wrote} times"
+    );
+}
+
+#[gpui::test]
+async fn test_a_runtime_dropped_without_quit_leaves_the_last_exact_change(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    c.h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let (id, token) = c.start_live(cx).await;
+    let old = age_record(&c.h, &id);
+    let before = active_writes(&c.h, cx);
+    c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
+    c.wait_live_state(&id, ChatState::Running, Source::Exact, cx)
+        .await;
+    wait_for(cx, "the record to change", WITHIN, |_| {
+        record_active(&c.h, &id) != old
+    })
+    .await;
+    let written = record_active(&c.h, &id);
+    // No quit, no close: the record holds the last change, the way a crash leaves it.
+    cx.run_until_parked();
+    cx.executor().timer(Duration::from_millis(300)).await;
+    assert_eq!(
+        record_active(&c.h, &id),
+        written,
+        "nothing wrote after the change"
+    );
+    assert_eq!(active_writes(&c.h, cx), before + 1);
 }
