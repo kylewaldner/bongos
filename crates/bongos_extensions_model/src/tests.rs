@@ -32,7 +32,32 @@ fn embedded_list_is_well_formed() {
     }
 }
 
-fn built_in_languages() -> Vec<(String, Vec<String>)> {
+#[test]
+fn embedded_apis_are_within_the_stable_limit() {
+    let mut file_types = HashSet::new();
+    for entry in embedded().entries() {
+        if let Some(api) = &entry.api {
+            let parts: Vec<u64> = api
+                .split('.')
+                .map(|part| part.parse().unwrap_or_else(|_| panic!("{}: {api}", entry.id)))
+                .collect();
+            assert_eq!(parts.len(), 3, "{}: {api}", entry.id);
+            assert!(
+                (parts[0], parts[1], parts[2]) <= (0, 7, 0),
+                "{} needs api {api}, newer than 0.7.0",
+                entry.id
+            );
+        }
+        for file_type in &entry.file_types {
+            assert!(
+                file_types.insert(file_type.clone()),
+                "file type {file_type} is listed twice"
+            );
+        }
+    }
+}
+
+fn built_in_languages() ->Vec<(String, Vec<String>)> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut languages = Vec::new();
     for dir in ["../grammars/src", "../bongos_languages/src"] {
