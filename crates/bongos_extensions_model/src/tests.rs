@@ -39,7 +39,10 @@ fn embedded_apis_are_within_the_stable_limit() {
         if let Some(api) = &entry.api {
             let parts: Vec<u64> = api
                 .split('.')
-                .map(|part| part.parse().unwrap_or_else(|_| panic!("{}: {api}", entry.id)))
+                .map(|part| {
+                    part.parse()
+                        .unwrap_or_else(|_| panic!("{}: {api}", entry.id))
+                })
                 .collect();
             assert_eq!(parts.len(), 3, "{}: {api}", entry.id);
             assert!(
@@ -57,7 +60,7 @@ fn embedded_apis_are_within_the_stable_limit() {
     }
 }
 
-fn built_in_languages() ->Vec<(String, Vec<String>)> {
+fn built_in_languages() -> Vec<(String, Vec<String>)> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut languages = Vec::new();
     for dir in ["../grammars/src", "../bongos_languages/src"] {
