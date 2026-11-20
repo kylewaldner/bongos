@@ -214,6 +214,24 @@ impl LiveChat {
         self.live.source
     }
 
+    /// Why the state is estimated, as the text of the "estimated" tag's tooltip; `None` when the
+    /// state is exact. The reason names the tool version where it has one.
+    pub fn estimate_reason(&self) -> Option<String> {
+        let Source::Estimated(reason) = self.live.source else {
+            return None;
+        };
+        Some(match self.live.channel {
+            ChannelStatus::Off => match &self.off_reason {
+                Some(off) => off.clone(),
+                None => sentence(reason),
+            },
+            ChannelStatus::Pending => {
+                format!("No report from {} yet", sentence(self.agent.as_str()))
+            }
+            ChannelStatus::Live => sentence(reason),
+        })
+    }
+
     /// The reporter's time (`at`, in milliseconds) of the newest applied report.
     pub fn last_report_at(&self) -> Option<u64> {
         self.live.last_report_at
