@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bongos_chat_model::channel::report::{
-    self, AgentName, ChatId, Detail, Event, Report, SessionSource, Token,
+    self, AgentName, ChatId, Detail, Event, Report, SessionId, SessionSource, Token,
 };
 use bongos_chat_model::channel::state::{FROM_TERMINAL, NO_TURN_END};
 use bongos_chat_model::{
@@ -237,6 +237,14 @@ impl Channels {
         self.h.runtime.read_with(cx, |runtime, _| {
             runtime.live(id).and_then(|chat| chat.last_report_at())
         })
+    }
+}
+
+/// A `session_start` report naming the session `session`.
+fn session_report(chat: &str, token: &str, at: u64, session: &str) -> Report {
+    Report {
+        session: Some(SessionId::new(session).unwrap()),
+        ..report_of(chat, token, at)
     }
 }
 
@@ -729,4 +737,262 @@ async fn test_one_chats_report_never_changes_another_chats_state(cx: &mut TestAp
     );
     assert_eq!(c.live_state(&a, cx), (ChatState::Running, Source::Exact));
     assert_eq!(c.live_state(&b, cx), (ChatState::Waiting, Source::Exact));
+}
+
+impl Channels {
+    fn record_session(&self, id: &str) -> Option<String> {
+        read_record(&record_path(&self.h.scope, id))
+            .unwrap()
+            .session_id
+    }
+
+    fn live_session(&self, id: &str, cx: &mut TestAppContext) -> Option<String> {
+        self.h.runtime.read_with(cx, |runtime, _| {
+            runtime
+                .live(id)
+                .and_then(|chat| chat.session_id().map(str::to_string))
+        })
+    }
+
+    /// The values that follow `flag` in the logged Claude arguments, in order.
+    fn flag_values(&self, flag: &str) -> Vec<String> {
+        let args = self.h.logged("claude", "arg");
+        args.windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .collect()
+    }
+
+    /// The token of `tokens` the server accepts for `chat`, found by sending each a `session_start`
+    /// report naming `session`. Exactly one is accepted.
+    async fn own_token(
+        &self,
+        chat: &str,
+        tokens: &[String],
+        session: &str,
+        cx: &mut TestAppContext,
+    ) -> String {
+        let mut accepted = Vec::new();
+        for token in tokens {
+            if self
+                .send(&session_report(chat, token, 1, session), cx)
+                .await
+                == OK
+            {
+                accepted.push(token.clone());
+            }
+        }
+        assert_eq!(accepted.len(), 1, "one token per chat");
+        accepted.pop().unwrap()
+    }
+
+    fn cleanups(&self, cx: &mut TestAppContext) -> usize {
+        self.h
+            .runtime
+            .read_with(cx, |runtime, _| runtime.stats().cleanups)
+    }
+
+    /// Closes the chat and waits until the store ran everything queued before (the cleanup too),
+    /// by queueing a write of `keep`'s record after it.
+    async fn close_and_settle(&self, id: &str, keep: &str, cx: &mut TestAppContext) {
+        assert!(
+            self.h
+                .runtime
+                .update(cx, |runtime, cx| runtime.close(id, cx))
+        );
+        let path = record_path(&self.h.scope, keep);
+        let write = self
+            .h
+            .store
+            .update(cx, |store, cx| store.update(path, |_| Ok(()), cx));
+        write.await.unwrap();
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+async fn test_two_claude_chats_started_at_once_each_resume_their_own_id(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    let first = c.request(Agent::Claude, "2.1.319");
+    let second = c.request(Agent::Claude, "2.1.319");
+    assert_eq!(first.record.cwd, second.record.cwd, "the same directory");
+    let (a, b) = (first.record.id.clone(), second.record.id.clone());
+    let mut resumes = [first.clone(), second.clone()];
+
+    // Both launches start before either finished.
+    let projects = vec![c.h.project.clone()];
+    let (launch_a, launch_b) = c.h.runtime.update(cx, |runtime, cx| {
+        (
+            runtime.launch(first, &projects, cx),
+            runtime.launch(second, &projects, cx),
+        )
+    });
+    launch_a.await.unwrap();
+    launch_b.await.unwrap();
+    wait_for(cx, "both fakes to start", STARTUP, |_| {
+        c.starts("claude") == 2
+    })
+    .await;
+    c.h.wait_content(&a, "ready", cx).await;
+    c.h.wait_content(&b, "ready", cx).await;
+
+    // Each id was chosen before launch and given on the command line: nothing is captured.
+    let session_a = c.record_session(&a).unwrap();
+    let session_b = c.record_session(&b).unwrap();
+    assert_ne!(session_a, session_b);
+    let mut given = c.flag_values("--session-id");
+    given.sort();
+    let mut expected = vec![session_a.clone(), session_b.clone()];
+    expected.sort();
+    assert_eq!(given, expected);
+    assert_eq!(
+        c.h.runtime
+            .read_with(cx, |runtime, _| runtime.stats().captures),
+        0
+    );
+
+    // Each chat's own report confirms its own id.
+    let tokens = c.env("BONGOS_CHAT_TOKEN");
+    assert_eq!(tokens.len(), 2);
+    let token_a = c.own_token(&a, &tokens, &session_a, cx).await;
+    let token_b = c.own_token(&b, &tokens, &session_b, cx).await;
+    assert_ne!(token_a, token_b);
+    // A report carrying the other chat's token never moves an id across.
+    c.deliver(session_report(&b, &token_a, 2, &session_a), cx);
+    c.deliver(session_report(&a, &token_b, 2, &session_b), cx);
+    cx.run_until_parked();
+    assert_eq!(c.live_session(&a, cx), Some(session_a.clone()));
+    assert_eq!(c.live_session(&b, cx), Some(session_b.clone()));
+
+    // Prompted, so both are kept; then each resumes its own id.
+    for (id, token) in [(&a, &token_a), (&b, &token_b)] {
+        c.deliver(event_report(id, token, 3, Event::PromptSubmitted), cx);
+    }
+    c.close_and_settle(&a, &a, cx).await;
+    c.close_and_settle(&b, &b, cx).await;
+    assert_eq!(c.cleanups(cx), 0);
+    for (resume, session) in resumes.iter_mut().zip([&session_a, &session_b]) {
+        resume.kind = LaunchKind::Resume;
+        resume.record = read_record(&resume.record_path).unwrap();
+        assert_eq!(resume.record.session_id.as_ref(), Some(session));
+        c.start(resume.clone(), cx).await;
+        assert_eq!(c.flag_values("--resume").last(), Some(session));
+    }
+}
+
+#[gpui::test]
+async fn test_a_fork_fallback_records_the_reported_session_id(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    let mut request = c.request(Agent::Claude, "2.1.319");
+    request.kind = LaunchKind::Fork {
+        source_session: "0b0c0d0e-1111-4222-8333-444455556666".to_string(),
+        native: true,
+    };
+    // The fallback that forks without `--session-id`: the CLI picks the id.
+    request.force = vec![Fallback::CaptureSessionId];
+    let id = c.start(request, cx).await;
+    assert!(c.flag_values("--session-id").is_empty());
+    assert_eq!(
+        c.h.logged("claude", "arg")
+            .iter()
+            .filter(|arg| *arg == "--fork-session")
+            .count(),
+        1
+    );
+    let chosen = c.record_session(&id).unwrap();
+    let token = c.env("BONGOS_CHAT_TOKEN").pop().unwrap();
+
+    // Another chat's or an earlier launch's report changes nothing.
+    let stray = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+    c.deliver(session_report(&id, &"0".repeat(32), 1, stray), cx);
+    cx.run_until_parked();
+    assert_eq!(c.live_session(&id, cx), Some(chosen.clone()));
+
+    let reported = "12345678-9abc-4def-8123-456789abcdef";
+    assert_ne!(chosen, reported);
+    assert_eq!(
+        c.send(&session_report(&id, &token, 2, reported), cx).await,
+        OK
+    );
+    assert_eq!(c.live_session(&id, cx).as_deref(), Some(reported));
+    wait_for(cx, "the reported id in the record", STARTUP, |_| {
+        c.record_session(&id).as_deref() == Some(reported)
+    })
+    .await;
+    assert_eq!(
+        c.h.runtime
+            .read_with(cx, |runtime, _| runtime.stats().captures),
+        0
+    );
+}
+
+#[gpui::test]
+async fn test_a_live_chat_with_no_prompt_report_is_cleaned_up_without_reading_files(
+    cx: &mut TestAppContext,
+) {
+    let c = channels(cx).await;
+    assert!(!c.h.home.join(".claude").exists());
+    let (id, _) = c.start_live(cx).await;
+    let (other, _) = c.start_live(cx).await;
+    c.close_and_settle(&id, &other, cx).await;
+    assert!(!record_path(&c.h.scope, &id).exists());
+    assert_eq!(c.cleanups(cx), 1);
+    assert_eq!(
+        crate::cleanup::storage_reads(&c.h.home),
+        0,
+        "no file was read"
+    );
+    assert!(!c.h.home.join(".claude").exists());
+}
+
+#[gpui::test]
+async fn test_a_live_chat_with_a_prompt_report_is_kept(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+    for event in [Event::PromptSubmitted, Event::TurnDone] {
+        let (id, token) = c.start_live(cx).await;
+        c.deliver(event_report(&id, &token, 2, event), cx);
+        assert!(c.h.runtime.read_with(cx, |runtime, _| {
+            runtime.live(&id).unwrap().prompt_reported()
+        }));
+        c.close_and_settle(&id, &id, cx).await;
+        assert!(record_path(&c.h.scope, &id).exists());
+    }
+    assert_eq!(c.cleanups(cx), 0);
+    assert_eq!(crate::cleanup::storage_reads(&c.h.home), 0);
+}
+
+#[gpui::test]
+async fn test_a_resumed_live_chat_without_a_prompt_report_keeps_the_file_check(
+    cx: &mut TestAppContext,
+) {
+    let c = channels(cx).await;
+    let request = c.request(Agent::Claude, "2.1.319");
+    let mut resume = request.clone();
+    let id = c.start(request, cx).await;
+    let token = c.env("BONGOS_CHAT_TOKEN").pop().unwrap();
+    assert_eq!(c.report(&id, &token, 1, cx).await, OK);
+    c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
+    c.close_and_settle(&id, &id, cx).await;
+
+    // A resume of a chat whose record does not say prompted: the conversation is in the CLI's
+    // files, not in this run's reports.
+    let path = record_path(&c.h.scope, &id);
+    resume.kind = LaunchKind::Resume;
+    resume.record = read_record(&path).unwrap();
+    assert!(!resume.record.prompted);
+    assert!(resume.record.session_id.is_some());
+    c.start(resume, cx).await;
+    let token = c.env("BONGOS_CHAT_TOKEN").pop().unwrap();
+    assert_eq!(c.report(&id, &token, 1, cx).await, OK);
+    wait_for(cx, "the channel to go live", STARTUP, |cx| {
+        c.channel(&id, cx) == Some(ChannelStatus::Live)
+    })
+    .await;
+
+    // No prompt in this run, but the conversation may be from before: the files decide, and with
+    // no Claude directory to look in, the record stays.
+    c.close_and_settle(&id, &id, cx).await;
+    assert!(path.exists());
+    assert_eq!(c.cleanups(cx), 0);
+    assert!(crate::cleanup::storage_reads(&c.h.home) > 0);
 }
