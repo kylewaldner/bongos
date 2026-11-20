@@ -39,7 +39,7 @@ kind = "program"
 purpose = "Rebase the branch when the parent PR has merged"
 script = "rebase_if_parent_merged.py"
 language = "python"
-permissions = { commands = ["gh", "git"], network = ["github.com", "*.github.com"], mcp = [] }
+permissions = { commands = ["gh", "git"], network = ["@remote"], mcp = [] }
 output = { result = { type = "choice", values = ["unchanged", "rebased", "conflict"] } }
 routes = [
   { when = { result = "unchanged" }, to = "ci" },
@@ -59,10 +59,10 @@ kind = "program"
 purpose = "Push the branch to the pull request"
 script = "push.py"
 language = "python"
-permissions = { commands = ["gh", "git"], network = ["github.com", "*.github.com"], mcp = [] }
+permissions = { commands = ["gh", "git"], network = ["@remote"], mcp = [] }
 output = { result = { type = "choice", values = ["pushed", "rejected"] } }
 routes = [
-  { when = { result = "pushed" }, to = "ci" },
+  { when = { result = "pushed" }, to = "ci", max_passes = 6, on_bound = "red_ci" },
   { when = { result = "rejected" }, to = "rejected" },
 ]
 
@@ -73,7 +73,7 @@ kind = "program"
 purpose = "Wait for CI and report green, red or waiting"
 script = "check_ci.py"
 language = "python"
-permissions = { commands = ["gh"], network = ["github.com", "*.github.com"], mcp = [] }
+permissions = { commands = ["gh"], network = ["@remote"], mcp = [] }
 polls = { value = "waiting" }
 output = { result = { type = "choice", values = ["green", "red", "waiting"] } }
 routes = [
@@ -95,7 +95,7 @@ purpose = "Merge the pull request"
 script = "merge_pr.py"
 language = "python"
 gate = { when = "before", question = "CI is green. Merge this pull request?" }
-permissions = { commands = ["gh"], network = ["github.com", "*.github.com"], mcp = [] }
+permissions = { commands = ["gh"], network = ["@remote"], mcp = [] }
 with = { method = "squash" }
 output = { result = { type = "choice", values = ["merged", "blocked"] } }
 routes = [

@@ -207,7 +207,7 @@ pub struct ClaudeNode {
 
 /// The Claude CLI as the runner uses it: the configured command (04's `chats.agents.claude`), the
 /// program it resolved to, and its capabilities.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaudeCli {
     pub command: String,
     pub program: PathBuf,

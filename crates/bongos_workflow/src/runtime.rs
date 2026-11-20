@@ -37,6 +37,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_workflow_model::inputs::Input;
 use bongos_workflow_model::record::RunningNode;
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
@@ -81,6 +82,9 @@ pub struct RunSpec {
     pub id: String,
     pub definition: Definition,
     pub attempt_dir: PathBuf,
+    /// The loop bound of the attempt (`Attempt::loop_bound`, or the setting for an old record):
+    /// what the scheduler applies to a loop whose route sets no `max_passes`.
+    pub loop_bound: u32,
 }
 
 /// A try that ended, as a [`Runner`] reports it.
@@ -113,15 +117,39 @@ impl Finish {
     }
 }
 
+/// Where a run lives and what it was started with: what a runner needs to start its nodes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunBinding {
+    pub workflow: String,
+    pub task_id: String,
+    /// The task's directory.
+    pub task_dir: PathBuf,
+    /// `<task dir>/runs/<id>`.
+    pub run_dir: PathBuf,
+    /// The directory of the current attempt.
+    pub attempt_dir: PathBuf,
+    pub worktree: RunWorktree,
+    pub checkout: TaskCheckout,
+    /// The run's resolved inputs.
+    pub inputs: Vec<Input>,
+}
+
+/// One try a runner is asked to start, with the context of its run.
+pub struct NodeStart<'a> {
+    pub run: &'a str,
+    pub definition: &'a Definition,
+    pub key: &'a NodeKey,
+    pub try_number: u32,
+    pub state: &'a RunState,
+    /// What is left of the run's cost cap; `None` when the run has none.
+    pub budget_left_usd: Option<f64>,
+    /// The run's binding, when the lifecycle bound it.
+    pub binding: Option<&'a RunBinding>,
+}
+
 /// What runs node tries: the agent runners, the program runner and the built-ins, or a fake in
 /// tests. The runtime decides; the runner only starts, reports and stops.
 pub trait Runner {
-    /// Whether this runner can execute nodes. The app's stand-in says no, so a start from the app
-    /// refuses before it creates anything.
-    fn is_connected(&self) -> bool {
-        true
-    }
-
     /// Starts try `try_number` of `key` of run `run`; the process it started, or why it could not.
     fn start(
         &mut self,
@@ -130,6 +158,17 @@ pub trait Runner {
         key: &NodeKey,
         try_number: u32,
     ) -> Result<ProcessRecord, Failure>;
+
+    /// Records the context of `run`, when an attempt begins and when a run is loaded.
+    fn bind(&mut self, _run: &str, _binding: RunBinding) {}
+
+    /// Forgets the context of `run`, when the runtime drops it.
+    fn unbind(&mut self, _run: &str) {}
+
+    /// [`Runner::start`] with the run's state and binding; the runtime calls this one.
+    fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
+        self.start(node.run, node.definition, node.key, node.try_number)
+    }
 
     /// The tries that ended since the last call.
     fn poll(&mut self) -> Vec<Finish>;
@@ -144,10 +183,6 @@ pub trait Runner {
 }
 
 impl<R: Runner + ?Sized> Runner for Box<R> {
-    fn is_connected(&self) -> bool {
-        (**self).is_connected()
-    }
-
     fn start(
         &mut self,
         run: &str,
@@ -156,6 +191,18 @@ impl<R: Runner + ?Sized> Runner for Box<R> {
         try_number: u32,
     ) -> Result<ProcessRecord, Failure> {
         (**self).start(run, definition, key, try_number)
+    }
+
+    fn bind(&mut self, run: &str, binding: RunBinding) {
+        (**self).bind(run, binding)
+    }
+
+    fn unbind(&mut self, run: &str) {
+        (**self).unbind(run)
+    }
+
+    fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
+        (**self).start_node(node)
     }
 
     fn poll(&mut self) -> Vec<Finish> {
@@ -194,6 +241,10 @@ struct LiveRun {
     in_flight: BTreeSet<NodeKey>,
     /// The keys of `in_flight` a built-in runs, with that built-in.
     builtins: BTreeMap<NodeKey, Arc<dyn BuiltinNode>>,
+    /// The run's context, once bound ([`Runtime::bind`]).
+    binding: Option<RunBinding>,
+    /// The attempt's loop bound; a later settings change reaches only new attempts.
+    loop_bound: u32,
 }
 
 impl LiveRun {
@@ -254,7 +305,7 @@ impl LiveRun {
 }
 
 /// Why a runtime command was refused.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
     #[error("no run {0} is loaded")]
     UnknownRun(String),
@@ -264,6 +315,10 @@ pub enum RuntimeError {
     Duplicate(String),
     #[error("{0}")]
     Io(String),
+    #[error(
+        "run {run} is over its cost cap: raise workflows.run_max_cost_usd above ${cost:.2} first"
+    )]
+    OverCap { run: String, cost: f64 },
 }
 
 impl RuntimeError {
@@ -348,18 +403,22 @@ impl<R: Runner> Runtime<R> {
         let index = self.live(id)?;
         let state = self.runs[index].state();
         let free = self.limits.free_sessions(self.sessions_in_flight());
-        let ends_succeeded =
-            scheduler::step(&self.runs[index].definition, &state, &self.limits, free)
-                .iter()
-                .any(|command| {
-                    matches!(
-                        command,
-                        Command::End {
-                            state: record::EndState::Succeeded,
-                            ..
-                        }
-                    )
-                });
+        let ends_succeeded = scheduler::step(
+            &self.runs[index].definition,
+            &state,
+            &self.limits_for(index),
+            free,
+        )
+        .iter()
+        .any(|command| {
+            matches!(
+                command,
+                Command::End {
+                    state: record::EndState::Succeeded,
+                    ..
+                }
+            )
+        });
         if !ends_succeeded || !state.open_gates.is_empty() || !self.runs[index].in_flight.is_empty()
         {
             return Err(RuntimeError::Io(format!(
@@ -394,6 +453,20 @@ impl<R: Runner> Runtime<R> {
         self.limits = limits;
     }
 
+    /// The limits for run `index`: the current ones with the loop bound of the run's attempt.
+    fn limits_for(&self, index: usize) -> Limits {
+        Limits {
+            loop_bound: self.runs[index].loop_bound,
+            ..self.limits
+        }
+    }
+
+    /// The limits in force for run `id`: the current ones with its attempt's loop bound.
+    pub fn run_limits(&self, id: &str) -> Limits {
+        self.find(id)
+            .map_or(self.limits, |index| self.limits_for(index))
+    }
+
     pub fn limits(&self) -> &Limits {
         &self.limits
     }
@@ -412,6 +485,15 @@ impl<R: Runner> Runtime<R> {
     pub fn events(&self, id: &str) -> Option<&[Event]> {
         self.find(id)
             .map(|index| self.runs[index].events.as_slice())
+    }
+
+    /// The place of run `id` among the runs waiting for a run slot (1 is next), `None` when it
+    /// does not wait for one.
+    pub fn queue_position(&self, id: &str) -> Option<usize> {
+        self.queue
+            .iter()
+            .position(|queued| queued == id)
+            .map(|index| index + 1)
     }
 
     /// Whether run `id` is waiting for a run slot.
@@ -441,10 +523,20 @@ impl<R: Runner> Runtime<R> {
         Ok(())
     }
 
+    /// Keeps `binding` as the context of run `id`, to hand to its node starts, and gives it to
+    /// the runner.
+    pub fn bind(&mut self, id: &str, binding: RunBinding) {
+        if let Some(index) = self.find(id) {
+            self.runs[index].binding = Some(binding.clone());
+        }
+        self.runner.bind(id, binding);
+    }
+
     /// Loads a run after a relaunch; [`Runtime::load_all`] with one run.
     pub fn load(&mut self, spec: RunSpec) -> Result<Vec<(NodeKey, OrphanOutcome)>, RuntimeError> {
-        let mut orphans = self.load_all(vec![spec])?;
-        Ok(orphans.pop().unwrap_or_default())
+        self.load_all(vec![spec])?
+            .pop()
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
     /// Loads runs after a relaunch. First every process the logs record as running (or
@@ -453,18 +545,31 @@ impl<R: Runner> Runtime<R> {
     /// a different process and is left alone. Then a run with a started key and no finish is
     /// marked interrupted with every such key. An interrupted, halted, ended or cancelled run gets
     /// no command until Kyle acts; any other run (queued, at a gate, with a sleeping poll) waits
-    /// for a run slot like a new one. Nothing starts here. A duplicate id or a log that cannot be
-    /// opened loads none of them. Returns each run's orphan outcomes, in `specs` order.
+    /// for a run slot like a new one. Nothing starts here. A duplicate id loads none of them. A log
+    /// that cannot be opened is logged and skips only that run. Returns one entry per spec, in
+    /// `specs` order: the run's orphan outcomes, or the error that kept it from loading.
     pub fn load_all(
         &mut self,
         specs: Vec<RunSpec>,
-    ) -> Result<Vec<Vec<(NodeKey, OrphanOutcome)>>, RuntimeError> {
+    ) -> Result<Vec<Result<Vec<(NodeKey, OrphanOutcome)>, RuntimeError>>, RuntimeError> {
         let mut runs: Vec<LiveRun> = Vec::with_capacity(specs.len());
+        // Per spec: the failed open's error, or `None` for a run that opened (in `runs` order).
+        let mut failures: Vec<Option<RuntimeError>> = Vec::with_capacity(specs.len());
         for spec in specs {
             if self.find(&spec.id).is_some() || runs.iter().any(|run| run.id == spec.id) {
                 return Err(RuntimeError::Duplicate(spec.id));
             }
-            runs.push(open_run(spec)?);
+            let id = spec.id.clone();
+            match open_run(spec) {
+                Ok(run) => {
+                    runs.push(run);
+                    failures.push(None);
+                }
+                Err(error) => {
+                    log::error!("workflows: run {id} not loaded: {error}");
+                    failures.push(Some(error));
+                }
+            }
         }
         let mut keys: Vec<Vec<NodeKey>> = Vec::with_capacity(runs.len());
         let mut records: Vec<ProcessRecord> = Vec::new();
@@ -506,7 +611,14 @@ impl<R: Runner> Runtime<R> {
             }
             self.runs.push(run);
         }
-        Ok(orphans)
+        let mut orphans = orphans.into_iter();
+        Ok(failures
+            .into_iter()
+            .map(|failure| match failure {
+                Some(error) => Err(error),
+                None => Ok(orphans.next().unwrap_or_default()),
+            })
+            .collect())
     }
 
     /// One pass of the run loop: appends the tries that ended, admits queued runs while run slots
@@ -517,6 +629,7 @@ impl<R: Runner> Runtime<R> {
             return false;
         }
         let mut changed = self.take_finishes();
+        changed |= self.check_caps();
         for _ in 0..MAX_ROUNDS {
             let woken = self.wake_parked();
             let admitted = self.admit_queued();
@@ -571,6 +684,14 @@ impl<R: Runner> Runtime<R> {
     pub fn resume(&mut self, id: &str) -> Result<Vec<NodeKey>, RuntimeError> {
         let index = self.live(id)?;
         let state = self.runs[index].state();
+        // The cap is whatever the limits say now (`set_limits` follows the settings), never a
+        // value kept from when the run halted.
+        if let Some((_, cost)) = cap_crossing(&state, self.limits.run_max_cost_usd) {
+            return Err(RuntimeError::OverCap {
+                run: id.to_string(),
+                cost,
+            });
+        }
         if state.paused || state.halted || !state.held.is_empty() {
             self.runs[index].append(Event::Resumed);
         }
@@ -590,6 +711,14 @@ impl<R: Runner> Runtime<R> {
     /// ([`RunState::retry_floors`]).
     pub fn rerun(&mut self, id: &str, key: NodeKey) -> Result<(), RuntimeError> {
         let index = self.live(id)?;
+        if let Some((_, cost)) =
+            cap_crossing(&self.runs[index].state(), self.limits.run_max_cost_usd)
+        {
+            return Err(RuntimeError::OverCap {
+                run: id.to_string(),
+                cost,
+            });
+        }
         self.start(index, key);
         self.requeue(index);
         Ok(())
@@ -652,6 +781,7 @@ impl<R: Runner> Runtime<R> {
         self.queue.retain(|queued| queued != id);
         self.settling.retain(|settling| settling != id);
         self.runs.remove(index);
+        self.runner.unbind(id);
         true
     }
 
@@ -683,17 +813,7 @@ impl<R: Runner> Runtime<R> {
     /// with every key in flight to each run that had one. Nothing starts afterwards.
     pub fn quit(&mut self) {
         self.quitting = true;
-        let indices: Vec<usize> = (0..self.runs.len()).collect();
-        self.stop_in_flight(&indices);
-        for run in &mut self.runs {
-            let state = run.state();
-            if state.running.is_empty() || state.halted || state.is_over() {
-                continue;
-            }
-            let keys: Vec<NodeKey> = state.running.keys().cloned().collect();
-            run.append(Event::Interrupted { keys });
-            run.status = Status::Held;
-        }
+        self.interrupt_all();
         self.queue.clear();
     }
 
@@ -817,6 +937,57 @@ impl<R: Runner> Runtime<R> {
         changed
     }
 
+    /// Halts each run whose finished tries cost at or above the cap: stops its tries, appends
+    /// `CapReached` (naming the key whose finish crossed it) and then `Halted`. Runs after every
+    /// finish of the tick is appended, so a run halts once however many tries ended together.
+    fn check_caps(&mut self) -> bool {
+        let Some(cap) = self.limits.run_max_cost_usd else {
+            return false;
+        };
+        let mut changed = false;
+        for index in 0..self.runs.len() {
+            let state = self.runs[index].state();
+            if state.halted || state.is_over() || state.ended.is_some() {
+                continue;
+            }
+            let Some((key, cost)) = cap_crossing(&state, Some(cap)) else {
+                continue;
+            };
+            self.stop_in_flight(&[index]);
+            let run = &mut self.runs[index];
+            run.append(Event::CapReached {
+                cap_usd: cap,
+                cost_usd: cost,
+                key,
+            });
+            run.append(Event::Halted);
+            self.hold(index);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Stops every process of every run together (within 5 s) and appends `Interrupted` with the
+    /// keys in flight to each run that had one, which then waits for a resume. Unlike
+    /// [`Runtime::quit`] later starts still work (workflows were turned off, not the app). Whether
+    /// any run was interrupted.
+    pub fn interrupt_all(&mut self) -> bool {
+        let indices: Vec<usize> = (0..self.runs.len()).collect();
+        self.stop_in_flight(&indices);
+        let mut changed = false;
+        for index in 0..self.runs.len() {
+            let state = self.runs[index].state();
+            if state.running.is_empty() || state.halted || state.is_over() {
+                continue;
+            }
+            let keys: Vec<NodeKey> = state.running.keys().cloned().collect();
+            self.runs[index].append(Event::Interrupted { keys });
+            self.hold(index);
+            changed = true;
+        }
+        changed
+    }
+
     /// Moves queued runs to executing, oldest first, while run slots are free, and appends
     /// `Queued` to each run left waiting that does not have it yet.
     fn admit_queued(&mut self) -> bool {
@@ -867,7 +1038,13 @@ impl<R: Runner> Runtime<R> {
                 continue;
             }
             let free = self.limits.free_sessions(self.sessions_in_flight());
-            if !scheduler::step(&self.runs[index].definition, &state, &self.limits, free).is_empty()
+            if !scheduler::step(
+                &self.runs[index].definition,
+                &state,
+                &self.limits_for(index),
+                free,
+            )
+            .is_empty()
             {
                 let run = &mut self.runs[index];
                 run.status = Status::Queued;
@@ -893,8 +1070,12 @@ impl<R: Runner> Runtime<R> {
                 continue;
             }
             let free = self.limits.free_sessions(self.sessions_in_flight());
-            let commands =
-                scheduler::step(&self.runs[index].definition, &state, &self.limits, free);
+            let commands = scheduler::step(
+                &self.runs[index].definition,
+                &state,
+                &self.limits_for(index),
+                free,
+            );
             if commands.is_empty() {
                 if state.running.is_empty() && self.runs[index].in_flight.is_empty() {
                     self.runs[index].status = Status::Parked;
@@ -1015,15 +1196,29 @@ impl<R: Runner> Runtime<R> {
                         state: &state,
                         key: &key,
                         try_number,
+                        binding: run.binding.as_ref(),
                     })
                     .map(|()| ProcessRecord {
                         pid: 0,
                         start_time: 0,
                     })
             }
-            None => self
-                .runner
-                .start(&run.id, &run.definition, &key, try_number),
+            None => {
+                let state = run.state();
+                let budget_left_usd = self
+                    .limits
+                    .run_max_cost_usd
+                    .map(|cap| (cap - state.cost_usd).max(0.0));
+                self.runner.start_node(NodeStart {
+                    run: &run.id,
+                    definition: &run.definition,
+                    key: &key,
+                    try_number,
+                    state: &state,
+                    budget_left_usd,
+                    binding: run.binding.as_ref(),
+                })
+            }
         };
         match started {
             Ok(process) => {
@@ -1096,6 +1291,23 @@ impl<R: Runner> Runtime<R> {
     }
 }
 
+/// The key whose finish took the run's cost to `cap` or past it, with the cost then; `None` with
+/// no cap, no finished try, or a cost under the cap.
+fn cap_crossing(state: &RunState, cap: Option<f64>) -> Option<(NodeKey, f64)> {
+    let cap = cap?;
+    if state.cost_usd < cap {
+        return None;
+    }
+    let mut cost = 0.0;
+    for finished in &state.finished {
+        cost += finished.cost_usd;
+        if cost >= cap {
+            return Some((finished.key.clone(), state.cost_usd));
+        }
+    }
+    None
+}
+
 fn process_record(running: &RunningNode) -> ProcessRecord {
     ProcessRecord {
         pid: running.pid,
@@ -1130,6 +1342,8 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
         status: Status::Held,
         in_flight: BTreeSet::new(),
         builtins: BTreeMap::new(),
+        binding: None,
+        loop_bound: spec.loop_bound,
     })
 }
 
@@ -1141,220 +1355,7 @@ pub fn holds_session(definition: &Definition, key: &NodeKey) -> bool {
         .is_some_and(bongos_workflow_model::definition::Node::is_checks)
 }
 
-/// A scripted [`Runner`] for tests. Each start takes the node's scripted result (or the default
-/// `{"summary": "ok"}`); a try finishes when the test releases it, or at the next poll with
-/// `auto_finish`. With `command` set, each start spawns that command as a real process in its own
-/// session ([`NodeProcess`](crate::process::NodeProcess)), so halt, cancel and quit stop real
-/// processes.
+/// The scripted runner of the tests.
 #[cfg(test)]
-pub(crate) mod fake {
-    use std::collections::BTreeMap;
-    use std::process::{Command, Stdio};
-
-    use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey};
-    use serde_json::{Value, json};
-
-    use super::{Finish, Runner};
-    use crate::process::{NodeProcess, ProcessRecord, stop_all};
-    use bongos_workflow_model::scheduler::Branch;
-
-    struct Try {
-        run: String,
-        key: NodeKey,
-        try_number: u32,
-        process: Option<NodeProcess>,
-        released: bool,
-    }
-
-    #[derive(Default)]
-    pub struct FakeRunner {
-        /// Finish every try at the next poll.
-        pub auto_finish: bool,
-        /// A command each start spawns as a real process.
-        pub command: Option<Vec<String>>,
-        /// Every try started, in order, as `(run, key)`.
-        pub started: Vec<(String, NodeKey)>,
-        /// Every try stopped, in order.
-        pub stopped: Vec<(String, NodeKey)>,
-        /// The processes stopped, kept so a test can check they are gone.
-        pub stopped_processes: Vec<NodeProcess>,
-        /// The most tries in flight at once, across runs.
-        pub max_in_flight: usize,
-        /// Every merge fails `merge conflict` when set, after the first `clean_merges` merges.
-        pub merge_conflicts: bool,
-        /// How many merges succeed before `merge_conflicts` takes effect.
-        pub clean_merges: usize,
-        /// Every merge asked for, as `(run, join, branch)`.
-        pub merges: Vec<(String, String, Branch)>,
-        results: BTreeMap<String, Value>,
-        /// Tries of each node still to fail, `agent exited nonzero`.
-        failures: BTreeMap<String, u32>,
-        /// The session id each node's tries report.
-        sessions: BTreeMap<String, String>,
-        running: Vec<Try>,
-    }
-
-    impl FakeRunner {
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        /// The result every try of `node` finishes with.
-        pub fn script(&mut self, node: &str, result: Value) -> &mut Self {
-            self.results.insert(node.to_string(), result);
-            self
-        }
-
-        /// The session id every try of `node` reports when it finishes.
-        pub fn session(&mut self, node: &str, id: &str) -> &mut Self {
-            self.sessions.insert(node.to_string(), id.to_string());
-            self
-        }
-
-        /// The next `times` tries of `node` fail `agent exited nonzero`.
-        pub fn fail(&mut self, node: &str, times: u32) -> &mut Self {
-            self.failures.insert(node.to_string(), times);
-            self
-        }
-
-        /// The tries in flight, as `(run, key)`.
-        pub fn in_flight(&self) -> Vec<(String, NodeKey)> {
-            self.running
-                .iter()
-                .map(|running| (running.run.clone(), running.key.clone()))
-                .collect()
-        }
-
-        /// The processes of the tries in flight.
-        pub fn processes(&mut self) -> impl Iterator<Item = &mut NodeProcess> {
-            self.running
-                .iter_mut()
-                .filter_map(|running| running.process.as_mut())
-        }
-
-        /// Lets every try in flight finish at the next poll.
-        pub fn release_all(&mut self) {
-            for running in &mut self.running {
-                running.released = true;
-            }
-        }
-
-        /// Lets the tries of run `run` finish at the next poll.
-        pub fn release(&mut self, run: &str) {
-            for running in &mut self.running {
-                if running.run == run {
-                    running.released = true;
-                }
-            }
-        }
-    }
-
-    impl Runner for FakeRunner {
-        fn start(
-            &mut self,
-            run: &str,
-            _definition: &Definition,
-            key: &NodeKey,
-            try_number: u32,
-        ) -> Result<ProcessRecord, Failure> {
-            let process = self.command.as_ref().map(|argv| {
-                let mut command = Command::new(&argv[0]);
-                command.args(&argv[1..]);
-                NodeProcess::spawn(command, Stdio::null(), Stdio::null(), Stdio::null())
-                    .expect("the fake command starts")
-            });
-            let record = process.as_ref().map_or(
-                ProcessRecord {
-                    pid: 4000 + self.started.len() as u32,
-                    start_time: 0,
-                },
-                NodeProcess::record,
-            );
-            self.started.push((run.to_string(), key.clone()));
-            self.running.push(Try {
-                run: run.to_string(),
-                key: key.clone(),
-                try_number,
-                process,
-                released: false,
-            });
-            self.max_in_flight = self.max_in_flight.max(self.running.len());
-            Ok(record)
-        }
-
-        fn poll(&mut self) -> Vec<Finish> {
-            let auto_finish = self.auto_finish;
-            let (done, running): (Vec<Try>, Vec<Try>) = std::mem::take(&mut self.running)
-                .into_iter()
-                .partition(|running| auto_finish || running.released);
-            self.running = running;
-            done.into_iter()
-                .map(|mut done| {
-                    if let Some(process) = done.process.as_mut() {
-                        process.stop();
-                    }
-                    if let Some(left) = self.failures.get_mut(&done.key.node)
-                        && *left > 0
-                    {
-                        *left -= 1;
-                        let failure = Failure::new(
-                            FailureReason::AgentExitedNonzero,
-                            Some(done.key.clone()),
-                            "scripted failure",
-                        );
-                        return Finish {
-                            outcome: Err(failure),
-                            ..Finish::ok(done.run, done.key, done.try_number, Value::Null)
-                        };
-                    }
-                    let result = self
-                        .results
-                        .get(&done.key.node)
-                        .cloned()
-                        .unwrap_or_else(|| json!({ "summary": "ok" }));
-                    let session_id = self.sessions.get(&done.key.node).cloned();
-                    Finish {
-                        session_id,
-                        ..Finish::ok(done.run, done.key, done.try_number, result)
-                    }
-                })
-                .collect()
-        }
-
-        fn stop(&mut self, tries: &[(String, NodeKey)]) {
-            let (stopped, running): (Vec<Try>, Vec<Try>) = std::mem::take(&mut self.running)
-                .into_iter()
-                .partition(|running| {
-                    tries
-                        .iter()
-                        .any(|(run, key)| *run == running.run && *key == running.key)
-                });
-            self.running = running;
-            let mut processes = Vec::new();
-            for stopped in stopped {
-                self.stopped.push((stopped.run, stopped.key));
-                processes.extend(stopped.process);
-            }
-            stop_all(&mut processes);
-            self.stopped_processes.extend(processes);
-        }
-
-        fn merge_branch(
-            &mut self,
-            run: &str,
-            join: &str,
-            branch: &Branch,
-        ) -> Result<String, Failure> {
-            self.merges
-                .push((run.to_string(), join.to_string(), branch.clone()));
-            if self.merge_conflicts && self.merges.len() > self.clean_merges {
-                return Err(Failure::new(
-                    FailureReason::MergeConflict,
-                    None,
-                    "conflict in src/lib.rs",
-                ));
-            }
-            Ok("0000000".to_string())
-        }
-    }
-}
+#[path = "runtime_fake.rs"]
+pub(crate) mod fake;

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use bongos_work::{NeedsYou, NeedsYouRegistry, NeedsYouSource};
-use bongos_workflow_model::record::EndState;
+use bongos_workflow_model::record::{CapReached, EndState};
 use bongos_workflow_model::{NodeKey, RunState};
 use gpui::{App, Global};
 use workspace::notifications::NotificationId;
@@ -43,11 +43,13 @@ pub fn reasons(state: &RunState) -> Vec<String> {
         Some(_) => return Vec::new(),
         None => {}
     }
-    let mut found: Vec<String> = state
-        .open_gates
-        .values()
-        .map(|question| format!("gate: {question}"))
-        .collect();
+    let mut found: Vec<String> = state.cap_reached.iter().map(CapReached::reason).collect();
+    found.extend(
+        state
+            .open_gates
+            .values()
+            .map(|question| format!("gate: {question}")),
+    );
     if !state.interrupted.is_empty() {
         found.push("run interrupted".to_string());
     }

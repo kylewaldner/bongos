@@ -262,3 +262,55 @@ fn a_running_node_shows_the_line_of_its_status_source(cx: &mut TestAppContext) {
     let text = cx.update(|cx| view.read(cx).text());
     assert!(!text.contains("running part 2 of 3"), "{text}");
 }
+
+#[test]
+fn the_view_text_gives_the_cost_cap_reason() {
+    use bongos_workflow_model::{Event, NodeKey, parse, replay};
+    let definition = parse(
+        r#"
+schema = 1
+name = "single"
+start = "implement"
+
+[nodes.implement]
+kind = "agent"
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#,
+    )
+    .unwrap();
+    let state = replay(&[
+        Event::Created,
+        Event::CapReached {
+            cap_usd: 5.0,
+            cost_usd: 5.12,
+            key: NodeKey::new("implement", 1),
+        },
+        Event::Halted,
+    ]);
+    let data = crate::run_view::RunData {
+        run: "run".to_string(),
+        workflow: "single".to_string(),
+        layer: "user".to_string(),
+        todo: "todo".to_string(),
+        definition,
+        state,
+        worktree: None,
+        attempt_dir: None,
+        session_limit: 6,
+        node_status: Default::default(),
+    };
+    let snapshot = Snapshot::build(&data, None);
+    assert_eq!(
+        snapshot.cap_reason.as_deref(),
+        Some("cost cap of $5.00 reached at node implement")
+    );
+    assert!(
+        snapshot
+            .text(Mode::List)
+            .contains("halted: cost cap of $5.00 reached at node implement")
+    );
+}

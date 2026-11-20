@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bongos_workflow_model::definition::AgentKind;
-use bongos_workflow_model::{FailureReason, NodeKey, ValidationContext, parse, validate};
+use bongos_workflow_model::{Failure, FailureReason, NodeKey, ValidationContext, parse, validate};
 use tempfile::TempDir;
 
+use crate::lifecycle::StartChecks as _;
 use crate::mcp::{
     CACHE_TTL, Discovery, Lister, Location, McpCache, ProcessLister, Source, available,
     check_start, codex_disable_args, discover, parse_list, validation_servers,
@@ -429,4 +430,97 @@ fn codex_does_not_disable_an_excluded_server_that_is_not_installed() {
     let installed = names(&["github"]);
     let args = codex_disable_args(&installed, &[], &list(&["ghost"]));
     assert_eq!(args, list(&["-c", "mcp_servers.github.enabled=false"]));
+}
+
+// The app's start checks answer from a refreshed cache (D8).
+
+const CLAUDE_LIST: &str =
+    "github: npx github-server - ✓ Connected\nlinear: npx linear-server - ✓ Connected\n";
+
+/// The start checks over a cache a fake lister filled for `exclude`.
+fn checks_after_refresh(lister: &Fixed, exclude: &[&str]) -> crate::engine::AppChecks {
+    let cache = std::sync::Mutex::new(McpCache::default());
+    let location = Location::new("/project", "/no-such-home");
+    let now = Instant::now();
+    crate::mcp::refresh(&cache, now, &[(AgentKind::Claude, true)], lister, &location);
+    crate::engine::AppChecks::from_cache(
+        ValidationContext::default(),
+        &cache,
+        &location.cwd,
+        now,
+        list(exclude),
+    )
+}
+
+/// The refusal the start gives a Claude node allowing `tools`, as `check_machine` computes it.
+fn start_refusal(checks: &crate::engine::AppChecks, tools: &[&str]) -> Option<Failure> {
+    let installed = checks.mcp_servers(AgentKind::Claude)?;
+    check_start(
+        AgentKind::Claude,
+        None,
+        &list(tools),
+        &installed,
+        &checks.mcp_exclude(),
+    )
+    .err()
+}
+
+#[test]
+fn a_missing_server_is_refused_before_start_naming_it() {
+    let lister = Fixed::new(Some(CLAUDE_LIST));
+    let checks = checks_after_refresh(&lister, &[]);
+    assert_eq!(
+        checks.mcp_servers(AgentKind::Claude),
+        Some(names(&["github", "linear"]))
+    );
+    let refusal = start_refusal(&checks, &["mcp__github__*", "mcp__slack__post"]).unwrap();
+    assert_eq!(refusal.reason, FailureReason::McpServerUnavailable);
+    assert!(
+        refusal
+            .detail
+            .starts_with("slack: MCP server not installed"),
+        "{}",
+        refusal.detail
+    );
+    assert!(start_refusal(&checks, &["mcp__github__*"]).is_none());
+}
+
+#[test]
+fn an_excluded_server_is_refused_before_start_naming_it() {
+    let lister = Fixed::new(Some(CLAUDE_LIST));
+    let checks = checks_after_refresh(&lister, &["github"]);
+    // Excluded servers are not reported as available.
+    assert_eq!(
+        checks.mcp_servers(AgentKind::Claude),
+        Some(names(&["linear"]))
+    );
+    let refusal = start_refusal(&checks, &["mcp__github__*"]).unwrap();
+    assert!(
+        refusal
+            .detail
+            .starts_with("github: excluded by workflows.mcp_exclude"),
+        "{}",
+        refusal.detail
+    );
+}
+
+#[test]
+fn a_discovery_that_timed_out_keeps_the_check_skipped() {
+    // The lister gives no answer, as when `mcp list` ran past its timeout.
+    let lister = Fixed::new(None);
+    let checks = checks_after_refresh(&lister, &[]);
+    assert_eq!(lister.calls.get(), 1);
+    assert_eq!(checks.mcp_servers(AgentKind::Claude), None);
+    assert!(start_refusal(&checks, &["mcp__slack__post"]).is_none());
+}
+
+#[test]
+fn a_codex_node_is_refused_naming_codex_support() {
+    let lister = Fixed::new(Some(CLAUDE_LIST));
+    let checks = checks_after_refresh(&lister, &[]);
+    assert_eq!(
+        checks.agent(AgentKind::Codex),
+        Err("Codex nodes need Codex support, which is not in this build".to_string())
+    );
+    assert_eq!(checks.agent(AgentKind::Claude), Ok(()));
 }

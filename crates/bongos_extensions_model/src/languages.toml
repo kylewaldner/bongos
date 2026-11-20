@@ -1,0 +1,163 @@
+# Curated language extensions, each pinned to a full commit.
+
+[[extension]]
+id = "swift"
+name = "Swift"
+description = "Swift language support."
+repository = "https://github.com/samuser107/zed-swift-extension"
+commit = "302c7978f1bc3d512960531ce11000ca333d5268"
+api = "0.6.0"
+file_types = ["swift", "swiftinterface"]
+
+[[extension]]
+id = "ruby"
+name = "Ruby"
+description = "Ruby language support, including ERB and RBS."
+repository = "https://github.com/zed-extensions/ruby"
+commit = "d799a32e2be733a6ab8cf363ccd763c962e62757"
+api = "0.7.0"
+file_types = ["erb", "html.erb", "js.erb", "rbs", "rb", "rbi", "Gemfile", "Guardfile", "rake", "Rakefile", "ru", "thor", "cap", "capfile", "Capfile", "jbuilder", "rabl", "rxml", "builder", "gemspec", "irbrc", "pryrc", "simplecov", "Steepfile", "Podfile", "Brewfile", "Vagrantfile", "Puppetfile", "Fastfile", "Appfile", "Matchfile", "Cheffile", "Hobofile", "Appraisals", "Rantfile", "Berksfile", "Berksfile.lock", "Thorfile", "Dangerfile", "Deliverfile", "Scanfile", "Snapfile", "Gymfile", "yml.erb", "yaml.erb"]
+
+[[extension]]
+id = "php"
+name = "PHP"
+description = "PHP language support."
+repository = "https://github.com/zed-extensions/php"
+commit = "6768398bea34ea3b2ad590ac8081eb6c1ce6bf29"
+api = "0.7.0"
+file_types = ["php", "phtml", "phpt"]
+
+[[extension]]
+id = "csharp"
+name = "C#"
+description = "C# language support."
+repository = "https://github.com/zed-extensions/csharp"
+commit = "88597e19d1323c7c4c3385093d9cdcb4ee78513e"
+api = "0.7.0"
+file_types = ["cs", "csproj", "proj", "props", "targets", "slnx"]
+
+[[extension]]
+id = "elixir"
+name = "Elixir"
+description = "Elixir language support, including EEx and HEEx."
+repository = "https://github.com/zed-extensions/elixir"
+commit = "f02229c005cfee90f54be99ec1943d455049668e"
+api = "0.7.0"
+file_types = ["eex", "ex", "exs", "mix.lock", "heex", "html.eex", "leex", "neex"]
+
+[[extension]]
+id = "zig"
+name = "Zig"
+description = "Zig language support."
+repository = "https://github.com/zed-extensions/zig"
+commit = "996432e66cb5bb2eed5a30ad2afaaa90349a3817"
+api = "0.7.0"
+file_types = ["zig", "zon"]
+
+[[extension]]
+id = "lua"
+name = "Lua"
+description = "Lua language support."
+repository = "https://github.com/zed-extensions/lua"
+commit = "ce3fde1f675b32ce2de032e32609aba18cbf8121"
+api = "0.7.0"
+file_types = ["lua"]
+
+[[extension]]
+id = "dockerfile"
+name = "Dockerfile"
+description = "Dockerfile and Docker Compose language support."
+repository = "https://github.com/zed-extensions/dockerfile"
+commit = "812fbe0e227d06e2c9e17864cd96985b064125ef"
+api = "0.7.0"
+file_types = ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml", "Dockerfile", "Containerfile", "dockerfile"]
+
+[[extension]]
+id = "sql"
+name = "SQL"
+description = "SQL language support."
+repository = "https://github.com/zed-extensions/sql"
+commit = "fdd2a42ab9c7f63c75becc80c9c47fb0b48fe5b8"
+file_types = ["sql"]
+
+[[extension]]
+id = "vue"
+name = "Vue"
+description = "Vue language support."
+repository = "https://github.com/zed-extensions/vue"
+commit = "7a57c87c8dde8b33002ea0a8e3d6e6e247fc9cca"
+api = "0.7.0"
+file_types = ["vue"]
+
+[[extension]]
+id = "svelte"
+name = "Svelte"
+description = "Svelte language support."
+repository = "https://github.com/zed-extensions/svelte"
+commit = "ca6c2c6c891583a23820d9b23772e116426cc57d"
+api = "0.7.0"
+file_types = ["svelte"]
+
+[[extension]]
+id = "astro"
+name = "Astro"
+description = "Astro language support."
+repository = "https://github.com/zed-extensions/astro"
+commit = "1f08b4175c2c79d79af4ca950db30f5a83999d5f"
+api = "0.7.0"
+file_types = ["astro"]
+
+[[extension]]
+id = "scala"
+name = "Scala"
+description = "Scala language support through Metals."
+repository = "https://github.com/scalameta/metals-zed"
+commit = "a7e91d6dc34190733181b1c2ae42e67c28c7efcf"
+api = "0.7.0"
+file_types = ["scala", "sbt", "sc", "mill"]
+
+[[extension]]
+id = "haskell"
+name = "Haskell"
+description = "Haskell language support, including Cabal and Alex."
+repository = "https://github.com/zed-extensions/haskell"
+commit = "9a6687db33133a57ae48c69eb34b025cd6f06faf"
+api = "0.7.0"
+file_types = ["x", "cabal", "hs", "lhs"]
+
+[[extension]]
+id = "nix"
+name = "Nix"
+description = "Nix language support."
+repository = "https://github.com/hasit/zed-nix"
+commit = "429479c09c5a597f31b8b53c3950cf96cec6e1f4"
+api = "0.7.0"
+file_types = ["nix"]
+
+[[extension]]
+id = "graphql"
+name = "GraphQL"
+description = "GraphQL language support."
+repository = "https://github.com/11bit/zed-extension-graphql"
+commit = "7337bb0ea46b0f71b0c29ef877e5d15ce5ad7252"
+api = "0.7.0"
+file_types = ["graphql", "gql", "graphqls"]
+
+[[extension]]
+id = "proto"
+name = "Protobuf"
+description = "Protocol Buffers language support."
+repository = "https://github.com/zed-industries/zed"
+path = "extensions/proto"
+commit = "6e368ab51570b0cf64851f54d7aa2b8576a52ed6"
+api = "0.7.0"
+file_types = ["proto"]
+
+[[extension]]
+id = "emmet"
+name = "Emmet"
+description = "Emmet abbreviation expansion."
+repository = "https://github.com/zed-extensions/emmet"
+commit = "aa6ce76eda5cc267d0f8a54a8199fb0f104ec638"
+api = "0.7.0"
+file_types = []

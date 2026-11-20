@@ -1,0 +1,18 @@
+# The fixture list of scenario 45-language-extensions. The scenario fills in the URLs and commits.
+
+[[extension]]
+id = "quokka"
+name = "Quokka"
+description = "Quokka language support (smoke fixture)."
+repository = "@QUOKKA_URL@"
+commit = "@QUOKKA_COMMIT@"
+file_types = ["quok"]
+
+[[extension]]
+id = "numbat"
+name = "Numbat"
+description = "Numbat language support (smoke fixture, needs a newer extension API)."
+repository = "@NUMBAT_URL@"
+commit = "@NUMBAT_COMMIT@"
+api = "0.99.0"
+file_types = ["numbat"]

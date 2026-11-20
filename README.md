@@ -365,8 +365,7 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   `name` (the key in the file, not the directory name): the project's
   (`~/.bongos/projects/<project>/workflows`) over yours (`~/.bongos/workflows`) over the ones bongos
   ships (`implement PR`, `implement tasks`, `ship PR` and `babysit PR`, written to the data directory
-  under `workflows/shipped/<version>/` and never edited). In this build the app reads the shipped and
-  your layers; the project layer is not connected yet. `workflow: new` makes a definition in your
+  under `workflows/shipped/<version>/` and never edited). `workflow: new` makes a definition in your
   layer, from a minimal one-agent template or as a copy of a shipped one to edit; `workflow: edit
   definition` opens one; `workflow: validate` checks them all and lists each finding with its line in
   a read-only buffer. A key bongos does not know is a warning, not an error.
@@ -413,13 +412,12 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   `C-c f k` cancels, `C-c f a` approves a gate and `C-c f v` sends it back with notes. `C-c f w`
   shows the Runs panel (the runs of every task, filtered with `t`, `p` and `s`; `enter` and `l` open the
   selected run's logs); `C-c f l` opens a run's logs, `C-c f s` its run view, `C-c f
-  o` its worktree, `C-c f d` its diff and `C-c f x` is meant to clear finished runs (the
-  worktrees of those older than `workflows.keep_finished_days`; not connected yet). `C-c f n`, `C-c f e` and `C-c f V`
+  o` its worktree, `C-c f d` its diff and `C-c f x` clears finished runs (the
+  worktrees of those older than `workflows.keep_finished_days`). `C-c f n`, `C-c f e` and `C-c f V`
   are `workflow: new`, `edit definition` and `validate`. A run waiting at a gate or failed marks its
   task as needing you. A run survives a restart of bongos; a run that was running comes back
-  interrupted and waits for `resume`. Runs do not execute yet: the node runners are not
-  connected to the engine in this build, so `workflow: run` refuses with "Workflow runs are not
-  connected to an agent runner yet" and starts nothing.
+  interrupted and waits for `resume`. Runs execute: `workflow: run` starts the agent, program and
+  built-in nodes of the definition you pick, in the run's own worktree.
 - **Settings.** All under `workflows`, the main ones also on the Work page of the settings window:
   `enabled` (true), `worktrees_dir` (null), `min_free_disk_mb` (2048), `keep_finished_days` (14),
   `max_concurrent_runs` (3), `max_concurrent_sessions` (null, twice the runs), `max_parallel_branches`
@@ -914,7 +912,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "string_rectangle"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "string_rectangle", "language_extensions"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
@@ -973,12 +971,107 @@ Tools bongos uses but does not install:
 - `bun` for Bun projects, `uv` or `poetry` for those projects' environments (bongos finds the
   environments they made; it does not create them), and the project's own Biome.
 
+## Language extensions
+
+A language bongos does not ship can come from a language extension, built from a git repository
+on your machine. There is no marketplace: bongos carries a short list of extensions, each pinned
+to a commit, and you can install any other repository by its URL.
+
+When you open a file of a language bongos does not know but the list does, the status bar says
+"Swift support is available" with Install, Not now (hides the offer for that language in that window
+until restart) and Don't offer again
+(adds the language to `language_extensions.never_offer`). Opening the file only reads the list;
+nothing is cloned or built until you choose Install.
+
+| Command | What it does |
+|---|---|
+| `extensions: install language` | Pick a language from the list and install it at its pinned commit |
+| `extensions: install from git` | Install a repository by URL, then a branch, tag or commit (empty for the default branch) |
+| `extensions: update` | Move an extension to its new pin, or refetch the ref you installed; `latest` leaves the pin |
+| `extensions: rebuild` | Build the same commit again, with no network for the extension itself |
+| `extensions: remove` | Unload an extension and delete its checkout, link and record |
+| `extensions: show build log` | Open the build log of an extension, of the running build, or of the last failed one |
+
+The status line shows each install as it goes ("Swift extension: building (12s)"), a failure
+with Show log and Dismiss, and "Swift installed" for a few seconds after one finishes. Installed
+extensions are also on the Extensions page (`zed: extensions`), with their source URL and short
+commit and Update, Rebuild and Remove buttons.
+
+Settings:
+
+```json
+{
+  "language_extensions": {
+    "enabled": true,
+    "offer": true,
+    "never_offer": []
+  }
+}
+```
+
+`enabled: false` turns the commands off (each then only says that language extensions are off),
+and the startup repair, the offer line and the build status item too; extensions already installed
+still load. `offer: false` turns the offer line off.
+
+Trust: an extension runs code. Its build runs on your machine, and once loaded it can download and
+start a language server. An install from the list at its pinned commit does not ask. Anything else,
+a URL not on the list, another commit of a listed repository, or an update to a new commit, asks a
+strict question naming the URL and the full commit, which only a typed `yes` or `no` answers. What
+a loaded extension may do is `granted_extension_capabilities`; its default allows any process, any
+download and any npm package:
+
+```json
+{
+  "granted_extension_capabilities": [
+    { "kind": "process:exec", "command": "*", "args": ["**"] },
+    { "kind": "download_file", "host": "*", "path": ["**"] },
+    { "kind": "npm:install", "package": "*" }
+  ]
+}
+```
+
+Tools: `git` is needed for every install. An extension with a Rust part (a `Cargo.toml`) needs
+Rust with the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`); without them the install
+stops before the build and says what to run. bongos never runs `rustup` for an
+install from git. An extension whose `zed_extension_api` is newer than this bongos supports is
+refused before the build, naming both versions. Builds run one at a time, in the background; the
+editor stays usable while one runs.
+
+Hosts, each contacted only when you run an install, update or rebuild, never at start and never on
+a timer:
+
+| Host | When |
+|---|---|
+| The extension's repository host | Install and update (`git ls-remote` and `git fetch`); a rebuild uses the local checkout |
+| The hosts of its grammar repositories (from its `extension.toml`) | Building an extension with grammars |
+| `github.com` | The first build of an extension with grammars, to download the WASI SDK (kept for later builds) |
+| Cargo's registry (`index.crates.io` and `static.crates.io` unless Cargo is configured otherwise) | Building an extension with a Rust part |
+
+A loaded extension may then download its language server from wherever it names, within
+`granted_extension_capabilities`. The test `crates/bongos_extensions/tests/idle.rs` checks the
+"never on a timer" part: a day passes with a file of a listed language open and nothing is
+contacted. The language extensions smoke run has no idle window of its own.
+
+Disk: everything is under the data directory (`~/.local/share/bongos` on Linux), in
+`extensions/git`: one checkout per extension (`git/<id>/<commit>`, with its build output), its
+install record, the build logs in `git/logs` and the lock files in `git/locks`.
+`extensions/installed/<id>` is a link to the checkout. The build output stays with the checkout,
+so a restart loads the extension again with no build. A build log is kept until that extension's
+next install, update, rebuild or remove replaces it; `extensions: remove` deletes the checkout,
+the link and the record.
+
+Before a release, a developer runs `script/bongos/check-language-list` by hand, with network: it
+fetches every listed commit, runs the preflight, builds each extension and checks its extension
+API version. No gate runs it, since it needs the network and a Rust toolchain.
+
 ## Privacy
 
 bongos's own code, and the telemetry and update checks of the language servers it runs, contact
 no host beyond what a feature needs (the JetBrains license check for the IntelliJ server). A
 project's own Gradle build is exempt: it may contact its hosts, such as services.gradle.org,
-plugins.gradle.org, Maven repositories and Artifact Registry.
+plugins.gradle.org, Maven repositories and Artifact Registry. An installed language extension's
+own code may contact hosts when its language server starts, within the capabilities granted to
+extensions.
 
 Linear (`api.linear.app`) is contacted only when `linear.enabled` is on (the default) and a token
 is set, for a linked task or a Linear command. The token is stored in the credential store and
@@ -989,6 +1082,10 @@ and the contents of masked fields (passwords) are never saved, nor is an entry o
 `emacs.save_kill_ring` to `false` turns saving off and deletes the saved ring.
 The secret hint is advisory: text from a password manager that sets no hint, from any macOS
 manager, or typed by hand is saved like any other kill. `emacs.save_kill_ring: false` turns saving off.
+
+Language extensions contact nothing on their own: no update check and no list download (the list
+is compiled in). An install, update or rebuild you run contacts only the extension's repository
+host and the hosts its build needs (see Language extensions for the table).
 
 bongos never contacts bongos.rocks. The list of kotlin-lsp builds is compiled in.
 

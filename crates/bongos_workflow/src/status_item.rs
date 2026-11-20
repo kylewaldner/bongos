@@ -70,6 +70,12 @@ pub(crate) fn changed(cx: &mut App) {
     cx.set_global(Revision(next));
 }
 
+/// How many times [`changed`] ran: tests compare it before and after.
+#[cfg(test)]
+pub(crate) fn revision(cx: &App) -> u64 {
+    cx.try_global::<Revision>().map_or(0, |revision| revision.0)
+}
+
 /// Calls `f` whenever the engine reports a change.
 pub(crate) fn observe_changes<T: 'static>(
     cx: &mut Context<T>,

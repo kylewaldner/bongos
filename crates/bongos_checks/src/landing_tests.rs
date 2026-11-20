@@ -450,7 +450,9 @@ fn landing_the_pins_stay_materialized_while_the_check_runs(cx: &mut TestAppConte
         1,
     ))
     .unwrap();
-    let pins = world.repo.location().state.join("pins");
+    // The script prints `$(pwd)`, the physical path, so compare against the canonical state dir.
+    let state = world.repo.location().state.clone();
+    let pins = std::fs::canonicalize(&state).unwrap_or(state).join("pins");
     assert!(
         log.contains(&format!("tree {}", pins.display())),
         "the check ran in the landing's copy of the tree: {log}"

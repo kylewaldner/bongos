@@ -7,7 +7,7 @@ use bongos_work_model::store::Task;
 use super::run_view_tests::engine_of;
 use super::*;
 use crate::lifecycle::RunStatus;
-use crate::runs_panel::{Filters, RunRow};
+use crate::runs_panel::{Filters, RunRow, cap_label};
 
 const SECOND: &str = "leaf-two";
 
@@ -138,4 +138,19 @@ fn rows_filter_by_task_project_and_state(cx: &mut TestAppContext) {
     cycled.cycle_state();
     assert_eq!(cycled.state, Some(RunStatus::WaitingOnYou));
     assert!(cycled.text().unwrap().contains("waiting on you"));
+}
+
+#[gpui::test]
+fn a_cap_halted_row_shows_its_reason(cx: &mut TestAppContext) {
+    let world = two_task_world();
+    let engine = engine_of(&world, cx);
+    start_task(&engine, &world, LEAF, cx);
+    let mut row = rows_of(&engine).remove(0);
+    assert_eq!(cap_label(&row), None);
+    row.cap_reason = Some("cost cap of $1.00 reached at node a".to_string());
+    assert_eq!(
+        cap_label(&row).as_deref(),
+        Some("cost cap of $1.00 reached at node a")
+    );
+    assert!(row.text().contains("cost cap of $1.00"), "{}", row.text());
 }

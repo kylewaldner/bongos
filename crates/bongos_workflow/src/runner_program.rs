@@ -165,11 +165,14 @@ pub struct ProgramSettings {
     pub max_output_mb: u64,
     pub poll_interval_minutes: u32,
     pub wait_give_up_days: u32,
+    /// `workflows.programs.allow_network`.
+    pub allow_network: bool,
 }
 
 impl Default for ProgramSettings {
     fn default() -> Self {
         Self {
+            allow_network: true,
             python: None,
             max_minutes: 10,
             max_output_mb: 10,
@@ -1019,12 +1022,15 @@ pub fn launch_env(
     let path = |path: &Path| path.to_string_lossy().into_owned();
     env.insert("BONGOS_STATE".to_string(), path(state_file));
     env.insert("BONGOS_RESULT".to_string(), path(&node.result_path()));
-    env.insert("TMPDIR".to_string(), path(&node.scratch.join("tmp")));
+    env.insert(
+        "TMPDIR".to_string(),
+        path(&node.scratch.join(crate::worktrees::SCRATCH_TMP_DIR)),
+    );
     env
 }
 
-/// The runner's clock; tests advance their own.
-pub trait Clock {
+/// The runner's clock; tests advance their own. `Send + Sync`, since the engine's runner is sent.
+pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
 }
 
@@ -1037,7 +1043,7 @@ impl Clock for SystemClock {
 }
 
 /// Whether the OS sandbox can be created for a policy in a working directory, or why not.
-pub type SandboxProbe = Arc<dyn Fn(&SandboxPolicy, &Path) -> Result<(), String>>;
+pub type SandboxProbe = Arc<dyn Fn(&SandboxPolicy, &Path) -> Result<(), String> + Send + Sync>;
 
 /// The real probe ([`Sandbox::can_create`]; on Linux a brief `bwrap` run).
 pub fn os_sandbox_probe() -> SandboxProbe {
@@ -1415,7 +1421,7 @@ impl ProgramRunner {
             ));
         }
         fs::create_dir_all(&dir).map_err(|error| io(&dir, error))?;
-        let tmp = node.scratch.join("tmp");
+        let tmp = node.scratch.join(crate::worktrees::SCRATCH_TMP_DIR);
         fs::create_dir_all(&tmp).map_err(|error| io(&tmp, error))?;
         let result_path = node.result_path();
         match fs::remove_file(&result_path) {

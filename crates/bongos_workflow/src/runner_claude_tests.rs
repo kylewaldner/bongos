@@ -621,6 +621,7 @@ fn a_valid_result_routes_through_the_runtime() {
             id: id.clone(),
             definition: definition(),
             attempt_dir: root.path().join("runs/1/attempts/1"),
+            loop_bound: 5,
         })
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);

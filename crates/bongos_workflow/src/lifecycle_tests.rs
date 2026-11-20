@@ -854,6 +854,66 @@ fn retry_fresh_refuses_a_definition_that_drops_a_completed_node() {
 }
 
 #[test]
+fn retry_fresh_replaces_a_stray_next_revision_directory() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("work", 1);
+    let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    // A crash after the copy and before `DefinitionReloaded` left this behind.
+    let attempt = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1);
+    let stray = definition_copy_dir(&attempt, 1);
+    fs::create_dir_all(&stray).unwrap();
+    fs::write(stray.join("leftover.md"), "stale\n").unwrap();
+
+    write_definition(world.profile(), "two", TWO);
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    assert!(!stray.join("leftover.md").exists());
+    assert!(stray.join(DEFINITION_FILE).is_file());
+    let events = lifecycle.runtime().events(&run).unwrap();
+    assert!(events.contains(&Event::DefinitionReloaded { rev: 1 }));
+}
+
+#[test]
+fn retry_fresh_never_removes_a_referenced_revision_directory() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("work", 2);
+    let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    write_definition(world.profile(), "two", TWO);
+    fs::write(world.profile().join("two").join("work.md"), "Second\n").unwrap();
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    fs::write(world.profile().join("two").join("work.md"), "Third\n").unwrap();
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    let attempt = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1);
+    assert_eq!(
+        fs::read_to_string(definition_copy_dir(&attempt, 1).join("work.md")).unwrap(),
+        "Second\n"
+    );
+    assert_eq!(
+        fs::read_to_string(definition_copy_dir(&attempt, 2).join("work.md")).unwrap(),
+        "Third\n"
+    );
+}
+
+#[test]
 fn revise_reruns_the_node_with_the_comment_and_approve_routes_on() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();
@@ -1200,13 +1260,21 @@ fn a_second_start_is_refused_through_can_start_run(cx: &mut TestAppContext) {
     let run = cx
         .update(|cx| engine.start_in(StartRequest::new(LEAF), &world.tree, cx))
         .unwrap();
+    // The start ticks once, so its first node is already running.
     assert_eq!(
         seen.borrow().as_slice(),
-        [WorkflowEvent::Changed {
-            run: run.clone(),
-            task_id: LEAF.to_string(),
-            state: RunStatus::Queued,
-        }]
+        [
+            WorkflowEvent::Changed {
+                run: run.clone(),
+                task_id: LEAF.to_string(),
+                state: RunStatus::Queued,
+            },
+            WorkflowEvent::Changed {
+                run: run.clone(),
+                task_id: LEAF.to_string(),
+                state: RunStatus::Running,
+            }
+        ]
     );
     engine.lifecycle().tick();
 
@@ -1271,6 +1339,8 @@ fn the_engine_reports_the_worktree_of_the_active_run(cx: &mut TestAppContext) {
 mod completion_tests;
 #[path = "enable_tests.rs"]
 mod enable_tests;
+#[path = "engine_tests.rs"]
+mod engine_tests;
 #[path = "gates_tests.rs"]
 mod gates_tests;
 #[path = "outcomes_tests.rs"]
@@ -1284,43 +1354,635 @@ mod runs_panel_tests;
 #[path = "task_link_tests.rs"]
 mod task_link_tests;
 
-#[gpui::test]
-fn the_app_engine_refuses_a_start_while_no_runner_is_connected(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        let store = SettingsStore::test(cx);
-        cx.set_global(store);
-        WorkflowsSettings::register(cx);
-    });
+#[test]
+fn a_lifecycle_binds_each_attempt_to_its_worktree_and_unbinds_at_a_restart() {
+    use crate::dispatch_tests::Recorder;
     let world = World::new();
-    let engine = WorkflowEngine::new(world.dirs.clone());
-    let runs_dir = world.tree.projects[0].task.children[0].dir.join("runs");
-    let todos_before = world.tree.projects[0].task.children[0]
-        .file
-        .as_ref()
-        .unwrap()
-        .todos
-        .clone();
-
-    let refusal = cx
-        .update(|cx| engine.start_in(StartRequest::new(LEAF), &world.tree, cx))
-        .unwrap_err();
-
-    assert_eq!(refusal.kind, RefusalKind::RunnerNotConnected);
-    assert!(
-        refusal
-            .to_string()
-            .starts_with("Workflow runs are not connected to an agent runner yet.")
-    );
-    assert!(!runs_dir.exists());
-    assert!(engine.active_run_id(LEAF).is_none());
+    let recorder = Recorder::default();
+    let worktrees = DirWorktrees {
+        root: world.root.join("runs"),
+        error: world.worktree_error.clone(),
+    };
+    let mut lifecycle = Lifecycle::new(recorder.clone(), Box::new(worktrees), world.settings());
+    let run = world
+        .start_with(&mut lifecycle, StartRequest::new(LEAF), None)
+        .unwrap();
+    let first = lifecycle.worktree(&run).unwrap().clone();
     assert_eq!(
-        world.tree.projects[0].task.children[0]
-            .file
-            .as_ref()
-            .unwrap()
-            .todos,
-        todos_before
+        recorder.lines(),
+        vec![format!("bind {run} {}", first.path.display())]
+    );
+
+    lifecycle.restart(&run, &world.dirs, None).unwrap();
+    let second = lifecycle.worktree(&run).unwrap().clone();
+    assert_ne!(first.path, second.path);
+    assert_eq!(
+        recorder.lines()[1..],
+        [
+            format!("unbind {run}"),
+            format!("bind {run} {}", second.path.display())
+        ]
     );
 }
+
+/// Starts `workflow` in a lifecycle of its own, lets `drive` move it, and drops the lifecycle (a
+/// quit without the `Interrupted` record). The run's files stay on disk in the world.
+fn seed(
+    world: &World,
+    workflow: &str,
+    drive: impl FnOnce(&mut Lifecycle<FakeRunner>, &str),
+) -> String {
+    let mut lifecycle = world.lifecycle();
+    let run = world
+        .start(&mut lifecycle, with_workflow(workflow))
+        .unwrap();
+    drive(&mut lifecycle, &run);
+    run
+}
+
+fn mid_node(lifecycle: &mut Lifecycle<FakeRunner>, _run: &str) {
+    settle(lifecycle);
+}
+
+fn run_dir_of(world: &World, run: &str) -> PathBuf {
+    world.root.join("work/app/tasks/login/runs").join(run)
+}
+
+fn events_of(world: &World, run: &str) -> PathBuf {
+    attempt_dir(&run_dir_of(world, run), 1).join("events.jsonl")
+}
+
+fn sleeper() -> crate::process::NodeProcess {
+    let mut command = std::process::Command::new("sleep");
+    command.arg("60");
+    crate::process::NodeProcess::spawn(
+        command,
+        std::process::Stdio::null(),
+        std::process::Stdio::null(),
+        std::process::Stdio::null(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn load_runs_loads_a_gate_a_mid_node_run_and_an_ended_run() {
+    let world = World::new();
+    let gate = seed(&world, "reviewed", |lifecycle, _| {
+        lifecycle
+            .runtime_mut()
+            .runner_mut()
+            .script("work", json!({ "summary": "draft", "verdict": "ship" }));
+        settle(lifecycle);
+        finish_all(lifecycle);
+    });
+    let mid = seed(&world, "single", mid_node);
+    let ended = seed(&world, "single", |lifecycle, _| {
+        settle(lifecycle);
+        finish_all(lifecycle);
+    });
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded.len(), 3, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+
+    let gate_state = lifecycle.state(&gate).unwrap();
+    assert_eq!(gate_state.open_gates.len(), 1);
+    assert!(gate_state.interrupted.is_empty());
+    let mid_state = lifecycle.state(&mid).unwrap();
+    assert_eq!(mid_state.interrupted.len(), 1);
+    assert!(mid_state.running.is_empty());
+    assert_eq!(lifecycle.status(&ended), Some(RunStatus::Succeeded));
+    // Each run is bound to its attempt's worktree, and nothing resumed by itself.
+    assert!(lifecycle.worktree(&mid).unwrap().path.ends_with("run"));
+    assert_eq!(lifecycle.task_of(&mid), Some(LEAF));
+    lifecycle.tick();
+    assert!(lifecycle.runtime().runner().started.is_empty());
+}
+
+#[test]
+fn load_runs_kills_a_leftover_process_with_a_matching_start_time() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let mut process = sleeper();
+    let record = process.record();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::process::start_time(record.pid).is_none() {
+        assert!(std::time::Instant::now() < deadline, "no start time");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let record = process.record();
+    let mut log = Event::Created.to_line();
+    log.push_str(
+        &Event::NodeStarted {
+            key: NodeKey::new("work", 1),
+            try_number: 1,
+            pid: record.pid,
+            pid_start_time: record.start_time,
+        }
+        .to_line(),
+    );
+    fs::write(events_of(&world, &run), log).unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(
+        report.orphans,
+        vec![(
+            run.clone(),
+            vec![(
+                NodeKey::new("work", 1),
+                crate::process::OrphanOutcome::Killed
+            )]
+        )]
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !process.has_exited() {
+        assert!(std::time::Instant::now() < deadline, "not killed");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
+}
+
+#[test]
+fn load_runs_skips_a_cleared_run_and_a_corrupt_record() {
+    let world = World::new();
+    let cleared = seed(&world, "single", mid_node);
+    let corrupt = seed(&world, "single", mid_node);
+    let kept = seed(&world, "single", mid_node);
+    fs::write(run_dir_of(&world, &cleared).join("cleared"), "").unwrap();
+    fs::write(run_dir_of(&world, &corrupt).join("run.toml"), "not = [toml").unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![kept]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(report.skipped[0].0.ends_with(&corrupt));
+    assert!(lifecycle.state(&cleared).is_none());
+    assert!(lifecycle.state(&corrupt).is_none());
+}
+
+#[test]
+fn load_runs_skips_a_record_without_an_event_log() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    fs::remove_file(events_of(&world, &run)).unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert!(report.loaded.is_empty());
+    assert!(report.skipped[0].1.contains("events.jsonl"), "{report:?}");
+    // Nothing was created for it either.
+    assert!(!events_of(&world, &run).exists());
+}
+
+#[test]
+fn load_runs_skips_a_damaged_log_and_loads_the_rest() {
+    let world = World::new();
+    let damaged = seed(&world, "single", mid_node);
+    let good = seed(&world, "single", mid_node);
+    fs::write(events_of(&world, &damaged), "not json\n").unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![good]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(report.skipped[0].0.ends_with(&damaged));
+    assert!(lifecycle.state(&damaged).is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn load_runs_skips_a_log_that_cannot_be_opened_and_loads_the_rest() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    let locked = seed(&world, "single", mid_node);
+    let good = seed(&world, "single", mid_node);
+    let path = events_of(&world, &locked);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    // Root ignores the mode and opens it anyway; the check below only holds for others.
+    let writable = fs::OpenOptions::new().append(true).open(&path).is_ok();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    if writable {
+        return;
+    }
+    assert_eq!(report.loaded, vec![good]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(lifecycle.state(&locked).is_none());
+}
+
+#[test]
+fn load_runs_skips_a_run_id_repeated_in_another_task_directory() {
+    let mut world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let other = world.root.join("work/app/tasks/other");
+    fs::create_dir_all(other.join("runs")).unwrap();
+    let copy = other.join("runs").join(&run);
+    fs::create_dir_all(&copy).unwrap();
+    let source = run_dir_of(&world, &run);
+    let mut stack = vec![source.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let target = copy.join(path.strip_prefix(&source).unwrap());
+            if path.is_dir() {
+                fs::create_dir_all(&target).unwrap();
+                stack.push(path);
+            } else {
+                fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+    let mut file = TaskFile::new("Other", Kind::PrShip);
+    file.id = "other".to_string();
+    let other_task = task(other, file, Vec::new());
+    world.tree.projects[0].task.children.push(other_task);
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![run.clone()]);
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert_eq!(lifecycle.all_runs(), vec![run]);
+}
+
+#[test]
+fn load_runs_takes_the_revision_from_the_log_not_from_a_stray_directory() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let attempt = attempt_dir(&run_dir_of(&world, &run), 1);
+    let copy = attempt.join("definition/1");
+    fs::create_dir_all(&copy).unwrap();
+    fs::write(copy.join(DEFINITION_FILE), "broken").unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![run.clone()], "{report:?}");
+    assert_eq!(lifecycle.state(&run).unwrap().definition_rev, None);
+}
+
+#[test]
+fn load_runs_with_no_runs_directory_loads_and_writes_nothing() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert!(report.loaded.is_empty() && report.skipped.is_empty());
+    assert!(!world.root.join("work").exists());
+    assert!(!world.root.join("runs").exists());
+}
+
+#[test]
+fn load_runs_twice_is_refused_as_a_duplicate() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    match lifecycle.load_runs(&world.tree) {
+        Err(crate::runtime::RuntimeError::Duplicate(id)) => assert_eq!(id, run),
+        other => panic!("expected Duplicate, got {other:?}"),
+    }
+    assert_eq!(lifecycle.all_runs(), vec![run]);
+}
+
+#[test]
+fn resume_after_load_reruns_only_the_interrupted_key() {
+    let world = World::new();
+    let run = seed(&world, "two", |lifecycle, _| {
+        settle(lifecycle);
+        lifecycle.runtime_mut().runner_mut().release_all();
+        settle(lifecycle);
+        assert_eq!(started_nodes(lifecycle), ["plan", "work"]);
+    });
+
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(
+        lifecycle.state(&run).unwrap().interrupted.keys().next(),
+        Some(&NodeKey::new("work", 1))
+    );
+    settle(&mut lifecycle);
+    assert!(started_nodes(&lifecycle).is_empty());
+    lifecycle.resume(&run).unwrap();
+    settle(&mut lifecycle);
+    assert_eq!(started_nodes(&lifecycle), ["work"]);
+
+    // The resumed run finishes, with `plan`'s result kept from before the relaunch.
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
+    assert_eq!(started_nodes(&lifecycle), ["work"]);
+    let state = lifecycle.state(&run).unwrap();
+    assert!(state.interrupted.is_empty());
+    assert!(
+        state
+            .finished
+            .iter()
+            .any(|finished| finished.key == NodeKey::new("plan", 1) && finished.succeeded())
+    );
+}
+
+const NETTED: &str = r#"
+schema = 1
+name = "netted"
+start = "fetch"
+
+[nodes.fetch]
+kind = "program"
+script = "fetch.py"
+permissions = { network = ["example.org"] }
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+#[test]
+fn restart_and_fresh_retry_refuse_a_network_entry_when_allow_network_is_off() {
+    let world = World::new();
+    write_definition(world.profile(), "netted", NETTED);
+    fs::write(
+        world.profile().join("netted").join("fetch.py"),
+        "print('ok')\n",
+    )
+    .unwrap();
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("fetch", 1);
+    let run = world
+        .start(&mut lifecycle, with_workflow("netted"))
+        .unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    // `programs.allow_network = false` now: neither a restart nor a fresh retry may run it.
+    let mut settings = world.settings();
+    settings.programs.allow_network = false;
+    lifecycle.set_settings(settings);
+    let refusal = lifecycle.restart(&run, &world.dirs, None).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Invalid, "{refusal}");
+    assert!(refusal.to_string().contains("allow_network"), "{refusal}");
+    let refusal = lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Invalid, "{refusal}");
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+    assert_eq!(lifecycle.record(&run).unwrap().attempts.len(), 1);
+}
+
+#[test]
+fn quit_stops_in_flight_work_and_records_interrupted() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    settle(&mut lifecycle);
+    assert_eq!(started_nodes(&lifecycle), ["work"]);
+
+    lifecycle.quit();
+    let events = lifecycle.runtime().events(&run).unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Interrupted { keys } if keys == &[NodeKey::new("work", 1)]
+        )),
+        "{events:?}"
+    );
+    assert!(!lifecycle.tick(), "nothing starts after a quit");
+}
+
+fn seed_succeeded(world: &World) -> String {
+    seed(world, "single", |lifecycle, _| {
+        settle(lifecycle);
+        finish_all(lifecycle);
+    })
+}
+
+fn seed_cancelled(world: &World) -> String {
+    seed(world, "single", |lifecycle, run| {
+        settle(lifecycle);
+        lifecycle.cancel(run).unwrap();
+    })
+}
+
+fn seed_failed(world: &World) -> String {
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("work", 1);
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    run
+}
+
+fn sorted(mut runs: Vec<String>) -> Vec<String> {
+    runs.sort();
+    runs
+}
+
+#[test]
+fn clear_finished_hides_succeeded_and_cancelled_runs_and_survives_a_reload() {
+    let world = World::new();
+    let succeeded = seed_succeeded(&world);
+    let cancelled = seed_cancelled(&world);
+    let failed = seed_failed(&world);
+    let active = seed(&world, "single", mid_node);
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded.len(), 4, "{report:?}");
+    assert_eq!(lifecycle.status(&failed), Some(RunStatus::Failed));
+
+    let outcome = lifecycle.clear_finished();
+    assert_eq!(
+        sorted(outcome.cleared.clone()),
+        sorted(vec![succeeded.clone(), cancelled.clone()])
+    );
+    assert!(outcome.failed.is_empty());
+    assert_eq!(
+        sorted(lifecycle.all_runs()),
+        sorted(vec![failed.clone(), active.clone()])
+    );
+    assert!(lifecycle.state(&succeeded).is_none());
+    assert!(lifecycle.state(&cancelled).is_none());
+    for run in [&succeeded, &cancelled] {
+        assert!(run_dir_of(&world, run).join("cleared").is_file());
+    }
+    for run in [&failed, &active] {
+        assert!(!run_dir_of(&world, run).join("cleared").exists());
+    }
+
+    // Twice is a no-op.
+    assert_eq!(lifecycle.clear_finished(), Default::default());
+
+    // A relaunch does not bring them back.
+    let mut fresh = world.lifecycle();
+    let report = fresh.load_runs(&world.tree).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(sorted(report.loaded), sorted(vec![failed, active]));
+}
+
+#[test]
+fn clear_finished_with_nothing_to_clear_writes_nothing() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    assert_eq!(lifecycle.clear_finished(), Default::default());
+    assert!(!world.root.join("work/app/tasks/login/runs").exists());
+
+    let active = seed(&world, "single", mid_node);
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(lifecycle.clear_finished(), Default::default());
+    assert!(!run_dir_of(&world, &active).join("cleared").exists());
+    assert_eq!(lifecycle.all_runs(), vec![active]);
+}
+
+#[test]
+fn a_failed_marker_write_leaves_the_run_listed() {
+    let world = World::new();
+    let blocked = seed_succeeded(&world);
+    let fine = seed_cancelled(&world);
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    // A directory where the marker goes: the write fails.
+    fs::create_dir(run_dir_of(&world, &blocked).join("cleared")).unwrap();
+
+    let outcome = lifecycle.clear_finished();
+    assert_eq!(outcome.cleared, vec![fine.clone()]);
+    assert_eq!(outcome.failed.len(), 1);
+    assert_eq!(outcome.failed[0].0, blocked);
+    assert_eq!(lifecycle.status(&blocked), Some(RunStatus::Succeeded));
+    assert!(lifecycle.state(&fine).is_none());
+}
+
+#[test]
+fn find_cleared_lists_the_finished_cleared_runs_with_their_worktrees() {
+    let world = World::new();
+    let succeeded = seed_succeeded(&world);
+    let active = seed(&world, "single", mid_node);
+    // Nothing is cleared yet.
+    assert!(crate::lifecycle::find_cleared(&world.tree).is_empty());
+
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    let worktree = lifecycle.worktree(&succeeded).unwrap().clone();
+    assert_eq!(lifecycle.clear_finished().cleared, vec![succeeded.clone()]);
+    // A marker on a run that is not finished never offers its worktree.
+    fs::write(run_dir_of(&world, &active).join("cleared"), "").unwrap();
+
+    let found = crate::lifecycle::find_cleared(&world.tree);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].id, succeeded);
+    assert_eq!(found[0].status, RunStatus::Succeeded);
+    assert_eq!(found[0].worktree, worktree);
+    assert_eq!(found[0].dir, run_dir_of(&world, &succeeded));
+    assert_eq!(
+        found[0].finished,
+        fs::metadata(events_of(&world, &succeeded))
+            .unwrap()
+            .modified()
+            .unwrap()
+    );
+}
+
+#[test]
+fn the_engine_dump_names_each_run_with_its_state_and_work_in_flight() {
+    let world = World::new();
+    let ended = seed_succeeded(&world);
+    let mut lifecycle = world.lifecycle();
+    lifecycle.load_runs(&world.tree).unwrap();
+    let mut settings = world.settings();
+    settings.limits.run_max_cost_usd = Some(5.0);
+    lifecycle.set_settings(settings);
+    let running = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+
+    // Started, not yet ticked: queued first.
+    let text = lifecycle.dump_text();
+    assert!(text.contains("runs: 2"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "run {running} task {LEAF} workflow single: queued;"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("queue position 1"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "run {ended} task {LEAF} workflow single: succeeded;"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("tries in flight: none"), "{text}");
+
+    settle(&mut lifecycle);
+    let text = lifecycle.dump_text();
+    assert!(
+        text.contains(&format!("run {running} task {LEAF} workflow single: running; in flight: work#1; not queued; cost $0.00, cap $5.00")),
+        "{text}"
+    );
+    assert!(text.contains("agent (claude): 1"), "{text}");
+}
+
+#[test]
+fn an_edited_gate_field_is_what_the_next_node_state_holds() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    lifecycle
+        .runtime_mut()
+        .runner_mut()
+        .script("work", json!({ "summary": "done", "verdict": "hold" }));
+    let run = world
+        .start(&mut lifecycle, with_workflow("reviewed"))
+        .unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    let key = NodeKey::new("work", 1);
+
+    let fields = lifecycle.gate_fields(&run, &key);
+    let named: Vec<(&str, &serde_json::Value)> = fields
+        .iter()
+        .map(|field| (field.name.as_str(), &field.value))
+        .collect();
+    assert_eq!(
+        named,
+        vec![("summary", &json!("done")), ("verdict", &json!("hold"))]
+    );
+
+    lifecycle
+        .approve(&run, &key, Some(("verdict".to_string(), json!("ship"))))
+        .unwrap();
+    let state = lifecycle.state(&run).unwrap();
+    let doc = bongos_workflow_model::state_doc::build(
+        &[],
+        &state,
+        bongos_workflow_model::state_doc::RunIdentity {
+            id: run.clone(),
+            workflow: "reviewed".to_string(),
+            todo: bongos_workflow_model::record::TodoRef {
+                index: 1,
+                name: "implement".to_string(),
+            },
+            task_id: LEAF.to_string(),
+            task_dir: world.root.clone(),
+            branch: TASK_BRANCH.to_string(),
+            run_branch: "run".to_string(),
+        },
+        &toml::Table::new(),
+        bongos_workflow_model::state_doc::Paths {
+            worktree: world.root.clone(),
+            scratch: world.root.clone(),
+        },
+    );
+    let value: serde_json::Value = serde_json::from_str(&doc.to_json()).unwrap();
+    assert_eq!(
+        value["results"]["work"],
+        json!({ "summary": "done", "verdict": "ship" })
+    );
+}
+
 #[path = "landing_tests.rs"]
 mod landing_tests;

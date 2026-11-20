@@ -2050,6 +2050,7 @@ dependencies = [
  "bongos_chat",
  "bongos_checks",
  "bongos_emacs",
+ "bongos_extensions",
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",
@@ -2407,6 +2408,59 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-width",
+]
+
+[[package]]
+name = "bongos_extensions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bongos_extensions",
+ "bongos_extensions_model",
+ "bongos_minibuffer",
+ "bongos_net",
+ "chrono",
+ "command_palette_hooks",
+ "editor",
+ "extension",
+ "extension_host",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "gpui_platform",
+ "http_client",
+ "language",
+ "log",
+ "parking_lot",
+ "paths",
+ "project",
+ "release_channel",
+ "reqwest_client",
+ "schemars 1.0.4",
+ "semver",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "tempfile",
+ "toml 0.8.23",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "bongos_extensions_model"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_net",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -2842,6 +2896,7 @@ dependencies = [
  "anyhow",
  "bongos_builder_model",
  "bongos_chat",
+ "bongos_minibuffer",
  "bongos_project_repo",
  "bongos_project_repo_model",
  "bongos_work",
@@ -6063,6 +6118,8 @@ name = "extensions_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_extensions",
+ "bongos_extensions_model",
  "cloud_api_types",
  "command_palette_hooks",
  "editor",

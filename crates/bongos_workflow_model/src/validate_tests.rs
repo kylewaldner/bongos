@@ -858,6 +858,32 @@ fn program_permissions_ceiling() {
 }
 
 #[test]
+fn the_remote_placeholder_is_a_network_entry_that_allow_network_governs() {
+    let text = mutate("network = []", r#"network = ["@remote"]"#);
+    assert_no_errors(&text);
+    let closed = ValidationContext {
+        allow_network: false,
+        ..context()
+    };
+    assert_error_with(
+        &text,
+        &closed,
+        Some("test"),
+        "permissions = ",
+        "network permission (@remote) is not allowed: workflows.programs.allow_network is false",
+    );
+    for bad in ["@remotes", "@", "@Remote", "@host"] {
+        let text = mutate("network = []", &format!(r#"network = ["{bad}"]"#));
+        assert_error(
+            &text,
+            Some("test"),
+            "permissions = ",
+            &format!("network entry '{bad}' is not known"),
+        );
+    }
+}
+
+#[test]
 fn node_names_are_branch_and_path_safe() {
     for bad in ["Fix", "fix me", "fix/me", "-fix", "fix.me", "fïx"] {
         let header = format!("[nodes.\"{bad}\"]");
@@ -1149,5 +1175,32 @@ fn checks_items_from_must_name_an_earlier_node() {
         Some("check"),
         r#"use = "checks""#,
         "`with.items_from` names 'report', which does not run before 'check'",
+    );
+}
+
+#[test]
+fn a_loop_bound_stands_in_for_max_passes_on_a_cycle() {
+    let text = mutate(
+        r#"to = "fix", max_passes = 3, on_bound = "stuck""#,
+        r#"to = "fix""#,
+    );
+    let definition = parse(&text).unwrap();
+    let bounded = ValidationContext {
+        loop_bound: Some(5),
+        ..context()
+    };
+    let diagnostics = validate(&definition, &bounded);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("cycle with no bounded edge")),
+        "{diagnostics:?}"
+    );
+    let unset = validate(&definition, &context());
+    assert!(
+        unset
+            .iter()
+            .any(|d| d.message.contains("cycle with no bounded edge")),
+        "{unset:?}"
     );
 }

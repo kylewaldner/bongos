@@ -20,6 +20,28 @@ pub struct ExtensionSettingsContent {
     pub auto_update_extensions: HashMap<Arc<str>, bool>,
     /// The capabilities granted to extensions.
     pub granted_extension_capabilities: Option<Vec<ExtensionCapabilityContent>>,
+    /// Installing language extensions from git.
+    pub language_extensions: Option<LanguageExtensionsSettingsContent>,
+}
+
+/// The `language_extensions` settings.
+#[with_fallible_options]
+#[derive(Debug, PartialEq, Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct LanguageExtensionsSettingsContent {
+    /// Whether installing language extensions from git is on. While false, the
+    /// `extensions:` commands are hidden and only say that language extensions are off.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// Whether bongos offers to install a language extension when you open a file of a
+    /// language it does not know.
+    ///
+    /// Default: true
+    pub offer: Option<bool>,
+    /// Languages bongos never offers an extension for.
+    ///
+    /// Default: []
+    pub never_offer: Option<Vec<String>>,
 }
 
 /// A capability for an extension.
