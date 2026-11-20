@@ -1,18 +1,23 @@
 //! The send path against the fake CLIs in a real PTY (the harness of `runtime_tests`): one paste
 //! and one Enter, no Enter without `submit`, nothing written without bracketed paste, the text kept
 //! on a refusal, the names a send and a title give, and `chat: send region` dispatched by name.
+//! Also the Enter's timing (the settle wait, the submit delay without a channel) and, on a live
+//! channel, the confirmation of the submit, its one retry and the sends that are not retried.
 
 #![cfg(unix)]
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use bongos_chat_model::channel::report::Event;
 use bongos_chat_model::{Agent, NamedBy, read_record, record_path, write_record};
 use editor::{Editor, MultiBufferOffset, SelectionEffects};
 use fs::RealFs;
 use gpui::{
-    AppContext as _, Entity, Focusable as _, TestAppContext, UpdateGlobal as _, VisualTestContext,
+    AppContext as _, Entity, Focusable as _, Task, TestAppContext, UpdateGlobal as _,
+    VisualTestContext,
 };
 use project::Project;
 use settings::SettingsStore;
@@ -20,8 +25,9 @@ use tempfile::TempDir;
 use workspace::notifications::NotificationId;
 use workspace::{MultiWorkspace, Workspace};
 
-use crate::runtime_tests::{Harness, STARTUP, harness, wait_for};
-use crate::{ChatRuntime, ChatToast, SendError, SendOptions, Sent, send};
+use crate::channel_runtime_tests::{Channels, channels, event_report, needs_input};
+use crate::runtime_tests::{Harness, STARTUP, WITHIN, harness, wait_for};
+use crate::{ChatRuntime, ChatState, ChatToast, SendError, SendOptions, Sent, Source, send};
 
 /// A multi-line prompt with a blank line, a tab, quotes and a fence.
 const PROMPT: &str = "Fix the backfill for invoices\n\n\tkeep the \"dry run\" flag\n```rust\nfn main() {}\n```\nthen stop";
@@ -91,6 +97,7 @@ async fn test_a_multiline_send_is_one_paste_and_one_enter(cx: &mut TestAppContex
         sent,
         Sent {
             submitted: true,
+            confirmed: false,
             named: Some("Fix the backfill for invoices".to_string()),
         }
     );
@@ -161,16 +168,233 @@ async fn test_two_sends_at_once_do_not_interleave(cx: &mut TestAppContext) {
     .await;
 }
 
-#[gpui::test]
-async fn test_a_chat_that_stops_before_its_enter(cx: &mut TestAppContext) {
-    let (h, _input_dir, input) = send_harness(cx, &[]).await;
+fn set_submit_delay(cx: &mut TestAppContext, ms: u64) {
     cx.update(|cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
-                content.chats.get_or_insert_default().submit_delay_ms = Some(1500);
+                content.chats.get_or_insert_default().submit_delay_ms = Some(ms);
             });
         });
     });
+}
+
+#[gpui::test]
+async fn test_a_large_paste_into_a_slow_reader_is_one_paste_and_one_enter(cx: &mut TestAppContext) {
+    let (h, _input_dir, input) = send_harness(cx, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    written(&h, &id, cx);
+
+    // The fake reads one byte at a time and answers every line, so it is still reading and
+    // printing long after the paste was written.
+    let mut text: String = (0..16)
+        .map(|line| format!("step {line:02} of the plan\n"))
+        .collect();
+    text.push_str("then stop");
+    let sent = send_text(&id, &text, true, cx).await.unwrap();
+    assert!(sent.submitted);
+    assert!(!sent.confirmed);
+    assert_eq!(written(&h, &id, cx), vec![bracketed(&text), b"\r".to_vec()]);
+    let mut expected = bracketed(&text);
+    expected.push(b'\r');
+    let expected = octal(&expected);
+    wait_for(
+        cx,
+        "the whole paste and its Enter to reach the fake",
+        STARTUP,
+        |_| std::fs::read_to_string(&input).unwrap_or_default() == expected,
+    )
+    .await;
+    // No second Enter follows.
+    cx.executor().timer(Duration::from_millis(300)).await;
+    cx.run_until_parked();
+    assert!(written(&h, &id, cx).is_empty());
+}
+
+#[gpui::test]
+async fn test_the_settle_wait_runs_without_a_channel(cx: &mut TestAppContext) {
+    let (h, _input_dir, _input) = send_harness(cx, &[]).await;
+    set_submit_delay(cx, 0);
+    let id = h.start(Agent::Codex, cx).await;
+    written(&h, &id, cx);
+    let start = Instant::now();
+    let sent = send_text(&id, PROMPT, true, cx).await.unwrap();
+    assert!(start.elapsed() >= Duration::from_millis(100));
+    assert!(sent.submitted);
+    assert!(!sent.confirmed);
+    assert_eq!(
+        written(&h, &id, cx),
+        vec![bracketed(PROMPT), b"\r".to_vec()]
+    );
+}
+
+#[gpui::test]
+async fn test_without_a_channel_the_enter_waits_the_submit_delay(cx: &mut TestAppContext) {
+    let (h, _input_dir, _input) = send_harness(cx, &[]).await;
+    set_submit_delay(cx, 1200);
+    let id = h.start(Agent::Claude, cx).await;
+    written(&h, &id, cx);
+    let start = Instant::now();
+    let sent = send_text(&id, "Fix it", true, cx).await.unwrap();
+    assert!(start.elapsed() >= Duration::from_millis(1200));
+    assert!(!sent.confirmed);
+    assert_eq!(
+        written(&h, &id, cx),
+        vec![bracketed("Fix it"), b"\r".to_vec()]
+    );
+}
+
+#[test]
+fn test_the_settle_limit_grows_with_the_text() {
+    assert_eq!(crate::send::settle_limit(0), Duration::from_secs(1));
+    assert_eq!(
+        crate::send::settle_limit(256 * 1024),
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        crate::send::settle_limit(128 * 1024),
+        Duration::from_millis(1500)
+    );
+    assert_eq!(
+        crate::send::settle_limit(100 * 1024 * 1024),
+        Duration::from_secs(30)
+    );
+}
+
+/// A Claude chat on a live channel, idle from its `session_start` report, with `confirm_wait` and
+/// a submit delay far longer than any wait the test allows.
+async fn live_chat(confirm_wait: Duration, cx: &mut TestAppContext) -> (Channels, String, String) {
+    let c = channels(cx).await;
+    set_submit_delay(cx, 60_000);
+    c.h.runtime
+        .update(cx, |runtime, _| runtime.set_confirm_wait(confirm_wait));
+    let (id, token) = c.start_live(cx).await;
+    written(&c.h, &id, cx);
+    (c, id, token)
+}
+
+fn start_send(c: &Channels, id: &str, cx: &mut TestAppContext) -> Task<Result<Sent, SendError>> {
+    c.h.runtime.update(cx, |runtime, cx| {
+        runtime.send(id, PROMPT.to_string(), SendOptions { submit: true }, cx)
+    })
+}
+
+/// Waits until `count` Enters were written after the paste; `log` keeps everything written.
+async fn wait_enters(
+    c: &Channels,
+    id: &str,
+    count: usize,
+    log: &RefCell<Vec<Vec<u8>>>,
+    cx: &mut TestAppContext,
+) {
+    wait_for(cx, "the Enter", WITHIN * 3, |cx| {
+        log.borrow_mut().extend(written(&c.h, id, cx));
+        log.borrow().iter().filter(|bytes| *bytes == b"\r").count() == count
+    })
+    .await;
+}
+
+fn state_of(c: &Channels, id: &str, cx: &mut TestAppContext) -> (ChatState, Source) {
+    c.h.runtime.read_with(cx, |runtime, _| {
+        let chat = runtime.live(id).unwrap();
+        (chat.state(), chat.state_source())
+    })
+}
+
+#[gpui::test]
+async fn test_a_reported_submit_confirms_the_send(cx: &mut TestAppContext) {
+    let (c, id, token) = live_chat(Duration::from_secs(10), cx).await;
+    let task = start_send(&c, &id, cx);
+    let log = RefCell::new(Vec::new());
+    // Well before the submit delay: a chat with a channel does not wait for it.
+    wait_enters(&c, &id, 1, &log, cx).await;
+    c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
+    let sent = task.await.unwrap();
+    assert!(sent.submitted);
+    assert!(sent.confirmed);
+    log.borrow_mut().extend(written(&c.h, &id, cx));
+    assert_eq!(*log.borrow(), vec![bracketed(PROMPT), b"\r".to_vec()]);
+}
+
+#[gpui::test]
+async fn test_an_unreported_submit_is_retried_once_then_not_confirmed(cx: &mut TestAppContext) {
+    let (c, id, _token) = live_chat(Duration::from_millis(300), cx).await;
+    let error = start_send(&c, &id, cx).await.unwrap_err();
+    let SendError::NotConfirmed { name } = &error else {
+        panic!("expected NotConfirmed, got {error:?}");
+    };
+    assert_eq!(
+        error.to_string(),
+        format!("Pasted into {name}, but the submit was not confirmed; check the chat")
+    );
+    assert_eq!(
+        written(&c.h, &id, cx),
+        vec![bracketed(PROMPT), b"\r".to_vec(), b"\r".to_vec()]
+    );
+    // The text reached the CLI: the chat counts as prompted.
+    assert!(read_record(&record_path(&c.h.scope, &id)).unwrap().prompted);
+    cx.executor().timer(Duration::from_millis(400)).await;
+    cx.run_until_parked();
+    assert!(written(&c.h, &id, cx).is_empty());
+}
+
+#[gpui::test]
+async fn test_a_submit_reported_after_the_retry_confirms(cx: &mut TestAppContext) {
+    let (c, id, token) = live_chat(Duration::from_secs(2), cx).await;
+    let task = start_send(&c, &id, cx);
+    let log = RefCell::new(Vec::new());
+    wait_enters(&c, &id, 2, &log, cx).await;
+    c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
+    assert!(task.await.unwrap().confirmed);
+    log.borrow_mut().extend(written(&c.h, &id, cx));
+    assert_eq!(
+        *log.borrow(),
+        vec![bracketed(PROMPT), b"\r".to_vec(), b"\r".to_vec()]
+    );
+}
+
+#[gpui::test]
+async fn test_a_send_into_a_running_turn_does_not_wait(cx: &mut TestAppContext) {
+    let (c, id, token) = live_chat(Duration::from_secs(60), cx).await;
+    c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
+    assert_eq!(state_of(&c, &id, cx), (ChatState::Running, Source::Exact));
+    let start = Instant::now();
+    let sent = start_send(&c, &id, cx).await.unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert!(sent.submitted);
+    assert!(!sent.confirmed);
+    cx.executor().timer(Duration::from_millis(400)).await;
+    cx.run_until_parked();
+    assert_eq!(
+        written(&c.h, &id, cx),
+        vec![bracketed(PROMPT), b"\r".to_vec()]
+    );
+}
+
+#[gpui::test]
+async fn test_a_send_to_a_waiting_chat_gets_no_second_enter(cx: &mut TestAppContext) {
+    let (c, id, token) = live_chat(Duration::from_millis(300), cx).await;
+    c.deliver(
+        event_report(&id, &token, 2, needs_input("permission_prompt")),
+        cx,
+    );
+    assert_eq!(state_of(&c, &id, cx), (ChatState::Waiting, Source::Exact));
+    let sent = start_send(&c, &id, cx).await.unwrap();
+    assert!(sent.submitted);
+    assert!(!sent.confirmed);
+    // The paste and its Enter did not end the exact waiting state.
+    assert_eq!(state_of(&c, &id, cx), (ChatState::Waiting, Source::Exact));
+    cx.executor().timer(Duration::from_millis(400)).await;
+    cx.run_until_parked();
+    assert_eq!(
+        written(&c.h, &id, cx),
+        vec![bracketed(PROMPT), b"\r".to_vec()]
+    );
+}
+
+#[gpui::test]
+async fn test_a_chat_that_stops_before_its_enter(cx: &mut TestAppContext) {
+    let (h, _input_dir, input) = send_harness(cx, &[]).await;
+    set_submit_delay(cx, 1500);
     let id = h.start(Agent::Claude, cx).await;
     let name = record_of(&h, &id).name;
     wait_indexed(&h, &id, cx).await;

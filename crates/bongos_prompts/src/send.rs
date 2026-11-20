@@ -302,9 +302,13 @@ fn options_for(chat_id: &str, cx: &App) -> SendOptions {
     }
 }
 
-/// Whether the text reached the CLI: a success, or a paste whose Enter could not follow.
+/// Whether the text reached the CLI: a success, a paste whose Enter could not follow, or a paste
+/// whose submit the chat did not confirm.
 fn delivered(result: &Result<Sent, SendError>) -> bool {
-    matches!(result, Ok(_) | Err(SendError::NotSubmitted { .. }))
+    matches!(
+        result,
+        Ok(_) | Err(SendError::NotSubmitted { .. } | SendError::NotConfirmed { .. })
+    )
 }
 
 fn send_to(chat_id: String, request: Request, window: &mut Window, cx: &mut Context<Workspace>) {
