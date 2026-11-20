@@ -435,11 +435,12 @@ impl ChatRuntime {
             // Keyboard input from before this change does not end the new state.
             chat.seen_inputs = chat.terminal.read(cx).keyboard_input_count();
         }
-        if before.0 != after.0 {
+        if before.0 != after.0 || typed {
             chat.last_active = bongos_work_model::now();
         }
-        // Output alone, and a return to the state of the last write, leave the record alone.
-        if (before.0 != after.0 || typed) && !noise && after.0 != chat.written_state {
+        // Output alone, and a return to the state of the last write, leave the record alone;
+        // typing is activity whatever the state, written through the debounce.
+        if (typed || before.0 != after.0) && !noise && (typed || after.0 != chat.written_state) {
             self.touch_active(chat_id, cx);
         }
         if before != after || changed {
@@ -1294,9 +1295,9 @@ impl ChatRuntime {
         chat_id: &str,
         cx: &mut Context<Self>,
     ) -> Option<impl Future<Output = ()> + use<>> {
-        let (path, prompted) = self.note_active_write(chat_id)?;
+        let (path, prompted, active) = self.note_active_write(chat_id)?;
         let write = self.store.update(cx, |store, cx| {
-            store.update(path, active_change(prompted), cx)
+            store.update(path, active_change(active, prompted), cx)
         });
         Some(async move {
             if let Err(error) = write.await {
@@ -1306,14 +1307,14 @@ impl ChatRuntime {
     }
 
     /// Books an active write of `chat_id` (replacing a pending one): its record path and whether
-    /// it is prompted. `None` when the chat is not live.
-    fn note_active_write(&mut self, chat_id: &str) -> Option<(PathBuf, bool)> {
+    /// it is prompted, and its in-memory `last_active`. `None` when the chat is not live.
+    fn note_active_write(&mut self, chat_id: &str) -> Option<(PathBuf, bool, Timestamp)> {
         let chat = self.live.get_mut(chat_id)?;
         chat.pending_active_write = None;
         chat.last_active_write = Some(Instant::now());
         chat.written_state = chat.live.state;
         self.stats.active_writes += 1;
-        Some((chat.record_path.clone(), chat.prompted))
+        Some((chat.record_path.clone(), chat.prompted, chat.last_active))
     }
 
     /// The names of the chats that are running (not exited), for the quit prompt. Empty while
@@ -1357,11 +1358,11 @@ impl ChatRuntime {
                     chat.cleanup_checked = true;
                 }
                 self.kill(&id, cx);
-                let Some((path, prompted)) = self.note_active_write(&id) else {
+                let Some((path, prompted, active)) = self.note_active_write(&id) else {
                     continue;
                 };
                 writes.push(self.store.update(cx, |store, _| {
-                    store.update_reply(path, active_change(prompted))
+                    store.update_reply(path, active_change(active, prompted))
                 }));
             }
         }
@@ -1667,13 +1668,15 @@ pub(crate) fn deliver_reports(
     });
 }
 
-/// The change of a `last_active` write: the time now, and `prompted` once the chat is.
+/// The change of a `last_active` write: the chat's in-memory last activity, and `prompted` once
+/// the chat is.
 fn active_change(
+    active: Timestamp,
     prompted: bool,
 ) -> impl FnOnce(&mut bongos_chat_model::ChatRecord) -> bongos_chat_model::Result<()> + Send + 'static
 {
     move |record| {
-        record.last_active = bongos_work_model::now();
+        record.last_active = active;
         if prompted {
             record.prompted = true;
         }

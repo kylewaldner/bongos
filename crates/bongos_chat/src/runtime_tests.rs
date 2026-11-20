@@ -948,11 +948,15 @@ async fn test_typing_writes_once_and_the_timer_ending_the_turn_writes_once(
         3,
         "the timer ending the turn wrote once"
     );
-    // The memory holds the newest change, the record the last write: never older.
+    // The write carries the memory's time, so the two agree once it lands.
     let live = h
         .runtime
         .read_with(cx, |runtime, _| runtime.live_activity());
-    assert!(timestamp_utc(&live[&id]) >= timestamp_utc(&record_active(&h, &id)));
+    assert_eq!(
+        timestamp_utc(&live[&id]),
+        timestamp_utc(&record_active(&h, &id)),
+        "the write carries the memory's time"
+    );
 }
 
 #[gpui::test]

@@ -156,8 +156,8 @@ impl ChatRuntime {
                 .ok();
             let submitted = delivered?;
 
-            // The text is in the CLI's input: the record says prompted, last active, and gets the
-            // name while it has the default one, even when the Enter could not follow.
+            // The text is in the CLI's input: the record says prompted (and last active once the
+            // Enter followed), and gets the name while it has the default one, even without it.
             let name = from_prompt(&text);
             let named = Arc::new(Mutex::new(None));
             let named_in_write = named.clone();
