@@ -30,6 +30,7 @@ mod region_commands;
 mod repeat;
 pub mod snapshot_text;
 mod space;
+mod symbol_jump;
 mod transpose;
 mod words;
 mod yank;
@@ -81,6 +82,8 @@ mod region_tests;
 mod repeat_tests;
 #[cfg(test)]
 mod space_tests;
+#[cfg(test)]
+mod symbol_jump_tests;
 #[cfg(test)]
 mod transpose_tests;
 #[cfg(test)]
@@ -195,6 +198,8 @@ pub fn init(cx: &mut App) {
             cx,
             prefix_commands::negative_argument_command,
         );
+        register(editor, &weak, cx, symbol_jump::symbol_jump_next_command);
+        register(editor, &weak, cx, symbol_jump::symbol_jump_prev_command);
         prefix_arg::init_editor(editor, window.as_deref_mut(), cx);
         recenter::init_editor(cx);
         kill_ring_sink::init_editor(cx);
