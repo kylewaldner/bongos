@@ -356,8 +356,9 @@ pub struct ChatRuntime {
     active_debounce: Duration,
     bracketed_wait: Duration,
     confirm_wait: Duration,
-    /// Per chat, the last send in line and its number: a send waits until the one before it has
-    /// written its Enter, so two pastes never interleave.
+    /// Per chat, the last send in line and its number: a send waits until the one before it is
+    /// done with its confirmation (confirmed, unconfirmed or given up), so two pastes never
+    /// interleave.
     send_queues: HashMap<String, (usize, Shared<oneshot::Receiver<()>>)>,
     next_send: usize,
     /// The agent of the last chat `chat: new` started, offered first next time.
@@ -637,7 +638,8 @@ impl ChatRuntime {
     }
 
     /// Puts a send to `chat_id` in line. Returns what it waits for (the send before it), the
-    /// sender to drop once its Enter is written, and its number for [`Self::leave_send_queue`].
+    /// sender to drop once its confirmation is done (confirmed, unconfirmed or given up), and its
+    /// number for [`Self::leave_send_queue`].
     pub(crate) fn join_send_queue(
         &mut self,
         chat_id: &str,
