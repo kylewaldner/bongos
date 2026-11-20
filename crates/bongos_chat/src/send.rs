@@ -358,10 +358,7 @@ async fn deliver(
         // No channel says when the CLI took the paste: wait the configured delay from the paste.
         let delay =
             Duration::from_millis(cx.update(|cx| ChatsSettings::get_global(cx).submit_delay_ms));
-        let elapsed = elapsed_since(this, pasted_at, cx);
-        if elapsed < delay {
-            cx.background_executor().timer(delay - elapsed).await;
-        }
+        wait_submit_delay(this, chat_id, terminal, pasted_at, delay, cx).await;
     }
 
     let Some(at_enter) = press_enter(this, chat_id, terminal, None, cx) else {
@@ -433,6 +430,30 @@ async fn settle(
             })
             .unwrap_or(true);
         if settled {
+            return;
+        }
+        cx.background_executor().timer(SEND_POLL).await;
+    }
+}
+
+/// Waits until `delay` passed since the paste at `pasted_at` on the runtime's clock, or until the
+/// chat stopped running in `terminal`, so a send to a chat that stopped ends at once.
+async fn wait_submit_delay(
+    this: &WeakEntity<ChatRuntime>,
+    chat_id: &str,
+    terminal: &Entity<Terminal>,
+    pasted_at: u64,
+    delay: Duration,
+    cx: &mut AsyncApp,
+) {
+    loop {
+        let done = this
+            .read_with(cx, |this, _| {
+                !this.runs_in(chat_id, terminal)
+                    || Duration::from_millis(this.now_ms().saturating_sub(pasted_at)) >= delay
+            })
+            .unwrap_or(true);
+        if done {
             return;
         }
         cx.background_executor().timer(SEND_POLL).await;

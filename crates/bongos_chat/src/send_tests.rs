@@ -394,17 +394,27 @@ async fn test_a_send_to_a_waiting_chat_gets_no_second_enter(cx: &mut TestAppCont
 #[gpui::test]
 async fn test_a_chat_that_stops_before_its_enter(cx: &mut TestAppContext) {
     let (h, _input_dir, input) = send_harness(cx, &[]).await;
-    set_submit_delay(cx, 1500);
+    // Far longer than the test runs: the Enter can only come after the close, and the send must
+    // notice the close instead of waiting the delay out.
+    set_submit_delay(cx, 600_000);
     let id = h.start(Agent::Claude, cx).await;
     let name = record_of(&h, &id).name;
     wait_indexed(&h, &id, cx).await;
+    let terminal = h.runtime.read_with(cx, |runtime, _| {
+        runtime.live(&id).unwrap().terminal().clone()
+    });
+    written(&h, &id, cx);
 
     let task = cx.update(|cx| send(&id, PROMPT.to_string(), SendOptions { submit: true }, cx));
-    let pasted = octal(&bracketed(PROMPT));
-    wait_for(cx, "the paste to reach the fake", STARTUP, |_| {
-        std::fs::read_to_string(&input).unwrap_or_default() == pasted
+    // The paste is in the terminal's input log the moment it is written.
+    let log = RefCell::new(Vec::new());
+    wait_for(cx, "the paste", STARTUP, |cx| {
+        log.borrow_mut()
+            .extend(terminal.update(cx, |terminal, _| terminal.take_input_log()));
+        !log.borrow().is_empty()
     })
     .await;
+    assert_eq!(log.take(), vec![bracketed(PROMPT)]);
     assert!(h.runtime.update(cx, |runtime, cx| runtime.close(&id, cx)));
     let error = task.await.unwrap_err();
     assert_eq!(error, SendError::NotSubmitted { name: name.clone() });
@@ -413,6 +423,15 @@ async fn test_a_chat_that_stops_before_its_enter(cx: &mut TestAppContext) {
         format!("The text was pasted into {name} but not submitted: it stopped")
     );
     assert!(record_of(&h, &id).prompted);
+    // No Enter was written after the close.
+    assert!(
+        terminal
+            .update(cx, |terminal, _| terminal.take_input_log())
+            .is_empty()
+    );
+    // The fake read some or all of the paste, and nothing after it.
+    let input = std::fs::read_to_string(&input).unwrap_or_default();
+    assert!(octal(&bracketed(PROMPT)).starts_with(&input), "{input}");
 }
 
 #[gpui::test]
