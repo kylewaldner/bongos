@@ -191,11 +191,46 @@ mem_total_kb() { awk '/^MemTotal:/ {print $2}' /proc/meminfo; }
 # 90% of total RAM and swap is 0. Falls back to plain cargo if the scope cannot start.
 # BONGOS_NICE=<n> runs cargo under nice -n <n>. BONGOS_CARGO_NO_NET=1 runs it in a network namespace
 # with loopback only (bwrap brings loopback up), with the real filesystem still writable.
+# BONGOS_CARGO_SLICE=<name>.slice puts the scope in that slice, which is kept running between builds so
+# its page cache stays charged to it; with BONGOS_CARGO_MEMORY_LOW=<n>[K|M|G] the slice is given that
+# MemoryLow, so the kernel reclaims other cgroups' page cache first. Both unset: no slice. A value that
+# is not a plain slice name or a size is ignored. When systemd refuses the slice before anything starts,
+# the scope runs without it (one warning); cargo itself is never run twice.
 cargo_limited() {
   local cmd=(cargo)
   [ -n "${BONGOS_CARGO_NO_NET:-}" ] && cmd=(env CARGO_NET_OFFLINE=true bwrap --unshare-net --dev-bind / / cargo)
   [ -n "${BONGOS_NICE:-}" ] && cmd=(nice -n "$BONGOS_NICE" "${cmd[@]}")
   local cap=$(( $(mem_total_kb) * 9 / 10 ))K
+  local slice_args=() slice=${BONGOS_CARGO_SLICE:-} low=${BONGOS_CARGO_MEMORY_LOW:-}
+  if [[ $slice =~ ^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,60}\.slice$ ]]; then
+    slice_args=(--slice="$slice")
+    if [[ $low =~ ^[1-9][0-9]{0,8}[KMG]?$ ]]; then
+      timeout 10 systemctl --user set-property --runtime "$slice" "MemoryLow=$low" >/dev/null 2>&1 || true
+    fi
+    timeout 10 systemctl --user start "$slice" >/dev/null 2>&1 || true
+  fi
+  if [ ${#slice_args[@]} -gt 0 ]; then
+    local sliced=1 started rc
+    systemd-run --user --scope -q "${slice_args[@]}" -p "MemoryMax=$cap" -p MemorySwapMax=0 true >/dev/null 2>&1 || sliced=""
+    if [ -n "$sliced" ]; then
+      # the wrapper touches "$started.s" when cargo's command is about to start: a failure without it
+      # is systemd refusing the scope, never cargo's own exit code, so only that falls back
+      started=$(mktemp 2>/dev/null) || started=""
+      rc=0
+      systemd-run --user --scope -q "${slice_args[@]}" -p "MemoryMax=$cap" -p MemorySwapMax=0 \
+        bash -c 'if [ -n "$1" ]; then : >"$1.s"; fi; shift; exec "$@"' bongos-slice "$started" "${cmd[@]}" "$@" || rc=$?
+      if [ -z "$started" ] || [ -e "$started.s" ] || [ "$rc" -eq 0 ]; then
+        [ -z "$started" ] || rm -f "$started" "$started.s"
+        return "$rc"
+      fi
+      rm -f "$started"
+    fi
+    local warned="${BONGOS_TMPDIR:-${TMPDIR:-}}/.cargo-slice-warned"
+    if [ "$warned" = "/.cargo-slice-warned" ] || [ ! -e "$warned" ]; then
+      echo "bongos: systemd refused slice $slice; running cargo without it" >&2
+      [ "$warned" = "/.cargo-slice-warned" ] || : >"$warned" 2>/dev/null || true
+    fi
+  fi
   if systemd-run --user --scope -q -p "MemoryMax=$cap" -p MemorySwapMax=0 true >/dev/null 2>&1; then
     systemd-run --user --scope -q -p "MemoryMax=$cap" -p MemorySwapMax=0 "${cmd[@]}" "$@"
   else
