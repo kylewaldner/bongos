@@ -1089,8 +1089,9 @@ impl ChatRuntime {
         let first = !std::mem::replace(&mut chat.prompted, true);
         let just_rang = chat.just_rang();
         if just_rang {
+            chat.last_active = bongos_work_model::now();
+            self.touch_active(chat_id, cx);
             if first {
-                self.touch_active(chat_id, cx);
                 cx.emit(ChatRuntimeEvent::Changed(chat_id.to_string()));
                 cx.notify();
             }
@@ -1139,6 +1140,7 @@ impl ChatRuntime {
             return;
         };
         chat.live.step(Input::Exit { code });
+        chat.last_active = bongos_work_model::now();
         let early_error = code.is_some_and(|code| code != 0)
             && chat.live.last_report_at.is_none()
             && chat.launched.elapsed() < early_exit;

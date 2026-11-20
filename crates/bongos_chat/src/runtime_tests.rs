@@ -960,6 +960,34 @@ async fn test_typing_writes_once_and_the_timer_ending_the_turn_writes_once(
 }
 
 #[gpui::test]
+async fn test_exit_writes_the_exit_time_as_last_active(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let id = h.start(Agent::Claude, cx).await;
+    h.type_line(&id, "hello", cx);
+    h.wait_content(&id, "got hello", cx).await;
+    // Let the memory's last activity fall behind the exit by more than a second.
+    cx.executor().timer(Duration::from_millis(1500)).await;
+    let before = h
+        .runtime
+        .read_with(cx, |runtime, _| runtime.live_activity())[&id];
+    let old = age_record(&h, &id);
+
+    h.type_line(&id, "exit 0", cx);
+    h.wait_state(&id, ChatState::Exited { code: Some(0) }, cx)
+        .await;
+    wait_for(cx, "the exit write", WITHIN, |_| {
+        record_active(&h, &id) != old
+    })
+    .await;
+    assert!(
+        timestamp_utc(&record_active(&h, &id)) > timestamp_utc(&before),
+        "the exit wrote its own time, not the earlier change's"
+    );
+}
+
+#[gpui::test]
 async fn test_codex_session_id_is_captured(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
     let id = h.start(Agent::Codex, cx).await;
