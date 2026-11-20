@@ -11,6 +11,7 @@ pub mod mark_ring;
 pub mod prefix_arg;
 pub mod recenter;
 mod space;
+pub mod symbol;
 mod text;
 mod transpose;
 mod words;
@@ -36,6 +37,8 @@ mod prefix_arg_tests;
 mod recenter_tests;
 #[cfg(test)]
 mod space_tests;
+#[cfg(test)]
+mod symbol_tests;
 #[cfg(test)]
 mod transpose_tests;
 #[cfg(test)]
