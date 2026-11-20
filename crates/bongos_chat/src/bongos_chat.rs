@@ -69,8 +69,8 @@ pub use scope::{
     ChatScope, CwdSource, IMPLEMENT_TYPE, START_FIRST, project_repositories, resolve_scope,
 };
 pub use send::{
-    BRACKETED_WAIT, ChatRef, ChatToast, SendError, SendOptions, Sent, chat_for_prompts_file,
-    chats_for_prompts_file, send, set_auto_submit, set_prompts_file,
+    BRACKETED_WAIT, CONFIRM_WAIT, ChatRef, ChatToast, SendError, SendOptions, Sent,
+    chat_for_prompts_file, chats_for_prompts_file, send, set_auto_submit, set_prompts_file,
 };
 pub use session_view::{
     PromptPaneProvider, SessionView, SessionViewEvent, set_prompt_pane_provider,

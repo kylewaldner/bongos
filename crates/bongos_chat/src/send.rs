@@ -2,10 +2,17 @@
 //!
 //! [`send`] is the one way text reaches a chat's CLI. It never drops or splits the text: the text
 //! goes in as one bracketed paste (`ESC[200~ ... ESC[201~`, so newlines, tabs, quotes and fences
-//! arrive as typed), then one Enter after `chats.submit_delay_ms` when asked. A CLI that has not
-//! asked for bracketed paste within [`BRACKETED_WAIT`] of its launch is refused, with nothing
-//! written to its terminal: a plain paste turns each newline into Enter, one submission per line.
-//! The caller keeps its text; on any error it is still there to send again.
+//! arrive as typed), then, when asked, Enter. A CLI that has not asked for bracketed paste within
+//! [`BRACKETED_WAIT`] of its launch is refused, with nothing written to its terminal: a plain paste
+//! turns each newline into Enter, one submission per line. The caller keeps its text; on any error
+//! it is still there to send again.
+//!
+//! The Enter waits until the terminal has been quiet for 100 ms after the paste (at most 1 s plus
+//! 1 s per 256 KiB of text, and never more than 30 s), so a large paste is handled before it. A
+//! chat whose channel reports submits gets its Enter then, and the send waits up to
+//! [`CONFIRM_WAIT`] for the report of the submit, pressing Enter once more when the chat was idle
+//! and none came ([`SendError::NotConfirmed`] when the second one is not reported either). Any
+//! other chat gets its Enter `chats.submit_delay_ms` after the paste at the earliest.
 //!
 //! A successful send marks the chat prompted and, while the chat still has its default name,
 //! names it from the text's first line ([`bongos_chat_model::from_prompt`]). A name Kyle chose is
@@ -32,12 +39,27 @@ use workspace::{Toast, Workspace};
 
 use crate::actions::chat;
 use crate::live_modes::is_open;
-use crate::{ChatPanel, ChatRuntime, ChatStore, ChatWriteError, ChatsSettings};
+use crate::{ChatPanel, ChatRuntime, ChatState, ChatStore, ChatWriteError, ChatsSettings, Source};
 
 /// How long after its launch a chat has to ask for bracketed paste before a send is refused.
 pub const BRACKETED_WAIT: Duration = Duration::from_secs(5);
 /// How often a send that waits for bracketed paste looks again.
 const MODE_POLL: Duration = Duration::from_millis(50);
+/// How long a send waits, after its Enter, for the chat's channel to report the submit.
+pub const CONFIRM_WAIT: Duration = Duration::from_secs(3);
+/// The terminal counts as settled after a paste once it was quiet this long.
+const SETTLE_QUIET: Duration = Duration::from_millis(100);
+/// The longest settle wait, whatever the size of the text.
+const SETTLE_CAP: Duration = Duration::from_secs(30);
+/// How often a send that waits for the terminal to settle, or for a confirmation, looks again.
+const SEND_POLL: Duration = Duration::from_millis(20);
+
+/// The longest a send waits for the terminal to settle after pasting `len` bytes: 1 s, plus 1 s
+/// per 256 KiB, at most [`SETTLE_CAP`].
+pub(crate) fn settle_limit(len: usize) -> Duration {
+    let per_size = u64::try_from(len).unwrap_or(u64::MAX).saturating_mul(1000) / (256 * 1024);
+    Duration::from_millis(1000u64.saturating_add(per_size)).min(SETTLE_CAP)
+}
 
 /// How to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +73,9 @@ pub struct SendOptions {
 pub struct Sent {
     /// Enter was pressed after the paste.
     pub submitted: bool,
+    /// The chat's channel reported the submit. False for a chat without such a channel, and for
+    /// a send into a turn that is running (the CLI takes the prompt when the turn ends).
+    pub confirmed: bool,
     /// The name the send gave the chat, when it named it.
     pub named: Option<String>,
 }
@@ -70,6 +95,9 @@ pub enum SendError {
     NotAcceptingPastes { agent: &'static str },
     /// The text was pasted, but the chat stopped before its Enter. The chat counts as prompted.
     NotSubmitted { name: String },
+    /// The text was pasted and Enter pressed (twice), but the chat's channel never reported the
+    /// submit. The chat counts as prompted.
+    NotConfirmed { name: String },
 }
 
 impl fmt::Display for SendError {
@@ -86,6 +114,12 @@ impl fmt::Display for SendError {
                 write!(
                     f,
                     "The text was pasted into {name} but not submitted: it stopped"
+                )
+            }
+            SendError::NotConfirmed { name } => {
+                write!(
+                    f,
+                    "Pasted into {name}, but the submit was not confirmed; check the chat"
                 )
             }
         }
@@ -143,7 +177,8 @@ impl ChatRuntime {
         let chat_id = chat_id.to_string();
         let (previous, done, number) = self.join_send_queue(&chat_id);
         cx.spawn(async move |this, cx| {
-            // One send at a time per chat: this one starts once the one before wrote its Enter.
+            // One send at a time per chat: this one starts once the one before is done with its
+            // Enter (and its confirmation), so a retried Enter never submits another send's text.
             if let Some(previous) = previous {
                 previous.await.ok();
             }
@@ -154,7 +189,12 @@ impl ChatRuntime {
             drop(done);
             this.update(cx, |this, _| this.leave_send_queue(&chat_id, number))
                 .ok();
-            let submitted = delivered?;
+            let delivered = delivered?;
+            // The Enter was pressed (confirmed or not), so the chat was last active now.
+            let entered = matches!(
+                delivered,
+                Delivered::Submitted { .. } | Delivered::Unconfirmed
+            );
 
             // The text is in the CLI's input: the record says prompted (and last active once the
             // Enter followed), and gets the name while it has the default one, even without it.
@@ -168,7 +208,7 @@ impl ChatRuntime {
                             record_path,
                             move |record| {
                                 record.prompted = true;
-                                if options.submit && submitted {
+                                if entered {
                                     record.last_active = bongos_work_model::now();
                                 }
                                 if let Some(name) = name
@@ -188,22 +228,27 @@ impl ChatRuntime {
                 // The text was sent; only the record lags until the next write.
                 log::warn!("chats: could not record a send: {error}");
             }
-            if options.submit && submitted {
+            if entered {
                 this.update(cx, |this, cx| this.note_submitted(&chat_id, cx))
                     .ok();
             }
-            if options.submit && !submitted {
-                let name = this
-                    .update(cx, |this, cx| match this.not_running(&chat_id, cx) {
-                        SendError::NotRunning { name } => name,
-                        _ => chat_id.clone(),
-                    })
-                    .unwrap_or_else(|_| chat_id.clone());
-                return Err(SendError::NotSubmitted { name });
-            }
+            let name = |cx: &mut AsyncApp| {
+                this.update(cx, |this, cx| match this.not_running(&chat_id, cx) {
+                    SendError::NotRunning { name } => name,
+                    _ => chat_id.clone(),
+                })
+                .unwrap_or_else(|_| chat_id.clone())
+            };
+            let confirmed = match delivered {
+                Delivered::Pasted => false,
+                Delivered::Submitted { confirmed } => confirmed,
+                Delivered::Stopped => return Err(SendError::NotSubmitted { name: name(cx) }),
+                Delivered::Unconfirmed => return Err(SendError::NotConfirmed { name: name(cx) }),
+            };
             let named = named.lock().unwrap_or_else(|e| e.into_inner()).take();
             Ok(Sent {
                 submitted: options.submit,
+                confirmed,
                 named,
             })
         })
@@ -233,9 +278,37 @@ impl ChatRuntime {
     }
 }
 
-/// Pastes `text` once the CLI accepts bracketed pastes, then presses Enter after the submit delay
-/// when `options.submit`. An error means nothing was written. `Ok(false)` means the paste went in
-/// but the chat stopped before its Enter.
+/// What [`deliver`] did once the text was pasted.
+enum Delivered {
+    /// Pasted, without Enter (none was asked).
+    Pasted,
+    /// Enter was pressed; `confirmed` when the chat's channel reported the submit.
+    Submitted { confirmed: bool },
+    /// Pasted, but the chat stopped before its Enter.
+    Stopped,
+    /// Enter was pressed, and once more, but no submit was reported.
+    Unconfirmed,
+}
+
+/// The chat as a send's Enter found it.
+struct AtEnter {
+    state: ChatState,
+    source: Source,
+    /// The chat's channel reports submits.
+    reports: bool,
+    /// Its count of applied submit reports before the Enter.
+    submits: u64,
+}
+
+/// Pastes `text` once the CLI accepts bracketed pastes and, when `options.submit`, presses Enter
+/// once the terminal settled (see the module documentation). An error means nothing was written.
+///
+/// A chat whose channel reports submits has its Enter confirmed: a send into a running turn is
+/// not (the CLI takes it when the turn ends, which may be minutes later); otherwise the send waits
+/// for the report of the submit, and when none comes and the chat was idle at the Enter, presses
+/// Enter once more and waits again. The second Enter is pressed only while no submit was reported,
+/// so the text is never submitted twice. Any other chat gets its Enter `chats.submit_delay_ms`
+/// after the paste at the earliest.
 #[allow(clippy::too_many_arguments)]
 async fn deliver(
     this: &WeakEntity<ChatRuntime>,
@@ -246,24 +319,30 @@ async fn deliver(
     agent: Agent,
     deadline: SystemTime,
     cx: &mut AsyncApp,
-) -> Result<bool, SendError> {
+) -> Result<Delivered, SendError> {
     // The check and the paste happen in one update, so the mode cannot change between them.
-    loop {
+    let pasted_at = loop {
         let pasted = this
             .update(cx, |this, cx| {
                 if !this.runs_in(chat_id, terminal) {
                     return Err(this.not_running(chat_id, cx));
                 }
                 if !accepts_pastes(terminal, cx) {
-                    return Ok(false);
+                    return Ok(None);
                 }
-                terminal.update(cx, |terminal, _| terminal.paste(text));
+                this.write_send_input(
+                    chat_id,
+                    terminal,
+                    false,
+                    |terminal| terminal.paste(text),
+                    cx,
+                );
                 this.note_pasted(chat_id, cx);
-                Ok(true)
+                Ok(Some(this.now_ms()))
             })
             .map_err(|_| SendError::Off)??;
-        if pasted {
-            break;
+        if let Some(pasted_at) = pasted {
+            break pasted_at;
         }
         let left = deadline
             .duration_since(SystemTime::now())
@@ -274,24 +353,194 @@ async fn deliver(
             });
         }
         cx.background_executor().timer(left.min(MODE_POLL)).await;
-    }
+    };
     if !options.submit {
-        return Ok(true);
+        return Ok(Delivered::Pasted);
     }
-    // Enter, once the CLI has handled the paste.
-    let delay = cx.update(|cx| ChatsSettings::get_global(cx).submit_delay_ms);
-    cx.background_executor()
-        .timer(Duration::from_millis(delay))
-        .await;
-    Ok(this
-        .update(cx, |this, cx| {
-            let running = this.runs_in(chat_id, terminal);
-            if running {
-                terminal.update(cx, |terminal, _| terminal.input(b"\r".as_slice()));
-            }
-            running
+    settle(this, chat_id, terminal, pasted_at, text.len(), cx).await;
+
+    let reports = this
+        .read_with(cx, |this, _| {
+            this.live(chat_id)
+                .is_some_and(|chat| chat.terminal() == terminal && chat.reports_submits())
         })
-        .unwrap_or(false))
+        .unwrap_or(false);
+    if !reports {
+        // No channel says when the CLI took the paste: wait the configured delay from the paste.
+        let delay =
+            Duration::from_millis(cx.update(|cx| ChatsSettings::get_global(cx).submit_delay_ms));
+        wait_submit_delay(this, chat_id, terminal, pasted_at, delay, cx).await;
+    }
+
+    let Some(at_enter) = press_enter(this, chat_id, terminal, None, cx) else {
+        return Ok(Delivered::Stopped);
+    };
+    if !at_enter.reports {
+        return Ok(Delivered::Submitted { confirmed: false });
+    }
+    if at_enter.state == ChatState::Running && at_enter.source == Source::Exact {
+        // A send into a running turn: the CLI queues it and reports its submit only when it takes
+        // it, so there is nothing to wait for.
+        return Ok(Delivered::Submitted { confirmed: false });
+    }
+    if wait_for_submit(this, chat_id, terminal, at_enter.submits, cx).await {
+        return Ok(Delivered::Submitted { confirmed: true });
+    }
+    if at_enter.state != ChatState::Idle {
+        // Waiting (a dialog may own the keyboard) or a guessed turn: a second Enter could answer
+        // something else, so none is sent.
+        return Ok(Delivered::Submitted { confirmed: false });
+    }
+    match press_enter(this, chat_id, terminal, Some(at_enter.submits), cx) {
+        // A submit was reported just before the second Enter, which was not sent.
+        Some(AtEnter { submits, .. }) if submits > at_enter.submits => {
+            return Ok(Delivered::Submitted { confirmed: true });
+        }
+        Some(_) => {}
+        None => return Ok(Delivered::Unconfirmed),
+    }
+    if wait_for_submit(this, chat_id, terminal, at_enter.submits, cx).await {
+        Ok(Delivered::Submitted { confirmed: true })
+    } else {
+        Ok(Delivered::Unconfirmed)
+    }
+}
+
+/// The time since `since` on the runtime's clock.
+fn elapsed_since(this: &WeakEntity<ChatRuntime>, since: u64, cx: &mut AsyncApp) -> Duration {
+    this.read_with(cx, |this, _| {
+        Duration::from_millis(this.now_ms().saturating_sub(since))
+    })
+    .unwrap_or(Duration::MAX)
+}
+
+/// Waits until the terminal of `chat_id` was quiet for [`SETTLE_QUIET`] after the paste at
+/// `pasted_at`, at most [`settle_limit`] of the paste's `len`, or until the chat stopped.
+async fn settle(
+    this: &WeakEntity<ChatRuntime>,
+    chat_id: &str,
+    terminal: &Entity<Terminal>,
+    pasted_at: u64,
+    len: usize,
+    cx: &mut AsyncApp,
+) {
+    let limit = settle_limit(len);
+    loop {
+        let settled = this
+            .read_with(cx, |this, _| {
+                let Some(chat) = this
+                    .live(chat_id)
+                    .filter(|chat| chat.terminal() == terminal)
+                else {
+                    return true;
+                };
+                let now = this.now_ms();
+                let last = chat.last_output_at().unwrap_or(0).max(pasted_at);
+                Duration::from_millis(now.saturating_sub(pasted_at)) >= limit
+                    || Duration::from_millis(now.saturating_sub(last)) >= SETTLE_QUIET
+            })
+            .unwrap_or(true);
+        if settled {
+            return;
+        }
+        cx.background_executor().timer(SEND_POLL).await;
+    }
+}
+
+/// Waits until `delay` passed since the paste at `pasted_at` on the runtime's clock, or until the
+/// chat stopped running in `terminal`, so a send to a chat that stopped ends at once.
+async fn wait_submit_delay(
+    this: &WeakEntity<ChatRuntime>,
+    chat_id: &str,
+    terminal: &Entity<Terminal>,
+    pasted_at: u64,
+    delay: Duration,
+    cx: &mut AsyncApp,
+) {
+    loop {
+        let done = this
+            .read_with(cx, |this, _| {
+                !this.runs_in(chat_id, terminal)
+                    || Duration::from_millis(this.now_ms().saturating_sub(pasted_at)) >= delay
+            })
+            .unwrap_or(true);
+        if done {
+            return;
+        }
+        cx.background_executor().timer(SEND_POLL).await;
+    }
+}
+
+/// Presses Enter in `chat_id` while it still runs in `terminal`, and returns how the chat was at
+/// that moment, or `None` when it stopped. With `unless_after`, the Enter is not pressed when the
+/// chat applied more submit reports than that already (the returned count says so).
+fn press_enter(
+    this: &WeakEntity<ChatRuntime>,
+    chat_id: &str,
+    terminal: &Entity<Terminal>,
+    unless_after: Option<u64>,
+    cx: &mut AsyncApp,
+) -> Option<AtEnter> {
+    this.update(cx, |this, cx| {
+        if !this.runs_in(chat_id, terminal) {
+            return None;
+        }
+        let chat = this.live(chat_id)?;
+        let at_enter = AtEnter {
+            state: chat.state(),
+            source: chat.state_source(),
+            reports: chat.reports_submits(),
+            submits: chat.prompt_submits(),
+        };
+        if unless_after.is_some_and(|before| at_enter.submits > before) {
+            return Some(at_enter);
+        }
+        this.write_send_input(
+            chat_id,
+            terminal,
+            true,
+            |terminal| terminal.input(b"\r".as_slice()),
+            cx,
+        );
+        Some(at_enter)
+    })
+    .ok()
+    .flatten()
+}
+
+/// Waits up to the runtime's confirm wait for `chat_id` to apply more submit reports than
+/// `before`. Returns whether it did; false at once when the chat stopped.
+async fn wait_for_submit(
+    this: &WeakEntity<ChatRuntime>,
+    chat_id: &str,
+    terminal: &Entity<Terminal>,
+    before: u64,
+    cx: &mut AsyncApp,
+) -> bool {
+    let Ok((start, wait)) = this.read_with(cx, |this, _| (this.now_ms(), this.confirm_wait()))
+    else {
+        return false;
+    };
+    loop {
+        let seen = this
+            .read_with(cx, |this, _| {
+                let chat = this
+                    .live(chat_id)
+                    .filter(|chat| chat.terminal() == terminal)?;
+                Some(chat.prompt_submits() > before)
+            })
+            .ok()
+            .flatten();
+        match seen {
+            Some(true) => return true,
+            None => return false,
+            Some(false) => {}
+        }
+        if elapsed_since(this, start, cx) >= wait {
+            return false;
+        }
+        cx.background_executor().timer(SEND_POLL).await;
+    }
 }
 
 /// Whether the program in `terminal` asked for bracketed paste.

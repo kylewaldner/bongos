@@ -59,15 +59,15 @@ fn set_claude_program(cx: &mut TestAppContext, program: &Path) {
     });
 }
 
-struct Channels {
-    h: Harness,
+pub(super) struct Channels {
+    pub(super) h: Harness,
     _socket_temp: TempDir,
     server: Entity<ChannelServer>,
 }
 
 /// The runtime harness with `chats.channels` on, a running global report server whose reports go
 /// to the runtime, and a reporter of `["true"]`.
-async fn channels(cx: &mut TestAppContext) -> Channels {
+pub(super) async fn channels(cx: &mut TestAppContext) -> Channels {
     let h = harness(cx, true, 60, &[]).await;
     set_channels(cx, true);
     let (socket_temp, base) = temp();
@@ -151,7 +151,7 @@ impl Channels {
     }
 
     /// Hands `report` to the runtime as the server would after its own checks.
-    fn deliver(&self, report: Report, cx: &mut TestAppContext) {
+    pub(super) fn deliver(&self, report: Report, cx: &mut TestAppContext) {
         self.h
             .runtime
             .update(cx, |runtime, cx| runtime.on_report(report, cx));
@@ -196,7 +196,7 @@ impl Channels {
 
     /// Starts a Claude chat, makes its channel live with a `session_start` report at `at` 1, and
     /// returns its id and token.
-    async fn start_live(&self, cx: &mut TestAppContext) -> (String, String) {
+    pub(super) async fn start_live(&self, cx: &mut TestAppContext) -> (String, String) {
         let id = self.start(self.request(Agent::Claude, "2.1.319"), cx).await;
         let token = self.env("BONGOS_CHAT_TOKEN").pop().unwrap();
         assert_eq!(self.report(&id, &token, 1, cx).await, OK);
@@ -262,7 +262,7 @@ fn report_of(chat: &str, token: &str, at: u64) -> Report {
     )
 }
 
-fn event_report(chat: &str, token: &str, at: u64, event: Event) -> Report {
+pub(super) fn event_report(chat: &str, token: &str, at: u64, event: Event) -> Report {
     Report {
         chat: ChatId::new(chat).unwrap(),
         token: Token::new(token).unwrap(),
@@ -273,7 +273,7 @@ fn event_report(chat: &str, token: &str, at: u64, event: Event) -> Report {
     }
 }
 
-fn needs_input(detail: &str) -> Event {
+pub(super) fn needs_input(detail: &str) -> Event {
     Event::NeedsInput {
         detail: Some(Detail::new(detail).unwrap()),
     }
