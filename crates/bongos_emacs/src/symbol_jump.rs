@@ -13,7 +13,6 @@ use editor::scroll::Autoscroll;
 use editor::{Editor, HighlightKey, SelectionEffects};
 use gpui::{App, Context, Entity, EntityId, Global, WeakEntity, Window};
 use multi_buffer::{Anchor, MultiBufferOffset, ToOffset as _};
-use theme::ActiveTheme as _;
 
 use crate::actions::{SymbolJumpNext, SymbolJumpPrev};
 use crate::lines::propagate_in_single_line;
