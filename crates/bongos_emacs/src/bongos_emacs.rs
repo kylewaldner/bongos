@@ -31,6 +31,7 @@ mod repeat;
 pub mod snapshot_text;
 mod space;
 mod symbol_jump;
+mod symbol_overlay;
 mod transpose;
 mod words;
 mod yank;
@@ -84,6 +85,8 @@ mod repeat_tests;
 mod space_tests;
 #[cfg(test)]
 mod symbol_jump_tests;
+#[cfg(test)]
+mod symbol_overlay_tests;
 #[cfg(test)]
 mod transpose_tests;
 #[cfg(test)]
@@ -200,6 +203,19 @@ pub fn init(cx: &mut App) {
         );
         register(editor, &weak, cx, symbol_jump::symbol_jump_next_command);
         register(editor, &weak, cx, symbol_jump::symbol_jump_prev_command);
+        register(
+            editor,
+            &weak,
+            cx,
+            symbol_overlay::symbol_overlay_put_command,
+        );
+        register(
+            editor,
+            &weak,
+            cx,
+            symbol_overlay::symbol_overlay_remove_all_command,
+        );
+        symbol_overlay::init_editor(cx);
         prefix_arg::init_editor(editor, window.as_deref_mut(), cx);
         recenter::init_editor(cx);
         kill_ring_sink::init_editor(cx);
