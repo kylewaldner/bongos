@@ -74,3 +74,20 @@ impl Settings for ChatsSettings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use settings::SettingsStore;
+
+    #[gpui::test]
+    fn test_default_settings_turn_channels_on(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::new(cx, &settings::default_settings());
+            cx.set_global(store);
+            ChatsSettings::register(cx);
+            assert!(ChatsSettings::get_global(cx).channels);
+        });
+    }
+}
