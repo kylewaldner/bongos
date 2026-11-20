@@ -533,6 +533,13 @@
     // Whether to show code action buttons in the editor toolbar.
     "code_actions": false,
   },
+  // Navigation history related settings
+  "navigation_history": {
+    // Whether a cursor move of ten or more rows is recorded in the navigation history.
+    "record_large_moves": true,
+    // Whether switching to another item is recorded in the navigation history.
+    "record_item_switches": true,
+  },
   // Whether to allow windows to tab together based on the user’s tabbing preference (macOS only).
   "use_system_window_tabs": false,
   // Titlebar related settings

@@ -91,7 +91,7 @@ mod yank_tests;
 mod zap_tests;
 
 use editor::Editor;
-use gpui::{App, Entity, Window};
+use gpui::{Action as _, App, Entity, Window};
 
 use crate::prefix_arg::CountArg;
 
@@ -109,6 +109,18 @@ pub fn init(cx: &mut App) {
     count_adapters::init(cx);
     cursor::init(cx);
     global_mark::init(cx);
+    for name in [
+        actions::SymbolJumpNext::name_for_type(),
+        actions::SymbolJumpPrev::name_for_type(),
+        actions::SymbolOverlayPut::name_for_type(),
+        actions::SymbolOverlayRemoveAll::name_for_type(),
+        actions::GotoStackBack::name_for_type(),
+        actions::GotoStackForward::name_for_type(),
+        actions::GotoStackPush::name_for_type(),
+        actions::XrefHistoryList::name_for_type(),
+    ] {
+        prefix_arg::declare(cx, name, prefix_arg::Meaning::Ignored);
+    }
     cx.observe_new(|editor: &mut Editor, mut window, cx| {
         let weak = cx.entity().downgrade();
         register(editor, &weak, cx, motion::forward_word);

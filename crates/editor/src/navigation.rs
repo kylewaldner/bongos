@@ -1431,8 +1431,19 @@ impl Editor {
                 }
             }
 
-            let cursor_row = data.cursor_position.row;
-            nav_history.push(Some(data), Some(cursor_row), cx);
+            let skip_item_switch = is_deactivate
+                && !EditorSettings::get_global(cx)
+                    .navigation_history
+                    .record_item_switches
+                && matches!(
+                    nav_history.mode(),
+                    workspace::pane::NavigationMode::Normal
+                        | workspace::pane::NavigationMode::ReopeningClosedItem
+                );
+            if !skip_item_switch {
+                let cursor_row = data.cursor_position.row;
+                nav_history.push(Some(data), Some(cursor_row), cx);
+            }
             cx.emit(EditorEvent::PushedToNavHistory {
                 anchor: cursor_anchor,
                 is_deactivate,

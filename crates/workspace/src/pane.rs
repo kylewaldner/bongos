@@ -4577,6 +4577,10 @@ impl Render for Pane {
 }
 
 impl ItemNavHistory {
+    pub fn mode(&self) -> NavigationMode {
+        self.history.mode()
+    }
+
     pub fn push<D: 'static + Any + Send + Sync>(
         &mut self,
         data: Option<D>,
