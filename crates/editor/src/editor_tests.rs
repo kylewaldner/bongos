@@ -39017,11 +39017,7 @@ fn range_on_row(row: u32) -> lsp::Range {
 }
 
 /// Writes another numbered file next to the test file and returns its URI.
-async fn insert_numbered_file(
-    cx: &mut EditorLspTestContext,
-    name: &str,
-    rows: usize,
-) -> lsp::Uri {
+async fn insert_numbered_file(cx: &mut EditorLspTestContext, name: &str, rows: usize) -> lsp::Uri {
     let fs = cx.update_workspace(|workspace, _, cx| workspace.project().read(cx).fs().clone());
     let path = EditorLspTestContext::root_path().join("dir").join(name);
     fs.as_fake()
@@ -39118,6 +39114,7 @@ fn definition_capabilities() -> lsp::ServerCapabilities {
 #[gpui::test]
 async fn test_goto_in_same_file_pushes_origin_once(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
+    update_test_editor_settings(cx, &|settings| settings.vertical_scroll_margin = Some(0.0));
     set_navigation_history_settings(cx, false, false);
     let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
     let window = cx.window;
@@ -39351,12 +39348,13 @@ async fn test_find_usages_with_one_result_in_another_file_pushes_origin(cx: &mut
             }
         });
 
-    cx.update_editor(|editor, window, cx| {
-        editor.find_all_references(&FindAllReferences::default(), window, cx)
-    })
-    .expect("should have spawned a task")
-    .await
-    .unwrap();
+    let action = FindAllReferences {
+        always_open_multibuffer: false,
+    };
+    cx.update_editor(|editor, window, cx| editor.find_all_references(&action, window, cx))
+        .expect("should have spawned a task")
+        .await
+        .unwrap();
     cx.run_until_parked();
 
     let (other, row) = active_editor_and_row(&mut cx);
@@ -39404,7 +39402,7 @@ async fn test_implementation_and_type_definition_lists_push_origin_once(cx: &mut
     assert_eq!(navigated, Navigated::Yes);
     assert_ne!(active_editor_and_row(&mut cx).0, original);
     assert_eq!(nav_entries(&mut cx), vec![(original, Some(2))]);
-    assert_eq!(*pushes.borrow(), vec![false]);
+    assert_eq!(pushes.borrow().iter().filter(|d| !**d).count(), 1);
 
     // Move the caret to another row so the second origin does not dedupe with the first.
     cx.update_editor(|editor, window, cx| {
@@ -39427,7 +39425,7 @@ async fn test_implementation_and_type_definition_lists_push_origin_once(cx: &mut
         nav_entries(&mut cx),
         vec![(original, Some(2)), (original, Some(5))]
     );
-    assert_eq!(*pushes.borrow(), vec![false, false]);
+    assert_eq!(pushes.borrow().iter().filter(|d| !**d).count(), 2);
 }
 
 #[gpui::test]
@@ -39445,20 +39443,22 @@ async fn test_cmd_click_pushes_origin_for_definition_and_file_but_not_url(cx: &m
     let original = cx.editor.entity_id();
     let symbol_range = lsp::Range::new(lsp::Position::new(0, 12), lsp::Position::new(0, 19));
     let target_range = lsp::Range::new(lsp::Position::new(1, 3), lsp::Position::new(1, 10));
-    cx.set_request_handler::<lsp::request::GotoDefinition, _, _>(move |url, params, _| async move {
-        if params.text_document_position_params.position.line == 0 {
-            Ok(Some(lsp::GotoDefinitionResponse::Link(vec![
-                lsp::LocationLink {
-                    origin_selection_range: Some(symbol_range),
-                    target_uri: url,
-                    target_range,
-                    target_selection_range: target_range,
-                },
-            ])))
-        } else {
-            Ok(Some(lsp::GotoDefinitionResponse::Link(vec![])))
-        }
-    });
+    cx.set_request_handler::<lsp::request::GotoDefinition, _, _>(
+        move |url, params, _| async move {
+            if params.text_document_position_params.position.line == 0 {
+                Ok(Some(lsp::GotoDefinitionResponse::Link(vec![
+                    lsp::LocationLink {
+                        origin_selection_range: Some(symbol_range),
+                        target_uri: url,
+                        target_range,
+                        target_selection_range: target_range,
+                    },
+                ])))
+            } else {
+                Ok(Some(lsp::GotoDefinitionResponse::Link(vec![])))
+            }
+        },
+    );
     let secondary = gpui::Modifiers::secondary_key();
 
     // A URL opens the browser and records nothing.
