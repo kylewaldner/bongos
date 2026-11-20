@@ -104,7 +104,12 @@ fn scroll_to(editor: &Entity<Editor>, y: f64, cx: &mut VisualTestContext) {
     });
 }
 
-fn edit(editor: &Entity<Editor>, range: std::ops::Range<Point>, text: &str, cx: &mut VisualTestContext) {
+fn edit(
+    editor: &Entity<Editor>,
+    range: std::ops::Range<Point>,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
     editor.update(cx, |editor, cx| {
         editor.buffer().update(cx, |buffer, cx| {
             buffer.edit([(range, text)], None, cx);
@@ -145,9 +150,18 @@ fn caret_and_line(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> 
                 .selections
                 .newest::<Point>(&editor.display_snapshot(cx))
                 .head();
-            assert!(caret <= snapshot.max_point(), "caret {caret:?} is past the end");
+            assert!(
+                caret <= snapshot.max_point(),
+                "caret {caret:?} is past the end"
+            );
             let line = snapshot
-                .text_for_range(Point::new(caret.row, 0)..Point::new(caret.row, snapshot.line_len(multi_buffer::MultiBufferRow(caret.row))))
+                .text_for_range(
+                    Point::new(caret.row, 0)
+                        ..Point::new(
+                            caret.row,
+                            snapshot.line_len(multi_buffer::MultiBufferRow(caret.row)),
+                        ),
+                )
                 .collect::<String>();
             (caret, line)
         })
@@ -202,11 +216,7 @@ fn echo(cx: &mut VisualTestContext) -> Rc<RefCell<Vec<String>>> {
     messages
 }
 
-async fn close(
-    workspace: &Entity<Workspace>,
-    editor: Entity<Editor>,
-    cx: &mut VisualTestContext,
-) {
+async fn close(workspace: &Entity<Workspace>, editor: Entity<Editor>, cx: &mut VisualTestContext) {
     let id = editor.entity_id();
     drop(editor);
     let pane = active_pane(workspace, cx);
@@ -355,7 +365,12 @@ async fn back_after_edits_above_lands_on_the_same_text(cx: &mut TestAppContext) 
     let one = open(&workspace, &paths[0], &mut cx).await;
     select_row(&one, 30, &mut cx);
     select_row(&one, 5, &mut cx);
-    edit(&one, Point::new(0, 0)..Point::new(0, 0), "a\nb\nc\n", &mut cx);
+    edit(
+        &one,
+        Point::new(0, 0)..Point::new(0, 0),
+        "a\nb\nc\n",
+        &mut cx,
+    );
 
     back(&mut cx);
     assert_eq!(
@@ -450,7 +465,9 @@ async fn two_panes_push_and_walk_independently(cx: &mut TestAppContext) {
     assert_eq!(caret_in_one, Point::new(6, 0));
     assert_eq!(backward_rows(&left, &mut cx), vec![Some(4)]);
 
-    left.update_in(&mut cx, |pane, window, cx| pane.focus_active_item(window, cx));
+    left.update_in(&mut cx, |pane, window, cx| {
+        pane.focus_active_item(window, cx)
+    });
     cx.run_until_parked();
     assert_eq!(active_pane(&workspace, &mut cx), left);
     back(&mut cx);
@@ -570,7 +587,9 @@ async fn the_goto_stack_commands_ignore_the_prefix_argument(cx: &mut TestAppCont
     select_row(&one, 20, &mut cx);
     select_row(&one, 35, &mut cx);
     let pane = active_pane(&workspace, &mut cx);
-    let pending = |cx: &mut VisualTestContext| cx.update(|window, cx| prefix_arg::pending(window, cx).is_some());
+    let pending = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| prefix_arg::pending(window, cx).is_some())
+    };
 
     // C-u back goes back one entry, not four.
     cx.simulate_keystrokes("ctrl-u f5");
@@ -583,6 +602,9 @@ async fn the_goto_stack_commands_ignore_the_prefix_argument(cx: &mut TestAppCont
 
     cx.simulate_keystrokes("ctrl-u f7");
     assert_eq!(file_and_row(&workspace, &mut cx), (paths[0].clone(), 35));
-    assert_eq!(backward_rows(&pane, &mut cx), vec![Some(0), Some(20), Some(35)]);
+    assert_eq!(
+        backward_rows(&pane, &mut cx),
+        vec![Some(0), Some(20), Some(35)]
+    );
     assert!(!pending(&mut cx));
 }
