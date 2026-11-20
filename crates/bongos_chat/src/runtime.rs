@@ -1172,17 +1172,7 @@ impl ChatRuntime {
                 cx.notify();
             }
         } else {
-            let writes = self.stats.active_writes;
             self.step(chat_id, Input::KeyboardInput, first, cx);
-            // The first input says `prompted`: a write the step did not already book.
-            let booked = self.stats.active_writes != writes
-                || self
-                    .live
-                    .get(chat_id)
-                    .is_some_and(|chat| chat.pending_active_write.is_some());
-            if first && !booked {
-                self.touch_active(chat_id, cx);
-            }
         }
     }
 
