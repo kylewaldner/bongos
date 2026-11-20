@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use bongos_chat_model::{
     Agent, AgentAdapter as _, Capabilities, ChatRecord, ClaudeAdapter, CodexAdapter, LaunchKind,
-    TaskFacts, read_record, record_path, resolve, seed, write_record,
+    TaskFacts, Timestamp, read_record, record_path, resolve, seed, timestamp_utc, write_record,
 };
 use bongos_work::{LiveModesRegistry, WorkDirs, WorkSettings, WorkStore, WorkStoreEvent};
 use bongos_work_model::session_context;
@@ -814,6 +814,26 @@ async fn test_nothing_launches_while_chats_are_off(cx: &mut TestAppContext) {
     assert!(h.log_lines("claude").is_empty());
 }
 
+/// `last_active` writes the runtime has asked of the store so far.
+pub(super) fn active_writes(h: &Harness, cx: &mut TestAppContext) -> usize {
+    h.runtime
+        .read_with(cx, |runtime, _| runtime.stats().active_writes)
+}
+
+/// Sets the record's `last_active` far in the past, so a later write shows.
+pub(super) fn age_record(h: &Harness, id: &str) -> Timestamp {
+    let path = record_path(&h.scope, id);
+    let mut record = read_record(&path).unwrap();
+    let old: Timestamp = "2020-01-01T10:00:00Z".parse().unwrap();
+    record.last_active = old;
+    write_record(&path, &record).unwrap();
+    old
+}
+
+pub(super) fn record_active(h: &Harness, id: &str) -> Timestamp {
+    read_record(&record_path(&h.scope, id)).unwrap().last_active
+}
+
 #[gpui::test]
 async fn test_last_active_writes_are_debounced(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
@@ -823,26 +843,22 @@ async fn test_last_active_writes_are_debounced(cx: &mut TestAppContext) {
     let id = h.start(Agent::Claude, cx).await;
     // Let the launch's own write fall out of the debounce window.
     cx.executor().timer(debounce).await;
-    let writes = |cx: &mut TestAppContext| {
-        h.runtime
-            .read_with(cx, |runtime, _| runtime.stats().active_writes)
-    };
-    let title = |cx: &mut TestAppContext| {
-        h.runtime.read_with(cx, |runtime, _| {
-            runtime.live(&id).unwrap().title().map(str::to_string)
-        })
-    };
 
-    let before = writes(cx);
+    let before = active_writes(&h, cx);
     let burst_started = std::time::Instant::now();
-    for name in ["one", "two", "three", "four"] {
-        h.type_line(&id, &format!("title {name}"), cx);
-        wait_for(cx, "the title", WITHIN, |cx| {
-            title(cx).as_deref() == Some(name)
-        })
-        .await;
-    }
-    let during = writes(cx);
+    // Bell, input, bell, input: four state changes that write (a title or output alone would not).
+    h.type_line(&id, "bell", cx);
+    h.wait_state(&id, ChatState::Waiting, cx).await;
+    // Input right after a bell is older than the bell's question, so it waits out the bell.
+    cx.executor().timer(Duration::from_millis(700)).await;
+    h.type_line(&id, "one", cx);
+    h.wait_state(&id, ChatState::Running, cx).await;
+    h.type_line(&id, "bell", cx);
+    h.wait_state(&id, ChatState::Waiting, cx).await;
+    cx.executor().timer(Duration::from_millis(700)).await;
+    h.type_line(&id, "two", cx);
+    h.wait_state(&id, ChatState::Running, cx).await;
+    let during = active_writes(&h, cx);
     // Four changes inside one debounce window write once. A slow machine can stretch the burst
     // over more windows, so each full window it took allows one more write: the assertion
     // depends on the time measured, not on the machine's speed.
@@ -857,9 +873,121 @@ async fn test_last_active_writes_are_debounced(cx: &mut TestAppContext) {
         .timer(debounce + Duration::from_millis(500))
         .await;
     cx.run_until_parked();
-    let after = writes(cx);
+    let after = active_writes(&h, cx);
     assert!(after - before <= 2 + windows, "{} writes", after - before);
     assert!(after > before, "the changes were written");
+}
+
+#[gpui::test]
+async fn test_a_spinner_title_on_an_idle_chat_writes_nothing(cx: &mut TestAppContext) {
+    // The fake prints a new title every 10 ms right after it starts; nobody types.
+    let h = harness(cx, true, 60, &[("FAKE_CLI_SPIN", "100")]).await;
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let id = h.start(Agent::Claude, cx).await;
+    h.wait_content(&id, "spun", cx).await;
+    // 30 s of the runtime's clock pass in 100 ms steps (shorter than the idle time).
+    for _ in 0..300 {
+        h.runtime.update(cx, |runtime, cx| {
+            runtime.advance_clock(Duration::from_millis(100), cx)
+        });
+    }
+    cx.run_until_parked();
+    cx.executor().timer(Duration::from_millis(300)).await;
+    cx.run_until_parked();
+    assert_eq!(
+        active_writes(&h, cx),
+        0,
+        "output and titles alone write nothing"
+    );
+    let titled = h.runtime.read_with(cx, |runtime, _| {
+        runtime.live(&id).unwrap().title().map(str::to_string)
+    });
+    assert!(titled.is_some_and(|title| title.starts_with("spinner")));
+}
+
+#[gpui::test]
+async fn test_typing_writes_once_and_the_timer_ending_the_turn_writes_once(
+    cx: &mut TestAppContext,
+) {
+    let h = harness(cx, true, 60, &[]).await;
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let id = h.start(Agent::Claude, cx).await;
+    h.runtime.update(cx, |runtime, cx| {
+        runtime.advance_clock(Duration::from_secs(61), cx)
+    });
+    h.wait_state(&id, ChatState::Idle, cx).await;
+    // The launch's running state ends once: that is a state change too.
+    wait_for(cx, "the first idle write", WITHIN, |cx| {
+        active_writes(&h, cx) == 1
+    })
+    .await;
+    let old = age_record(&h, &id);
+
+    h.type_line(&id, "hello", cx);
+    h.wait_state(&id, ChatState::Running, cx).await;
+    h.wait_content(&id, "got hello", cx).await;
+    wait_for(cx, "the keyboard write", WITHIN, |_| {
+        record_active(&h, &id) != old
+    })
+    .await;
+    assert_eq!(active_writes(&h, cx), 2, "typing wrote once");
+
+    let old = age_record(&h, &id);
+    h.runtime.update(cx, |runtime, cx| {
+        runtime.advance_clock(Duration::from_secs(61), cx)
+    });
+    h.wait_state(&id, ChatState::Idle, cx).await;
+    wait_for(cx, "the timer's write", WITHIN, |_| {
+        record_active(&h, &id) != old
+    })
+    .await;
+    assert_eq!(
+        active_writes(&h, cx),
+        3,
+        "the timer ending the turn wrote once"
+    );
+    // The write carries the memory's time, so the two agree once it lands.
+    let live = h
+        .runtime
+        .read_with(cx, |runtime, _| runtime.live_activity());
+    assert_eq!(
+        timestamp_utc(&live[&id]),
+        timestamp_utc(&record_active(&h, &id)),
+        "the write carries the memory's time"
+    );
+}
+
+#[gpui::test]
+async fn test_exit_writes_the_exit_time_as_last_active(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let id = h.start(Agent::Claude, cx).await;
+    h.type_line(&id, "hello", cx);
+    h.wait_content(&id, "got hello", cx).await;
+    // Let the memory's last activity fall behind the exit by more than a second.
+    cx.executor().timer(Duration::from_millis(1500)).await;
+    let before = h
+        .runtime
+        .read_with(cx, |runtime, _| runtime.live_activity())[&id];
+    let old = age_record(&h, &id);
+
+    // No keystroke: a keystroke would write the time itself, hiding the exit's own write.
+    h.runtime.update(cx, |runtime, cx| runtime.kill(&id, cx));
+    wait_for(cx, "the chat to exit", WITHIN, |cx| {
+        matches!(h.state(&id, cx), ChatState::Exited { .. })
+    })
+    .await;
+    wait_for(cx, "the exit write", WITHIN, |_| {
+        record_active(&h, &id) != old
+    })
+    .await;
+    assert!(
+        timestamp_utc(&record_active(&h, &id)) > timestamp_utc(&before),
+        "the exit wrote its own time, not the earlier change's"
+    );
 }
 
 #[gpui::test]

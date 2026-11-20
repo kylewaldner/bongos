@@ -190,9 +190,14 @@ impl ChatRuntime {
             this.update(cx, |this, _| this.leave_send_queue(&chat_id, number))
                 .ok();
             let delivered = delivered?;
+            // The Enter was pressed (confirmed or not), so the chat was last active now.
+            let entered = matches!(
+                delivered,
+                Delivered::Submitted { .. } | Delivered::Unconfirmed
+            );
 
-            // The text is in the CLI's input: the record says prompted, last active, and gets the
-            // name while it has the default one, even when the Enter could not follow.
+            // The text is in the CLI's input: the record says prompted (and last active once the
+            // Enter followed), and gets the name while it has the default one, even without it.
             let name = from_prompt(&text);
             let named = Arc::new(Mutex::new(None));
             let named_in_write = named.clone();
@@ -203,7 +208,9 @@ impl ChatRuntime {
                             record_path,
                             move |record| {
                                 record.prompted = true;
-                                record.last_active = bongos_work_model::now();
+                                if entered {
+                                    record.last_active = bongos_work_model::now();
+                                }
                                 if let Some(name) = name
                                     && apply_name(record, name.clone())
                                 {
@@ -220,6 +227,10 @@ impl ChatRuntime {
             if let Err(error) = write.await {
                 // The text was sent; only the record lags until the next write.
                 log::warn!("chats: could not record a send: {error}");
+            }
+            if entered {
+                this.update(cx, |this, cx| this.note_submitted(&chat_id, cx))
+                    .ok();
             }
             let name = |cx: &mut AsyncApp| {
                 this.update(cx, |this, cx| match this.not_running(&chat_id, cx) {
@@ -567,6 +578,7 @@ pub fn chats_for_prompts_file(path: &Path, cx: &App) -> Vec<ChatRef> {
     };
     let runtime = runtime.read(cx);
     let store = runtime.store().read(cx);
+    let activity = runtime.live_activity();
     let mut chats: Vec<ChatRef> = store
         .index()
         .values()
@@ -576,7 +588,7 @@ pub fn chats_for_prompts_file(path: &Path, cx: &App) -> Vec<ChatRef> {
             id: record.id.clone(),
             name: record.name.clone(),
             running: is_open(runtime.state(&record.id)),
-            last_active: record.last_active,
+            last_active: *activity.get(&record.id).unwrap_or(&record.last_active),
         })
         .collect();
     // `max_by_key` in `chat_for_prompts_file` keeps the last of equal keys: so does this order.

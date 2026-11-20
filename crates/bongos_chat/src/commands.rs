@@ -965,11 +965,11 @@ fn open_chats(
                 && task_id.is_none_or(|id| chat.task_id.as_deref() == Some(id))
         })
         .collect();
-    chats.sort_by(|(_, a), (_, b)| {
-        timestamp_utc(&b.last_active)
-            .cmp(&timestamp_utc(&a.last_active))
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    let activity = runtime.live_activity();
+    let time = |record: &ChatRecord| {
+        timestamp_utc(activity.get(&record.id).unwrap_or(&record.last_active))
+    };
+    chats.sort_by(|(_, a), (_, b)| time(b).cmp(&time(a)).then_with(|| a.id.cmp(&b.id)));
     chats
         .into_iter()
         .map(|(chat, record)| {
