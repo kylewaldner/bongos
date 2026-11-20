@@ -1873,9 +1873,9 @@ pub struct ChatsSettingsContent {
     /// Default: null
     pub types_dir: Option<String>,
     /// Whether running chats report their state to bongos over a private local socket (agent
-    /// hooks), instead of bongos estimating it from terminal output.
+    /// hooks). Set to false to fall back to estimating it from terminal output.
     ///
-    /// Default: false
+    /// Default: true
     pub channels: Option<bool>,
     /// The agent command lines.
     pub agents: Option<ChatAgentsContent>,

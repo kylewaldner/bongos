@@ -68,8 +68,15 @@ pub(super) struct Channels {
 /// The runtime harness with `chats.channels` on, a running global report server whose reports go
 /// to the runtime, and a reporter of `["true"]`.
 pub(super) async fn channels(cx: &mut TestAppContext) -> Channels {
+    channels_with(cx, true).await
+}
+
+/// `channels`, setting `chats.channels` only when `explicit`, so the default applies otherwise.
+async fn channels_with(cx: &mut TestAppContext, explicit: bool) -> Channels {
     let h = harness(cx, true, 60, &[]).await;
-    set_channels(cx, true);
+    if explicit {
+        set_channels(cx, true);
+    }
     let (socket_temp, base) = temp();
     let server = cx.new(|cx| ChannelServer::new(inputs(&base, None), cx));
     cx.update(|cx| {
@@ -332,6 +339,20 @@ async fn test_a_claude_launch_with_channels_carries_env_and_hooks_and_registers(
         .await;
     assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Live));
     assert_eq!(c.last_report_at(&id, cx), Some(7));
+}
+
+#[gpui::test]
+async fn test_default_settings_launch_a_claude_chat_with_hooks(cx: &mut TestAppContext) {
+    let c = channels_with(cx, false).await;
+    assert!(cx.update(|cx| {
+        use settings::Settings as _;
+        crate::ChatsSettings::get_global(cx).channels
+    }));
+    let id = c.start(c.request(Agent::Claude, "2.1.319"), cx).await;
+    let settings =
+        std::fs::read_to_string(c.h.runtime_root.join(&id).join(CLAUDE_SETTINGS_FILE)).unwrap();
+    assert!(settings.contains("claude-hook"), "{settings}");
+    assert_eq!(c.channel(&id, cx), Some(ChannelStatus::Pending));
 }
 
 #[gpui::test]

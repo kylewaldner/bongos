@@ -1681,7 +1681,7 @@ const PROJECT_REPOSITORY_KEYS: &[(&str, &str, &str)] = &[
 ];
 
 fn chats_page() -> SettingsPage {
-    fn chats_section() -> [SettingsPageItem; 6] {
+    fn chats_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Chats"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -1745,6 +1745,20 @@ fn chats_page() -> SettingsPage {
                             .chats
                             .get_or_insert_default()
                             .submit_delay_ms = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Report Channels",
+                description: "Whether running chats report their state to bongos over a private local socket (agent hooks). Turn off to estimate it from terminal output instead.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("chats.channels"),
+                    pick: |settings_content| settings_content.chats.as_ref()?.channels.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.chats.get_or_insert_default().channels = value;
                     },
                 }),
                 metadata: None,
@@ -12146,6 +12160,7 @@ mod tests {
                 "chats.prompt_pane",
                 "chats.idle_after_secs",
                 "chats.submit_delay_ms",
+                "chats.channels",
                 "chats.agents",
                 "prompts.enabled",
                 "prompts.auto_submit",
