@@ -2783,9 +2783,11 @@
     "default_width": 720,
     // Whether a dual-layout chat shows the prompts pane beside its terminal.
     "prompt_pane": true,
-    // Seconds without output after which a running chat counts as idle.
+    // Seconds without output after which a running chat counts as idle. Applies to the fallback
+    // only: a chat without reports, or a turn that ended unreported.
     "idle_after_secs": 60,
-    // Milliseconds between pasting a prompt into a chat and submitting it.
+    // Milliseconds between pasting a prompt into a chat and submitting it. Applies to the
+    // fallback only: a chat without reports, or a turn that ended unreported.
     "submit_delay_ms": 100,
     // The directory of session types; null means ~/.bongos/chat-types.
     "types_dir": null,

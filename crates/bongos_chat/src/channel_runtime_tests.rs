@@ -996,3 +996,68 @@ async fn test_a_resumed_live_chat_without_a_prompt_report_keeps_the_file_check(
     assert_eq!(c.cleanups(cx), 0);
     assert!(crate::cleanup::storage_reads(&c.h.home) > 0);
 }
+
+impl Channels {
+    /// The text the estimated tag's tooltip shows for the chat, `None` when its state is exact.
+    fn estimate_reason(&self, id: &str, cx: &mut TestAppContext) -> Option<String> {
+        self.h.runtime.read_with(cx, |runtime, _| {
+            runtime.live(id).and_then(|chat| chat.estimate_reason())
+        })
+    }
+}
+
+#[gpui::test]
+async fn test_the_estimated_tag_names_each_reason(cx: &mut TestAppContext) {
+    let c = channels(cx).await;
+
+    // A launch whose channel waits for its first report.
+    let pending = c.start(c.request(Agent::Claude, "2.1.319"), cx).await;
+    assert_eq!(c.channel(&pending, cx), Some(ChannelStatus::Pending));
+    assert_eq!(
+        c.estimate_reason(&pending, cx).as_deref(),
+        Some("No report from Claude yet")
+    );
+
+    // A live channel: exact has no reason, an unreported turn end has one.
+    let (live, token) = c.start_live(cx).await;
+    assert_eq!(c.estimate_reason(&live, cx), None);
+    c.deliver(event_report(&live, &token, 2, Event::PromptSubmitted), cx);
+    assert_eq!(c.estimate_reason(&live, cx), None);
+    c.pass_idle_time(cx);
+    assert_eq!(
+        c.estimate_reason(&live, cx).as_deref(),
+        Some("No turn end reported (interrupted or denied)")
+    );
+
+    // An agent with no channel, and an old tool version.
+    let codex = c.start(c.request(Agent::Codex, ""), cx).await;
+    assert_eq!(
+        c.estimate_reason(&codex, cx).as_deref(),
+        Some("Codex does not report its state yet")
+    );
+    let old = c.start(c.request(Agent::Claude, "2.1.300"), cx).await;
+    assert_eq!(
+        c.estimate_reason(&old, cx).as_deref(),
+        Some("Claude 2.1.300 is older than the first version with hooks bongos knows (2.1.319)")
+    );
+
+    // A reporter path that cannot be quoted.
+    cx.update(|cx| {
+        ChannelConfig {
+            reporter: vec!["it's".to_string()],
+        }
+        .set_global(cx);
+    });
+    let unquotable = c.start(c.request(Agent::Claude, "2.1.319"), cx).await;
+    assert_eq!(
+        c.estimate_reason(&unquotable, cx).as_deref(),
+        Some("The bongos path cannot be quoted")
+    );
+
+    // Channels off, for a running chat and for a new one.
+    set_channels(cx, false);
+    cx.run_until_parked();
+    assert_eq!(c.estimate_reason(&live, cx).as_deref(), Some(REPORTS_OFF));
+    let off = c.start(c.request(Agent::Claude, "2.1.319"), cx).await;
+    assert_eq!(c.estimate_reason(&off, cx).as_deref(), Some(REPORTS_OFF));
+}
