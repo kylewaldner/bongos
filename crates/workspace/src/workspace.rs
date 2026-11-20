@@ -2777,14 +2777,15 @@ impl Workspace {
                         if navigated {
                             break None;
                         }
-                    } else {
-                        // If the item is no longer present in this pane, then retrieve its
-                        // path info in order to reopen it.
-                        break pane
-                            .nav_history()
-                            .path_for_item(entry.item.id())
-                            .map(|(project_path, abs_path)| (project_path, abs_path, entry));
+                    } else if let Some((project_path, abs_path)) =
+                        pane.nav_history().path_for_item(entry.item.id())
+                    {
+                        // If the item is no longer present in this pane, then reopen it from
+                        // its path.
+                        break Some((project_path, abs_path, entry));
                     }
+                    // An item that is gone and has no path (a closed untitled buffer) cannot
+                    // be reopened, so the walk goes on to the next entry.
                 }
             })
         } else {
@@ -2792,10 +2793,35 @@ impl Workspace {
         };
 
         if let Some((project_path, abs_path, entry)) = to_load {
-            // If the item was no longer present, then load it again from its previous path, first try the local path
-            let open_by_project_path = self.load_path(project_path.clone(), window, cx);
+            // A local file deleted since its item closed is skipped rather than reopened as a
+            // new empty file.
+            let fs = self.app_state.fs.clone();
+            let path_on_disk = self
+                .project
+                .read(cx)
+                .is_local()
+                .then(|| {
+                    self.project
+                        .read(cx)
+                        .absolute_path(&project_path, cx)
+                        .or_else(|| abs_path.clone())
+                })
+                .flatten();
 
             cx.spawn_in(window, async move  |workspace, cx| {
+                if let Some(path_on_disk) = path_on_disk
+                    && !fs.is_file(&path_on_disk).await
+                {
+                    return workspace
+                        .update_in(cx, |workspace, window, cx| {
+                            Self::navigate_history(workspace, pane, mode, window, cx)
+                        })?
+                        .await;
+                }
+                // If the item was no longer present, then load it again from its previous path, first try the local path
+                let open_by_project_path = workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.load_path(project_path.clone(), window, cx)
+                })?;
                 let open_by_project_path = open_by_project_path.await;
                 let mut navigated = false;
                 match open_by_project_path
@@ -11874,6 +11900,74 @@ mod tests {
         pane.read_with(cx, |pane, _| {
             assert!(pane.can_navigate_forward(), "Should be able to go forward");
         });
+    }
+
+    /// An entry whose item was closed and has no path to reopen it from (an untitled buffer) is
+    /// skipped, and going back lands on the next older entry instead of doing nothing.
+    #[gpui::test]
+    async fn test_go_back_skips_closed_item_without_path(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let item_a = cx.new(|cx| {
+            TestItem::new(cx).with_project_items(&[TestProjectItem::new(1, "a.txt", cx)])
+        });
+        let untitled = cx.new(|cx| TestItem::new(cx));
+        let item_c = cx.new(|cx| {
+            TestItem::new(cx).with_project_items(&[TestProjectItem::new(3, "c.txt", cx)])
+        });
+        let untitled_id = untitled.entity_id();
+
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item_a.clone()), None, true, window, cx);
+            workspace.add_item_to_active_pane(Box::new(untitled.clone()), None, true, window, cx);
+            workspace.add_item_to_active_pane(Box::new(item_c.clone()), None, true, window, cx);
+        });
+        // History: c, a, untitled; c is active.
+        for item in [
+            Box::new(item_a.clone()) as Box<dyn ItemHandle>,
+            Box::new(untitled.clone()),
+            Box::new(item_c.clone()),
+        ] {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.activate_item(item.as_ref(), false, false, window, cx);
+            });
+            cx.run_until_parked();
+        }
+        drop(untitled);
+
+        pane.update_in(cx, |pane, window, cx| {
+            pane.close_item_by_id(untitled_id, SaveIntent::Skip, window, cx)
+        })
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert_eq!(pane.items_len(), 2);
+            assert!(pane.nav_history().path_for_item(untitled_id).is_none());
+        });
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.go_back(pane.downgrade(), window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let active_item = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item(cx).unwrap().item_id()
+        });
+        assert_eq!(
+            active_item,
+            item_a.entity_id(),
+            "going back skips the closed untitled item and lands on the item before it"
+        );
     }
 
     #[gpui::test]
