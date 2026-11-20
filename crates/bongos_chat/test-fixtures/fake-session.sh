@@ -20,6 +20,7 @@
 #
 # Knobs (environment variables): FAKE_CLI_LOG, FAKE_CLI_INPUT, FAKE_CLI_TITLE, FAKE_CLI_NO_BRACKETED,
 # FAKE_CLI_SPIN (spin that many titles right after `ready`, then print `spun`),
+# FAKE_CLI_EVENT_DIR (fake-claude only, with `--settings <file>`; see fake_events below),
 # and for fake-codex FAKE_CLI_HOME: when set, a new or forked session writes the session file Codex would,
 # `$FAKE_CLI_HOME/.codex/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl`, whose first line holds
 # the id and the working directory.
@@ -76,6 +77,97 @@ fake_command() {
   esac
 }
 
+# Hook events (fake-claude only). When $FAKE_CLI_EVENT_DIR is set and the arguments hold
+# `--settings <file>` (or `--settings=<file>`), a background poller watches that directory. A file
+# named `<Event>` or `<seq>-<Event>` (a leading run of digits and a dash is dropped) is a marker:
+# for each `command` hook the settings file lists under that event (`"hooks"` as serde_json's
+# pretty printer writes it: event keys indented four spaces), the poller runs `sh -c <command>`
+# with one JSON object on stdin, then deletes the marker. Hook timeouts are ignored and hook output
+# is discarded. Files starting with `.` are skipped, so a scenario can write one and rename it.
+# The marker's lines `source=`, `notification_type=` and `tool_name=` set those fields (defaults:
+# startup, idle_prompt, Bash); the other lines are the marker text, put in `prompt`, `message`
+# and `last_assistant_message`.
+fake_json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\r\t' '   '
+}
+
+fake_hook_commands() {
+  awk -v event="$1" '
+    /^    "[^"]+": \[$/ { current = $1; gsub(/[":]/, "", current); next }
+    current == event && /^ *"command": "/ {
+      line = $0
+      sub(/^ *"command": "/, "", line)
+      sub(/",?$/, "", line)
+      print line
+    }
+  ' "$2" | sed -e 's/\\"/"/g' -e 's/\\\\/\\/g'
+}
+
+fake_fire() {
+  fake_event=$1
+  fake_settings=$2
+  fake_marker=$3
+  fake_source=startup
+  fake_ntype=idle_prompt
+  fake_tool=Bash
+  fake_text=''
+  while IFS= read -r fake_row || [ -n "$fake_row" ]; do
+    case $fake_row in
+      source=*) fake_source=${fake_row#source=} ;;
+      notification_type=*) fake_ntype=${fake_row#notification_type=} ;;
+      tool_name=*) fake_tool=${fake_row#tool_name=} ;;
+      *) fake_text="${fake_text:+$fake_text }$fake_row" ;;
+    esac
+  done < "$fake_marker"
+  fake_text=$(fake_json_escape "$fake_text")
+  fake_payload=$(printf '{"hook_event_name":"%s","session_id":"%s","source":"%s","notification_type":"%s","tool_name":"%s","prompt":"%s","message":"%s","last_assistant_message":"%s"}' \
+    "$fake_event" "${fake_session_id:-00000000-0000-4000-8000-000000000000}" "$(fake_json_escape "$fake_source")" \
+    "$(fake_json_escape "$fake_ntype")" "$(fake_json_escape "$fake_tool")" "$fake_text" "$fake_text" "$fake_text")
+  fake_hook_commands "$fake_event" "$fake_settings" | while IFS= read -r fake_cmd; do
+    printf '%s\n' "$fake_payload" | sh -c "$fake_cmd" > /dev/null 2>&1
+  done
+}
+
+fake_events() {
+  fake_dir=$1
+  fake_settings=$2
+  while :; do
+    for fake_file in "$fake_dir"/*; do
+      [ -f "$fake_file" ] || continue
+      fake_base=${fake_file##*/}
+      case $fake_base in
+        .*) continue ;;
+        [0-9]*-*) fake_base=${fake_base#*-} ;;
+      esac
+      fake_fire "$fake_base" "$fake_settings" "$fake_file"
+      rm -f "$fake_file"
+    done
+    sleep 0.05
+  done
+}
+
+fake_start_events() {
+  [ -n "${FAKE_CLI_EVENT_DIR:-}" ] || return 0
+  fake_settings=''
+  fake_session_id=''
+  fake_prev=''
+  for fake_arg in "$@"; do
+    case $fake_prev in
+      --settings) fake_settings=$fake_arg ;;
+      --session-id | --resume | -r) fake_session_id=$fake_arg ;;
+    esac
+    case $fake_arg in
+      --settings=*) fake_settings=${fake_arg#--settings=} ;;
+    esac
+    fake_prev=$fake_arg
+  done
+  [ -f "$fake_settings" ] || return 0
+  mkdir -p "$FAKE_CLI_EVENT_DIR"
+  fake_events "$FAKE_CLI_EVENT_DIR" "$fake_settings" < /dev/null &
+  fake_events_pid=$!
+  trap 'kill "$fake_events_pid" 2>/dev/null' EXIT
+}
+
 fake_session() {
   fake_name=$1
   shift
@@ -90,6 +182,8 @@ fake_session() {
   if [ "$fake_name" = codex ]; then
     fake_codex_session_file "$@"
   fi
+
+  fake_start_events "$@"
 
   stty raw -echo 2>/dev/null
   if [ -z "${FAKE_CLI_NO_BRACKETED:-}" ]; then

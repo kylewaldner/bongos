@@ -1276,3 +1276,76 @@ fn test_runtime_root_is_created_private_and_checked() {
     std::fs::write(&file, "x").unwrap();
     assert!(write_runtime_dir(&file, &file.join("c1"), &files).is_err());
 }
+
+#[test]
+// A plain test thread with no executor to block, driving a fixture process.
+#[allow(clippy::disallowed_methods)]
+fn test_fake_claude_runs_the_settings_hooks_for_event_markers() {
+    use std::process::{Command, Stdio};
+
+    let temp = TempDir::new().unwrap();
+    let out = temp.path().join("hook-out.jsonl");
+    let events = temp.path().join("events");
+    std::fs::create_dir(&events).unwrap();
+    let settings = temp.path().join("settings.json");
+    write(
+        &settings,
+        concat!(
+            "{\n  \"hooks\": {\n",
+            "    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n",
+            "            \"type\": \"command\",\n",
+            "            \"command\": \"sh -c 'cat >> $OUT'\",\n",
+            "            \"timeout\": 5\n          }\n        ]\n      }\n    ],\n",
+            "    \"Notification\": [\n      {\n        \"hooks\": [\n          {\n",
+            "            \"type\": \"command\",\n",
+            "            \"command\": \"sh -c 'cat >> $OUT'\"\n",
+            "          }\n        ]\n      }\n    ]\n  }\n}\n",
+        ),
+    );
+    let mut child = Command::new(fixture("fake-claude"))
+        .args(["--settings"])
+        .arg(&settings)
+        .env("FAKE_CLI_EVENT_DIR", &events)
+        .env("OUT", &out)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Written then renamed, so the poller never reads a half-written marker.
+    let drop_marker = |name: &str, text: &str| {
+        write(&events.join(format!(".{name}.tmp")), text);
+        std::fs::rename(events.join(format!(".{name}.tmp")), events.join(name)).unwrap();
+    };
+    drop_marker(
+        "1-Notification",
+        "notification_type=permission_prompt\nneeds you MARKER-ONE\n",
+    );
+    drop_marker("2-Stop", "done MARKER-TWO\n");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut text = String::new();
+    while Instant::now() < deadline {
+        text = std::fs::read_to_string(&out).unwrap_or_default();
+        if text.contains("MARKER-ONE") && text.contains("MARKER-TWO") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(child.stdin.take());
+    child.wait().unwrap();
+
+    assert!(
+        text.contains("\"hook_event_name\":\"Notification\"")
+            && text.contains("\"notification_type\":\"permission_prompt\"")
+            && text.contains("\"message\":\"needs you MARKER-ONE\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"hook_event_name\":\"Stop\"")
+            && text.contains("\"prompt\":\"done MARKER-TWO\""),
+        "{text}"
+    );
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(files_under(&events).is_empty(), "markers are consumed");
+}
