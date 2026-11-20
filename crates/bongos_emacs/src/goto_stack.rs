@@ -26,15 +26,13 @@ fn goto_stack_back(
         return;
     }
     let walk = workspace.go_back_reporting(pane.downgrade(), window, cx);
-    cx.spawn_in(window, async move |_, cx| {
-        match walk.await {
-            Ok(false) => {
-                cx.update(|window, cx| bongos_minibuffer::message(window, cx, NO_EARLIER_LOCATION))
-                    .ok();
-            }
-            Ok(true) => {}
-            Err(error) => log::error!("goto stack walk failed: {error:#}"),
+    cx.spawn_in(window, async move |_, cx| match walk.await {
+        Ok(false) => {
+            cx.update(|window, cx| bongos_minibuffer::message(window, cx, NO_EARLIER_LOCATION))
+                .ok();
         }
+        Ok(true) => {}
+        Err(error) => log::error!("goto stack walk failed: {error:#}"),
     })
     .detach();
 }
@@ -52,15 +50,13 @@ fn goto_stack_forward(
         return;
     }
     let walk = workspace.go_forward_reporting(pane.downgrade(), window, cx);
-    cx.spawn_in(window, async move |_, cx| {
-        match walk.await {
-            Ok(false) => {
-                cx.update(|window, cx| bongos_minibuffer::message(window, cx, NO_LATER_LOCATION))
-                    .ok();
-            }
-            Ok(true) => {}
-            Err(error) => log::error!("goto stack walk failed: {error:#}"),
+    cx.spawn_in(window, async move |_, cx| match walk.await {
+        Ok(false) => {
+            cx.update(|window, cx| bongos_minibuffer::message(window, cx, NO_LATER_LOCATION))
+                .ok();
         }
+        Ok(true) => {}
+        Err(error) => log::error!("goto stack walk failed: {error:#}"),
     })
     .detach();
 }
