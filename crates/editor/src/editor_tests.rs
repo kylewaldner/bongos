@@ -32390,6 +32390,190 @@ pub(crate) fn update_test_editor_settings(
     })
 }
 
+fn set_navigation_history_settings(
+    cx: &mut TestAppContext,
+    record_large_moves: bool,
+    record_item_switches: bool,
+) {
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                    record_large_moves: Some(record_large_moves),
+                    record_item_switches: Some(record_item_switches),
+                });
+            });
+        });
+    });
+}
+
+#[gpui::test]
+async fn test_navigation_history_without_large_moves(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, false, true);
+
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+    _ = window.update(cx, |_mw, window, cx| {
+        cx.new(|cx| {
+            let buffer = MultiBuffer::build_simple(&sample_text(300, 5, 'a'), cx);
+            let mut editor = build_editor(buffer, window, cx);
+            let handle = cx.entity();
+            editor.set_nav_history(Some(pane.read(cx).nav_history_for_item(&handle)));
+
+            fn can_go_back(editor: &mut Editor, cx: &mut App) -> bool {
+                editor
+                    .nav_history
+                    .as_mut()
+                    .unwrap()
+                    .pop_backward(cx)
+                    .is_some()
+            }
+
+            editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(20), 0)..DisplayPoint::new(DisplayRow(20), 0)
+                ])
+            });
+            assert!(!can_go_back(&mut editor, cx));
+
+            editor.change_selections(
+                SelectionEffects::no_scroll().nav_history(true),
+                window,
+                cx,
+                |s| {
+                    s.select_display_ranges([
+                        DisplayPoint::new(DisplayRow(21), 0)..DisplayPoint::new(DisplayRow(21), 0)
+                    ])
+                },
+            );
+            assert!(can_go_back(&mut editor, cx));
+            editor
+        })
+    });
+}
+
+#[gpui::test]
+async fn test_navigation_history_without_item_switches(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, true, false);
+
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let first = window
+        .update(cx, |_mw, window, cx| {
+            cx.new(|cx| {
+                let buffer = MultiBuffer::build_simple(&sample_text(300, 5, 'a'), cx);
+                build_editor(buffer, window, cx)
+            })
+        })
+        .unwrap();
+    let second = window
+        .update(cx, |_mw, window, cx| {
+            cx.new(|cx| {
+                let buffer = MultiBuffer::build_simple(&sample_text(300, 5, 'b'), cx);
+                build_editor(buffer, window, cx)
+            })
+        })
+        .unwrap();
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(first.clone()), None, true, window, cx);
+    });
+    first.update_in(cx, |editor, window, cx| {
+        editor.change_selections(
+            SelectionEffects::no_scroll().nav_history(false),
+            window,
+            cx,
+            |s| {
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(30), 0)..DisplayPoint::new(DisplayRow(30), 0)
+                ])
+            },
+        );
+        // Leave an entry for the first file, so there is something to go back to.
+        editor.change_selections(
+            SelectionEffects::no_scroll().nav_history(true),
+            window,
+            cx,
+            |s| {
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(31), 0)..DisplayPoint::new(DisplayRow(31), 0)
+                ])
+            },
+        );
+    });
+    pane.update(cx, |pane, _| {
+        assert!(pane.can_navigate_backward());
+    });
+    // Drop that entry; only the switch itself is under test below.
+    pane.update(cx, |pane, cx| {
+        pane.nav_history_mut().clear(cx);
+        assert!(!pane.can_navigate_backward());
+    });
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(second.clone()), None, true, window, cx);
+    });
+    pane.update(cx, |pane, _| {
+        assert!(
+            !pane.can_navigate_backward(),
+            "switching items must not record an entry"
+        );
+    });
+
+    // Make an entry in the first file, then go back to it and forward again.
+    first.update_in(cx, |editor, window, cx| {
+        editor.change_selections(
+            SelectionEffects::no_scroll().nav_history(true),
+            window,
+            cx,
+            |s| {
+                s.select_display_ranges([
+                    DisplayPoint::new(DisplayRow(50), 0)..DisplayPoint::new(DisplayRow(50), 0)
+                ])
+            },
+        );
+    });
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .go_back(workspace.active_pane().downgrade(), window, cx)
+            .detach_and_log_err(cx);
+    });
+    cx.executor().run_until_parked();
+    workspace.update(cx, |workspace, cx| {
+        assert_eq!(
+            workspace.active_item(cx).unwrap().item_id(),
+            first.entity_id()
+        );
+    });
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .go_forward(workspace.active_pane().downgrade(), window, cx)
+            .detach_and_log_err(cx);
+    });
+    cx.executor().run_until_parked();
+    workspace.update(cx, |workspace, cx| {
+        assert_eq!(
+            workspace.active_item(cx).unwrap().item_id(),
+            second.entity_id()
+        );
+    });
+}
+
 pub(crate) fn init_test(cx: &mut TestAppContext, f: fn(&mut AllLanguageSettingsContent)) {
     cx.update(|cx| {
         assets::Assets.load_test_fonts(cx);
