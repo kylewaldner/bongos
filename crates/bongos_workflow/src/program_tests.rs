@@ -1255,6 +1255,88 @@ fn a_write_through_a_symlink_is_checked_where_it_leads() {
 }
 
 #[test]
+fn a_symlink_leading_outside_can_be_removed_and_renamed_but_not_written_through() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let outside = fixture.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside = std::fs::canonicalize(&outside).unwrap();
+    let held = outside.join("held.txt");
+    std::fs::write(&held, "theirs").unwrap();
+    // The links themselves are inside the writable root, so removing or renaming them is fine,
+    // whatever they lead to; a directory of links goes with shutil.rmtree.
+    let finish = fixture.run(&script(
+        &format!(
+            "import shutil\nos.symlink({held:?}, 'file-link')\nos.symlink({held:?}, 'other-link')\n\
+             os.symlink({dir:?}, 'dir-link')\n\
+             os.rename('file-link', 'renamed-link')\nos.remove('renamed-link')\n\
+             os.unlink('dir-link')\n\
+             os.makedirs('venv/bin')\nos.symlink({held:?}, 'venv/bin/python')\n\
+             shutil.rmtree('venv')\n\
+             os.rename('other-link', 'final-link')",
+            held = held.to_string_lossy(),
+            dir = outside.to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    assert_eq!(finish.outcome, Ok(json!({ "status": "done" })));
+    let tree = fixture.path("run-worktree");
+    for gone in ["file-link", "renamed-link", "dir-link", "venv", "other-link"] {
+        assert!(std::fs::symlink_metadata(tree.join(gone)).is_err(), "{gone}");
+    }
+    assert!(std::fs::symlink_metadata(tree.join("final-link")).is_ok());
+    assert_eq!(std::fs::read_to_string(&held).unwrap(), "theirs");
+
+    // Writing through the link is still refused.
+    let finish = fixture.run(&script(
+        &format!(
+            "os.symlink({held:?}, 'through')\n\
+             try:\n    open('through', 'w').write('mine')\nexcept PermissionError:\n    pass",
+            held = held.to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    assert_eq!(says(failure(&finish)), refusal(&held));
+    assert_eq!(std::fs::read_to_string(&held).unwrap(), "theirs");
+}
+
+#[test]
+fn a_directory_holding_a_mask_cannot_be_renamed_or_removed() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let tree = std::fs::canonicalize(fixture.path("run-worktree")).unwrap();
+    let moved = tree.with_file_name("run-worktree-moved");
+    let node = private_node(
+        &fixture,
+        &common,
+        &script(
+            &format!(
+                "try:\n    os.rename({tree:?}, {moved:?})\nexcept PermissionError:\n    pass",
+                tree = tree.to_string_lossy(),
+                moved = moved.to_string_lossy(),
+            ),
+            "'done'",
+        ),
+        &[],
+    );
+    let finish = fixture.run_node(node);
+    assert_eq!(says(failure(&finish)), refusal(&tree));
+    assert!(tree.join(".git").exists());
+    assert!(!moved.exists());
+}
+
+#[test]
 fn git_config_from_the_environment_is_appended_to() {
     let mut env = BTreeMap::new();
     add_git_config(&mut env, "core.logAllRefUpdates", "false");

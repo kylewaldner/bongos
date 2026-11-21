@@ -16,8 +16,13 @@
 # Every write denial names the rule: "permission denied: <RULE>: <path>", where
 # RULE is the text of bongos_confine::RULE. The shim mirrors the OS sandbox's
 # allowlist and denies only what that allowlist would: a write outside the
-# writable roots or inside a mask. Symlinks and hard links are not special; a
-# write through one is checked at the path it resolves to.
+# writable roots or inside a mask. A write through a symlink or hard link is checked
+# at the path it resolves to; an operation on the directory entry itself (os.remove,
+# os.rmdir, os.rename, the destination of os.symlink and os.link) is checked at the
+# entry, with only its parent resolved, so a symlink in a writable root that leads
+# elsewhere can be removed or renamed. Removing or renaming a directory that holds a
+# mask is refused. Known gap: chmod, chown and utime with follow_symlinks=False raise
+# the same audit event as the following forms, so they are checked at the link's target.
 #
 # Denied: starting a program not in `commands` (subprocess.Popen, os.system,
 # os.exec*, os.posix_spawn*, and the fork_exec under subprocess, replaced by a
@@ -181,7 +186,20 @@ def _install(policy):
         except OSError:
             return None
 
-    def resolve(path, dir_fd=None):
+    def resolve(path, dir_fd=None, entry=False):
+        """The real path a write lands on. With `entry`, the operation acts on the directory
+        entry and not on what a final symlink leads to (unlink, rmdir, rename, symlink, link):
+        only the parent is resolved, so the link itself is what gets checked."""
+        if entry and type(path) is not int:
+            name = text(path)
+            if name is not None and os.path.basename(name) not in ("", ".", ".."):
+                base = os.path.dirname(name)
+                if not os.path.isabs(name):
+                    where = dir_base(dir_fd)
+                    if where is None:
+                        deny(rule + ": relative to a directory descriptor: " + name)
+                    base = os.path.join(where, base)
+                return os.path.join(os.path.realpath(base), os.path.basename(name))
         if path is None:
             return None
         if type(path) is int:
@@ -207,7 +225,7 @@ def _install(policy):
             return True
         return under(path, writable) and not under(path, masks)
 
-    def check_write(path, dir_fd=None):
+    def check_write(path, dir_fd=None, entry=False):
         if type(path) in (str, bytes) and path in (
             "/dev/stdout",
             "/dev/stderr",
@@ -215,22 +233,31 @@ def _install(policy):
             b"/dev/stderr",
         ):
             return
-        resolved = resolve(path, dir_fd)
+        resolved = resolve(path, dir_fd, entry)
         if not is_writable(resolved):
             deny(rule + ": " + resolved)
+        if entry and path is not None and type(path) is not int:
+            # Removing or moving a directory that holds a mask would put the mask's contents
+            # somewhere unmasked.
+            prefix = resolved.rstrip(os.sep) + os.sep
+            if any(mask.startswith(prefix) for mask in masks):
+                deny(rule + ": " + resolved)
 
     def on_rename(args):
-        check_write(args[0], args[2])
-        check_write(args[1], args[3])
+        check_write(args[0], args[2], True)
+        check_write(args[1], args[3], True)
+
+    def on_remove(args):
+        check_write(args[0], args[1], True)
 
     def on_link(args):
-        check_write(args[1], args[3])
+        check_write(args[1], args[3], True)
 
     def on_symlink(args):
         """A symlink may be made wherever writes are allowed (a virtual environment makes
         some); a write through it is checked at the path it resolves to."""
         destination, dir_fd = (list(args) + [None, None, None])[1:3]
-        check_write(destination, dir_fd)
+        check_write(destination, dir_fd, True)
 
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 
@@ -552,8 +579,8 @@ def _install(policy):
 
     handlers = {
         "open": on_open,
-        "os.remove": lambda args: check_write(args[0], args[1]),
-        "os.rmdir": lambda args: check_write(args[0], args[1]),
+        "os.remove": on_remove,
+        "os.rmdir": on_remove,
         "os.mkdir": lambda args: check_write(args[0], args[2]),
         "os.rename": on_rename,
         "os.link": on_link,
