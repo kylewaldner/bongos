@@ -176,7 +176,8 @@ pub struct LiveChat {
     /// When (on the runtime's clock) the last report of the current launch was accepted; the idle
     /// timer counts quiet time from it as from output.
     last_report_seen: Option<u64>,
-    last_active_write: Option<Instant>,
+    /// When `last_active` was last written, on the runtime's clock.
+    last_active_write: Option<u64>,
     /// The state when `last_active` was last written (or at launch).
     written_state: ChatState,
     /// The newest time of any state change, in memory; the record may lag it.
@@ -630,6 +631,14 @@ impl ChatRuntime {
             .iter()
             .map(|(id, chat)| (id.clone(), chat.last_active))
             .collect()
+    }
+
+    /// Sets the in-memory last activity of `chat_id`, so a test can tell a later write from it.
+    #[cfg(test)]
+    pub(crate) fn set_live_activity(&mut self, chat_id: &str, at: Timestamp) {
+        if let Some(chat) = self.live.get_mut(chat_id) {
+            chat.last_active = at;
+        }
     }
 
     /// A send pressed Enter in `chat_id`: it is active now, and the record says so at once.
@@ -1102,7 +1111,7 @@ impl ChatRuntime {
             auto_named: prepared.record.named_by != NamedBy::None,
             seen_inputs,
             last_report_seen: None,
-            last_active_write: Some(Instant::now()),
+            last_active_write: Some(self.clock.now_ms()),
             written_state: initial_state,
             last_active: bongos_work_model::now(),
             pending_active_write: None,
@@ -1416,6 +1425,7 @@ impl ChatRuntime {
     /// once the debounce has passed.
     fn touch_active(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let debounce = self.active_debounce;
+        let now = self.clock.now_ms();
         let Some(chat) = self.live.get_mut(chat_id) else {
             return;
         };
@@ -1424,7 +1434,7 @@ impl ChatRuntime {
         }
         let wait = chat
             .last_active_write
-            .map(|last| debounce.saturating_sub(last.elapsed()))
+            .map(|last| debounce.saturating_sub(Duration::from_millis(now.saturating_sub(last))))
             .unwrap_or_default();
         if wait.is_zero() {
             self.write_active_now(chat_id, cx);
@@ -1466,9 +1476,10 @@ impl ChatRuntime {
     /// Books an active write of `chat_id` (replacing a pending one): its record path and whether
     /// it is prompted, and its in-memory `last_active`. `None` when the chat is not live.
     fn note_active_write(&mut self, chat_id: &str) -> Option<(PathBuf, bool, Timestamp)> {
+        let now = self.clock.now_ms();
         let chat = self.live.get_mut(chat_id)?;
         chat.pending_active_write = None;
-        chat.last_active_write = Some(Instant::now());
+        chat.last_active_write = Some(now);
         chat.written_state = chat.live.state;
         self.stats.active_writes += 1;
         Some((chat.record_path.clone(), chat.prompted, chat.last_active))

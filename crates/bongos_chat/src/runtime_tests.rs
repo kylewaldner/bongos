@@ -363,6 +363,16 @@ impl Harness {
         );
     }
 
+    /// Moves the runtime's clock past the bell's grace, so output and input count again.
+    pub(super) fn pass_bell_grace(&self, cx: &mut TestAppContext) {
+        self.runtime.update(cx, |runtime, cx| {
+            runtime.advance_clock(
+                bongos_chat_model::channel::state::BELL_GRACE + Duration::from_millis(1),
+                cx,
+            )
+        });
+    }
+
     pub(super) async fn wait_content(&self, id: &str, text: &str, cx: &mut TestAppContext) {
         wait_for(cx, &format!("`{text}` in the terminal"), STARTUP, |cx| {
             self.runtime.update(cx, |runtime, cx| {
@@ -655,10 +665,11 @@ async fn test_bell_title_and_exit_reach_the_state_within_a_second(cx: &mut TestA
     h.type_line(&id, "bell", cx);
     h.wait_state(&id, ChatState::Waiting, cx).await;
     // The output that follows a bell in the same read does not end the wait.
-    cx.executor().timer(Duration::from_millis(700)).await;
     cx.run_until_parked();
     assert_eq!(h.state(&id, cx), ChatState::Waiting);
 
+    // Input after the bell's grace answers its question.
+    h.pass_bell_grace(cx);
     h.type_line(&id, "hello", cx);
     h.wait_state(&id, ChatState::Running, cx).await;
 
@@ -837,45 +848,37 @@ pub(super) fn record_active(h: &Harness, id: &str) -> Timestamp {
 #[gpui::test]
 async fn test_last_active_writes_are_debounced(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
-    let debounce = Duration::from_secs(2);
+    // Shorter than the time a turn takes to look idle, so the clock moves it without a state change.
+    let debounce = Duration::from_secs(30);
     h.runtime
         .update(cx, |runtime, _| runtime.set_active_debounce(debounce));
     let id = h.start(Agent::Claude, cx).await;
     // Let the launch's own write fall out of the debounce window.
-    cx.executor().timer(debounce).await;
+    h.runtime
+        .update(cx, |runtime, cx| runtime.advance_clock(debounce, cx));
 
     let before = active_writes(&h, cx);
-    let burst_started = std::time::Instant::now();
     // Bell, input, bell, input: four state changes that write (a title or output alone would not).
     h.type_line(&id, "bell", cx);
     h.wait_state(&id, ChatState::Waiting, cx).await;
     // Input right after a bell is older than the bell's question, so it waits out the bell.
-    cx.executor().timer(Duration::from_millis(700)).await;
+    h.pass_bell_grace(cx);
     h.type_line(&id, "one", cx);
     h.wait_state(&id, ChatState::Running, cx).await;
     h.type_line(&id, "bell", cx);
     h.wait_state(&id, ChatState::Waiting, cx).await;
-    cx.executor().timer(Duration::from_millis(700)).await;
+    h.pass_bell_grace(cx);
     h.type_line(&id, "two", cx);
     h.wait_state(&id, ChatState::Running, cx).await;
-    let during = active_writes(&h, cx);
-    // Four changes inside one debounce window write once. A slow machine can stretch the burst
-    // over more windows, so each full window it took allows one more write: the assertion
-    // depends on the time measured, not on the machine's speed.
-    let windows = (burst_started.elapsed().as_millis() / debounce.as_millis()) as usize;
-    assert!(
-        during - before <= 1 + windows,
-        "four changes in {:?} wrote {} times",
-        burst_started.elapsed(),
-        during - before
-    );
-    cx.executor()
-        .timer(debounce + Duration::from_millis(500))
-        .await;
+    // Four changes inside one debounce window write once.
+    assert_eq!(active_writes(&h, cx) - before, 1, "the first change writes");
+    cx.executor().advance_clock(debounce);
     cx.run_until_parked();
-    let after = active_writes(&h, cx);
-    assert!(after - before <= 2 + windows, "{} writes", after - before);
-    assert!(after > before, "the changes were written");
+    assert_eq!(
+        active_writes(&h, cx) - before,
+        2,
+        "the rest is one write when the window closes"
+    );
 }
 
 #[gpui::test]
@@ -892,8 +895,6 @@ async fn test_a_spinner_title_on_an_idle_chat_writes_nothing(cx: &mut TestAppCon
             runtime.advance_clock(Duration::from_millis(100), cx)
         });
     }
-    cx.run_until_parked();
-    cx.executor().timer(Duration::from_millis(300)).await;
     cx.run_until_parked();
     assert_eq!(
         active_writes(&h, cx),
@@ -967,11 +968,10 @@ async fn test_exit_writes_the_exit_time_as_last_active(cx: &mut TestAppContext) 
     let id = h.start(Agent::Claude, cx).await;
     h.type_line(&id, "hello", cx);
     h.wait_content(&id, "got hello", cx).await;
-    // Let the memory's last activity fall behind the exit by more than a second.
-    cx.executor().timer(Duration::from_millis(1500)).await;
-    let before = h
-        .runtime
-        .read_with(cx, |runtime, _| runtime.live_activity())[&id];
+    // Put the memory's last activity at a time the exit's own write cannot be.
+    let before: Timestamp = "2021-06-01T10:00:00Z".parse().unwrap();
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_live_activity(&id, before));
     let old = age_record(&h, &id);
 
     // No keystroke: a keystroke would write the time itself, hiding the exit's own write.
@@ -984,10 +984,16 @@ async fn test_exit_writes_the_exit_time_as_last_active(cx: &mut TestAppContext) 
         record_active(&h, &id) != old
     })
     .await;
-    assert!(
-        timestamp_utc(&record_active(&h, &id)) > timestamp_utc(&before),
+    let written = timestamp_utc(&record_active(&h, &id));
+    assert_ne!(
+        written,
+        timestamp_utc(&before),
         "the exit wrote its own time, not the earlier change's"
     );
+    let live = h
+        .runtime
+        .read_with(cx, |runtime, _| runtime.live_activity());
+    assert_eq!(written, timestamp_utc(&live[&id]));
 }
 
 #[gpui::test]

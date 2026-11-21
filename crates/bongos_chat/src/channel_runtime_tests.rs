@@ -493,7 +493,6 @@ async fn test_an_early_error_exit_relaunches_once_without_the_channel(cx: &mut T
         c.h.state(&id, cx) == ChatState::Exited { code: Some(4) }
     })
     .await;
-    cx.executor().timer(Duration::from_millis(300)).await;
     cx.run_until_parked();
     assert_eq!(c.starts("claude"), 1);
     assert_eq!(rejected(&c), 1);
@@ -786,11 +785,13 @@ async fn test_each_exact_change_writes_once_and_a_burst_writes_once(cx: &mut Tes
     c.deliver(event_report(&id, &token, 6, Event::TurnDone), cx);
     assert_eq!(active_writes(&c.h, cx), writes, "no change, no write");
 
-    // With a debounce, a burst of reports is one write once the window has passed.
-    let debounce = Duration::from_secs(2);
-    c.h.runtime
-        .update(cx, |runtime, _| runtime.set_active_debounce(debounce));
-    cx.executor().timer(debounce).await;
+    // With a debounce, a burst of reports is one write at once (the window has passed on the
+    // runtime's clock) and one more when the window closes.
+    let debounce = Duration::from_secs(60);
+    c.h.runtime.update(cx, |runtime, cx| {
+        runtime.set_active_debounce(debounce);
+        runtime.advance_clock(debounce, cx)
+    });
     let before = active_writes(&c.h, cx);
     for (at, (event, _)) in (7..).zip([
         (Event::PromptSubmitted, ()),
@@ -799,14 +800,14 @@ async fn test_each_exact_change_writes_once_and_a_burst_writes_once(cx: &mut Tes
     ]) {
         c.deliver(event_report(&id, &token, at, event), cx);
     }
-    cx.executor()
-        .timer(debounce + Duration::from_millis(500))
-        .await;
     cx.run_until_parked();
-    let wrote = active_writes(&c.h, cx) - before;
-    assert!(
-        (1..=2).contains(&wrote),
-        "a burst of reports wrote {wrote} times"
+    assert_eq!(active_writes(&c.h, cx) - before, 1, "the first change writes");
+    cx.executor().advance_clock(debounce);
+    cx.run_until_parked();
+    assert_eq!(
+        active_writes(&c.h, cx) - before,
+        2,
+        "the rest of the burst is one write when the window closes"
     );
 }
 
@@ -828,7 +829,6 @@ async fn test_a_runtime_dropped_without_quit_leaves_the_last_exact_change(cx: &m
     let written = record_active(&c.h, &id);
     // No quit, no close: the record holds the last change, the way a crash leaves it.
     cx.run_until_parked();
-    cx.executor().timer(Duration::from_millis(300)).await;
     assert_eq!(
         record_active(&c.h, &id),
         written,
