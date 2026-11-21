@@ -856,8 +856,8 @@ fn common_dir_of(git_dir: &Path) -> Result<PathBuf> {
 /// target lies in a job root, and refused otherwise or when its target is missing.
 fn read_alternates(objects: &Path, in_job_root: &dyn Fn(&Path) -> bool) -> Result<Option<Vec<u8>>> {
     let alternates = objects.join("info/alternates");
-    let is_symlink = fs::symlink_metadata(&alternates)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let is_symlink =
+        fs::symlink_metadata(&alternates).is_ok_and(|metadata| metadata.file_type().is_symlink());
     if !is_symlink {
         return read_regular_file_limited(&alternates, ALTERNATES_LIMIT);
     }
