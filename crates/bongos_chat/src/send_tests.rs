@@ -269,7 +269,7 @@ fn test_the_settle_limit_grows_with_the_text() {
 /// a submit delay far longer than any wait the test allows.
 async fn live_chat(confirm_wait: Duration, cx: &mut TestAppContext) -> (Channels, String, String) {
     let c = channels(cx).await;
-    set_submit_delay(cx, 60_000);
+    set_submit_delay(cx, 3_600_000);
     c.h.runtime
         .update(cx, |runtime, _| runtime.set_confirm_wait(confirm_wait));
     let (id, token) = c.start_live(cx).await;
@@ -358,10 +358,11 @@ async fn test_a_submit_reported_after_the_retry_confirms(cx: &mut TestAppContext
 
 #[gpui::test]
 async fn test_a_send_into_a_running_turn_does_not_wait(cx: &mut TestAppContext) {
-    let (c, id, token) = live_chat(Duration::from_secs(60), cx).await;
+    let (c, id, token) = live_chat(Duration::from_secs(3600), cx).await;
     c.deliver(event_report(&id, &token, 2, Event::PromptSubmitted), cx);
     assert_eq!(state_of(&c, &id, cx), (ChatState::Running, Source::Exact));
-    // The submit delay and the confirm wait are a minute: the send returning at all is the proof.
+    // The submit delay and the confirm wait are an hour: without the early return the send hangs
+    // and nextest kills the test, so the send returning at all is the proof.
     let sent = start_send(&c, &id, cx).await.unwrap();
     assert!(sent.submitted);
     assert!(!sent.confirmed);
@@ -443,7 +444,7 @@ async fn test_no_enter_without_submit(cx: &mut TestAppContext) {
 
     let sent = send_text(&id, PROMPT, false, cx).await.unwrap();
     assert!(!sent.submitted);
-    // Longer than the submit delay: no Enter comes later either.
+    // Without a submit no Enter is scheduled; parking runs anything that was, and none shows up.
     cx.run_until_parked();
     assert_eq!(written(&h, &id, cx), vec![bracketed(PROMPT)]);
     let expected = octal(&bracketed(PROMPT));
