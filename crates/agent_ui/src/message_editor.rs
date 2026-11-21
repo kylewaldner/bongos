@@ -3017,11 +3017,10 @@ mod tests {
             use gpui::UpdateGlobal as _;
             settings::SettingsStore::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |settings| {
-                    settings.editor.navigation_history =
-                        Some(settings::NavigationHistoryContent {
-                            record_large_moves: Some(true),
-                            record_item_switches: Some(true),
-                        });
+                    settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                        record_large_moves: Some(true),
+                        record_item_switches: Some(true),
+                    });
                 });
             });
         });
