@@ -5,11 +5,20 @@
 //! declaration [`Confinement::build`] makes one allowlist of writable roots, the read-only masks
 //! inside them (each tree's `.git`, and for a main worktree its nested worktrees and the `.git` of
 //! each nested repository) and the [`SandboxPolicy`] that enforces them. Nothing else is writable.
-//! Building is pure: it reads the filesystem and writes nothing.
+//! Building records the writable roots in the job roots registry ([`util::job_roots`]), so no
+//! git the editor or bongos runs ever trusts git data the job could have written;
+//! [`Confinement::finish`] retires a main worktree's root once the job is gone.
+//!
+//! Every host git command bongos runs in a job tree, or to import a job's work, goes through
+//! [`safe_git::SafeGit`], which takes the git directory from the caller's record of the tree and
+//! refuses one a job could have written.
 
 pub mod annotate;
 mod promise_text;
+pub mod safe_git;
 
+#[cfg(test)]
+mod safe_git_tests;
 #[cfg(test)]
 mod tests;
 
@@ -19,6 +28,7 @@ use std::{
 };
 
 use sandbox::{GitSandboxPolicy, SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
+use util::job_roots::RootLifetime;
 
 pub use promise_text::{Platform, Promise, SandboxAvailability, promise, switch_off_notes};
 
@@ -135,6 +145,71 @@ pub enum ConfineError {
     MaskOutsideRoots { path: PathBuf },
     #[error("cannot read {} to find nested repositories: {error}", path.display())]
     Walk { path: PathBuf, error: String },
+    #[error("cannot record the job's writable roots: {error}")]
+    Register { error: String },
+    #[error("cannot retire the job root {}: {error}", root.display())]
+    Retire { root: PathBuf, error: String },
+}
+
+/// Makes `<data dir>/confinement/roots.json` this process's job roots registry. Runs once per
+/// process; later calls do nothing. Called at startup, after a confined helper process has been
+/// dispatched, so a helper never opens the registry.
+pub fn init() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let path = paths::data_dir().join("confinement").join("roots.json");
+        if let Err(error) = util::job_roots::init(&path) {
+            log::error!(
+                "confinement: cannot prune the job roots registry {}: {error:#}",
+                path.display()
+            );
+        }
+    });
+}
+
+/// Where a build records its roots: the process registry, or a given one in tests.
+pub(crate) trait Registry {
+    fn register(
+        &self,
+        root: &Path,
+        excluded: &[PathBuf],
+        lifetime: RootLifetime,
+    ) -> anyhow::Result<()>;
+    fn retire(&self, root: &Path) -> anyhow::Result<()>;
+}
+
+/// The registry [`init`] installed.
+struct ProcessRegistry;
+
+impl Registry for ProcessRegistry {
+    fn register(
+        &self,
+        root: &Path,
+        excluded: &[PathBuf],
+        lifetime: RootLifetime,
+    ) -> anyhow::Result<()> {
+        util::job_roots::register(root, excluded, lifetime)
+    }
+
+    fn retire(&self, root: &Path) -> anyhow::Result<()> {
+        util::job_roots::retire(root)
+    }
+}
+
+#[cfg(test)]
+impl Registry for util::job_roots::JobRoots {
+    fn register(
+        &self,
+        root: &Path,
+        excluded: &[PathBuf],
+        lifetime: RootLifetime,
+    ) -> anyhow::Result<()> {
+        util::job_roots::JobRoots::register(self, root, excluded, lifetime)
+    }
+
+    fn retire(&self, root: &Path) -> anyhow::Result<()> {
+        util::job_roots::JobRoots::retire(self, root)
+    }
 }
 
 /// The confinement of one job: its writable roots and the read-only masks inside them.
@@ -144,6 +219,8 @@ pub struct Confinement {
     masks: Vec<PathBuf>,
     exclusions: Vec<RootExclusions>,
     network: SandboxNetPolicy,
+    /// The roots recorded in the job roots registry, each with its lifetime.
+    registered: Vec<(PathBuf, RootLifetime)>,
 }
 
 impl Confinement {
@@ -155,7 +232,31 @@ impl Confinement {
     /// that contains or lies inside the run records directory, a read-only tree with private
     /// git, a read-only tree that equals or lies inside a writable root and a main worktree with
     /// private git. A read-only tree is not a writable root.
+    ///
+    /// Once the declaration is accepted, every writable root is recorded in the process's job
+    /// roots registry: a main worktree (a writable tree whose `.git` is a directory) for the
+    /// lifetime of this process, without its masked `.git` and the other masks directly under
+    /// it (see [`RootExclusions`]); every other root (the trees and scratch bongos made, the
+    /// declared directories) permanently. When a root cannot be recorded the build fails, after
+    /// retiring the main worktrees it had recorded; the permanent entries stay, which refuses
+    /// more than needed but never less.
     pub fn build(declaration: &JobDeclaration, host: &HostGit) -> Result<Self, ConfineError> {
+        Self::build_in(declaration, host, &ProcessRegistry)
+    }
+
+    /// [`Confinement::build`], recording the roots in `registry`.
+    pub(crate) fn build_in(
+        declaration: &JobDeclaration,
+        host: &HostGit,
+        registry: &dyn Registry,
+    ) -> Result<Self, ConfineError> {
+        let mut confinement = Self::plan(declaration, host)?;
+        confinement.register(registry)?;
+        Ok(confinement)
+    }
+
+    /// Checks the declaration and works out the roots and masks, writing nothing.
+    fn plan(declaration: &JobDeclaration, host: &HostGit) -> Result<Self, ConfineError> {
         let mut roots = vec![canonical(&declaration.scratch)?];
         let mut writable_trees = Vec::new();
         let mut read_only_trees = Vec::new();
@@ -287,7 +388,75 @@ impl Confinement {
             masks,
             exclusions,
             network: declaration.network.clone(),
+            registered: Vec::new(),
         })
+    }
+
+    /// Records every writable root in `registry` (see [`Confinement::build`]).
+    fn register(&mut self, registry: &dyn Registry) -> Result<(), ConfineError> {
+        let register_error = |error: String| ConfineError::Register { error };
+        let mut job_lifetime = None;
+        for root in &self.writable_roots {
+            let exclusions = self.exclusions.iter().find(|entry| &entry.root == root);
+            let (excluded, lifetime) = match exclusions {
+                Some(entry) => {
+                    let lifetime = match job_lifetime {
+                        Some(lifetime) => lifetime,
+                        None => {
+                            let lifetime = this_process_lifetime().map_err(register_error)?;
+                            job_lifetime = Some(lifetime);
+                            lifetime
+                        }
+                    };
+                    (entry.excluded.as_slice(), lifetime)
+                }
+                None => (&[][..], RootLifetime::Permanent),
+            };
+            if let Err(error) = registry.register(root, excluded, lifetime) {
+                // Undo the job-lifetime entries; a permanent entry may predate this build, so
+                // it stays.
+                for (root, lifetime) in &self.registered {
+                    if *lifetime != RootLifetime::Permanent
+                        && let Err(retire_error) = registry.retire(root)
+                    {
+                        log::error!(
+                            "confinement: cannot retire {} after a failed build: {retire_error:#}",
+                            root.display()
+                        );
+                    }
+                }
+                self.registered.clear();
+                return Err(register_error(format!("{error:#}")));
+            }
+            self.registered.push((root.clone(), lifetime));
+        }
+        Ok(())
+    }
+
+    /// Retires the job-lifetime roots this build recorded (the main worktrees); permanent roots
+    /// stay. Call it once the job's process group is gone, so nothing the job runs can still
+    /// write the tree. Tries every root, and returns the first failure.
+    pub fn finish(&self) -> Result<(), ConfineError> {
+        self.finish_in(&ProcessRegistry)
+    }
+
+    /// [`Confinement::finish`] on `registry`.
+    pub(crate) fn finish_in(&self, registry: &dyn Registry) -> Result<(), ConfineError> {
+        let mut result = Ok(());
+        for (root, lifetime) in &self.registered {
+            if *lifetime == RootLifetime::Permanent {
+                continue;
+            }
+            if let Err(error) = registry.retire(root)
+                && result.is_ok()
+            {
+                result = Err(ConfineError::Retire {
+                    root: root.clone(),
+                    error: format!("{error:#}"),
+                });
+            }
+        }
+        result
     }
 
     /// The canonical directories the job may write.
@@ -324,6 +493,22 @@ impl Confinement {
             read_only_masks: self.masks.clone(),
         }
     }
+}
+
+/// The lifetime of an entry owned by this process: it is retired once this process is gone.
+fn this_process_lifetime() -> Result<RootLifetime, String> {
+    let pid = std::process::id();
+    let start_time = util::job_roots::process_start_time(pid);
+    // Only Linux reports start times; elsewhere an owner always counts as alive.
+    if cfg!(target_os = "linux") && start_time.is_none() {
+        return Err(format!(
+            "cannot read the start time of this process ({pid})"
+        ));
+    }
+    Ok(RootLifetime::Job {
+        pid,
+        start_time: start_time.unwrap_or_default(),
+    })
 }
 
 fn unresolved(path: &Path, error: io::Error) -> ConfineError {

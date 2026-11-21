@@ -13,8 +13,13 @@ path = "src/bongos_confine.rs"
 doctest = false
 
 [dependencies]
+anyhow.workspace = true
+log.workspace = true
+paths.workspace = true
 sandbox.workspace = true
 thiserror.workspace = true
+util.workspace = true
 
 [dev-dependencies]
+smol.workspace = true
 tempfile.workspace = true

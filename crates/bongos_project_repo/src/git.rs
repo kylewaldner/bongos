@@ -20,6 +20,9 @@ pub enum GitError {
     Spawn { args: String, message: String },
     #[error("git {args} failed: {stderr}")]
     Failed { args: String, stderr: String },
+    /// The repository git would use in the directory was written by a sandboxed job.
+    #[error("{message}")]
+    Refused { message: String },
 }
 
 impl GitError {
@@ -190,6 +193,7 @@ impl Git {
             args: shown.clone(),
             message: error.to_string(),
         };
+        refuse_job_written_repository(directory)?;
         let mut command = self.command(directory, index, args);
         let output = match stdin {
             None => command.output().await.map_err(spawn_error)?,
@@ -284,6 +288,7 @@ impl Git {
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
+        refuse_job_written_repository(directory)?;
         let mut command = self.command(directory, None, args);
         command
             .stdin(util::command::Stdio::null())
@@ -1057,6 +1062,47 @@ impl Git {
         self.run_bounded(parent, args, timeout).await?;
         Ok(())
     }
+}
+
+/// Refuses to run git in `directory` when the repository git would find there has its git
+/// directory, or the common directory its `commondir` names, inside a registered job root: a
+/// sandboxed job may have written its configuration and hooks. Everything else runs as before.
+fn refuse_job_written_repository(directory: &Path) -> Result<(), GitError> {
+    match discovered_git_dir(directory) {
+        Some(git_dir) => {
+            bongos_confine::safe_git::check_git_dir(&git_dir).map_err(|error| GitError::Refused {
+                message: error.to_string(),
+            })
+        }
+        None => Ok(()),
+    }
+}
+
+/// The git directory git would discover from `directory` (none of the redirecting variables are
+/// set; see [`REDIRECTING_VARIABLES`]): the nearest ancestor holding a `.git` directory, the
+/// target of a `.git` file's `gitdir:` line, or an ancestor that is itself a git directory (a bare
+/// repository). A `.git` file that cannot be read stands for itself, so a job root around it still
+/// refuses it.
+fn discovered_git_dir(directory: &Path) -> Option<PathBuf> {
+    let start = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+    for ancestor in start.ancestors() {
+        let dot_git = ancestor.join(".git");
+        if let Ok(metadata) = std::fs::metadata(&dot_git) {
+            if metadata.is_dir() {
+                return Some(dot_git);
+            }
+            let pointer = std::fs::read_to_string(&dot_git).ok().and_then(|text| {
+                let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+                (!target.is_empty()).then(|| ancestor.join(target))
+            });
+            return Some(pointer.unwrap_or(dot_git));
+        }
+        let has = |name: &str| std::fs::symlink_metadata(ancestor.join(name)).is_ok();
+        if has("HEAD") && ((has("objects") && has("refs")) || has("commondir")) {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 /// How a rebase ended.

@@ -4,6 +4,7 @@ use std::{
 };
 
 use sandbox::{GitSandboxPolicy, SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
+use util::job_roots::JobRoots;
 
 use crate::{
     ConfineError, Confinement, HostGit, JobDeclaration, JobKind, JobTree, Platform, RULE,
@@ -13,13 +14,31 @@ use crate::{
 struct Fixture {
     _temp: tempfile::TempDir,
     base: PathBuf,
+    _registry_temp: tempfile::TempDir,
+    roots: JobRoots,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
-        Self { _temp: temp, base }
+        let registry_temp = tempfile::tempdir().unwrap();
+        let roots = JobRoots::new(&registry_temp.path().join("registry").join("roots.json"));
+        Self {
+            _temp: temp,
+            base,
+            _registry_temp: registry_temp,
+            roots,
+        }
+    }
+
+    /// Builds the confinement, recording its roots in this fixture's own registry.
+    fn build(
+        &self,
+        declaration: &JobDeclaration,
+        host: &HostGit,
+    ) -> Result<Confinement, ConfineError> {
+        Confinement::build_in(declaration, host, &self.roots)
     }
 
     fn dir(&self, relative: &str) -> PathBuf {
@@ -87,18 +106,19 @@ fn builds_an_allowed_linked_worktree_job() {
         records_dir: Some(fixture.dir("records")),
     };
 
-    let confinement = Confinement::build(
-        &declaration(
-            scratch.clone(),
-            vec![
-                tree(worktree.clone(), TreeAccess::Writable, TreeGit::Private),
-                tree(snapshot.clone(), TreeAccess::ReadOnly, TreeGit::None),
-            ],
-            vec![lane.clone()],
-        ),
-        &host,
-    )
-    .unwrap();
+    let confinement = fixture
+        .build(
+            &declaration(
+                scratch.clone(),
+                vec![
+                    tree(worktree.clone(), TreeAccess::Writable, TreeGit::Private),
+                    tree(snapshot.clone(), TreeAccess::ReadOnly, TreeGit::None),
+                ],
+                vec![lane.clone()],
+            ),
+            &host,
+        )
+        .unwrap();
 
     assert_eq!(
         confinement.writable_roots(),
@@ -128,11 +148,12 @@ fn no_trees_and_no_declared_dirs_gives_scratch_alone() {
     let fixture = Fixture::new();
     let scratch = fixture.dir("scratch");
 
-    let confinement = Confinement::build(
-        &declaration(scratch.clone(), Vec::new(), Vec::new()),
-        &HostGit::default(),
-    )
-    .unwrap();
+    let confinement = fixture
+        .build(
+            &declaration(scratch.clone(), Vec::new(), Vec::new()),
+            &HostGit::default(),
+        )
+        .unwrap();
 
     assert_eq!(confinement.writable_roots(), std::slice::from_ref(&scratch));
     assert!(confinement.masks().is_empty());
@@ -159,7 +180,9 @@ fn refuses_each_unsafe_declaration() {
         records_dir: None,
     };
     let build = |scratch: PathBuf, trees: Vec<JobTree>, dirs: Vec<PathBuf>, host: &HostGit| {
-        Confinement::build(&declaration(scratch, trees, dirs), host).unwrap_err()
+        fixture
+            .build(&declaration(scratch, trees, dirs), host)
+            .unwrap_err()
     };
 
     assert_eq!(
@@ -341,18 +364,19 @@ fn main_worktree_masks_its_git_nested_worktree_and_nested_clone() {
     std::os::unix::fs::symlink(fixture.base.join("outside"), repo.join("linked")).unwrap();
     let scratch = fixture.dir("scratch");
 
-    let confinement = Confinement::build(
-        &declaration(
-            scratch,
-            vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
-            Vec::new(),
-        ),
-        &HostGit {
-            git_dirs: vec![repo.join(".git"), nested_git_dir],
-            records_dir: None,
-        },
-    )
-    .unwrap();
+    let confinement = fixture
+        .build(
+            &declaration(
+                scratch,
+                vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
+                Vec::new(),
+            ),
+            &HostGit {
+                git_dirs: vec![repo.join(".git"), nested_git_dir],
+                records_dir: None,
+            },
+        )
+        .unwrap();
 
     let expected = vec![
         repo.join(".git"),
@@ -378,18 +402,19 @@ fn main_worktree_skips_a_stale_gitdir_entry_and_lists_exclusions() {
     fixture.file("repo/sub/.git", "gitdir: ../.git/modules/sub\n");
     let scratch = fixture.dir("scratch");
 
-    let confinement = Confinement::build(
-        &declaration(
-            scratch,
-            vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
-            Vec::new(),
-        ),
-        &HostGit {
-            git_dirs: vec![repo.join(".git")],
-            records_dir: None,
-        },
-    )
-    .unwrap();
+    let confinement = fixture
+        .build(
+            &declaration(
+                scratch,
+                vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
+                Vec::new(),
+            ),
+            &HostGit {
+                git_dirs: vec![repo.join(".git")],
+                records_dir: None,
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         confinement.masks(),
@@ -417,18 +442,19 @@ fn nested_clone_git_is_masked_but_not_excluded() {
     fixture.file("repo/vendor/lib/.git/config", "[core]\n");
     let scratch = fixture.dir("scratch");
 
-    let confinement = Confinement::build(
-        &declaration(
-            scratch,
-            vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
-            Vec::new(),
-        ),
-        &HostGit {
-            git_dirs: vec![repo.join(".git"), direct_git_dir, deep_git_dir],
-            records_dir: None,
-        },
-    )
-    .unwrap();
+    let confinement = fixture
+        .build(
+            &declaration(
+                scratch,
+                vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
+                Vec::new(),
+            ),
+            &HostGit {
+                git_dirs: vec![repo.join(".git"), direct_git_dir, deep_git_dir],
+                records_dir: None,
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         confinement.masks(),
@@ -461,15 +487,16 @@ fn refuses_a_tree_whose_git_is_a_symlink() {
     let scratch = fixture.dir("scratch");
 
     assert_eq!(
-        Confinement::build(
-            &declaration(
-                scratch,
-                vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
-                Vec::new(),
-            ),
-            &HostGit::default(),
-        )
-        .unwrap_err(),
+        fixture
+            .build(
+                &declaration(
+                    scratch,
+                    vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
+                    Vec::new(),
+                ),
+                &HostGit::default(),
+            )
+            .unwrap_err(),
         ConfineError::MaskSymlink {
             path: repo.join(".git")
         }
@@ -491,7 +518,7 @@ fn refuses_a_main_worktree_with_an_unreadable_directory() {
     // then succeeds and this case cannot be produced, so the test checks nothing there.
     let readable = fs::read_dir(&locked).is_ok();
 
-    let result = Confinement::build(
+    let result = fixture.build(
         &declaration(
             scratch,
             vec![tree(repo, TreeAccess::Writable, TreeGit::ReadOnly)],
@@ -622,4 +649,86 @@ fn promise_text_per_platform() {
         ["Task checks are not confined (confinement.task_checks is off)"]
     );
     assert!(switch_off_notes(true, true).is_empty());
+}
+
+#[test]
+fn failed_root_registration_fails_the_build() {
+    let fixture = Fixture::new();
+    let scratch = fixture.dir("scratch");
+    // The registry's directory is a file, so the roots file cannot be written.
+    let blocker = fixture.file("registry-blocker", "");
+    let roots = JobRoots::new(&blocker.join("roots.json"));
+
+    let error = Confinement::build_in(
+        &declaration(scratch.clone(), Vec::new(), Vec::new()),
+        &HostGit::default(),
+        &roots,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, ConfineError::Register { .. }));
+    let message = error.to_string();
+    assert!(
+        message.starts_with("cannot record the job's writable roots: "),
+        "{message}"
+    );
+    assert!(message.contains("registry-blocker"), "{message}");
+    assert!(!roots.contains(&scratch));
+}
+
+#[test]
+fn main_worktree_root_is_registered_for_the_job_and_retired_by_finish() {
+    let fixture = Fixture::new();
+    let repo = fixture.dir("repo");
+    fixture.file("repo/.git/HEAD", "ref: refs/heads/main\n");
+    fixture.file("repo/src/main.rs", "");
+    let scratch = fixture.dir("scratch");
+
+    let confinement = fixture
+        .build(
+            &declaration(
+                scratch.clone(),
+                vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
+                Vec::new(),
+            ),
+            &HostGit {
+                git_dirs: vec![repo.join(".git")],
+                records_dir: None,
+            },
+        )
+        .unwrap();
+
+    assert!(fixture.roots.contains(&repo));
+    assert!(fixture.roots.contains(&repo.join("src/main.rs")));
+    assert!(!fixture.roots.contains(&repo.join(".git")));
+    assert!(fixture.roots.contains(&scratch));
+
+    confinement.finish_in(&fixture.roots).unwrap();
+
+    assert!(!fixture.roots.contains(&repo));
+    assert!(!fixture.roots.contains(&repo.join("src/main.rs")));
+    assert!(!fixture.roots.contains(&repo.join(".git")));
+    // The scratch bongos made stays refused.
+    assert!(fixture.roots.contains(&scratch));
+}
+
+#[test]
+fn roots_file_survives_a_reload() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("confinement").join("roots.json");
+    let made = temp.path().join("made");
+    let checkout = temp.path().join("checkout");
+    fs::create_dir_all(made.join("src")).unwrap();
+    fs::create_dir_all(checkout.join("src")).unwrap();
+
+    util::job_roots::init(&file).unwrap();
+    util::job_roots::register(&made, &[], util::job_roots::RootLifetime::Permanent).unwrap();
+    util::job_roots::register(&checkout, &[], crate::this_process_lifetime().unwrap()).unwrap();
+
+    // A second registry on the same file, as the next start of the app opens it.
+    util::job_roots::init(&file).unwrap();
+    assert!(util::job_roots::contains(&made.join("src")));
+    assert!(util::job_roots::contains(&checkout.join("src")));
+    assert!(!util::job_roots::contains(temp.path()));
+    assert!(JobRoots::new(&file).contains(&made));
 }
