@@ -23,6 +23,7 @@ async fn setup(
         let app_state = AppState::test(cx);
         editor::init(cx);
         crate::init(cx);
+        crate::goto_stack_tests::record_implicit_navigation(cx);
         app_state
     });
     let fake = app_state.fs.as_fake();

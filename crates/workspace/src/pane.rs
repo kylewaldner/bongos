@@ -510,6 +510,16 @@ pub struct NavigationEntry {
     pub row: Option<u32>,
 }
 
+/// One backward or forward entry as a list shows it.
+#[derive(Clone)]
+pub struct HistoryRow {
+    pub timestamp: usize,
+    pub project_path: Option<ProjectPath>,
+    /// The zero-based row of the place, when the entry recorded one.
+    pub row: Option<u32>,
+    pub item: Arc<dyn WeakItemHandle + Send + Sync>,
+}
+
 #[derive(Clone)]
 pub struct TagStackEntry {
     pub origin: NavigationEntry,
@@ -4577,6 +4587,10 @@ impl Render for Pane {
 }
 
 impl ItemNavHistory {
+    pub fn mode(&self) -> NavigationMode {
+        self.history.mode()
+    }
+
     pub fn push<D: 'static + Any + Send + Sync>(
         &mut self,
         data: Option<D>,
@@ -4591,6 +4605,20 @@ impl ItemNavHistory {
             let is_preview_item = self.history.0.lock().preview_item_id == Some(self.item.id());
             self.history
                 .push(data, self.item.clone(), is_preview_item, row, cx);
+        }
+    }
+
+    /// Pushes a prebuilt entry, such as one from `navigation_entry`, onto the history. It emits
+    /// no event of its own.
+    pub fn push_entry(&mut self, entry: NavigationEntry, cx: &mut App) {
+        if entry
+            .item
+            .upgrade()
+            .is_some_and(|item| item.include_in_nav_history())
+        {
+            let is_preview_item = self.history.0.lock().preview_item_id == Some(entry.item.id());
+            self.history
+                .push_shared(entry.data, entry.item, is_preview_item, entry.row, cx);
         }
     }
 
@@ -4643,6 +4671,48 @@ impl NavHistory {
                     f(entry, (path, None));
                 }
             })
+    }
+
+    /// The backward and forward entries (not the closed stack), newest first by timestamp.
+    pub fn entries_newest_first(&self, cx: &App) -> Vec<HistoryRow> {
+        let state = self.0.lock();
+        let mut rows: Vec<HistoryRow> = state
+            .backward_stack
+            .iter()
+            .chain(state.forward_stack.iter())
+            .map(|entry| HistoryRow {
+                timestamp: entry.timestamp,
+                project_path: match state.paths_by_item.get(&entry.item.id()) {
+                    Some((path, _)) => Some(path.clone()),
+                    None => entry.item.upgrade().and_then(|item| item.project_path(cx)),
+                },
+                row: entry.row,
+                item: entry.item.clone(),
+            })
+            .collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.timestamp));
+        rows
+    }
+
+    /// The timestamps of the backward stack and of the forward stack, oldest first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stack_timestamps(&self) -> (Vec<usize>, Vec<usize>) {
+        let state = self.0.lock();
+        (
+            state.backward_stack.iter().map(|e| e.timestamp).collect(),
+            state.forward_stack.iter().map(|e| e.timestamp).collect(),
+        )
+    }
+
+    /// A copy of the backward or forward entry with this timestamp. Nothing is removed.
+    pub fn entry_with_timestamp(&self, timestamp: usize) -> Option<NavigationEntry> {
+        let state = self.0.lock();
+        state
+            .backward_stack
+            .iter()
+            .chain(state.forward_stack.iter())
+            .find(|entry| entry.timestamp == timestamp)
+            .cloned()
     }
 
     pub fn set_mode(&mut self, mode: NavigationMode) {
@@ -4749,6 +4819,24 @@ impl NavHistory {
         row: Option<u32>,
         cx: &mut App,
     ) {
+        self.push_shared(
+            data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+            item,
+            is_preview,
+            row,
+            cx,
+        );
+    }
+
+    /// Like `push`, for data that is already shared, as in a prebuilt `NavigationEntry`.
+    pub fn push_shared(
+        &mut self,
+        data: Option<Arc<dyn Any + Send + Sync>>,
+        item: Arc<dyn WeakItemHandle + Send + Sync>,
+        is_preview: bool,
+        row: Option<u32>,
+        cx: &mut App,
+    ) {
         let state = &mut *self.0.lock();
         let new_item_id = item.id();
 
@@ -4767,7 +4855,7 @@ impl NavHistory {
                 }
                 state.backward_stack.push_back(NavigationEntry {
                     item,
-                    data: data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+                    data,
                     timestamp: state.next_timestamp.fetch_add(1, Ordering::SeqCst),
                     is_preview,
                     row,
@@ -4782,7 +4870,7 @@ impl NavHistory {
                 }
                 state.forward_stack.push_back(NavigationEntry {
                     item,
-                    data: data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+                    data,
                     timestamp: state.next_timestamp.fetch_add(1, Ordering::SeqCst),
                     is_preview,
                     row,
@@ -4798,7 +4886,7 @@ impl NavHistory {
                 }
                 state.backward_stack.push_back(NavigationEntry {
                     item,
-                    data: data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+                    data,
                     timestamp: state.next_timestamp.fetch_add(1, Ordering::SeqCst),
                     is_preview,
                     row,
@@ -4811,7 +4899,7 @@ impl NavHistory {
                 }
                 state.closed_stack.push_back(NavigationEntry {
                     item,
-                    data: data.map(|data| Arc::new(data) as Arc<dyn Any + Send + Sync>),
+                    data,
                     timestamp: state.next_timestamp.fetch_add(1, Ordering::SeqCst),
                     is_preview,
                     row,

@@ -10724,7 +10724,11 @@ fn init_test_with_editor(cx: &mut TestAppContext) {
                     .project_panel
                     .get_or_insert_default()
                     .auto_fold_dirs = Some(false);
-                settings.project.worktree.file_scan_exclusions = Some(Vec::new())
+                settings.project.worktree.file_scan_exclusions = Some(Vec::new());
+                settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                    record_large_moves: Some(true),
+                    record_item_switches: Some(true),
+                });
             });
         });
     });

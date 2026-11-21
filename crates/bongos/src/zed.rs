@@ -43,6 +43,8 @@ mod quick_action_bar;
 mod rectangle_keymap_tests;
 pub mod remote_debug;
 #[cfg(test)]
+mod symbol_keymap_tests;
+#[cfg(test)]
 mod universal_argument_tests;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 pub mod visual_tests;
@@ -4812,6 +4814,7 @@ mod tests {
     #[gpui::test]
     async fn test_navigation(cx: &mut TestAppContext) {
         let app_state = init_test(cx);
+        record_implicit_navigation(cx);
         app_state
             .fs
             .as_fake()
@@ -5035,7 +5038,8 @@ mod tests {
             (file3.clone(), DisplayPoint::new(DisplayRow(0), 0), 0.)
         );
 
-        // Go back to an item that has been closed and removed from disk
+        // Going back past an item that has been closed and removed from disk skips it rather
+        // than reopening it as a new empty file.
         workspace
             .update_in(cx, |_, window, cx| {
                 pane.update(cx, |pane, cx| {
@@ -5061,8 +5065,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             active_location(&workspace, cx),
-            (file2.clone(), DisplayPoint::new(DisplayRow(0), 0), 0.)
+            (file1.clone(), DisplayPoint::new(DisplayRow(10), 0), 0.)
         );
+        pane.read_with(cx, |pane, cx| {
+            assert!(
+                pane.items()
+                    .all(|item| item.project_path(cx).as_ref() != Some(&file2)),
+                "the deleted file is not reopened"
+            );
+        });
         workspace
             .update_in(cx, |w, window, cx| {
                 w.go_forward(w.active_pane().downgrade(), window, cx)
@@ -5173,6 +5184,7 @@ mod tests {
     #[gpui::test]
     async fn test_reopening_closed_items(cx: &mut TestAppContext) {
         let app_state = init_test(cx);
+        record_implicit_navigation(cx);
         app_state
             .fs
             .as_fake()
@@ -5947,6 +5959,20 @@ mod tests {
             }
         }
         found
+    }
+
+    /// Turns on the item-switch and large-move recording that the Emacs profile leaves off.
+    fn record_implicit_navigation(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                        record_large_moves: Some(true),
+                        record_item_switches: Some(true),
+                    });
+                });
+            });
+        });
     }
 
     pub(crate) fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {

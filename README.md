@@ -927,6 +927,40 @@ happened, such as `Replaced 12 occurrences` or `Replaced 12, skipped 3`.
 `minibuffer.enabled_for` names `query_replace` by default, so the prompts and the questions are in
 the strip. Remove it from that list to get them as a centered modal; the keys are the same.
 
+## Symbol jump and goto stack
+
+M-n and M-p jump between the occurrences of the symbol at the cursor, as `symbol-overlay` does in
+Emacs, and a goto stack lets you go back to where you were after a jump. Under the Emacs base keymap
+(the default) these keys work in an editor:
+
+| Key | Command |
+|---|---|
+| M-n, M-p | jump to the next, previous occurrence of the symbol at the cursor |
+| M-i | toggle the highlight (overlay) of the symbol at the cursor |
+| M-I | clear every symbol highlight in the buffer |
+| left, right | goto stack: back, forward |
+| up | goto stack: push the current place |
+| C-c x h | xref history list |
+
+- **Jumps.** M-n and M-p match the symbol as a whole word (`n` does not match `println`), flash the
+  occurrence they land on, and wrap around the buffer; the echo area says `wrapped` when they do. With
+  no symbol at the cursor the echo area says `No symbol at point`.
+- **Overlay.** M-i highlights every occurrence of the symbol at the cursor and M-i on it again removes
+  the highlight; M-I removes them all.
+- **Goto stack.** `left` goes back to the previous place of the stack, `right` goes forward again, and
+  `up` pushes the current place so that `left` can return to it later. `C-c x h` opens the stack as a
+  picker, newest first; RET goes to the entry.
+- **Navigation history settings.** Two settings decide what else the stack records:
+  `navigation_history.record_large_moves` (a cursor move of ten rows or more) and
+  `navigation_history.record_item_switches` (switching to another item). Both default to off under
+  the Emacs base keymap without vim or helix mode, and to on otherwise; an explicit `true` or
+  `false` overrides the default.
+- **Panes.** The arrow keys are bound only in editors of the center panes (not in docks, in agent
+  threads, in editors that are not full-mode, in vim mode, or while completions, code actions or
+  signature help show), so they move the cursor everywhere else. Each pane has its
+  own stack. The Emacs keymap no longer binds `alt-,`; on Linux it reaches
+  `editor::GoToPreviousHunk`. `alt-n` also reaches the query editor of full-mode pickers.
+
 ## Minibuffer
 
 As in Emacs, prompts open in a one-line strip at the bottom of the window, below the status bar,
