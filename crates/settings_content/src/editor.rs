@@ -385,11 +385,11 @@ pub struct ToolbarContent {
 pub struct NavigationHistoryContent {
     /// Whether a cursor move of ten or more rows is recorded in the navigation history.
     ///
-    /// Default: true
+    /// Default: null (false under the Emacs base keymap without vim or helix mode, true otherwise)
     pub record_large_moves: Option<bool>,
     /// Whether switching to another item is recorded in the navigation history.
     ///
-    /// Default: true
+    /// Default: null (false under the Emacs base keymap without vim or helix mode, true otherwise)
     pub record_item_switches: Option<bool>,
 }
 

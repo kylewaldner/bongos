@@ -372,9 +372,14 @@ pub fn jump_motion(
 
 #[cfg(test)]
 mod test {
-    use crate::test::{NeovimBackedTestContext, VimTestContext};
-    use editor::Editor;
-    use gpui::TestAppContext;
+    use crate::{
+        VimAddon,
+        state::{Mark, Mode},
+        test::{NeovimBackedTestContext, VimTestContext},
+    };
+    use editor::{Editor, ToPoint as _, test::editor_lsp_test_context::EditorLspTestContext};
+    use gpui::{TestAppContext, UpdateGlobal as _};
+    use settings::SettingsStore;
     use std::path::Path;
     use util::path;
     use workspace::{CloseActiveItem, OpenOptions};
@@ -461,5 +466,99 @@ mod test {
 
             assert_eq!(file_path.to_str().unwrap(), path!("/second.rs"));
         })
+    }
+
+    /// Twenty lines, `line <row>`, with the caret on row 5.
+    fn twenty_lines_with_caret_on_row_5() -> String {
+        (0..20)
+            .map(|row| {
+                if row == 5 {
+                    format!("ˇline {row}\n")
+                } else {
+                    format!("line {row}\n")
+                }
+            })
+            .collect()
+    }
+
+    /// Writes `dir/other.rs` next to the test file and opens it in the active pane.
+    async fn switch_to_another_file(cx: &mut VimTestContext) -> gpui::EntityId {
+        let path = EditorLspTestContext::root_path()
+            .join("dir")
+            .join("other.rs");
+        let fs = cx.workspace(|workspace, _, cx| workspace.project().read(cx).fs().clone());
+        fs.as_fake().insert_file(&path, "other\n".into()).await;
+        let item = cx
+            .workspace(|workspace, window, cx| {
+                workspace.open_abs_path(path.clone(), OpenOptions::default(), window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        item.item_id()
+    }
+
+    /// The row of the test editor's `"` mark, the place it was left.
+    fn quote_mark_row(cx: &mut VimTestContext) -> Option<u32> {
+        cx.update_editor(|editor, window, cx| {
+            let vim = editor.addon::<VimAddon>().unwrap().entity.clone();
+            let mark = vim.update(cx, |vim, cx| vim.get_mark("\"", editor, window, cx))?;
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            match mark {
+                Mark::Local(anchors) | Mark::Buffer(_, anchors) => {
+                    anchors.first().map(|anchor| anchor.to_point(&snapshot).row)
+                }
+                Mark::Path(_, points) => points.first().map(|point| point.row),
+            }
+        })
+    }
+
+    fn active_item_id(cx: &mut VimTestContext) -> gpui::EntityId {
+        cx.workspace(|workspace, _, cx| workspace.active_item(cx).unwrap().item_id())
+    }
+
+    #[gpui::test]
+    async fn test_profile_nav_vim_file_switch_sets_quote_mark_and_ctrl_o_returns(
+        cx: &mut TestAppContext,
+    ) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.set_state(&twenty_lines_with_caret_on_row_5(), Mode::Normal);
+        let original = cx.editor.entity_id();
+
+        let other = switch_to_another_file(&mut cx).await;
+        assert_ne!(other, original);
+        assert_eq!(quote_mark_row(&mut cx), Some(5));
+
+        cx.simulate_keystrokes("ctrl-o");
+        cx.run_until_parked();
+        assert_eq!(active_item_id(&mut cx), original);
+        cx.assert_state(&twenty_lines_with_caret_on_row_5(), Mode::Normal);
+        assert_eq!(quote_mark_row(&mut cx), Some(5));
+    }
+
+    #[gpui::test]
+    async fn test_profile_nav_vim_quote_mark_without_item_switch_recording(
+        cx: &mut TestAppContext,
+    ) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                        // Off too, so setting up the text leaves the history empty.
+                        record_large_moves: Some(false),
+                        record_item_switches: Some(false),
+                    });
+                });
+            });
+        });
+        cx.set_state(&twenty_lines_with_caret_on_row_5(), Mode::Normal);
+
+        switch_to_another_file(&mut cx).await;
+        // The switch is not in the history, but the `"` mark still records where it left.
+        cx.workspace(|workspace, _, cx| {
+            assert!(!workspace.active_pane().read(cx).can_navigate_backward());
+        });
+        assert_eq!(quote_mark_row(&mut cx), Some(5));
     }
 }

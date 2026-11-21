@@ -278,6 +278,12 @@ impl Settings for EditorSettings {
                 Some(EmacsCursorStyle::Modern) => Some(CursorShape::Bar),
                 Some(EmacsCursorStyle::Auto) | None => None,
             };
+        // Under the Emacs profile only explicit gotos are recorded, unless a modal keymap
+        // (vim or helix) is on, whose jump list expects Zed's implicit pushes.
+        let records_navigation_by_default = content.base_keymap.map(BaseKeymap::from)
+            != Some(BaseKeymap::Emacs)
+            || content.vim_mode.unwrap_or(false)
+            || content.helix_mode.unwrap_or(false);
         Self {
             cursor_blink: editor.cursor_blink.unwrap(),
             cursor_shape: explicit_cursor_style.or_else(|| {
@@ -321,8 +327,12 @@ impl Settings for EditorSettings {
                 code_actions: toolbar.code_actions.unwrap(),
             },
             navigation_history: NavigationHistory {
-                record_large_moves: navigation_history.record_large_moves.unwrap(),
-                record_item_switches: navigation_history.record_item_switches.unwrap(),
+                record_large_moves: navigation_history
+                    .record_large_moves
+                    .unwrap_or(records_navigation_by_default),
+                record_item_switches: navigation_history
+                    .record_item_switches
+                    .unwrap_or(records_navigation_by_default),
             },
             scrollbar: Scrollbar {
                 show: scrollbar.show.map(ui_scrollbar_settings_from_raw).unwrap(),
