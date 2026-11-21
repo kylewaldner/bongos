@@ -8,74 +8,39 @@
 //!   `$BONGOS_STATE`; the script writes its typed result to `$BONGOS_RESULT` in the node's scratch
 //!   directory. The run record is never in a writable path.
 //! - Permissions (`permissions = { commands, network, mcp }`) are enforced twice. First by the OS
-//!   sandbox (Bubblewrap on Linux): writes only in an allowlist ([`ProgramNode::writable_paths`]:
-//!   the node's worktree, its scratch directory, the common git directory's `objects/`, `refs/`
-//!   and `logs/`, and the worktree's own git directory; and the sandbox's own `/tmp`), network
-//!   blocked unless declared and then restricted to the declared hosts. When the sandbox cannot be
-//!   created the script runs with the second layer alone and the try's `summary.json` says
-//!   "not sandboxed: <reason>". Second by the embedded shim's audit hook (`shim.py`), which denies
-//!   unlisted programs, writes outside the same allowlist and undeclared connections. A denial
-//!   reaches bongos through a pipe (file descriptor 3, kept in `denials.jsonl`), so it fails the
-//!   node even when the script caught the `PermissionError`; the shim ends the log with a marker,
-//!   and a clean exit without it fails the node too. MCP is refused in v1.
+//!   sandbox (Bubblewrap on Linux) under the node's [`Confinement`]: writes only in its writable
+//!   roots (the node's worktree unless it is [`TreeAccess::ReadOnly`], its scratch directory and
+//!   its declared directories; and the sandbox's own `/tmp`), with the read-only masks inside
+//!   them (the worktree's `.git`) and the network blocked unless declared and then restricted to
+//!   the declared hosts. When the sandbox cannot be created the script runs with the second layer
+//!   alone and the try's `summary.json` says "not sandboxed: <reason>". Second by the embedded
+//!   shim's audit hook (`shim.py`), which denies unlisted programs, writes outside the same
+//!   roots or to a mask, and undeclared connections. A denial reaches bongos through a pipe
+//!   (file descriptor 3, kept in `denials.jsonl`), so it fails the node even when the script
+//!   caught the `PermissionError`; the shim ends the log with a marker, and a clean exit without
+//!   it fails the node too. A write the sandbox refused outside the roots that the output reports
+//!   fails the node with the rule ([`bongos_confine::RULE`]). MCP is refused in v1.
 //! - The shim is a guardrail, not a security boundary: code in the same Python process can always
 //!   get around an audit hook. The OS sandbox is the boundary, so a run that is "not sandboxed"
 //!   is not hard-confined. Known gaps of the shim, accepted because the sandbox holds: a walk
 //!   through closures (`__closure__`, `cell_contents`) reaches its state; `os.link` checks only
-//!   the destination (and refuses one into the git paths); binding a unix socket creates a file anywhere; the arguments and
+//!   the destination; binding a unix socket creates a file anywhere; the arguments and
 //!   environment of a listed command are not checked (`git -c core.fsmonitor=...` runs).
-//! - Git: the common git directory itself is never writable (the sandbox's root is read-only),
-//!   so a script cannot change `config`, `hooks/`, `packed-refs`, plant `commondir` or touch
-//!   another worktree's git directory. Host git does run while a script runs (another run's
-//!   worktree setup, a merge, an agent node, the owner's IDE), all sharing the common git
-//!   directory, so what the sandbox keeps read-only is what such a git can trust. Inside the
-//!   writable paths the worktree's `.git` file and its git
-//!   directory's `gitdir`, `commondir` and `config.worktree` (made empty first when missing) stay
-//!   read-only ([`ProgramNode::read_only_paths`]). A commit and a branch ref update work; branch
-//!   deletion, `pack-refs`, `git gc --auto` and `git config` writes are refused. In the main
-//!   worktree, whose `.git` is the common git directory, the whole git directory is read-only, so
-//!   a script there cannot commit. Elsewhere than Linux the sandbox cannot keep a path inside the
-//!   writable ones read-only, so only the shim refuses those writes. A run without the sandbox, or
-//!   with a sandbox other than Bubblewrap, is checked after every pass instead ([`GitMetadata`],
-//!   [`git_metadata_needed`]): changed metadata is put back and fails the node ("program changed
-//!   git metadata"). This runner calls no host git itself; the crate's own git
-//!   (`worktrees::Git`) runs with `GIT_NO_REPLACE_OBJECTS=1`.
-//! - Inside the writable git paths a script could plant what a host git follows, during the pass
-//!   or after it: a symlink (`logs/refs/heads/main` to a file outside, which git's reflog append
-//!   writes through), a replace ref (`refs/replace/*`) or an alternate object store
-//!   (`objects/info/alternates`, `objects/info/http-alternates`). Under Bubblewrap the sandbox
-//!   keeps all three out of reach while the script runs: the reflog directories (the common
-//!   `logs/` and the worktree git directory's `logs/`, [`ProgramNode::hidden_git_paths`]) are
-//!   covered by an empty read-only tmpfs and the program's git runs with
-//!   `core.logAllRefUpdates=false`, so a commit or a branch update writes no reflog (an existing
-//!   one is not appended to; the host's stay as they were), and the replace refs and alternates
-//!   ([`ProgramNode::git_forbidden_paths`]) are bound read-only, made first when missing (an
-//!   empty `refs/replace/` and empty alternates files change nothing); the `objects/info`
-//!   directory holding the alternates is bound to itself first ([`ProgramNode::git_mount_points`]),
-//!   so it cannot be renamed away with the read-only files inside and replaced. The shim refuses
-//!   creating a symlink inside the git paths, renaming or hard linking one into them, writing
-//!   through a symlink that sits inside them, and writing the replace refs and alternates. After
-//!   every pass [`GitGuard`] walks the git paths without following symlinks and removes every
-//!   symlink found ("program planted symlinks in git") and puts the replace refs and alternates
-//!   back as they were ("program changed git metadata"); either fails the node. A git path that
-//!   is already a symlink when a pass starts, `objects/info` included, refuses the start.
-//! - Accepted risks. Without Bubblewrap (no sandbox, or elsewhere than Linux) the git paths are
-//!   plainly writable: a host git run during the pass can follow what the script planted before
-//!   the walk removes it, and concurrent passes on one repository snapshot each other's replace
-//!   refs and alternates. Under Bubblewrap a symlink in `refs/` or `objects/` stays until the
-//!   walk, and a host git run meanwhile can follow it: a symlink to a file is replaced (git
-//!   renames a new ref over it and only reads objects), but a symlink to a directory
-//!   (`objects/ab` or `refs/heads/team` naming a directory outside) is followed, so git writes a
-//!   loose object or a ref and its lock file into that directory. The checks run when a pass
-//!   ends: after an app crash mid-pass nothing puts
-//!   the git paths back or removes what was planted (the orphan cleanup stops processes only).
-//!   While `objects/` is writable the integrity of loose objects, packs, `commit-graph` and
-//!   `multi-pack-index` cannot be protected: a script can write a corrupt or misleading one.
-//!   Since the worktree is writable by design and bongos never resumes them on the host: a nested
-//!   repository the script makes in the worktree (`sub/.git/config`, which a git command run
-//!   inside `sub/` would read), and `rebase-merge/` or `sequencer/` todo files in the worktree's
-//!   own git directory (bongos never runs `rebase --continue` or `cherry-pick --continue`). Which
-//!   refs a pass changed is not recorded.
+//! - Git: a run or branch worktree gets private git ([`TreeGit::Private`]): before the script
+//!   starts its `.git` is pointed at a git directory of its own in the scratch directory
+//!   ([`private_git::prepare`]; a failure refuses the start), so the script's commits and
+//!   branches never touch the shared repository, whose git directories are outside every
+//!   writable root. Once the pass's process group is gone the job's own branch and new branches
+//!   are imported into the shared repository ([`PrivateGit::import`]), with or without the
+//!   sandbox; anything else the script changed (another branch, a tag) is refused and fails the
+//!   node naming each entry, the allowed refs are imported all the same and the private
+//!   directory is kept. A failed import fails the node and keeps the commits there. The
+//!   worktree's git directories come from the run's record ([`ProgramNode::host_git`]), never
+//!   from the tree, and the import's host git runs through [`SafeGit`]. A worktree with no `.git`
+//!   gets no git work. The passes of one polling node run one at a time, each prepared and
+//!   imported on its own.
+//! - The git allowlist helpers ([`ProgramNode::git_layout`], [`GitGuard`], [`GitMetadata`],
+//!   [`hide_in_bubblewrap`]) are not used by any pass.
 //! - Caps: `max_minutes` (the node's, else `workflows.programs.max_minutes`), the captured output
 //!   (`workflows.programs.max_output_mb`; the rest is dropped and the process stopped) and the
 //!   result size ([`RESULT_CAP`]). Halt and cancel stop the process group within 5 s.
@@ -99,6 +64,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bongos_chat::find_program;
+use bongos_confine::private_git::{self, PrivateGit};
+use bongos_confine::safe_git::SafeGit;
+use bongos_confine::{
+    Confinement, HostGit, JobDeclaration, JobKind, JobTree, TreeAccess, TreeGit, annotate,
+};
 use bongos_workflow_model::definition::{Node, OutputField, Permissions, Polls};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey, StateDoc, TypedResult, schema};
 use sandbox::{
@@ -321,10 +291,19 @@ pub struct ProgramNode {
     pub state: StateDoc,
     /// The node's worktree: the working directory, writable.
     pub worktree: PathBuf,
-    /// The node's scratch directory, writable; holds `$BONGOS_RESULT` and `TMPDIR`.
+    /// The node's scratch directory, writable; holds `$BONGOS_RESULT`, `TMPDIR` and the private
+    /// git directory.
     pub scratch: PathBuf,
-    /// The repository's common git directory, writable so the script can commit.
-    pub git_common_dir: Option<PathBuf>,
+    /// Directories the node declared it writes, besides its worktree and scratch.
+    pub declared_dirs: Vec<PathBuf>,
+    /// Whether the script may write its worktree.
+    pub tree_access: TreeAccess,
+    /// What git the script gets in its worktree.
+    pub tree_git: TreeGit,
+    /// What the host read about the repository from the run's record, never from the worktree:
+    /// the common git directory first, then the worktree's linked git directory when it has one;
+    /// and the run's record directory.
+    pub host_git: HostGit,
     /// The try's record directory (`nodes/<node>/<branch>/<pass>-<try>/`); never writable.
     pub try_dir: PathBuf,
     pub task_id: String,
@@ -337,6 +316,52 @@ impl ProgramNode {
     /// `$BONGOS_RESULT`.
     pub fn result_path(&self) -> PathBuf {
         self.scratch.join(SCRATCH_RESULT_FILE)
+    }
+
+    /// The repository's common git directory, the first of [`ProgramNode::host_git`]'s.
+    pub fn git_common_dir(&self) -> Option<&Path> {
+        self.host_git.git_dirs.first().map(PathBuf::as_path)
+    }
+
+    /// The worktree's linked git directory as the run's record names it, the second of
+    /// [`ProgramNode::host_git`]'s; git is never discovered from the worktree.
+    /// [`private_git::prepare`] checks that the worktree's `.git` names it under the common
+    /// directory (`linked_git_dir_from_record`).
+    pub fn recorded_git_dir(&self) -> Result<&Path, String> {
+        self.host_git
+            .git_dirs
+            .get(1)
+            .map(PathBuf::as_path)
+            .ok_or_else(|| {
+                format!(
+                    "the run's record names no git directory for {}",
+                    self.worktree.display()
+                )
+            })
+    }
+
+    /// What the node may write, as [`Confinement::build`] takes it: its worktree (with
+    /// [`ProgramNode::tree_access`] and [`ProgramNode::tree_git`]), its scratch directory and its
+    /// declared directories, and the network it declared.
+    pub fn declaration(&self) -> JobDeclaration {
+        JobDeclaration {
+            kind: JobKind::Program,
+            trees: vec![JobTree {
+                path: self.worktree.clone(),
+                access: self.tree_access,
+                git: self.tree_git,
+            }],
+            scratch: self.scratch.clone(),
+            declared_dirs: self.declared_dirs.clone(),
+            extra_writable: Vec::new(),
+            network: if self.permissions.network.is_empty() {
+                SandboxNetPolicy::Blocked
+            } else {
+                SandboxNetPolicy::Restricted {
+                    allowed_domains: self.permissions.network.clone(),
+                }
+            },
+        }
     }
 
     /// Where the worktree's git metadata lives (see [`GitLayout`]).
@@ -357,7 +382,7 @@ impl ProgramNode {
         };
         // A linked git directory is trusted only where git puts it, `<common>/worktrees/<name>`,
         // with its `gitdir` and `commondir`; anything else is read-only as a whole.
-        let trusted = self.git_common_dir.as_deref().is_some_and(|common| {
+        let trusted = self.git_common_dir().is_some_and(|common| {
             let parent = git_dir.parent().and_then(canonical);
             parent.is_some() && parent == canonical(&common.join("worktrees"))
         }) && fs::symlink_metadata(&git_dir)
@@ -406,7 +431,7 @@ impl ProgramNode {
     /// `refs/` and `logs/` and, in a linked worktree, the worktree's own git directory. Nothing
     /// in the main worktree or without a common git directory.
     pub fn git_writable_paths(&self) -> Vec<PathBuf> {
-        let Some(common) = &self.git_common_dir else {
+        let Some(common) = self.git_common_dir() else {
             return Vec::new();
         };
         let mut paths: Vec<PathBuf> = Vec::new();
@@ -433,7 +458,7 @@ impl ProgramNode {
         if self.git_writable_paths().is_empty() {
             return Vec::new();
         }
-        let Some(common) = &self.git_common_dir else {
+        let Some(common) = self.git_common_dir() else {
             return Vec::new();
         };
         GIT_FORBIDDEN.iter().map(|name| common.join(name)).collect()
@@ -443,7 +468,7 @@ impl ProgramNode {
     /// host git appending a reflog follows what a script planted there: the common git
     /// directory's `logs/` and, in a linked worktree, its own git directory's `logs/`.
     pub fn hidden_git_paths(&self) -> Vec<PathBuf> {
-        let Some(common) = &self.git_common_dir else {
+        let Some(common) = self.git_common_dir() else {
             return Vec::new();
         };
         match self.git_layout() {
@@ -489,65 +514,10 @@ impl ProgramNode {
         }
     }
 
-    /// Makes what the sandbox must bind before it starts, since a missing path cannot be bound
-    /// and the script could then create it: `logs/` in the common git directory and in a linked
-    /// worktree's git directory, and an empty `config.worktree` there; on Linux also
-    /// `refs/replace/` and empty `objects/info/alternates` and `objects/info/http-alternates`
-    /// (an existing one is left as it is).
-    fn prepare_git(&self) -> std::io::Result<()> {
-        let missing = |path: &Path| fs::symlink_metadata(path).is_err();
-        let add = |path: &Path, error: std::io::Error| {
-            std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
-        };
-        let make_file = |path: &Path| {
-            if !missing(path) {
-                return Ok(());
-            }
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(_) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-                Err(error) => Err(add(path, error)),
-            }
-        };
-        let make_dir = |path: &Path| {
-            if missing(path) {
-                fs::create_dir_all(path).map_err(|error| add(path, error))?;
-            }
-            Ok::<(), std::io::Error>(())
-        };
-        if self.git_writable_paths().is_empty() {
-            return Ok(());
-        }
-        for logs in self.hidden_git_paths() {
-            make_dir(&logs)?;
-        }
-        if let GitLayout::Linked { git_dir } = self.git_layout() {
-            make_file(&git_dir.join("config.worktree"))?;
-        }
-        if cfg!(target_os = "linux") {
-            for path in self.git_forbidden_paths() {
-                if path.ends_with("refs/replace") {
-                    make_dir(&path)?;
-                } else {
-                    if let Some(parent) = path.parent() {
-                        make_dir(parent)?;
-                    }
-                    make_file(&path)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The OS sandbox policy of the node: [`ProgramNode::writable_paths`] writable, and on Linux
-    /// [`ProgramNode::read_only_paths`] and [`ProgramNode::git_forbidden_paths`] as protected git
-    /// directories, which Bubblewrap binds read-only over the writable ones (the reflog
-    /// directories are covered in [`ProgramRunner`]'s wrap). Elsewhere a protected path cannot be
-    /// read either (git needs them), so there only the allowlist applies.
+    /// The sandbox policy of the git allowlist above: [`ProgramNode::writable_paths`] writable,
+    /// and on Linux [`ProgramNode::read_only_paths`] and [`ProgramNode::git_forbidden_paths`] as
+    /// protected git directories. A pass does not spawn under it: it spawns under its
+    /// [`Confinement`]'s policy.
     pub fn sandbox_policy(&self) -> SandboxPolicy {
         let writable_paths = self.writable_paths();
         let git = if cfg!(target_os = "linux") {
@@ -768,8 +738,8 @@ impl GitMetadata {
     pub fn take(node: &ProgramNode) -> Self {
         let gitlink = node.worktree.join(".git");
         let mut paths = vec![(gitlink.clone(), false)];
-        if let Some(common) = &node.git_common_dir {
-            paths.push((common.clone(), false));
+        if let Some(common) = node.git_common_dir() {
+            paths.push((common.to_path_buf(), false));
             paths.push((common.join("config"), false));
             paths.push((common.join("hooks"), true));
         }
@@ -969,35 +939,6 @@ pub fn add_git_config(env: &mut BTreeMap<String, String>, key: &str, value: &str
     env.insert(format!("GIT_CONFIG_KEY_{count}"), key.to_string());
     env.insert(format!("GIT_CONFIG_VALUE_{count}"), value.to_string());
     env.insert("GIT_CONFIG_COUNT".to_string(), (count + 1).to_string());
-}
-
-/// The failure of a pass that changed git metadata or planted symlinks in git.
-fn git_failure(key: &NodeKey, changes: &GitChanges) -> Failure {
-    let list = |paths: &[PathBuf]| {
-        paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let mut parts = Vec::new();
-    if !changes.symlinks.is_empty() {
-        parts.push(format!(
-            "program planted symlinks in git (removed): {}",
-            list(&changes.symlinks)
-        ));
-    }
-    if !changes.metadata.is_empty() {
-        parts.push(format!(
-            "program changed git metadata: {}",
-            list(&changes.metadata)
-        ));
-    }
-    Failure::new(
-        FailureReason::PermissionDenied,
-        Some(key.clone()),
-        parts.join("; "),
-    )
 }
 
 /// The environment of a program: the agent runners' names, `BONGOS_STATE`, `BONGOS_RESULT` and
@@ -1306,6 +1247,16 @@ struct Launch {
     sandbox_note: String,
 }
 
+/// A spawned pass's process and what goes with it.
+struct Spawned {
+    process: NodeProcess,
+    capture: Arc<Capture>,
+    readers: Vec<JoinHandle<()>>,
+    sandbox: Option<Sandbox>,
+    sandbox_note: String,
+    private_git: Option<PrivateGit>,
+}
+
 /// One pass of a program node in flight.
 struct Pass {
     run: String,
@@ -1325,8 +1276,10 @@ struct Pass {
     sandbox_note: String,
     /// Kept alive while the process runs: it owns the network proxy.
     sandbox: Option<Sandbox>,
-    /// The git checks taken before the script started, run after it ends.
-    git: GitGuard,
+    /// What the pass may write; finished once its process group is gone.
+    confinement: Confinement,
+    /// The worktree's private git, imported once the process group is gone.
+    private_git: Option<PrivateGit>,
 }
 
 /// A polling node between passes: no process, no cost.
@@ -1396,6 +1349,9 @@ impl ProgramRunner {
         self.launch(run, key, try_number, node, dir, 1, None)
     }
 
+    /// Starts one pass: builds the node's [`Confinement`] (a refusal refuses the start with its
+    /// message), then [`ProgramRunner::spawn`]s the script under it. When the spawn fails the
+    /// confinement is finished at once, since no process of the pass exists.
     #[allow(clippy::too_many_arguments)]
     fn launch(
         &mut self,
@@ -1430,26 +1386,66 @@ impl ProgramRunner {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io(&result_path, error)),
         }
-        let symlinked = node.symlinked_git_paths();
-        if !symlinked.is_empty() {
-            let list: Vec<String> = symlinked
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect();
-            return Err(refuse(
-                FailureReason::PermissionDenied,
-                format!(
-                    "git paths are symlinks, so bongos will not make them writable: {}",
-                    list.join(", ")
-                ),
-            ));
-        }
-        node.prepare_git().map_err(|error| {
+        let confinement = Confinement::build(&node.declaration(), &node.host_git)
+            .map_err(|error| refuse(FailureReason::PermissionDenied, error.to_string()))?;
+        let spawned = match self.spawn(run, key, &node, &dir, number, &confinement) {
+            Ok(spawned) => spawned,
+            Err(failure) => {
+                finish_confinement(&confinement);
+                return Err(failure);
+            }
+        };
+        let record = spawned.process.record();
+        self.passes.push((
+            Pass {
+                run: run.to_string(),
+                key: key.clone(),
+                try_number,
+                node,
+                dir,
+                number,
+                first_waiting,
+                started: self.clock.now(),
+                started_wall: Instant::now(),
+                capture: spawned.capture,
+                readers: spawned.readers,
+                sandbox_note: spawned.sandbox_note,
+                sandbox: spawned.sandbox,
+                confinement,
+                private_git: spawned.private_git,
+            },
+            spawned.process,
+        ));
+        Ok(record)
+    }
+
+    /// Writes the try's files, wraps the script in the confinement's sandbox, prepares the
+    /// worktree's private git (with [`TreeGit::Private`]; a failure refuses the start) and spawns
+    /// the script. A spawn that fails switches the worktree back to shared git.
+    fn spawn(
+        &self,
+        run: &str,
+        key: &NodeKey,
+        node: &ProgramNode,
+        dir: &Path,
+        number: u32,
+        confinement: &Confinement,
+    ) -> Result<Spawned, Failure> {
+        let refuse =
+            |reason: FailureReason, detail: String| Failure::new(reason, Some(key.clone()), detail);
+        let io = |path: &Path, error: std::io::Error| {
             refuse(
                 FailureReason::WorktreeUnavailable,
-                format!("could not prepare git for the sandbox: {error}"),
+                format!("{}: {error}", path.display()),
             )
-        })?;
+        };
+        let linked_git_dir = match node.tree_git {
+            TreeGit::Private => Some(
+                node.recorded_git_dir()
+                    .map_err(|detail| refuse(FailureReason::WorktreeUnavailable, detail))?,
+            ),
+            TreeGit::ReadOnly | TreeGit::None => None,
+        };
         let shim = dir.join(SHIM_FILE);
         fs::write(&shim, SHIM).map_err(|error| io(&shim, error))?;
         let state_file = dir.join(STATE_FILE);
@@ -1457,16 +1453,16 @@ impl ProgramRunner {
             .write_readonly(&state_file)
             .map_err(|error| io(&state_file, error))?;
         let policy_file = dir.join(POLICY_FILE);
+        // The shim refuses writes outside the writable roots and to the read-only masks; the OS
+        // sandbox enforces both.
         let policy = json!({
             "commands": node.permissions.commands,
             "network": node.permissions.network,
-            "writable": node.writable_paths(),
-            "protected": node
-                .read_only_paths()
-                .into_iter()
-                .chain(node.git_forbidden_paths())
-                .collect::<Vec<_>>(),
-            "git": node.git_writable_paths(),
+            "writable": confinement.writable_roots(),
+            "protected": confinement.masks(),
+            // Carried for a later step; the shim ignores it and refuses through `protected`.
+            "masks": confinement.masks(),
+            "git": Vec::<PathBuf>::new(),
             "denials_fd": DENIALS_FD,
         });
         fs::write(
@@ -1483,27 +1479,53 @@ impl ProgramRunner {
             path(&policy_file),
             path(&node.script),
         ];
-        let env = launch_env(&self.base_env, run, key, &node, &state_file);
+        let env = launch_env(&self.base_env, run, key, node, &state_file);
         let Launch {
             program,
             args,
             env,
             sandbox,
             sandbox_note,
-        } = self
-            .wrap(&node, path(&self.interpreter.program), args, env)
-            .map_err(|error| {
-                refuse(
-                    FailureReason::PermissionDenied,
-                    format!("could not hide the reflogs in the sandbox: {error}"),
-                )
-            })?;
-        let git = GitGuard::take(&node, sandbox.is_some());
-        write_summary(&dir, &json!({ "pass": number, "sandbox": sandbox_note }));
+        } = self.wrap(
+            node,
+            confinement,
+            path(&self.interpreter.program),
+            args,
+            env,
+        );
+        if sandbox.is_none() && confinement.requires_sandbox() {
+            return Err(refuse(
+                FailureReason::PermissionDenied,
+                format!(
+                    "a job in a main worktree runs only in the OS sandbox ({sandbox_note}): {}",
+                    node.worktree.display()
+                ),
+            ));
+        }
+        write_summary(dir, &json!({ "pass": number, "sandbox": sandbox_note }));
 
-        let (stdout_read, stdout_write) = std::io::pipe().map_err(|error| io(&dir, error))?;
-        let (stderr_read, stderr_write) = std::io::pipe().map_err(|error| io(&dir, error))?;
-        let (denials_read, denials_write) = std::io::pipe().map_err(|error| io(&dir, error))?;
+        let (stdout_read, stdout_write) = std::io::pipe().map_err(|error| io(dir, error))?;
+        let (stderr_read, stderr_write) = std::io::pipe().map_err(|error| io(dir, error))?;
+        let (denials_read, denials_write) = std::io::pipe().map_err(|error| io(dir, error))?;
+
+        // Last before the spawn: no process of the pass exists in the scratch or the worktree.
+        let private_git = match &linked_git_dir {
+            Some(linked_git_dir) => Some(
+                futures::executor::block_on(private_git::prepare(
+                    &node.worktree,
+                    linked_git_dir,
+                    &node.scratch,
+                ))
+                .map_err(|error| {
+                    refuse(
+                        FailureReason::WorktreeUnavailable,
+                        format!("could not give the node its own git: {error:#}"),
+                    )
+                })?,
+            ),
+            None => None,
+        };
+
         let mut command = Command::new(&program);
         command
             .args(&args)
@@ -1518,20 +1540,31 @@ impl ProgramRunner {
             Stdio::from(stderr_write),
         );
         drop(denials_write);
-        let process = spawned.map_err(|error| {
-            let not_found = error
-                .chain()
-                .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
-                .any(|error| error.kind() == std::io::ErrorKind::NotFound);
-            if not_found {
-                refuse(
-                    FailureReason::ProgramInterpreterMissing,
-                    format!("{program}: {INTERPRETER_FIX}"),
-                )
-            } else {
-                refuse(FailureReason::ProgramExitedNonzero, format!("{error:#}"))
+        let process = match spawned {
+            Ok(process) => process,
+            Err(error) => {
+                if let Some(private_git) = private_git
+                    && let Err(abandon_error) = private_git.abandon()
+                {
+                    log::error!(
+                        "workflows: could not switch {} back to shared git: {abandon_error:#}",
+                        node.worktree.display()
+                    );
+                }
+                let not_found = error
+                    .chain()
+                    .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+                    .any(|error| error.kind() == std::io::ErrorKind::NotFound);
+                return Err(if not_found {
+                    refuse(
+                        FailureReason::ProgramInterpreterMissing,
+                        format!("{program}: {INTERPRETER_FIX}"),
+                    )
+                } else {
+                    refuse(FailureReason::ProgramExitedNonzero, format!("{error:#}"))
+                });
             }
-        })?;
+        };
 
         let capture = Arc::new(Capture::default());
         let cap = node.caps.max_output_bytes;
@@ -1545,71 +1578,40 @@ impl ProgramRunner {
                 DENIALS_CAP,
             ),
         ];
-        let record = process.record();
-        self.passes.push((
-            Pass {
-                run: run.to_string(),
-                key: key.clone(),
-                try_number,
-                node,
-                dir,
-                number,
-                first_waiting,
-                started: self.clock.now(),
-                started_wall: Instant::now(),
-                capture,
-                readers,
-                sandbox_note,
-                sandbox,
-                git,
-            },
+        Ok(Spawned {
             process,
-        ));
-        Ok(record)
+            capture,
+            readers,
+            sandbox,
+            sandbox_note,
+            private_git,
+        })
     }
 
-    /// The command to spawn: inside the OS sandbox when it can be created, else as it is with
-    /// the reason it is not sandboxed. A sandbox that can be created but whose reflog directories
-    /// cannot be covered refuses the start (the error) rather than running without it.
+    /// The command to spawn: inside the OS sandbox enforcing `confinement` when it can be
+    /// created, else as it is with the reason it is not sandboxed.
     fn wrap(
         &self,
         node: &ProgramNode,
+        confinement: &Confinement,
         program: String,
         args: Vec<String>,
         env: BTreeMap<String, String>,
-    ) -> Result<Launch, String> {
-        let policy = node.sandbox_policy();
-        let mut refused = None;
+    ) -> Launch {
+        let policy = confinement.sandbox_policy();
         let wrapped = (self.probe)(&policy, &node.worktree).and_then(|()| {
             let mut sandbox = Sandbox::new(policy).map_err(|error| error.to_string())?;
-            let hidden = if cfg!(target_os = "linux") {
-                node.hidden_git_paths()
-            } else {
-                Vec::new()
-            };
-            let mut env = env.clone();
-            if !hidden.is_empty() {
-                // The reflog directories are read-only and empty: git must not try to make one.
-                add_git_config(&mut env, "core.logAllRefUpdates", "false");
-            }
             let command = CommandAndArgs {
                 program: program.clone(),
                 args: args.clone(),
-                env: env.into_iter().collect::<HashMap<_, _>>(),
+                env: env.clone().into_iter().collect::<HashMap<_, _>>(),
                 cwd: Some(node.worktree.clone()),
             };
-            let mut wrapped = futures::executor::block_on(sandbox.wrap(&command))
+            let wrapped = futures::executor::block_on(sandbox.wrap(&command))
                 .map_err(|error| error.to_string())?;
-            if let Err(error) = hide_in_bubblewrap(&mut wrapped.args, &hidden) {
-                refused = Some(error.clone());
-                return Err(error);
-            }
             Ok((wrapped, sandbox))
         });
-        if let Some(reason) = refused {
-            return Err(reason);
-        }
-        Ok(match wrapped {
+        match wrapped {
             Ok((wrapped, sandbox)) => Launch {
                 program: wrapped.program,
                 args: wrapped.args,
@@ -1627,7 +1629,7 @@ impl ProgramRunner {
                     sandbox_note: format!("not sandboxed: {reason}"),
                 }
             }
-        })
+        }
     }
 
     /// The passes that ended since the last call (a `waiting` result included: it is recorded,
@@ -1724,19 +1726,21 @@ impl ProgramRunner {
             .partition(|(pass, _)| matches(&pass.run, &pass.key));
         self.passes = kept;
         let mut processes: Vec<NodeProcess> = Vec::new();
-        let mut sandboxes = Vec::new();
-        let mut gits = Vec::new();
+        let mut passes = Vec::new();
         for (pass, process) in stopped {
             processes.push(process);
-            sandboxes.push(pass.sandbox);
-            gits.push(pass.git);
+            passes.push(pass);
         }
         stop_all(&mut processes);
-        drop(sandboxes);
-        for git in gits {
-            let changes = git.check_and_restore();
-            if !changes.is_empty() {
-                log::error!("workflows: a stopped program changed git (undone): {changes:?}");
+        // The process groups are gone: the work of each stopped pass is imported all the same.
+        for mut pass in passes {
+            drop(pass.sandbox.take());
+            let settled = settle_git(&pass.key, &pass.confinement, pass.private_git.take());
+            if let Some(failure) = settled.failure {
+                log::error!(
+                    "workflows: the git of a stopped program: {}",
+                    failure.detail
+                );
             }
         }
     }
@@ -1770,7 +1774,7 @@ impl ProgramRunner {
         drop(pass.sandbox.take());
         let capped = pass.capture.capped.load(Ordering::SeqCst);
         let denials = read_denials(&pass.dir.join(DENIALS_FILE));
-        let git_changes = pass.git.check_and_restore();
+        let settled = settle_git(&pass.key, &pass.confinement, pass.private_git.take());
         let classified = classify(
             &pass.key,
             &pass.node,
@@ -1780,10 +1784,22 @@ impl ProgramRunner {
             ResultFile::read(&pass.node.result_path()),
             &read_tail(&pass.dir.join(STDERR_FILE), STDERR_TAIL),
         );
-        let classified = if git_changes.is_empty() {
-            classified
-        } else {
-            Err(git_failure(&pass.key, &git_changes))
+        // A write the sandbox refused fails the node with the rule, even when the script went on.
+        let refused_write = [STDERR_FILE, STDOUT_FILE].iter().find_map(|file| {
+            output_refusal(&pass.dir.join(file), pass.confinement.writable_roots())
+        });
+        let classified = match (classified, refused_write) {
+            (Err(failure), _) if failure.reason == FailureReason::PermissionDenied => Err(failure),
+            (_, Some(refusal)) => Err(Failure::new(
+                FailureReason::PermissionDenied,
+                Some(pass.key.clone()),
+                refusal,
+            )),
+            (classified, None) => classified,
+        };
+        let classified = match settled.failure.clone() {
+            Some(failure) => Err(failure),
+            None => classified,
         };
         write_summary(
             &pass.dir,
@@ -1799,8 +1815,9 @@ impl ProgramRunner {
                 "output_capped": capped,
                 "denials": denials.denials,
                 "denial_log_ended": denials.ended,
-                "git_metadata_changed": git_changes.metadata,
-                "git_symlinks_removed": git_changes.symlinks,
+                "git_imported": settled.imported,
+                "git_refused": settled.refused,
+                "git_notes": settled.notes,
             }),
         );
         let elapsed_ms = pass.started_wall.elapsed().as_millis() as u64;
@@ -1847,6 +1864,79 @@ impl ProgramRunner {
         }
         finish(Ok(result))
     }
+}
+
+/// What the end of a pass did with the worktree's git.
+#[derive(Default)]
+struct Settled {
+    imported: Vec<String>,
+    refused: Vec<String>,
+    notes: Vec<String>,
+    /// Why the git fails the node: a refused entry, or an import that failed.
+    failure: Option<Failure>,
+}
+
+/// Ends a pass's confinement once its process group is gone: imports the private git (when the
+/// worktree has one) into the shared repository, then finishes `confinement`. Entries the import
+/// refused fail the node with [`FailureReason::PermissionDenied`], naming each; the allowed ones
+/// are imported all the same and the private directory is kept. A failed import fails the node
+/// and keeps the commits in the private directory.
+fn settle_git(
+    key: &NodeKey,
+    confinement: &Confinement,
+    private_git: Option<PrivateGit>,
+) -> Settled {
+    let mut settled = Settled::default();
+    if let Some(private_git) = private_git {
+        // Host git for the worktree's linked git directory, which no job can write.
+        let git = SafeGit::without_work_tree(private_git.linked_git_dir());
+        match futures::executor::block_on(private_git.import(&git)) {
+            Ok(report) => {
+                if !report.refused.is_empty() {
+                    let mut detail = report.refused.join("; ");
+                    if let Some(kept) = &report.kept_private_dir {
+                        detail.push_str(&format!(
+                            "; the node's git directory {} is kept",
+                            kept.display()
+                        ));
+                    }
+                    settled.failure = Some(Failure::new(
+                        FailureReason::PermissionDenied,
+                        Some(key.clone()),
+                        detail,
+                    ));
+                }
+                settled.imported = report.imported;
+                settled.refused = report.refused;
+                settled.notes = report.notes;
+            }
+            Err(error) => {
+                settled.failure = Some(Failure::new(
+                    FailureReason::WorktreeUnavailable,
+                    Some(key.clone()),
+                    format!("could not import the node's commits: {error:#}"),
+                ));
+            }
+        }
+    }
+    finish_confinement(confinement);
+    settled
+}
+
+/// Finishes `confinement`; a failure is logged, since the job is already over.
+fn finish_confinement(confinement: &Confinement) {
+    if let Err(error) = confinement.finish() {
+        log::error!("workflows: could not finish a program's confinement: {error}");
+    }
+}
+
+/// The annotation naming the rule for the first line of the log at `path` that reports a write
+/// the sandbox refused outside `roots` ([`annotate::refusal`]).
+fn output_refusal(path: &Path, roots: &[PathBuf]) -> Option<String> {
+    let text = fs::read(path).ok()?;
+    String::from_utf8_lossy(&text)
+        .lines()
+        .find_map(|line| annotate::refusal(line, roots))
 }
 
 fn gave_up(run: String, key: NodeKey, try_number: u32, polls: &PollPlan) -> Finish {
