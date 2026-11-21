@@ -598,7 +598,6 @@ struct Job {
     log: PathBuf,
     reader: Option<JoinHandle<()>>,
     reaped: Arc<Mutex<bool>>,
-    exited: bool,
     _sandbox: Sandbox,
 }
 
@@ -677,14 +676,38 @@ impl Job {
                 // SAFETY: a zeroed siginfo is a valid out-parameter for waitid.
                 let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
                 // SAFETY: plain syscall on our child's pid; WNOWAIT leaves it unreaped.
-                unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        pid as libc::id_t,
-                        &mut info,
-                        libc::WEXITED | libc::WNOWAIT,
-                    );
+                let waited = loop {
+                    let result = unsafe {
+                        libc::waitid(
+                            libc::P_PID,
+                            pid as libc::id_t,
+                            &mut info,
+                            libc::WEXITED | libc::WNOWAIT,
+                        )
+                    };
+                    if result == 0 {
+                        break true;
+                    }
+                    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                        break false;
+                    }
+                };
+                if !waited {
+                    // waitid failed for another reason, so the job may still be running: poll
+                    // without ever holding the lock across a blocking wait.
+                    loop {
+                        let mut guard = reaped.lock().unwrap_or_else(|error| error.into_inner());
+                        if let Ok(Some(status)) = child.try_status() {
+                            *guard = true;
+                            drop(guard);
+                            sender.send(Event::Exited(Ok(status))).ok();
+                            return;
+                        }
+                        drop(guard);
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                 }
+                // The child has exited, so `status` returns at once under the lock.
                 let mut reaped = reaped.lock().unwrap_or_else(|error| error.into_inner());
                 let status = smol::block_on(child.status());
                 *reaped = true;
@@ -700,7 +723,6 @@ impl Job {
             release,
             log,
             reader: Some(reader),
-            exited: false,
             _sandbox: sandbox,
         }
     }
@@ -711,7 +733,6 @@ impl Job {
             Ok(Event::Ready(Ok(text))) if !text.trim().is_empty() => text,
             Ok(Event::Ready(result)) => self.fail(&format!("the job signaled nothing: {result:?}")),
             Ok(Event::Exited(status)) => {
-                self.exited = true;
                 self.fail(&format!("the job exited before signaling: {status:?}"))
             }
             Err(error) => self.fail(&format!("no signal from the job: {error}")),
@@ -730,11 +751,8 @@ impl Job {
             self.fail(&format!("cannot release the job: {error}"));
         }
         match self.events.recv_timeout(HANG_GUARD) {
-            Ok(Event::Exited(Ok(status))) if status.success() => self.exited = true,
-            Ok(Event::Exited(status)) => {
-                self.exited = true;
-                self.fail(&format!("the job failed: {status:?}"))
-            }
+            Ok(Event::Exited(Ok(status))) if status.success() => {}
+            Ok(Event::Exited(status)) => self.fail(&format!("the job failed: {status:?}")),
             Ok(Event::Ready(_)) => self.fail("the job signaled twice"),
             Err(error) => self.fail(&format!("the job did not exit: {error}")),
         }
