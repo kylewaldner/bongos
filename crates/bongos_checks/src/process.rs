@@ -151,10 +151,30 @@ pub type SandboxProbe = Arc<dyn Fn(&SandboxPolicy, &Path) -> Result<(), String> 
 /// its git read-only, the part's own scratch and the lane's declared directories (the ones
 /// [`EnvBase::declared_dirs`] names) writable, nothing else. A sandbox that cannot be created is
 /// no verdict, never an unconfined run.
-#[derive(Clone, Default)]
+///
+/// The scratch is made fresh for every process (whatever a former run left there is removed
+/// first), and the files bongos reads back (the result file, the scope script's answer) are read
+/// from it before it is removed. The output folder, where bongos writes the process's output and
+/// its own files, is never writable.
+#[derive(Clone)]
 pub struct PartConfinement {
     /// `None` asks the OS sandbox itself.
     pub probe: Option<SandboxProbe>,
+    /// The checks' output folder; no declared directory may equal, contain or lie inside it.
+    pub records_dir: Option<PathBuf>,
+    /// The git directories bongos trusts for the part's tree (see [`host_git_dirs`]), taken
+    /// from the git directory it recorded for the tree; the error says why it trusts none.
+    pub git_dirs: Result<Vec<PathBuf>, String>,
+}
+
+impl Default for PartConfinement {
+    fn default() -> Self {
+        Self {
+            probe: None,
+            records_dir: None,
+            git_dirs: Ok(Vec::new()),
+        }
+    }
 }
 
 /// Everything one part needs.
@@ -207,6 +227,9 @@ pub struct PartOutcome {
     pub command: Vec<String>,
     pub output: OutputSummary,
     pub duration: Duration,
+    /// A scope script's answer file as it was when the script ended, at most `result_limit` + 1
+    /// bytes; `None` when it wrote none (or for any other role).
+    pub scope_answer: Option<Vec<u8>>,
 }
 
 impl PartOutcome {
@@ -215,6 +238,7 @@ impl PartOutcome {
             verdict: Verdict::NoVerdict(reason),
             exit: None,
             result: None,
+            scope_answer: None,
             start: None,
             command,
             output: OutputSummary::default(),
@@ -346,21 +370,66 @@ impl PartFiles {
         }
     }
 
+    /// Removes any result file left before and writes the params file as a new file, never
+    /// through an entry (a symlink) already at its path.
     fn prepare(&self, decl: &CheckDecl) -> std::io::Result<()> {
         if let Some(dir) = self.result.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        match std::fs::remove_file(&self.result) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
+        remove_entry(&self.result)?;
+        remove_entry(&self.params)?;
         let params = decl.params.clone().unwrap_or_default();
         let json = serde_json::to_vec(&params).map_err(std::io::Error::other)?;
-        std::fs::write(&self.params, json)
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.params)?;
+        std::io::Write::write_all(&mut file, &json)
     }
 }
 
-fn check_vars(spec: &PartSpec, files: &PartFiles, token: &str) -> Vec<(String, OsString)> {
+/// Removes the file or symlink at `path` (the link itself, never its target); nothing there is
+/// fine.
+fn remove_entry(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// A part's scratch directory, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    /// Makes `path` a new empty directory: whatever is there first (a directory a former run
+    /// left, a symlink, a file) is removed, a symlink as the link itself.
+    fn fresh(path: &Path) -> std::io::Result<Self> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path)?,
+            Ok(_) => std::fs::remove_file(path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::create_dir(path)?;
+        Ok(Self(path.to_path_buf()))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+fn check_vars(
+    spec: &PartSpec,
+    files: &PartFiles,
+    scope_answer: Option<&Path>,
+    token: &str,
+) -> Vec<(String, OsString)> {
     let mut vars = vec![
         ("BONGOS_CHECK_NAME", OsString::from(&spec.decl.name)),
         ("BONGOS_CHECK_PARAMS", files.params.clone().into_os_string()),
@@ -390,7 +459,8 @@ fn check_vars(spec: &PartSpec, files: &PartFiles, token: &str) -> Vec<(String, O
             result,
         } => {
             vars.push((CHANGED_FILES_VAR, changed_files.clone().into_os_string()));
-            vars.push((SCOPE_RESULT_VAR, result.clone().into_os_string()));
+            let answer = scope_answer.unwrap_or(result);
+            vars.push((SCOPE_RESULT_VAR, answer.as_os_str().to_os_string()));
         }
         ProcessRole::Plan { durations } => {
             vars.push((DURATIONS_VAR, durations.clone().into_os_string()));
@@ -428,16 +498,27 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
         );
     }
     let token = uuid::Uuid::new_v4().to_string();
-    // A confined part writes its result and params files in its own scratch, the one place
-    // besides the tree and the lane's directories it may write.
+    // A confined part writes its result and params files (and a scope script its answer) in its
+    // own scratch, the one place besides the tree and the lane's directories it may write.
     let scratch = spec.confinement.as_ref().map(|_| scratch_of(&spec.output));
     let files = match &scratch {
         Some(scratch) => PartFiles::of(&scratch.join(spec.output.file_name().unwrap_or_default())),
         None => PartFiles::of(&spec.output),
     };
+    let scope_answer = match (&spec.role, &scratch) {
+        (ProcessRole::Scope { result, .. }, Some(scratch)) => Some(
+            scratch.join(
+                result
+                    .file_name()
+                    .unwrap_or(OsStr::new("scope-answer.json")),
+            ),
+        ),
+        (ProcessRole::Scope { result, .. }, None) => Some(result.clone()),
+        _ => None,
+    };
     let mut env = part_env(
         &spec.env,
-        &check_vars(&spec, &files, &token),
+        &check_vars(&spec, &files, scope_answer.as_deref(), &token),
         &spec.decl.unset,
     );
     if let Some(scratch) = &scratch {
@@ -450,6 +531,16 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
     let argv: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
         .chain(args.iter().cloned())
         .collect();
+    // Removed on every path out, after the confinement (declared later) is finished.
+    let _scratch = match scratch.as_deref().map(Scratch::fresh).transpose() {
+        Ok(scratch) => scratch,
+        Err(error) => {
+            return refuse(
+                NoVerdictReason::StartFailed(format!("making the part's scratch: {error}")),
+                argv,
+            );
+        }
+    };
     if let Err(error) = files.prepare(&spec.decl) {
         return refuse(
             NoVerdictReason::StartFailed(format!("preparing the part's files: {error}")),
@@ -506,7 +597,7 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
         },
     };
     // Dropped after the process group is gone (declared before the process): the confinement
-    // is finished and the scratch removed then.
+    // is finished then, before the scratch is removed.
     let mut confined = None;
     let command = match (&spec.confinement, &scratch) {
         (Some(options), Some(scratch)) => {
@@ -590,6 +681,10 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
         );
     }
     let output = lock(&sink).finish();
+    let scope_answer = match (&ending, &scope_answer) {
+        (Ending::Exited, Some(path)) => read_capped(path, spec.result_limit),
+        _ => None,
+    };
     let (verdict, result) = match ending {
         Ending::Stopped(reason) => (Verdict::NoVerdict(reason), None),
         Ending::Exited => {
@@ -614,14 +709,14 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
         command: argv,
         output,
         duration: started.elapsed(),
+        scope_answer,
     }
 }
 
 /// A part's confinement and sandbox, held while its process group lives; dropping it finishes
-/// the confinement and removes the part's scratch.
+/// the confinement.
 struct Confined {
     confinement: Confinement,
-    scratch: PathBuf,
     // Kept alive while the process runs.
     _sandbox: Option<Sandbox>,
 }
@@ -631,7 +726,6 @@ impl Drop for Confined {
         if let Err(error) = self.confinement.finish() {
             log::error!("checks: cannot finish the confinement of a part: {error}");
         }
-        std::fs::remove_dir_all(&self.scratch).ok();
     }
 }
 
@@ -644,31 +738,90 @@ fn scratch_of(output: &Path) -> PathBuf {
     dir.join(format!("{stem}.scratch"))
 }
 
-/// The git directories bongos trusts for `tree`, read from its `.git`: a linked worktree's git
-/// directory, the common directory and the repository's other worktrees' git directories, or the
-/// `.git` directory of a plain repository.
-fn host_git(tree: &Path) -> HostGit {
+/// The git directories bongos trusts for a tree whose git directory it recorded as `git_dir`
+/// (never read from the tree's own `.git`, which the job may have rewritten): a linked
+/// worktree's git directory, its common directory and the repository's other worktrees' git
+/// directories, or the `.git` directory of a plain repository.
+pub fn host_git_dirs(git_dir: &Path) -> Vec<PathBuf> {
     let mut git_dirs = Vec::new();
-    let dot_git = tree.join(".git");
-    if let Ok(text) = std::fs::read_to_string(&dot_git)
-        && let Some(git_dir) = text.trim().strip_prefix("gitdir:")
+    let common = std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|common| git_dir.join(common.trim_end_matches(['\n', '\r'])));
+    if let Some(common) = &common
+        && let Ok(entries) = std::fs::read_dir(common.join("worktrees"))
     {
-        let git_dir = tree.join(git_dir.trim());
-        let common = std::fs::read_to_string(git_dir.join("commondir"))
-            .ok()
-            .map(|common| git_dir.join(common.trim()));
-        if let Some(common) = &common
-            && let Ok(entries) = std::fs::read_dir(common.join("worktrees"))
-        {
-            git_dirs.extend(entries.flatten().map(|entry| entry.path()));
+        git_dirs.extend(entries.flatten().map(|entry| entry.path()));
+    }
+    git_dirs.push(git_dir.to_path_buf());
+    git_dirs.extend(common);
+    git_dirs
+}
+
+/// `path` with its longest existing ancestor resolved (symlinks followed) and the rest appended;
+/// refused when it is relative or names `.` or `..`.
+fn resolved(path: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(format!(
+            "the declared directory {} must be an absolute path without . or ..",
+            path.display()
+        ));
+    }
+    let mut rest = Vec::new();
+    let mut existing = path;
+    loop {
+        match existing.canonicalize() {
+            Ok(canonical) => {
+                return Ok(rest
+                    .iter()
+                    .rev()
+                    .fold(canonical, |path: PathBuf, part| path.join(part)));
+            }
+            Err(_) => match (existing.parent(), existing.file_name()) {
+                (Some(parent), Some(name)) => {
+                    rest.push(name.to_os_string());
+                    existing = parent;
+                }
+                _ => return Ok(path.to_path_buf()),
+            },
         }
-        git_dirs.push(git_dir);
-        git_dirs.extend(common);
     }
-    HostGit {
-        git_dirs,
-        records_dir: None,
+}
+
+/// Refuses a declared directory that equals, contains or lies inside the checks' output folder
+/// (`records_dir`) or bongos's data folder, or that equals or contains the home folder. Checked
+/// before anything is made at a declared path.
+fn check_declared_dirs(dirs: &[PathBuf], records_dir: Option<&Path>) -> Result<(), String> {
+    let lenient = |path: &Path| resolved(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut both_ways = vec![("the bongos data folder", lenient(paths::data_dir()))];
+    if let Some(records_dir) = records_dir {
+        both_ways.push(("the checks' output folder", lenient(records_dir)));
     }
+    let home = lenient(paths::home_dir());
+    for dir in dirs {
+        let path = resolved(dir)?;
+        for (what, other) in &both_ways {
+            if path.starts_with(other) || other.starts_with(&path) {
+                return Err(format!(
+                    "the declared directory {} overlaps {what} {}",
+                    dir.display(),
+                    other.display()
+                ));
+            }
+        }
+        if home.starts_with(&path) {
+            return Err(format!(
+                "the declared directory {} contains the home folder {}",
+                dir.display(),
+                home.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The command that runs the part's process in the sandbox, and what to hold while it lives.
@@ -682,14 +835,14 @@ fn confine_command(
     env: &BTreeMap<OsString, OsString>,
 ) -> Result<(Command, Confined), NoVerdictReason> {
     let failed = |why: String| NoVerdictReason::StartFailed(why);
-    std::fs::create_dir_all(scratch)
-        .map_err(|error| failed(format!("creating the part's scratch: {error}")))?;
+    let git_dirs = options
+        .git_dirs
+        .clone()
+        .map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
     let mut declared_dirs = spec.env.declared_dirs().to_vec();
-    if let ProcessRole::Scope { result, .. } = &spec.role
-        && let Some(dir) = result.parent()
-    {
-        declared_dirs.push(dir.to_path_buf());
-    }
+    check_declared_dirs(&declared_dirs, options.records_dir.as_deref())
+        .map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
+    // Only once they are checked; one that cannot be made is not writable.
     declared_dirs.retain(|dir| std::fs::create_dir_all(dir).is_ok());
     let declaration = JobDeclaration {
         kind: JobKind::Check,
@@ -703,12 +856,15 @@ fn confine_command(
         extra_writable: Vec::new(),
         network: SandboxNetPolicy::Unrestricted,
     };
-    let confinement = Confinement::build(&declaration, &host_git(&spec.tree))
+    let host = HostGit {
+        git_dirs,
+        records_dir: None,
+    };
+    let confinement = Confinement::build(&declaration, &host)
         .map_err(|error| failed(format!("the sandbox cannot be created: {error}")))?;
     // From here the guard finishes the confinement on every path out.
     let mut confined = Confined {
         confinement,
-        scratch: scratch.to_path_buf(),
         _sandbox: None,
     };
     let policy = confined.confinement.sandbox_policy();
@@ -809,9 +965,31 @@ fn annotation(line: &[u8], roots: &[PathBuf]) -> Option<String> {
     annotate::refusal(&String::from_utf8_lossy(line), roots).map(|note| format!("{note}\n"))
 }
 
+/// Opens `path` for reading, refusing a symlink there: a file the process wrote in its scratch
+/// is read as it is, never through a link to somewhere else.
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+/// At most `limit` + 1 bytes of the file at `path` (no symlink); `None` when it cannot be read.
+fn read_capped(path: &Path, limit: usize) -> Option<Vec<u8>> {
+    let file = open_no_follow(path).ok()?;
+    let mut bytes = Vec::new();
+    let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    file.take(cap).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
 /// The result file: `None` when there is none; refused when larger than `limit`.
 fn read_result(path: &Path, limit: usize) -> Option<Result<ResultFile, String>> {
-    let file = match std::fs::File::open(path) {
+    let file = match open_no_follow(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => return Some(Err(format!("reading it: {error}"))),
