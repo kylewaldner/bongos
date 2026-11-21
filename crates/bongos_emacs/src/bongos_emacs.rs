@@ -10,6 +10,7 @@ mod count_adapters;
 mod cursor;
 mod global_mark;
 mod goto_line;
+mod goto_stack;
 mod intercept;
 mod jumps;
 mod kill;
@@ -52,6 +53,8 @@ mod cursor_tests;
 mod global_mark_tests;
 #[cfg(test)]
 mod goto_line_tests;
+#[cfg(test)]
+mod goto_stack_tests;
 #[cfg(test)]
 mod intercept_tests;
 #[cfg(test)]
@@ -119,14 +122,12 @@ pub fn init(cx: &mut App) {
     cursor::init(cx);
     global_mark::init(cx);
     xref_history::init(cx);
+    goto_stack::init(cx);
     for name in [
         actions::SymbolJumpNext::name_for_type(),
         actions::SymbolJumpPrev::name_for_type(),
         actions::SymbolOverlayPut::name_for_type(),
         actions::SymbolOverlayRemoveAll::name_for_type(),
-        actions::GotoStackBack::name_for_type(),
-        actions::GotoStackForward::name_for_type(),
-        actions::GotoStackPush::name_for_type(),
         actions::XrefHistoryList::name_for_type(),
     ] {
         prefix_arg::declare(cx, name, prefix_arg::Meaning::Ignored);
@@ -207,6 +208,7 @@ pub fn init(cx: &mut App) {
         );
         register(editor, &weak, cx, symbol_jump::symbol_jump_next_command);
         register(editor, &weak, cx, symbol_jump::symbol_jump_prev_command);
+        register(editor, &weak, cx, goto_stack::goto_stack_push_command);
         register(
             editor,
             &weak,
