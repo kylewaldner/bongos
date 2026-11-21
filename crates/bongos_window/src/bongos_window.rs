@@ -3,6 +3,7 @@
 
 pub mod actions;
 pub mod picker;
+mod split;
 pub mod targets;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -10,6 +11,8 @@ mod zoom;
 
 #[cfg(test)]
 mod picker_tests;
+#[cfg(test)]
+mod split_tests;
 #[cfg(test)]
 mod targets_tests;
 #[cfg(test)]
@@ -31,6 +34,9 @@ pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(switch_window);
         workspace.register_action(zoom::toggle_zoom);
+        workspace.register_action(split::split_window_below);
+        workspace.register_action(split::split_window_right);
+        workspace.register_action(split::delete_window);
     })
     .detach();
 }
