@@ -1177,6 +1177,25 @@ impl RealGitRepository {
         system_git_binary_path: Option<PathBuf>,
         executor: BackgroundExecutor,
     ) -> Result<Self> {
+        Self::new_with_job_roots(
+            dotgit_path,
+            bundled_git_binary_path,
+            system_git_binary_path,
+            executor,
+            &util::job_roots::contains,
+        )
+    }
+
+    /// Like [`RealGitRepository::new`], with `in_job_root` deciding whether a resolved git
+    /// directory lies inside a job root. A repository whose git directory or common directory was
+    /// written by a sandboxed job is refused, so its hooks and config never run in the editor.
+    fn new_with_job_roots(
+        dotgit_path: &Path,
+        bundled_git_binary_path: Option<PathBuf>,
+        system_git_binary_path: Option<PathBuf>,
+        executor: BackgroundExecutor,
+        in_job_root: &dyn Fn(&Path) -> bool,
+    ) -> Result<Self> {
         let any_git_binary_path = system_git_binary_path
             .clone()
             .or(bundled_git_binary_path)
@@ -1228,6 +1247,13 @@ impl RealGitRepository {
                 git_dir.clone()
             }
         };
+
+        if in_job_root(&git_dir) || in_job_root(&common_dir) {
+            bail!(
+                "not opening {}: its git data was written by a bongos job",
+                dotgit_path.display()
+            );
+        }
 
         Ok(Self {
             git_dir,
@@ -5469,5 +5495,236 @@ mod tests {
             remote_urls.get("upstream").unwrap(),
             "/Users/user/My Projects/upstream.git"
         );
+    }
+
+    fn open_with_job_roots(
+        roots: &util::job_roots::JobRoots,
+        dotgit_path: &Path,
+        cx: &TestAppContext,
+    ) -> Result<RealGitRepository> {
+        RealGitRepository::new_with_job_roots(
+            dotgit_path,
+            None,
+            Some("git".into()),
+            cx.executor(),
+            &|path| roots.contains(path),
+        )
+    }
+
+    #[track_caller]
+    fn assert_refused(result: Result<RealGitRepository>) {
+        match result {
+            Ok(repository) => panic!("expected {:?} to be refused", repository.git_dir),
+            Err(error) => assert!(
+                error.to_string().contains("written by a bongos job"),
+                "unexpected error: {error:#}"
+            ),
+        }
+    }
+
+    fn job_roots_in(directory: &Path) -> util::job_roots::JobRoots {
+        util::job_roots::JobRoots::new(&directory.join("registry").join("roots.json"))
+    }
+
+    #[gpui::test]
+    fn test_job_roots_nested_repository_inside_root_is_refused(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let root = temp_dir.path().join("tree");
+        git_init_repo(&root.join("nested"));
+        roots
+            .register(&root, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+
+        assert_refused(open_with_job_roots(
+            &roots,
+            &root.join("nested").join(".git"),
+            cx,
+        ));
+    }
+
+    #[gpui::test]
+    fn test_job_roots_linked_worktree_with_git_directory_outside_roots_opens(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let main = temp_dir.path().join("main");
+        let root = temp_dir.path().join("tree");
+        git_init_repo(&main);
+        fs::write(main.join("file.txt"), "initial").unwrap();
+        git_command(&main, ["add", "file.txt"]);
+        git_command(&main, ["commit", "-m", "initial"]);
+        fs::create_dir_all(&root).unwrap();
+        let worktree = root.join("worktree");
+        git_command(
+            &main,
+            [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("-b"),
+                OsString::from("feature"),
+                worktree.as_os_str().into(),
+            ],
+        );
+        roots
+            .register(&root, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+
+        let repository = open_with_job_roots(&roots, &worktree.join(".git"), cx).unwrap();
+        assert_same_path(&repository.common_dir, main.join(".git"));
+        assert!(roots.contains(&worktree.join("file.txt")));
+    }
+
+    #[gpui::test]
+    fn test_job_roots_git_file_pointing_into_root_is_refused(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let root = temp_dir.path().join("tree");
+        git_init_repo(&root.join("repo"));
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            outside.join(".git"),
+            format!("gitdir: {}\n", root.join("repo").join(".git").display()),
+        )
+        .unwrap();
+
+        assert!(open_with_job_roots(&roots, &outside.join(".git"), cx).is_ok());
+        roots
+            .register(&root, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+        assert_refused(open_with_job_roots(&roots, &outside.join(".git"), cx));
+    }
+
+    #[gpui::test]
+    fn test_job_roots_commondir_pointing_into_root_is_refused(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let root = temp_dir.path().join("tree");
+        git_init_repo(&root.join("repo"));
+        roots
+            .register(&root, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+
+        let git_dir = temp_dir.path().join("linked-git-dir");
+        fs::create_dir_all(&git_dir).unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            outside.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        assert!(open_with_job_roots(&roots, &outside.join(".git"), cx).is_ok());
+
+        fs::write(
+            git_dir.join("commondir"),
+            format!("{}\n", root.join("repo").join(".git").display()),
+        )
+        .unwrap();
+        assert_refused(open_with_job_roots(&roots, &outside.join(".git"), cx));
+    }
+
+    #[gpui::test]
+    fn test_job_roots_excluded_main_git_directory_opens(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = util::job_roots::JobRoots::with_owner_check(
+            &temp_dir.path().join("registry").join("roots.json"),
+            Arc::new(|_, _| true),
+        );
+        let main = temp_dir.path().join("main");
+        git_init_repo(&main);
+        fs::write(main.join("file.txt"), "initial").unwrap();
+        roots
+            .register(
+                &main,
+                &[main.join(".git")],
+                util::job_roots::RootLifetime::Job {
+                    pid: 1,
+                    start_time: 1,
+                },
+            )
+            .unwrap();
+
+        let repository = open_with_job_roots(&roots, &main.join(".git"), cx).unwrap();
+        assert_same_path(&repository.git_dir, main.join(".git"));
+        assert!(roots.contains(&main.join("file.txt")));
+        assert!(!roots.contains(&main.join(".git").join("HEAD")));
+    }
+
+    #[gpui::test]
+    fn test_job_roots_empty_registry_changes_nothing(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let repo = temp_dir.path().join("repo");
+        git_init_repo(&repo);
+
+        assert!(open_with_job_roots(&roots, &repo.join(".git"), cx).is_ok());
+        assert!(
+            open_with_job_roots(&roots, &temp_dir.path().join("missing").join(".git"), cx).is_ok()
+        );
+        assert!(!roots.contains(&repo));
+        assert!(!roots.contains(&temp_dir.path().join("missing")));
+        assert!(!temp_dir.path().join("registry").exists());
+    }
+
+    #[gpui::test]
+    fn test_job_roots_dead_owner_root_is_retired_by_next_register(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let owner_alive = Arc::new(AtomicBool::new(true));
+        let roots = util::job_roots::JobRoots::with_owner_check(
+            &temp_dir.path().join("registry").join("roots.json"),
+            Arc::new({
+                let owner_alive = owner_alive.clone();
+                move |_, _| owner_alive.load(std::sync::atomic::Ordering::SeqCst)
+            }),
+        );
+        let main = temp_dir.path().join("main");
+        git_init_repo(&main);
+        fs::write(main.join("file.txt"), "initial").unwrap();
+        git_command(&main, ["init", "--bare", "mirror.git"]);
+        roots
+            .register(
+                &main,
+                &[main.join(".git")],
+                util::job_roots::RootLifetime::Job {
+                    pid: 1,
+                    start_time: 1,
+                },
+            )
+            .unwrap();
+        assert_refused(open_with_job_roots(&roots, &main.join("mirror.git"), cx));
+
+        git_init_repo(&main.join("nested"));
+        assert_refused(open_with_job_roots(
+            &roots,
+            &main.join("nested").join(".git"),
+            cx,
+        ));
+
+        owner_alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        let other = temp_dir.path().join("other");
+        fs::create_dir_all(&other).unwrap();
+        roots
+            .register(&other, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+
+        assert!(open_with_job_roots(&roots, &main.join("mirror.git"), cx).is_ok());
+        assert!(open_with_job_roots(&roots, &main.join(".git"), cx).is_ok());
+        assert!(!roots.contains(&main.join("file.txt")));
+        assert_refused(open_with_job_roots(
+            &roots,
+            &main.join("nested").join(".git"),
+            cx,
+        ));
+        assert!(roots.contains(&other));
     }
 }
