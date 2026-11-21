@@ -1285,8 +1285,17 @@ fn a_symlink_leading_outside_can_be_removed_and_renamed_but_not_written_through(
     ));
     assert_eq!(finish.outcome, Ok(json!({ "status": "done" })));
     let tree = fixture.path("run-worktree");
-    for gone in ["file-link", "renamed-link", "dir-link", "venv", "other-link"] {
-        assert!(std::fs::symlink_metadata(tree.join(gone)).is_err(), "{gone}");
+    for gone in [
+        "file-link",
+        "renamed-link",
+        "dir-link",
+        "venv",
+        "other-link",
+    ] {
+        assert!(
+            std::fs::symlink_metadata(tree.join(gone)).is_err(),
+            "{gone}"
+        );
     }
     assert!(std::fs::symlink_metadata(tree.join("final-link")).is_ok());
     assert_eq!(std::fs::read_to_string(&held).unwrap(), "theirs");
