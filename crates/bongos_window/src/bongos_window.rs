@@ -3,6 +3,7 @@
 
 pub mod actions;
 mod dedication;
+mod layout;
 mod orientation;
 pub mod picker;
 mod split;
@@ -13,6 +14,8 @@ mod zoom;
 
 #[cfg(test)]
 mod dedication_tests;
+#[cfg(test)]
+mod layout_tests;
 #[cfg(test)]
 mod orientation_tests;
 #[cfg(test)]
@@ -46,6 +49,9 @@ pub fn init(cx: &mut App) {
         workspace.register_action(split::delete_window);
         workspace.register_action(orientation::split_window_horizontally_instead);
         workspace.register_action(orientation::split_window_vertically_instead);
+        workspace.register_action(layout::balance_panes);
+        workspace.register_action(layout::swap_panes);
+        workspace.register_action(layout::move_buffer_to_pane);
     })
     .detach();
 }
