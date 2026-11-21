@@ -41,9 +41,7 @@ use bongos_checks_model::evidence::{
 };
 use bongos_checks_model::verdict::NoVerdictReason;
 use bongos_checks_model::{Applicability, EffectiveSet, NamedSets, Row, effective_set};
-use bongos_project_repo::{
-    Git, ProjectRepo, StateEvent, StateHandle, StateRead, StateTx, StateWriter,
-};
+use bongos_project_repo::{ProjectRepo, StateEvent, StateHandle, StateRead, StateTx, StateWriter};
 use bongos_project_repo_model::{DefinitionNode, DefinitionTree};
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt as _, StreamExt as _};
@@ -61,6 +59,7 @@ use crate::live::{HoldRow, hold_key};
 use crate::owed::{OwedMarker, marker_in, uses_unknown_set};
 use crate::pin::Pin;
 use crate::settings::TaskChecksSettings;
+use crate::task_git::TaskGit;
 use crate::task_source::TaskChecks;
 use crate::task_tree::TaskTree;
 use crate::tree_key::{TreeKey, combine_trees, key_inputs_digest, tree_key};
@@ -840,7 +839,7 @@ async fn decide_task(
                     })
                     .collect();
                 if let Err(error) =
-                    crate::retained::keep_trees(task.project.git(), task_id, &kept).await
+                    crate::retained::keep_trees(&TaskGit::of(&task.project), task_id, &kept).await
                 {
                     log::error!("keeping the tree of {task_id}: {error:#}");
                 }
@@ -979,7 +978,7 @@ pub(crate) async fn judge(
         return Judgment::NoTree;
     };
     let tree_key = match keys
-        .key(task.project.git(), &task.index_dir, &done_trees)
+        .key(&TaskGit::of(&task.project), &task.index_dir, &done_trees)
         .await
     {
         Ok(key) => key,
@@ -1031,7 +1030,7 @@ impl TreeKeys {
     /// repository's tree had the first time this judgment asked for it.
     pub(crate) async fn key(
         &mut self,
-        git: &Git,
+        git: &TaskGit,
         index_dir: &Path,
         trees: &[crate::engine::RepoTree],
     ) -> Result<String, Judgment> {
@@ -1080,7 +1079,9 @@ async fn state_of(
         .iter()
         .map(|path| first.path.join(path))
         .collect();
-    let tree_key = keys.key(task.project.git(), &task.index_dir, &tips).await?;
+    let tree_key = keys
+        .key(&TaskGit::of(&task.project), &task.index_dir, &tips)
+        .await?;
     let key_inputs = key_inputs_digest(&inputs).map_err(|error| {
         Judgment::Failed(format!(
             "the key inputs of {} could not be read ({error})",

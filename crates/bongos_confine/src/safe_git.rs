@@ -120,6 +120,7 @@ pub struct SafeGit {
     work_tree: Option<PathBuf>,
     config: Vec<(String, String)>,
     envs: Vec<(OsString, OsString)>,
+    untrusted_tree: bool,
 }
 
 impl SafeGit {
@@ -142,7 +143,16 @@ impl SafeGit {
             work_tree: None,
             config: Vec::new(),
             envs: Vec::new(),
+            untrusted_tree: false,
         }
+    }
+
+    /// Treats the work tree as a job tree whether or not it lies inside a registered job root: the
+    /// job tree protections of the module documentation apply to every command. For a caller that
+    /// cannot rely on the registry to know a tree a job may have written.
+    pub fn untrusted_tree(mut self) -> Self {
+        self.untrusted_tree = true;
+        self
     }
 
     /// Runs the git binary at `binary` instead of the one on the `PATH`.
@@ -176,7 +186,7 @@ impl SafeGit {
     pub(crate) async fn command_with<S: AsRef<OsStr>>(
         &self,
         args: &[S],
-        in_job_root: &dyn Fn(&Path) -> bool,
+        in_job_root: &(dyn Fn(&Path) -> bool + Sync),
     ) -> Result<util::command::Command> {
         let Some(subcommand) = args.first().map(AsRef::as_ref) else {
             bail!("a git command needs a subcommand");
@@ -189,7 +199,10 @@ impl SafeGit {
         }
         check_git_dir_with(&self.git_dir, in_job_root)?;
 
-        let job_tree = self.work_tree.as_deref().filter(|tree| in_job_root(tree));
+        let job_tree = self
+            .work_tree
+            .as_deref()
+            .filter(|tree| self.untrusted_tree || in_job_root(tree));
         if job_tree.is_some() {
             check_job_tree_args(&args[1..])?;
         }

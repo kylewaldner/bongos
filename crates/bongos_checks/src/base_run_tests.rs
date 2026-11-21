@@ -18,6 +18,7 @@ use crate::engine::RunChecksRequest;
 use crate::engine_tests::{World, finish, set_kill_grace};
 use crate::pools_tests::FakeClock;
 use crate::process::StopHandle;
+use crate::task_git::TaskGit;
 use crate::test_support::{
     FakeSecond, FakeTrees, commit_everything, git_in, init_git_repo, tree_snapshot, write_file,
 };
@@ -42,8 +43,11 @@ run = \"checks/where-log\"
 repos = [\"a\", \"b\"]
 ";
 
-fn git() -> Git {
-    Git::locate().expect("git is installed").isolated()
+fn git() -> TaskGit {
+    TaskGit::new(
+        Git::locate().expect("git is installed").isolated(),
+        std::path::PathBuf::new(),
+    )
 }
 
 /// A world whose task tree is on the branch `task`, one commit past `main`, with an edit and an

@@ -815,3 +815,34 @@ fn safe_git_gives_git_only_absolute_path_entries_outside_job_roots() {
     );
     assert!(!fixture.base.join("job-ran").exists());
 }
+
+#[test]
+fn untrusted_tree_applies_the_job_tree_protections_outside_every_job_root() {
+    let fixture = Fixture::new();
+    let marker = fixture.base.join("filter-ran");
+    let filter = fixture.marker_script("bin/filter", &marker, "cat");
+    let filter = filter.to_string_lossy().into_owned();
+    let host = fixture.dir("host");
+    fixture.git(&fixture.base, &["init", "-q", "host"]);
+    let tree = fixture.dir("tree");
+    fixture.file("tree/.gitattributes", "*.txt filter=x\n");
+    fixture.file("tree/file.txt", "one\n");
+    let host_git = host.join(".git");
+    fixture.git(&host, &["config", "filter.x.clean", &filter]);
+    let add = ["add", "-A", "--ignore-errors", "."];
+
+    // Nothing is registered, so a plain SafeGit leaves the configured filter on.
+    fixture.run_safe(&fixture.safe_git(&host_git, &tree), &add);
+    assert!(marker.exists(), "the filter should run without the flag");
+    fs::remove_file(&marker).unwrap();
+    fs::remove_file(host_git.join("index")).unwrap();
+
+    fixture.run_safe(&fixture.safe_git(&host_git, &tree).untrusted_tree(), &add);
+    assert!(!marker.exists());
+
+    // The nested repository refusal applies too.
+    fixture.dir("tree/inner");
+    fixture.git(&fixture.base, &["init", "-q", "tree/inner"]);
+    let error = fixture.refused(&fixture.safe_git(&host_git, &tree).untrusted_tree(), &add);
+    assert!(error.contains("nested repository"), "{error}");
+}

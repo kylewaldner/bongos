@@ -161,6 +161,16 @@ impl Git {
         }
     }
 
+    /// The git binary this runs.
+    pub fn binary(&self) -> &Path {
+        &self.binary
+    }
+
+    /// Whether this ignores the user's and the system's git configuration.
+    pub fn is_isolated(&self) -> bool {
+        self.isolated
+    }
+
     /// Ignores the user's and the system's git configuration, for tests.
     pub fn isolated(mut self) -> Self {
         self.isolated = true;

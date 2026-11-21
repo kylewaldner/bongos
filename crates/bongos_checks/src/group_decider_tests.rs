@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bongos_checks_model::evidence::StartedBy;
 use bongos_checks_model::verdict::Verdict;
 use bongos_checks_model::{EvidenceRecord, effective_set};
-use bongos_project_repo::{LandingResult, ProjectRepo, StateApplyHooks, StateWriter};
+use bongos_project_repo::{Git, LandingResult, ProjectRepo, StateApplyHooks, StateWriter};
 use bongos_project_repo_model::{DefinitionTree, TaskStateRecord};
 use bongos_work_model::Status;
 use gpui::{BorrowAppContext as _, Entity, TestAppContext};
@@ -34,7 +34,7 @@ use crate::settings::TaskChecksSettings;
 use crate::task_source::{TaskChecks, TaskSource};
 use crate::task_tree::RunWorktrees;
 use crate::test_support::{
-    FakeSecond, FakeTrees, commit_everything, definition_toml, fixture_project_with_hooks, git_in,
+    FakeSecond, FakeTrees, commit_everything, definition_toml, fixture_project_with_git, git_in,
     init_git_repo, land, main_commit, new_copy, person, write_definition, write_file,
 };
 use crate::trees::{SecondTree, TaskTrees as _, TaskTreesRegistry};
@@ -80,6 +80,29 @@ impl RunWorktrees for NoRuns {
 }
 
 /// Fields drop in order: the engine and the project go before the folder holding them.
+/// A git that runs the real one, except that while `filter/arm` exists in `root` a
+/// `checkout-index` first creates `filter/writing` and waits for `filter/go`: git is slow writing
+/// a tree, with no configured driver (which a job tree's git never runs).
+fn slow_git(root: &Path) -> Git {
+    let real = Git::locate().expect("git is installed");
+    let marks = root.join("filter");
+    let script = root.join("slow-git");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *\" checkout-index \"*)\n  if [ -f '{marks}/arm' ]; then\n    touch '{marks}/writing'\n    while [ ! -f '{marks}/go' ]; do sleep 0.05; done\n  fi;;\nesac\nexec '{real}' \"$@\"\n",
+            marks = marks.display(),
+            real = real.binary().display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    Git::at(script).isolated()
+}
+
 struct World {
     engine: Entity<ChecksEngine>,
     clock: Rc<FakeClock>,
@@ -112,7 +135,7 @@ impl World {
         hook.set_enabled(true);
         hook.set_named_sets(Arc::new(FolderSets(repository.join("definitions"))));
         hooks.register(hook);
-        let repo = fixture_project_with_hooks(&root, &hooks);
+        let repo = fixture_project_with_git(&root, &hooks, slow_git(root.path()));
         for (folder, id, checks) in tasks {
             write_file(
                 &repository.join("definitions"),
@@ -758,18 +781,7 @@ async fn a_drain_while_git_writes_the_lent_tree_releases_the_lease_only_after_gi
     // Writing out a Rust file in the lent tree waits until `go` exists.
     let marks = world.root.path().join("filter");
     std::fs::create_dir_all(&marks).unwrap();
-    let marks_arg = marks.to_str().unwrap();
-    git_in(
-        &world.app,
-        &[
-            "config",
-            "filter.slow.smudge",
-            &format!(
-                "touch {marks_arg}/writing; while [ ! -f {marks_arg}/go ]; do sleep 0.05; done; cat"
-            ),
-        ],
-    );
-    std::fs::write(world.app.join(".git/info/attributes"), "*.rs filter=slow\n").unwrap();
+    std::fs::write(marks.join("arm"), "").unwrap();
     world.decide(cx).await;
     reached(marks.join("writing")).await.unwrap();
 
@@ -856,18 +868,7 @@ async fn a_drain_while_git_writes_one_lent_tree_releases_the_other_repositorys_l
     // Writing out a Rust file in app's lent tree waits until `go` exists.
     let marks = world.root.path().join("filter");
     std::fs::create_dir_all(&marks).unwrap();
-    let marks_arg = marks.to_str().unwrap();
-    git_in(
-        &world.app,
-        &[
-            "config",
-            "filter.slow.smudge",
-            &format!(
-                "touch {marks_arg}/writing; while [ ! -f {marks_arg}/go ]; do sleep 0.05; done; cat"
-            ),
-        ],
-    );
-    std::fs::write(world.app.join(".git/info/attributes"), "*.rs filter=slow\n").unwrap();
+    std::fs::write(marks.join("arm"), "").unwrap();
     world.decide(cx).await;
     reached(marks.join("writing")).await.unwrap();
     assert_eq!(trees.state().leased, ["app", "lib"]);
@@ -1050,7 +1051,7 @@ fn group(
 /// The tree key of `path` as the decider computes it.
 fn key_of(world: &World, path: &Path) -> String {
     futures::executor::block_on(crate::tree_key::tree_key(
-        world.repo.git(),
+        &crate::task_git::TaskGit::of(&world.repo),
         path,
         &world.root.path().join("index"),
     ))

@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use bongos_project_repo::{Git, GitError};
+use crate::task_git::TaskGit;
 
 /// Why a directory is not usable as a working tree.
 pub(crate) enum Problem {
@@ -11,35 +11,19 @@ pub(crate) enum Problem {
     NotWorkTree(String),
     /// The directory is inside a working tree whose top is the given directory.
     NotTopLevel(PathBuf),
-    Git(GitError),
 }
 
 /// Succeeds when `directory` is the top-level directory of a git working tree. A subdirectory
 /// of a working tree is refused, because a key or a list made from one would cover only part
 /// of the tree or name paths relative to the wrong directory.
-pub(crate) async fn ensure_top_level(git: &Git, directory: &Path) -> Result<(), Problem> {
-    match git
-        .run(directory, &["rev-parse", "--is-inside-work-tree"])
-        .await
-    {
-        Ok(answer) if answer == "true" => {}
-        Ok(_) => {
-            return Err(Problem::NotWorkTree(
-                "not inside a working tree".to_string(),
-            ));
-        }
-        Err(GitError::Failed { stderr, .. }) => return Err(Problem::NotWorkTree(stderr)),
-        Err(error) => return Err(Problem::Git(error)),
-    }
-    let top = git
-        .run(directory, &["rev-parse", "--show-toplevel"])
-        .await
-        .map_err(Problem::Git)?;
-    let top = PathBuf::from(top);
-    let here = directory.canonicalize();
-    let there = top.canonicalize();
-    match (here, there) {
-        (Ok(here), Ok(there)) if here == there => Ok(()),
-        _ => Err(Problem::NotTopLevel(top)),
+pub(crate) async fn ensure_top_level(git: &TaskGit, directory: &Path) -> Result<(), Problem> {
+    // A tree is the top of its working tree when its git directory is recorded for it; a
+    // directory below a tree has no record of its own.
+    match git.check_tree(directory) {
+        Ok(()) => Ok(()),
+        Err(error) => match TaskGit::top_above(directory) {
+            Some(top) => Err(Problem::NotTopLevel(top)),
+            None => Err(Problem::NotWorkTree(error.to_string())),
+        },
     }
 }
