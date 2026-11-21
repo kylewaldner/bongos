@@ -908,7 +908,7 @@ fn safe_git_reads_one_job_object_directory_as_an_alternate_only() {
             .starts_with(refusal)
     );
     fixture.run_safe(
-        &through_env.clone().job_object_directory(&job_objects),
+        &through_env.job_object_directory(&job_objects),
         &["count-objects"],
     );
     let as_object_dir = host_git()
