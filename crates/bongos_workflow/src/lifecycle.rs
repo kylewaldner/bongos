@@ -448,6 +448,8 @@ pub(crate) fn attempt_worktree(
     let path = PathBuf::from(&attempt.worktree);
     let git_dir = match &attempt.git_dir {
         Some(git_dir) => PathBuf::from(git_dir),
+        // The tree is gone: no git call runs in it, and its branch goes alone (see `run_worktrees`).
+        None if !path.exists() => PathBuf::new(),
         None => {
             let task_worktree = checkout.worktree.as_deref().filter(|tree| tree.is_dir());
             let task_worktree = task_worktree.ok_or_else(|| {
