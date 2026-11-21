@@ -214,6 +214,10 @@ const EDITOR_KEYS: &[(&str, &str)] = &[
     ("ctrl-u", "emacs::UniversalArgument"),
     ("alt--", "emacs::NegativeArgument"),
     ("ctrl-o", "emacs::OpenLine"),
+    ("alt-n", "emacs::SymbolJumpNext"),
+    ("alt-p", "emacs::SymbolJumpPrev"),
+    ("alt-i", "emacs::SymbolOverlayPut"),
+    ("alt-shift-i", "emacs::SymbolOverlayRemoveAll"),
 ];
 
 /// Keys where the Emacs action replaces Zed's inside editors, with Zed's Linux action in an
@@ -415,11 +419,9 @@ async fn the_key_table_covers_every_emacs_action(cx: &mut gpui::TestAppContext) 
         // Every emacs action has an editor key; the cursor toggle is left unbound on purpose.
         // `pop-global-mark` is a workspace key (`mark_keymap_tests`) and the implementations
         // jump stays in the palette. The digit keys carry an argument, so they are tested apart.
-        const UNBOUND: [&str; 11] = [
-            "emacs::SymbolJumpNext",
-            "emacs::SymbolJumpPrev",
-            "emacs::SymbolOverlayPut",
-            "emacs::SymbolOverlayRemoveAll",
+        // The goto stack's arrows (center pane editors only) and `xref-history-list` (a workspace
+        // key) are tested in `symbol_keymap_tests`.
+        const UNBOUND: [&str; 7] = [
             "emacs::GotoStackBack",
             "emacs::GotoStackForward",
             "emacs::GotoStackPush",
@@ -680,10 +682,6 @@ const RESERVED: &[(&str, &[&str])] = &[
     ("ctrl-/", &["editor::Undo"]),
     ("ctrl-_", &["editor::Undo"]),
     ("ctrl-x u", &["editor::Undo"]),
-    ("alt-i", &[]),
-    ("alt-shift-i", &[]),
-    ("alt-n", &[]),
-    ("alt-p", &[]),
     ("alt-;", &[]),
     ("ctrl-;", &[]),
     ("ctrl-alt-;", &[]),
