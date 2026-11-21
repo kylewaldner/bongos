@@ -2048,6 +2048,7 @@ dependencies = [
  "bongos_app",
  "bongos_builder",
  "bongos_chat",
+ "bongos_chat_model",
  "bongos_checks",
  "bongos_emacs",
  "bongos_extensions",
@@ -2287,6 +2288,7 @@ dependencies = [
  "language",
  "log",
  "menu",
+ "net",
  "nix 0.29.0",
  "paths",
  "project",
@@ -2312,6 +2314,7 @@ version = "0.1.0"
 dependencies = [
  "bongos_work_model",
  "chrono",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -10479,6 +10482,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.1",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use bongos_work_model::{SessionContext, SharedArtifact, layout};
 use serde_json::json;
 
+use crate::adapter::ChannelPlan;
+use crate::claude::{HOOK_REPORT_MODE, REPORT_HOOK_EVENTS, REPORT_HOOK_TIMEOUT_SECS};
 use crate::error::{Error, ErrorKind, Result};
 use crate::facts::TaskFacts;
 use crate::record::ChatRecord;
@@ -244,15 +246,36 @@ pub fn shell_quote(path: &Path) -> Result<String> {
 
 /// `claude-settings.json`: one `SessionStart` hook that prints `context.md`, and the terminal bell
 /// notification channel so "waiting for input" rings (see `claude.rs` for what is verified).
-pub fn render_settings(context_path: &Path) -> Result<String> {
+///
+/// With a `channel`, the reporter (`<reporter> claude-hook`) also runs on every event of
+/// [`REPORT_HOOK_EVENTS`], after the context hook on `SessionStart`. No entry has a `matcher`, so
+/// each matches every source and tool. Only the plan's reporter command is read: the socket and
+/// token reach the agent through the environment.
+pub fn render_settings(context_path: &Path, channel: Option<&ChannelPlan>) -> Result<String> {
     let command = format!("cat {}", shell_quote(context_path)?);
+    let mut hooks = serde_json::Map::new();
+    hooks.insert(
+        "SessionStart".to_string(),
+        json!([{ "hooks": [ { "type": "command", "command": command } ] }]),
+    );
+    if let Some(channel) = channel {
+        let report = json!({
+            "type": "command",
+            "command": format!("{} {HOOK_REPORT_MODE}", channel.reporter_command()),
+            "timeout": REPORT_HOOK_TIMEOUT_SECS,
+        });
+        for event in REPORT_HOOK_EVENTS {
+            let entry = hooks
+                .entry(event.to_string())
+                .or_insert_with(|| json!([{ "hooks": [] }]));
+            if let Some(list) = entry[0]["hooks"].as_array_mut() {
+                list.push(report.clone());
+            }
+        }
+    }
     let settings = json!({
         crate::claude::BELL_KEY: crate::claude::BELL_VALUE,
-        "hooks": {
-            "SessionStart": [
-                { "hooks": [ { "type": "command", "command": command } ] }
-            ]
-        }
+        "hooks": hooks,
     });
     let mut text = serde_json::to_string_pretty(&settings)
         .map_err(|error| Error::new(ErrorKind::Serialize(error.to_string())))?;

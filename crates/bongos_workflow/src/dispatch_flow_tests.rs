@@ -311,6 +311,7 @@ fn fake_cli(command: &Path, env: &BTreeMap<String, String>) -> ClaudeCli {
         },
         fix: String::new(),
         caps: Some(caps),
+        chat_caps: None,
     };
     ClaudeCli::check(
         &AgentCommand {

@@ -88,6 +88,7 @@ fn ready(caps: Capabilities) -> Health {
         },
         fix: String::new(),
         caps: Some(caps),
+        chat_caps: None,
     }
 }
 

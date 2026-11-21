@@ -4,7 +4,10 @@ use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
 
-use crate::adapter_tests::{ARTIFACT, RUNTIME, SESSION, SOURCE, claude_caps, plan, strings};
+use crate::adapter_tests::{
+    ARTIFACT, RUNTIME, SESSION, SOCKET, SOURCE, TOKEN_MARKER, channel_plan, claude_caps, plan,
+    reporter, strings,
+};
 use crate::*;
 
 const NO_FILE_FLAG: &str = "2.1.0";
@@ -255,6 +258,20 @@ fn no_argv_carries_an_artifact_path() {
 }
 
 #[test]
+fn login_probe_reads_the_table_row_for_version_built_capabilities() {
+    let adapter = ClaudeAdapter::new("claude");
+    assert_eq!(
+        adapter.login_probe(&adapter.capabilities(Some("2.1.319 (Claude Code)"))),
+        Some(strings(&["auth", "status"]))
+    );
+    assert_eq!(
+        adapter.login_probe(&adapter.capabilities(Some("2.0.0"))),
+        None
+    );
+    assert_eq!(adapter.login_probe(&adapter.capabilities(None)), None);
+}
+
+#[test]
 fn login_probe_and_parse() {
     let adapter = ClaudeAdapter::new("claude");
     assert_eq!(
@@ -330,4 +347,214 @@ fn a_fork_id_is_the_newest_unclaimed_transcript_since_launch() {
     // Files made before the launch do not count.
     let after = SystemTime::now() + Duration::from_secs(3600);
     assert_eq!(adapter.capture_session_id(&query(after, &claimed)), None);
+}
+
+fn table_names() -> Vec<&'static str> {
+    let mut names: Vec<_> = VERSION_TABLE.rows.iter().map(|row| row.name).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+fn claude_table_caps(version: Option<&str>) -> Capabilities {
+    ClaudeAdapter::new("claude").capabilities(version)
+}
+
+#[test]
+fn the_claude_table_has_every_row_at_the_known_good_version() {
+    for version in [
+        "2.1.319",
+        "2.1.319 (Claude Code)",
+        "v2.1.319",
+        "2.1.320",
+        "2.1.326",
+        "2.1.327",
+        "2.1.327 (Claude Code)",
+        "2.2.0",
+        "3.0.0",
+    ] {
+        let caps = claude_table_caps(Some(version));
+        for name in table_names() {
+            assert!(caps.has(name), "{name} at {version}");
+        }
+        assert!(caps.has(HOOKS) && caps.has("auth"), "{version}");
+        for flag in [
+            "--append-system-prompt-file",
+            "--append-system-prompt",
+            "--settings",
+            "--plugin-dir",
+            "--resume",
+            "--fork-session",
+            "--session-id",
+            "--name",
+            "--model",
+        ] {
+            assert!(caps.has_flag(flag), "{flag} at {version}");
+        }
+    }
+}
+
+#[test]
+fn an_older_claude_has_no_row() {
+    for version in ["2.1.318", "2.1.0", "2.1", "2.0.999", "1.0.0"] {
+        let caps = claude_table_caps(Some(version));
+        for name in table_names() {
+            assert!(!caps.has(name), "{name} at {version}");
+        }
+        assert!(!caps.has_flag("--append-system-prompt-file"), "{version}");
+    }
+}
+
+#[test]
+fn an_unreadable_claude_version_gives_no_capabilities() {
+    for version in [None, Some(""), Some("abc"), Some("v"), Some("Claude Code")] {
+        assert_eq!(claude_table_caps(version), Capabilities::default());
+    }
+    assert!(!claude_table_caps(Some("garbage")).has(HOOKS));
+}
+
+#[test]
+fn the_table_agrees_with_the_hidden_flag_list() {
+    let caps = claude_table_caps(Some("2.1.319 (Claude Code)"));
+    for hidden in crate::claude::HIDDEN_FLAGS {
+        assert!(
+            VERSION_TABLE
+                .rows
+                .iter()
+                .any(|row| row.name == hidden.flag && row.min_version == hidden.min_version),
+            "{}",
+            hidden.flag
+        );
+        assert!(caps.has_flag(hidden.flag));
+    }
+}
+
+#[test]
+fn the_table_marks_the_installed_version_row_verified() {
+    let hooks: Vec<_> = VERSION_TABLE
+        .rows
+        .iter()
+        .filter(|row| row.name == HOOKS)
+        .map(|row| (row.min_version, row.verified))
+        .collect();
+    assert_eq!(hooks, [("2.1.319", true), ("2.1.327", true)]);
+}
+
+fn launch_plan(plan: &LaunchPlan, drop: &[&str]) -> LaunchSpec {
+    ClaudeAdapter::new("claude").launch(plan, &claude_caps(drop))
+}
+
+#[test]
+fn a_channel_keeps_the_line_and_sets_the_environment() {
+    for kind in [LaunchKind::New, LaunchKind::Resume, fork(true), fork(false)] {
+        let mut plan = channel_plan(Agent::Claude, kind.clone(), Some(SESSION));
+        // The record's id is the one the plain environment carries too.
+        plan.env
+            .insert("BONGOS_CHAT_ID".to_string(), plan.chat.id.clone());
+        let with = launch_plan(&plan, &[]);
+        plan.channel = None;
+        let without = launch_plan(&plan, &[]);
+        // The command line is the same: the hooks live in the settings file it already names.
+        assert_eq!(with.args, without.args, "{kind:?}");
+        assert_eq!(with.fallbacks, without.fallbacks, "{kind:?}");
+        assert!(with.channel && !without.channel);
+        assert_eq!(with.env[CHANNEL_SOCKET_ENV], SOCKET);
+        assert_eq!(with.env[CHANNEL_TOKEN_ENV], TOKEN_MARKER);
+        assert!(!without.env.contains_key(CHANNEL_SOCKET_ENV));
+        assert!(!without.env.contains_key(CHANNEL_TOKEN_ENV));
+        let mut rest = with.env.clone();
+        rest.remove(CHANNEL_SOCKET_ENV);
+        rest.remove(CHANNEL_TOKEN_ENV);
+        assert_eq!(rest, without.env);
+    }
+    let with = launch_plan(
+        &channel_plan(Agent::Claude, LaunchKind::New, Some(SESSION)),
+        &[],
+    );
+    // The id is still chosen before launch.
+    assert_eq!(
+        with.args,
+        line(&["--session-id", SESSION, "--name", "Billing proration"])
+    );
+}
+
+#[test]
+fn a_channel_never_scans_transcripts() {
+    // Without a channel these launches capture the id from the CLI's files.
+    let mut forced = channel_plan(Agent::Claude, fork(true), Some(SESSION));
+    forced.force = vec![Fallback::CaptureSessionId];
+    let mut no_id = channel_plan(Agent::Claude, LaunchKind::New, None);
+    for plan in [&mut forced, &mut no_id] {
+        assert!(launch_plan(plan, &[]).channel);
+        assert!(!launch_plan(plan, &[]).capture_session_id);
+        plan.channel = None;
+        assert!(launch_plan(plan, &[]).capture_session_id);
+    }
+    // Unchanged without a channel: a new chat with an id captures nothing.
+    assert!(!launch(LaunchKind::New, Some(SESSION), &[]).capture_session_id);
+}
+
+#[test]
+fn a_channel_needs_the_settings_file_and_no_forced_off() {
+    let plan = channel_plan(Agent::Claude, LaunchKind::New, None);
+    let spec = launch_plan(&plan, &["--settings"]);
+    assert!(!spec.channel && spec.capture_session_id);
+    assert!(!spec.env.contains_key(CHANNEL_TOKEN_ENV));
+
+    let mut off = plan;
+    off.force = vec![Fallback::ChannelOff(ChannelOff::UnquotablePath)];
+    let spec = launch_plan(&off, &[]);
+    assert!(!spec.channel && spec.capture_session_id);
+    assert!(!spec.env.contains_key(CHANNEL_TOKEN_ENV));
+    assert!(!spec.env.contains_key(CHANNEL_SOCKET_ENV));
+}
+
+#[test]
+fn an_unquotable_bongos_path_launches_without_a_channel() {
+    let mut plan = plan(Agent::Claude, LaunchKind::New, Some(SESSION));
+    let without = launch_plan(&plan, &[]);
+    plan.channel = plan_channel(
+        &reporter("/opt/it's/bongos"),
+        std::path::PathBuf::from(SOCKET),
+        channel::report::Token::new(TOKEN_MARKER).unwrap(),
+        &mut plan.force,
+    );
+    let spec = launch_plan(&plan, &[]);
+    assert!(!spec.channel);
+    assert_eq!(spec.args, without.args);
+    assert_eq!(spec.env, without.env);
+    assert_eq!(
+        spec.fallbacks,
+        vec![Fallback::ChannelOff(ChannelOff::UnquotablePath)]
+    );
+    assert_eq!(
+        spec.fallbacks[0].label(),
+        "the bongos path cannot be quoted"
+    );
+}
+
+#[test]
+fn the_token_is_only_in_the_environment() {
+    for kind in [LaunchKind::New, LaunchKind::Resume, fork(true)] {
+        for drop in [&[][..], &["--append-system-prompt-file"][..]] {
+            let plan = channel_plan(Agent::Claude, kind.clone(), Some(SESSION));
+            let spec = launch_plan(&plan, drop);
+            assert!(spec.channel);
+            assert!(!spec.program.contains(TOKEN_MARKER));
+            for arg in &spec.args {
+                assert!(!arg.contains(TOKEN_MARKER), "{arg}");
+            }
+            let in_env: Vec<_> = spec
+                .env
+                .iter()
+                .filter(|(_, value)| value.contains(TOKEN_MARKER))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            assert_eq!(in_env, [CHANNEL_TOKEN_ENV]);
+            // Neither the plan nor the spec prints it.
+            assert!(!format!("{plan:?}").contains(TOKEN_MARKER));
+            assert!(!format!("{spec:?}").contains(TOKEN_MARKER));
+            assert!(!plan.files.system_text.contains(TOKEN_MARKER));
+        }
+    }
 }

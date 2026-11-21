@@ -981,6 +981,7 @@ impl TerminalBuilder {
             },
             child_exited: None,
             keyboard_input_sent: false,
+            keyboard_inputs: 0,
             init_command_startup_marker: None,
             init_command_startup_tx: None,
             event_loop_task: Task::ready(Ok(())),
@@ -1206,6 +1207,7 @@ impl TerminalBuilder {
                 },
                 child_exited: None,
                 keyboard_input_sent: false,
+                keyboard_inputs: 0,
                 init_command_startup_marker: None,
                 init_command_startup_tx: None,
                 event_loop_task: Task::ready(Ok(())),
@@ -1367,6 +1369,8 @@ pub struct Terminal {
     activation_script: Vec<String>,
     child_exited: Option<ExitStatus>,
     keyboard_input_sent: bool,
+    /// How many times [`Terminal::input`] wrote to the terminal.
+    keyboard_inputs: u64,
     init_command_startup_marker: Option<String>,
     init_command_startup_tx: Option<Sender<()>>,
     event_loop_task: Task<Result<(), anyhow::Error>>,
@@ -1924,6 +1928,7 @@ impl Terminal {
 
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
         self.keyboard_input_sent = true;
+        self.keyboard_inputs = self.keyboard_inputs.wrapping_add(1);
         self.complete_init_command_startup_handshake();
         self.write_input(input);
     }
@@ -2051,6 +2056,12 @@ impl Terminal {
     /// Whether anything was ever written to the terminal through [`Terminal::input`].
     pub fn keyboard_input_sent(&self) -> bool {
         self.keyboard_input_sent
+    }
+
+    /// How many times anything was written through [`Terminal::input`]; a change since the last
+    /// look means new keyboard input.
+    pub fn keyboard_input_count(&self) -> u64 {
+        self.keyboard_inputs
     }
 
     pub fn toggle_vi_mode(&mut self) {
