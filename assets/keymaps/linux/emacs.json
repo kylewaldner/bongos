@@ -212,7 +212,7 @@
     // The goto stack on the arrows, in editors of the center panes only, with or without a region (keep this
     // block after the `selection_mode` block above, which it outranks). Every other place keeps its own
     // arrows: small and dock editors, terminals, panels, agent threads, editors showing completions, code
-    // actions or signature help, and vim's modes. `down` stays Zed's.
+    // actions or signature help, and vim's modes. `down` keeps its default row.
     "context": "!Dock && Pane > Editor && mode == full && !AcpThread && !showing_completions && !showing_code_actions && !showing_signature_help && !vim_mode",
     "bindings": {
       "left": "emacs::GotoStackBack", // goto-stack-back
