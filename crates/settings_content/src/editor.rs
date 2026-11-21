@@ -66,6 +66,8 @@ pub struct EditorSettingsContent {
     pub hover_popover_hiding_delay: Option<DelayMs>,
     /// Toolbar related settings
     pub toolbar: Option<ToolbarContent>,
+    /// Navigation history related settings
+    pub navigation_history: Option<NavigationHistoryContent>,
     /// Scrollbar related settings
     pub scrollbar: Option<ScrollbarContent>,
     /// Minimap related settings
@@ -375,6 +377,20 @@ pub struct ToolbarContent {
     ///
     /// Default: false
     pub code_actions: Option<bool>,
+}
+
+/// Navigation history related settings
+#[with_fallible_options]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Eq)]
+pub struct NavigationHistoryContent {
+    /// Whether a cursor move of ten or more rows is recorded in the navigation history.
+    ///
+    /// Default: null (false under the Emacs base keymap without vim or helix mode, true otherwise)
+    pub record_large_moves: Option<bool>,
+    /// Whether switching to another item is recorded in the navigation history.
+    ///
+    /// Default: null (false under the Emacs base keymap without vim or helix mode, true otherwise)
+    pub record_item_switches: Option<bool>,
 }
 
 /// Scrollbar related settings

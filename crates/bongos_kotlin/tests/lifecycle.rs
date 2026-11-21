@@ -437,7 +437,7 @@ async fn test_switching_one_worktree_leaves_the_others_server_alone(cx: &mut Tes
 /// sends the signal runs again after the fallback; kotlin-lsp's signal is not matched.
 #[gpui::test]
 async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppContext) {
-    let setup = start(cx, Path::new(FAKE_SERVER), "license-lost-after=200").await;
+    let setup = start(cx, Path::new(FAKE_SERVER), "license-lost-on-gate").await;
     cx.update(|cx| {
         workspace::AppState::test(cx);
         editor::init(cx);
@@ -475,12 +475,30 @@ async fn test_a_lost_license_keeps_buffers_open_and_editable(cx: &mut TestAppCon
         })
         .detach();
     });
+    let kotlin_lsp_id = setup.manager.read_with(cx, |manager, _| {
+        manager
+            .worktree(setup.worktree_id)
+            .and_then(|state| state.server_id)
+    });
     setup
         .manager
         .update(cx, |manager, cx| {
             manager.switch_server(setup.worktree_id, Some(KotlinServerKind::Intellij), cx)
         })
         .unwrap();
+    // Only once IntelliJ is the registered, ready server and kotlin-lsp has exited does the signal
+    // go out, so it is attributed to IntelliJ and kotlin-lsp's own text cannot race it.
+    setup.wait_until(cx, "IntelliJ to be ready and kotlin-lsp gone", |cx| {
+        setup.manager.read_with(cx, |manager, _| {
+            manager.worktree(setup.worktree_id).is_some_and(|state| {
+                state.effective == KotlinServerKind::Intellij
+                    && state.server_id.is_some()
+                    && state.server_id != kotlin_lsp_id
+            })
+        }) && setup.status(cx) == Some(ServerStatus::Ready)
+            && setup.pid_files().len() == 1
+    });
+    setup.open_gate("LicenseLost");
     let fallback = |cx: &mut TestAppContext| {
         setup.manager.read_with(cx, |manager, _| {
             manager

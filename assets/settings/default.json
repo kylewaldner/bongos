@@ -533,6 +533,17 @@
     // Whether to show code action buttons in the editor toolbar.
     "code_actions": false,
   },
+  // Navigation history related settings
+  "navigation_history": {
+    // Whether a cursor move of ten or more rows is recorded in the navigation history.
+    // When null, this is false under the Emacs base keymap (without vim or helix mode)
+    // and true otherwise.
+    "record_large_moves": null,
+    // Whether switching to another item is recorded in the navigation history.
+    // When null, this is false under the Emacs base keymap (without vim or helix mode)
+    // and true otherwise.
+    "record_item_switches": null,
+  },
   // Whether to allow windows to tab together based on the user’s tabbing preference (macOS only).
   "use_system_window_tabs": false,
   // Titlebar related settings
@@ -2684,7 +2695,7 @@
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
     // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
-    // "project_symbols", "string_rectangle", "language_extensions".
+    // "project_symbols", "xref_history", "string_rectangle", "language_extensions".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2702,6 +2713,7 @@
       "set_keybindings",
       "outline",
       "project_symbols",
+      "xref_history",
       "string_rectangle",
       "language_extensions"
     ],
@@ -2794,12 +2806,18 @@
     "default_width": 720,
     // Whether a dual-layout chat shows the prompts pane beside its terminal.
     "prompt_pane": true,
-    // Seconds without output after which a running chat counts as idle.
+    // Seconds without output after which a running chat counts as idle. Applies to the fallback
+    // only: a chat without reports, or a turn that ended unreported.
     "idle_after_secs": 60,
-    // Milliseconds between pasting a prompt into a chat and submitting it.
+    // Milliseconds between pasting a prompt into a chat and submitting it. Applies to the
+    // fallback only: a chat without reports, or a turn that ended unreported.
     "submit_delay_ms": 100,
     // The directory of session types; null means ~/.bongos/chat-types.
     "types_dir": null,
+    // Whether running chats report their state to bongos over a private local
+    // socket (agent hooks). Set to false to fall back to estimating it from
+    // terminal output.
+    "channels": true,
     // The agent CLIs: the program to run and arguments added to every launch.
     "agents": {
       "claude": { "command": "claude", "extra_args": [] },

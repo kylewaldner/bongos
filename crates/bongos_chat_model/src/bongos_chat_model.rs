@@ -3,12 +3,14 @@
 //! the open and archived lists with their order, fork lookup, chat names, and the digest of the
 //! artifact list a chat was given, the agent adapters (capabilities, launch lines and fallbacks, login
 //! probe, session id capture), the pure renderer of what a launch injects (`context.md`, the
-//! system prompt, the hook settings and the environment), and the session types (directories of plain files, with their
+//! system prompt, the hook settings and the environment), the chat channel's report format and the
+//! translation of agent hook input into reports, and the session types (directories of plain files, with their
 //! shipped defaults, seeding and resolution). It has no UI dependency and never touches the real home
 //! directory: every path function takes the directory it works under.
 
 mod adapter;
 mod capture;
+pub mod channel;
 mod claude;
 mod codex;
 mod digest;
@@ -22,10 +24,15 @@ mod shipped;
 mod types;
 
 pub use adapter::{
-    AgentAdapter, Capabilities, CaptureQuery, ENV_NAMES, Fallback, GeneratedFiles, HiddenFlag,
-    LaunchKind, LaunchPlan, LaunchSpec, Login, Shape, adapter_for, version_at_least,
+    AgentAdapter, CHANNEL_SOCKET_ENV, CHANNEL_TOKEN_ENV, Capabilities, CaptureQuery, ChannelOff,
+    ChannelPlan, ENV_NAMES, Fallback, GeneratedFiles, HiddenFlag, LaunchKind, LaunchPlan,
+    LaunchSpec, Login, Shape, VersionRow, VersionTable, adapter_for, plan_channel,
+    version_at_least,
 };
-pub use claude::{BELL_KEY, BELL_VALUE, ClaudeAdapter, project_slug};
+pub use claude::{
+    BELL_KEY, BELL_VALUE, ClaudeAdapter, HOOK_REPORT_MODE, HOOKS, REPORT_HOOK_EVENTS,
+    REPORT_HOOK_TIMEOUT_SECS, VERSION_TABLE, project_slug,
+};
 pub use codex::{CODEX_TABLE, CodexAdapter, CodexTable};
 pub use digest::{DIGEST_PREFIX, context_digest};
 pub use error::{Error, ErrorKind, Result};
@@ -34,7 +41,9 @@ pub use inject::{
     CHAT_ID_LABEL, HandoffParent, RenderInput, handoff_note, render_codex_instructions,
     render_context, render_env, render_settings, render_system, shell_quote,
 };
-pub use list::{ChatEntry, ChatLists, chat_lists, forks_of, read_chats_dir, read_scope_chats};
+pub use list::{
+    ChatEntry, ChatLists, chat_lists, display_order, forks_of, read_chats_dir, read_scope_chats,
+};
 pub use naming::{MAX_NAME_CHARS, default_name, from_prompt, from_title};
 pub use record::{
     Agent, ChatRecord, Extra, Fork, Layout, NamedBy, SCHEMA, Timestamp, chats_dir, create_record,

@@ -2717,7 +2717,7 @@ impl Workspace {
         mode: NavigationMode,
         window: &mut Window,
         cx: &mut Context<Workspace>,
-    ) -> Task<Result<()>> {
+    ) -> Task<Result<bool>> {
         self.navigate_history_impl(
             pane,
             mode,
@@ -2727,6 +2727,11 @@ impl Workspace {
         )
     }
 
+    /// Drops whether a walk navigated, for callers that only care about errors.
+    fn ignore_navigated(task: Task<Result<bool>>, cx: &mut Context<Workspace>) -> Task<Result<()>> {
+        cx.spawn(async move |_, _| task.await.map(|_| ()))
+    }
+
     fn navigate_tag_history(
         &mut self,
         pane: WeakEntity<Pane>,
@@ -2734,13 +2739,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Task<Result<()>> {
-        self.navigate_history_impl(
+        let task = self.navigate_history_impl(
             pane,
             NavigationMode::Normal,
             window,
             &mut |history, _cx| history.pop_tag(mode),
             cx,
-        )
+        );
+        Self::ignore_navigated(task, cx)
     }
 
     fn navigate_history_impl(
@@ -2750,7 +2756,9 @@ impl Workspace {
         window: &mut Window,
         cb: &mut dyn FnMut(&mut NavHistory, &mut App) -> Option<NavigationEntry>,
         cx: &mut Context<Workspace>,
-    ) -> Task<Result<()>> {
+    ) -> Task<Result<bool>> {
+        // The outer `None` is a walk that ran out of entries without navigating; `Some(None)` is
+        // a walk that navigated within the pane; `Some(Some(..))` is an entry to reopen.
         let to_load = if let Some(pane) = pane.upgrade() {
             pane.update(cx, |pane, cx| {
                 window.focus(&pane.focus_handle(cx), cx);
@@ -2775,27 +2783,63 @@ impl Workspace {
                         }
 
                         if navigated {
-                            break None;
+                            break Some(None);
                         }
-                    } else {
-                        // If the item is no longer present in this pane, then retrieve its
-                        // path info in order to reopen it.
-                        break pane
-                            .nav_history()
-                            .path_for_item(entry.item.id())
-                            .map(|(project_path, abs_path)| (project_path, abs_path, entry));
+                    } else if let Some((project_path, abs_path)) =
+                        pane.nav_history().path_for_item(entry.item.id())
+                    {
+                        // If the item is no longer present in this pane, then reopen it from
+                        // its path.
+                        break Some(Some((project_path, abs_path, entry)));
                     }
+                    // An item that is gone and has no path (a closed untitled buffer) cannot
+                    // be reopened, so the walk goes on to the next entry.
                 }
             })
         } else {
             None
         };
 
+        let Some(to_load) = to_load else {
+            return Task::ready(Ok(false));
+        };
         if let Some((project_path, abs_path, entry)) = to_load {
-            // If the item was no longer present, then load it again from its previous path, first try the local path
-            let open_by_project_path = self.load_path(project_path.clone(), window, cx);
+            // A local file deleted since its item closed is skipped rather than reopened as a
+            // new empty file, unless the project still has its buffer open with unsaved edits.
+            let fs = self.app_state.fs.clone();
+            let path_on_disk = self
+                .project
+                .read(cx)
+                .is_local()
+                .then(|| {
+                    self.project
+                        .read(cx)
+                        .absolute_path(&project_path, cx)
+                        .or_else(|| abs_path.clone())
+                })
+                .flatten()
+                .filter(|_| {
+                    !self
+                        .project
+                        .read(cx)
+                        .get_open_buffer(&project_path, cx)
+                        .is_some_and(|buffer| buffer.read(cx).is_dirty())
+                });
 
             cx.spawn_in(window, async move  |workspace, cx| {
+                if let Some(path_on_disk) = path_on_disk
+                    && !fs.is_file(&path_on_disk).await
+                {
+                    return workspace
+                        .update_in(cx, |workspace, window, cx| {
+                            Self::navigate_history(workspace, pane, mode, window, cx)
+                        })?
+                        .await;
+                }
+                // If the item was no longer present, then load it again from its previous path, first try the local path
+                let open_by_project_path = workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.load_path(project_path.clone(), window, cx)
+                })?;
                 let open_by_project_path = open_by_project_path.await;
                 let mut navigated = false;
                 match open_by_project_path
@@ -2850,6 +2894,11 @@ impl Workspace {
                                     })?;
                                 }
                                 Err(open_by_abs_path_e) => {
+                                    // The failed open must not leave the pane walking history.
+                                    pane.update(cx, |pane, _| {
+                                        pane.nav_history_mut().set_mode(NavigationMode::Normal)
+                                    })
+                                    .ok();
                                     log::error!("Failed to navigate history: {open_by_project_path_e:#} and {open_by_abs_path_e:#}");
                                 }
                             }
@@ -2858,18 +2907,46 @@ impl Workspace {
                 }
 
                 if !navigated {
-                    workspace
+                    return workspace
                         .update_in(cx, |workspace, window, cx| {
                             Self::navigate_history(workspace, pane, mode, window, cx)
                         })?
-                        .await?;
+                        .await;
                 }
 
-                Ok(())
+                Ok(true)
             })
         } else {
-            Task::ready(Ok(()))
+            Task::ready(Ok(true))
         }
+    }
+
+    /// Goes to the backward or forward entry of `pane` with this timestamp without changing
+    /// either stack: nothing is popped, and nothing is pushed in the disabled mode.
+    pub fn navigate_to_history_entry(
+        &mut self,
+        pane: WeakEntity<Pane>,
+        timestamp: usize,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Task<Result<()>> {
+        let Some(entry) = pane
+            .upgrade()
+            .and_then(|pane| pane.read(cx).nav_history().entry_with_timestamp(timestamp))
+        else {
+            return Task::ready(Ok(()));
+        };
+        // Handed back once: a second call means the first did not navigate (the caret is
+        // already there), and the walk must end instead of looping.
+        let mut target = Some(entry);
+        let task = self.navigate_history_impl(
+            pane,
+            NavigationMode::Disabled,
+            window,
+            &mut |_, _| target.take(),
+            cx,
+        );
+        Self::ignore_navigated(task, cx)
     }
 
     pub fn go_back(
@@ -2878,6 +2955,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Task<Result<()>> {
+        let task = self.navigate_history(pane, NavigationMode::GoingBack, window, cx);
+        Self::ignore_navigated(task, cx)
+    }
+
+    /// Like `go_back`, resolving to whether any location was navigated to.
+    pub fn go_back_reporting(
+        &mut self,
+        pane: WeakEntity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Task<Result<bool>> {
         self.navigate_history(pane, NavigationMode::GoingBack, window, cx)
     }
 
@@ -2894,7 +2982,7 @@ impl Workspace {
             .and_then(|pane| pane.read(cx).active_item())
             .map(|item| (Some(item.item_id()), item.project_path(cx)))
             .unwrap_or((None, None));
-        self.navigate_history_impl(
+        let task = self.navigate_history_impl(
             pane,
             NavigationMode::GoingBack,
             window,
@@ -2908,7 +2996,8 @@ impl Workspace {
                 )
             },
             cx,
-        )
+        );
+        Self::ignore_navigated(task, cx)
     }
 
     pub fn go_forward(
@@ -2917,6 +3006,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Task<Result<()>> {
+        let task = self.navigate_history(pane, NavigationMode::GoingForward, window, cx);
+        Self::ignore_navigated(task, cx)
+    }
+
+    /// Like `go_forward`, resolving to whether any location was navigated to.
+    pub fn go_forward_reporting(
+        &mut self,
+        pane: WeakEntity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Task<Result<bool>> {
         self.navigate_history(pane, NavigationMode::GoingForward, window, cx)
     }
 
@@ -2925,12 +3025,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Task<Result<()>> {
-        self.navigate_history(
+        let task = self.navigate_history(
             self.active_pane().downgrade(),
             NavigationMode::ReopeningClosedItem,
             window,
             cx,
-        )
+        );
+        Self::ignore_navigated(task, cx)
     }
 
     pub fn client(&self) -> &Arc<Client> {
@@ -12168,6 +12269,74 @@ mod tests {
         pane.read_with(cx, |pane, _| {
             assert!(pane.can_navigate_forward(), "Should be able to go forward");
         });
+    }
+
+    /// An entry whose item was closed and has no path to reopen it from (an untitled buffer) is
+    /// skipped, and going back lands on the next older entry instead of doing nothing.
+    #[gpui::test]
+    async fn test_go_back_skips_closed_item_without_path(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let item_a = cx.new(|cx| {
+            TestItem::new(cx).with_project_items(&[TestProjectItem::new(1, "a.txt", cx)])
+        });
+        let untitled = cx.new(|cx| TestItem::new(cx));
+        let item_c = cx.new(|cx| {
+            TestItem::new(cx).with_project_items(&[TestProjectItem::new(3, "c.txt", cx)])
+        });
+        let untitled_id = untitled.entity_id();
+
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item_a.clone()), None, true, window, cx);
+            workspace.add_item_to_active_pane(Box::new(untitled.clone()), None, true, window, cx);
+            workspace.add_item_to_active_pane(Box::new(item_c.clone()), None, true, window, cx);
+        });
+        // History: c, a, untitled; c is active.
+        for item in [
+            Box::new(item_a.clone()) as Box<dyn ItemHandle>,
+            Box::new(untitled.clone()),
+            Box::new(item_c.clone()),
+        ] {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.activate_item(item.as_ref(), false, false, window, cx);
+            });
+            cx.run_until_parked();
+        }
+        drop(untitled);
+
+        pane.update_in(cx, |pane, window, cx| {
+            pane.close_item_by_id(untitled_id, SaveIntent::Skip, window, cx)
+        })
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert_eq!(pane.items_len(), 2);
+            assert!(pane.nav_history().path_for_item(untitled_id).is_none());
+        });
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.go_back(pane.downgrade(), window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let active_item = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item(cx).unwrap().item_id()
+        });
+        assert_eq!(
+            active_item,
+            item_a.entity_id(),
+            "going back skips the closed untitled item and lands on the item before it"
+        );
     }
 
     #[gpui::test]

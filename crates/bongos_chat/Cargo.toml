@@ -60,4 +60,5 @@ terminal_view = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(unix)'.dependencies]
-nix.workspace = true
+net.workspace = true
+nix = { workspace = true, features = ["socket", "user", "signal"] }

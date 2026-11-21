@@ -164,6 +164,7 @@ recent_projects.workspace = true
 bongos_app.workspace = true
 bongos_builder.workspace = true
 bongos_chat.workspace = true
+bongos_chat_model.workspace = true
 bongos_checks.workspace = true
 bongos_emacs.workspace = true
 bongos_extensions.workspace = true

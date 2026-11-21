@@ -156,12 +156,35 @@ launch.
   no environment variable. Hide one and resume the chat, and the regenerated list no longer has it.
   This is not file protection: a CLI can still read any file it can reach, and a manifest that
   cannot be parsed lists nothing.
-- **Fallbacks are labeled.** bongos reads each CLI's own `--help` and uses only what it finds. When
-  a feature is missing, the chat still starts and its row in the Chats list says what changed
-  (`labels:`), for example "session id read from the CLI's files", "name not passed to the CLI",
-  "context appended to the system prompt (no hooks)", or "started a new session (no session to
-  resume)". A fork when the CLI has no fork command is a fresh session that starts from a note naming
-  the chat it continues, and is labeled `handoff`; nothing passes one off as a native fork.
+- **Chat state.** Each chat shows `running`, `waiting` or `idle`. A Claude chat's state is exact:
+  Claude's own hooks (session start, prompt submitted, turn done, notification, tool done) run
+  `bongos --chat-report`, which tells bongos the event and nothing else, never the prompt, message,
+  tool data, transcript path or directory. A Codex chat's state is estimated as before, from the
+  bell, terminal output and an idle timer. An estimated state carries a muted "estimated" tag in the
+  chat's header and its list row, whose tooltip says why: reports are off (`chats.channels`), the
+  report socket is unavailable, the Claude version is older than the first with hooks bongos knows,
+  no report has come yet, a turn ended without a report (interrupted or denied), the agent does not
+  report its state yet, the CLI exited when given the hooks (it is then started once more without
+  them), or the bongos path cannot be quoted. `chats.channels` (default `true`) turns reports on for
+  new launches; turning it off stops them at once and running chats go back to estimates.
+  `chats.idle_after_secs` and `chats.submit_delay_ms` apply only to the fallback: a chat without
+  reports, or a turn that ended without one. Reports arrive on one socket per bongos process,
+  `$XDG_RUNTIME_DIR/bongos/chat-<pid>.sock`, else `<temp dir>/bongos-<uid>/chat-<pid>.sock`: the
+  directory is yours alone (mode `0700`, refused if it is a symlink or open to others), the socket
+  is mode `0600`, a connection from another user is dropped, and a report must name a running chat
+  and carry that launch's token, which lives only in bongos's memory and the chat's environment.
+  This keeps out other users and accidental cross-talk (a stale process, a copied environment, a
+  nested CLI). It does not stop a hostile program running as you, which could read a chat's
+  environment from `/proc`; such a program can already do anything you can.
+- **Fallbacks are labeled.** bongos checks each Claude version against a table of the versions it
+  has verified (flags, the login probe and hooks), instead of parsing `--help`: a newer version is
+  assumed to keep everything, and an older or unreadable one gets the fallbacks; Codex is still read
+  from its `--help`. When a feature is missing, the chat still starts and its row in the Chats list
+  says what changed (`labels:`), for example "session id read from the CLI's files", "name not
+  passed to the CLI", "context appended to the system prompt (no hooks)", or "started a new session
+  (no session to resume)". A fork when the CLI has no fork command is a fresh session that starts
+  from a note naming the chat it continues, and is labeled `handoff`; nothing passes one off as a
+  native fork.
 - **Keys (Emacs keymap only).** `C-c c n` starts a chat on the focused task, `C-c c o` opens one
   (resuming it when closed), `C-c c ]` and `C-c c [` cycle, `C-c c k` closes, `C-c c a` archives and
   `C-c c u` restores, `C-c c l` lists the archive, `C-c c r` renames, `C-c c f` forks into another
@@ -926,6 +949,40 @@ happened, such as `Replaced 12 occurrences` or `Replaced 12, skipped 3`.
 
 `minibuffer.enabled_for` names `query_replace` by default, so the prompts and the questions are in
 the strip. Remove it from that list to get them as a centered modal; the keys are the same.
+
+## Symbol jump and goto stack
+
+M-n and M-p jump between the occurrences of the symbol at the cursor, as `symbol-overlay` does in
+Emacs, and a goto stack lets you go back to where you were after a jump. Under the Emacs base keymap
+(the default) these keys work in an editor:
+
+| Key | Command |
+|---|---|
+| M-n, M-p | jump to the next, previous occurrence of the symbol at the cursor |
+| M-i | toggle the highlight (overlay) of the symbol at the cursor |
+| M-I | clear every symbol highlight in the buffer |
+| left, right | goto stack: back, forward |
+| up | goto stack: push the current place |
+| C-c x h | xref history list |
+
+- **Jumps.** M-n and M-p match the symbol as a whole word (`n` does not match `println`), flash the
+  occurrence they land on, and wrap around the buffer; the echo area says `wrapped` when they do. With
+  no symbol at the cursor the echo area says `No symbol at point`.
+- **Overlay.** M-i highlights every occurrence of the symbol at the cursor and M-i on it again removes
+  the highlight; M-I removes them all.
+- **Goto stack.** `left` goes back to the previous place of the stack, `right` goes forward again, and
+  `up` pushes the current place so that `left` can return to it later. `C-c x h` opens the stack as a
+  picker, newest first; RET goes to the entry.
+- **Navigation history settings.** Two settings decide what else the stack records:
+  `navigation_history.record_large_moves` (a cursor move of ten rows or more) and
+  `navigation_history.record_item_switches` (switching to another item). Both default to off under
+  the Emacs base keymap without vim or helix mode, and to on otherwise; an explicit `true` or
+  `false` overrides the default.
+- **Panes.** The arrow keys are bound only in editors of the center panes (not in docks, in agent
+  threads, in editors that are not full-mode, in vim mode, or while completions, code actions or
+  signature help show), so they move the cursor everywhere else. Each pane has its
+  own stack. The Emacs keymap no longer binds `alt-,`; on Linux it reaches
+  `editor::GoToPreviousHunk`. `alt-n` also reaches the query editor of full-mode pickers.
 
 ## Minibuffer
 

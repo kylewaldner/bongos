@@ -1,7 +1,7 @@
 //! A stand-in for kotlin-lsp and the IntelliJ server, used by tests and smoke scenarios. It speaks
 //! LSP over stdio with Content-Length framing. `BONGOS_FAKE_LSP_MODE` holds comma-separated modes:
 //! `progress`, `push`, `pull`, `crash-after=<ms>` (exit 1 that long after `initialized`),
-//! `hang-shutdown`, `license-lost-after=<ms>` (counted from `initialized`), `slow-init=<ms>`, `stderr` (one line on stderr at start). `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
+//! `hang-shutdown`, `license-lost-after=<ms>` (counted from `initialized`), `license-lost-on-gate` (after `initialized`, waits for the gate file `LicenseLost`), `slow-init=<ms>`, `stderr` (one line on stderr at start). `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
 //! With `BONGOS_FAKE_LSP_GATES` set to a directory, each `progress` step holds its report until a
 //! file named after the step's title (`Importing`, `Indexing`) exists there.
 //! `license status` prints per `BONGOS_FAKE_LICENSE=licensed|unlicensed|offline`.
@@ -31,6 +31,7 @@ struct Modes {
     stderr: bool,
     crash_after: Option<u64>,
     license_lost_after: Option<u64>,
+    license_lost_on_gate: bool,
     slow_init: Option<u64>,
 }
 
@@ -55,6 +56,7 @@ impl Modes {
                 "stderr" => modes.stderr = true,
                 "crash-after" => modes.crash_after = number,
                 "license-lost-after" => modes.license_lost_after = number,
+                "license-lost-on-gate" => modes.license_lost_on_gate = true,
                 "slow-init" => modes.slow_init = number,
                 _ => {}
             }
@@ -222,6 +224,18 @@ fn serve(modes: Modes) -> io::Result<()> {
             let output = output.clone();
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(milliseconds));
+                send(
+                    &output,
+                    &json!({ "jsonrpc": "2.0", "method": "window/showMessage", "params": { "type": 1, "message": LICENSE_LOST_TEXT } }),
+                )
+                .ok();
+            });
+        }
+        // Sent when the test opens the `LicenseLost` gate, so it decides when the signal arrives.
+        if method == "initialized" && modes.license_lost_on_gate {
+            let output = output.clone();
+            thread::spawn(move || {
+                wait_for_gate("LicenseLost");
                 send(
                     &output,
                     &json!({ "jsonrpc": "2.0", "method": "window/showMessage", "params": { "type": 1, "message": LICENSE_LOST_TEXT } }),

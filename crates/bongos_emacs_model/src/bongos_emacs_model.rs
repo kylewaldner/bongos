@@ -13,6 +13,7 @@ pub mod recenter;
 pub mod rectangle;
 pub mod rectangle_ops;
 mod space;
+pub mod symbol;
 mod text;
 mod transpose;
 mod words;
@@ -42,6 +43,8 @@ mod rectangle_ops_tests;
 mod rectangle_tests;
 #[cfg(test)]
 mod space_tests;
+#[cfg(test)]
+mod symbol_tests;
 #[cfg(test)]
 mod transpose_tests;
 #[cfg(test)]

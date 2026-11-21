@@ -41,6 +41,7 @@ pub struct EditorSettings {
     pub hover_popover_sticky: bool,
     pub hover_popover_hiding_delay: DelayMs,
     pub toolbar: Toolbar,
+    pub navigation_history: NavigationHistory,
     pub scrollbar: Scrollbar,
     pub minimap: Minimap,
     pub gutter: Gutter,
@@ -93,6 +94,12 @@ pub struct Jupyter {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct StickyScroll {
     pub enabled: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct NavigationHistory {
+    pub record_large_moves: bool,
+    pub record_item_switches: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +268,7 @@ impl Settings for EditorSettings {
         let gutter = editor.gutter.unwrap();
         let axes = scrollbar.axes.unwrap();
         let toolbar = editor.toolbar.unwrap();
+        let navigation_history = editor.navigation_history.unwrap();
         let search = editor.search.unwrap();
         let drag_and_drop_selection = editor.drag_and_drop_selection.unwrap();
         let sticky_scroll = editor.sticky_scroll.unwrap();
@@ -270,6 +278,12 @@ impl Settings for EditorSettings {
                 Some(EmacsCursorStyle::Modern) => Some(CursorShape::Bar),
                 Some(EmacsCursorStyle::Auto) | None => None,
             };
+        // Under the Emacs profile only explicit gotos are recorded, unless a modal keymap
+        // (vim or helix) is on, whose jump list expects Zed's implicit pushes.
+        let records_navigation_by_default = content.base_keymap.map(BaseKeymap::from)
+            != Some(BaseKeymap::Emacs)
+            || content.vim_mode.unwrap_or(false)
+            || content.helix_mode.unwrap_or(false);
         Self {
             cursor_blink: editor.cursor_blink.unwrap(),
             cursor_shape: explicit_cursor_style.or_else(|| {
@@ -311,6 +325,14 @@ impl Settings for EditorSettings {
                 selections_menu: toolbar.selections_menu.unwrap(),
                 agent_review: toolbar.agent_review.unwrap(),
                 code_actions: toolbar.code_actions.unwrap(),
+            },
+            navigation_history: NavigationHistory {
+                record_large_moves: navigation_history
+                    .record_large_moves
+                    .unwrap_or(records_navigation_by_default),
+                record_item_switches: navigation_history
+                    .record_item_switches
+                    .unwrap_or(records_navigation_by_default),
             },
             scrollbar: Scrollbar {
                 show: scrollbar.show.map(ui_scrollbar_settings_from_raw).unwrap(),

@@ -16,7 +16,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use bongos_chat_model::{Agent, Capabilities, Login, adapter_for};
+use bongos_chat_model::{Agent, Capabilities, ClaudeAdapter, Login, adapter_for};
 use futures::future::{Either, select};
 use gpui::{App, AppContext as _, BackgroundExecutor, Entity, EventEmitter, Global, Task};
 use settings::{Settings as _, SettingsStore};
@@ -59,6 +59,11 @@ pub struct Health {
     pub fix: String,
     /// The CLI's flags and subcommands, once its `--help` was read.
     pub caps: Option<Capabilities>,
+    /// What a chat launch may rely on. For Claude it is built from the `--version` alone by the
+    /// adapter's version table (empty when the version cannot be read, so every fallback applies),
+    /// never from `--help`; for Codex it is the help-derived set. `None` until the CLI answered
+    /// (and for a program that was not found). Chat launch decisions read this, not `caps`.
+    pub chat_caps: Option<Capabilities>,
 }
 
 impl Health {
@@ -74,6 +79,7 @@ impl Health {
             state: HealthState::Unchecked,
             fix,
             caps: None,
+            chat_caps: None,
         }
     }
 }
@@ -248,6 +254,7 @@ async fn probe_agent(
             state: HealthState::NotFound,
             fix: fix_not_found(agent, &command),
             caps: None,
+            chat_caps: None,
         })
     };
     let Some(program) = find_program(&command, &env) else {
@@ -260,7 +267,12 @@ async fn probe_agent(
         }
         Probe::NotFound => return not_found(),
         _ => {
-            return Probed::plain(Health::unchecked(agent, fix_no_answer(agent, &command)));
+            let mut health = Health::unchecked(agent, fix_no_answer(agent, &command));
+            // An unreadable version is an empty set for Claude: every fallback applies, quietly.
+            if agent == Agent::Claude {
+                health.chat_caps = Some(ClaudeAdapter::new(&command).capabilities(None));
+            }
+            return Probed::plain(health);
         }
     };
 
@@ -283,6 +295,11 @@ async fn probe_agent(
             }
             caps
         }
+    };
+    // Claude's chat capabilities come from the version alone; Codex keeps its help-derived set.
+    let chat_caps = match agent {
+        Agent::Claude => Some(ClaudeAdapter::new(&command).capabilities(Some(&version))),
+        Agent::Codex => Some(caps.clone()),
     };
     let shown_version = if caps.version().is_empty() {
         version
@@ -325,6 +342,7 @@ async fn probe_agent(
             state,
             fix,
             caps: Some(caps),
+            chat_caps,
         },
         learned,
         help_reads,

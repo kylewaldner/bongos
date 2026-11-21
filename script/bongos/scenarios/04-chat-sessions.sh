@@ -305,12 +305,15 @@ git init -q -b main "$REPO"
 printf '# billing\n' >"$REPO/README.md"
 git -C "$REPO" add README.md
 git -C "$REPO" "${GIT_ID[@]}" commit -qm "first commit"
+# chats.channels is false because this scenario exercises the terminal-output fallback (the bell);
+# the fake claude sends no channel reports, so with channels on the chat would read "channel: pending".
 cat >"$SETTINGS_FILE" <<JSON
 {
   "base_keymap": "Emacs",
   "project_repository": { "enabled": false },
   "chats": {
     "enabled": true,
+    "channels": false,
     "agents": {
       "claude": { "command": "$CHAT_BIN/claude" },
       "codex": { "command": "$CHAT_BIN/codex" }
@@ -527,7 +530,7 @@ ckeys t
 type_text bell
 keys Return
 dump_chat_view bell
-sed -n 2p "$CHAT_VIEW" | grep -qE ' - claude - implement - waiting$' || fail "the shown chat does not read waiting after the bell: $(cat "$CHAT_VIEW")"
+sed -n 2p "$CHAT_VIEW" | grep -qE ' - claude - implement - waiting( \(estimated\))?$' || fail "the shown chat does not read waiting after the bell: $(cat "$CHAT_VIEW")"
 dump_list bell-list
 row_has "$PROMPT_NAME" 'state: waiting' || fail "the claude row does not read waiting: $(cat "$CHAT_VIEW")"
 shot chat-waiting

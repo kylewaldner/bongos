@@ -292,6 +292,7 @@ impl VsCodeSettings {
             lsp_highlight_debounce: None,
             middle_click_paste: None,
             minimap: self.minimap_content(),
+            navigation_history: None,
             minimum_contrast_for_highlights: None,
             multi_cursor_modifier: self.read_enum("editor.multiCursorModifier", |s| match s {
                 "ctrlCmd" => Some(MultiCursorModifier::CmdOrCtrl),
