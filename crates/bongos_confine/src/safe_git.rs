@@ -39,13 +39,22 @@
 //! root is refused like a job-written git directory: the alternates chain is read (absolute or
 //! relative entries; a quoted entry, a chain deeper than git's own limit of
 //! [`ALTERNATES_DEPTH`], or an entry that cannot be resolved is refused, since it cannot be
-//! checked).
+//! checked). An entry where nothing exists is skipped, as git skips it, when it has no `..`
+//! component and its nearest existing ancestor lies outside every job root (no job can create it
+//! before git reads it); otherwise it is checked like any entry, and one that cannot be resolved
+//! counts as inside a job root. An alternates file that is a symlink is
+//! followed only when neither the object directory nor the symlink's target lies in a job root,
+//! so no job can change what it says between this check and git's read; otherwise, or when the
+//! target is missing, it is refused. An alternates file larger than 64 KiB is always refused:
+//! git writes one line per alternate, so no real repository comes near it, and reading it only in
+//! part would leave entries unchecked.
 //!
 //! The one exception is [`SafeGit::job_object_directory`], which importing a confined job's
 //! commits needs: it names exactly one object directory inside a job root that git may read,
 //! reached through the git directory's alternates or `GIT_ALTERNATE_OBJECT_DIRECTORIES`, never
-//! as a git directory, common directory or `GIT_OBJECT_DIRECTORY`. It must be an absolute path
-//! ending in `objects` that is a directory, not a symlink; the command must have no work tree;
+//! as a git directory, common directory or `GIT_OBJECT_DIRECTORY`. It must be an absolute,
+//! canonical path (no symlink in it, the last component included) ending in `objects` that is a
+//! directory; the command must have no work tree;
 //! its own alternates may not lead into any job root; and every command built with it gets
 //! [`UNTRUSTED_OBJECTS_CONFIG`], so git reads only its loose objects and packs (whose contents
 //! are checked by hash), never a commit graph, multi-pack index, bitmap or reverse index from
@@ -424,14 +433,17 @@ impl SafeGit {
                     objects.display()
                 );
             }
-            let is_real_dir = fs::symlink_metadata(objects)
-                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+            // Canonical, so no symlink anywhere in the path leads git elsewhere than the
+            // directory checked here.
+            let is_canonical_dir = fs::canonicalize(objects)
+                .is_ok_and(|canonical| canonical == *objects)
+                && fs::symlink_metadata(objects).is_ok_and(|metadata| metadata.is_dir());
             if !objects.is_absolute()
                 || objects.file_name() != Some(OsStr::new("objects"))
-                || !is_real_dir
+                || !is_canonical_dir
             {
                 bail!(
-                    "{OBJECTS_REFUSAL}: {} (not an absolute objects directory)",
+                    "{OBJECTS_REFUSAL}: {} (not a canonical absolute objects directory)",
                     objects.display()
                 );
             }
@@ -458,8 +470,9 @@ impl SafeGit {
                             entry.display()
                         );
                     }
-                    self.check_alternate(&entry, false, in_job_root)?;
-                    pending.push((entry, 1));
+                    if self.check_alternate(&entry, false, in_job_root)? {
+                        pending.push((entry, 1));
+                    }
                 }
             }
         }
@@ -471,8 +484,7 @@ impl SafeGit {
                 continue;
             }
             let from_job = self.job_objects.as_deref() == Some(objects.as_path());
-            let alternates = objects.join("info/alternates");
-            let contents = read_regular_file_limited(&alternates, ALTERNATES_LIMIT)?;
+            let contents = read_alternates(&objects, in_job_root)?;
             for line in contents
                 .as_deref()
                 .unwrap_or_default()
@@ -489,8 +501,9 @@ impl SafeGit {
                     );
                 }
                 let entry = objects.join(path_from_bytes(line)?);
-                self.check_alternate(&entry, from_job, in_job_root)?;
-                pending.push((entry, depth + 1));
+                if self.check_alternate(&entry, from_job, in_job_root)? {
+                    pending.push((entry, depth + 1));
+                }
             }
             seen.push(objects);
         }
@@ -499,20 +512,24 @@ impl SafeGit {
 
     /// Refuses the alternate object directory `entry` when it lies inside a job root, unless it
     /// is the one [`SafeGit::job_object_directory`] names and was not reached through that one's
-    /// own alternates (`from_job`).
+    /// own alternates (`from_job`). Returns whether git reads it: an entry where nothing exists
+    /// and no job can create anything (see [`missing_outside_job_roots`]) is skipped by git.
     fn check_alternate(
         &self,
         entry: &Path,
         from_job: bool,
         in_job_root: &dyn Fn(&Path) -> bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !from_job && self.job_objects.as_deref() == Some(entry) {
-            return Ok(());
+            return Ok(true);
+        }
+        if missing_outside_job_roots(entry, in_job_root) {
+            return Ok(false);
         }
         if in_job_root(entry) {
             bail!("{OBJECTS_REFUSAL}: {}", entry.display());
         }
-        Ok(())
+        Ok(true)
     }
 
     /// The `-c` settings that switch off every driver and configured hook the configuration
@@ -832,6 +849,55 @@ fn common_dir_of(git_dir: &Path) -> Result<PathBuf> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(git_dir.to_path_buf()),
         Err(error) => Err(error).with_context(|| format!("reading {}", commondir_file.display())),
     }
+}
+
+/// The `info/alternates` of the object directory `objects`, `None` when there is none (see the
+/// module documentation): a symlink is followed only when neither `objects` nor the symlink's
+/// target lies in a job root, and refused otherwise or when its target is missing.
+fn read_alternates(objects: &Path, in_job_root: &dyn Fn(&Path) -> bool) -> Result<Option<Vec<u8>>> {
+    let alternates = objects.join("info/alternates");
+    let is_symlink = fs::symlink_metadata(&alternates)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink());
+    if !is_symlink {
+        return read_regular_file_limited(&alternates, ALTERNATES_LIMIT);
+    }
+    let target = fs::canonicalize(&alternates).map_err(|error| {
+        anyhow!(
+            "{OBJECTS_REFUSAL}: cannot follow the symlink {} ({error})",
+            alternates.display()
+        )
+    })?;
+    if in_job_root(objects) || in_job_root(&target) {
+        bail!(
+            "{OBJECTS_REFUSAL}: {} is a symlink a job could change",
+            alternates.display()
+        );
+    }
+    read_regular_file_limited(&target, ALTERNATES_LIMIT)
+}
+
+/// Whether git skips the alternate `entry` as missing for good: nothing is there, and its
+/// nearest existing ancestor lies outside every job root, so no job can create it before git
+/// reads it. A path that cannot be examined is not missing, nor one with a `..` component (git
+/// resolves those by name, not through the file system).
+fn missing_outside_job_roots(entry: &Path, in_job_root: &dyn Fn(&Path) -> bool) -> bool {
+    let has_parent_component = entry
+        .components()
+        .any(|component| component == std::path::Component::ParentDir);
+    if has_parent_component
+        || !matches!(fs::symlink_metadata(entry), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    {
+        return false;
+    }
+    let mut ancestor = entry.parent();
+    while let Some(dir) = ancestor {
+        match fs::symlink_metadata(dir) {
+            Ok(_) => return !in_job_root(dir),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => ancestor = dir.parent(),
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf> {

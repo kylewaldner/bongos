@@ -947,5 +947,99 @@ fn safe_git_reads_one_job_object_directory_as_an_alternate_only() {
                 .refused(&host_git().job_object_directory(&link), &["count-objects"])
                 .starts_with(refusal)
         );
+        // A symlink above the directory is refused too.
+        let linked_parent = job.join("linked-parent");
+        std::os::unix::fs::symlink(job.join("repo.git"), &linked_parent).unwrap();
+        fs::write(
+            &alternates,
+            format!("{}\n", linked_parent.join("objects").display()),
+        )
+        .unwrap();
+        assert!(
+            fixture
+                .refused(
+                    &host_git().job_object_directory(linked_parent.join("objects")),
+                    &["count-objects"]
+                )
+                .contains("not a canonical absolute objects directory")
+        );
+    }
+}
+
+#[test]
+fn safe_git_skips_a_missing_alternate_outside_job_roots() {
+    let fixture = Fixture::new();
+    let job = fixture.dir("job");
+    fixture.git(&fixture.base, &["init", "-q", "--bare", "host.git"]);
+    let host = fixture.base.join("host.git");
+    fixture.register(&job);
+    let host_git = SafeGit::without_work_tree(&host)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("HOME", &fixture.home);
+    let refusal = "refusing to let git read a job-written object directory";
+    let alternates = host.join("objects/info/alternates");
+
+    // A stale entry outside every job root: git skips it, and so does the check.
+    let gone = fixture.base.join("gone/repo.git/objects");
+    fs::write(&alternates, format!("{}\n", gone.display())).unwrap();
+    fixture.run_safe(&host_git, &["count-objects"]);
+    fixture.run_safe(
+        &host_git
+            .clone()
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &gone),
+        &["count-objects"],
+    );
+
+    // A missing entry inside a job root could be created by the job: refused.
+    let not_yet = job.join("not-yet/objects");
+    fs::write(&alternates, format!("{}\n", not_yet.display())).unwrap();
+    assert_eq!(
+        fixture.refused(&host_git, &["count-objects"]),
+        format!("{refusal}: {}", not_yet.display())
+    );
+    // So is an existing one.
+    let existing = fixture.dir("job/existing/objects");
+    fs::write(&alternates, format!("{}\n", existing.display())).unwrap();
+    assert_eq!(
+        fixture.refused(&host_git, &["count-objects"]),
+        format!("{refusal}: {}", existing.display())
+    );
+    // And a missing one named through `..`, which git resolves by name.
+    fs::write(&alternates, "../../gone/../job/not-yet/objects\n").unwrap();
+    assert!(
+        fixture
+            .refused(&host_git, &["count-objects"])
+            .starts_with(refusal)
+    );
+
+    #[cfg(unix)]
+    {
+        // A symlinked alternates file outside every job root is followed.
+        let outside_list = fixture.file("outside/alternates", &format!("{}\n", gone.display()));
+        fs::remove_file(&alternates).unwrap();
+        std::os::unix::fs::symlink(&outside_list, &alternates).unwrap();
+        fixture.run_safe(&host_git, &["count-objects"]);
+        fs::write(&outside_list, format!("{}\n", existing.display())).unwrap();
+        assert_eq!(
+            fixture.refused(&host_git, &["count-objects"]),
+            format!("{refusal}: {}", existing.display())
+        );
+        // One into a job root, or dangling, is refused.
+        let job_list = fixture.file("job/alternates", &format!("{}\n", gone.display()));
+        fs::remove_file(&alternates).unwrap();
+        std::os::unix::fs::symlink(&job_list, &alternates).unwrap();
+        assert!(
+            fixture
+                .refused(&host_git, &["count-objects"])
+                .contains("is a symlink a job could change")
+        );
+        fs::remove_file(&alternates).unwrap();
+        std::os::unix::fs::symlink(fixture.base.join("no-such-file"), &alternates).unwrap();
+        assert!(
+            fixture
+                .refused(&host_git, &["count-objects"])
+                .contains("cannot follow the symlink")
+        );
     }
 }
