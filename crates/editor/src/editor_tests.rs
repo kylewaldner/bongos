@@ -963,6 +963,7 @@ fn test_toggle_breadcrumb_does_not_change_settings(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn test_navigation_history(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
+    set_navigation_history_settings(cx, true, true);
 
     use workspace::item::Item;
 
@@ -23701,6 +23702,7 @@ async fn test_multibuffer_reverts(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn test_multibuffer_in_navigation_history(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
+    set_navigation_history_settings(cx, true, true);
 
     let cols = 4;
     let rows = 10;
@@ -30892,6 +30894,7 @@ async fn test_linked_edits_on_typing_dot_without_language_override(cx: &mut Test
 #[gpui::test]
 async fn test_invisible_worktree_servers(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
+    set_navigation_history_settings(cx, true, true);
 
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree(
@@ -32390,7 +32393,7 @@ pub(crate) fn update_test_editor_settings(
     })
 }
 
-fn set_navigation_history_settings(
+pub(crate) fn set_navigation_history_settings(
     cx: &mut TestAppContext,
     record_large_moves: bool,
     record_item_switches: bool,
@@ -39490,4 +39493,197 @@ async fn test_cmd_click_pushes_origin_for_definition_and_file_but_not_url(cx: &m
         nav_entries(&mut cx),
         vec![(original, Some(0)), (original, Some(2))]
     );
+}
+
+/// The resolved (record_large_moves, record_item_switches) after applying `f` to the user
+/// settings.
+fn resolved_navigation_history(
+    cx: &mut TestAppContext,
+    f: &dyn Fn(&mut SettingsContent),
+) -> (bool, bool) {
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| store.update_user_settings(cx, f));
+        let navigation = &EditorSettings::get_global(cx).navigation_history;
+        (
+            navigation.record_large_moves,
+            navigation.record_item_switches,
+        )
+    })
+}
+
+#[gpui::test]
+fn test_profile_nav_defaults_follow_the_keymap_profile(cx: &mut TestAppContext) {
+    use settings::BaseKeymapContent as Keymap;
+
+    init_test(cx, |_| {});
+    let profile = |base_keymap, vim_mode, helix_mode| {
+        move |settings: &mut SettingsContent| {
+            settings.base_keymap = Some(base_keymap);
+            settings.vim_mode = Some(vim_mode);
+            settings.helix_mode = Some(helix_mode);
+            settings.editor.navigation_history = None;
+        }
+    };
+
+    assert_eq!(resolved_navigation_history(cx, &|_| {}), (false, false));
+    assert_eq!(
+        resolved_navigation_history(cx, &profile(Keymap::Emacs, false, false)),
+        (false, false)
+    );
+    // A retired base keymap resolves to Emacs.
+    assert_eq!(
+        resolved_navigation_history(cx, &profile(Keymap::JetBrains, false, false)),
+        (false, false)
+    );
+    assert_eq!(
+        resolved_navigation_history(cx, &profile(Keymap::Emacs, true, false)),
+        (true, true)
+    );
+    assert_eq!(
+        resolved_navigation_history(cx, &profile(Keymap::Emacs, false, true)),
+        (true, true)
+    );
+    assert_eq!(
+        resolved_navigation_history(cx, &profile(Keymap::VSCode, false, false)),
+        (true, true)
+    );
+    assert_eq!(
+        resolved_navigation_history(cx, &profile(Keymap::None, false, false)),
+        (true, true)
+    );
+
+    // An explicit value always wins.
+    let explicit = |base_keymap, vim_mode, record: Option<bool>| {
+        move |settings: &mut SettingsContent| {
+            profile(base_keymap, vim_mode, false)(settings);
+            settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                record_large_moves: record,
+                record_item_switches: Some(true),
+            });
+        }
+    };
+    assert_eq!(
+        resolved_navigation_history(cx, &explicit(Keymap::Emacs, false, None)),
+        (false, true)
+    );
+    assert_eq!(
+        resolved_navigation_history(cx, &explicit(Keymap::Emacs, false, Some(true))),
+        (true, true)
+    );
+    assert_eq!(
+        resolved_navigation_history(cx, &explicit(Keymap::VSCode, false, Some(false))),
+        (false, true)
+    );
+    assert_eq!(
+        resolved_navigation_history(cx, &explicit(Keymap::Emacs, true, Some(false))),
+        (false, true)
+    );
+}
+
+/// Opens `dir/<name>` the way the project panel does, by project path, and focuses it.
+async fn open_file_by_project_path(cx: &mut EditorLspTestContext, name: &str) -> EntityId {
+    let path = EditorLspTestContext::root_path().join("dir").join(name);
+    let task = cx.update_workspace(|workspace, window, cx| {
+        let project_path = workspace
+            .project()
+            .read(cx)
+            .find_project_path(&path, cx)
+            .expect("the file should be in the project");
+        workspace.open_path(project_path, None, true, window, cx)
+    });
+    let item = task.await.expect("the file should open");
+    cx.run_until_parked();
+    item.item_id()
+}
+
+fn move_caret_to_row(cx: &mut EditorLspTestContext, row: u32) {
+    cx.update_editor(|editor, window, cx| {
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select_ranges([Point::new(row, 0)..Point::new(row, 0)])
+        });
+    });
+    cx.run_until_parked();
+}
+
+fn activate_test_editor(cx: &mut EditorLspTestContext) {
+    let editor = cx.editor.clone();
+    cx.update_workspace(|workspace, window, cx| {
+        workspace.active_pane().update(cx, |pane, cx| {
+            let index = pane
+                .index_for_item(&editor)
+                .expect("the test editor should be in the pane");
+            pane.activate_item(index, true, true, window, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn test_profile_nav_emacs_records_only_explicit_gotos(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    cx.update(|_, cx| {
+        let navigation = &EditorSettings::get_global(cx).navigation_history;
+        assert!(!navigation.record_large_moves);
+        assert!(!navigation.record_item_switches);
+    });
+    cx.set_state(&numbered_rows(60, Some(2)));
+    let original = cx.editor.entity_id();
+    let other_uri = insert_numbered_file(&mut cx, "other.rs", 40).await;
+
+    // A 30-row caret move records nothing.
+    move_caret_to_row(&mut cx, 32);
+    assert_eq!(nav_entries(&mut cx), vec![]);
+
+    // Opening another file, and switching back, records nothing.
+    let other = open_file_by_project_path(&mut cx, "other.rs").await;
+    assert_ne!(other, original);
+    assert_eq!(nav_entries(&mut cx), vec![]);
+    activate_test_editor(&mut cx);
+    assert_eq!(active_editor_and_row(&mut cx), (original, 32));
+    assert_eq!(nav_entries(&mut cx), vec![]);
+
+    // A goto to another file records its origin, and back returns there.
+    cx.lsp
+        .set_request_handler::<lsp::request::GotoDefinition, _, _>(move |_, _| {
+            let uri = other_uri.clone();
+            async move {
+                Ok(Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
+                    uri,
+                    range: range_on_row(10),
+                })))
+            }
+        });
+    go_to_definition_in_active_editor(&mut cx).await;
+    assert_eq!(active_editor_and_row(&mut cx), (other, 10));
+    assert_eq!(nav_entries(&mut cx), vec![(original, Some(32))]);
+
+    go_back_in_active_pane(&mut cx);
+    assert_eq!(active_editor_and_row(&mut cx), (original, 32));
+}
+
+#[gpui::test]
+async fn test_profile_nav_explicit_true_under_emacs_restores_implicit_pushes(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx, |_| {});
+    set_navigation_history_settings(cx, true, true);
+    let mut cx = EditorLspTestContext::new_rust(definition_capabilities(), cx).await;
+    cx.set_state(&numbered_rows(60, Some(2)));
+    let original = cx.editor.entity_id();
+    insert_numbered_file(&mut cx, "other.rs", 40).await;
+    // Setting the text up may itself record a large move; only what follows is checked.
+    let mut expected = nav_entries(&mut cx);
+
+    move_caret_to_row(&mut cx, 32);
+    expected.push((original, Some(2)));
+    assert_eq!(nav_entries(&mut cx), expected);
+
+    let other = open_file_by_project_path(&mut cx, "other.rs").await;
+    assert_ne!(other, original);
+    expected.push((original, Some(32)));
+    assert_eq!(nav_entries(&mut cx), expected);
+
+    go_back_in_active_pane(&mut cx);
+    assert_eq!(active_editor_and_row(&mut cx), (original, 32));
 }

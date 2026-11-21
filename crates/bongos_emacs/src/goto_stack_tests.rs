@@ -30,6 +30,7 @@ async fn setup(
         let app_state = AppState::test(cx);
         editor::init(cx);
         crate::init(cx);
+        record_implicit_navigation(cx);
         app_state
     });
     let fake = app_state.fs.as_fake();
@@ -55,6 +56,20 @@ async fn setup(
     };
     let paths = [path("one.txt"), path("two.txt"), path("three.txt")];
     (workspace, paths, cx)
+}
+
+/// Turns on the item-switch and large-move recording these tests build their history from; the
+/// Emacs profile leaves both off.
+pub(crate) fn record_implicit_navigation(cx: &mut gpui::App) {
+    use gpui::UpdateGlobal as _;
+    settings::SettingsStore::update_global(cx, |store, cx| {
+        store.update_user_settings(cx, |settings| {
+            settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                record_large_moves: Some(true),
+                record_item_switches: Some(true),
+            });
+        });
+    });
 }
 
 fn lines(name: &str, count: u32) -> String {
