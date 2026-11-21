@@ -39,6 +39,8 @@ mod prompts_keymap_tests;
 #[cfg(test)]
 mod query_replace_keymap_tests;
 mod quick_action_bar;
+#[cfg(test)]
+mod rectangle_keymap_tests;
 pub mod remote_debug;
 #[cfg(test)]
 mod universal_argument_tests;

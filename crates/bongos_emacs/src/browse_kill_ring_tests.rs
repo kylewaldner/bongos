@@ -19,7 +19,7 @@ use crate::mark::mark_for;
 
 /// A workspace with an editor on `text`, the caret at `caret`, focused, the minibuffer installed
 /// and the keys the browser needs bound as the keymap files bind them.
-async fn workspace_editor(
+pub(crate) async fn workspace_editor(
     text: &str,
     caret: usize,
     cx: &mut TestAppContext,
@@ -98,7 +98,7 @@ fn seed(texts: &[&str], cx: &mut VisualTestContext) {
     });
 }
 
-fn session(
+pub(crate) fn session(
     workspace: &Entity<Workspace>,
     cx: &mut VisualTestContext,
 ) -> Option<Entity<SessionView>> {
@@ -107,11 +107,11 @@ fn session(
     })
 }
 
-fn text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
+pub(crate) fn text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
     editor.update(cx, |editor, cx| editor.text(cx))
 }
 
-fn caret(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
+pub(crate) fn caret(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
     editor.update(cx, |editor, cx| {
         let display = editor.display_snapshot(cx);
         editor
@@ -122,7 +122,7 @@ fn caret(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
     })
 }
 
-fn mark(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Option<usize> {
+pub(crate) fn mark(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Option<usize> {
     cx.update(|_, cx| {
         let anchor = mark_for(editor, cx)?;
         let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
@@ -152,7 +152,7 @@ fn rows(query: &str, cx: &mut VisualTestContext) -> Vec<(usize, String)> {
     })
 }
 
-fn open(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+pub(crate) fn open(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
     cx.simulate_keystrokes("alt-shift-y");
     cx.run_until_parked();
     assert!(session(workspace, cx).is_some(), "the browser is open");
@@ -196,6 +196,37 @@ async fn rows_are_newest_first_with_duplicates_once(cx: &mut TestAppContext) {
         .map(|row| row.0)
         .collect::<Vec<_>>();
     assert_eq!(indexes, [0, 1, 2]);
+}
+
+#[gpui::test]
+async fn a_rectangle_row_has_the_rectangle_kind(cx: &mut TestAppContext) {
+    let (_, _, mut cx) = workspace_editor("", 0, cx).await;
+    let cx = &mut cx;
+    seed(&["ab\ncd"], cx);
+    cx.update(|_, cx| {
+        kill_ring::update(cx, |ring| {
+            ring.push(Entry::rectangle(&["ab".to_string(), "cd".to_string()]))
+        })
+    });
+
+    let kinds = cx.update(|_, cx| {
+        candidates("", cx)
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.primary.to_string(),
+                    candidate.kind.map(|kind| kind.to_string()),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        kinds,
+        [
+            ("ab⏎cd".to_string(), Some("rectangle".to_string())),
+            ("ab⏎cd".to_string(), None),
+        ]
+    );
 }
 
 #[gpui::test]
