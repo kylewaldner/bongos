@@ -39,7 +39,9 @@ struct Fixture {
 /// A project whose master holds every fixture script under `definitions/checks/` and the
 /// registry `definitions/registry/flaky-tests.md`, pinned at `main`, and an empty tree.
 fn fixture() -> Fixture {
-    let root = TempDir::new().unwrap();
+    // Under the resolved temp folder: declared directories reached through a symlink are refused,
+    // and the temp folder itself may sit below one.
+    let root = TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let repo = fixture_project(&root);
     let repository = repo.location().repository.clone();
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures");
