@@ -10122,7 +10122,8 @@ impl Editor {
                     let pane = if split {
                         workspace.adjacent_pane(window, cx)
                     } else {
-                        workspace.active_pane().clone()
+                        let active_pane = workspace.active_pane().clone();
+                        workspace.pane_for_open(active_pane, window, cx)
                     };
 
                     for (buffer, (ranges, scroll_offset)) in new_selections_by_buffer {
