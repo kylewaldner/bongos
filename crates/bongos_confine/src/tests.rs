@@ -6,9 +6,8 @@ use std::{
 use sandbox::{GitSandboxPolicy, SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 
 use crate::{
-    Confinement, ConfineError, HostGit, JobDeclaration, JobKind, JobTree, Platform,
-    RootExclusions, RULE, SandboxAvailability, TreeAccess, TreeGit, annotate, promise,
-    switch_off_notes,
+    ConfineError, Confinement, HostGit, JobDeclaration, JobKind, JobTree, Platform, RULE,
+    RootExclusions, SandboxAvailability, TreeAccess, TreeGit, annotate, promise, switch_off_notes,
 };
 
 struct Fixture {
@@ -55,7 +54,11 @@ impl Fixture {
     }
 }
 
-fn declaration(scratch: PathBuf, trees: Vec<JobTree>, declared_dirs: Vec<PathBuf>) -> JobDeclaration {
+fn declaration(
+    scratch: PathBuf,
+    trees: Vec<JobTree>,
+    declared_dirs: Vec<PathBuf>,
+) -> JobDeclaration {
     JobDeclaration {
         kind: JobKind::Program,
         trees,
@@ -131,7 +134,7 @@ fn no_trees_and_no_declared_dirs_gives_scratch_alone() {
     )
     .unwrap();
 
-    assert_eq!(confinement.writable_roots(), [scratch.clone()]);
+    assert_eq!(confinement.writable_roots(), std::slice::from_ref(&scratch));
     assert!(confinement.masks().is_empty());
     let policy = confinement.sandbox_policy();
     assert_eq!(
@@ -160,7 +163,12 @@ fn refuses_each_unsafe_declaration() {
     };
 
     assert_eq!(
-        build(PathBuf::from("relative/scratch"), Vec::new(), Vec::new(), &host),
+        build(
+            PathBuf::from("relative/scratch"),
+            Vec::new(),
+            Vec::new(),
+            &host
+        ),
         ConfineError::RelativePath {
             path: PathBuf::from("relative/scratch")
         }
@@ -172,7 +180,12 @@ fn refuses_each_unsafe_declaration() {
         }
     );
     assert_eq!(
-        build(scratch.clone(), Vec::new(), vec![fixture.base.clone()], &host),
+        build(
+            scratch.clone(),
+            Vec::new(),
+            vec![fixture.base.clone()],
+            &host
+        ),
         ConfineError::GitDirectory {
             root: fixture.base.clone(),
             git_dir: linked_git_dir.clone(),
@@ -189,13 +202,15 @@ fn refuses_each_unsafe_declaration() {
     assert_eq!(
         build(
             scratch.clone(),
-            vec![tree(worktree.clone(), TreeAccess::ReadOnly, TreeGit::Private)],
+            vec![tree(
+                worktree.clone(),
+                TreeAccess::ReadOnly,
+                TreeGit::Private
+            )],
             Vec::new(),
             &host
         ),
-        ConfineError::ReadOnlyTreeWithPrivateGit {
-            tree: worktree.clone()
-        }
+        ConfineError::ReadOnlyTreeWithPrivateGit { tree: worktree }
     );
     let missing = fixture.base.join("missing");
     assert!(matches!(
@@ -205,7 +220,11 @@ fn refuses_each_unsafe_declaration() {
     assert_eq!(
         build(
             scratch.clone(),
-            vec![tree(fixture.base.join("repo"), TreeAccess::Writable, TreeGit::Private)],
+            vec![tree(
+                fixture.base.join("repo"),
+                TreeAccess::Writable,
+                TreeGit::Private
+            )],
             Vec::new(),
             &host
         ),
@@ -232,7 +251,7 @@ fn refuses_each_unsafe_declaration() {
         assert_eq!(
             build(scratch, Vec::new(), vec![link], &host),
             ConfineError::GitDirectory {
-                root: common.clone(),
+                root: common,
                 git_dir: linked_git_dir,
             }
         );
@@ -248,7 +267,10 @@ fn main_worktree_masks_its_git_nested_worktree_and_nested_clone() {
     let nested_git_dir = fixture.add_worktree("task", &nested_worktree);
     fixture.file("repo/vendor/lib/.git/config", "[core]\n");
     fixture.file("repo/vendor/lib/src/main.rs", "");
-    fixture.file("repo/.bongos-worktrees/task/inner/.git", "gitdir: elsewhere\n");
+    fixture.file(
+        "repo/.bongos-worktrees/task/inner/.git",
+        "gitdir: elsewhere\n",
+    );
     fixture.file("outside/clone/.git/config", "[core]\n");
     #[cfg(unix)]
     std::os::unix::fs::symlink(fixture.base.join("outside"), repo.join("linked")).unwrap();
@@ -324,7 +346,10 @@ fn annotates_both_os_refusal_messages() {
     let annotation = |path: &str| Some(format!("bongos: {RULE}: {path}"));
 
     assert_eq!(
-        annotate::refusal("touch: cannot touch '/home/u/x': Read-only file system", &roots),
+        annotate::refusal(
+            "touch: cannot touch '/home/u/x': Read-only file system",
+            &roots
+        ),
         annotation("/home/u/x")
     );
     assert_eq!(
@@ -363,7 +388,10 @@ fn leaves_allowed_paths_and_other_lines_alone() {
     let roots = [PathBuf::from("/work/tree"), PathBuf::from("/work/scratch")];
 
     assert_eq!(
-        annotate::refusal("touch: cannot touch '/work/tree/a': Read-only file system", &roots),
+        annotate::refusal(
+            "touch: cannot touch '/work/tree/a': Read-only file system",
+            &roots
+        ),
         None
     );
     assert_eq!(
@@ -375,7 +403,10 @@ fn leaves_allowed_paths_and_other_lines_alone() {
         None
     );
     assert_eq!(
-        annotate::refusal("touch: cannot touch 'relative': Read-only file system", &roots),
+        annotate::refusal(
+            "touch: cannot touch 'relative': Read-only file system",
+            &roots
+        ),
         None
     );
     assert_eq!(annotate::refusal("Read-only file system", &roots), None);
@@ -384,8 +415,16 @@ fn leaves_allowed_paths_and_other_lines_alone() {
 #[test]
 fn promise_text_per_platform() {
     let linux = promise(Platform::Linux, SandboxAvailability::Available);
-    assert!(linux.body.starts_with("Jobs (workflow programs, agent steps and task checks)"));
-    assert!(linux.body.contains("never uses configuration or pointers a job wrote"));
+    assert!(
+        linux
+            .body
+            .starts_with("Jobs (workflow programs, agent steps and task checks)")
+    );
+    assert!(
+        linux
+            .body
+            .contains("never uses configuration or pointers a job wrote")
+    );
 
     let macos = promise(Platform::MacOs, SandboxAvailability::Available);
     assert!(macos.body.contains("macOS enforces this by path"));

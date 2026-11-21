@@ -183,7 +183,9 @@ impl Confinement {
                 }
                 Ok(metadata) if metadata.is_dir() => {
                     if *git == TreeGit::Private {
-                        return Err(ConfineError::MainWorktreeWithPrivateGit { tree: tree.clone() });
+                        return Err(ConfineError::MainWorktreeWithPrivateGit {
+                            tree: tree.clone(),
+                        });
                     }
                     main_worktrees.push(tree.clone());
                 }

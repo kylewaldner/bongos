@@ -62,8 +62,7 @@ fn bare_path(prefix: &str) -> Option<&str> {
             word.trim_end_matches(':')
                 .trim_matches(|c| matches!(c, '\'' | '"' | '‘' | '’' | '`'))
         })
-        .filter(|word| word.starts_with('/'))
-        .last()
+        .rfind(|word| word.starts_with('/'))
 }
 
 fn normalize(path: &Path) -> PathBuf {
