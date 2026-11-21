@@ -2227,6 +2227,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_avy_model"
+version = "0.1.0"
+
+[[package]]
 name = "bongos_builder"
 version = "0.1.0"
 dependencies = [
