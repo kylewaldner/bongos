@@ -1,0 +1,10 @@
+id = "numbat"
+name = "Numbat"
+description = "Numbat language support (smoke fixture)."
+version = "0.0.1"
+schema_version = 1
+authors = ["bongos smoke"]
+languages = ["languages/numbat"]
+
+[lib]
+kind = "Rust"

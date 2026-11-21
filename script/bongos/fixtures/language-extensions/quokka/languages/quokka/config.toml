@@ -1,0 +1,3 @@
+name = "Quokka"
+path_suffixes = ["quok"]
+line_comments = ["# "]

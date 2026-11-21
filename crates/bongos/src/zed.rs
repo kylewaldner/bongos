@@ -39,6 +39,8 @@ mod prompts_keymap_tests;
 #[cfg(test)]
 mod query_replace_keymap_tests;
 mod quick_action_bar;
+#[cfg(test)]
+mod rectangle_keymap_tests;
 pub mod remote_debug;
 #[cfg(test)]
 mod universal_argument_tests;
@@ -759,6 +761,10 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         bongos_linear::register(workspace);
         bongos_workflow::register(workspace);
         bongos_checks::register(workspace);
+        let language_offer = cx.new(|_| bongos_extensions::offer::LanguageOffer::new());
+        let extension_build_status = cx.new(|cx| {
+            bongos_extensions::status_item::ExtensionBuildStatus::new(workspace.weak_handle(), cx)
+        });
         let work_focus = cx.new(bongos_work::FocusStatus::new);
         let workflow_status = cx.new(bongos_workflow::WorkflowStatus::new);
         let prompts_mode_line = cx.new(|_| bongos_prompts::PromptsModeLine::new());
@@ -774,6 +780,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(kotlin_status, window, cx);
             status_bar.add_left_item(language_status, window, cx);
+            status_bar.add_left_item(language_offer, window, cx);
+            status_bar.add_left_item(extension_build_status, window, cx);
             status_bar.add_left_item(work_focus, window, cx);
             status_bar.add_left_item(workflow_status, window, cx);
             status_bar.add_left_item(prompts_mode_line, window, cx);
@@ -5632,6 +5640,7 @@ mod tests {
                 "editor",
                 "emacs",
                 "encoding_selector",
+                "extensions",
                 "file_finder",
                 "git",
                 "git_graph",
@@ -6003,6 +6012,17 @@ mod tests {
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
             debugger_ui::init(cx);
+            // These tests do not start the extension store, which the language extension offer
+            // line reads when a file of an unknown language opens, so the feature stays off here.
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .extension
+                        .language_extensions
+                        .get_or_insert_default()
+                        .enabled = Some(false);
+                });
+            });
             initialize_workspace(app_state.clone(), cx);
             search::init(cx);
             cx.set_global(workspace::PaneSearchBarCallbacks {

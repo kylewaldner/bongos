@@ -33,7 +33,7 @@ fn arg(value: i32) -> PrefixArg {
 }
 
 /// Calls the adapter declared for `A` with the argument `value`.
-fn call<A: gpui::Action>(cx: &mut EditorTestContext, value: i32) {
+pub(crate) fn call<A: gpui::Action>(cx: &mut EditorTestContext, value: i32) {
     call_named(cx, A::name_for_type(), value);
 }
 

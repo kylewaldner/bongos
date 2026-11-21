@@ -63,6 +63,18 @@ const FS_WATCH_LATENCY: Duration = Duration::from_millis(100);
 /// The current extension [`SchemaVersion`] supported by Zed.
 const CURRENT_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
 
+/// Returns whether the extension is suppressed and must not be loaded or installed.
+pub fn is_suppressed_extension(id: &str) -> bool {
+    SUPPRESSED_EXTENSIONS.contains(id)
+}
+
+/// Returns the newest extension API version this build supports.
+pub fn supported_api_max(cx: &App) -> semver::Version {
+    wasm_host::wit::wasm_api_version_range(release_channel::ReleaseChannel::global(cx))
+        .end()
+        .clone()
+}
+
 /// Extensions that should no longer be loaded or downloaded.
 ///
 /// These snippets should no longer be downloaded or loaded, because their
@@ -622,39 +634,101 @@ impl ExtensionStore {
                 util::log_err(error);
             })?;
 
-            let output_path = &extensions_dir.join(extension_id.as_ref());
-            if let Some(metadata) = fs.metadata(output_path).await? {
-                if metadata.is_symlink {
-                    fs.remove_file(
-                        output_path,
-                        RemoveOptions {
-                            recursive: false,
-                            ignore_if_not_exists: true,
-                        },
-                    )
-                    .await?;
-                } else {
-                    bail!("extension {extension_id} is still installed");
-                }
+            Self::link_extension_inner(
+                &this,
+                cx,
+                &fs,
+                &extensions_dir,
+                &extension_id,
+                extension_source_path,
+            )
+            .await
+        })
+    }
+
+    /// Links an already built extension folder into the installed extensions
+    /// directory, replacing an earlier link for the same extension, then reloads.
+    pub fn link_extension(
+        &mut self,
+        extension_id: Arc<str>,
+        extension_source_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let extensions_dir = self.extensions_dir();
+        let fs = self.fs.clone();
+
+        cx.spawn(async move |this, cx| {
+            if !this.update(cx, |this, cx| {
+                match this.outstanding_operations.entry(extension_id.clone()) {
+                    btree_map::Entry::Occupied(_) => return false,
+                    btree_map::Entry::Vacant(e) => e.insert(ExtensionOperation::Install),
+                };
+                cx.notify();
+                true
+            })? {
+                return Ok(());
             }
 
-            fs.create_symlink(output_path, extension_source_path)
-                .await?;
-
-            this.update(cx, |this, cx| this.reload(None, cx))?.await;
-            this.update(cx, |this, cx| {
-                cx.emit(Event::ExtensionInstalled(extension_id.clone()));
-                if let Some(events) = ExtensionEvents::try_global(cx)
-                    && let Some(manifest) = this.extension_manifest_for_id(&extension_id)
-                {
-                    events.update(cx, |this, cx| {
-                        this.emit(extension::Event::ExtensionInstalled(manifest.clone()), cx)
-                    });
+            let _finish = cx.on_drop(&this, {
+                let extension_id = extension_id.clone();
+                move |this, cx| {
+                    this.outstanding_operations.remove(extension_id.as_ref());
+                    cx.notify();
                 }
-            })?;
+            });
 
-            Ok(())
+            Self::link_extension_inner(
+                &this,
+                cx,
+                &fs,
+                &extensions_dir,
+                &extension_id,
+                extension_source_dir,
+            )
+            .await
         })
+    }
+
+    async fn link_extension_inner(
+        this: &WeakEntity<Self>,
+        cx: &mut AsyncApp,
+        fs: &Arc<dyn Fs>,
+        extensions_dir: &Path,
+        extension_id: &Arc<str>,
+        extension_source_path: PathBuf,
+    ) -> Result<()> {
+        let output_path = &extensions_dir.join(extension_id.as_ref());
+        if let Some(metadata) = fs.metadata(output_path).await? {
+            if metadata.is_symlink {
+                fs.remove_file(
+                    output_path,
+                    RemoveOptions {
+                        recursive: false,
+                        ignore_if_not_exists: true,
+                    },
+                )
+                .await?;
+            } else {
+                bail!("extension {extension_id} is still installed");
+            }
+        }
+
+        fs.create_symlink(output_path, extension_source_path)
+            .await?;
+
+        this.update(cx, |this, cx| this.reload(None, cx))?.await;
+        this.update(cx, |this, cx| {
+            cx.emit(Event::ExtensionInstalled(extension_id.clone()));
+            if let Some(events) = ExtensionEvents::try_global(cx)
+                && let Some(manifest) = this.extension_manifest_for_id(extension_id)
+            {
+                events.update(cx, |this, cx| {
+                    this.emit(extension::Event::ExtensionInstalled(manifest.clone()), cx)
+                });
+            }
+        })?;
+
+        Ok(())
     }
 
     pub fn rebuild_dev_extension(&mut self, extension_id: Arc<str>, cx: &mut Context<Self>) {

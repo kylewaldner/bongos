@@ -2135,6 +2135,15 @@
   },
   // Bongos has no extension marketplace, so nothing is installed automatically.
   "auto_install_extensions": {},
+  // Installing language extensions from git. While `enabled` is false, the `extensions:`
+  // commands are hidden and only say that language extensions are off.
+  "language_extensions": {
+    "enabled": true,
+    // Offer to install an extension when a file of an unknown language is opened.
+    "offer": true,
+    // Languages never offered an extension.
+    "never_offer": [],
+  },
   // The capabilities granted to extensions.
   //
   // This list can be customized to restrict what extensions are able to do.
@@ -2675,7 +2684,7 @@
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
     // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
-    // "project_symbols".
+    // "project_symbols", "string_rectangle", "language_extensions".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2692,7 +2701,9 @@
       "query_replace",
       "set_keybindings",
       "outline",
-      "project_symbols"
+      "project_symbols",
+      "string_rectangle",
+      "language_extensions"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,

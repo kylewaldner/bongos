@@ -278,3 +278,32 @@ fn license_status_subcommand_follows_the_environment() {
     let (code, _) = license_status("offline");
     assert_eq!(code, Some(3));
 }
+
+#[test]
+fn license_lost_waits_for_the_initialized_notification() {
+    let pids = tempfile::tempdir().expect("tempdir");
+    let mut client = Client::start("license-lost-after=0,slow-init=300", pids.path());
+    client.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }));
+    // Read until the response, keeping what arrives first.
+    let mut before_initialized = Vec::new();
+    loop {
+        let message = client.next();
+        if message.get("id") == Some(&json!(1)) && message.get("method").is_none() {
+            break;
+        }
+        before_initialized.push(message);
+    }
+    // The server answers in order, so any early signal is already in the channel.
+    while let Ok(message) = client.messages.try_recv() {
+        before_initialized.push(message);
+    }
+    assert!(
+        !before_initialized.iter().any(|message| {
+            message.get("method").and_then(Value::as_str) == Some("window/showMessage")
+        }),
+        "license loss was signaled before initialized: {before_initialized:?}"
+    );
+    client.notify("initialized", json!({}));
+    let message = client.next_matching("window/showMessage");
+    assert_eq!(message["params"]["message"], "No valid license found");
+}

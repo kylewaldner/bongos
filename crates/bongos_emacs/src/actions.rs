@@ -142,6 +142,15 @@ no_count!(
     EndOfBuffer,
     XrefFindDefinitions,
     XrefFindImplementations,
+    RectangleMarkMode,
+    CopyRectangleAsKill,
+    KillRectangle,
+    DeleteRectangle,
+    OpenRectangle,
+    ClearRectangle,
+    StringRectangle,
+    YankRectangle,
+    KeepRectangle,
 );
 
 /// Starts or extends the prefix argument: C-u.
@@ -352,4 +361,27 @@ actions!(
 count_action!(
     /// Sets the mark at the cursor and starts the region, or deactivates the region.
     SetMarkCommand
+);
+actions!(
+    emacs,
+    [
+        /// Starts or ends selecting a rectangle between the mark and the cursor.
+        RectangleMarkMode,
+        /// Copies the rectangle between the mark and the cursor to the kill ring.
+        CopyRectangleAsKill,
+        /// Deletes the rectangle between the mark and the cursor and saves it to the kill ring.
+        KillRectangle,
+        /// Deletes the rectangle between the mark and the cursor without saving it.
+        DeleteRectangle,
+        /// Inserts blank space where the rectangle is, pushing its text to the right.
+        OpenRectangle,
+        /// Replaces the rectangle between the mark and the cursor with spaces.
+        ClearRectangle,
+        /// Replaces each row of the rectangle with a string, asking for it.
+        StringRectangle,
+        /// Inserts the newest rectangle from the kill ring with its top left at the cursor.
+        YankRectangle,
+        /// Keeps only the rectangle's text on its rows and deletes the rest of those rows.
+        KeepRectangle,
+    ]
 );

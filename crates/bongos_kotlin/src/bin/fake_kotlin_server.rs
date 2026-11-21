@@ -1,7 +1,7 @@
 //! A stand-in for kotlin-lsp and the IntelliJ server, used by tests and smoke scenarios. It speaks
 //! LSP over stdio with Content-Length framing. `BONGOS_FAKE_LSP_MODE` holds comma-separated modes:
 //! `progress`, `push`, `pull`, `crash-after=<ms>` (exit 1 that long after `initialized`),
-//! `hang-shutdown`, `license-lost-after=<ms>`, `slow-init=<ms>`, `stderr` (one line on stderr at start). `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
+//! `hang-shutdown`, `license-lost-after=<ms>` (counted from `initialized`), `slow-init=<ms>`, `stderr` (one line on stderr at start). `BONGOS_FAKE_LSP_PIDS` names a directory that gets one file per live process.
 //! With `BONGOS_FAKE_LSP_GATES` set to a directory, each `progress` step holds its report until a
 //! file named after the step's title (`Importing`, `Indexing`) exists there.
 //! `license status` prints per `BONGOS_FAKE_LICENSE=licensed|unlicensed|offline`.
@@ -193,18 +193,6 @@ fn serve(modes: Modes) -> io::Result<()> {
         eprintln!("{STARTUP_STDERR}");
     }
 
-    if let Some(milliseconds) = modes.license_lost_after {
-        let output = output.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(milliseconds));
-            send(
-                &output,
-                &json!({ "jsonrpc": "2.0", "method": "window/showMessage", "params": { "type": 1, "message": LICENSE_LOST_TEXT } }),
-            )
-            .ok();
-        });
-    }
-
     while let Some(message) = read_message(&mut input)? {
         let id = message.get("id").cloned();
         let Some(method) = message.get("method").and_then(Value::as_str) else {
@@ -225,6 +213,20 @@ fn serve(modes: Modes) -> io::Result<()> {
                 thread::sleep(Duration::from_millis(milliseconds));
                 // A crash leaves the pid file behind, as a real crash would.
                 std::process::exit(1)
+            });
+        }
+        // Timed from `initialized` too, so the signal never arrives before the handshake ends.
+        if method == "initialized"
+            && let Some(milliseconds) = modes.license_lost_after
+        {
+            let output = output.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(milliseconds));
+                send(
+                    &output,
+                    &json!({ "jsonrpc": "2.0", "method": "window/showMessage", "params": { "type": 1, "message": LICENSE_LOST_TEXT } }),
+                )
+                .ok();
             });
         }
         let mut result = Value::Null;

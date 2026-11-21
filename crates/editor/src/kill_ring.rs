@@ -177,6 +177,22 @@ pub fn push_plain_text(text: String, cx: &mut App) {
     update(cx, |ring| ring.push(Entry::plain(text)));
 }
 
+/// Pushes `rows` as a new rectangle entry, even when every row is empty. The
+/// clipboard's text is captured first, as a kill does, so a text copied in
+/// another app keeps its own entry; then that text is ignored, so the next
+/// yank takes the rectangle and not the clipboard. A rectangle never joins a
+/// kill sequence, and the clipboard is never written.
+pub fn push_rectangle(rows: &[String], cx: &mut App) {
+    capture_clipboard(cx);
+    update(cx, |ring| ring.push(Entry::rectangle(rows)));
+    if let Some(entry) = cx
+        .read_from_clipboard()
+        .and_then(|item| entry_from_clipboard(&item))
+    {
+        ignore_clipboard_text(&entry.text, cx);
+    }
+}
+
 /// Remembers `text` so that [`capture_clipboard`] never pushes it. Only the
 /// latest ignored text is kept.
 pub fn ignore_clipboard_text(text: &str, cx: &mut App) {
