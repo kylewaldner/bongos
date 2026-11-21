@@ -116,7 +116,14 @@ impl ChatPanel {
     /// The text of the view shown: the list, or the header line of the chat.
     pub fn view_text(&self, cx: &App) -> String {
         match self.session() {
-            Some(session) => format!("Chat\n{}\n", session.read(cx).header_text(cx)),
+            Some(session) => {
+                let session = session.read(cx);
+                format!(
+                    "Chat\n{}\n{}",
+                    session.header_text(cx),
+                    session.channel_text(cx)
+                )
+            }
             None => self.list.read(cx).view_text(cx),
         }
     }

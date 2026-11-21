@@ -1858,11 +1858,13 @@ pub struct ChatsSettingsContent {
     ///
     /// Default: true
     pub prompt_pane: Option<bool>,
-    /// Seconds without output after which a running chat counts as idle.
+    /// Seconds without output after which a running chat counts as idle. Applies to the fallback
+    /// only: a chat without reports, or a turn that ended unreported.
     ///
     /// Default: 60
     pub idle_after_secs: Option<u64>,
-    /// Milliseconds between pasting a prompt into a chat and submitting it.
+    /// Milliseconds between pasting a prompt into a chat and submitting it. Applies to the
+    /// fallback only: a chat without reports, or a turn that ended unreported.
     ///
     /// Default: 100
     pub submit_delay_ms: Option<u64>,
@@ -1870,6 +1872,11 @@ pub struct ChatsSettingsContent {
     ///
     /// Default: null
     pub types_dir: Option<String>,
+    /// Whether running chats report their state to bongos over a private local socket (agent
+    /// hooks). Set to false to fall back to estimating it from terminal output.
+    ///
+    /// Default: true
+    pub channels: Option<bool>,
     /// The agent command lines.
     pub agents: Option<ChatAgentsContent>,
 }

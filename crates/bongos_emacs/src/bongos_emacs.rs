@@ -26,6 +26,8 @@ pub mod prefix_arg;
 mod prefix_commands;
 pub mod quit;
 pub mod recenter;
+mod rectangle;
+mod rectangle_mode;
 pub mod region;
 mod region_commands;
 mod repeat;
@@ -33,6 +35,7 @@ pub mod snapshot_text;
 mod space;
 mod symbol_jump;
 mod symbol_overlay;
+mod string_rectangle;
 mod transpose;
 mod words;
 mod xref_history;
@@ -82,6 +85,12 @@ mod quit_tests;
 #[cfg(test)]
 mod recenter_tests;
 #[cfg(test)]
+mod rectangle_mode_tests;
+#[cfg(test)]
+mod rectangle_tests;
+#[cfg(test)]
+mod rectangle_yank_tests;
+#[cfg(test)]
 mod region_tests;
 #[cfg(test)]
 mod repeat_tests;
@@ -91,6 +100,8 @@ mod space_tests;
 mod symbol_jump_tests;
 #[cfg(test)]
 mod symbol_overlay_tests;
+#[cfg(test)]
+mod string_rectangle_tests;
 #[cfg(test)]
 mod transpose_tests;
 #[cfg(test)]
@@ -132,6 +143,7 @@ pub fn init(cx: &mut App) {
     ] {
         prefix_arg::declare(cx, name, prefix_arg::Meaning::Ignored);
     }
+    rectangle_mode::init(cx);
     cx.observe_new(|editor: &mut Editor, mut window, cx| {
         let weak = cx.entity().downgrade();
         register(editor, &weak, cx, motion::forward_word);
@@ -193,6 +205,20 @@ pub fn init(cx: &mut App) {
         register(editor, &weak, cx, jumps::end_of_buffer_command);
         register(editor, &weak, cx, jumps::xref_find_definitions_command);
         register(editor, &weak, cx, jumps::xref_find_implementations_command);
+        register(editor, &weak, cx, rectangle::rectangle_mark_mode_command);
+        register(editor, &weak, cx, rectangle::copy_rectangle_as_kill_command);
+        register(editor, &weak, cx, rectangle::kill_rectangle_command);
+        register(editor, &weak, cx, rectangle::delete_rectangle_command);
+        register(editor, &weak, cx, rectangle::open_rectangle_command);
+        register(editor, &weak, cx, rectangle::clear_rectangle_command);
+        register(
+            editor,
+            &weak,
+            cx,
+            string_rectangle::string_rectangle_command,
+        );
+        register(editor, &weak, cx, rectangle::yank_rectangle_command);
+        register(editor, &weak, cx, rectangle::keep_rectangle_command);
         register(
             editor,
             &weak,
@@ -225,6 +251,7 @@ pub fn init(cx: &mut App) {
         prefix_arg::init_editor(editor, window.as_deref_mut(), cx);
         recenter::init_editor(cx);
         kill_ring_sink::init_editor(cx);
+        rectangle_mode::init_editor(editor, window.as_deref_mut(), cx);
         mark::init_editor(window, cx);
     })
     .detach();

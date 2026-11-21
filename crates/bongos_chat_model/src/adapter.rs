@@ -5,17 +5,27 @@
 //! Everything here is pure. A launch is computed from the plan and the capabilities and returns data;
 //! nothing runs a process, and the only files read are the agents' own session files in
 //! `capture_session_id`, under a `home` the caller passes in. No output of this module holds a
-//! secret: the login parsers keep one boolean, and the environment is filtered to the `BONGOS_*`
-//! names of D10.
+//! credential: the login parsers keep one boolean, and the environment is filtered to the `BONGOS_*`
+//! names of D10. The one per-launch value that must stay private, the chat channel's token, lives in
+//! a [`ChannelPlan`] and reaches only a launch's environment: it is never in a generated file, an
+//! argument or a `Debug` rendering.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::fmt;
+use std::path::{Path, PathBuf};
 
+use crate::channel::report::Token;
 use crate::claude::ClaudeAdapter;
 use crate::codex::CodexAdapter;
+use crate::inject::shell_quote;
 use crate::record::{Agent, ChatRecord};
 
 pub use crate::capture::CaptureQuery;
+
+/// The environment variable that holds the chat channel's socket path.
+pub const CHANNEL_SOCKET_ENV: &str = "BONGOS_CHAT_SOCKET";
+/// The environment variable that holds the chat channel's per-launch token.
+pub const CHANNEL_TOKEN_ENV: &str = "BONGOS_CHAT_TOKEN";
 
 /// The only environment variables a launch sets (D10). Everything else in a plan's `env` is dropped.
 pub const ENV_NAMES: &[&str] = &[
@@ -30,7 +40,107 @@ pub const ENV_NAMES: &[&str] = &[
     "BONGOS_PROJECT_DIR",
     "BONGOS_WORKTREE",
     "BONGOS_ROOT",
+    CHANNEL_SOCKET_ENV,
+    CHANNEL_TOKEN_ENV,
 ];
+
+/// The names of [`ENV_NAMES`] that only a [`ChannelPlan`] sets. A plan's plain `env` never passes
+/// them, so a launch without a channel has neither.
+const CHANNEL_ENV_NAMES: &[&str] = &[CHANNEL_SOCKET_ENV, CHANNEL_TOKEN_ENV];
+
+/// Why a launch has no chat channel. Shown through [`Fallback::ChannelOff`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChannelOff {
+    /// A word of the reporter command (the bongos program path) cannot be single-quoted.
+    UnquotablePath,
+    /// The launch with the channel exited with an error before any report: the relaunch goes
+    /// without it, in case the CLI rejects the hooks.
+    ExitedEarly,
+}
+
+impl ChannelOff {
+    pub fn reason(self) -> &'static str {
+        match self {
+            ChannelOff::UnquotablePath => "the bongos path cannot be quoted",
+            ChannelOff::ExitedEarly => "started without reports (the CLI exited when given them)",
+        }
+    }
+}
+
+/// The chat channel of one launch (D6): the reporter command the agent's hooks run, the report
+/// socket and the launch token.
+///
+/// The token is private and has no accessor: the only way out of a plan is [`ChannelPlan::env`],
+/// which the adapter merges into the launch environment. The reporter command is built from the
+/// reporter words alone, so the settings file and the command line, which read only
+/// [`ChannelPlan::reporter_command`], cannot carry the token. `Debug` shows the token as `Token(..)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelPlan {
+    reporter_command: String,
+    socket: PathBuf,
+    token: Token,
+}
+
+impl ChannelPlan {
+    /// The plan for `reporter` (the program and its leading arguments, such as
+    /// `[<bongos path>, "--chat-report"]`; the hook appends its mode), each word single-quoted with
+    /// [`shell_quote`]. A word that cannot be quoted, or an empty `reporter`, turns the channel off.
+    pub fn new(reporter: &[String], socket: PathBuf, token: Token) -> Result<Self, ChannelOff> {
+        if reporter.is_empty() {
+            return Err(ChannelOff::UnquotablePath);
+        }
+        let words = reporter
+            .iter()
+            .map(|word| shell_quote(Path::new(word)).map_err(|_| ChannelOff::UnquotablePath))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            reporter_command: words.join(" "),
+            socket,
+            token,
+        })
+    }
+
+    /// The quoted reporter words, without a mode: `'<exe>' '--chat-report'`.
+    pub fn reporter_command(&self) -> &str {
+        &self.reporter_command
+    }
+
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// The channel's environment for chat `chat_id`: the socket, the id and the token.
+    pub(crate) fn env(&self, chat_id: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                CHANNEL_SOCKET_ENV.to_string(),
+                self.socket.to_string_lossy().into_owned(),
+            ),
+            ("BONGOS_CHAT_ID".to_string(), chat_id.to_string()),
+            (
+                CHANNEL_TOKEN_ENV.to_string(),
+                self.token.as_str().to_string(),
+            ),
+        ])
+    }
+}
+
+/// The channel for a launch, or `None` with [`Fallback::ChannelOff`] and its reason pushed onto
+/// `force` (so the launch is the one without a channel, labeled).
+pub fn plan_channel(
+    reporter: &[String],
+    socket: PathBuf,
+    token: Token,
+    force: &mut Vec<Fallback>,
+) -> Option<ChannelPlan> {
+    match ChannelPlan::new(reporter, socket, token) {
+        Ok(plan) => Some(plan),
+        Err(off) => {
+            note(force, Fallback::ChannelOff(off));
+            None
+        }
+    }
+}
 
 /// A flag that an agent accepts but its `--help` does not list, present from `min_version` on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,15 +149,65 @@ pub struct HiddenFlag {
     pub min_version: &'static str,
 }
 
+/// One capability of a [`VersionTable`]: present from `min_version` on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VersionRow {
+    /// A flag (starts with `-`, and then also answers `has_flag`) or any other capability name.
+    pub name: &'static str,
+    pub min_version: &'static str,
+    /// Whether the row was checked against a real binary, as opposed to assumed.
+    pub verified: bool,
+}
+
+/// What a CLI can do by version: capability rows, each with the version it first holds. A name may
+/// have several rows; it is present when any of them is satisfied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VersionTable {
+    pub rows: &'static [VersionRow],
+}
+
+impl VersionTable {
+    pub const fn new(rows: &'static [VersionRow]) -> Self {
+        Self { rows }
+    }
+}
+
 /// The flags and subcommands one installed CLI version offers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     flags: BTreeSet<String>,
     subcommands: BTreeSet<String>,
+    /// Capability names from a [`VersionTable`] (empty for the help-derived constructors).
+    names: BTreeSet<String>,
     version: String,
 }
 
 impl Capabilities {
+    /// Capabilities from the version alone, by `table`. A version that cannot be read (absent,
+    /// empty, garbage) gives an empty set, so every fallback applies, quietly. A row holds when the
+    /// version is at least its minimum, so a version newer than the table keeps every row.
+    pub fn from_version(version: Option<&str>, table: &VersionTable) -> Self {
+        let Some(token) = version
+            .and_then(version_token)
+            .filter(|token| version_parts(token).is_some())
+        else {
+            return Self::default();
+        };
+        let mut caps = Self {
+            version: token.clone(),
+            ..Self::default()
+        };
+        for row in table.rows {
+            if version_at_least(&token, row.min_version) {
+                caps.names.insert(row.name.to_string());
+                if row.name.starts_with('-') {
+                    caps.flags.insert(row.name.to_string());
+                }
+            }
+        }
+        caps
+    }
+
     /// Reads capabilities from the output of `<cli> --version` and `<cli> --help`. Only option lines
     /// (a line that starts with `-`, names separated by commas) give flags and only bare command
     /// words (alone, or followed by two spaces or an argument bracket) give subcommands, so a
@@ -73,6 +233,7 @@ impl Capabilities {
         Self {
             flags,
             subcommands,
+            names: BTreeSet::new(),
             version,
         }
     }
@@ -82,8 +243,14 @@ impl Capabilities {
         Self {
             flags: flags.iter().map(|name| name.to_string()).collect(),
             subcommands: subcommands.iter().map(|name| name.to_string()).collect(),
+            names: BTreeSet::new(),
             version: version.to_string(),
         }
+    }
+
+    /// Whether a [`VersionTable`] row of this name holds (only `from_version` sets any).
+    pub fn has(&self, name: &str) -> bool {
+        self.names.contains(name)
     }
 
     pub fn has_flag(&self, flag: &str) -> bool {
@@ -201,6 +368,8 @@ pub enum Fallback {
     ResumedLatest,
     /// Codex: no instructions key, so the instructions path is the first message.
     ContextAsFirstMessage,
+    /// The launch has no chat channel, for the reason given.
+    ChannelOff(ChannelOff),
 }
 
 impl Fallback {
@@ -217,6 +386,7 @@ impl Fallback {
             Fallback::RestartNoSession => "started a new session (no session to resume)",
             Fallback::ResumedLatest => "resumed the latest Codex session in this directory",
             Fallback::ContextAsFirstMessage => "context sent as first message",
+            Fallback::ChannelOff(off) => off.reason(),
         }
     }
 }
@@ -273,18 +443,51 @@ pub struct LaunchPlan {
     /// Fallbacks already known to be needed, such as a Claude fork whose first try with a new session
     /// id ended in an error exit.
     pub force: Vec<Fallback>,
+    /// The chat channel to configure, if any. The settings file must have been rendered with the
+    /// same plan. Only the Claude adapter uses it; [`Fallback::ChannelOff`] in `force` turns it off.
+    pub channel: Option<ChannelPlan>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
     pub program: String,
     pub args: Vec<String>,
+    /// Holds the channel's token when `channel` is true; `Debug` redacts it.
     pub env: BTreeMap<String, String>,
     pub cwd: PathBuf,
     /// Shown on the row.
     pub fallbacks: Vec<Fallback>,
     /// The session id is unknown after launch: poll [`AgentAdapter::capture_session_id`].
     pub capture_session_id: bool,
+    /// The launch configured the chat channel: its hooks are in the settings passed on the command
+    /// line and its socket, chat id and token are in `env`.
+    pub channel: bool,
+}
+
+impl fmt::Debug for LaunchSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let env = self
+            .env
+            .iter()
+            .map(|(name, value)| {
+                let shown = if name == CHANNEL_TOKEN_ENV {
+                    ".."
+                } else {
+                    value.as_str()
+                };
+                (name.as_str(), shown)
+            })
+            .collect::<BTreeMap<_, _>>();
+        f.debug_struct("LaunchSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("env", &env)
+            .field("cwd", &self.cwd)
+            .field("fallbacks", &self.fallbacks)
+            .field("capture_session_id", &self.capture_session_id)
+            .field("channel", &self.channel)
+            .finish()
+    }
 }
 
 pub trait AgentAdapter {
@@ -310,10 +513,12 @@ pub fn adapter_for(agent: Agent, command: &str) -> Box<dyn AgentAdapter> {
     }
 }
 
-/// `env` reduced to the D10 names.
+/// `env` reduced to the D10 names, without the channel's names (only a [`ChannelPlan`] sets those).
 pub(crate) fn launch_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     env.iter()
-        .filter(|(name, _)| ENV_NAMES.contains(&name.as_str()))
+        .filter(|(name, _)| {
+            ENV_NAMES.contains(&name.as_str()) && !CHANNEL_ENV_NAMES.contains(&name.as_str())
+        })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
 }

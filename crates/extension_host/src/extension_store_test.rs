@@ -1087,6 +1087,198 @@ async fn test_extension_store_makes_no_requests(cx: &mut TestAppContext) {
     assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
+const LINK_FIXTURE_MANIFEST: &str = r#"
+id = "link-fixture"
+name = "Link Fixture"
+version = "0.0.1"
+schema_version = 1
+authors = []
+description = "fixture"
+repository = "https://example.com/link-fixture"
+"#;
+
+async fn link_test_store(
+    cx: &mut TestAppContext,
+    tree: &TempTree,
+) -> (gpui::Entity<ExtensionStore>, Arc<RealFs>) {
+    init_test(cx);
+    cx.executor().allow_parking();
+    let fs = Arc::new(RealFs::new(None, cx.executor()));
+    let root = tree.path().canonicalize().unwrap();
+    let store = cx.new(|cx| {
+        ExtensionStore::new(
+            root.clone(),
+            Some(root.join("cache")),
+            Arc::new(ExtensionHostProxy::new()),
+            fs.clone(),
+            FakeHttpClient::with_404_response(),
+            FakeHttpClient::with_404_response(),
+            None,
+            NodeRuntime::unavailable(),
+            cx,
+        )
+    });
+    let mut events = cx.events(&store);
+    let executor = cx.executor();
+    let task = cx.executor().spawn(async move {
+        while let Some(event) = events.next().await {
+            if let Event::StartedReloading = event {
+                executor.advance_clock(RELOAD_DEBOUNCE_DURATION);
+            }
+        }
+    });
+    task.detach();
+    (store, fs)
+}
+
+fn link_tree() -> TempTree {
+    TempTree::new(json!({
+        "installed": {},
+        "cache": {},
+        "one": { "extension.toml": LINK_FIXTURE_MANIFEST },
+        "two": { "extension.toml": LINK_FIXTURE_MANIFEST, "marker": "" },
+    }))
+}
+
+fn count_installed_events(
+    store: &gpui::Entity<ExtensionStore>,
+    cx: &mut TestAppContext,
+) -> Arc<Mutex<Vec<Arc<str>>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    cx.update(|cx| {
+        cx.subscribe(store, {
+            let seen = seen.clone();
+            move |_, event, _| {
+                if let Event::ExtensionInstalled(id) = event {
+                    seen.lock().push(id.clone());
+                }
+            }
+        })
+        .detach();
+    });
+    seen
+}
+
+#[gpui::test]
+async fn test_link_extension_loads_and_emits(cx: &mut TestAppContext) {
+    let tree = link_tree();
+    let (store, _fs) = link_test_store(cx, &tree).await;
+    let seen = count_installed_events(&store, cx);
+    let root = tree.path().canonicalize().unwrap();
+
+    store
+        .update(cx, |store, cx| {
+            store.link_extension("link-fixture".into(), root.join("one"), cx)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        seen.lock().as_slice(),
+        ["link-fixture".into()] as [Arc<str>; 1]
+    );
+    store.read_with(cx, |store, _| {
+        assert!(store.installed_extensions().contains_key("link-fixture"));
+        assert!(store.outstanding_operations().is_empty());
+    });
+    assert!(root.join("installed/link-fixture").is_symlink());
+}
+
+#[gpui::test]
+async fn test_link_extension_replaces_existing_link(cx: &mut TestAppContext) {
+    let tree = link_tree();
+    let (store, _fs) = link_test_store(cx, &tree).await;
+    let seen = count_installed_events(&store, cx);
+    let root = tree.path().canonicalize().unwrap();
+
+    for dir in ["one", "two"] {
+        store
+            .update(cx, |store, cx| {
+                store.link_extension("link-fixture".into(), root.join(dir), cx)
+            })
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(seen.lock().len(), 2);
+    assert_eq!(
+        std::fs::read_link(root.join("installed/link-fixture")).unwrap(),
+        root.join("two")
+    );
+    assert!(root.join("installed/link-fixture/marker").exists());
+    store.read_with(cx, |store, _| {
+        assert!(store.installed_extensions().contains_key("link-fixture"));
+    });
+}
+
+#[gpui::test]
+async fn test_link_extension_refuses_real_folder(cx: &mut TestAppContext) {
+    let tree = link_tree();
+    let (store, _fs) = link_test_store(cx, &tree).await;
+    let root = tree.path().canonicalize().unwrap();
+    let real = root.join("installed/link-fixture");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("keep"), "x").unwrap();
+
+    let result = store
+        .update(cx, |store, cx| {
+            store.link_extension("link-fixture".into(), root.join("one"), cx)
+        })
+        .await;
+
+    assert!(result.is_err());
+    assert!(!real.is_symlink());
+    assert_eq!(std::fs::read_to_string(real.join("keep")).unwrap(), "x");
+    store.read_with(cx, |store, _| {
+        assert!(store.outstanding_operations().is_empty());
+    });
+}
+
+#[gpui::test]
+async fn test_supported_api_max_per_channel(cx: &mut TestAppContext) {
+    let (stable, dev) = cx.update(|cx| {
+        release_channel::init_test(
+            semver::Version::new(0, 0, 0),
+            release_channel::ReleaseChannel::Stable,
+            cx,
+        );
+        let stable = crate::supported_api_max(cx);
+        release_channel::init_test(
+            semver::Version::new(0, 0, 0),
+            release_channel::ReleaseChannel::Dev,
+            cx,
+        );
+        (stable, crate::supported_api_max(cx))
+    });
+    assert_eq!(stable, semver::Version::new(0, 7, 0));
+    assert_eq!(dev, semver::Version::new(0, 8, 0));
+    assert!(stable < dev);
+    assert!(crate::is_suppressed_extension("snippets"));
+    assert!(!crate::is_suppressed_extension("link-fixture"));
+}
+
+#[gpui::test]
+async fn test_install_dev_extension_still_links_and_loads(cx: &mut TestAppContext) {
+    let tree = link_tree();
+    let (store, _fs) = link_test_store(cx, &tree).await;
+    let seen = count_installed_events(&store, cx);
+    let root = tree.path().canonicalize().unwrap();
+
+    store
+        .update(cx, |store, cx| {
+            store.install_dev_extension(root.join("one"), cx)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(seen.lock().len(), 1);
+    assert!(root.join("installed/link-fixture").is_symlink());
+    store.read_with(cx, |store, _| {
+        assert!(store.installed_extensions().contains_key("link-fixture"));
+        assert!(store.outstanding_operations().is_empty());
+    });
+}
+
 fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let store = SettingsStore::test(cx);

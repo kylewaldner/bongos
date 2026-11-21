@@ -578,7 +578,7 @@ async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 61] = [
+const EMACS_ACTIONS: [(&str, &str); 70] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -661,6 +661,18 @@ const EMACS_ACTIONS: [(&str, &str); 61] = [
     ("emacs::DigitArgument", "emacs: digit argument"),
     ("emacs::NegativeArgument", "emacs: negative argument"),
     ("emacs::OpenLine", "emacs: open line"),
+    ("emacs::RectangleMarkMode", "emacs: rectangle mark mode"),
+    (
+        "emacs::CopyRectangleAsKill",
+        "emacs: copy rectangle as kill",
+    ),
+    ("emacs::KillRectangle", "emacs: kill rectangle"),
+    ("emacs::DeleteRectangle", "emacs: delete rectangle"),
+    ("emacs::OpenRectangle", "emacs: open rectangle"),
+    ("emacs::ClearRectangle", "emacs: clear rectangle"),
+    ("emacs::StringRectangle", "emacs: string rectangle"),
+    ("emacs::YankRectangle", "emacs: yank rectangle"),
+    ("emacs::KeepRectangle", "emacs: keep rectangle"),
 ];
 
 #[gpui::test]
@@ -1366,6 +1378,9 @@ async fn task_mode_chat_reaches_the_real_chat_new(cx: &mut TestAppContext) {
                 types_root: dir.join("chat-types"),
                 runtime: dir.join("runtime"),
             },
+            bongos_chat::ChannelConfig {
+                reporter: vec!["true".to_string()],
+            },
             cx,
         );
     });
@@ -1451,6 +1466,9 @@ async fn default_workspace_has_the_chats_panel(cx: &mut TestAppContext) {
             bongos_chat::ChatDirs {
                 types_root: dir.join("chat-types"),
                 runtime: dir.join("runtime"),
+            },
+            bongos_chat::ChannelConfig {
+                reporter: vec!["true".to_string()],
             },
             cx,
         );

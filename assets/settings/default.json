@@ -2146,6 +2146,15 @@
   },
   // Bongos has no extension marketplace, so nothing is installed automatically.
   "auto_install_extensions": {},
+  // Installing language extensions from git. While `enabled` is false, the `extensions:`
+  // commands are hidden and only say that language extensions are off.
+  "language_extensions": {
+    "enabled": true,
+    // Offer to install an extension when a file of an unknown language is opened.
+    "offer": true,
+    // Languages never offered an extension.
+    "never_offer": [],
+  },
   // The capabilities granted to extensions.
   //
   // This list can be customized to restrict what extensions are able to do.
@@ -2686,7 +2695,7 @@
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
     // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
-    // "project_symbols", "xref_history".
+    // "project_symbols", "xref_history", "string_rectangle", "language_extensions".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2704,7 +2713,9 @@
       "set_keybindings",
       "outline",
       "project_symbols",
-      "xref_history"
+      "xref_history",
+      "string_rectangle",
+      "language_extensions"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,
@@ -2795,12 +2806,18 @@
     "default_width": 720,
     // Whether a dual-layout chat shows the prompts pane beside its terminal.
     "prompt_pane": true,
-    // Seconds without output after which a running chat counts as idle.
+    // Seconds without output after which a running chat counts as idle. Applies to the fallback
+    // only: a chat without reports, or a turn that ended unreported.
     "idle_after_secs": 60,
-    // Milliseconds between pasting a prompt into a chat and submitting it.
+    // Milliseconds between pasting a prompt into a chat and submitting it. Applies to the
+    // fallback only: a chat without reports, or a turn that ended unreported.
     "submit_delay_ms": 100,
     // The directory of session types; null means ~/.bongos/chat-types.
     "types_dir": null,
+    // Whether running chats report their state to bongos over a private local
+    // socket (agent hooks). Set to false to fall back to estimating it from
+    // terminal output.
+    "channels": true,
     // The agent CLIs: the program to run and arguments added to every launch.
     "agents": {
       "claude": { "command": "claude", "extra_args": [] },

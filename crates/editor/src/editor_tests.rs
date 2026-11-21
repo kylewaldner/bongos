@@ -39002,6 +39002,117 @@ async fn test_set_kill_ring_text_is_yanked(cx: &mut TestAppContext) {
     cx.assert_editor_state("one sent prompt ˇtwo");
 }
 
+fn past_line_end_bounds_for(
+    cx: &mut EditorTestContext,
+) -> (Vec<gpui::Bounds<gpui::Pixels>>, gpui::Pixels, gpui::Pixels) {
+    cx.update_editor(|editor, _, cx| {
+        let snapshot = editor.display_snapshot(cx);
+        let rows = editor.past_line_end_highlight_rows(&snapshot);
+        let position_map = editor.last_position_map.as_ref().unwrap();
+        let origin = position_map.text_hitbox.bounds.origin;
+        let eol_x = position_map.line_layouts[0].width;
+        (
+            position_map.past_line_end_bounds(origin, &rows),
+            origin.x + eol_x,
+            position_map.em_layout_width,
+        )
+    })
+}
+
+fn set_first_line_highlight(cx: &mut EditorTestContext, row: u32, cells: Range<u32>) {
+    cx.update_editor(|editor, _, cx| {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let anchor = snapshot.anchor_after(Point::new(row, snapshot.line_len(MultiBufferRow(row))));
+        editor.set_past_line_end_highlights(vec![(anchor, cells)], cx);
+    });
+}
+
+#[gpui::test]
+async fn test_past_line_end_highlight_layout(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state("abˇ\nlonger line here\nlast");
+    set_first_line_highlight(&mut cx, 0, 2..5);
+    cx.run_until_parked();
+    let (bounds, eol_x, em) = past_line_end_bounds_for(&mut cx);
+    assert_eq!(bounds.len(), 1);
+    assert!((bounds[0].origin.x - (eol_x + em * 2.0)).abs() < gpui::px(0.01));
+    assert!((bounds[0].size.width - em * 3.0).abs() < gpui::px(0.01));
+}
+
+#[gpui::test]
+async fn test_past_line_end_highlight_skips_rows_outside_visible_range(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    let text = (0..200)
+        .map(|ix| format!("line {ix}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    cx.set_state(&format!("ˇ{text}"));
+    set_first_line_highlight(&mut cx, 150, 1..3);
+    cx.run_until_parked();
+    let (bounds, _, _) = past_line_end_bounds_for(&mut cx);
+    assert!(bounds.is_empty());
+}
+
+#[gpui::test]
+async fn test_clear_past_line_end_highlights(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state("abˇ\nlonger line here");
+    set_first_line_highlight(&mut cx, 0, 1..3);
+    cx.run_until_parked();
+    assert_eq!(past_line_end_bounds_for(&mut cx).0.len(), 1);
+    cx.update_editor(|editor, _, cx| editor.clear_past_line_end_highlights(cx));
+    cx.run_until_parked();
+    assert!(past_line_end_bounds_for(&mut cx).0.is_empty());
+}
+
+#[gpui::test]
+async fn test_past_line_end_highlight_moves_with_edits(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state("ˇab\nlonger line here");
+    set_first_line_highlight(&mut cx, 0, 1..3);
+    cx.update_editor(|editor, window, cx| {
+        editor.insert("new\n", window, cx);
+    });
+    cx.run_until_parked();
+    let rows = cx.update_editor(|editor, _, cx| {
+        let snapshot = editor.display_snapshot(cx);
+        editor.past_line_end_highlight_rows(&snapshot)
+    });
+    assert_eq!(rows, vec![(DisplayRow(1), 1..3)]);
+}
+
+#[gpui::test]
+async fn test_control_chord_shows_no_pending_text(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    cx.update(|cx| {
+        cx.bind_keys([gpui::KeyBinding::new(
+            "ctrl-x r o",
+            MoveToEnd,
+            Some("Editor"),
+        )])
+    });
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state("abˇc");
+    cx.update_editor(|editor, window, cx| {
+        editor.finalize_last_transaction(cx);
+        editor.insert("Z", window, cx);
+        editor.finalize_last_transaction(cx);
+    });
+
+    cx.simulate_keystrokes("ctrl-x r");
+    cx.assert_editor_state("abZˇc");
+
+    cx.simulate_keystrokes("o");
+    cx.assert_editor_state("abZcˇ");
+    // The chord left nothing in the history, so undo takes back the insert.
+    cx.update_editor(|editor, window, cx| editor.undo(&Undo, window, cx));
+    cx.assert_editor_state("abˇc");
+}
+
 /// `count` lines, `fn f<row>() {}`, with the caret on the name in `caret_row`.
 fn numbered_rows(count: usize, caret_row: Option<usize>) -> String {
     (0..count)

@@ -10,6 +10,11 @@
 //! When any of these is unknown (an unknown agent, a Claude chat without a session id, a CLI
 //! storage directory that is not there or cannot be read, a CLI whose storage the environment
 //! moved with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`) the record is kept: when unsure, keep.
+//!
+//! A new Claude chat whose channel went live in this run answers the last question from its
+//! reports instead (design D11): no `prompt_submitted` and no `turn_done` report means the CLI stored
+//! no conversation, and no file is read. Any other chat (resumed, forked, or one whose channel
+//! never went live) keeps the file checks.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -46,6 +51,8 @@ pub enum KeepReason {
     ConversationStored,
     /// The CLI's storage directory is not there or could not be read.
     CannotCheck,
+    /// The chat's channel reported a prompt or a finished turn.
+    PromptReported,
 }
 
 /// The verdict on `record`, which ended. `saw_input` is whether the runtime saw keyboard input or
@@ -55,6 +62,29 @@ pub enum KeepReason {
 pub fn cleanup_verdict(
     record: &ChatRecord,
     saw_input: bool,
+    live_session: Option<&str>,
+    home: &Path,
+    env: &BTreeMap<String, String>,
+    find_codex_session: impl FnOnce() -> Option<String>,
+) -> Cleanup {
+    cleanup_verdict_with_reports(
+        record,
+        saw_input,
+        None,
+        live_session,
+        home,
+        env,
+        find_codex_session,
+    )
+}
+
+/// [`cleanup_verdict`] for a chat whose channel may answer: `prompt_reported` is `Some` only for a
+/// new Claude chat whose channel went live in this run, and says whether a `prompt_submitted` or
+/// `turn_done` report was accepted. Then no file is read.
+pub fn cleanup_verdict_with_reports(
+    record: &ChatRecord,
+    saw_input: bool,
+    prompt_reported: Option<bool>,
     live_session: Option<&str>,
     home: &Path,
     env: &BTreeMap<String, String>,
@@ -70,6 +100,11 @@ pub fn cleanup_verdict(
     match record.known_agent() {
         None => Cleanup::Keep(KeepReason::UnknownAgent),
         Some(Agent::Claude) => {
+            match prompt_reported {
+                Some(true) => return Cleanup::Keep(KeepReason::PromptReported),
+                Some(false) => return Cleanup::Delete,
+                None => {}
+            }
             let Some(session) = session else {
                 return Cleanup::Keep(KeepReason::SessionUnknown);
             };
@@ -86,7 +121,11 @@ pub fn cleanup_verdict(
             if session.is_some() {
                 return Cleanup::Keep(KeepReason::ConversationStored);
             }
-            if env.contains_key(CODEX_HOME) || !home.join(".codex").join("sessions").is_dir() {
+            if env.contains_key(CODEX_HOME) {
+                return Cleanup::Keep(KeepReason::CannotCheck);
+            }
+            note_storage_read(home);
+            if !home.join(".codex").join("sessions").is_dir() {
                 return Cleanup::Keep(KeepReason::CannotCheck);
             }
             match find_codex_session() {
@@ -95,6 +134,32 @@ pub fn cleanup_verdict(
             }
         }
     }
+}
+
+/// The homes whose CLI storage a lookup read, in order, for the tests.
+#[cfg(test)]
+static STORAGE_READS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Notes a look into the CLI storage under `home` (tests only; nothing in release builds).
+fn note_storage_read(home: &Path) {
+    #[cfg(test)]
+    STORAGE_READS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(home.to_path_buf());
+    #[cfg(not(test))]
+    let _ = home;
+}
+
+/// How many times a lookup read the CLI storage under `home` so far.
+#[cfg(test)]
+pub(crate) fn storage_reads(home: &Path) -> usize {
+    STORAGE_READS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|read| read.as_path() == home)
+        .count()
 }
 
 /// Whether Claude Code keeps a transcript of `session` run in `cwd`: `None` when its projects
@@ -111,6 +176,7 @@ pub(crate) fn claude_transcript(home: &Path, cwd: &Path, session: &str) -> Optio
     if session.is_empty() || session.starts_with('.') || session.contains(['/', '\\', '\0']) {
         return None;
     }
+    note_storage_read(home);
     let projects = home.join(".claude").join("projects");
     if !projects.is_dir() {
         return None;

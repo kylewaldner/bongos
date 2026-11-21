@@ -10,6 +10,8 @@
 
 mod actions;
 mod artifacts_view;
+#[cfg(unix)]
+mod channel_server;
 mod cleanup;
 mod commands;
 mod facts;
@@ -39,6 +41,8 @@ use gpui::{App, AppContext as _, Entity, Global};
 
 pub use actions::{action_types, chat, init_palette};
 pub use artifacts_view::{ROW_NOTE, STALE_LINE, artifacts_text, is_stale, stale_chat};
+#[cfg(unix)]
+pub use channel_server::{ChannelServer, MAX_SOCKET_PATH_BYTES, ReportHandler, SocketDirInputs};
 pub use cleanup::{Cleanup, KeepReason, cleanup_verdict};
 pub use commands::{
     agent_choices, list_types, offer_resume_and_send, open_chat, start_chat_on_task,
@@ -58,15 +62,15 @@ pub use layout::PROMPT_PANE_OFF;
 pub use live_modes::{SOURCE_NAME, start_current_todo};
 pub use panel::{ChatPanel, focus_prompts, init_panel, open_prompts_in_center};
 pub use runtime::{
-    ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChatRuntime, ChatRuntimeEvent, ChatState,
-    LiveChat, MID_TURN, RuntimeStats,
+    ACTIVE_DEBOUNCE, CAPTURE_INTERVAL, CAPTURE_WINDOW, ChannelStatus, ChatRuntime,
+    ChatRuntimeEvent, ChatState, EARLY_EXIT, LiveChat, MID_TURN, REPORTS_OFF, RuntimeStats, Source,
 };
 pub use scope::{
     ChatScope, CwdSource, IMPLEMENT_TYPE, START_FIRST, project_repositories, resolve_scope,
 };
 pub use send::{
-    BRACKETED_WAIT, ChatRef, ChatToast, SendError, SendOptions, Sent, chat_for_prompts_file,
-    chats_for_prompts_file, send, set_auto_submit, set_prompts_file,
+    BRACKETED_WAIT, CONFIRM_WAIT, ChatRef, ChatToast, SendError, SendOptions, Sent,
+    chat_for_prompts_file, chats_for_prompts_file, send, set_auto_submit, set_prompts_file,
 };
 pub use session_view::{
     PromptPaneProvider, SessionView, SessionViewEvent, set_prompt_pane_provider,
@@ -95,6 +99,30 @@ impl ChatDirs {
     }
 }
 
+/// How a chat's agent hooks run the report client: the program and its leading arguments, which
+/// the app makes its own executable plus `--chat-report`. Tests pass `["true"]`, so a hook a fake
+/// CLI runs never starts the test binary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelConfig {
+    pub reporter: Vec<String>,
+}
+
+struct GlobalChannelConfig(ChannelConfig);
+
+impl Global for GlobalChannelConfig {}
+
+impl ChannelConfig {
+    /// The configuration [`init`] was given; `None` after [`init_in`] alone.
+    pub fn global(cx: &App) -> Option<&ChannelConfig> {
+        cx.try_global::<GlobalChannelConfig>()
+            .map(|global| &global.0)
+    }
+
+    pub(crate) fn set_global(self, cx: &mut App) {
+        cx.set_global(GlobalChannelConfig(self));
+    }
+}
+
 /// Registers the actions of the `chat` namespace that have handlers on `workspace`.
 pub fn register(workspace: &mut workspace::Workspace) {
     send::register(workspace);
@@ -110,8 +138,10 @@ impl Global for GlobalChatStore {}
 
 /// Registers the `chats` settings and creates the global [`ChatHealth`], [`ChatStore`] and
 /// [`ChatRuntime`]. Call after `bongos_work::init`. The store reads and writes nothing, and the
-/// runtime starts nothing, until `chats.enabled` is true.
-pub fn init(dirs: ChatDirs, cx: &mut App) {
+/// runtime starts nothing, until `chats.enabled` is true. `channel` is kept as a global for the
+/// launches that report over the chat channel.
+pub fn init(dirs: ChatDirs, channel: ChannelConfig, cx: &mut App) {
+    channel.set_global(cx);
     init_in(
         util::paths::home_dir().clone(),
         std::collections::BTreeMap::new(),
@@ -140,6 +170,12 @@ pub fn init_in(
     let runtime = cx.new(|cx| ChatRuntime::new(store.clone(), home, cx));
     live_modes::init(&runtime, &store, cx);
     lifecycle::init(&store, cx);
+    // The report server binds nothing until `chats.enabled && chats.channels`.
+    #[cfg(unix)]
+    {
+        let server = channel_server::init(cx);
+        runtime::deliver_reports(&server, &runtime, cx);
+    }
     end_chats_on_quit(&runtime, cx);
     ChatRuntime::set_global(runtime, cx);
 }
@@ -197,6 +233,12 @@ impl ChatStore {
 
 #[cfg(test)]
 mod artifacts_tests;
+
+#[cfg(all(test, unix))]
+mod channel_runtime_tests;
+
+#[cfg(all(test, unix))]
+mod channel_server_tests;
 
 #[cfg(test)]
 mod commands_tests;

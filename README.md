@@ -156,12 +156,35 @@ launch.
   no environment variable. Hide one and resume the chat, and the regenerated list no longer has it.
   This is not file protection: a CLI can still read any file it can reach, and a manifest that
   cannot be parsed lists nothing.
-- **Fallbacks are labeled.** bongos reads each CLI's own `--help` and uses only what it finds. When
-  a feature is missing, the chat still starts and its row in the Chats list says what changed
-  (`labels:`), for example "session id read from the CLI's files", "name not passed to the CLI",
-  "context appended to the system prompt (no hooks)", or "started a new session (no session to
-  resume)". A fork when the CLI has no fork command is a fresh session that starts from a note naming
-  the chat it continues, and is labeled `handoff`; nothing passes one off as a native fork.
+- **Chat state.** Each chat shows `running`, `waiting` or `idle`. A Claude chat's state is exact:
+  Claude's own hooks (session start, prompt submitted, turn done, notification, tool done) run
+  `bongos --chat-report`, which tells bongos the event and nothing else, never the prompt, message,
+  tool data, transcript path or directory. A Codex chat's state is estimated as before, from the
+  bell, terminal output and an idle timer. An estimated state carries a muted "estimated" tag in the
+  chat's header and its list row, whose tooltip says why: reports are off (`chats.channels`), the
+  report socket is unavailable, the Claude version is older than the first with hooks bongos knows,
+  no report has come yet, a turn ended without a report (interrupted or denied), the agent does not
+  report its state yet, the CLI exited when given the hooks (it is then started once more without
+  them), or the bongos path cannot be quoted. `chats.channels` (default `true`) turns reports on for
+  new launches; turning it off stops them at once and running chats go back to estimates.
+  `chats.idle_after_secs` and `chats.submit_delay_ms` apply only to the fallback: a chat without
+  reports, or a turn that ended without one. Reports arrive on one socket per bongos process,
+  `$XDG_RUNTIME_DIR/bongos/chat-<pid>.sock`, else `<temp dir>/bongos-<uid>/chat-<pid>.sock`: the
+  directory is yours alone (mode `0700`, refused if it is a symlink or open to others), the socket
+  is mode `0600`, a connection from another user is dropped, and a report must name a running chat
+  and carry that launch's token, which lives only in bongos's memory and the chat's environment.
+  This keeps out other users and accidental cross-talk (a stale process, a copied environment, a
+  nested CLI). It does not stop a hostile program running as you, which could read a chat's
+  environment from `/proc`; such a program can already do anything you can.
+- **Fallbacks are labeled.** bongos checks each Claude version against a table of the versions it
+  has verified (flags, the login probe and hooks), instead of parsing `--help`: a newer version is
+  assumed to keep everything, and an older or unreadable one gets the fallbacks; Codex is still read
+  from its `--help`. When a feature is missing, the chat still starts and its row in the Chats list
+  says what changed (`labels:`), for example "session id read from the CLI's files", "name not
+  passed to the CLI", "context appended to the system prompt (no hooks)", or "started a new session
+  (no session to resume)". A fork when the CLI has no fork command is a fresh session that starts
+  from a note naming the chat it continues, and is labeled `handoff`; nothing passes one off as a
+  native fork.
 - **Keys (Emacs keymap only).** `C-c c n` starts a chat on the focused task, `C-c c o` opens one
   (resuming it when closed), `C-c c ]` and `C-c c [` cycle, `C-c c k` closes, `C-c c a` archives and
   `C-c c u` restores, `C-c c l` lists the archive, `C-c c r` renames, `C-c c f` forks into another
@@ -599,6 +622,13 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-up, M-down | move the line up or down |
 | C-x C-;, C-c ;, C-c y | toggle comment, comment-dwim, duplicate line |
 | C-=, C-- | expand and contract the region |
+| C-x SPC | rectangle-mark-mode: start or end selecting a rectangle |
+| C-x r M-w | copy-rectangle-as-kill |
+| C-x r k, C-x r d | kill rectangle, delete rectangle |
+| C-x r o, C-x r c | open rectangle (blank column), clear rectangle (spaces) |
+| C-x r t | string-rectangle: replace each row of the rectangle with a string (prompts in the minibuffer) |
+| C-x r y | yank-rectangle |
+| C-x r K | keep-rectangle: keep only the rectangle's text on its rows |
 
 | Key | Command |
 |---|---|
@@ -667,6 +697,28 @@ deactivated; set it to `true` to have typing replace the region, as in other edi
 ```json
 { "emacs": { "delete_selection": true } }
 ```
+
+### Rectangles
+
+A rectangle is the block of columns between the mark and the cursor, over every row from one to the
+other. C-x SPC starts rectangle-mark-mode, which shows the block as you move; the `C-x r` commands
+also work on a plain mark and the cursor.
+
+| Key | What it does |
+|---|---|
+| C-x r M-w | copy the rectangle to the kill ring |
+| C-x r k, C-x r d | kill it (to the ring), delete it |
+| C-x r o | open it: insert blank space as wide as the rectangle and push the text right |
+| C-x r c | clear it: replace it with spaces |
+| C-x r t | ask for a string in the minibuffer (`String rectangle: `) and replace each row with it |
+| C-x r y | yank the newest rectangle with its top left at the cursor |
+| C-x r K | keep only the rectangle's text on its rows |
+
+Columns are the displayed ones: a tab that crosses an edge of the rectangle is cut there and the
+rest is filled with spaces. A wide character (such as a Chinese one) is never split: it belongs to
+the rectangle when its first column is inside it. A yank pads short rows with
+spaces and adds lines at the end of the buffer. Each command is one undo step. C-y yanks a killed
+rectangle row by row, as C-x r y does. The rectangle commands never touch the system clipboard.
 
 ### Universal argument
 
@@ -918,7 +970,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "string_rectangle", "language_extensions"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
@@ -977,12 +1029,107 @@ Tools bongos uses but does not install:
 - `bun` for Bun projects, `uv` or `poetry` for those projects' environments (bongos finds the
   environments they made; it does not create them), and the project's own Biome.
 
+## Language extensions
+
+A language bongos does not ship can come from a language extension, built from a git repository
+on your machine. There is no marketplace: bongos carries a short list of extensions, each pinned
+to a commit, and you can install any other repository by its URL.
+
+When you open a file of a language bongos does not know but the list does, the status bar says
+"Swift support is available" with Install, Not now (hides the offer for that language in that window
+until restart) and Don't offer again
+(adds the language to `language_extensions.never_offer`). Opening the file only reads the list;
+nothing is cloned or built until you choose Install.
+
+| Command | What it does |
+|---|---|
+| `extensions: install language` | Pick a language from the list and install it at its pinned commit |
+| `extensions: install from git` | Install a repository by URL, then a branch, tag or commit (empty for the default branch) |
+| `extensions: update` | Move an extension to its new pin, or refetch the ref you installed; `latest` leaves the pin |
+| `extensions: rebuild` | Build the same commit again, with no network for the extension itself |
+| `extensions: remove` | Unload an extension and delete its checkout, link and record |
+| `extensions: show build log` | Open the build log of an extension, of the running build, or of the last failed one |
+
+The status line shows each install as it goes ("Swift extension: building (12s)"), a failure
+with Show log and Dismiss, and "Swift installed" for a few seconds after one finishes. Installed
+extensions are also on the Extensions page (`zed: extensions`), with their source URL and short
+commit and Update, Rebuild and Remove buttons.
+
+Settings:
+
+```json
+{
+  "language_extensions": {
+    "enabled": true,
+    "offer": true,
+    "never_offer": []
+  }
+}
+```
+
+`enabled: false` turns the commands off (each then only says that language extensions are off),
+and the startup repair, the offer line and the build status item too; extensions already installed
+still load. `offer: false` turns the offer line off.
+
+Trust: an extension runs code. Its build runs on your machine, and once loaded it can download and
+start a language server. An install from the list at its pinned commit does not ask. Anything else,
+a URL not on the list, another commit of a listed repository, or an update to a new commit, asks a
+strict question naming the URL and the full commit, which only a typed `yes` or `no` answers. What
+a loaded extension may do is `granted_extension_capabilities`; its default allows any process, any
+download and any npm package:
+
+```json
+{
+  "granted_extension_capabilities": [
+    { "kind": "process:exec", "command": "*", "args": ["**"] },
+    { "kind": "download_file", "host": "*", "path": ["**"] },
+    { "kind": "npm:install", "package": "*" }
+  ]
+}
+```
+
+Tools: `git` is needed for every install. An extension with a Rust part (a `Cargo.toml`) needs
+Rust with the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`); without them the install
+stops before the build and says what to run. bongos never runs `rustup` for an
+install from git. An extension whose `zed_extension_api` is newer than this bongos supports is
+refused before the build, naming both versions. Builds run one at a time, in the background; the
+editor stays usable while one runs.
+
+Hosts, each contacted only when you run an install, update or rebuild, never at start and never on
+a timer:
+
+| Host | When |
+|---|---|
+| The extension's repository host | Install and update (`git ls-remote` and `git fetch`); a rebuild uses the local checkout |
+| The hosts of its grammar repositories (from its `extension.toml`) | Building an extension with grammars |
+| `github.com` | The first build of an extension with grammars, to download the WASI SDK (kept for later builds) |
+| Cargo's registry (`index.crates.io` and `static.crates.io` unless Cargo is configured otherwise) | Building an extension with a Rust part |
+
+A loaded extension may then download its language server from wherever it names, within
+`granted_extension_capabilities`. The test `crates/bongos_extensions/tests/idle.rs` checks the
+"never on a timer" part: a day passes with a file of a listed language open and nothing is
+contacted. The language extensions smoke run has no idle window of its own.
+
+Disk: everything is under the data directory (`~/.local/share/bongos` on Linux), in
+`extensions/git`: one checkout per extension (`git/<id>/<commit>`, with its build output), its
+install record, the build logs in `git/logs` and the lock files in `git/locks`.
+`extensions/installed/<id>` is a link to the checkout. The build output stays with the checkout,
+so a restart loads the extension again with no build. A build log is kept until that extension's
+next install, update, rebuild or remove replaces it; `extensions: remove` deletes the checkout,
+the link and the record.
+
+Before a release, a developer runs `script/bongos/check-language-list` by hand, with network: it
+fetches every listed commit, runs the preflight, builds each extension and checks its extension
+API version. No gate runs it, since it needs the network and a Rust toolchain.
+
 ## Privacy
 
 bongos's own code, and the telemetry and update checks of the language servers it runs, contact
 no host beyond what a feature needs (the JetBrains license check for the IntelliJ server). A
 project's own Gradle build is exempt: it may contact its hosts, such as services.gradle.org,
-plugins.gradle.org, Maven repositories and Artifact Registry.
+plugins.gradle.org, Maven repositories and Artifact Registry. An installed language extension's
+own code may contact hosts when its language server starts, within the capabilities granted to
+extensions.
 
 Linear (`api.linear.app`) is contacted only when `linear.enabled` is on (the default) and a token
 is set, for a linked task or a Linear command. The token is stored in the credential store and
@@ -993,6 +1140,10 @@ and the contents of masked fields (passwords) are never saved, nor is an entry o
 `emacs.save_kill_ring` to `false` turns saving off and deletes the saved ring.
 The secret hint is advisory: text from a password manager that sets no hint, from any macOS
 manager, or typed by hand is saved like any other kill. `emacs.save_kill_ring: false` turns saving off.
+
+Language extensions contact nothing on their own: no update check and no list download (the list
+is compiled in). An install, update or rebuild you run contacts only the extension's repository
+host and the hosts its build needs (see Language extensions for the table).
 
 bongos never contacts bongos.rocks. The list of kotlin-lsp builds is compiled in.
 

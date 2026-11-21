@@ -3,6 +3,9 @@ mod components;
 use std::any::TypeId;
 use std::sync::Arc;
 
+use bongos_extensions::commands::git_installs;
+use bongos_extensions::installer::Installer;
+use bongos_extensions_model::InstallRecord;
 use cloud_api_types::ExtensionProvides;
 use command_palette_hooks::CommandPaletteFilter;
 use editor::{Editor, EditorElement, EditorStyle};
@@ -75,8 +78,113 @@ impl WorkspaceError for DevExtensionNotInstalledError {
     }
 }
 
+/// The git install records, or none when the installer is not set up.
+fn git_records(cx: &App) -> Vec<InstallRecord> {
+    Installer::try_global(cx)
+        .map(|installer| git_installs(installer.read(cx).layout()))
+        .unwrap_or_default()
+}
+
+/// The dev extensions the rebuild command offers: those without an install record.
+fn rebuild_candidates(
+    dev_extensions: Vec<Arc<ExtensionManifest>>,
+    records: &[InstallRecord],
+) -> Vec<Arc<ExtensionManifest>> {
+    dev_extensions
+        .into_iter()
+        .filter(|manifest| {
+            !records
+                .iter()
+                .any(|record| record.id == manifest.id.as_ref())
+        })
+        .collect()
+}
+
+fn rebuild_candidates_from_store(cx: &App) -> Vec<Arc<ExtensionManifest>> {
+    let dev_extensions = ExtensionStore::global(cx)
+        .read(cx)
+        .dev_extensions()
+        .cloned()
+        .collect();
+    rebuild_candidates(dev_extensions, &git_records(cx))
+}
+
+/// A button on the card of a git-installed extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitInstallButton {
+    Update,
+    UpdateToLatest,
+    Rebuild,
+    Remove,
+}
+
+impl GitInstallButton {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Update => "Update",
+            Self::UpdateToLatest => "Update to latest",
+            Self::Rebuild => "Rebuild",
+            Self::Remove => "Remove",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::UpdateToLatest => "update-latest",
+            Self::Rebuild => "rebuild",
+            Self::Remove => "remove",
+        }
+    }
+
+    /// The action the shared command path runs for this button.
+    fn action(self, id: &str) -> Box<dyn gpui::Action> {
+        let id = Some(id.to_string());
+        match self {
+            Self::Update => Box::new(bongos_extensions::Update { id, latest: None }),
+            Self::UpdateToLatest => Box::new(bongos_extensions::Update {
+                id,
+                latest: Some(true),
+            }),
+            Self::Rebuild => Box::new(bongos_extensions::Rebuild { id }),
+            Self::Remove => Box::new(bongos_extensions::Remove { id }),
+        }
+    }
+}
+
+/// Plain dev extensions get Rebuild; recorded ones get the git buttons instead.
+fn shows_dev_rebuild(is_dev: bool, record: Option<&InstallRecord>) -> bool {
+    is_dev && record.is_none()
+}
+
+fn shows_uninstall(record: Option<&InstallRecord>) -> bool {
+    record.is_none()
+}
+
+fn git_install_buttons(record: &InstallRecord) -> Vec<GitInstallButton> {
+    let mut buttons = vec![GitInstallButton::Update];
+    if record.listed {
+        buttons.push(GitInstallButton::UpdateToLatest);
+    }
+    buttons.push(GitInstallButton::Rebuild);
+    buttons.push(GitInstallButton::Remove);
+    buttons
+}
+
+/// The source line under the description: URL, short commit and who chose the revision.
+fn git_install_source_text(record: &InstallRecord) -> String {
+    let commit: String = record.commit.chars().take(8).collect();
+    let who = if record.listed {
+        "(listed)"
+    } else {
+        "(pinned by you)"
+    };
+    format!("{} @ {commit} {who}", record.source_url)
+}
+
 fn update_rebuild_dev_extension_visibility(store: &Entity<ExtensionStore>, cx: &mut App) {
-    let has_dev_extensions = store.read(cx).dev_extensions().next().is_some();
+    let _ = store;
+    let has_dev_extensions = !rebuild_candidates_from_store(cx).is_empty();
     CommandPaletteFilter::update_global(cx, |filter, _cx| {
         if has_dev_extensions {
             filter.show_action_types(&[TypeId::of::<RebuildDevExtension>()]);
@@ -236,11 +344,7 @@ pub fn init(cx: &mut App) {
                     return;
                 }
 
-                let dev_extensions = ExtensionStore::global(cx)
-                    .read(cx)
-                    .dev_extensions()
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let dev_extensions = rebuild_candidates_from_store(cx);
 
                 match dev_extensions.len() {
                     0 => {
@@ -282,9 +386,10 @@ fn extension_provides_label(provides: ExtensionProvides) -> &'static str {
 pub struct ExtensionsPage {
     list: UniformListScrollHandle,
     entries: Vec<(Arc<ExtensionManifest>, bool)>,
+    records: Vec<InstallRecord>,
     query_editor: Entity<Editor>,
     provides_filter: Option<ExtensionProvides>,
-    _subscriptions: [gpui::Subscription; 2],
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl ExtensionsPage {
@@ -296,7 +401,7 @@ impl ExtensionsPage {
     ) -> Entity<Self> {
         cx.new(|cx| {
             let store = ExtensionStore::global(cx);
-            let subscriptions = [
+            let mut subscriptions = vec![
                 cx.observe(&store, |_: &mut Self, _, cx| cx.notify()),
                 cx.subscribe(&store, |this, _, event, cx| {
                     if let extension_host::Event::ExtensionsUpdated = event {
@@ -304,6 +409,13 @@ impl ExtensionsPage {
                     }
                 }),
             ];
+            // An install, update or rebuild changes the commit shown and the busy buttons.
+            if let Some(installer) = Installer::try_global(cx) {
+                subscriptions.push(cx.observe(&installer, |this: &mut Self, _, cx| {
+                    this.records = git_records(cx);
+                    cx.notify();
+                }));
+            }
 
             let query_editor = cx.new(|cx| {
                 let mut input = Editor::single_line(window, cx);
@@ -318,6 +430,7 @@ impl ExtensionsPage {
             let mut this = Self {
                 list: UniformListScrollHandle::new(),
                 entries: Vec::new(),
+                records: Vec::new(),
                 query_editor,
                 provides_filter,
                 _subscriptions: subscriptions,
@@ -348,6 +461,7 @@ impl ExtensionsPage {
             .map(|entry| (entry.manifest.clone(), entry.dev))
             .collect();
         self.entries = entries;
+        self.records = git_records(cx);
         self.list.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }
@@ -372,10 +486,22 @@ impl ExtensionsPage {
         is_dev: bool,
         cx: &mut Context<Self>,
     ) -> ExtensionCard {
-        let busy = ExtensionStore::global(cx)
-            .read(cx)
-            .outstanding_operations()
-            .contains_key(extension.id.as_ref());
+        let record = self
+            .records
+            .iter()
+            .find(|record| record.id == extension.id.as_ref())
+            .cloned();
+        let installer_busy = Installer::try_global(cx).is_some_and(|installer| {
+            installer
+                .read(cx)
+                .busy_message(extension.id.as_ref())
+                .is_some()
+        });
+        let busy = installer_busy
+            || ExtensionStore::global(cx)
+                .read(cx)
+                .outstanding_operations()
+                .contains_key(extension.id.as_ref());
 
         let repository_url = extension.repository.clone();
 
@@ -399,7 +525,7 @@ impl ExtensionsPage {
                         h_flex()
                             .gap_1()
                             .justify_between()
-                            .when(is_dev, |this| {
+                            .when(shows_dev_rebuild(is_dev, record.as_ref()), |this| {
                                 this.child(
                                     Button::new(
                                         SharedString::from(format!("rebuild-{}", extension.id)),
@@ -417,7 +543,21 @@ impl ExtensionsPage {
                                     }),
                                 )
                             })
-                            .child(
+                            .children(record.as_ref().map(git_install_buttons).unwrap_or_default().into_iter().map(|button| {
+                                Button::new(
+                                    SharedString::from(format!("git-{}-{}", button.key(), extension.id)),
+                                    button.label(),
+                                )
+                                .color(Color::Accent)
+                                .disabled(busy)
+                                .on_click({
+                                    let extension_id = extension.id.clone();
+                                    move |_, window, cx| {
+                                        window.dispatch_action(button.action(extension_id.as_ref()), cx);
+                                    }
+                                })
+                            }))
+                            .when(shows_uninstall(record.as_ref()), |this| this.child(
                                 Button::new(SharedString::from(format!("uninstall-{}", extension.id)), "Uninstall")
                                     .color(Color::Accent)
                                     .disabled(busy)
@@ -429,7 +569,7 @@ impl ExtensionsPage {
                                             });
                                         }
                                     }),
-                            )
+                            ))
                             .when(can_configure, |this| {
                                 this.child(
                                     Button::new(
@@ -507,6 +647,12 @@ impl ExtensionsPage {
                         .tooltip(Tooltip::text(repository_url))
                     })),
             )
+            .children(record.as_ref().map(|record| {
+                Label::new(git_install_source_text(record))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate()
+            }))
     }
 
     fn render_search(&self, cx: &mut Context<Self>) -> Div {
@@ -900,5 +1046,154 @@ impl Item for ExtensionsPage {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
         f(*event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bongos_extensions_model::RecordState;
+    use extension::SchemaVersion;
+    use gpui::TestAppContext;
+
+    fn record(id: &str, listed: bool) -> InstallRecord {
+        InstallRecord {
+            version: 1,
+            id: id.to_string(),
+            source_url: "https://example.com/org/kotlin".to_string(),
+            path: None,
+            requested_ref: None,
+            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            listed,
+            trusted_commit: None,
+            state: RecordState::Installed,
+            installed_at: "2026-01-01T00:00:00Z".to_string(),
+            extra: Default::default(),
+        }
+    }
+
+    fn manifest(id: &str) -> Arc<ExtensionManifest> {
+        Arc::new(ExtensionManifest {
+            id: id.into(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            schema_version: SchemaVersion::ZERO,
+            description: None,
+            repository: None,
+            authors: Vec::new(),
+            lib: Default::default(),
+            themes: Default::default(),
+            icon_themes: Vec::new(),
+            languages: Vec::new(),
+            grammars: Default::default(),
+            language_servers: Default::default(),
+            context_servers: Default::default(),
+            slash_commands: Default::default(),
+            snippets: None,
+            capabilities: Vec::new(),
+            debug_adapters: Default::default(),
+            debug_locators: Default::default(),
+            language_model_providers: Default::default(),
+        })
+    }
+
+    #[test]
+    fn rebuild_picker_omits_recorded_ids() {
+        let candidates = rebuild_candidates(
+            vec![manifest("kotlin"), manifest("plain")],
+            &[record("kotlin", true)],
+        );
+        let ids: Vec<&str> = candidates.iter().map(|m| m.id.as_ref()).collect();
+        assert_eq!(ids, vec!["plain"]);
+    }
+
+    #[test]
+    fn git_install_shows_source_and_buttons() {
+        let record = record("kotlin", false);
+        let text = git_install_source_text(&record);
+        assert!(text.contains("https://example.com/org/kotlin"));
+        assert!(text.contains("01234567"));
+        assert!(!text.contains("0123456789"));
+        assert!(text.contains("(pinned by you)"));
+        let labels: Vec<_> = git_install_buttons(&record)
+            .into_iter()
+            .map(GitInstallButton::label)
+            .collect();
+        assert_eq!(labels, vec!["Update", "Rebuild", "Remove"]);
+        assert!(!shows_uninstall(Some(&record)));
+        assert!(!shows_dev_rebuild(true, Some(&record)));
+    }
+
+    #[test]
+    fn listed_install_adds_update_to_latest() {
+        let record = record("kotlin", true);
+        assert!(git_install_source_text(&record).contains("(listed)"));
+        let labels: Vec<_> = git_install_buttons(&record)
+            .into_iter()
+            .map(GitInstallButton::label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["Update", "Update to latest", "Rebuild", "Remove"]
+        );
+    }
+
+    #[test]
+    fn buttons_dispatch_the_shared_actions_with_the_id() {
+        let update = GitInstallButton::Update.action("kotlin");
+        assert_eq!(
+            update.as_any().downcast_ref::<bongos_extensions::Update>(),
+            Some(&bongos_extensions::Update {
+                id: Some("kotlin".into()),
+                latest: None
+            })
+        );
+        let latest = GitInstallButton::UpdateToLatest.action("kotlin");
+        assert_eq!(
+            latest.as_any().downcast_ref::<bongos_extensions::Update>(),
+            Some(&bongos_extensions::Update {
+                id: Some("kotlin".into()),
+                latest: Some(true)
+            })
+        );
+        let rebuild = GitInstallButton::Rebuild.action("kotlin");
+        assert_eq!(
+            rebuild
+                .as_any()
+                .downcast_ref::<bongos_extensions::Rebuild>(),
+            Some(&bongos_extensions::Rebuild {
+                id: Some("kotlin".into())
+            })
+        );
+        let remove = GitInstallButton::Remove.action("kotlin");
+        assert_eq!(
+            remove.as_any().downcast_ref::<bongos_extensions::Remove>(),
+            Some(&bongos_extensions::Remove {
+                id: Some("kotlin".into())
+            })
+        );
+    }
+
+    #[test]
+    fn plain_dev_extension_keeps_rebuild_and_uninstall() {
+        assert!(shows_dev_rebuild(true, None));
+        assert!(shows_uninstall(None));
+        assert!(!shows_dev_rebuild(false, None));
+    }
+
+    #[gpui::test]
+    fn install_dev_extension_action_is_still_registered(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let action = cx
+                .build_action("zed::InstallDevExtension", None)
+                .expect("the action is registered");
+            assert!(action.as_any().is::<InstallDevExtension>());
+            assert_eq!(
+                DevExtensionNotInstalledError::default()
+                    .primary_action()
+                    .label,
+                "Install Dev Extension"
+            );
+        });
     }
 }

@@ -30,6 +30,15 @@
       "ctrl-.": "emacs::SetMarkCommand", // set-mark-command (beats editor::ToggleCodeActions in editors)
       "ctrl-x ctrl-space": "emacs::PopMark", // pop-mark
       "ctrl-x ctrl-x": "emacs::ExchangePointAndMark", // exchange-point-and-mark
+      "ctrl-x space": "emacs::RectangleMarkMode", // rectangle-mark-mode
+      "ctrl-x r alt-w": "emacs::CopyRectangleAsKill", // copy-rectangle-as-kill
+      "ctrl-x r k": "emacs::KillRectangle", // kill-rectangle
+      "ctrl-x r d": "emacs::DeleteRectangle", // delete-rectangle
+      "ctrl-x r o": "emacs::OpenRectangle", // open-rectangle
+      "ctrl-x r c": "emacs::ClearRectangle", // clear-rectangle
+      "ctrl-x r t": "emacs::StringRectangle", // string-rectangle
+      "ctrl-x r y": "emacs::YankRectangle", // yank-rectangle
+      "ctrl-x r shift-k": "emacs::KeepRectangle", // keep-rectangle
       "ctrl-f": "editor::MoveRight", // forward-char
       "ctrl-b": "editor::MoveLeft", // backward-char
       "ctrl-n": "editor::MoveDown", // next-line

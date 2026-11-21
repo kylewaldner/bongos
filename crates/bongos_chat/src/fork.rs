@@ -148,7 +148,7 @@ pub(crate) fn fork_chat(
         return Task::ready(Err(format!("Unknown agent `{}`", cached.agent)));
     };
     let caps = request.caps.clone().or_else(|| {
-        ChatHealth::global(cx).and_then(|health| health.read(cx).health(agent).caps.clone())
+        ChatHealth::global(cx).and_then(|health| health.read(cx).health(agent).chat_caps.clone())
     });
     let Some(caps) = caps else {
         return Task::ready(Err(fix_not_probed(agent)));

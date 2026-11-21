@@ -17,9 +17,9 @@ use collections::HashMap;
 use editor::Editor;
 use fs::{CreateOptions, Fs};
 use gpui::{
-    Action as _, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, Task, WeakEntity, Window,
+    Action as _, AnyElement, App, AppContext as _, Context, ElementId, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Task, WeakEntity, Window,
 };
 use language::{Buffer, BufferEvent};
 use project::Project;
@@ -30,8 +30,9 @@ use workspace::item::ItemHandle;
 use workspace::{Pane, PaneGroup, PaneRenderContext, SplitDirection, Workspace};
 
 use crate::layout::{self, PROMPT_PANE_OFF};
+use crate::list_view::{ESTIMATED_SUFFIX, estimated_tag};
 use crate::send::prompts_file;
-use crate::{ChatRuntime, ChatRuntimeEvent, ChatStoreEvent, ChatsSettings};
+use crate::{ChannelStatus, ChatRuntime, ChatRuntimeEvent, ChatStoreEvent, ChatsSettings};
 
 /// Builds the item of the prompts pane for a prompts file. The default is a plain editor; feature
 /// 25 installs its own with [`set_prompt_pane_provider`]. The item must act as an [`Editor`] for
@@ -554,11 +555,46 @@ impl SessionView {
 
     /// The one line of the header: name, agent, type and state.
     pub fn header_text(&self, cx: &App) -> String {
-        let Some(runtime) = ChatRuntime::global(cx) else {
+        let (line, reason) = self.header_parts(cx);
+        let tag = if reason.is_some() {
+            ESTIMATED_SUFFIX
+        } else {
+            ""
+        };
+        format!("{line}{tag}")
+    }
+
+    /// The dump lines `state: <state> (<exact|estimated: reason>)` and `channel: off|pending|live`;
+    /// empty when the chat is not running.
+    pub fn channel_text(&self, cx: &App) -> String {
+        let Some(live) = ChatRuntime::global(cx).and_then(|runtime| {
+            let runtime = runtime.read(cx);
+            runtime
+                .live(&self.chat_id)
+                .map(|live| (live.state(), live.estimate_reason(), live.channel()))
+        }) else {
             return String::new();
         };
+        let (state, reason, channel) = live;
+        let source = match reason {
+            Some(reason) => format!("estimated: {reason}"),
+            None => "exact".to_string(),
+        };
+        let channel = match channel {
+            ChannelStatus::Off => "off",
+            ChannelStatus::Pending => "pending",
+            ChannelStatus::Live => "live",
+        };
+        format!("state: {state} ({source})\nchannel: {channel}\n")
+    }
+
+    /// The header line without the estimated tag, and the reason the state is estimated.
+    fn header_parts(&self, cx: &App) -> (String, Option<String>) {
+        let Some(runtime) = ChatRuntime::global(cx) else {
+            return (String::new(), None);
+        };
         let runtime = runtime.read(cx);
-        runtime
+        let line = runtime
             .store()
             .read(cx)
             .find(&self.chat_id)
@@ -572,7 +608,12 @@ impl SessionView {
                     runtime.state(&self.chat_id)
                 )
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let reason = runtime
+            .live(&self.chat_id)
+            .and_then(|live| live.estimate_reason())
+            .filter(|_| !line.is_empty());
+        (line, reason)
     }
 
     /// The provider's text about the prompts pane's item, for the header.
@@ -582,7 +623,7 @@ impl SessionView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
-        let line = self.header_text(cx);
+        let (line, reason) = self.header_parts(cx);
         let mode_line = self.mode_line(cx);
         h_flex()
             .px_2()
@@ -593,6 +634,9 @@ impl SessionView {
                 h_flex()
                     .gap_2()
                     .child(Label::new(line).size(LabelSize::Small).color(Color::Muted))
+                    .children(reason.map(|reason| {
+                        estimated_tag(ElementId::Name("chat-header-estimated".into()), reason)
+                    }))
                     .children(mode_line.map(|mode_line| {
                         Label::new(mode_line)
                             .size(LabelSize::Small)
