@@ -836,6 +836,10 @@ impl Pane {
         self.can_split_predicate = can_split_predicate;
     }
 
+    pub fn can_toggle_zoom(&self) -> bool {
+        self.can_toggle_zoom
+    }
+
     pub fn set_can_toggle_zoom(&mut self, can_toggle_zoom: bool, cx: &mut Context<Self>) {
         self.can_toggle_zoom = can_toggle_zoom;
         cx.notify();

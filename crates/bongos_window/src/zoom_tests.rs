@@ -1,3 +1,4 @@
+use bongos_minibuffer::minibuffer_for_window;
 use editor::Editor;
 use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle, point};
 use project::{Fs as _, Project, ProjectPath};
@@ -9,7 +10,8 @@ use workspace::{
 
 use crate::actions::ToggleDeleteOtherWindows;
 use crate::test_support::{
-    add_editor, add_panel, add_terminal, layout_snapshot, new_dock_pane, split_center,
+    add_editor, add_panel, add_terminal, add_zooming_panel, layout_snapshot, new_dock_pane,
+    split_center,
 };
 
 /// A workspace in a multi-workspace window on a project of three 40-line files, `one.txt`,
@@ -22,6 +24,7 @@ async fn setup(
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         editor::init(cx);
         bongos_emacs::init(cx);
+        bongos_minibuffer::init(cx);
         crate::init(cx);
         params
     });
@@ -224,9 +227,12 @@ async fn one_pane_does_nothing(cx: &mut TestAppContext) {
     assert_eq!(cx.update(|_, cx| layout_snapshot(&workspace, cx)), before);
 }
 
-/// A center pane with an editor, and a bottom dock whose pane shows a display-only terminal.
+/// A center pane with an editor, and a bottom dock whose pane shows a display-only terminal. The
+/// panel zooms with its pane, as the terminal panel does, when `zooms`; otherwise it never hears
+/// of a zoom.
 fn editor_and_terminal_dock(
     workspace: &Entity<Workspace>,
+    zooms: bool,
     cx: &mut VisualTestContext,
 ) -> (Entity<Pane>, Entity<Pane>, Entity<TestPanel>) {
     let result = cx.update(|window, cx| {
@@ -234,15 +240,27 @@ fn editor_and_terminal_dock(
         let editor = add_editor(workspace, &center, window, cx);
         let terminal_pane = new_dock_pane(workspace, window, cx);
         add_terminal(workspace, &terminal_pane, window, cx);
-        let panel = add_panel(
-            workspace,
-            DockPosition::Bottom,
-            10,
-            Some(terminal_pane.clone()),
-            true,
-            window,
-            cx,
-        );
+        let panel = if zooms {
+            add_zooming_panel(
+                workspace,
+                DockPosition::Bottom,
+                10,
+                terminal_pane.clone(),
+                true,
+                window,
+                cx,
+            )
+        } else {
+            add_panel(
+                workspace,
+                DockPosition::Bottom,
+                10,
+                Some(terminal_pane.clone()),
+                true,
+                window,
+                cx,
+            )
+        };
         window.focus(&editor.focus_handle(cx), cx);
         (center, terminal_pane, panel)
     });
@@ -254,24 +272,43 @@ fn panel_zoomed(panel: &Entity<TestPanel>, cx: &mut VisualTestContext) -> bool {
     cx.update(|_, cx| panel.read(cx).zoomed)
 }
 
-#[gpui::test]
-async fn a_focused_terminal_dock_zooms_through_its_panel_and_a_second_press_unzooms(
-    cx: &mut TestAppContext,
-) {
-    let (workspace, _, mut cx) = setup(cx).await;
-    let cx = &mut cx;
-    let (center, _, panel) = editor_and_terminal_dock(&workspace, cx);
-    let items = open_items(&workspace, cx);
+fn focus_panel(panel: &Entity<TestPanel>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         let handle = panel.read(cx).focus_handle.clone();
         window.focus(&handle, cx)
     });
     cx.run_until_parked();
+}
+
+/// The echo area's log, newest first.
+fn echoed(cx: &mut VisualTestContext) -> Vec<String> {
+    let strip = cx
+        .update(|window, cx| minibuffer_for_window(window.window_handle(), cx))
+        .expect("the window has a strip");
+    strip.read_with(cx, |strip, _| {
+        strip
+            .messages()
+            .into_iter()
+            .map(|line| line.text.to_string())
+            .collect()
+    })
+}
+
+#[gpui::test]
+async fn a_focused_terminal_dock_zooms_through_its_pane_and_a_second_press_unzooms(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, _, mut cx) = setup(cx).await;
+    let cx = &mut cx;
+    let (center, _, panel) = editor_and_terminal_dock(&workspace, true, cx);
+    let items = open_items(&workspace, cx);
+    focus_panel(&panel, cx);
     assert!(!panel_zoomed(&panel, cx));
     toggle(cx);
     assert!(panel_zoomed(&panel, cx));
     assert!(is_zoomed(&workspace, cx));
     assert_eq!(zoomed_panes(std::slice::from_ref(&center), cx), vec![false]);
+    assert_eq!(echoed(cx), Vec::<String>::new());
     toggle(cx);
     assert!(!panel_zoomed(&panel, cx));
     assert!(!is_zoomed(&workspace, cx));
@@ -279,10 +316,35 @@ async fn a_focused_terminal_dock_zooms_through_its_panel_and_a_second_press_unzo
 }
 
 #[gpui::test]
+async fn a_dock_panel_that_does_not_zoom_says_so(cx: &mut TestAppContext) {
+    let (workspace, _, mut cx) = setup(cx).await;
+    let cx = &mut cx;
+    let (_, _, panel) = editor_and_terminal_dock(&workspace, false, cx);
+    focus_panel(&panel, cx);
+    toggle(cx);
+    assert!(!is_zoomed(&workspace, cx));
+    assert!(!panel_zoomed(&panel, cx));
+    assert_eq!(echoed(cx), vec!["This pane cannot be zoomed".to_string()]);
+}
+
+#[gpui::test]
+async fn a_center_pane_that_cannot_toggle_zoom_says_so(cx: &mut TestAppContext) {
+    let (workspace, _, mut cx) = setup(cx).await;
+    let cx = &mut cx;
+    let (panes, editors) = panes_with_editors(&workspace, 2, cx);
+    focus_editor(&editors[1], cx);
+    cx.update(|_, cx| panes[1].update(cx, |pane, cx| pane.set_can_toggle_zoom(false, cx)));
+    toggle(cx);
+    assert!(!is_zoomed(&workspace, cx));
+    assert_eq!(zoomed_panes(&panes, cx), vec![false, false]);
+    assert_eq!(echoed(cx), vec!["This pane cannot be zoomed".to_string()]);
+}
+
+#[gpui::test]
 async fn an_empty_center_pane_is_not_zoomed(cx: &mut TestAppContext) {
     let (workspace, _, mut cx) = setup(cx).await;
     let cx = &mut cx;
-    let (center, _, panel) = editor_and_terminal_dock(&workspace, cx);
+    let (center, _, panel) = editor_and_terminal_dock(&workspace, true, cx);
     let empty = cx.update(|window, cx| {
         let empty = workspace.update(cx, |workspace, cx| {
             workspace.split_pane(center.clone(), workspace::SplitDirection::Right, window, cx)
@@ -295,6 +357,7 @@ async fn an_empty_center_pane_is_not_zoomed(cx: &mut TestAppContext) {
     assert!(!is_zoomed(&workspace, cx));
     assert!(!panel_zoomed(&panel, cx));
     assert_eq!(zoomed_panes(&[center, empty], cx), vec![false, false]);
+    assert_eq!(echoed(cx), vec!["This pane cannot be zoomed".to_string()]);
 }
 
 #[gpui::test]
