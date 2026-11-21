@@ -612,8 +612,13 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-x | execute-extended-command (the command palette) |
 | C-x C-f, C-x b | find a file, switch buffer |
 | C-x C-s, C-x C-w, C-x s | save, write file, save all |
-| C-x k, C-x 0, C-x 1 | kill buffer, close the item, close the others |
-| C-x 2, C-x 3, C-x o | split below, split right, other window |
+| C-x k | kill buffer, close the item |
+| C-x o | other window: pick one by its letter |
+| C-x 1, C-x 0 | delete other windows (toggles back), delete this window |
+| C-x 2, C-x 3 | split below, split right |
+| C-x \|, C-x _ | lay two windows out side by side, stacked |
+| C-c down | toggle window dedication |
+| C-x +, C-x \, C-x M-o | balance windows, swap windows, move the buffer to another window |
 | C-x C-c | quit |
 | C-h e | show the echo-area messages |
 
@@ -629,6 +634,24 @@ bar.
 ```json
 { "base_keymap": "VSCode", "emacs": { "cursor_style": "auto" } }
 ```
+
+### Windows
+
+Emacs windows are panes. The window commands act on the panes of the editor area and, for picking,
+on the panels that show an editor or a terminal. Nothing here closes a tab or a buffer.
+
+- C-x o switches window. With two windows it goes to the other one; with more, every window shows
+  a letter (a, s, d, f, ...) in reading order, and the letter you press picks it. The letter goes
+  to the picker, never to the editor or the shell in the window; any other key cancels.
+- C-x 1 zooms the current window to fill the frame, and C-x 1 again restores the layout.
+  C-x 0 deletes the current window and hands its tabs to a neighbor.
+- C-x 2 and C-x 3 split below and to the right. C-u before either keeps focus in the old window.
+- C-x _ stacks two windows and C-x | puts them side by side. With more than two windows, the
+  current one and the next stay and the others hand their tabs to the next.
+- C-c down dedicates the current window to what it shows: files opened later go to another
+  window. Press it again to undo.
+- C-x + balances the windows to the same size, C-x \ swaps the current window with a picked one
+  and C-x M-o moves the current tab to a picked window.
 
 ### Kill ring
 
