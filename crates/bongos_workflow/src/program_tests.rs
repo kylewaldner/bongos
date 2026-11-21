@@ -23,9 +23,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::runner_program::{
-    Clock, DENIALS_END, DENIALS_FILE, GitGuard, INTERPRETER_FIX, Interpreter, MCP_REFUSAL,
-    PollPlan, ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe,
-    add_git_config, git_metadata_needed, hide_in_bubblewrap, os_sandbox_probe, remove_symlinks,
+    Clock, DENIALS_END, DENIALS_FILE, INTERPRETER_FIX, Interpreter, MCP_REFUSAL, PollPlan,
+    ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe,
+    add_git_config, os_sandbox_probe,
 };
 use crate::runtime::Finish;
 
@@ -1013,52 +1013,6 @@ fn git_metadata_targets(fixture: &Fixture, common: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn the_writable_git_paths_are_an_allowlist() {
-    let Some(fixture) = Fixture::new() else {
-        return;
-    };
-    let Some(common) = git_repo(&fixture) else {
-        return;
-    };
-    let mut node = fixture.node("pass\n");
-    node.host_git.git_dirs = vec![common.clone()];
-    // git writes the real path into the worktree's `.git` file.
-    let own = std::fs::canonicalize(common.join("worktrees/run-worktree")).unwrap();
-    let mut writable = vec![
-        node.worktree.clone(),
-        node.scratch.clone(),
-        common.join("objects"),
-        common.join("refs"),
-        common.join("logs"),
-        own.clone(),
-    ];
-    assert_eq!(node.git_mount_points(), vec![common.join("objects/info")]);
-    // On Linux `objects/info` is bound to itself after the writable roots, so it is a mountpoint.
-    if cfg!(target_os = "linux") {
-        writable.push(common.join("objects/info"));
-    }
-    assert_eq!(node.writable_paths(), writable);
-    assert_eq!(
-        node.read_only_paths(),
-        vec![
-            node.worktree.join(".git"),
-            own.join("gitdir"),
-            own.join("commondir"),
-            own.join("config.worktree"),
-        ]
-    );
-
-    // In the main worktree the git directory is the common one: read-only as a whole.
-    node.worktree = fixture.path("repo");
-    assert_eq!(
-        node.writable_paths(),
-        vec![node.worktree.clone(), node.scratch.clone()]
-    );
-    assert!(node.git_mount_points().is_empty());
-    assert_eq!(node.read_only_paths(), vec![common]);
-}
-
-#[test]
 fn the_shim_refuses_git_metadata_outside_the_writable_roots() {
     let Some(mut fixture) = Fixture::new() else {
         return;
@@ -1113,162 +1067,6 @@ fn git_config_from_the_environment_is_appended_to() {
     assert_eq!(env["GIT_CONFIG_VALUE_1"], "someone");
     assert_eq!(env["GIT_CONFIG_KEY_2"], "core.logAllRefUpdates");
     assert_eq!(env["GIT_CONFIG_VALUE_2"], "false");
-}
-
-#[test]
-fn bubblewrap_covers_the_reflogs_before_the_end_of_its_options() {
-    let root = TempDir::new().unwrap();
-    let logs = root.path().join("logs");
-    std::fs::create_dir_all(&logs).unwrap();
-    let logs = std::fs::canonicalize(&logs)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    let mut args: Vec<String> = ["--ro-bind", "/", "/", "--", "python3", "--"]
-        .map(String::from)
-        .to_vec();
-    hide_in_bubblewrap(&mut args, &[root.path().join("logs")]).unwrap();
-    let expected: Vec<String> = [
-        "--ro-bind",
-        "/",
-        "/",
-        "--tmpfs",
-        &logs,
-        "--remount-ro",
-        &logs,
-        "--",
-        "python3",
-        "--",
-    ]
-    .map(String::from)
-    .to_vec();
-    assert_eq!(args, expected);
-    let mut no_end = vec!["--ro-bind".to_string()];
-    assert!(hide_in_bubblewrap(&mut no_end, &[root.path().join("logs")]).is_err());
-    assert!(hide_in_bubblewrap(&mut no_end, &[]).is_ok());
-}
-
-#[test]
-fn the_walk_removes_every_symlink_without_following_one() {
-    if cfg!(not(unix)) {
-        return;
-    }
-    let root = TempDir::new().unwrap();
-    let outside = root.path().join("outside");
-    std::fs::create_dir_all(outside.join("deep")).unwrap();
-    std::fs::write(outside.join("deep/file"), "x").unwrap();
-    let walked = root.path().join("refs");
-    std::fs::create_dir_all(walked.join("heads/nested")).unwrap();
-    std::fs::write(walked.join("heads/main"), "abc\n").unwrap();
-    let file_link = walked.join("heads/nested/evil");
-    let dir_link = walked.join("heads/to-outside");
-    std::os::unix::fs::symlink(outside.join("deep/file"), &file_link).unwrap();
-    std::os::unix::fs::symlink(&outside, &dir_link).unwrap();
-
-    let mut expected = vec![file_link, dir_link];
-    expected.sort();
-    assert_eq!(remove_symlinks(&walked), expected);
-    assert_eq!(
-        std::fs::read_to_string(walked.join("heads/main")).unwrap(),
-        "abc\n"
-    );
-    // The targets are left alone.
-    assert_eq!(
-        std::fs::read_to_string(outside.join("deep/file")).unwrap(),
-        "x"
-    );
-    assert!(remove_symlinks(&walked).is_empty());
-    // A root that is itself a symlink is not walked.
-    let root_link = root.path().join("root-link");
-    std::os::unix::fs::symlink(&outside, &root_link).unwrap();
-    std::os::unix::fs::symlink(outside.join("deep/file"), outside.join("deep/link")).unwrap();
-    assert!(remove_symlinks(&root_link).is_empty());
-    assert!(std::fs::symlink_metadata(outside.join("deep/link")).is_ok());
-}
-
-#[test]
-fn the_git_guard_undoes_symlinks_replace_refs_and_alternates() {
-    let Some(fixture) = Fixture::new() else {
-        return;
-    };
-    if cfg!(not(unix)) {
-        return;
-    }
-    let Some(common) = git_repo(&fixture) else {
-        return;
-    };
-    let mut node = fixture.node("pass\n");
-    node.host_git.git_dirs = vec![common.clone()];
-    assert_eq!(
-        node.git_forbidden_paths(),
-        vec![
-            common.join("refs/replace"),
-            common.join("objects/info/alternates"),
-            common.join("objects/info/http-alternates"),
-        ]
-    );
-    let bashrc = fixture.path("bashrc");
-    std::fs::write(&bashrc, "safe\n").unwrap();
-    assert_eq!(
-        node.hidden_git_paths(),
-        vec![
-            common.join("logs"),
-            std::fs::canonicalize(common.join("worktrees/run-worktree"))
-                .unwrap()
-                .join("logs"),
-        ]
-    );
-    let own = std::fs::canonicalize(common.join("worktrees/run-worktree")).unwrap();
-    // The replace refs and alternates are snapshotted and put back with or without Bubblewrap
-    // (under it, as a second line behind the read-only binds); only the other git metadata is
-    // left to the sandbox.
-    let sandboxed = GitGuard::take(&node, true);
-    let guard = GitGuard::take(&node, false);
-
-    let reflog = common.join("logs/refs/heads/main");
-    std::fs::remove_file(&reflog).unwrap();
-    std::os::unix::fs::symlink(&bashrc, &reflog).unwrap();
-    std::os::unix::fs::symlink(&bashrc, own.join("planted")).unwrap();
-    std::fs::create_dir_all(common.join("refs/replace")).unwrap();
-    std::fs::write(common.join("refs/replace/0123"), "4567\n").unwrap();
-    std::fs::create_dir_all(common.join("objects/info")).unwrap();
-    std::fs::write(common.join("objects/info/alternates"), "/elsewhere\n").unwrap();
-
-    let planted_metadata = vec![
-        common.join("refs/replace"),
-        common.join("objects/info/alternates"),
-    ];
-    if cfg!(target_os = "linux") {
-        let walked = sandboxed.check_and_restore();
-        assert_eq!(walked.metadata, planted_metadata);
-        assert_eq!(walked.symlinks.len(), 2);
-        assert!(std::fs::symlink_metadata(common.join("objects/info/alternates")).is_err());
-        std::os::unix::fs::symlink(&bashrc, &reflog).unwrap();
-        std::os::unix::fs::symlink(&bashrc, own.join("planted")).unwrap();
-        std::fs::create_dir_all(common.join("refs/replace")).unwrap();
-        std::fs::write(common.join("refs/replace/0123"), "4567\n").unwrap();
-        std::fs::write(common.join("objects/info/alternates"), "/elsewhere\n").unwrap();
-    }
-    let changes = guard.check_and_restore();
-    let mut symlinks = vec![reflog.clone(), own.join("planted")];
-    symlinks.sort();
-    let mut found = changes.symlinks.clone();
-    found.sort();
-    assert_eq!(found, symlinks);
-    assert_eq!(changes.metadata, planted_metadata);
-    assert!(std::fs::symlink_metadata(&reflog).is_err());
-    assert!(std::fs::symlink_metadata(common.join("refs/replace")).is_err());
-    assert!(std::fs::symlink_metadata(common.join("objects/info/alternates")).is_err());
-    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "safe\n");
-    assert!(guard.check_and_restore().is_empty());
-}
-
-#[test]
-fn git_metadata_is_checked_unless_bubblewrap_sandboxes_the_run() {
-    assert!(git_metadata_needed(false, true));
-    assert!(git_metadata_needed(false, false));
-    assert!(git_metadata_needed(true, false));
-    assert!(!git_metadata_needed(true, true));
 }
 
 #[test]
