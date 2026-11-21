@@ -667,11 +667,6 @@ async fn ctrl_c_y_leaves_the_chat_and_work_keys_alone(cx: &mut gpui::TestAppCont
 /// each owner replaces its row.
 const RESERVED: &[(&str, &[&str])] = &[
     ("ctrl-x b", &["tab_switcher::Toggle"]),
-    ("ctrl-x 0", &["pane::CloseActiveItem"]),
-    ("ctrl-x 1", &["pane::CloseOtherItems"]),
-    ("ctrl-x 2", &["pane::SplitDown"]),
-    ("ctrl-x 3", &["pane::SplitRight"]),
-    ("ctrl-x o", &["workspace::ActivateNextPane"]),
     // Incremental search, and the search bar's own next and previous match.
     ("ctrl-s", &["isearch::Forward", "search::SelectNextMatch"]),
     (

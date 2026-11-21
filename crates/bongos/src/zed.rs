@@ -44,6 +44,8 @@ mod rectangle_keymap_tests;
 pub mod remote_debug;
 #[cfg(test)]
 mod universal_argument_tests;
+#[cfg(test)]
+mod window_keymap_tests;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 pub mod visual_tests;
 #[cfg(target_os = "windows")]
