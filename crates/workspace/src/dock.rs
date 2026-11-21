@@ -77,6 +77,10 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn pane(&self) -> Option<Entity<Pane>> {
         None
     }
+    /// Every pane this panel shows; defaults to its single `pane`.
+    fn panes(&self, _cx: &App) -> Vec<Entity<Pane>> {
+        self.pane().into_iter().collect()
+    }
     fn remote_id() -> Option<proto::PanelId> {
         None
     }
@@ -107,6 +111,7 @@ pub trait PanelHandle: Send + Sync {
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn remote_id(&self) -> Option<proto::PanelId>;
     fn pane(&self, cx: &App) -> Option<Entity<Pane>>;
+    fn panes(&self, cx: &App) -> Vec<Entity<Pane>>;
     fn default_size(&self, window: &Window, cx: &App) -> Pixels;
     fn min_size(&self, window: &Window, cx: &App) -> Option<Pixels>;
     fn initial_size_state(&self, window: &Window, cx: &App) -> PanelSizeState;
@@ -183,6 +188,10 @@ where
 
     fn pane(&self, cx: &App) -> Option<Entity<Pane>> {
         self.read(cx).pane()
+    }
+
+    fn panes(&self, cx: &App) -> Vec<Entity<Pane>> {
+        self.read(cx).panes(cx)
     }
 
     fn remote_id(&self) -> Option<PanelId> {
@@ -1432,6 +1441,7 @@ pub mod test {
         pub default_size: Pixels,
         pub flexible: bool,
         pub activation_priority: u32,
+        pub pane: Option<Entity<Pane>>,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -1447,6 +1457,7 @@ pub mod test {
                 default_size: px(300.),
                 flexible: false,
                 activation_priority,
+                pane: None,
             }
         }
 
@@ -1544,6 +1555,10 @@ pub mod test {
 
         fn activation_priority(&self) -> u32 {
             self.activation_priority
+        }
+
+        fn pane(&self) -> Option<Entity<Pane>> {
+            self.pane.clone()
         }
     }
 

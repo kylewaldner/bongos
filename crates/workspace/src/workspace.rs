@@ -5677,6 +5677,30 @@ impl Workspace {
         &self.panes
     }
 
+    /// The center panes in tree order (left before right, top before bottom).
+    pub fn center_panes(&self) -> Vec<Entity<Pane>> {
+        self.center.panes().into_iter().cloned().collect()
+    }
+
+    /// Stops every center pane and dock panel from being zoomed. Docks stay open
+    /// and focus does not move. Emits `ZoomChanged` once.
+    pub fn unzoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Cleared first so the dock observers, which emit `ZoomChanged` for a zoomed
+        // position, stay quiet when the docks notify below.
+        self.zoomed = None;
+        self.zoomed_position = None;
+        for pane in self.center_panes() {
+            if pane.read(cx).is_zoomed() {
+                pane.update(cx, |pane, cx| pane.set_zoomed(false, cx));
+            }
+        }
+        for dock in self.all_docks() {
+            dock.update(cx, |dock, cx| dock.zoom_out(window, cx));
+        }
+        cx.emit(Event::ZoomChanged);
+        cx.notify();
+    }
+
     pub fn active_pane(&self) -> &Entity<Pane> {
         &self.active_pane
     }
@@ -13478,6 +13502,116 @@ mod tests {
         workspace.update(cx, |workspace, cx| {
             let right_dock = workspace.right_dock();
             assert!(!right_dock.read(cx).is_open());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_panel_panes_default_to_its_pane(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+        let (without, with) = workspace.update(cx, |_, cx| {
+            let without = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let with = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Right, 101, cx);
+                panel.pane = Some(pane.clone());
+                panel
+            });
+            (without, with)
+        });
+        cx.update(|_, cx| {
+            assert!(without.read(cx).panes(cx).is_empty());
+            assert_eq!(with.read(cx).panes(cx), vec![pane.clone()]);
+            assert_eq!(PanelHandle::panes(&with, cx), vec![pane.clone()]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_unzoom_clears_pane_and_panel_zoom_keeping_dock_and_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            panel
+        });
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            let item = cx.new(TestItem::new);
+            workspace.add_item(pane.clone(), Box::new(item), None, true, true, window, cx);
+        });
+
+        let zoom_changes = Rc::new(std::cell::Cell::new(0));
+        let _subscription = workspace.update(cx, |_, cx| {
+            let zoom_changes = zoom_changes.clone();
+            cx.subscribe(&workspace, move |_, _, event: &Event, _| {
+                if matches!(event, Event::ZoomChanged) {
+                    zoom_changes.set(zoom_changes.get() + 1);
+                }
+            })
+        });
+
+        // A zoomed center pane.
+        pane.update_in(cx, |pane, window, cx| {
+            pane.zoom_in(&crate::ZoomIn, window, cx);
+        });
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.center_panes()),
+            vec![pane.clone()]
+        );
+        cx.run_until_parked();
+        zoom_changes.set(0);
+        workspace.update_in(cx, |workspace, window, cx| workspace.unzoom(window, cx));
+        assert_eq!(zoom_changes.get(), 1, "ZoomChanged is emitted once");
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(!pane.read(cx).is_zoomed());
+            assert!(workspace.zoomed.is_none());
+            assert!(
+                pane.read(cx).focus_handle(cx).contains_focused(window, cx),
+                "focus stays in the pane"
+            );
+        });
+
+        // A zoomed dock panel.
+        panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.zoomed_position, Some(DockPosition::Right));
+        });
+        // Let the panel's focus settle so its focus events are not counted below.
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.run_until_parked();
+        let focused_before = workspace.update_in(cx, |_, window, cx| {
+            panel.panel_focus_handle(cx).contains_focused(window, cx)
+        });
+        cx.run_until_parked();
+        zoom_changes.set(0);
+        workspace.update_in(cx, |workspace, window, cx| workspace.unzoom(window, cx));
+        cx.run_until_parked();
+        // Remounting the dock's panel after it was zoomed makes the dock's own focus
+        // handling emit more events, so only a lower bound holds here.
+        assert!(zoom_changes.get() >= 1, "ZoomChanged is emitted");
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(!panel.read(cx).zoomed);
+            assert_eq!(workspace.zoomed_position, None);
+            assert!(workspace.zoomed.is_none());
+            assert!(workspace.right_dock().read(cx).is_open(), "dock stays open");
+            assert_eq!(
+                panel.panel_focus_handle(cx).contains_focused(window, cx),
+                focused_before,
+                "focus does not move"
+            );
         });
     }
 
