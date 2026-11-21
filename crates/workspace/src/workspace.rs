@@ -2780,10 +2780,14 @@ impl Workspace {
                     } else {
                         // If the item is no longer present in this pane, then retrieve its
                         // path info in order to reopen it.
-                        break pane
-                            .nav_history()
-                            .path_for_item(entry.item.id())
-                            .map(|(project_path, abs_path)| (project_path, abs_path, entry));
+                        // An item with no recorded path (a closed untitled buffer) cannot be
+                        // reopened: go on to the next entry.
+                        let Some((project_path, abs_path)) =
+                            pane.nav_history().path_for_item(entry.item.id())
+                        else {
+                            continue;
+                        };
+                        break Some((project_path, abs_path, entry));
                     }
                 }
             })
@@ -2870,6 +2874,33 @@ impl Workspace {
         } else {
             Task::ready(Ok(()))
         }
+    }
+
+    /// Goes to the backward or forward entry of `pane` with this timestamp without changing
+    /// either stack: nothing is popped, and nothing is pushed in the disabled mode.
+    pub fn navigate_to_history_entry(
+        &mut self,
+        pane: WeakEntity<Pane>,
+        timestamp: usize,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Task<Result<()>> {
+        let Some(entry) = pane
+            .upgrade()
+            .and_then(|pane| pane.read(cx).nav_history().entry_with_timestamp(timestamp))
+        else {
+            return Task::ready(Ok(()));
+        };
+        // Handed back once: a second call means the first did not navigate (the caret is
+        // already there), and the walk must end instead of looping.
+        let mut target = Some(entry);
+        self.navigate_history_impl(
+            pane,
+            NavigationMode::Disabled,
+            window,
+            &mut |_, _| target.take(),
+            cx,
+        )
     }
 
     pub fn go_back(

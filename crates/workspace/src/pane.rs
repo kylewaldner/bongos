@@ -510,6 +510,16 @@ pub struct NavigationEntry {
     pub row: Option<u32>,
 }
 
+/// One backward or forward entry as a list shows it.
+#[derive(Clone)]
+pub struct HistoryRow {
+    pub timestamp: usize,
+    pub project_path: Option<ProjectPath>,
+    /// The zero-based row of the place, when the entry recorded one.
+    pub row: Option<u32>,
+    pub item: Arc<dyn WeakItemHandle + Send + Sync>,
+}
+
 #[derive(Clone)]
 pub struct TagStackEntry {
     pub origin: NavigationEntry,
@@ -4661,6 +4671,48 @@ impl NavHistory {
                     f(entry, (path, None));
                 }
             })
+    }
+
+    /// The backward and forward entries (not the closed stack), newest first by timestamp.
+    pub fn entries_newest_first(&self, cx: &App) -> Vec<HistoryRow> {
+        let state = self.0.lock();
+        let mut rows: Vec<HistoryRow> = state
+            .backward_stack
+            .iter()
+            .chain(state.forward_stack.iter())
+            .map(|entry| HistoryRow {
+                timestamp: entry.timestamp,
+                project_path: match state.paths_by_item.get(&entry.item.id()) {
+                    Some((path, _)) => Some(path.clone()),
+                    None => entry.item.upgrade().and_then(|item| item.project_path(cx)),
+                },
+                row: entry.row,
+                item: entry.item.clone(),
+            })
+            .collect();
+        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        rows
+    }
+
+    /// The timestamps of the backward stack and of the forward stack, oldest first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stack_timestamps(&self) -> (Vec<usize>, Vec<usize>) {
+        let state = self.0.lock();
+        (
+            state.backward_stack.iter().map(|e| e.timestamp).collect(),
+            state.forward_stack.iter().map(|e| e.timestamp).collect(),
+        )
+    }
+
+    /// A copy of the backward or forward entry with this timestamp. Nothing is removed.
+    pub fn entry_with_timestamp(&self, timestamp: usize) -> Option<NavigationEntry> {
+        let state = self.0.lock();
+        state
+            .backward_stack
+            .iter()
+            .chain(state.forward_stack.iter())
+            .find(|entry| entry.timestamp == timestamp)
+            .cloned()
     }
 
     pub fn set_mode(&mut self, mode: NavigationMode) {
