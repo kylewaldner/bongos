@@ -71,7 +71,6 @@
       "ctrl-alt-shift-z": "emacs::ZapBackUpToChar", // zap-back-up-to-char
       "alt-.": "emacs::XrefFindDefinitions", // xref-find-definitions
       "alt-?": "editor::FindAllReferences", // xref-find-references
-      "alt-,": "pane::GoBack", // xref-pop-marker-stack
       "ctrl-x h": "editor::SelectAll", // mark-whole-buffer
       "ctrl-d": "editor::Delete", // delete-char
       "alt-d": "emacs::KillWord", // kill-word
@@ -134,6 +133,10 @@
       "alt-9": ["emacs::DigitArgument", { "digit": 9 }], // digit-argument
       "alt--": "emacs::NegativeArgument", // negative-argument
       "ctrl-o": "emacs::OpenLine", // open-line
+      "alt-n": "emacs::SymbolJumpNext", // symbol-overlay-jump-next
+      "alt-p": "emacs::SymbolJumpPrev", // symbol-overlay-jump-prev
+      "alt-i": "emacs::SymbolOverlayPut", // symbol-overlay-put
+      "alt-shift-i": "emacs::SymbolOverlayRemoveAll", // symbol-overlay-remove-all
     },
   },
   {
@@ -200,6 +203,18 @@
     },
   },
   {
+    // The goto stack on the arrows, in editors of the center panes only, with or without a region (keep this
+    // block after the `selection_mode` block above, which it outranks). Every other place keeps its own
+    // arrows: small and dock editors, terminals, panels, agent threads, editors showing completions, code
+    // actions or signature help, and vim's modes. `down` stays Zed's.
+    "context": "!Dock && Pane > Editor && mode == full && !AcpThread && !showing_completions && !showing_code_actions && !showing_signature_help && !vim_mode",
+    "bindings": {
+      "left": "emacs::GotoStackBack", // goto-stack-back
+      "right": "emacs::GotoStackForward", // goto-stack-forward
+      "up": "emacs::GotoStackPush", // goto-stack-push
+    },
+  },
+  {
     "context": "Editor && (showing_code_actions || showing_completions)",
     "bindings": {
       "ctrl-p": "editor::ContextMenuPrevious",
@@ -244,6 +259,7 @@
       "ctrl-x ctrl-.": "emacs::PopGlobalMark", // pop-global-mark
       "ctrl-x ctrl-w": "workspace::SaveAs", // write-file
       "ctrl-x s": "workspace::SaveAll", // save-some-buffers
+      "ctrl-c x h": "emacs::XrefHistoryList", // xref-history-list
       // Work panel (C-c w): tasks, todos, projects and artifacts. The unbound commands are in
       // the command palette.
       "ctrl-c w w": "work::TogglePanel",
