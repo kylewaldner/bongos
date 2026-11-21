@@ -17,6 +17,11 @@ pub trait TaskTrees: 'static {
     /// lane's edits applied (a variable the lane removes is absent). Empty when no lane serves
     /// the task.
     fn env(&self, task_id: &str, repo: &str) -> Vec<(String, String)>;
+    /// The directories the lane declares it writes (its build directory, index directory and so
+    /// on) for the tip tree of `task_id` in `repo`. A confined check may write them.
+    fn declared_dirs(&self, _task_id: &str, _repo: &str) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// The answer to [`TaskTrees::second_tree`].
@@ -34,6 +39,10 @@ pub trait SecondTreeLease {
     fn path(&self) -> &Path;
     /// The complete environment of the leased tree, like [`TaskTrees::env`].
     fn env(&self) -> Vec<(String, String)>;
+    /// The directories the lane declares it writes, like [`TaskTrees::declared_dirs`].
+    fn declared_dirs(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// The environment a check process starts from, before the check's own variables are added and
@@ -44,6 +53,12 @@ pub enum EnvBase {
     Lane(Vec<(String, String)>),
     /// Bongos's own environment.
     Own,
+    /// A lane's environment (bongos's own when `env` is empty) and the directories the lane
+    /// declares it writes.
+    Declared {
+        env: Vec<(String, String)>,
+        dirs: Vec<PathBuf>,
+    },
 }
 
 impl EnvBase {
@@ -56,14 +71,33 @@ impl EnvBase {
         }
     }
 
+    /// [`EnvBase::from_lane`], remembering the lane's declared directories.
+    fn from_lane_with_dirs(env: Vec<(String, String)>, dirs: Vec<PathBuf>) -> Self {
+        if dirs.is_empty() {
+            Self::from_lane(env)
+        } else {
+            Self::Declared { env, dirs }
+        }
+    }
+
     /// The base for the tip tree of `task_id` in `repo`; bongos's own with no implementation.
     pub fn for_tip(trees: Option<&dyn TaskTrees>, task_id: &str, repo: &str) -> Self {
-        trees.map_or(Self::Own, |trees| Self::from_lane(trees.env(task_id, repo)))
+        trees.map_or(Self::Own, |trees| {
+            Self::from_lane_with_dirs(trees.env(task_id, repo), trees.declared_dirs(task_id, repo))
+        })
     }
 
     /// The base for a leased second tree.
     pub fn for_lease(lease: &dyn SecondTreeLease) -> Self {
-        Self::from_lane(lease.env())
+        Self::from_lane_with_dirs(lease.env(), lease.declared_dirs())
+    }
+
+    /// The directories the lane declares it writes; none for bongos's own environment.
+    pub fn declared_dirs(&self) -> &[PathBuf] {
+        match self {
+            Self::Declared { dirs, .. } => dirs,
+            Self::Lane(_) | Self::Own => &[],
+        }
     }
 }
 
