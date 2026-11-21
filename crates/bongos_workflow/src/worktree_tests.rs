@@ -1063,10 +1063,9 @@ async fn a_planted_git_file_in_the_run_worktree_runs_nothing(cx: &mut TestAppCon
     plant_git_file(&run, &fixture.root.join("fake-git-dir"), &marker);
 
     // Control: plain git does run the planted configuration, so the plant works.
-    let control = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(&run.path)
-        .output()
+    let control = git
+        .output(&run.path, &["status", "--porcelain"])
+        .await
         .unwrap();
     assert!(
         marker.exists(),

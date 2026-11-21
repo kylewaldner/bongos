@@ -447,10 +447,10 @@ pub(crate) fn attempt_worktree(
 ) -> Result<RunWorktree, String> {
     let path = PathBuf::from(&attempt.worktree);
     let git_dir = match &attempt.git_dir {
-        Some(git_dir) => PathBuf::from(git_dir),
+        Some(git_dir) if !git_dir.is_empty() => PathBuf::from(git_dir),
         // The tree is gone: no git call runs in it, and its branch goes alone (see `run_worktrees`).
-        None if !path.exists() => PathBuf::new(),
-        None => {
+        _ if !path.exists() => PathBuf::new(),
+        _ => {
             let task_worktree = checkout.worktree.as_deref().filter(|tree| tree.is_dir());
             let task_worktree = task_worktree.ok_or_else(|| {
                 "the task worktree is gone, so the git directory of the run worktree is unknown"
@@ -1530,7 +1530,8 @@ impl<R: Runner> Lifecycle<R> {
             definition_commit,
             worktree: entry.worktree.path.to_string_lossy().into_owned(),
             branch: entry.worktree.branch.clone(),
-            git_dir: Some(entry.worktree.git_dir.to_string_lossy().into_owned()),
+            git_dir: Some(entry.worktree.git_dir.to_string_lossy().into_owned())
+                .filter(|git_dir| !git_dir.is_empty()),
             loop_bound: Some(loop_bound),
         });
         entry.rev = 0;
