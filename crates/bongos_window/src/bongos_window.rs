@@ -6,11 +6,14 @@ pub mod picker;
 pub mod targets;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+mod zoom;
 
 #[cfg(test)]
 mod picker_tests;
 #[cfg(test)]
 mod targets_tests;
+#[cfg(test)]
+mod zoom_tests;
 
 use bongos_emacs::prefix_arg::{Meaning, declare};
 use gpui::{App, Context, Window};
@@ -27,6 +30,7 @@ pub fn init(cx: &mut App) {
     }
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(switch_window);
+        workspace.register_action(zoom::toggle_zoom);
     })
     .detach();
 }

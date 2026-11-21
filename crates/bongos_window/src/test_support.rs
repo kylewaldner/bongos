@@ -9,7 +9,8 @@ use terminal::TerminalBuilder;
 use terminal_view::TerminalView;
 use workspace::{
     Pane, SplitDirection, Workspace,
-    dock::{DockPosition, test::TestPanel},
+    dock::{DockPosition, PanelEvent, test::TestPanel},
+    pane,
     pane_group::Member,
 };
 
@@ -215,4 +216,44 @@ pub fn add_panel(
         }
         panel
     })
+}
+
+/// Like `add_panel` with a pane, and the panel zooms with its pane as the terminal panel does:
+/// the pane's zoom events become the panel's, and the panel keeps the pane's zoom flag. A panel
+/// from `add_panel` leaves its pane's zoom events unheard, a panel that cannot zoom.
+pub fn add_zooming_panel(
+    workspace: &Entity<Workspace>,
+    position: DockPosition,
+    priority: u32,
+    pane: Entity<Pane>,
+    open: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<TestPanel> {
+    let panel = add_panel(
+        workspace,
+        position,
+        priority,
+        Some(pane.clone()),
+        open,
+        window,
+        cx,
+    );
+    panel.update(cx, |_, cx| {
+        cx.subscribe(&pane, |panel, pane, event: &pane::Event, cx| match event {
+            pane::Event::ZoomIn => {
+                panel.zoomed = true;
+                pane.update(cx, |pane, cx| pane.set_zoomed(true, cx));
+                cx.emit(PanelEvent::ZoomIn);
+            }
+            pane::Event::ZoomOut => {
+                panel.zoomed = false;
+                pane.update(cx, |pane, cx| pane.set_zoomed(false, cx));
+                cx.emit(PanelEvent::ZoomOut);
+            }
+            _ => {}
+        })
+        .detach();
+    });
+    panel
 }
