@@ -1256,6 +1256,18 @@ pub struct NavigationOverlayLabel {
     pub text_color: Hsla,
     pub x_offset: Pixels,
     pub scale_factor: f32,
+    pub background: Option<Hsla>,
+}
+
+/// Text layout of the last painted frame, in window coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisibleTextLayout {
+    pub content_origin: gpui::Point<Pixels>,
+    pub line_height: Pixels,
+    pub em_advance: Pixels,
+    pub scroll_pixel_x: Pixels,
+    /// Rows that are entirely visible; a partially visible first or last row is excluded.
+    pub fully_visible_rows: Range<DisplayRow>,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -9380,6 +9392,29 @@ impl Editor {
         cx: &'a App,
     ) -> Option<(HighlightStyle, &'a [Range<Anchor>])> {
         self.display_map.read(cx).text_highlights(key)
+    }
+
+    /// Text layout from the last paint, or `None` before the first paint.
+    pub fn visible_text_layout(&self) -> Option<VisibleTextLayout> {
+        let position_map = self.last_position_map.as_ref()?;
+        let line_height = position_map.line_height;
+        let scroll_y = position_map.scroll_position.y;
+        let visible = &position_map.visible_row_range;
+        let first = if scroll_y > f64::from(visible.start.0) {
+            visible.start.0 + 1
+        } else {
+            visible.start.0
+        };
+        let viewport_rows = f64::from(position_map.size.height / line_height);
+        let bottom = scroll_y + viewport_rows;
+        let last = (visible.end.0).min(bottom.floor().max(0.0) as u32);
+        Some(VisibleTextLayout {
+            content_origin: position_map.content_origin,
+            line_height,
+            em_advance: position_map.em_advance,
+            scroll_pixel_x: position_map.scroll_pixel_position.x.into(),
+            fully_visible_rows: DisplayRow(first)..DisplayRow(last.max(first)),
+        })
     }
 
     pub fn set_navigation_overlays(

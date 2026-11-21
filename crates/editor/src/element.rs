@@ -1217,6 +1217,7 @@ impl EditorElement {
             .text_size(label_text_size)
             .text_color(label.text_color)
             .line_height(context.line_height)
+            .when_some(label.background, |div, color| div.bg(color))
             .child(label.text.clone())
             .into_any_element();
         element.prepaint_as_root(origin, AvailableSpace::min_size(), window, cx);
@@ -9304,6 +9305,7 @@ impl Element for EditorElement {
                         scroll_position,
                         scroll_pixel_position,
                         scroll_max,
+                        content_origin,
                         line_layouts,
                         line_height,
                         em_advance,
@@ -10035,6 +10037,7 @@ pub(crate) struct PositionMap {
     pub scroll_position: gpui::Point<ScrollOffset>,
     pub scroll_pixel_position: gpui::Point<ScrollPixelOffset>,
     pub scroll_max: gpui::Point<ScrollOffset>,
+    pub content_origin: gpui::Point<Pixels>,
     pub em_advance: Pixels,
     pub em_layout_width: Pixels,
     pub visible_row_range: Range<DisplayRow>,
@@ -10713,6 +10716,7 @@ mod tests {
                 text_color: Hsla::black(),
                 x_offset: Pixels::ZERO,
                 scale_factor: 1.0,
+                background: None,
             },
             covered_text_range,
         }
@@ -10998,6 +11002,232 @@ mod tests {
             narrow_label_origin.x < wide_label_origin.x,
             "expected inline label to recompute its horizontal position for the wrapped row"
         );
+    }
+
+    fn draw_editor(
+        cx: &mut VisualTestContext,
+        editor: &Entity<Editor>,
+        style: &EditorStyle,
+        size: Size<Pixels>,
+    ) -> EditorLayout {
+        let (_, state) = cx.draw(Default::default(), size, |_, _| {
+            EditorElement::new(editor, style.clone())
+        });
+        state
+    }
+
+    #[gpui::test]
+    async fn test_navigation_label_background_paints_fill_under_cursor(cx: &mut TestAppContext) {
+        init_test(cx, |_| {});
+        let window = cx.add_window(|window, cx| {
+            let buffer = MultiBuffer::build_simple("label target text\nsecond line", cx);
+            Editor::new(EditorMode::full(), buffer, None, window, cx)
+        });
+        let cx = &mut VisualTestContext::from_window(*window, cx);
+        let editor = window.root(cx).unwrap();
+        cx.focus(&editor);
+        let style = cx.update(|_, cx| editor.update(cx, |editor, cx| editor.style(cx).clone()));
+
+        let fill = Hsla {
+            h: 0.0,
+            s: 1.0,
+            l: 0.5,
+            a: 1.0,
+        };
+        editor.update(cx, |editor, cx| {
+            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+            let target_start = buffer_snapshot.anchor_after(Point::new(0, 0));
+            let target_end = buffer_snapshot.anchor_after(Point::new(0, 5));
+            let mut overlay = navigation_overlay("ab", target_start..target_end, None);
+            overlay.label.background = Some(fill);
+            editor.set_navigation_overlays(PRIMARY_NAVIGATION_OVERLAY_KEY, vec![overlay], cx);
+        });
+
+        let window_size = size(px(400.), px(200.));
+        cx.simulate_resize(window_size);
+        let state = draw_editor(cx, &editor, &style, window_size);
+        let label_origin = navigation_label_layouts(&state)[0].origin;
+
+        // Each fill quad must be followed by a cursor quad at the same spot with a higher draw
+        // order. The test window's scene can hold more than one painted pass, so check per fill.
+        let fills_checked = cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let at_target = |quad: &gpui::Quad| {
+                (quad.bounds.origin.x.0 / scale - f32::from(label_origin.x)).abs() < 1.0
+                    && (quad.bounds.origin.y.0 / scale - f32::from(label_origin.y)).abs() < 1.0
+            };
+            let fill_background = gpui::Background::from(fill);
+            let quads = window.painted_quads();
+            let mut fills_checked = 0;
+            for (index, fill_quad) in quads.iter().enumerate() {
+                if fill_quad.background != fill_background {
+                    continue;
+                }
+                assert!(at_target(fill_quad), "fill quad is not at the target");
+                let cursor_quad = quads[index + 1..]
+                    .iter()
+                    .find(|quad| quad.background != fill_background && at_target(quad))
+                    .expect("expected a cursor quad at the target after the label fill");
+                assert!(
+                    cursor_quad.order > fill_quad.order,
+                    "label fill must be painted under the cursor"
+                );
+                fills_checked += 1;
+            }
+            fills_checked
+        });
+        assert!(fills_checked >= 1, "expected a label fill quad");
+    }
+
+    #[gpui::test]
+    async fn test_navigation_labels_do_not_change_text_layout(cx: &mut TestAppContext) {
+        init_test(cx, |_| {});
+        let text = "soft wrapped navigation target words ".repeat(12);
+        let window = cx.add_window(|window, cx| {
+            let buffer = MultiBuffer::build_simple(&text, cx);
+            let mut editor = Editor::new(EditorMode::full(), buffer, None, window, cx);
+            editor.set_soft_wrap_mode(language_settings::SoftWrap::EditorWidth, cx);
+            editor
+        });
+        let cx = &mut VisualTestContext::from_window(*window, cx);
+        let editor = window.root(cx).unwrap();
+        let style = cx.update(|_, cx| editor.update(cx, |editor, cx| editor.style(cx).clone()));
+        let window_size = size(px(260.), px(300.));
+
+        let observe = |cx: &mut VisualTestContext| {
+            let state = draw_editor(cx, &editor, &style, window_size);
+            let widths = state
+                .position_map
+                .line_layouts
+                .iter()
+                .map(|line| line.width)
+                .collect::<Vec<_>>();
+            let display_snapshot = &state.position_map.snapshot.display_snapshot;
+            (
+                display_snapshot.text(),
+                display_snapshot.max_point().row(),
+                widths,
+            )
+        };
+
+        let before = observe(cx);
+        assert!(before.1 > DisplayRow(1), "expected the text to wrap");
+
+        editor.update(cx, |editor, cx| {
+            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+            let overlays = [3, 40, 90, 150]
+                .into_iter()
+                .map(|column| {
+                    let start = buffer_snapshot.anchor_after(Point::new(0, column));
+                    let end = buffer_snapshot.anchor_after(Point::new(0, column + 4));
+                    let covered_end = buffer_snapshot.anchor_after(Point::new(0, column + 2));
+                    let mut overlay =
+                        navigation_overlay("jk", start..end, Some(start..covered_end));
+                    overlay.label.background = Some(Hsla::black());
+                    overlay
+                })
+                .collect();
+            editor.set_navigation_overlays(PRIMARY_NAVIGATION_OVERLAY_KEY, overlays, cx);
+        });
+        let during = observe(cx);
+
+        editor.update(cx, |editor, cx| {
+            editor.clear_navigation_overlays(PRIMARY_NAVIGATION_OVERLAY_KEY, cx);
+        });
+        let after = observe(cx);
+
+        assert_eq!(before, during);
+        assert_eq!(before, after);
+    }
+
+    #[gpui::test]
+    async fn test_visible_text_layout_is_none_before_first_paint(cx: &mut TestAppContext) {
+        init_test(cx, |_| {});
+        let window = cx.add_window(|window, cx| {
+            let buffer = MultiBuffer::build_simple("text", cx);
+            Editor::new(EditorMode::full(), buffer, None, window, cx)
+        });
+        // The window root may already have been painted, so check an editor that never was.
+        let unpainted = window
+            .update(cx, |_, window, cx| {
+                let buffer = MultiBuffer::build_simple("text", cx);
+                cx.new(|cx| Editor::new(EditorMode::full(), buffer, None, window, cx))
+            })
+            .unwrap();
+        assert_eq!(
+            unpainted.read_with(cx, |editor, _| editor.visible_text_layout()),
+            None
+        );
+
+        let cx = &mut VisualTestContext::from_window(*window, cx);
+        let editor = window.root(cx).unwrap();
+        let style = cx.update(|_, cx| editor.update(cx, |editor, cx| editor.style(cx).clone()));
+        draw_editor(cx, &editor, &style, size(px(300.), px(200.)));
+        assert!(
+            editor
+                .read_with(cx, |editor, _| editor.visible_text_layout())
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    async fn test_visible_text_layout_lists_only_fully_visible_rows(cx: &mut TestAppContext) {
+        init_test(cx, |_| {});
+        let window = cx.add_window(|window, cx| {
+            let buffer = MultiBuffer::build_simple(&sample_text(50, 6, 'a'), cx);
+            Editor::new(EditorMode::full(), buffer, None, window, cx)
+        });
+        let cx = &mut VisualTestContext::from_window(*window, cx);
+        let editor = window.root(cx).unwrap();
+        let style = cx.update(|_, cx| editor.update(cx, |editor, cx| editor.style(cx).clone()));
+        let line_height =
+            cx.update(|window, _| style.text.line_height_in_pixels(window.rem_size()));
+        let window_size = size(px(300.), line_height * 10.0);
+
+        // The window itself repaints the root editor, so size the window to match.
+        cx.simulate_resize(window_size);
+        draw_editor(cx, &editor, &style, window_size);
+        let layout = editor
+            .read_with(cx, |editor, _| editor.visible_text_layout())
+            .unwrap();
+        assert_eq!(layout.fully_visible_rows, DisplayRow(0)..DisplayRow(10));
+        assert_eq!(layout.line_height, line_height);
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.set_scroll_position(gpui::point(0.0, 3.5), window, cx);
+        });
+        draw_editor(cx, &editor, &style, window_size);
+        let layout = editor
+            .read_with(cx, |editor, _| editor.visible_text_layout())
+            .unwrap();
+        assert_eq!(layout.fully_visible_rows, DisplayRow(4)..DisplayRow(13));
+    }
+
+    #[gpui::test]
+    async fn test_visible_text_layout_content_origin_includes_gutter_margin(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx, |_| {});
+        let window = cx.add_window(|window, cx| {
+            let buffer = MultiBuffer::build_simple(&sample_text(20, 6, 'a'), cx);
+            Editor::new(EditorMode::full(), buffer, None, window, cx)
+        });
+        let cx = &mut VisualTestContext::from_window(*window, cx);
+        let editor = window.root(cx).unwrap();
+        let style = cx.update(|_, cx| editor.update(cx, |editor, cx| editor.style(cx).clone()));
+
+        let state = draw_editor(cx, &editor, &style, size(px(300.), px(200.)));
+        let layout = editor
+            .read_with(cx, |editor, _| editor.visible_text_layout())
+            .unwrap();
+        let margin = editor.read_with(cx, |editor, _| editor.gutter_dimensions.margin);
+        assert!(margin > Pixels::ZERO);
+        assert_eq!(
+            layout.content_origin,
+            state.position_map.text_hitbox.origin + gpui::point(margin, Pixels::ZERO)
+        );
+        assert_eq!(layout.em_advance, state.position_map.em_advance);
+        assert_eq!(layout.scroll_pixel_x, Pixels::ZERO);
     }
 
     #[gpui::test]
