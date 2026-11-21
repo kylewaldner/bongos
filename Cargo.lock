@@ -2915,6 +2915,7 @@ dependencies = [
  "anyhow",
  "bongos_builder_model",
  "bongos_chat",
+ "bongos_confine",
  "bongos_minibuffer",
  "bongos_project_repo",
  "bongos_project_repo_model",

@@ -3,9 +3,9 @@
 //! written it refuses a task worktree with uncommitted changes; a conflict is aborted, leaving both
 //! branches and the task worktree as they were.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::worktrees::{Git, GitError, MergeError, short_id};
+use crate::worktrees::{At, Git, GitError, MergeError, short_id, task_git_dir};
 
 /// The refusal for a task worktree with uncommitted changes.
 pub const DIRTY_TASK_WORKTREE: &str =
@@ -47,6 +47,9 @@ impl MergeStyle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MergeRequest {
     pub task_worktree: PathBuf,
+    /// The run worktree's recorded git directory, which names the repository the task worktree must
+    /// belong to ([`crate::worktrees::task_git_dir`]); git never discovers one from a worktree.
+    pub run_git_dir: PathBuf,
     pub task_branch: String,
     pub run_branch: String,
     pub run_id: String,
@@ -94,12 +97,21 @@ pub enum MergeRefusal {
 
 /// Merges the run branch into the task branch in the task worktree, in `request.style`.
 pub async fn merge(git: &Git, request: &MergeRequest) -> Result<Merged, MergeRefusal> {
-    let worktree = request.task_worktree.as_path();
+    let task_git_dir =
+        task_git_dir(&request.task_worktree, &request.run_git_dir).map_err(|message| GitError {
+            args: "rev-parse --git-dir".to_string(),
+            message: format!("the task worktree's git directory is not trusted: {message}"),
+        })?;
+    let worktree = At {
+        git_dir: &task_git_dir,
+        directory: &request.task_worktree,
+        job: false,
+    };
     if git.is_dirty(worktree).await? {
         return Err(MergeRefusal::DirtyTaskWorktree);
     }
     let current = git
-        .run(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .run_at(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .await
         .unwrap_or_default();
     if current != request.task_branch {
@@ -115,7 +127,7 @@ pub async fn merge(git: &Git, request: &MergeRequest) -> Result<Merged, MergeRef
     let fast_forward = can_fast_forward(git, worktree, &request.run_branch).await?;
     match (request.style, fast_forward) {
         (MergeStyle::FfOrMerge | MergeStyle::FfOnly, true) => {
-            git.run(
+            git.run_at(
                 worktree,
                 &[
                     "merge",
@@ -156,9 +168,9 @@ pub async fn merge(git: &Git, request: &MergeRequest) -> Result<Merged, MergeRef
 }
 
 /// Whether HEAD is an ancestor of `branch`, so the merge can fast-forward.
-async fn can_fast_forward(git: &Git, worktree: &Path, branch: &str) -> Result<bool, GitError> {
+async fn can_fast_forward(git: &Git, worktree: At<'_>, branch: &str) -> Result<bool, GitError> {
     let output = git
-        .output(worktree, &["merge-base", "--is-ancestor", "HEAD", branch])
+        .output_at(worktree, &["merge-base", "--is-ancestor", "HEAD", branch])
         .await?;
     match output.status.code() {
         Some(0) => Ok(true),
@@ -170,6 +182,6 @@ async fn can_fast_forward(git: &Git, worktree: &Path, branch: &str) -> Result<bo
     }
 }
 
-async fn head(git: &Git, worktree: &Path) -> Result<String, GitError> {
-    git.run(worktree, &["rev-parse", "HEAD"]).await
+async fn head(git: &Git, worktree: At<'_>) -> Result<String, GitError> {
+    git.run_at(worktree, &["rev-parse", "HEAD"]).await
 }

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use bongos_workflow_model::record::{EndState, Lifecycle};
+use bongos_workflow_model::record::{Attempt, EndState, Lifecycle};
 use gpui::TestAppContext;
 use tempfile::TempDir;
 
@@ -15,6 +15,7 @@ use crate::WorkflowsSettings;
 use crate::builtin_merge::{
     DIRTY_TASK_WORKTREE, MergeRefusal, MergeRequest, MergeStyle, Merged, merge,
 };
+use crate::lifecycle::attempt_worktree;
 use crate::worktrees::{
     ClearItem, FinishedRun, Git, NOT_STARTED, RunWorktree, TaskCheckout, WorktreeError,
     apply_clear, branch_worktree_path, check_free_space, check_run_dir, create_branch, create_run,
@@ -121,6 +122,7 @@ impl Fixture {
         MergeRequest {
             task_worktree: self.task_worktree().to_path_buf(),
             task_branch: TASK_BRANCH.to_string(),
+            run_git_dir: run.git_dir.clone(),
             run_branch: run.branch.clone(),
             run_id: RUN_ID.to_string(),
             workflow: "build".to_string(),
@@ -266,6 +268,7 @@ fn worktree_in(run_dir: &Path) -> RunWorktree {
         path: run_worktree_path(run_dir),
         run_dir: run_dir.to_path_buf(),
         branch: "b".into(),
+        git_dir: PathBuf::from("/repo/.git/worktrees/b"),
     }
 }
 
@@ -277,6 +280,7 @@ fn a_recorded_worktree_off_the_run_layout_is_not_a_run_worktree() {
         path: run_worktree_path(&dir),
         run_dir: dir.clone(),
         branch: "b".into(),
+        git_dir: PathBuf::from("/repo/.git/worktrees/b"),
     };
     assert!(is_run_worktree(&real, None, "add-login", 2));
     // An unrelated worktree: its parent would be removed with it.
@@ -284,6 +288,7 @@ fn a_recorded_worktree_off_the_run_layout_is_not_a_run_worktree() {
         path: PathBuf::from("/home/me/project/src"),
         run_dir: PathBuf::from("/home/me/project"),
         branch: "b".into(),
+        git_dir: PathBuf::from("/repo/.git/worktrees/b"),
     };
     assert!(!is_run_worktree(&stray, None, "add-login", 2));
     // The right shape in the wrong place.
@@ -291,6 +296,7 @@ fn a_recorded_worktree_off_the_run_layout_is_not_a_run_worktree() {
         path: PathBuf::from("/home/me/stuff/run"),
         run_dir: PathBuf::from("/home/me/stuff"),
         branch: "b".into(),
+        git_dir: PathBuf::from("/repo/.git/worktrees/b"),
     };
     assert!(!is_run_worktree(&elsewhere, None, "add-login", 2));
     // A configured runs directory.
@@ -299,6 +305,7 @@ fn a_recorded_worktree_off_the_run_layout_is_not_a_run_worktree() {
         path: run_worktree_path(&run_dir(custom, "t", RUN_ID, 1)),
         run_dir: run_dir(custom, "t", RUN_ID, 1),
         branch: "b".into(),
+        git_dir: PathBuf::from("/repo/.git/worktrees/b"),
     };
     assert!(is_run_worktree(&moved, Some(custom), "t", 1));
     assert!(!is_run_worktree(&moved, None, "t", 1));
@@ -881,6 +888,7 @@ async fn clear_finished_keeps_a_run_whose_recorded_dir_is_not_the_one_the_app_ma
         path: run_worktree_path(&elsewhere),
         run_dir: elsewhere.clone(),
         branch: run.branch.clone(),
+        git_dir: run.git_dir.clone(),
     };
     let finished = vec![fixture.finished(
         RUN_ID,
@@ -1018,4 +1026,200 @@ async fn clear_finished_refuses_a_run_dir_swapped_for_a_symlink_after_the_plan(
     );
     assert!(elsewhere.join("run").join("README.md").exists());
     assert!(branch_exists(git, &fixture.repository, &run.branch).await);
+}
+
+/// Makes `run`'s `.git` a file that names `fake`, a directory whose configuration would run
+/// `touch <marker>` as the file system monitor, as a job could write it.
+fn plant_git_file(run: &RunWorktree, fake: &Path, marker: &Path) {
+    fs::create_dir_all(fake).unwrap();
+    // Everything plain git needs to accept it as a repository, so only the code under test keeps
+    // the configuration from running.
+    fs::create_dir_all(fake.join("objects")).unwrap();
+    fs::create_dir_all(fake.join("refs")).unwrap();
+    fs::write(fake.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(
+        fake.join("config"),
+        // `sh -c` takes the arguments git appends to the hook as positionals, so they create no files.
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = sh -c 'touch {}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        run.path.join(".git"),
+        format!("gitdir: {}\n", fake.display()),
+    )
+    .unwrap();
+}
+
+#[gpui::test]
+async fn a_planted_git_file_in_the_run_worktree_runs_nothing(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let run = fixture.create_run(RUN_ID).await;
+    let marker = fixture.root.join("fsmonitor-ran");
+    plant_git_file(&run, &fixture.root.join("fake-git-dir"), &marker);
+
+    // Control: plain git does run the planted configuration, so the plant works.
+    let control = git
+        .output(&run.path, &["status", "--porcelain"])
+        .await
+        .unwrap();
+    assert!(
+        marker.exists(),
+        "plain git did not run the planted fsmonitor: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    fs::remove_file(&marker).unwrap();
+
+    // Every host call in the run tree names the recorded git directory.
+    assert!(!git.is_dirty(run.at()).await.unwrap());
+    let head = git.run_at(run.at(), &["rev-parse", "HEAD"]).await.unwrap();
+    assert_eq!(head, rev(git, &fixture.repository, &run.branch).await);
+    let branch = create_branch(git, &run, "build", 0).await.unwrap();
+    assert!(branch.path.join("README.md").exists());
+    assert_eq!(
+        git.run_at(branch.at(), &["rev-parse", "HEAD"])
+            .await
+            .unwrap(),
+        head
+    );
+    let outcome = join(git, &run, "build", &[0]).await.unwrap();
+    assert_eq!(outcome.merged, vec![0]);
+    assert!(
+        !marker.exists(),
+        "the planted fsmonitor ran in the run worktree"
+    );
+}
+
+#[gpui::test]
+async fn the_run_diff_runs_no_external_diff_or_text_conversion(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let run = fixture.create_run(RUN_ID).await;
+    commit_file(git, &run.path, "shared.txt", "one\ntwo\nthree\nfour\n").await;
+
+    // A driver the repository configuration defines, selected by a `.gitattributes` the job wrote.
+    let marker = fixture.root.join("driver-ran");
+    let script = fixture.root.join("driver.sh");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch {}\ncat \"$1\"\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let script_text = script.to_string_lossy().into_owned();
+    git_out(
+        git,
+        &fixture.repository,
+        &["config", "diff.evil.textconv", &script_text],
+    )
+    .await;
+    git_out(
+        git,
+        &fixture.repository,
+        &["config", "diff.evil.command", &script_text],
+    )
+    .await;
+    git_out(
+        git,
+        &fixture.repository,
+        &["config", "diff.external", &script_text],
+    )
+    .await;
+    fs::write(run.path.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
+    let range = format!("{TASK_BRANCH}...{}", run.branch);
+
+    // The same command from a discovered `.git` does run the driver, so this test can fail.
+    git_out(git, &run.path, &["diff", "--no-color", &range]).await;
+    assert!(marker.exists(), "the control run did not use the driver");
+    fs::remove_file(&marker).unwrap();
+
+    let diff = git
+        .run_at(run.at(), &["diff", "--no-color", &range])
+        .await
+        .unwrap();
+    assert!(diff.contains("+four"), "{diff}");
+    assert!(!marker.exists(), "the run diff ran a configured driver");
+}
+
+#[gpui::test]
+async fn an_old_record_without_a_git_directory_is_filled_in(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let run = fixture.create_run(RUN_ID).await;
+    let attempt = |git_dir: Option<String>| Attempt {
+        n: 1,
+        created: "2026-11-11T10:00:00Z".to_string(),
+        definition_hash: "h".to_string(),
+        definition_commit: None,
+        worktree: run.path.to_string_lossy().into_owned(),
+        branch: run.branch.clone(),
+        git_dir,
+        loop_bound: None,
+    };
+    let migrated = attempt_worktree(&attempt(None), &fixture.task).unwrap();
+    assert_eq!(migrated, run);
+    let recorded = attempt(Some(run.git_dir.to_string_lossy().into_owned()));
+    assert_eq!(attempt_worktree(&recorded, &fixture.task).unwrap(), run);
+}
+
+#[gpui::test]
+async fn an_old_record_whose_git_file_names_an_untrusted_directory_refuses(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let run = fixture.create_run(RUN_ID).await;
+    let attempt = Attempt {
+        n: 1,
+        created: "2026-11-11T10:00:00Z".to_string(),
+        definition_hash: "h".to_string(),
+        definition_commit: None,
+        worktree: run.path.to_string_lossy().into_owned(),
+        branch: run.branch.clone(),
+        git_dir: None,
+        loop_bound: None,
+    };
+    // A directory that is not under the repository's `worktrees/`.
+    let marker = fixture.root.join("fsmonitor-ran");
+    plant_git_file(&run, &fixture.root.join("fake-git-dir"), &marker);
+    let error = attempt_worktree(&attempt, &fixture.task).unwrap_err();
+    assert!(error.contains("worktrees/"), "{error}");
+
+    // Another worktree's git directory, which does sit under `worktrees/`.
+    let task_git_dir = git_out(
+        &fixture.git,
+        fixture.task_worktree(),
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    )
+    .await;
+    fs::write(run.path.join(".git"), format!("gitdir: {task_git_dir}\n")).unwrap();
+    let error = attempt_worktree(&attempt, &fixture.task).unwrap_err();
+    assert!(error.contains("another worktree"), "{error}");
+    assert!(!marker.exists());
+}
+
+#[gpui::test]
+async fn an_old_record_whose_worktree_is_gone_still_loads(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let gone = fixture.root.join("gone-run").join("run");
+    let attempt = Attempt {
+        n: 1,
+        created: "2026-11-11T10:00:00Z".to_string(),
+        definition_hash: "h".to_string(),
+        definition_commit: None,
+        worktree: gone.to_string_lossy().into_owned(),
+        branch: "bongos/workflow-gone".to_string(),
+        git_dir: None,
+        loop_bound: None,
+    };
+    let run = attempt_worktree(&attempt, &fixture.task).unwrap();
+    assert_eq!(run.path, gone);
+    assert_eq!(run.branch, "bongos/workflow-gone");
+    assert_eq!(run.git_dir, PathBuf::new());
 }

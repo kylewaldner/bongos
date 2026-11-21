@@ -2,7 +2,7 @@
 //! the attempt's definition copy, caps, poll plan, state document, worktree, scratch, git
 //! directory and network list with `@remote` resolved) and hands it to one [`ProgramRunner`].
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bongos_workflow_model::record::TodoRef;
@@ -18,7 +18,7 @@ use crate::runner_program::{
     Clock, Interpreter, PollPlan, ProgramCaps, ProgramNode, ProgramRunner, SandboxProbe,
 };
 use crate::runtime::{Finish, NodeStart, RunBinding};
-use crate::worktrees::{Git, repository_root};
+use crate::worktrees::{Git, common_dir_of, repository_of};
 
 /// The network entry that stands for the host of the task repository's push remote.
 pub(crate) const REMOTE_ENTRY: &str = "@remote";
@@ -156,7 +156,7 @@ impl NodeKind for ProgramNodes {
                 .as_ref()
                 .map(|polls| PollPlan::resolve(polls, &inputs.programs)),
             state,
-            git_common_dir: common_git_dir(&worktree),
+            git_common_dir: common_dir_of(&binding.worktree.git_dir).ok(),
             worktree,
             scratch,
             node_result: try_dir.join("node-result.json"),
@@ -206,25 +206,10 @@ fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) -> PathBuf 
         .join(format!("{}-{try_number}", key.pass))
 }
 
-/// The common git directory of `worktree`, when it is in a git repository.
-fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
-    let git = Git::new("git");
-    let output = futures::executor::block_on(git.run(
-        worktree,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    ))
-    .ok()?;
-    Some(PathBuf::from(output))
-}
-
 /// The hosts of the task repository's push remote, or [`NO_ORIGIN`].
 pub(crate) fn task_remote_hosts(git: &Git, binding: &RunBinding) -> Result<Vec<String>, String> {
-    let task_tree = binding
-        .checkout
-        .worktree
-        .clone()
-        .unwrap_or_else(|| binding.worktree.path.clone());
-    let root = futures::executor::block_on(repository_root(git, &task_tree)).unwrap_or(task_tree);
+    // The repository comes from the run's recorded git directory; no tree is asked.
+    let root = repository_of(&binding.worktree.git_dir).map_err(|_| NO_ORIGIN.to_string())?;
     let url =
         futures::executor::block_on(git.run(&root, &["remote", "get-url", "--push", "origin"]))
             .map_err(|_| NO_ORIGIN.to_string())?;

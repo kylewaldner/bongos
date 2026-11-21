@@ -26,7 +26,7 @@ use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged}
 use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 use crate::builtin_wait::{self, WaitCondition, WaitOutcome, WaitRequest};
 use crate::runtime::{Finish, RunBinding};
-use crate::worktrees::Git;
+use crate::worktrees::{At, Git, task_git_dir};
 
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_GIVE_UP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -180,8 +180,8 @@ fn node_with<'a>(start: &BuiltinStart<'a>) -> Result<&'a toml::Table, Failure> {
 pub struct MergeNode {
     git: Git,
     tries: Tries,
-    /// The task worktree each run's merge started in, for [`BuiltinNode::recover`].
-    worktrees: Mutex<HashMap<String, PathBuf>>,
+    /// The task worktree and the run's git directory each run's merge started in, for [`BuiltinNode::recover`].
+    worktrees: Mutex<HashMap<String, (PathBuf, PathBuf)>>,
     recoveries: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
@@ -235,6 +235,7 @@ impl MergeNode {
         };
         Ok(MergeRequest {
             task_worktree: task_worktree.clone(),
+            run_git_dir: binding.worktree.git_dir.clone(),
             task_branch: task_branch.clone(),
             run_branch: binding.worktree.branch.clone(),
             run_id: start.run.to_string(),
@@ -266,12 +267,24 @@ async fn run_merge(git: &Git, request: &MergeRequest, key: &NodeKey) -> Result<V
 }
 
 /// Aborts a merge in progress in `worktree`; does nothing when there is none.
-async fn abort_half_done(git: &Git, worktree: &Path) {
+async fn abort_half_done(git: &Git, worktree: &Path, run_git_dir: &Path) {
+    let Ok(git_dir) = task_git_dir(worktree, run_git_dir) else {
+        log::error!(
+            "workflows: the task worktree's git directory is not trusted; no merge aborted"
+        );
+        return;
+    };
+    let git_dir = git_dir.as_path();
+    let at = At {
+        git_dir,
+        directory: worktree,
+        job: false,
+    };
     let in_progress = git
-        .run(worktree, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .run_at(at, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
         .await
         .is_ok();
-    if in_progress && let Err(error) = git.run(worktree, &["merge", "--abort"]).await {
+    if in_progress && let Err(error) = git.run_at(at, &["merge", "--abort"]).await {
         log::error!("workflows: could not abort a half-done merge: {error}");
     }
 }
@@ -282,7 +295,10 @@ impl BuiltinNode for MergeNode {
         self.worktrees
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(start.run.to_string(), request.task_worktree.clone());
+            .insert(
+                start.run.to_string(),
+                (request.task_worktree.clone(), request.run_git_dir.clone()),
+            );
         let git = self.git.clone();
         let key = start.key.clone();
         let id = (start.run.to_string(), key.clone(), start.try_number);
@@ -300,7 +316,7 @@ impl BuiltinNode for MergeNode {
     }
 
     fn recover(&self, run: &str, _keys: &[NodeKey]) {
-        let Some(worktree) = self
+        let Some((worktree, git_dir)) = self
             .worktrees
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -312,7 +328,7 @@ impl BuiltinNode for MergeNode {
         let git = self.git.clone();
         let handle = std::thread::Builder::new()
             .name("workflow-merge-recover".to_string())
-            .spawn(move || futures::executor::block_on(abort_half_done(&git, &worktree)));
+            .spawn(move || futures::executor::block_on(abort_half_done(&git, &worktree, &git_dir)));
         if let Ok(handle) = handle {
             self.recoveries
                 .lock()

@@ -280,6 +280,7 @@ impl RunWorktrees for DirWorktrees {
         let path = run_dir.join("run");
         fs::create_dir_all(&path).unwrap();
         Ok(RunWorktree {
+            git_dir: run_dir.join("git"),
             run_dir,
             path,
             branch: format!("{TASK_BRANCH}-run-{attempt}"),

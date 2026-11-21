@@ -86,6 +86,7 @@ fn binding(dir: &Path) -> RunBinding {
             run_dir: dir.to_path_buf(),
             path: dir.to_path_buf(),
             branch: "run".to_string(),
+            git_dir: dir.join(".git"),
         },
         checkout: TaskCheckout {
             slug: "todo".to_string(),
