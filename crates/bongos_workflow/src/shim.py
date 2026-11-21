@@ -2,13 +2,22 @@
 #
 # It reads the node's permissions from the policy file, installs an audit hook
 # (sys.addaudithook) that denies what the node did not declare, then runs the
-# script with runpy as __main__. A denial raises
+# script with runpy as __main__. The policy is `commands`, `network`, `writable`
+# (the writable roots: the job tree, the node's scratch directory and the declared
+# directories) and `masks` (read-only paths inside the roots; an empty list is
+# valid), as the runner's confinement works them out. A denial raises
 # PermissionError("permission denied: <what>") and writes one JSON line to the
 # denials pipe (handed over as file descriptor 3 and moved to a high number at
 # startup), which bongos reads after the script exits; any denial fails the
 # node even when the script caught the exception. When the script ends, the
 # shim writes an end marker to the pipe; a clean exit without it fails the node,
 # so closing the pipe cannot hide a denial.
+#
+# Every write denial names the rule: "permission denied: <RULE>: <path>", where
+# RULE is the text of bongos_confine::RULE. The shim mirrors the OS sandbox's
+# allowlist and denies only what that allowlist would: a write outside the
+# writable roots or inside a mask. Symlinks and hard links are not special; a
+# write through one is checked at the path it resolves to.
 #
 # Denied: starting a program not in `commands` (subprocess.Popen, os.system,
 # os.exec*, os.posix_spawn*, and the fork_exec under subprocess, replaced by a
@@ -17,16 +26,10 @@
 # from or resolve into a writable path; a shell only as `<shell> -c <line>` whose
 # line names a listed command; an environment that makes a shell, the dynamic
 # loader or Python run other code, set for a program or in the shim's own),
-# opening or changing a file outside the writable paths or inside a protected one
-# (the OS sandbox's allowlist: the worktree, the scratch directory, the common git
-# directory's objects/, refs/ and logs/ and the worktree's own git directory; its
-# .git file, gitdir, commondir and config.worktree protected, and refs/replace,
-# objects/info/alternates and objects/info/http-alternates too)
+# opening or changing a file outside the writable roots or inside a mask
 # (relative to a directory descriptor or through a file descriptor too; FIFOs and
-# device nodes included), creating a symlink inside the writable git paths (one
-# elsewhere in the writable paths is allowed), writing through a symlink that
-# sits inside the writable git paths, renaming a symlink or hard linking anything
-# into them (a later host git would write through it), connecting a socket when the node declares no network
+# device nodes included; a rename needs both ends writable, a hard link its
+# destination), connecting a socket when the node declares no network
 # (or to a host it did not declare), and the introspection that reaches the hook's
 # own state (gc object walks, ctypes, frame walks into the shim, tracing). Reads
 # are never blocked. Only plain str and bytes (and their subclasses, read without
@@ -36,8 +39,7 @@
 # process can always defeat an audit hook. The OS sandbox is the boundary; a run
 # without it ("not sandboxed" in the try's summary) is not hard-confined. Known
 # gaps, accepted for that reason: a walk through closures (__closure__,
-# cell_contents) reaches the hook's state; os.link checks only the destination
-# (and refuses one into the git paths);
+# cell_contents) reaches the hook's state; os.link checks only the destination;
 # binding a unix socket creates a file anywhere; the arguments and environment of
 # a listed command are not checked (git -c core.fsmonitor=... runs).
 
@@ -65,12 +67,13 @@ def _install(policy):
         return os.path.realpath(path).rstrip(os.sep) or os.sep
 
     writable = tuple(norm(path) for path in policy.get("writable") or [])
-    protected = tuple(norm(path) for path in policy.get("protected") or [])
-    git_roots = tuple(norm(path) for path in policy.get("git") or [])
+    masks = tuple(norm(path) for path in policy.get("masks") or [])
     hosts = tuple(host.lower().rstrip(".") for host in policy.get("network") or [])
     shell_names = frozenset(("sh", "bash", "dash", "zsh", "ksh"))
     shell_syntax = frozenset(";&|`$()<>\n\\*?{}[]~")
     shim_file = norm(__file__)
+    # The text of bongos_confine::RULE.
+    rule = "write outside the job tree and declared directories refused"
 
     # The denials pipe, moved off 3 so a script that closes or reuses 3 does not lose it.
     # Closed at 3 so the programs it starts do not inherit it.
@@ -185,16 +188,16 @@ def _install(policy):
             # fchmod, fchown, futimens, ftruncate, fsetxattr: the file the descriptor names.
             name = fd_path(path)
             if name is None:
-                deny("change through a file descriptor bongos cannot check")
+                deny(rule + ": a file descriptor bongos cannot check")
             return os.path.realpath(name)
         name = text(path)
         if name is None:
-            deny("write to a path object bongos cannot check")
+            deny(rule + ": a path object bongos cannot check")
         if os.path.isabs(name):
             return os.path.realpath(name)
         base = dir_base(dir_fd)
         if base is None:
-            deny("write relative to a directory descriptor: " + name)
+            deny(rule + ": relative to a directory descriptor: " + name)
         return os.path.realpath(os.path.join(base, name))
 
     def is_writable(path):
@@ -202,40 +205,7 @@ def _install(policy):
             return True
         if path == "/dev/null" or path.startswith("/dev/fd/") or path.startswith("/proc/self/fd/"):
             return True
-        return under(path, writable) and not under(path, protected)
-
-    def unresolved(path, dir_fd=None):
-        """The absolute path `path` names with no symlink resolved, or None (a descriptor)."""
-        if path is None or type(path) is int:
-            return None
-        name = text(path)
-        if name is None:
-            return None
-        if os.path.isabs(name):
-            return name
-        base = dir_base(dir_fd)
-        return None if base is None else os.path.join(base, name)
-
-    def git_symlink(name):
-        """The first symlink sitting inside the writable git paths that resolving `name` passes
-        (its last part included), or None. A later host git would follow it too."""
-        if not git_roots or name is None:
-            return None
-        current = os.sep
-        for part in name.split(os.sep):
-            if part in ("", "."):
-                continue
-            if part == "..":
-                current = os.path.dirname(current)
-                continue
-            candidate = os.path.join(current, part)
-            if os.path.islink(candidate):
-                if under(candidate, git_roots):
-                    return candidate
-                current = os.path.realpath(candidate)
-            else:
-                current = candidate
-        return None
+        return under(path, writable) and not under(path, masks)
 
     def check_write(path, dir_fd=None):
         if type(path) in (str, bytes) and path in (
@@ -247,44 +217,19 @@ def _install(policy):
             return
         resolved = resolve(path, dir_fd)
         if not is_writable(resolved):
-            deny("write " + resolved)
-        found = git_symlink(unresolved(path, dir_fd))
-        if found is not None:
-            deny("write through a symlink in git " + found)
-
-    def check_into_git(source, source_dir_fd, destination, destination_dir_fd, what):
-        """Denies moving or linking a symlink (or, for a hard link, anything) into the writable
-        git paths, where a later host git would write through it."""
-        target = resolve(destination, destination_dir_fd)
-        if target is None or not under(target, git_roots):
-            return
-        if what == "link":
-            deny("hard link into git " + target)
-        name = unresolved(source, source_dir_fd)
-        if name is None or os.path.islink(name):
-            deny("move a symlink into git " + target)
+            deny(rule + ": " + resolved)
 
     def on_rename(args):
         check_write(args[0], args[2])
         check_write(args[1], args[3])
-        check_into_git(args[0], args[2], args[1], args[3], "rename")
 
     def on_link(args):
         check_write(args[1], args[3])
-        check_into_git(args[0], args[2], args[1], args[3], "link")
 
     def on_symlink(args):
-        """A symlink may be made where writes are allowed (a virtual environment makes some), but
-        not inside the writable git paths, where a host git would follow it."""
+        """A symlink may be made wherever writes are allowed (a virtual environment makes
+        some); a write through it is checked at the path it resolves to."""
         destination, dir_fd = (list(args) + [None, None, None])[1:3]
-        name = unresolved(destination, dir_fd)
-        if name is None:
-            deny("create a symlink bongos cannot check")
-        # The link itself is not followed: only its directory is resolved.
-        name = name.rstrip(os.sep) or os.sep
-        place = os.path.join(norm(os.path.dirname(name)), os.path.basename(name))
-        if under(place, git_roots):
-            deny("create a symlink in git " + place)
         check_write(destination, dir_fd)
 
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
@@ -302,7 +247,7 @@ def _install(policy):
         # directory descriptor's file: refuse it rather than guess.
         name = text(path)
         if mode is None and name is not None and not os.path.isabs(name):
-            deny("write relative to a directory descriptor: " + name)
+            deny(rule + ": relative to a directory descriptor: " + name)
         check_write(path)
 
     # Programs.
@@ -524,7 +469,7 @@ def _install(policy):
         def make(path, mode=default_mode, *rest, dir_fd=None, **options):
             path = plain(path)
             if dir_fd is not None and type(dir_fd) is not int:
-                deny("write relative to a directory descriptor bongos cannot check")
+                deny(rule + ": a directory descriptor bongos cannot check")
             check_write(path, dir_fd)
             return real(path, mode, *rest, dir_fd=dir_fd, **options)
 
