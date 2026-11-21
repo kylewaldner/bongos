@@ -1149,6 +1149,9 @@ pub struct RealGitRepository {
     any_git_binary_help_output: Arc<Mutex<Option<SharedString>>>,
     executor: BackgroundExecutor,
     is_trusted: Arc<AtomicBool>,
+    /// The git data found at open, which every command of a repository with a working directory
+    /// is bound to. Set once in `new`.
+    pin: Option<GitPin>,
 }
 
 #[derive(Debug)]
@@ -1182,19 +1185,20 @@ impl RealGitRepository {
             bundled_git_binary_path,
             system_git_binary_path,
             executor,
-            &util::job_roots::contains,
+            Arc::new(util::job_roots::contains),
         )
     }
 
-    /// Like [`RealGitRepository::new`], with `in_job_root` deciding whether a resolved git
-    /// directory lies inside a job root. A repository whose git directory or common directory was
-    /// written by a sandboxed job is refused, so its hooks and config never run in the editor.
+    /// Like [`RealGitRepository::new`], with `in_job_root` deciding whether a path lies inside a
+    /// job root. A repository whose git directory or common directory was written by a sandboxed
+    /// job is refused, so its hooks and config never run in the editor. The same check runs again
+    /// before every command.
     fn new_with_job_roots(
         dotgit_path: &Path,
         bundled_git_binary_path: Option<PathBuf>,
         system_git_binary_path: Option<PathBuf>,
         executor: BackgroundExecutor,
-        in_job_root: &dyn Fn(&Path) -> bool,
+        in_job_root: JobRootCheck,
     ) -> Result<Self> {
         let any_git_binary_path = system_git_binary_path
             .clone()
@@ -1203,12 +1207,7 @@ impl RealGitRepository {
         log::info!(
             "opening git repository at {dotgit_path:?} using git binary {any_git_binary_path:?}"
         );
-        let refuse = || {
-            anyhow!(
-                "not opening {}: its git data was written by a bongos job",
-                dotgit_path.display()
-            )
-        };
+        let refuse = || written_by_job_error(dotgit_path);
         // Git and the kernel resolve symbolic links before `..`, so a path is checked as written
         // as well as after lexical normalization: `link/..` may lead somewhere else than the
         // normalized path does.
@@ -1278,6 +1277,25 @@ impl RealGitRepository {
             return Err(refuse());
         }
 
+        // Every command passes the git directory explicitly, which skips git's own
+        // `safe.directory` ownership check, so it runs here instead.
+        #[cfg(unix)]
+        check_ownership(
+            &any_git_binary_path,
+            working_directory.as_deref(),
+            &git_dir,
+            &common_dir,
+        )?;
+
+        // A bare repository has no working tree to pin, and keeps running as before.
+        let pin = working_directory.as_ref().map(|work_tree| GitPin {
+            filter_drivers: read_filter_drivers(&any_git_binary_path, &git_dir, work_tree),
+            git_dir: git_dir.clone(),
+            common_dir: common_dir.clone(),
+            work_tree: work_tree.clone(),
+            in_job_root,
+        });
+
         Ok(Self {
             git_dir,
             common_dir,
@@ -1287,7 +1305,72 @@ impl RealGitRepository {
             executor,
             any_git_binary_help_output: Arc::new(Mutex::new(None)),
             is_trusted: Arc::new(AtomicBool::new(false)),
+            pin,
         })
+    }
+
+    /// The pin for a command run in `worktree_path`, another worktree of this repository: its own
+    /// git directory, found from this repository's records (the `gitdir` files under the common
+    /// directory's `worktrees`), never from the worktree's `.git` file.
+    fn pin_for_worktree(&self, worktree_path: &Path) -> Result<Option<GitPin>> {
+        let Some(pin) = &self.pin else {
+            return Ok(None);
+        };
+        let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+        let target = canonical(worktree_path);
+        let same_directory = |candidate: &Path| {
+            candidate == worktree_path || (target.is_some() && canonical(candidate) == target)
+        };
+        let not_a_worktree = || {
+            anyhow!(
+                "not a worktree of this repository: {}",
+                worktree_path.display()
+            )
+        };
+        // This repository's own working tree, whatever its git directory is named.
+        if same_directory(&pin.work_tree) {
+            return Ok(Some(GitPin {
+                work_tree: worktree_path.to_path_buf(),
+                ..pin.clone()
+            }));
+        }
+        if self.common_dir.file_name() == Some(OsStr::new(".git"))
+            && let Some(main_worktree) = self.common_dir.parent()
+            && same_directory(main_worktree)
+        {
+            return Ok(Some(GitPin {
+                git_dir: self.common_dir.clone(),
+                work_tree: worktree_path.to_path_buf(),
+                ..pin.clone()
+            }));
+        }
+        let entries = match std::fs::read_dir(self.common_dir.join("worktrees")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(not_a_worktree());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let git_dir = entry?.path();
+            let Ok(gitdir_file) = std::fs::read_to_string(git_dir.join("gitdir")) else {
+                continue;
+            };
+            // Relative with `worktree.useRelativePaths`, from the entry's own directory.
+            // `same_directory` resolves any `..` the way the kernel does.
+            let dotgit = git_dir.join(gitdir_file.trim_end_matches(['\n', '\r']));
+            if dotgit.file_name() == Some(OsStr::new(".git"))
+                && let Some(worktree) = dotgit.parent()
+                && same_directory(worktree)
+            {
+                return Ok(Some(GitPin {
+                    git_dir,
+                    work_tree: worktree_path.to_path_buf(),
+                    ..pin.clone()
+                }));
+            }
+        }
+        Err(not_a_worktree())
     }
 
     fn working_directory(&self) -> Result<PathBuf> {
@@ -1309,9 +1392,12 @@ impl RealGitRepository {
             self.path(),
             self.executor.clone(),
             self.is_trusted(),
+            self.pin.clone(),
         ))
     }
 
+    /// Runs in the working directory, or in the git directory of a bare repository (which has no
+    /// pin).
     fn git_binary(&self) -> GitBinary {
         GitBinary::new(
             self.any_git_binary_path.clone(),
@@ -1319,6 +1405,7 @@ impl RealGitRepository {
             self.path(),
             self.executor.clone(),
             self.is_trusted(),
+            self.pin.clone(),
         )
     }
 
@@ -1391,6 +1478,9 @@ pub async fn get_git_committer(cx: &AsyncApp) -> GitCommitter {
         paths::home_dir().join(".git"),
         cx.background_executor().clone(),
         true,
+        // Only reads the global configuration; there is no git directory to pin, and
+        // `core.fsmonitor` is disabled on every command.
+        None,
     );
 
     cx.background_spawn(async move {
@@ -1426,7 +1516,7 @@ impl GitRepository for RealGitRepository {
                         "--no-patch",
                         "--format=%H%x00%B%x00%at%x00%ae%x00%an%x00",
                         &commit,
-                    ])
+                    ])?
                     .output()
                     .await?;
                 let output = std::str::from_utf8(&output.stdout)?;
@@ -1461,7 +1551,7 @@ impl GitRepository for RealGitRepository {
                     "--no-renames",
                     "--name-status",
                     "--first-parent",
-                ])
+                ])?
                 .arg(&commit)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1475,7 +1565,7 @@ impl GitRepository for RealGitRepository {
             let parent_sha = format!("{}^", commit);
 
             let mut cat_file_process = git
-                .build_command(&["cat-file", "--batch=%(objectsize)"])
+                .build_command(&["cat-file", "--batch=%(objectsize)"])?
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1591,7 +1681,7 @@ impl GitRepository for RealGitRepository {
             };
 
             let output = git
-                .build_command(&["reset", mode_flag, &commit])
+                .build_command(&["reset", mode_flag, &commit])?
                 .envs(env.iter())
                 .output()
                 .await?;
@@ -1619,7 +1709,7 @@ impl GitRepository for RealGitRepository {
             }
 
             let output = git
-                .build_command(&["checkout", &commit, "--"])
+                .build_command(&["checkout", &commit, "--"])?
                 .envs(env.iter())
                 .args(paths.iter().map(|path| path.as_unix_str()))
                 .output()
@@ -1642,6 +1732,7 @@ impl GitRepository for RealGitRepository {
                 let git = git_binary;
                 let output = git
                     .build_command(&["show", &path_str])
+                    .log_err()?
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output()
@@ -1662,6 +1753,7 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 let output = git
                     .build_command(&["show", &path_str])
+                    .log_err()?
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output()
@@ -1692,7 +1784,7 @@ impl GitRepository for RealGitRepository {
                 let working_directory = working_directory?;
                 let git_binary = git_binary?;
                 let output = git_binary
-                    .build_command(&["config", "--get", "commit.template"])
+                    .build_command(&["config", "--get", "commit.template"])?
                     .output()
                     .await
                     .context("failed to run git config --get commit.template")?;
@@ -1739,7 +1831,7 @@ impl GitRepository for RealGitRepository {
 
                 if let Some(content) = content {
                     let mut child = git
-                        .build_command(&["hash-object", "-w", "--stdin"])
+                        .build_command(&["hash-object", "-w", "--stdin"])?
                         .envs(env.iter())
                         .stdin(Stdio::piped())
                         .stdout(Stdio::piped())
@@ -1754,7 +1846,7 @@ impl GitRepository for RealGitRepository {
                     log::debug!("indexing SHA: {sha}, path {path:?}");
 
                     let output = git
-                        .build_command(&["update-index", "--add", "--cacheinfo", mode, sha])
+                        .build_command(&["update-index", "--add", "--cacheinfo", mode, sha])?
                         .envs(env.iter())
                         .arg(path.as_unix_str())
                         .output()
@@ -1768,7 +1860,7 @@ impl GitRepository for RealGitRepository {
                 } else {
                     log::debug!("removing path {path:?} from the index");
                     let output = git
-                        .build_command(&["update-index", "--force-remove", "--"])
+                        .build_command(&["update-index", "--force-remove", "--"])?
                         .envs(env.iter())
                         .arg(path.as_unix_str())
                         .output()
@@ -1809,7 +1901,7 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let mut process = git
-                    .build_command(&["cat-file", "--batch-check=%(objectname)"])
+                    .build_command(&["cat-file", "--batch-check=%(objectname)"])?
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -1863,7 +1955,7 @@ impl GitRepository for RealGitRepository {
         log::debug!("Checking for git status in {path_prefixes:?}");
         self.executor.spawn(async move {
             let git = git?;
-            let output = git.build_command(&args).output().await?;
+            let output = git.build_command(&args)?.output().await?;
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 stdout.parse()
@@ -1908,7 +2000,7 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let git = git?;
-                let output = git.build_command(&args).output().await?;
+                let output = git.build_command(&args)?.output().await?;
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     stdout.parse()
@@ -1926,7 +2018,7 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 let git = git?;
                 let output = git
-                    .build_command(&["stash", "list", "--pretty=format:%gd%x00%H%x00%ct%x00%s"])
+                    .build_command(&["stash", "list", "--pretty=format:%gd%x00%H%x00%ct%x00%s"])?
                     .output()
                     .await?;
                 if output.status.success() {
@@ -1963,7 +2055,7 @@ impl GitRepository for RealGitRepository {
                     "--format",
                     &fields,
                 ];
-                let output = git.build_command(&args).output().await?;
+                let output = git.build_command(&args)?.output().await?;
 
                 let error = if output.status.success() {
                     None
@@ -1978,7 +2070,7 @@ impl GitRepository for RealGitRepository {
                 if branches.is_empty() {
                     let args = vec!["symbolic-ref", "--quiet", "HEAD"];
 
-                    let output = git.build_command(&args).output().await?;
+                    let output = git.build_command(&args)?.output().await?;
 
                     // git symbolic-ref returns a non-0 exit code if HEAD points
                     // to something other than a branch
@@ -2005,7 +2097,7 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let output = git
-                    .build_command(&["worktree", "list", "--porcelain"])
+                    .build_command(&["worktree", "list", "--porcelain"])?
                     .output()
                     .await?;
                 if output.status.success() {
@@ -2087,7 +2179,7 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-                let output = git.build_command(&args).output().await?;
+                let output = git.build_command(&args)?.output().await?;
                 if output.status.success() {
                     Ok(())
                 } else {
@@ -2139,16 +2231,20 @@ impl GitRepository for RealGitRepository {
         worktree_path: PathBuf,
         create: bool,
     ) -> BoxFuture<'_, Result<()>> {
-        let git_binary = GitBinary::new(
-            self.any_git_binary_path.clone(),
-            worktree_path,
-            self.path(),
-            self.executor.clone(),
-            self.is_trusted(),
-        );
+        let git_binary = self.pin_for_worktree(&worktree_path).map(|pin| {
+            GitBinary::new(
+                self.any_git_binary_path.clone(),
+                worktree_path,
+                self.path(),
+                self.executor.clone(),
+                self.is_trusted(),
+                pin,
+            )
+        });
 
         self.executor
             .spawn(async move {
+                let git_binary = git_binary?;
                 if create {
                     git_binary.run(&["checkout", "-b", &branch_name]).await?;
                 } else {
@@ -2284,11 +2380,11 @@ impl GitRepository for RealGitRepository {
                 let git = git?;
                 let output = match diff {
                     DiffType::HeadToIndex => {
-                        git.build_command(&["diff", "--staged"]).output().await?
+                        git.build_command(&["diff", "--staged"])?.output().await?
                     }
-                    DiffType::HeadToWorktree => git.build_command(&["diff"]).output().await?,
+                    DiffType::HeadToWorktree => git.build_command(&["diff"])?.output().await?,
                     DiffType::MergeBase { base_ref } => {
-                        git.build_command(&["diff", "--merge-base", base_ref.as_ref()])
+                        git.build_command(&["diff", "--merge-base", base_ref.as_ref()])?
                             .output()
                             .await?
                     }
@@ -2345,7 +2441,7 @@ impl GitRepository for RealGitRepository {
                 let git = git?;
                 if !paths.is_empty() {
                     let output = git
-                        .build_command(&["update-index", "--add", "--remove", "--"])
+                        .build_command(&["update-index", "--add", "--remove", "--"])?
                         .envs(env.iter())
                         .args(paths.iter().map(|p| p.as_unix_str()))
                         .output()
@@ -2373,7 +2469,7 @@ impl GitRepository for RealGitRepository {
                 let git = git?;
                 if !paths.is_empty() {
                     let output = git
-                        .build_command(&["reset", "--quiet", "--"])
+                        .build_command(&["reset", "--quiet", "--"])?
                         .envs(env.iter())
                         .args(paths.iter().map(|p| p.as_std_path()))
                         .output()
@@ -2395,12 +2491,16 @@ impl GitRepository for RealGitRepository {
         paths: Vec<RepoPath>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
+        // With no path, `stash push` would take the whole tree, following any submodule's `.git`.
+        if paths.is_empty() {
+            return futures::future::ready(Ok(())).boxed();
+        }
         let git = self.git_binary_in_worktree();
         self.executor
             .spawn(async move {
                 let git = git?;
                 let output = git
-                    .build_command(&["stash", "push", "--quiet", "--include-untracked", "--"])
+                    .build_command(&["stash", "push", "--quiet", "--include-untracked", "--"])?
                     .envs(env.iter())
                     .args(paths.iter().map(|p| p.as_unix_str()))
                     .output()
@@ -2429,7 +2529,7 @@ impl GitRepository for RealGitRepository {
                 if let Some(index) = index {
                     args.push(format!("stash@{{{}}}", index));
                 }
-                let output = git.build_command(&args).envs(env.iter()).output().await?;
+                let output = git.build_command(&args)?.envs(env.iter()).output().await?;
 
                 anyhow::ensure!(
                     output.status.success(),
@@ -2454,7 +2554,7 @@ impl GitRepository for RealGitRepository {
                 if let Some(index) = index {
                     args.push(format!("stash@{{{}}}", index));
                 }
-                let output = git.build_command(&args).envs(env.iter()).output().await?;
+                let output = git.build_command(&args)?.envs(env.iter()).output().await?;
 
                 anyhow::ensure!(
                     output.status.success(),
@@ -2479,7 +2579,7 @@ impl GitRepository for RealGitRepository {
                 if let Some(index) = index {
                     args.push(format!("stash@{{{}}}", index));
                 }
-                let output = git.build_command(&args).envs(env.iter()).output().await?;
+                let output = git.build_command(&args)?.envs(env.iter()).output().await?;
 
                 anyhow::ensure!(
                     output.status.success(),
@@ -2505,7 +2605,7 @@ impl GitRepository for RealGitRepository {
         // which we want to block on.
         async move {
             let git = git?;
-            let mut cmd = git.build_command(&["commit", "--quiet", "-m"]);
+            let mut cmd = git.build_command(&["commit", "--quiet", "-m"])?;
             cmd.envs(env.iter())
                 .arg(&message.to_string())
                 .arg("--cleanup=strip")
@@ -2570,6 +2670,7 @@ impl GitRepository for RealGitRepository {
         let executor = cx.background_executor().clone();
         let git_binary_path = self.system_git_binary_path.clone();
         let is_trusted = self.is_trusted();
+        let pin = self.pin.clone();
         // Note: Do not spawn this command on the background thread, it might pop open the credential helper
         // which we want to block on.
         async move {
@@ -2580,8 +2681,9 @@ impl GitRepository for RealGitRepository {
                 git_directory,
                 executor.clone(),
                 is_trusted,
+                pin,
             );
-            let mut command = git.build_command(&["push"]);
+            let mut command = git.build_command(&["push"])?;
             command
                 .envs(env.iter())
                 .args(options.map(|option| match option {
@@ -2613,6 +2715,7 @@ impl GitRepository for RealGitRepository {
         let executor = cx.background_executor().clone();
         let git_binary_path = self.system_git_binary_path.clone();
         let is_trusted = self.is_trusted();
+        let pin = self.pin.clone();
         // Note: Do not spawn this command on the background thread, it might pop open the credential helper
         // which we want to block on.
         async move {
@@ -2623,8 +2726,9 @@ impl GitRepository for RealGitRepository {
                 git_directory,
                 executor.clone(),
                 is_trusted,
+                pin,
             );
-            let mut command = git.build_command(&["pull"]);
+            let mut command = git.build_command(&["pull"])?;
             command.envs(env.iter());
 
             if rebase {
@@ -2655,6 +2759,7 @@ impl GitRepository for RealGitRepository {
         let git_binary_path = self.system_git_binary_path.clone();
         let executor = cx.background_executor().clone();
         let is_trusted = self.is_trusted();
+        let pin = self.pin.clone();
         // Note: Do not spawn this command on the background thread, it might pop open the credential helper
         // which we want to block on.
         async move {
@@ -2665,8 +2770,9 @@ impl GitRepository for RealGitRepository {
                 git_directory,
                 executor.clone(),
                 is_trusted,
+                pin,
             );
-            let mut command = git.build_command(&["fetch", &remote_name]);
+            let mut command = git.build_command(&["fetch", &remote_name])?;
             command
                 .envs(env.iter())
                 .stdout(Stdio::piped())
@@ -2682,7 +2788,7 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let output = git
-                    .build_command(&["rev-parse", "--abbrev-ref"])
+                    .build_command(&["rev-parse", "--abbrev-ref"])?
                     .arg(format!("{branch}@{{push}}"))
                     .output()
                     .await?;
@@ -2706,7 +2812,7 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let output = git
-                    .build_command(&["config", "--get"])
+                    .build_command(&["config", "--get"])?
                     .arg(format!("branch.{branch}.remote"))
                     .output()
                     .await?;
@@ -2726,7 +2832,7 @@ impl GitRepository for RealGitRepository {
         let git = self.git_binary();
         self.executor
             .spawn(async move {
-                let output = git.build_command(&["remote", "-v"]).output().await?;
+                let output = git.build_command(&["remote", "-v"])?.output().await?;
 
                 anyhow::ensure!(
                     output.status.success(),
@@ -2811,7 +2917,7 @@ impl GitRepository for RealGitRepository {
                     let head_sha = git.run(&["rev-parse", "HEAD"]).await.ok();
                     let mut excludes = exclude_files(git).await?;
 
-                    git.run(&["add", "--all"]).await?;
+                    git.run(&git.add_all_args().await?).await?;
                     let tree = git.run(&["write-tree"]).await?;
                     let checkpoint_sha = if let Some(head_sha) = head_sha.as_deref() {
                         git.run(&["commit-tree", &tree, "-p", head_sha, "-m", "Checkpoint"])
@@ -2892,7 +2998,7 @@ impl GitRepository for RealGitRepository {
                 // a temporary index so we don't disturb the real one.
                 let unstaged_sha = git
                     .with_temp_index(async |git| {
-                        git.run(&["add", "--all"]).await?;
+                        git.run(&git.add_all_args().await?).await?;
                         let full_tree = git.run(&["write-tree"]).await?;
                         let sha = git
                             .run(&[
@@ -3084,6 +3190,10 @@ impl GitRepository for RealGitRepository {
             {
                 let hook_abs_path = git_dir.join("hooks").join(hook.as_str());
                 if hook_abs_path.is_file() && git_binary.is_trusted {
+                    // The same check `build_command` runs before every git command.
+                    if let Some(pin) = &git_binary.pin {
+                        pin.check(&working_directory)?;
+                    }
                     #[allow(clippy::disallowed_methods)]
                     let output = new_command(&hook_abs_path)
                         .envs(env.iter())
@@ -3126,7 +3236,7 @@ impl GitRepository for RealGitRepository {
         async move {
             let mut git_log_command = vec!["log", GRAPH_COMMIT_FORMAT, log_order.as_arg()];
             git_log_command.extend(log_source.get_args()?);
-            let mut command = git.build_command(&git_log_command);
+            let mut command = git.build_command(&git_log_command)?;
             command.stdout(Stdio::piped());
             command.stderr(Stdio::piped());
 
@@ -3211,7 +3321,7 @@ impl GitRepository for RealGitRepository {
             }
 
             args.extend(log_source.get_args()?);
-            let mut command = git.build_command(&args);
+            let mut command = git.build_command(&args)?;
             command.stdout(Stdio::piped());
             command.stderr(Stdio::null());
 
@@ -3280,7 +3390,7 @@ impl GitRepository for RealGitRepository {
             .to_vec();
             args.extend(paths.iter().map(|path| OsString::from(path.as_unix_str())));
 
-            let output = git.build_command(&args).output().await?;
+            let output = git.build_command(&args)?.output().await?;
             anyhow::ensure!(
                 output.status.success(),
                 "git log failed:\n{}",
@@ -3325,7 +3435,7 @@ async fn run_commit_data_reader(
     request_rx: async_channel::Receiver<CommitDataRequest>,
 ) -> Result<()> {
     let mut process = git
-        .build_command(&["cat-file", "--batch"])
+        .build_command(&["cat-file", "--batch"])?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3527,6 +3637,195 @@ async fn exclude_files(git: &GitBinary) -> Result<GitExcludeOverride> {
     Ok(excludes)
 }
 
+/// Decides whether a path lies inside a job root (a tree a sandboxed job may have written).
+type JobRootCheck = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+
+fn written_by_job_error(path: &Path) -> anyhow::Error {
+    anyhow!(
+        "not opening {}: its git data was written by a bongos job",
+        path.display()
+    )
+}
+
+/// Refuses a repository whose working tree, git directory or common directory belongs to another
+/// user, unless `safe.directory` (from the system or global configuration, as git reads it)
+/// allows its working tree, or its git directory when it has none. Git runs this check itself
+/// only while it discovers the repository, which an explicit `--git-dir` skips.
+#[cfg(unix)]
+fn check_ownership(
+    git_binary_path: &Path,
+    working_directory: Option<&Path>,
+    git_dir: &Path,
+    common_dir: &Path,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let uid = nix::unistd::geteuid().as_raw();
+    let foreign = [working_directory, Some(git_dir), Some(common_dir)]
+        .into_iter()
+        .flatten()
+        .any(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.uid() != uid));
+    if !foreign {
+        return Ok(());
+    }
+    let repository_path = working_directory.unwrap_or(git_dir);
+    if safe_directory_allows(git_binary_path, repository_path) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "not opening {}: it is owned by another user and not listed in safe.directory",
+        repository_path.display()
+    ))
+}
+
+/// Whether the system or global `safe.directory` entries allow `repository_path`, matched the
+/// way git matches them: `*` allows all, a trailing `/*` allows a prefix, and an empty value
+/// clears the entries before it.
+#[cfg(unix)]
+fn safe_directory_allows(git_binary_path: &Path, repository_path: &Path) -> bool {
+    // Runs only for a repository owned by another user, once per open.
+    #[allow(clippy::disallowed_methods)]
+    let output = std::process::Command::new(git_binary_path)
+        .current_dir("/")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .args([
+            "config",
+            "-z",
+            "--show-scope",
+            "--get-all",
+            "safe.directory",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output();
+    let Some(output) = output.log_err() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return false;
+    };
+    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+    let repository_path = canonical(repository_path);
+    let mut allowed = false;
+    // `-z --show-scope` prints `<scope>\0<value>\0` per entry.
+    let fields = stdout.split_terminator('\0').collect::<Vec<_>>();
+    for pair in fields.chunks(2) {
+        let [scope, value] = pair else {
+            return false;
+        };
+        // Git ignores the entries of the repository's own configuration.
+        if !matches!(*scope, "system" | "global" | "command") {
+            continue;
+        }
+        if value.is_empty() {
+            allowed = false;
+            continue;
+        }
+        if *value == "*" {
+            allowed = true;
+            continue;
+        }
+        let expand = |value: &str| match value.strip_prefix("~/") {
+            Some(rest) => paths::home_dir().join(rest),
+            None => PathBuf::from(value),
+        };
+        if let Some(prefix) = value.strip_suffix("/*") {
+            if repository_path.starts_with(canonical(&expand(prefix))) {
+                allowed = true;
+            }
+        } else if canonical(&expand(value)) == repository_path {
+            allowed = true;
+        }
+    }
+    allowed
+}
+
+/// The git data a command is bound to, found when the repository was opened. Commands pass it to
+/// git explicitly, so a `.git` replaced later (for example by a job pointing it at a directory
+/// with its own configuration) is never read.
+#[derive(Clone)]
+pub(crate) struct GitPin {
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    work_tree: PathBuf,
+    /// The filter drivers named in the configuration read at open, or `None` when that read
+    /// failed, in which case every command run inside a job root is refused.
+    filter_drivers: Option<Arc<[String]>>,
+    in_job_root: JobRootCheck,
+}
+
+impl GitPin {
+    /// Fails when either pinned directory is now inside a job root; otherwise returns whether
+    /// `working_directory` is inside one.
+    fn check(&self, working_directory: &Path) -> Result<bool> {
+        for directory in [&self.git_dir, &self.common_dir] {
+            if (self.in_job_root)(directory) {
+                return Err(written_by_job_error(directory));
+            }
+        }
+        Ok((self.in_job_root)(working_directory))
+    }
+}
+
+/// Reads the names of the filter drivers in the configuration of `git_dir`. Returns `None` when
+/// the configuration cannot be read.
+fn read_filter_drivers(
+    git_binary_path: &Path,
+    git_dir: &Path,
+    work_tree: &Path,
+) -> Option<Arc<[String]>> {
+    let mut git_dir_arg = OsString::from("--git-dir=");
+    git_dir_arg.push(git_dir);
+    // Runs once per open, synchronously, like the rest of the resolution in `new`.
+    #[allow(clippy::disallowed_methods)]
+    let output = std::process::Command::new(git_binary_path)
+        .current_dir(work_tree)
+        .args(["-c", "core.fsmonitor=false", "--no-optional-locks"])
+        .arg(git_dir_arg)
+        .args(["config", "-z", "--name-only", "--get-regexp", r"^filter\."])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .log_err()?;
+    match output.status.code() {
+        Some(0) => {}
+        // No matching key.
+        Some(1) => return Some(Arc::from([])),
+        _ => {
+            log::error!(
+                "reading the filter drivers of {}: {}",
+                git_dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return None;
+        }
+    }
+    let stdout = String::from_utf8(output.stdout).log_err()?;
+    let mut names = Vec::new();
+    for key in stdout.split_terminator('\0') {
+        // Keys are `filter.<name>.<key>`, and names may contain dots.
+        let name = key
+            .strip_prefix("filter.")
+            .and_then(|rest| rest.rsplit_once('.'))
+            .map(|(name, _)| name);
+        match name {
+            Some(name) if !name.is_empty() => {
+                if !names.iter().any(|existing| existing == name) {
+                    names.push(name.to_string());
+                }
+            }
+            _ => {
+                log::error!("unexpected filter key {key:?} in {}", git_dir.display());
+                return None;
+            }
+        }
+    }
+    Some(names.into())
+}
+
 pub(crate) struct GitBinary {
     git_binary_path: PathBuf,
     working_directory: PathBuf,
@@ -3535,6 +3834,7 @@ pub(crate) struct GitBinary {
     index_file_path: Option<PathBuf>,
     envs: HashMap<String, String>,
     is_trusted: bool,
+    pin: Option<GitPin>,
 }
 
 impl GitBinary {
@@ -3544,6 +3844,7 @@ impl GitBinary {
         git_directory: PathBuf,
         executor: BackgroundExecutor,
         is_trusted: bool,
+        pin: Option<GitPin>,
     ) -> Self {
         Self {
             git_binary_path,
@@ -3553,6 +3854,7 @@ impl GitBinary {
             index_file_path: None,
             envs: HashMap::default(),
             is_trusted,
+            pin,
         }
     }
 
@@ -3635,7 +3937,7 @@ impl GitBinary {
     where
         S: AsRef<OsStr>,
     {
-        let mut command = self.build_command(args);
+        let mut command = self.build_command(args)?;
         let output = command.output().await?;
         anyhow::ensure!(
             output.status.success(),
@@ -3648,11 +3950,47 @@ impl GitBinary {
         Ok(String::from_utf8(output.stdout)?)
     }
 
+    /// The arguments of `add --all`. In a job tree they leave out every submodule in the index:
+    /// git follows a submodule's `.git`, which a job may point at a repository whose
+    /// configuration names its own filter drivers, and no configuration option stops it.
+    async fn add_all_args(&self) -> Result<Vec<OsString>> {
+        let in_job_tree = match &self.pin {
+            Some(pin) => pin.check(&self.working_directory)?,
+            None => false,
+        };
+        let mut args = vec![OsString::from("add"), OsString::from("--all")];
+        if !in_job_tree {
+            return Ok(args);
+        }
+        let entries = self
+            .run_raw(&["ls-files", "--stage", "--full-name", "-z"])
+            .await?;
+        args.push("--".into());
+        args.push(":/".into());
+        for entry in entries.split_terminator('\0') {
+            let (info, path) = entry
+                .split_once('\t')
+                .with_context(|| format!("unexpected ls-files entry {entry:?}"))?;
+            if info.starts_with("160000 ") {
+                let mut exclude = OsString::from(":(top,exclude,literal)");
+                exclude.push(path);
+                args.push(exclude);
+            }
+        }
+        Ok(args)
+    }
+
+    /// Builds a git command. Fails when the pinned git data is now inside a job root, or when the
+    /// command would run inside a job root while the filter drivers could not be read at open.
     #[allow(clippy::disallowed_methods)]
-    pub(crate) fn build_command<S>(&self, args: &[S]) -> util::command::Command
+    pub(crate) fn build_command<S>(&self, args: &[S]) -> Result<util::command::Command>
     where
         S: AsRef<OsStr>,
     {
+        let in_job_tree = match &self.pin {
+            Some(pin) => pin.check(&self.working_directory)?,
+            None => false,
+        };
         let mut command = new_command(&self.git_binary_path);
         command.current_dir(&self.working_directory);
         // Disabled to stop malicious actors from running arbitrary commands via fsmonitor hooks
@@ -3670,7 +4008,66 @@ impl GitBinary {
             command.args(["-c", "protocol.ext.allow=never"]);
             command.args(["-c", "diff.external="]);
         }
-        command.args(args);
+        if let Some(pin) = &self.pin {
+            // A tree a job wrote may name any driver in its `.gitattributes`, so no configured
+            // driver runs there, whatever the trust.
+            if in_job_tree {
+                let filter_drivers = pin.filter_drivers.as_ref().with_context(|| {
+                    format!(
+                        "not running git in {}: the filter drivers of {} could not be read when \
+                         it was opened",
+                        self.working_directory.display(),
+                        pin.git_dir.display()
+                    )
+                })?;
+                command.args(["-c", "diff.external="]);
+                // A submodule's `.git` in the tree may point anywhere, so git never follows it
+                // into a repository whose configuration names its own drivers.
+                command.args(["-c", "submodule.recurse=false"]);
+                command.args(["-c", "fetch.recurseSubmodules=false"]);
+                command.args(["-c", "diff.ignoreSubmodules=all"]);
+                for name in filter_drivers.iter() {
+                    for setting in ["clean=", "smudge=", "process=", "required=false"] {
+                        command.arg("-c");
+                        command.arg(format!("filter.{name}.{setting}"));
+                    }
+                }
+            }
+            let mut git_dir = OsString::from("--git-dir=");
+            git_dir.push(&pin.git_dir);
+            let mut work_tree = OsString::from("--work-tree=");
+            work_tree.push(&pin.work_tree);
+            command.arg(git_dir).arg(work_tree);
+        }
+        match args.split_first() {
+            Some((subcommand, rest)) if in_job_tree => {
+                command.arg(subcommand);
+                // Right after the subcommand, so they never land after a `--`. The command-line
+                // submodule options also override what the tree's `.gitmodules` says.
+                match subcommand.as_ref().to_str() {
+                    Some("diff") => {
+                        command.args(["--no-ext-diff", "--no-textconv", "--ignore-submodules=all"]);
+                    }
+                    Some("log" | "show") => {
+                        command.args(["--no-ext-diff", "--no-textconv"]);
+                    }
+                    Some("blame") => {
+                        command.arg("--no-textconv");
+                    }
+                    Some("status") => {
+                        command.arg("--ignore-submodules=all");
+                    }
+                    Some("fetch" | "pull") => {
+                        command.arg("--no-recurse-submodules");
+                    }
+                    _ => {}
+                }
+                command.args(rest);
+            }
+            _ => {
+                command.args(args);
+            }
+        }
 
         // If the `diff` command is being used, we'll want to add the
         // `--no-ext-diff` flag when working on an untrusted repository,
@@ -3683,7 +4080,20 @@ impl GitBinary {
             command.env("GIT_INDEX_FILE", index_file_path);
         }
         command.envs(&self.envs);
-        command
+        if self.pin.is_some() {
+            // The pin decides the git data, so nothing inherited may redirect it or add
+            // configuration (`GIT_CONFIG_KEY_*` are ignored without `GIT_CONFIG_COUNT`).
+            for name in [
+                "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_COUNT",
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_COMMON_DIR",
+            ] {
+                command.env_remove(name);
+            }
+        }
+        Ok(command)
     }
 }
 
@@ -4333,9 +4743,11 @@ mod tests {
             dir.path().join(".git"),
             cx.executor(),
             false,
+            None,
         );
         let output = git
             .build_command(&["version"])
+            .unwrap()
             .output()
             .await
             .expect("git version should succeed");
@@ -4347,9 +4759,11 @@ mod tests {
             dir.path().join(".git"),
             cx.executor(),
             false,
+            None,
         );
         let output = git
             .build_command(&["config", "--get", "core.fsmonitor"])
+            .unwrap()
             .output()
             .await
             .expect("git config should run");
@@ -4367,9 +4781,11 @@ mod tests {
             dir.path().join(".git"),
             cx.executor(),
             false,
+            None,
         );
         let output = git
             .build_command(&["config", "--get", "core.hooksPath"])
+            .unwrap()
             .output()
             .await
             .expect("git config should run");
@@ -4393,9 +4809,11 @@ mod tests {
             dir.path().join(".git"),
             cx.executor(),
             true,
+            None,
         );
         let output = git
             .build_command(&["config", "--get", "core.fsmonitor"])
+            .unwrap()
             .output()
             .await
             .expect("git config should run");
@@ -4412,9 +4830,11 @@ mod tests {
             dir.path().join(".git"),
             cx.executor(),
             true,
+            None,
         );
         let output = git
             .build_command(&["config", "--get", "core.hooksPath"])
+            .unwrap()
             .output()
             .await
             .expect("git config should run");
@@ -4436,9 +4856,11 @@ mod tests {
             dir.path().join(".git"),
             cx.executor(),
             true,
+            None,
         );
         let output = git
             .build_command(&["config", "--get", "log.showSignature"])
+            .unwrap()
             .output()
             .await
             .expect("git config should run");
@@ -4455,9 +4877,11 @@ mod tests {
             dir.path().join(".git"),
             cx.executor(),
             false,
+            None,
         );
         let output = git
             .build_command(&["config", "--get", "log.showSignature"])
+            .unwrap()
             .output()
             .await
             .expect("git config should run");
@@ -4480,6 +4904,7 @@ mod tests {
             git_directory.clone(),
             cx.executor(),
             false,
+            None,
         );
 
         let path = git.path_for_index_id(Uuid::nil());
@@ -5306,6 +5731,7 @@ mod tests {
         assert!(!graph.contains(&hidden_sha));
 
         git.build_command(&["update-ref", "--no-deref", "HEAD", &hidden_sha.to_string()])
+            .unwrap()
             .output()
             .await
             .unwrap();
@@ -5463,6 +5889,7 @@ mod tests {
                         git_directory,
                         executor,
                         true,
+                        None,
                     );
                     git.run(&["gc", "--prune"]).await?;
                     Ok(())
@@ -5521,7 +5948,7 @@ mod tests {
     }
 
     fn open_with_job_roots(
-        roots: &util::job_roots::JobRoots,
+        roots: &Arc<util::job_roots::JobRoots>,
         dotgit_path: &Path,
         cx: &TestAppContext,
     ) -> Result<RealGitRepository> {
@@ -5530,7 +5957,10 @@ mod tests {
             None,
             Some("git".into()),
             cx.executor(),
-            &|path| roots.contains(path),
+            {
+                let roots = roots.clone();
+                Arc::new(move |path: &Path| roots.contains(path))
+            },
         )
     }
 
@@ -5545,8 +5975,10 @@ mod tests {
         }
     }
 
-    fn job_roots_in(directory: &Path) -> util::job_roots::JobRoots {
-        util::job_roots::JobRoots::new(&directory.join("registry").join("roots.json"))
+    fn job_roots_in(directory: &Path) -> Arc<util::job_roots::JobRoots> {
+        Arc::new(util::job_roots::JobRoots::new(
+            &directory.join("registry").join("roots.json"),
+        ))
     }
 
     #[gpui::test]
@@ -5657,10 +6089,10 @@ mod tests {
     fn test_job_roots_excluded_main_git_directory_opens(cx: &mut TestAppContext) {
         disable_git_global_config();
         let temp_dir = tempfile::tempdir().unwrap();
-        let roots = util::job_roots::JobRoots::with_owner_check(
+        let roots = Arc::new(util::job_roots::JobRoots::with_owner_check(
             &temp_dir.path().join("registry").join("roots.json"),
             Arc::new(|_, _| true),
-        );
+        ));
         let main = temp_dir.path().join("main");
         git_init_repo(&main);
         fs::write(main.join("file.txt"), "initial").unwrap();
@@ -5703,13 +6135,13 @@ mod tests {
         disable_git_global_config();
         let temp_dir = tempfile::tempdir().unwrap();
         let owner_alive = Arc::new(AtomicBool::new(true));
-        let roots = util::job_roots::JobRoots::with_owner_check(
+        let roots = Arc::new(util::job_roots::JobRoots::with_owner_check(
             &temp_dir.path().join("registry").join("roots.json"),
             Arc::new({
                 let owner_alive = owner_alive.clone();
                 move |_, _| owner_alive.load(std::sync::atomic::Ordering::SeqCst)
             }),
-        );
+        ));
         let main = temp_dir.path().join("main");
         git_init_repo(&main);
         fs::write(main.join("file.txt"), "initial").unwrap();
@@ -5758,13 +6190,13 @@ mod tests {
         disable_git_global_config();
         let temp_dir = tempfile::tempdir().unwrap();
         let owner_alive = Arc::new(AtomicBool::new(true));
-        let roots = util::job_roots::JobRoots::with_owner_check(
+        let roots = Arc::new(util::job_roots::JobRoots::with_owner_check(
             &temp_dir.path().join("registry").join("roots.json"),
             Arc::new({
                 let owner_alive = owner_alive.clone();
                 move |_, _| owner_alive.load(std::sync::atomic::Ordering::SeqCst)
             }),
-        );
+        ));
         let main = temp_dir.path().join("main");
         git_init_repo(&main);
         fs::write(main.join("file.txt"), "initial").unwrap();
@@ -5892,5 +6324,655 @@ mod tests {
             .unwrap();
 
         assert_refused(open_with_job_roots(&roots, &outside.join(".git"), cx));
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    #[track_caller]
+    fn git_output<I, S>(working_directory: &Path, arguments: I) -> String
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(working_directory)
+            .env("GIT_CONFIG_GLOBAL", "")
+            .env("GIT_CONFIG_SYSTEM", "")
+            .output()
+            .expect("failed to run git command");
+        assert!(
+            output.status.success(),
+            "git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// A shell command for git configuration that creates `marker` and passes its input through.
+    fn marker_command(marker: &Path) -> String {
+        format!("touch '{}'; cat", marker.display())
+    }
+
+    /// Configures, in the configuration file `config`, an fsmonitor hook, a filter driver named
+    /// `filter_name` and a textconv driver named `evil` that each create a marker file in
+    /// `markers`.
+    fn configure_marker_drivers(config: &Path, filter_name: &str, markers: &Path) {
+        fs::create_dir_all(markers).unwrap();
+        let config = config.to_string_lossy().to_string();
+        let set = |key: &str, value: &str| {
+            git_command(
+                Path::new("/"),
+                ["config", "--file", config.as_str(), key, value],
+            );
+        };
+        set(
+            "core.fsmonitor",
+            &format!("touch '{}'; false", markers.join("fsmonitor").display()),
+        );
+        set(
+            &format!("filter.{filter_name}.clean"),
+            &marker_command(&markers.join("clean")),
+        );
+        set(
+            &format!("filter.{filter_name}.smudge"),
+            &marker_command(&markers.join("smudge")),
+        );
+        set(
+            "diff.evil.textconv",
+            &marker_command(&markers.join("textconv")),
+        );
+        set(
+            "diff.external",
+            &format!("touch '{}'; true", markers.join("external").display()),
+        );
+    }
+
+    #[track_caller]
+    fn assert_no_markers(markers: &Path) {
+        let found = fs::read_dir(markers)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert!(found.is_empty(), "drivers ran: {found:?}");
+    }
+
+    /// Runs status, a worktree diff and a blame of `a.txt`, returning their results.
+    async fn status_diff_and_blame(repository: &RealGitRepository) -> [Result<()>; 3] {
+        let status = repository.status(&[]).await.map(|_| ());
+        let diff = repository.diff(DiffType::HeadToWorktree).await.map(|_| ());
+        let blame = repository
+            .blame(
+                RepoPath::new("a.txt").unwrap(),
+                Rope::from("changed\n"),
+                LineEnding::Unix,
+            )
+            .await
+            .map(|_| ());
+        [status, diff, blame]
+    }
+
+    #[track_caller]
+    fn command_args(git: &GitBinary, args: &[&str]) -> Vec<String> {
+        git.build_command(args)
+            .unwrap()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect()
+    }
+
+    /// A repository at `<directory>/repo` whose `a.txt` is committed, then changed, with
+    /// `.gitattributes` naming the filter `filter_name` and the diff driver `evil` for it.
+    fn changed_repository(directory: &Path, filter_name: &str) -> PathBuf {
+        let repo = directory.join("repo");
+        git_init_repo(&repo);
+        fs::write(
+            repo.join(".gitattributes"),
+            format!("a.txt filter={filter_name} diff=evil\n"),
+        )
+        .unwrap();
+        fs::write(repo.join("a.txt"), "initial\n").unwrap();
+        git_command(&repo, ["add", "."]);
+        git_command(&repo, ["commit", "-m", "initial"]);
+        change_keeping_size(&repo.join("a.txt"), "changed\n");
+        repo
+    }
+
+    /// Writes `contents`, the same size as the file's, and dates the file long before the index,
+    /// so git must hash it (running any clean filter) to tell whether it changed.
+    fn change_keeping_size(path: &Path, contents: &str) {
+        assert_eq!(fs::metadata(path).unwrap().len(), contents.len() as u64);
+        fs::write(path, contents).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_redirected_git_directory_is_never_read(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let repo = temp_dir.path().join("repo");
+        let real_git_dir = temp_dir.path().join("real-git-dir");
+        fs::create_dir_all(&repo).unwrap();
+        git_command(
+            &repo,
+            [
+                "init".into(),
+                "-b".into(),
+                "main".into(),
+                format!("--separate-git-dir={}", real_git_dir.display()),
+            ],
+        );
+        fs::write(repo.join(".gitattributes"), "a.txt filter=evil diff=evil\n").unwrap();
+        fs::write(repo.join("a.txt"), "first\n").unwrap();
+        git_command(&repo, ["add", "."]);
+        git_command(&repo, ["commit", "-m", "initial"]);
+        fs::write(repo.join("a.txt"), "changed\n").unwrap();
+
+        let repository = open_with_job_roots(&roots, &repo.join(".git"), cx).unwrap();
+
+        // A job swaps `.git` for a copy of the repository with its own configuration.
+        let scratch = temp_dir.path().join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let redirected = scratch.join("git");
+        git_command(
+            temp_dir.path(),
+            [
+                "clone".into(),
+                "--bare".into(),
+                real_git_dir.display().to_string(),
+                redirected.display().to_string(),
+            ],
+        );
+        fs::copy(real_git_dir.join("index"), redirected.join("index")).unwrap();
+        git_command(&redirected, ["config", "core.bare", "false"]);
+        let markers = temp_dir.path().join("markers");
+        configure_marker_drivers(&redirected.join("config"), "evil", &markers);
+        fs::write(
+            repo.join(".git"),
+            format!("gitdir: {}\n", redirected.display()),
+        )
+        .unwrap();
+
+        for result in status_diff_and_blame(&repository).await {
+            result.unwrap();
+        }
+        let diff = repository.diff(DiffType::HeadToWorktree).await.unwrap();
+        assert!(diff.contains("+changed"), "unexpected diff: {diff}");
+        assert_no_markers(&markers);
+
+        // The same commands through the redirected `.git` would have run the drivers.
+        git_output(&repo, ["diff"]);
+        assert!(markers.join("textconv").exists() || markers.join("external").exists());
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_root_registered_after_open_fails_next_command(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let repo = changed_repository(temp_dir.path(), "evil");
+
+        let repository = open_with_job_roots(&roots, &repo.join(".git"), cx).unwrap();
+        repository.status(&[]).await.unwrap();
+
+        roots
+            .register(&repo, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+        for result in status_diff_and_blame(&repository).await {
+            let error = result.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("written by a bongos job"),
+                "unexpected error: {error:#}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_checkout_in_linked_worktree_moves_that_worktree(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let main = temp_dir.path().join("main");
+        git_init_repo(&main);
+        fs::write(main.join("a.txt"), "a\n").unwrap();
+        git_command(&main, ["add", "."]);
+        git_command(&main, ["commit", "-m", "initial"]);
+        git_command(&main, ["checkout", "-b", "feature"]);
+        fs::write(main.join("b.txt"), "b\n").unwrap();
+        git_command(&main, ["add", "."]);
+        git_command(&main, ["commit", "-m", "feature"]);
+        git_command(&main, ["checkout", "main"]);
+        let linked = temp_dir.path().join("linked");
+        git_command(
+            &main,
+            [
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                "other".into(),
+                linked.display().to_string(),
+            ],
+        );
+
+        let repository = open_with_job_roots(&roots, &main.join(".git"), cx).unwrap();
+        repository
+            .checkout_branch_in_worktree("feature".into(), linked.clone(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git_output(&linked, ["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature"
+        );
+        assert_eq!(git_output(&linked, ["ls-files"]), "a.txt\nb.txt");
+        assert!(linked.join("b.txt").exists());
+        assert_eq!(
+            git_output(&main, ["rev-parse", "--abbrev-ref", "HEAD"]),
+            "main"
+        );
+        assert_eq!(git_output(&main, ["ls-files"]), "a.txt");
+        assert!(!main.join("b.txt").exists());
+
+        let stranger = temp_dir.path().join("stranger");
+        git_init_repo(&stranger);
+        let error = repository
+            .checkout_branch_in_worktree("feature".into(), stranger, false)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not a worktree of this repository"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_worktree_lookup_relative_paths_and_separate_git_dir(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let main = temp_dir.path().join("main");
+        let real_git_dir = temp_dir.path().join("real-git-dir");
+        fs::create_dir_all(&main).unwrap();
+        git_command(
+            &main,
+            [
+                "init".into(),
+                "-b".into(),
+                "main".into(),
+                format!("--separate-git-dir={}", real_git_dir.display()),
+            ],
+        );
+        fs::write(main.join("a.txt"), "a\n").unwrap();
+        git_command(&main, ["add", "."]);
+        git_command(&main, ["commit", "-m", "initial"]);
+        git_command(&main, ["branch", "feature"]);
+        git_command(&main, ["branch", "topic"]);
+        let linked = temp_dir.path().join("linked");
+        git_command(
+            &main,
+            [
+                "-c".into(),
+                "worktree.useRelativePaths=true".into(),
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                "other".into(),
+                linked.display().to_string(),
+            ],
+        );
+        let gitdir_entry =
+            fs::read_to_string(real_git_dir.join("worktrees").join("linked").join("gitdir"))
+                .unwrap();
+        assert!(
+            Path::new(gitdir_entry.trim()).is_relative(),
+            "{gitdir_entry}"
+        );
+
+        let repository = open_with_job_roots(&roots, &main.join(".git"), cx).unwrap();
+        repository
+            .checkout_branch_in_worktree("feature".into(), linked.clone(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            git_output(&linked, ["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature"
+        );
+        // The repository's own working tree, whose git directory is not named `.git`.
+        repository
+            .checkout_branch_in_worktree("topic".into(), main.clone(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            git_output(&main, ["rev-parse", "--abbrev-ref", "HEAD"]),
+            "topic"
+        );
+    }
+
+    /// Opens `<directory>/repo`, which tracks a submodule `sub`, makes the repository a job root,
+    /// then, as a job would, points the submodule's `.git` at a git directory whose configuration
+    /// names a clean filter that creates `<directory>/markers/clean`, selects it for a file and
+    /// changes that file so git must hash it. Returns the repository, its path and the markers.
+    fn job_tree_with_hostile_submodule(
+        directory: &Path,
+        cx: &TestAppContext,
+    ) -> (
+        RealGitRepository,
+        PathBuf,
+        PathBuf,
+        Arc<util::job_roots::JobRoots>,
+    ) {
+        let roots = job_roots_in(directory);
+        let origin = directory.join("origin");
+        git_init_repo(&origin);
+        fs::write(origin.join("b.txt"), "initial\n").unwrap();
+        git_command(&origin, ["add", "."]);
+        git_command(&origin, ["commit", "-m", "initial"]);
+        let repo = directory.join("repo");
+        git_init_repo(&repo);
+        git_command(
+            &repo,
+            [
+                "-c".into(),
+                "protocol.file.allow=always".into(),
+                "submodule".into(),
+                "add".into(),
+                origin.display().to_string(),
+                "sub".into(),
+            ],
+        );
+        git_command(&repo, ["commit", "-m", "add submodule"]);
+
+        let repository = open_with_job_roots(&roots, &repo.join(".git"), cx).unwrap();
+        repository.set_trusted(true);
+        roots
+            .register(
+                &repo,
+                &[repo.join(".git")],
+                util::job_roots::RootLifetime::Permanent,
+            )
+            .unwrap();
+
+        let evil = directory.join("evil-git-dir");
+        git_command(
+            directory,
+            [
+                "clone".into(),
+                "--bare".into(),
+                origin.display().to_string(),
+                evil.display().to_string(),
+            ],
+        );
+        git_command(&evil, ["config", "core.bare", "false"]);
+        fs::copy(
+            repo.join(".git").join("modules").join("sub").join("index"),
+            evil.join("index"),
+        )
+        .unwrap();
+        let markers = directory.join("markers");
+        fs::create_dir_all(&markers).unwrap();
+        git_command(
+            &evil,
+            [
+                "config".into(),
+                "filter.evil.clean".into(),
+                marker_command(&markers.join("clean")),
+            ],
+        );
+        let sub = repo.join("sub");
+        fs::write(sub.join(".git"), format!("gitdir: {}\n", evil.display())).unwrap();
+        fs::write(sub.join(".gitattributes"), "b.txt filter=evil\n").unwrap();
+        change_keeping_size(&sub.join("b.txt"), "changed\n");
+        (repository, repo, markers, roots)
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_job_tree_checkpoint_never_follows_submodule_git(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (repository, repo, markers, _roots) =
+            job_tree_with_hostile_submodule(temp_dir.path(), cx);
+        fs::write(repo.join("new.txt"), "new\n").unwrap();
+
+        let checkpoint = repository.checkpoint().await.unwrap();
+        let (_, unstaged) = repository.create_archive_checkpoint().await.unwrap();
+        repository
+            .stash_paths(Vec::new(), Arc::new(HashMap::default()))
+            .await
+            .unwrap();
+        assert_no_markers(&markers);
+        // The checkpoints still take the rest of the tree, and keep the submodule as committed.
+        for commit in [checkpoint.commit_sha.to_string(), unstaged] {
+            let files = git_output(&repo, ["ls-tree", "--name-only", commit.as_str()]);
+            assert!(files.lines().any(|file| file == "new.txt"), "{files}");
+            assert_eq!(
+                git_output(&repo, ["rev-parse", &format!("{commit}:sub")]),
+                git_output(&repo, ["rev-parse", "HEAD:sub"]),
+            );
+        }
+        assert!(repo.join("new.txt").exists(), "the empty stash stashed");
+
+        // Plain `git add --all` follows the submodule's `.git` and runs the filter.
+        git_output(&repo, ["add", "--all"]);
+        assert!(markers.join("clean").exists(), "the control ran no filter");
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_job_tree_never_follows_submodule_git(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (repository, repo, markers, _roots) =
+            job_tree_with_hostile_submodule(temp_dir.path(), cx);
+
+        repository.status(&[]).await.unwrap();
+        repository.diff(DiffType::HeadToWorktree).await.unwrap();
+        let args = command_args(&repository.git_binary(), &["status", "--", "sub"]);
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        let ignore = args
+            .iter()
+            .position(|arg| arg == "--ignore-submodules=all")
+            .unwrap();
+        assert!(ignore < separator, "{args:?}");
+        assert_no_markers(&markers);
+
+        // Plain git status follows the submodule's `.git` and runs the filter.
+        git_output(&repo, ["status"]);
+        assert!(markers.join("clean").exists(), "the control ran no filter");
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_outside_roots_gets_no_driver_overrides(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let unrelated = temp_dir.path().join("unrelated");
+        fs::create_dir_all(&unrelated).unwrap();
+        roots
+            .register(&unrelated, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+        let repo = changed_repository(temp_dir.path(), "evil");
+        let markers = temp_dir.path().join("markers");
+        configure_marker_drivers(&repo.join(".git").join("config"), "evil", &markers);
+
+        let repository = open_with_job_roots(&roots, &repo.join(".git"), cx).unwrap();
+        repository.set_trusted(true);
+        let args = command_args(&repository.git_binary(), &["diff"]);
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("filter.") || arg == "--no-textconv"),
+            "unexpected overrides: {args:?}"
+        );
+        assert!(args.iter().any(|arg| arg.starts_with("--git-dir=")));
+
+        // Status hashes the same-size change, so the configured clean filter runs.
+        repository.status(&[]).await.unwrap();
+        assert!(markers.join("clean").exists(), "status ran no clean filter");
+        repository.diff(DiffType::HeadToWorktree).await.unwrap();
+        assert!(markers.join("textconv").exists() || markers.join("external").exists());
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_job_tree_runs_no_configured_driver(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        // Filter names may contain dots.
+        let repo = changed_repository(temp_dir.path(), "evil.with.dots");
+        let markers = temp_dir.path().join("markers");
+        configure_marker_drivers(
+            &repo.join(".git").join("config"),
+            "evil.with.dots",
+            &markers,
+        );
+
+        let repository = open_with_job_roots(&roots, &repo.join(".git"), cx).unwrap();
+        repository.set_trusted(true);
+        roots
+            .register(
+                &repo,
+                &[repo.join(".git")],
+                util::job_roots::RootLifetime::Permanent,
+            )
+            .unwrap();
+
+        let args = command_args(&repository.git_binary(), &["diff", "--", "a.txt"]);
+        for expected in [
+            "filter.evil.with.dots.clean=",
+            "filter.evil.with.dots.smudge=",
+            "filter.evil.with.dots.process=",
+            "filter.evil.with.dots.required=false",
+            "diff.external=",
+        ] {
+            assert!(args.iter().any(|arg| arg == expected), "{expected} missing");
+        }
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        let no_textconv = args.iter().position(|arg| arg == "--no-textconv").unwrap();
+        assert!(no_textconv < separator, "{args:?}");
+        let blame_args = command_args(&repository.git_binary(), &["blame", "--"]);
+        assert!(blame_args.iter().any(|arg| arg == "--no-textconv"));
+
+        for result in status_diff_and_blame(&repository).await {
+            result.unwrap();
+        }
+        let diff = repository.diff(DiffType::HeadToWorktree).await.unwrap();
+        assert!(diff.contains("+changed"), "unexpected diff: {diff}");
+        assert_no_markers(&markers);
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_unreadable_filter_drivers_refuse_job_tree_commands(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let repo = changed_repository(temp_dir.path(), "evil");
+        let config = repo.join(".git").join("config");
+        let mut contents = fs::read_to_string(&config).unwrap();
+        contents.push_str("[broken\n");
+        fs::write(&config, contents).unwrap();
+
+        let repository = open_with_job_roots(&roots, &repo.join(".git"), cx).unwrap();
+        assert!(repository.pin.as_ref().unwrap().filter_drivers.is_none());
+        roots
+            .register(
+                &repo,
+                &[repo.join(".git")],
+                util::job_roots::RootLifetime::Permanent,
+            )
+            .unwrap();
+
+        let error = repository.status(&[]).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("could not be read"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_bare_repository_is_not_pinned(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let bare = temp_dir.path().join("bare.git");
+        fs::create_dir_all(&bare).unwrap();
+        git_command(&bare, ["init", "--bare", "-b", "main"]);
+
+        let repository = open_with_job_roots(&roots, &bare, cx).unwrap();
+        assert!(repository.pin.is_none());
+        let git = repository.git_binary();
+        let args = command_args(&git, &["rev-parse", "--is-bare-repository"]);
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("--git-dir=") || arg.starts_with("--work-tree=")),
+            "{args:?}"
+        );
+        assert_eq!(
+            git.run(&["rev-parse", "--is-bare-repository"])
+                .await
+                .unwrap(),
+            "true"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_untrusted_overrides_still_apply(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let repo = changed_repository(temp_dir.path(), "evil");
+
+        let repository = open_with_job_roots(&roots, &repo.join(".git"), cx).unwrap();
+        let git = repository.git_binary();
+        let args = command_args(&git, &["diff"]);
+        for expected in [
+            "core.hooksPath=/dev/null",
+            "credential.helper=",
+            "protocol.ext.allow=never",
+            "--no-ext-diff",
+        ] {
+            assert!(args.iter().any(|arg| arg == expected), "{expected} missing");
+        }
+        assert!(args.iter().any(|arg| arg.starts_with("--git-dir=")));
+        assert_eq!(
+            git.run(&["config", "--get", "core.hooksPath"])
+                .await
+                .unwrap(),
+            "/dev/null"
+        );
+
+        roots
+            .register(
+                &repo,
+                &[repo.join(".git")],
+                util::job_roots::RootLifetime::Permanent,
+            )
+            .unwrap();
+        let args = command_args(&repository.git_binary(), &["diff"]);
+        assert!(args.iter().any(|arg| arg == "core.hooksPath=/dev/null"));
+        assert!(args.iter().any(|arg| arg == "--no-textconv"));
+
+        repository.set_trusted(true);
+        let args = command_args(&repository.git_binary(), &["diff"]);
+        assert!(!args.iter().any(|arg| arg == "core.hooksPath=/dev/null"));
     }
 }
