@@ -1662,6 +1662,7 @@ fn merge_request(context: &SettleContext) -> Option<MergeRequest> {
     Some(MergeRequest {
         task_worktree: context.checkout.worktree.clone()?,
         task_branch: context.checkout.branch.clone()?,
+        run_git_dir: context.worktree.git_dir.clone(),
         run_branch: context.worktree.branch.clone(),
         run_id: context.run.clone(),
         workflow: context.workflow.clone(),

@@ -1345,21 +1345,16 @@ fn show_diff(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let (dir, task_branch, run_branch) = {
+    let (worktree, task_branch) = {
         let lifecycle = engine.lifecycle();
         (
-            lifecycle
-                .worktree(&run)
-                .map(|worktree| worktree.path.clone()),
+            lifecycle.worktree(&run).cloned(),
             lifecycle
                 .task_checkout(&run)
                 .and_then(|checkout| checkout.branch.clone()),
-            lifecycle
-                .worktree(&run)
-                .map(|worktree| worktree.branch.clone()),
         )
     };
-    let (Some(dir), Some(task_branch), Some(run_branch)) = (dir, task_branch, run_branch) else {
+    let (Some(worktree), Some(task_branch)) = (worktree, task_branch) else {
         show_toast(
             workspace,
             "The run has no branch to compare with its task".to_string(),
@@ -1367,11 +1362,13 @@ fn show_diff(
         );
         return;
     };
-    let range = format!("{task_branch}...{run_branch}");
+    let range = format!("{task_branch}...{}", worktree.branch);
     let title = format!("Run diff {range}");
     let output = cx.background_spawn(async move {
+        // The run tree is job-written: git gets the recorded git directory and, from `SafeGit`,
+        // no external diff, text conversion or driver a job's config or attributes could name.
         Git::new("git")
-            .run(&dir, &["diff", "--no-color", &range])
+            .run_at(worktree.at(), &["diff", "--no-color", &range])
             .await
     });
     cx.spawn_in(window, async move |workspace, cx| {

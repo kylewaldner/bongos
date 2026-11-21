@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 bongos_chat.workspace = true
+bongos_confine.workspace = true
 bongos_minibuffer.workspace = true
 bongos_project_repo.workspace = true
 bongos_project_repo_model.workspace = true

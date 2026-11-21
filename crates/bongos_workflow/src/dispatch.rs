@@ -276,5 +276,5 @@ fn merge_into_run(git: &Git, run: &RunWorktree, fan: &str, index: u32) -> Result
             ));
         }
     }
-    futures::executor::block_on(git.run(&run.path, &["rev-parse", "HEAD"])).map_err(git_failure)
+    futures::executor::block_on(git.run_at(run.at(), &["rev-parse", "HEAD"])).map_err(git_failure)
 }
