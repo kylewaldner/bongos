@@ -3,7 +3,9 @@
 
 pub mod actions;
 mod dedication;
+mod orientation;
 pub mod picker;
+mod split;
 pub mod targets;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -12,7 +14,11 @@ mod zoom;
 #[cfg(test)]
 mod dedication_tests;
 #[cfg(test)]
+mod orientation_tests;
+#[cfg(test)]
 mod picker_tests;
+#[cfg(test)]
+mod split_tests;
 #[cfg(test)]
 mod targets_tests;
 #[cfg(test)]
@@ -35,6 +41,11 @@ pub fn init(cx: &mut App) {
         workspace.register_action(switch_window);
         workspace.register_action(zoom::toggle_zoom);
         workspace.register_action(dedication::toggle_dedication);
+        workspace.register_action(split::split_window_below);
+        workspace.register_action(split::split_window_right);
+        workspace.register_action(split::delete_window);
+        workspace.register_action(orientation::split_window_horizontally_instead);
+        workspace.register_action(orientation::split_window_vertically_instead);
     })
     .detach();
 }
