@@ -101,6 +101,7 @@ impl Fixture {
             kill_grace: Duration::from_secs(5),
             stop: StopHandle::default(),
             on_start: None,
+            confinement: None,
         }
     }
 
@@ -728,4 +729,215 @@ fn orphan_parts_are_stopped_by_their_record() {
     wait_for("the detached child to be reaped", || {
         !process_alive(detached)
     });
+}
+
+// Confined parts (`confinement.task_checks`).
+
+/// A check that runs `script` with `sh -c`.
+fn shell(name: &str, script: &str) -> CheckDecl {
+    CheckDecl {
+        name: name.to_string(),
+        command: Some(vec!["sh".to_string(), "-c".to_string(), script.to_string()]),
+        ..CheckDecl::default()
+    }
+}
+
+/// Makes the job roots registry of this test's own folder.
+fn own_registry(fixture: &Fixture) {
+    util::job_roots::init(&fixture.root.path().join("registry").join("roots.json")).unwrap();
+}
+
+/// A repository in the fixture's tree with one commit of `file`.
+fn tree_repository(fixture: &Fixture) {
+    crate::test_support::init_git_repo(&fixture.tree);
+    fixture.write_tree("file", "one\n");
+    commit_everything(&fixture.tree, "first");
+}
+
+/// Whether the OS sandbox can be created here, else says why the test skips.
+fn sandbox_available(fixture: &Fixture) -> bool {
+    let policy = sandbox::SandboxPolicy {
+        fs: sandbox::SandboxFsPolicy::Restricted {
+            writable_paths: vec![fixture.tree.clone()],
+        },
+        network: sandbox::SandboxNetPolicy::Unrestricted,
+        git: sandbox::GitSandboxPolicy::default(),
+        read_only_masks: Vec::new(),
+    };
+    match sandbox::Sandbox::can_create(&policy, Some(&fixture.tree)) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("skipped: no OS sandbox ({error})");
+            false
+        }
+    }
+}
+
+fn confined_spec(fixture: &Fixture, decl: CheckDecl, dirs: &[&Path]) -> PartSpec {
+    let mut spec = fixture.spec(decl);
+    spec.confinement = Some(crate::process::PartConfinement::default());
+    spec.env = EnvBase::Declared {
+        env: Vec::new(),
+        dirs: dirs.iter().map(|dir| dir.to_path_buf()).collect(),
+    };
+    spec
+}
+
+#[test]
+fn a_confined_check_builds_into_declared_directories() {
+    let fixture = fixture();
+    if !sandbox_available(&fixture) {
+        return;
+    }
+    own_registry(&fixture);
+    let build = fixture.root.path().join("lane/build");
+    let index = fixture.root.path().join("lane/index");
+    std::fs::create_dir_all(&index).unwrap();
+    std::fs::write(index.join("entries"), "old\n").unwrap();
+    let script = format!(
+        "mkdir -p {build}/deep && echo built > {build}/deep/out && echo new >> {index}/entries \
+         && echo tree > in-tree && echo scratch > \"$TMPDIR/note\"",
+        build = build.display(),
+        index = index.display()
+    );
+    let spec = confined_spec(&fixture, shell("build", &script), &[&build, &index]);
+    let output = spec.output.clone();
+    let outcome = block_on(run_part(spec));
+    assert_eq!(outcome.verdict, Verdict::Pass, "{}", output_text(&output));
+    assert_eq!(
+        std::fs::read_to_string(build.join("deep/out")).unwrap(),
+        "built\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(index.join("entries")).unwrap(),
+        "old\nnew\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.tree.join("in-tree")).unwrap(),
+        "tree\n"
+    );
+    let scratch = output.parent().unwrap().join("part-1.scratch");
+    assert!(
+        !scratch.exists(),
+        "the part's scratch is removed at the end"
+    );
+}
+
+#[test]
+fn a_confined_check_cannot_write_an_undeclared_directory_and_the_log_says_so() {
+    let fixture = fixture();
+    if !sandbox_available(&fixture) {
+        return;
+    }
+    own_registry(&fixture);
+    let spec = confined_spec(
+        &fixture,
+        shell("escape", "touch /usr/bongos-confinement-test"),
+        &[],
+    );
+    let output = spec.output.clone();
+    let outcome = block_on(run_part(spec));
+    assert_eq!(outcome.verdict, Verdict::Fail, "{}", output_text(&output));
+    let log = output_text(&output);
+    let note = format!(
+        "bongos: {}: /usr/bongos-confinement-test",
+        bongos_confine::RULE
+    );
+    assert!(log.contains(&note), "{log}");
+    assert!(!Path::new("/usr/bongos-confinement-test").exists());
+}
+
+#[test]
+fn a_confined_check_cannot_commit_in_its_tree() {
+    let fixture = fixture();
+    if !sandbox_available(&fixture) {
+        return;
+    }
+    tree_repository(&fixture);
+    own_registry(&fixture);
+    fixture.write_tree("file", "two\n");
+    let spec = confined_spec(
+        &fixture,
+        shell(
+            "commit",
+            "if git -c user.name=t -c user.email=t@example.com commit -q -a -m second; \
+             then exit 1; fi",
+        ),
+        &[],
+    );
+    let output = spec.output.clone();
+    let outcome = block_on(run_part(spec));
+    // The script passes only when the commit failed.
+    assert_eq!(outcome.verdict, Verdict::Pass, "{}", output_text(&output));
+    let count = crate::test_support::git_in(&fixture.tree, &["rev-list", "--count", "HEAD"]);
+    assert_eq!(count, "1");
+}
+
+#[test]
+fn a_confined_check_can_diff_its_tree() {
+    let fixture = fixture();
+    if !sandbox_available(&fixture) {
+        return;
+    }
+    tree_repository(&fixture);
+    own_registry(&fixture);
+    fixture.write_tree("file", "two\n");
+    // `git diff --exit-code` exits 1 when the tree differs from the index.
+    let spec = confined_spec(
+        &fixture,
+        shell("diff", "git diff --exit-code > diff.txt; test $? -eq 1"),
+        &[],
+    );
+    let output = spec.output.clone();
+    let outcome = block_on(run_part(spec));
+    assert_eq!(outcome.verdict, Verdict::Pass, "{}", output_text(&output));
+    let diff = std::fs::read_to_string(fixture.tree.join("diff.txt")).unwrap();
+    assert!(diff.contains("+two"), "{diff}");
+}
+
+#[test]
+fn with_the_switch_off_a_check_runs_as_before() {
+    let fixture = fixture();
+    let other = fixture.root.path().join("undeclared");
+    std::fs::create_dir_all(&other).unwrap();
+    let script = format!(
+        "echo free > {other}/file && echo \"${{TMPDIR:-unset}}\" > tmpdir",
+        other = other.display()
+    );
+    let spec = fixture.spec(shell("plain", &script));
+    assert!(spec.confinement.is_none());
+    let output = spec.output.clone();
+    let outcome = block_on(run_part(spec));
+    assert_eq!(outcome.verdict, Verdict::Pass, "{}", output_text(&output));
+    assert_eq!(
+        std::fs::read_to_string(other.join("file")).unwrap(),
+        "free\n"
+    );
+    let tmpdir = std::fs::read_to_string(fixture.tree.join("tmpdir")).unwrap();
+    assert!(!tmpdir.contains(".scratch"), "{tmpdir}");
+    assert!(!output.parent().unwrap().join("part-1.scratch").exists());
+}
+
+#[test]
+fn a_sandbox_that_cannot_be_created_is_a_start_failure_and_nothing_runs() {
+    let fixture = fixture();
+    own_registry(&fixture);
+    let marker = fixture.tree.join("ran");
+    let mut spec = confined_spec(
+        &fixture,
+        shell("none", &format!("touch {}", marker.display())),
+        &[],
+    );
+    spec.confinement = Some(crate::process::PartConfinement {
+        probe: Some(Arc::new(|_, _| Err("no sandbox in this test".to_string()))),
+    });
+    let outcome = block_on(run_part(spec));
+    match outcome.verdict {
+        Verdict::NoVerdict(NoVerdictReason::StartFailed(reason)) => {
+            assert!(reason.contains("no sandbox in this test"), "{reason}");
+        }
+        other => panic!("expected a start failure, got {other:?}"),
+    }
+    assert!(outcome.start.is_none());
+    assert!(!marker.exists(), "the check ran unconfined");
 }

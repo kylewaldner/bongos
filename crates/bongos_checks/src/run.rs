@@ -56,8 +56,8 @@ use crate::evidence_store::{evidence_prefix, scan_records_in, store_record, task
 use crate::pin::Pin;
 use crate::pools::{CheckClock, CheckPools, Holder, PoolLease, PoolRequest, WaitStatus};
 use crate::process::{
-    self, PartOutcome, PartScope, PartSpec, PartStart, ProcessRole, StopHandle, kill_orphan_parts,
-    run_part,
+    self, PartConfinement, PartOutcome, PartScope, PartSpec, PartStart, ProcessRole, StopHandle,
+    kill_orphan_parts, run_part,
 };
 use crate::settings::TaskChecksSettings;
 use crate::task_git::TaskGit;
@@ -999,6 +999,7 @@ impl CheckRun {
             kill_grace: Duration::from_secs(u64::from(self.settings.kill_grace_seconds)),
             stop: self.stop.clone(),
             on_start: None,
+            confinement: self.settings.confine.then(PartConfinement::default),
         }
     }
 

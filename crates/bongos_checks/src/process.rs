@@ -23,10 +23,14 @@ use bongos_checks_model::evidence::{PartRecord, TreeKind};
 use bongos_checks_model::verdict::{
     Exit, NoVerdictReason, ResultFile, Verdict, judge, parse_result_file,
 };
+use bongos_confine::{
+    Confinement, HostGit, JobDeclaration, JobKind, JobTree, TreeAccess, TreeGit, annotate,
+};
 use bongos_project_repo_model::RelPath;
 use bongos_workflow::process::{
     NodeProcess, OrphanOutcome, ProcessRecord, kill_orphans, start_time, stop_all_with,
 };
+use sandbox::{CommandAndArgs, Sandbox, SandboxNetPolicy, SandboxPolicy};
 
 use crate::output::{OutputSink, OutputSummary};
 use crate::pin::{Pin, PinPathError};
@@ -46,6 +50,8 @@ const POLL: Duration = Duration::from_millis(20);
 /// How long the output may stay open after the process ended (a child still holding it).
 const DRAIN: Duration = Duration::from_secs(2);
 const READ_BUFFER: usize = 64 * 1024;
+/// The longest line kept to look for a refused write in.
+const LINE_CAP: usize = 64 * 1024;
 
 /// A switch the owner of a running part flips to stop it (cancel, halt, quit).
 #[derive(Clone, Debug, Default)]
@@ -138,6 +144,19 @@ pub struct PartStart {
     pub token: String,
 }
 
+/// Whether the OS sandbox can be created for a policy in a working directory, or why not.
+pub type SandboxProbe = Arc<dyn Fn(&SandboxPolicy, &Path) -> Result<(), String> + Send + Sync>;
+
+/// Runs the part's process in a confinement (`confinement.task_checks`): the tree writable with
+/// its git read-only, the part's own scratch and the lane's declared directories (the ones
+/// [`EnvBase::declared_dirs`] names) writable, nothing else. A sandbox that cannot be created is
+/// no verdict, never an unconfined run.
+#[derive(Clone, Default)]
+pub struct PartConfinement {
+    /// `None` asks the OS sandbox itself.
+    pub probe: Option<SandboxProbe>,
+}
+
 /// Everything one part needs.
 pub struct PartSpec {
     pub decl: CheckDecl,
@@ -172,6 +191,8 @@ pub struct PartSpec {
     pub stop: StopHandle,
     /// Called with the pid, its start time and the token before any output is read.
     pub on_start: Option<Box<dyn FnOnce(&PartStart) + Send>>,
+    /// `Some` while `confinement.task_checks` is on.
+    pub confinement: Option<PartConfinement>,
 }
 
 /// How one part ended.
@@ -228,7 +249,11 @@ pub fn part_env(
             .iter()
             .map(|(name, value)| (OsString::from(name), OsString::from(value)))
             .collect(),
-        EnvBase::Own => std::env::vars_os().collect(),
+        EnvBase::Declared { env, .. } if !env.is_empty() => env
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect(),
+        EnvBase::Own | EnvBase::Declared { .. } => std::env::vars_os().collect(),
     };
     env.retain(|name, _| !is_own_variable(name));
     for name in unset {
@@ -403,12 +428,21 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
         );
     }
     let token = uuid::Uuid::new_v4().to_string();
-    let files = PartFiles::of(&spec.output);
-    let env = part_env(
+    // A confined part writes its result and params files in its own scratch, the one place
+    // besides the tree and the lane's directories it may write.
+    let scratch = spec.confinement.as_ref().map(|_| scratch_of(&spec.output));
+    let files = match &scratch {
+        Some(scratch) => PartFiles::of(&scratch.join(spec.output.file_name().unwrap_or_default())),
+        None => PartFiles::of(&spec.output),
+    };
+    let mut env = part_env(
         &spec.env,
         &check_vars(&spec, &files, &token),
         &spec.decl.unset,
     );
+    if let Some(scratch) = &scratch {
+        env.insert(OsString::from("TMPDIR"), scratch.clone().into_os_string());
+    }
     let (program, args) = match resolve_program(&spec, &env) {
         Program::Resolved(program, args) => (program, args),
         Program::Refused(reason) => return refuse(reason, Vec::new()),
@@ -471,12 +505,32 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
             }
         },
     };
-    let mut command = Command::new(&program);
-    command
-        .args(&args)
-        .current_dir(&spec.tree)
-        .env_clear()
-        .envs(&env);
+    // Dropped after the process group is gone (declared before the process): the confinement
+    // is finished and the scratch removed then.
+    let mut confined = None;
+    let command = match (&spec.confinement, &scratch) {
+        (Some(options), Some(scratch)) => {
+            match confine_command(&spec, options, scratch, &program, &args, &env) {
+                Ok((command, held)) => {
+                    confined = Some(held);
+                    command
+                }
+                Err(reason) => return refuse(reason, argv),
+            }
+        }
+        _ => {
+            let mut command = Command::new(&program);
+            command
+                .args(&args)
+                .current_dir(&spec.tree)
+                .env_clear()
+                .envs(&env);
+            command
+        }
+    };
+    let roots = confined
+        .as_ref()
+        .map(|held| held.confinement.writable_roots().to_vec());
     let spawned = NodeProcess::spawn(command, Stdio::null(), Stdio::from(pipe_write), stderr);
     let mut process = match spawned {
         Ok(process) => process,
@@ -496,7 +550,7 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
     let reader = std::thread::Builder::new()
         .name("check output".to_string())
         .spawn(move || {
-            read_output(pipe_read, &reader_sink);
+            read_output(pipe_read, &reader_sink, roots.as_deref());
             done_sender.send(()).ok();
         });
     if let Err(error) = &reader {
@@ -563,6 +617,130 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
     }
 }
 
+/// A part's confinement and sandbox, held while its process group lives; dropping it finishes
+/// the confinement and removes the part's scratch.
+struct Confined {
+    confinement: Confinement,
+    scratch: PathBuf,
+    // Kept alive while the process runs.
+    _sandbox: Option<Sandbox>,
+}
+
+impl Drop for Confined {
+    fn drop(&mut self) {
+        if let Err(error) = self.confinement.finish() {
+            log::error!("checks: cannot finish the confinement of a part: {error}");
+        }
+        std::fs::remove_dir_all(&self.scratch).ok();
+    }
+}
+
+/// `<output dir>/<output stem>.scratch`, the part's own scratch directory.
+fn scratch_of(output: &Path) -> PathBuf {
+    let dir = output.parent().unwrap_or(Path::new("."));
+    let stem = output
+        .file_stem()
+        .map_or_else(|| "part".into(), |stem| stem.to_string_lossy());
+    dir.join(format!("{stem}.scratch"))
+}
+
+/// The git directories bongos trusts for `tree`, read from its `.git`: a linked worktree's git
+/// directory, the common directory and the repository's other worktrees' git directories, or the
+/// `.git` directory of a plain repository.
+fn host_git(tree: &Path) -> HostGit {
+    let mut git_dirs = Vec::new();
+    let dot_git = tree.join(".git");
+    if let Ok(text) = std::fs::read_to_string(&dot_git)
+        && let Some(git_dir) = text.trim().strip_prefix("gitdir:")
+    {
+        let git_dir = tree.join(git_dir.trim());
+        let common = std::fs::read_to_string(git_dir.join("commondir"))
+            .ok()
+            .map(|common| git_dir.join(common.trim()));
+        if let Some(common) = &common
+            && let Ok(entries) = std::fs::read_dir(common.join("worktrees"))
+        {
+            git_dirs.extend(entries.flatten().map(|entry| entry.path()));
+        }
+        git_dirs.push(git_dir);
+        git_dirs.extend(common);
+    }
+    HostGit {
+        git_dirs,
+        records_dir: None,
+    }
+}
+
+/// The command that runs the part's process in the sandbox, and what to hold while it lives.
+/// Every failure is a start failure: a part is never run unconfined once the switch is on.
+fn confine_command(
+    spec: &PartSpec,
+    options: &PartConfinement,
+    scratch: &Path,
+    program: &Path,
+    args: &[String],
+    env: &BTreeMap<OsString, OsString>,
+) -> Result<(Command, Confined), NoVerdictReason> {
+    let failed = |why: String| NoVerdictReason::StartFailed(why);
+    std::fs::create_dir_all(scratch)
+        .map_err(|error| failed(format!("creating the part's scratch: {error}")))?;
+    let mut declared_dirs = spec.env.declared_dirs().to_vec();
+    if let ProcessRole::Scope { result, .. } = &spec.role
+        && let Some(dir) = result.parent()
+    {
+        declared_dirs.push(dir.to_path_buf());
+    }
+    declared_dirs.retain(|dir| std::fs::create_dir_all(dir).is_ok());
+    let declaration = JobDeclaration {
+        kind: JobKind::Check,
+        trees: vec![JobTree {
+            path: spec.tree.clone(),
+            access: TreeAccess::Writable,
+            git: TreeGit::ReadOnly,
+        }],
+        scratch: scratch.to_path_buf(),
+        declared_dirs,
+        extra_writable: Vec::new(),
+        network: SandboxNetPolicy::Unrestricted,
+    };
+    let confinement = Confinement::build(&declaration, &host_git(&spec.tree))
+        .map_err(|error| failed(format!("the sandbox cannot be created: {error}")))?;
+    // From here the guard finishes the confinement on every path out.
+    let mut confined = Confined {
+        confinement,
+        scratch: scratch.to_path_buf(),
+        _sandbox: None,
+    };
+    let policy = confined.confinement.sandbox_policy();
+    let probed = match &options.probe {
+        Some(probe) => probe(&policy, &spec.tree),
+        None => Sandbox::can_create(&policy, Some(&spec.tree)).map_err(|error| error.to_string()),
+    };
+    probed.map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
+    let mut sandbox = Sandbox::new(policy)
+        .map_err(|error| failed(format!("the sandbox cannot be created: {error}")))?;
+    let lossy = |text: &OsStr| text.to_string_lossy().into_owned();
+    let command = CommandAndArgs {
+        program: lossy(program.as_os_str()),
+        args: args.to_vec(),
+        env: env
+            .iter()
+            .map(|(name, value)| (lossy(name), lossy(value)))
+            .collect(),
+        cwd: Some(spec.tree.clone()),
+    };
+    let wrapped = futures::executor::block_on(sandbox.wrap(&command))
+        .map_err(|error| failed(format!("the sandbox cannot be created: {error}")))?;
+    confined._sandbox = Some(sandbox);
+    let mut process = Command::new(&wrapped.program);
+    process
+        .args(&wrapped.args)
+        .current_dir(wrapped.cwd.as_ref().unwrap_or(&spec.tree))
+        .env_clear()
+        .envs(&wrapped.env);
+    Ok((process, confined))
+}
+
 /// Why the process could not start, from the program and the io error only: the spawn error's
 /// context prints the whole command with its environment, which may hold secrets.
 fn spawn_failure(error: &anyhow::Error, program: &str) -> NoVerdictReason {
@@ -583,8 +761,10 @@ fn lock(sink: &Mutex<OutputSink>) -> std::sync::MutexGuard<'_, OutputSink> {
     sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn read_output(mut pipe: std::io::PipeReader, sink: &Mutex<OutputSink>) {
+fn read_output(mut pipe: std::io::PipeReader, sink: &Mutex<OutputSink>, roots: Option<&[PathBuf]>) {
     let mut buffer = vec![0u8; READ_BUFFER];
+    // The part of the current line already written, for the annotation of a confined part.
+    let mut line: Vec<u8> = Vec::new();
     loop {
         let n = match pipe.read(&mut buffer) {
             Ok(0) => break,
@@ -596,8 +776,37 @@ fn read_output(mut pipe: std::io::PipeReader, sink: &Mutex<OutputSink>) {
         if sink.is_finished() {
             return;
         }
-        sink.write(&buffer[..n]);
+        let Some(roots) = roots else {
+            sink.write(&buffer[..n]);
+            continue;
+        };
+        for piece in buffer[..n].split_inclusive(|byte| *byte == b'\n') {
+            sink.write(piece);
+            if line.len() < LINE_CAP {
+                line.extend_from_slice(piece);
+            }
+            if piece.ends_with(b"\n") {
+                if let Some(note) = annotation(&line, roots) {
+                    sink.write(note.as_bytes());
+                }
+                line.clear();
+            }
+        }
     }
+    if let Some(roots) = roots
+        && !line.is_empty()
+        && let Some(note) = annotation(&line, roots)
+    {
+        let mut sink = lock(sink);
+        if !sink.is_finished() {
+            sink.write(format!("\n{note}").as_bytes());
+        }
+    }
+}
+
+/// The note after an output line that reports a write the sandbox refused, with its newline.
+fn annotation(line: &[u8], roots: &[PathBuf]) -> Option<String> {
+    annotate::refusal(&String::from_utf8_lossy(line), roots).map(|note| format!("{note}\n"))
 }
 
 /// The result file: `None` when there is none; refused when larger than `limit`.
