@@ -815,3 +815,88 @@ fn safe_git_gives_git_only_absolute_path_entries_outside_job_roots() {
     );
     assert!(!fixture.base.join("job-ran").exists());
 }
+
+#[test]
+fn untrusted_tree_applies_the_job_tree_protections_outside_every_job_root() {
+    let fixture = Fixture::new();
+    let marker = fixture.base.join("filter-ran");
+    let filter = fixture.marker_script("bin/filter", &marker, "cat");
+    let filter = filter.to_string_lossy().into_owned();
+    let host = fixture.dir("host");
+    fixture.git(&fixture.base, &["init", "-q", "host"]);
+    let tree = fixture.dir("tree");
+    fixture.file("tree/.gitattributes", "*.txt filter=x\n");
+    fixture.file("tree/file.txt", "one\n");
+    let host_git = host.join(".git");
+    fixture.git(&host, &["config", "filter.x.clean", &filter]);
+    let add = ["add", "-A", "--ignore-errors", "."];
+
+    // Nothing is registered, so a plain SafeGit leaves the configured filter on.
+    fixture.run_safe(&fixture.safe_git(&host_git, &tree), &add);
+    assert!(marker.exists(), "the filter should run without the flag");
+    fs::remove_file(&marker).unwrap();
+    fs::remove_file(host_git.join("index")).unwrap();
+
+    fixture.run_safe(&fixture.safe_git(&host_git, &tree).untrusted_tree(), &add);
+    assert!(!marker.exists());
+
+    // The nested repository refusal applies too.
+    fixture.dir("tree/inner");
+    fixture.git(&fixture.base, &["init", "-q", "tree/inner"]);
+    let error = fixture.refused(&fixture.safe_git(&host_git, &tree).untrusted_tree(), &add);
+    assert!(error.contains("nested repository"), "{error}");
+}
+
+#[test]
+fn linked_git_dir_is_refused_when_its_commondir_names_another_repository() {
+    let fixture = Fixture::new();
+    let host = fixture.dir("host");
+    fixture.git(&fixture.base, &["init", "-q", "host"]);
+    fixture.git(&host, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    fixture.git(&fixture.base, &["init", "-q", "other"]);
+    let linked = fixture.base.join("linked");
+    let linked_arg = linked.to_string_lossy().into_owned();
+    fixture.git(&host, &["worktree", "add", "-q", "--detach", &linked_arg]);
+    let git_dir = host.join(".git/worktrees/linked");
+    assert!(linked_git_dir_from_record(&linked, &host.join(".git")).is_ok());
+
+    // Git would read the other repository's configuration, refs and objects through this.
+    fs::write(git_dir.join("commondir"), "../../../other/.git\n").unwrap();
+    let error = linked_git_dir_from_record(&linked, &host.join(".git")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("its commondir names another common directory"),
+        "{error}"
+    );
+}
+
+#[test]
+fn allow_nested_repositories_runs_commands_that_stay_out_of_the_nested_repository() {
+    let fixture = Fixture::new();
+    let marker = fixture.base.join("nested-filter-ran");
+    let tree = job_main_worktree(&fixture, "tree");
+    let nested = plant_nested_repository(&fixture, &tree, "sub", &marker);
+    fixture.git(&tree, &["add", "sub"]);
+    fixture.git(&tree, &["commit", "-q", "-m", "gitlink"]);
+    fs::write(nested.join("f"), "two\n").unwrap();
+
+    // Plain git's status checks the gitlink with a status inside it, which runs the filter.
+    fixture.git(&tree, &["status", "--porcelain"]);
+    assert!(marker.exists(), "plain git status never ran the filter");
+    fs::remove_file(&marker).unwrap();
+
+    let git = fixture.safe_git(&tree.join(".git"), &tree);
+    let status = ["status", "--porcelain"];
+    assert!(fixture.refused(&git, &status).contains("nested repository"));
+    let allowed = git.allow_nested_repositories();
+    for args in [
+        &status[..],
+        &["diff", "HEAD", "--"],
+        &["ls-files", "--others", "--exclude-standard"],
+        &["write-tree"],
+    ] {
+        fixture.run_safe(&allowed, args);
+    }
+    assert!(!marker.exists(), "a nested filter ran");
+}

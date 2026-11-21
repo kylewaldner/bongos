@@ -2327,6 +2327,7 @@ dependencies = [
  "anyhow",
  "async-task",
  "bongos_checks_model",
+ "bongos_confine",
  "bongos_project_repo",
  "bongos_project_repo_model",
  "bongos_work",

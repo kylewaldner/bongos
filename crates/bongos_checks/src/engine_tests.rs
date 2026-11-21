@@ -259,6 +259,15 @@ impl World {
             base_branch: Some("main".to_string()),
             output_dir: self.output.clone(),
             index_dir: self.index.clone(),
+            code_repositories: vec![self.tree.clone()],
+        }
+    }
+
+    /// Trusts the linked worktrees of the repository at `repository` for every known task, as
+    /// a configured code repository.
+    pub(crate) fn trust(&self, repository: &Path) {
+        for task in self.source.tasks.borrow_mut().values_mut() {
+            task.code_repositories.push(repository.to_path_buf());
         }
     }
 

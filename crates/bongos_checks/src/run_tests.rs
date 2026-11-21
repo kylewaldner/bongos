@@ -128,7 +128,10 @@ impl Fixture {
             base: None,
             tree_key: "tree-1".to_string(),
             key_inputs: "inputs-1".to_string(),
-            git: Git::locate().expect("git is installed").isolated(),
+            git: crate::task_git::TaskGit::new(
+                Git::locate().expect("git is installed").isolated(),
+                PathBuf::new(),
+            ),
             base_branch: Some("main".to_string()),
             env: EnvBase::Own,
             output_dir: self.output.clone(),

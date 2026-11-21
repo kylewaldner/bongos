@@ -190,6 +190,7 @@ impl World {
             base_branch: Some("main".to_string()),
             output_dir: root.join("output"),
             index_dir: root.join("index"),
+            code_repositories: Vec::new(),
         }
     }
 
@@ -572,7 +573,7 @@ fn every_key_of_a_judgment_rests_on_the_first_key_of_each_tree() {
     };
     let (app, lib) = (make("app"), make("lib"));
     let indexes = root.path().join("indexes");
-    let git = Git::locate().unwrap().isolated();
+    let git = crate::task_git::TaskGit::new(Git::locate().unwrap().isolated(), PathBuf::new());
     let tree = |repo: &str, path: &PathBuf| RepoTree {
         repo: repo.to_string(),
         path: path.clone(),

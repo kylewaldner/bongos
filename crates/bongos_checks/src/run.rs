@@ -43,7 +43,7 @@ use bongos_checks_model::verdict::{
     MAX_PARTS, NoVerdictReason, ScopeAnswer, Verdict, combine, parse_plan_answer,
     parse_scope_answer, union_failing,
 };
-use bongos_project_repo::{Git, StateTx, StateWriter};
+use bongos_project_repo::{StateTx, StateWriter};
 use bongos_workflow::RunId;
 use bongos_workflow_model::NodeKey;
 use futures::StreamExt as _;
@@ -60,6 +60,7 @@ use crate::process::{
     run_part,
 };
 use crate::settings::TaskChecksSettings;
+use crate::task_git::TaskGit;
 use crate::trees::EnvBase;
 
 /// The current time as RFC 3339 text, injected so nothing here reads the clock itself.
@@ -131,7 +132,7 @@ pub struct CheckRun {
     /// The combined digest of the check's key input files.
     pub key_inputs: String,
     /// Lists the changed files for a scope script.
-    pub git: Git,
+    pub git: TaskGit,
     /// The task's base branch; `None` hands a scoped check `all` with "no base branch".
     pub base_branch: Option<String>,
     pub env: EnvBase,

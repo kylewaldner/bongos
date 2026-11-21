@@ -40,6 +40,7 @@ use crate::pools::{CheckClock, CheckPoolsRegistry};
 use crate::process::{StopHandle, part_output_path};
 use crate::run::{CheckRun, Now};
 use crate::settings::TaskChecksSettings;
+use crate::task_git::TaskGit;
 use crate::trees::EnvBase;
 
 /// The key of a `[[landing.checks]]` entry's `run` table that holds a check declaration.
@@ -377,7 +378,7 @@ async fn run_landing(plan: LandingPlan) -> CheckOutcome {
         base: None,
         tree_key: plan.tree.clone(),
         key_inputs,
-        git: plan.project.git().clone(),
+        git: TaskGit::of(&plan.project),
         base_branch: None,
         env: EnvBase::Own,
         output_dir: plan.output_dir,
