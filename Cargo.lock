@@ -2924,6 +2924,7 @@ dependencies = [
  "bongos_workflow_model",
  "chrono",
  "command_palette_hooks",
+ "ctor",
  "editor",
  "fs",
  "futures 0.3.32",

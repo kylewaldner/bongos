@@ -1,10 +1,13 @@
 //! The program node kind of the app runner: turns a node start into a [`ProgramNode`] (script of
-//! the attempt's definition copy, caps, poll plan, state document, worktree, scratch, git
-//! directory and network list with `@remote` resolved) and hands it to one [`ProgramRunner`].
+//! the attempt's definition copy, caps, poll plan, state document, worktree, scratch, what it may
+//! write, the host's record of its git and network list with `@remote` resolved) and hands it to
+//! one [`ProgramRunner`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_confine::safe_git::linked_git_dir_from_record;
+use bongos_confine::{HostGit, TreeAccess, TreeGit};
 use bongos_workflow_model::record::TodoRef;
 use bongos_workflow_model::state_doc::{self, Paths, RunIdentity};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
@@ -146,6 +149,8 @@ impl NodeKind for ProgramNodes {
             },
         );
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
+        let (host_git, tree_git) = host_git(binding, &worktree)
+            .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
         let program_node = ProgramNode {
             script,
             output: definition_node.output.clone(),
@@ -156,7 +161,10 @@ impl NodeKind for ProgramNodes {
                 .as_ref()
                 .map(|polls| PollPlan::resolve(polls, &inputs.programs)),
             state,
-            git_common_dir: common_dir_of(&binding.worktree.git_dir).ok(),
+            declared_dirs: Vec::new(),
+            tree_access: TreeAccess::Writable,
+            tree_git,
+            host_git,
             worktree,
             scratch,
             node_result: try_dir.join("node-result.json"),
@@ -193,6 +201,35 @@ fn todo_of(binding: &RunBinding) -> TodoRef {
             .map(|value| value.to_text())
             .unwrap_or_default(),
     }
+}
+
+/// What the host trusts about the node's repository, read from the run's record and never from
+/// the tree, and the git the node gets in `worktree`. The common git directory comes from the
+/// run worktree's recorded git directory; the worktree's own linked git directory is the one
+/// under that common directory that names it ([`linked_git_dir_from_record`]). A run or branch
+/// worktree gets [`TreeGit::Private`]; a worktree with no `.git` gets [`TreeGit::None`]; a `.git`
+/// that is not a linked worktree of the run's repository (a directory, a pointer elsewhere)
+/// refuses the start. The run's record directory is the records directory no writable root may
+/// hold.
+fn host_git(binding: &RunBinding, worktree: &Path) -> Result<(HostGit, TreeGit), String> {
+    let records_dir = binding.run_dir.exists().then(|| binding.run_dir.clone());
+    let common = common_dir_of(&binding.worktree.git_dir);
+    if std::fs::symlink_metadata(worktree.join(".git")).is_err() {
+        let host = HostGit {
+            git_dirs: common.into_iter().collect(),
+            records_dir,
+        };
+        return Ok((host, TreeGit::None));
+    }
+    let common = common?;
+    let linked = linked_git_dir_from_record(worktree, &common).map_err(|error| {
+        format!("the git directory of the node's worktree is not trusted: {error:#}")
+    })?;
+    let host = HostGit {
+        git_dirs: vec![common, linked],
+        records_dir,
+    };
+    Ok((host, TreeGit::Private))
 }
 
 /// The node's scratch directory, beside the run's worktrees and outside the record.
