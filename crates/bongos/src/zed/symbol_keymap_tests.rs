@@ -26,15 +26,31 @@ const REGION_EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor mode=full selecti
 /// Places whose arrows are not stack keys, with what they are.
 const NATIVE: &[(&str, &[&str])] = &[
     ("pane", &["Workspace", "Pane"]),
-    ("pane single-line editor", &["Workspace", "Pane", "Editor mode=single_line"]),
-    ("pane auto-height editor", &["Workspace", "Pane", "Editor mode=auto_height"]),
+    (
+        "pane single-line editor",
+        &["Workspace", "Pane", "Editor mode=single_line"],
+    ),
+    (
+        "pane auto-height editor",
+        &["Workspace", "Pane", "Editor mode=auto_height"],
+    ),
     (
         "buffer search",
-        &["Workspace", "Pane", "BufferSearchBar", "Editor mode=auto_height"],
+        &[
+            "Workspace",
+            "Pane",
+            "BufferSearchBar",
+            "Editor mode=auto_height",
+        ],
     ),
     (
         "buffer search, single line",
-        &["Workspace", "Pane", "BufferSearchBar", "Editor mode=single_line"],
+        &[
+            "Workspace",
+            "Pane",
+            "BufferSearchBar",
+            "Editor mode=single_line",
+        ],
     ),
     (
         "picker query",
@@ -44,18 +60,33 @@ const NATIVE: &[(&str, &[&str])] = &[
         "minibuffer",
         &["Workspace", "Minibuffer", "Picker", "Editor mode=full"],
     ),
-    ("minibuffer prompt", &["Workspace", "Minibuffer", "Editor mode=full"]),
+    (
+        "minibuffer prompt",
+        &["Workspace", "Minibuffer", "Editor mode=full"],
+    ),
     ("isearch", &["Workspace", "Isearch", "Editor mode=full"]),
     ("center terminal", &PANE_TERMINAL),
     ("dock terminal", &TERMINAL),
     ("dock editor", &["Workspace", "Dock", "Editor mode=full"]),
     (
         "dock pane editor",
-        &["Workspace", "Dock", "DebugPanel", "Pane", "Editor mode=full"],
+        &[
+            "Workspace",
+            "Dock",
+            "DebugPanel",
+            "Pane",
+            "Editor mode=full",
+        ],
     ),
     (
         "dock agent editor",
-        &["Workspace", "Dock", "AgentPanel", "AcpThread", "Editor mode=full"],
+        &[
+            "Workspace",
+            "Dock",
+            "AgentPanel",
+            "AcpThread",
+            "Editor mode=full",
+        ],
     ),
     (
         "center agent editor",
@@ -80,7 +111,11 @@ const NATIVE: &[(&str, &[&str])] = &[
     ),
     (
         "signature help",
-        &["Workspace", "Pane", "Editor mode=full showing_signature_help"],
+        &[
+            "Workspace",
+            "Pane",
+            "Editor mode=full showing_signature_help",
+        ],
     ),
     (
         "vim insert",
@@ -88,7 +123,11 @@ const NATIVE: &[(&str, &[&str])] = &[
     ),
     (
         "vim insert in a region",
-        &["Workspace", "Pane", "Editor mode=full selection_mode vim_mode=insert"],
+        &[
+            "Workspace",
+            "Pane",
+            "Editor mode=full selection_mode vim_mode=insert",
+        ],
     ),
     ("vim normal", &VIM_NORMAL),
 ];
@@ -170,13 +209,7 @@ async fn the_arrows_keep_their_meaning_everywhere_else(cx: &mut TestAppContext) 
 #[gpui::test]
 async fn the_menus_and_modes_that_own_an_arrow_keep_it(cx: &mut TestAppContext) {
     init_keymap_test(cx);
-    let place = |name: &str| {
-        NATIVE
-            .iter()
-            .find(|(place, _)| *place == name)
-            .unwrap()
-            .1
-    };
+    let place = |name: &str| NATIVE.iter().find(|(place, _)| *place == name).unwrap().1;
     for macos in [false, true] {
         let (keymap, _) = emacs_keymaps(false, macos, cx);
         for (input, name, action) in [
@@ -188,8 +221,16 @@ async fn the_menus_and_modes_that_own_an_arrow_keep_it(cx: &mut TestAppContext) 
             ("left", "dock pane editor", "editor::MoveLeft"),
             ("up", "center agent editor", "editor::MoveUp"),
             ("up", "minibuffer", "minibuffer::SelectPrev"),
-            ("left", "project panel", "project_panel::CollapseSelectedEntry"),
-            ("right", "project panel", "project_panel::ExpandSelectedEntry"),
+            (
+                "left",
+                "project panel",
+                "project_panel::CollapseSelectedEntry",
+            ),
+            (
+                "right",
+                "project panel",
+                "project_panel::ExpandSelectedEntry",
+            ),
             ("up", "center terminal", "terminal::SendKeystroke"),
             ("up", "dock terminal", "terminal::SendKeystroke"),
         ] {
@@ -279,7 +320,11 @@ async fn the_symbol_and_history_keys_resolve_in_a_full_editor(cx: &mut TestAppCo
                 "isearch::RingPrevious",
             ),
         ] {
-            assert_eq!(first(&keymap, "alt-n", contexts), Some(next), "{contexts:?}");
+            assert_eq!(
+                first(&keymap, "alt-n", contexts),
+                Some(next),
+                "{contexts:?}"
+            );
             assert_eq!(
                 first(&keymap, "alt-p", contexts),
                 Some(previous),
