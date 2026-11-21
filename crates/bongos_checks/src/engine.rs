@@ -40,7 +40,7 @@ use bongos_checks_model::evidence::{
 use bongos_checks_model::section::{Live, TaskSection, TreeState, section};
 use bongos_checks_model::verdict::{NoVerdictReason, Verdict};
 use bongos_checks_model::{Applicability, Row};
-use bongos_project_repo::{Git, MAIN_BRANCH, StateWriter};
+use bongos_project_repo::{MAIN_BRANCH, StateWriter};
 use bongos_workflow::RunId;
 use bongos_workflow_model::NodeKey;
 use futures::StreamExt as _;
@@ -61,6 +61,7 @@ use crate::pools::{CheckClock, CheckPoolsRegistry, ExecutorClock};
 use crate::process::StopHandle;
 use crate::run::{CheckRun, LiveState, Now, RunTree};
 use crate::settings::TaskChecksSettings;
+use crate::task_git::TaskGit;
 use crate::task_source::{TREE_KEYS_FOLDER, TaskChecks, TaskSource, WorkTaskSource};
 use crate::task_tree::{RunWorktrees, TaskTree, WorkflowRunWorktrees, resolve_task_tree};
 use crate::tree_key::{key_inputs_digest, trees_key};
@@ -279,7 +280,7 @@ impl RecordedTrees {
     /// digest of `key_inputs` read from the first tree.
     pub(crate) async fn state(
         &self,
-        git: &Git,
+        git: &TaskGit,
         repos: &[String],
         key_inputs: &[String],
     ) -> Result<(Vec<&RecordedTree>, String, String), NoVerdictReason> {
@@ -878,9 +879,11 @@ impl ChecksEngine {
     }
 
     /// Removes the temporary base trees a crash left in the scratch folder: every one whose
-    /// owner process is gone. Resolves with the trees removed. `git` runs the removals.
-    pub fn sweep_scratch(&self, git: Git, cx: &mut Context<Self>) -> Task<Vec<PathBuf>> {
+    /// owner process is gone. Resolves with the trees removed. `git` runs the removals, trusting
+    /// the temporary trees that are linked worktrees of the configured code repositories.
+    pub fn sweep_scratch(&self, git: TaskGit, cx: &mut Context<Self>) -> Task<Vec<PathBuf>> {
         let scratch = TaskChecksSettings::get_global(cx).scratch_folder();
+        let git = git.with_trusted_repositories(self.source.code_repositories(cx));
         cx.background_spawn(async move {
             let index_dir = scratch.join(TREE_KEYS_FOLDER);
             sweep_scratch(&git, &scratch, &index_dir).await
@@ -1312,7 +1315,7 @@ pub(crate) fn repo_trees(
 
 /// The key of `trees`: one tree's own key, or the digest of the sorted (repository, key) pairs.
 pub(crate) async fn key_of(
-    git: &Git,
+    git: &TaskGit,
     trees: &[RepoTree],
     index_dir: &Path,
 ) -> Result<String, NoVerdictReason> {
@@ -1328,7 +1331,7 @@ pub(crate) async fn key_of(
 
 /// The merge-base of each tip's `HEAD` and the task's base branch, resolved now.
 async fn base_commits(
-    git: &Git,
+    git: &TaskGit,
     tips: &[RepoTree],
     branch: Option<&str>,
 ) -> Result<Vec<String>, String> {
@@ -1367,7 +1370,7 @@ async fn base_trees(
     leftovers: &mut Leftovers,
 ) -> Result<Vec<RepoTree>, NoVerdictReason> {
     let task = &plan.task;
-    let git = task.project.git();
+    let git = &TaskGit::of_task(&task);
     let mut protected: Vec<&Path> = tips.iter().map(|tip| tip.path.as_path()).collect();
     protected.push(plan.tree.path.as_path());
     protected.push(task.project.location().repository.as_path());
@@ -1505,7 +1508,7 @@ async fn prepare(
     let task = &plan.task;
     let decl = row.decl.clone();
     let digest = check_digest(&decl, pin)?;
-    let git = task.project.git().clone();
+    let git = TaskGit::of_task(&task);
     if let Some(recorded) = &plan.recorded {
         let (trees, key, key_inputs) = recorded
             .state(&git, &check_repos(task, &decl), &decl.key_inputs)
@@ -1604,7 +1607,7 @@ fn check_run(
         base,
         tree_key: key,
         key_inputs,
-        git: task.project.git().clone(),
+        git: TaskGit::of_task(&task),
         base_branch: task.base_branch.clone(),
         env: first.env,
         output_dir: task.output_dir.clone(),
