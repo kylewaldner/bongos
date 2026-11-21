@@ -11068,9 +11068,12 @@ mod tests {
                     .iter()
                     .find(|quad| quad.background != fill_background && at_target(quad))
                     .expect("expected a cursor quad at the target after the label fill");
+                assert!(at_target(cursor_quad), "cursor quad is not at the target");
                 assert!(
-                    cursor_quad.order > fill_quad.order,
-                    "label fill must be painted under the cursor"
+                    fill_quad.order < cursor_quad.order,
+                    "label fill (order {:?}) must be painted strictly under the cursor (order {:?})",
+                    fill_quad.order,
+                    cursor_quad.order
                 );
                 fills_checked += 1;
             }
@@ -11110,8 +11113,20 @@ mod tests {
             )
         };
 
+        // The window repaints the root editor, so size the window to the test width first.
+        cx.simulate_resize(window_size);
+        cx.run_until_parked();
         let before = observe(cx);
-        assert!(before.1 > DisplayRow(1), "expected the text to wrap");
+        // The unwrapped text is one buffer row, so many display rows mean it wrapped at this width.
+        assert!(
+            before.1 >= DisplayRow(8),
+            "expected the text to wrap at the test width, got max row {:?}",
+            before.1
+        );
+        assert!(
+            before.2.iter().all(|width| *width <= window_size.width),
+            "wrapped lines must fit the test width"
+        );
 
         editor.update(cx, |editor, cx| {
             let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
@@ -11129,11 +11144,13 @@ mod tests {
                 .collect();
             editor.set_navigation_overlays(PRIMARY_NAVIGATION_OVERLAY_KEY, overlays, cx);
         });
+        cx.run_until_parked();
         let during = observe(cx);
 
         editor.update(cx, |editor, cx| {
             editor.clear_navigation_overlays(PRIMARY_NAVIGATION_OVERLAY_KEY, cx);
         });
+        cx.run_until_parked();
         let after = observe(cx);
 
         assert_eq!(before, during);

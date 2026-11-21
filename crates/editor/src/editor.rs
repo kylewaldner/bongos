@@ -9400,14 +9400,16 @@ impl Editor {
         let line_height = position_map.line_height;
         let scroll_y = position_map.scroll_position.y;
         let visible = &position_map.visible_row_range;
-        let first = if scroll_y > f64::from(visible.start.0) {
+        // Tolerance so float noise (3.0000000000000004, 12.999999) keeps a fully visible row.
+        const EPSILON: f64 = 1e-3;
+        let first = if scroll_y - f64::from(visible.start.0) > EPSILON {
             visible.start.0 + 1
         } else {
             visible.start.0
         };
         let viewport_rows = f64::from(position_map.size.height / line_height);
         let bottom = scroll_y + viewport_rows;
-        let last = (visible.end.0).min(bottom.floor().max(0.0) as u32);
+        let last = (visible.end.0).min((bottom + EPSILON).floor().max(0.0) as u32);
         Some(VisibleTextLayout {
             content_origin: position_map.content_origin,
             line_height,
