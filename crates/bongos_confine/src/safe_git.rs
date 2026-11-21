@@ -29,6 +29,27 @@
 //! it, and is refused when it lies inside a job root. The command gets a `PATH` of the absolute
 //! entries outside every job root only, so the programs git itself looks up (`ssh`, a pager, a
 //! `git-<name>` command, a remote helper) are never found in a job-written directory either.
+//!
+//! # Object directories
+//!
+//! Git also reads every object directory the repository's `objects/info/alternates` names (and
+//! theirs in turn), and those a caller sets in `GIT_ALTERNATE_OBJECT_DIRECTORIES` or
+//! `GIT_OBJECT_DIRECTORY`. Besides objects, an object directory holds files git parses as
+//! trusted (a commit graph, a multi-pack index, bitmaps, reverse indexes), so one inside a job
+//! root is refused like a job-written git directory: the alternates chain is read (absolute or
+//! relative entries; a quoted entry, a chain deeper than git's own limit of
+//! [`ALTERNATES_DEPTH`], or an entry that cannot be resolved is refused, since it cannot be
+//! checked).
+//!
+//! The one exception is [`SafeGit::job_object_directory`], which importing a confined job's
+//! commits needs: it names exactly one object directory inside a job root that git may read,
+//! reached through the git directory's alternates or `GIT_ALTERNATE_OBJECT_DIRECTORIES`, never
+//! as a git directory, common directory or `GIT_OBJECT_DIRECTORY`. It must be an absolute path
+//! ending in `objects` that is a directory, not a symlink; the command must have no work tree;
+//! its own alternates may not lead into any job root; and every command built with it gets
+//! [`UNTRUSTED_OBJECTS_CONFIG`], so git reads only its loose objects and packs (whose contents
+//! are checked by hash), never a commit graph, multi-pack index, bitmap or reverse index from
+//! it. The caller checks what else lies in it (see [`crate::private_git`]).
 
 use std::{
     ffi::{OsStr, OsString},
@@ -98,12 +119,31 @@ const REFUSAL: &str = "refusing to run git with a job-written git directory";
 /// directory holding its `.git`.
 const NESTED_REFUSAL: &str = "refusing to run git in a job tree that holds a nested repository";
 
+/// The message of a refusal for an object directory inside a job root, followed by it.
+const OBJECTS_REFUSAL: &str = "refusing to let git read a job-written object directory";
+
 /// The most directory entries the nested repository check reads in one work tree; a larger tree
 /// is refused rather than half checked.
 pub const NESTED_WALK_LIMIT: usize = 1_000_000;
 
 /// The largest work tree `.gitmodules` read for its submodule names; a larger one is refused.
 const GITMODULES_LIMIT: u64 = 1 << 20;
+
+/// The largest `objects/info/alternates` file read; a larger one is refused.
+const ALTERNATES_LIMIT: u64 = 64 << 10;
+
+/// The deepest alternates chain git follows (its own limit); a deeper one is refused.
+pub const ALTERNATES_DEPTH: usize = 5;
+
+/// The configuration a command reading untrusted object directories gets: git reads only loose
+/// objects and packs, never the derived files (commit graph, multi-pack index, bitmaps, reverse
+/// indexes) a job could have planted, whose contents git does not check against the objects.
+pub const UNTRUSTED_OBJECTS_CONFIG: &[(&str, &str)] = &[
+    ("core.commitGraph", "false"),
+    ("core.multiPackIndex", "false"),
+    ("pack.useBitmaps", "false"),
+    ("pack.readReverseIndex", "false"),
+];
 
 /// The git binary a command runs and the `PATH` it gets.
 struct Program {
@@ -120,6 +160,7 @@ pub struct SafeGit {
     work_tree: Option<PathBuf>,
     config: Vec<(String, String)>,
     envs: Vec<(OsString, OsString)>,
+    job_objects: Option<PathBuf>,
 }
 
 impl SafeGit {
@@ -142,7 +183,34 @@ impl SafeGit {
             work_tree: None,
             config: Vec::new(),
             envs: Vec::new(),
+            job_objects: None,
         }
+    }
+
+    /// This git (binary, environment and configuration) for another git directory and work
+    /// tree. A [`SafeGit::job_object_directory`] is not carried over.
+    pub fn for_git_dir(&self, git_dir: impl Into<PathBuf>, work_tree: Option<PathBuf>) -> Self {
+        Self {
+            binary: self.binary.clone(),
+            git_dir: git_dir.into(),
+            work_tree,
+            config: self.config.clone(),
+            envs: self.envs.clone(),
+            job_objects: None,
+        }
+    }
+
+    /// The git directory the commands run on.
+    pub fn git_dir(&self) -> &Path {
+        &self.git_dir
+    }
+
+    /// Lets git read the object directory `objects` although it lies inside a job root, as an
+    /// alternate object directory only (see the module documentation). Every command then gets
+    /// [`UNTRUSTED_OBJECTS_CONFIG`].
+    pub fn job_object_directory(mut self, objects: impl Into<PathBuf>) -> Self {
+        self.job_objects = Some(objects.into());
+        self
     }
 
     /// Runs the git binary at `binary` instead of the one on the `PATH`.
@@ -188,6 +256,7 @@ impl SafeGit {
             );
         }
         check_git_dir_with(&self.git_dir, in_job_root)?;
+        self.check_object_directories(in_job_root)?;
 
         let job_tree = self.work_tree.as_deref().filter(|tree| in_job_root(tree));
         if job_tree.is_some() {
@@ -336,7 +405,114 @@ impl SafeGit {
         command.args(["-c", "core.fsmonitor=false"]);
         command.args(["-c", "safe.bareRepository=explicit"]);
         command.args(["-c", "core.untrackedCache=false"]);
+        if self.job_objects.is_some() {
+            for (key, value) in UNTRUSTED_OBJECTS_CONFIG {
+                command.arg("-c").arg(format!("{key}={value}"));
+            }
+        }
         command
+    }
+
+    /// Refuses every object directory git would read that lies inside a job root, but the one
+    /// [`SafeGit::job_object_directory`] names, reached as an alternate (see the module
+    /// documentation).
+    fn check_object_directories(&self, in_job_root: &dyn Fn(&Path) -> bool) -> Result<()> {
+        if let Some(objects) = &self.job_objects {
+            if self.work_tree.is_some() {
+                bail!(
+                    "{OBJECTS_REFUSAL}: {} (a job object directory is read without a work tree only)",
+                    objects.display()
+                );
+            }
+            let is_real_dir = fs::symlink_metadata(objects)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+            if !objects.is_absolute()
+                || objects.file_name() != Some(OsStr::new("objects"))
+                || !is_real_dir
+            {
+                bail!(
+                    "{OBJECTS_REFUSAL}: {} (not an absolute objects directory)",
+                    objects.display()
+                );
+            }
+        }
+        // Each object directory git would read, with the depth of the alternates chain that
+        // reached it.
+        let mut pending: Vec<(PathBuf, usize)> = Vec::new();
+        for (key, value) in &self.envs {
+            if key == "GIT_OBJECT_DIRECTORY" {
+                let objects = Path::new(value);
+                if in_job_root(objects) {
+                    bail!("{OBJECTS_REFUSAL}: {}", objects.display());
+                }
+                pending.push((objects.to_path_buf(), 0));
+            } else if key == "GIT_ALTERNATE_OBJECT_DIRECTORIES" {
+                for entry in std::env::split_paths(value) {
+                    if entry.as_os_str().is_empty() {
+                        continue;
+                    }
+                    let quoted = entry.as_os_str().as_encoded_bytes().first() == Some(&b'"');
+                    if quoted || !entry.is_absolute() {
+                        bail!(
+                            "{OBJECTS_REFUSAL}: cannot check the alternate {}",
+                            entry.display()
+                        );
+                    }
+                    self.check_alternate(&entry, false, in_job_root)?;
+                    pending.push((entry, 1));
+                }
+            }
+        }
+        pending.push((common_dir_of(&self.git_dir)?.join("objects"), 0));
+
+        let mut seen = Vec::new();
+        while let Some((objects, depth)) = pending.pop() {
+            if seen.contains(&objects) {
+                continue;
+            }
+            let from_job = self.job_objects.as_deref() == Some(objects.as_path());
+            let alternates = objects.join("info/alternates");
+            let contents = read_regular_file_limited(&alternates, ALTERNATES_LIMIT)?;
+            for line in contents
+                .as_deref()
+                .unwrap_or_default()
+                .split(|byte| *byte == b'\n')
+            {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                if line.is_empty() || line.first() == Some(&b'#') {
+                    continue;
+                }
+                if depth >= ALTERNATES_DEPTH || line.first() == Some(&b'"') {
+                    bail!(
+                        "{OBJECTS_REFUSAL}: cannot check the alternates of {}",
+                        objects.display()
+                    );
+                }
+                let entry = objects.join(path_from_bytes(line)?);
+                self.check_alternate(&entry, from_job, in_job_root)?;
+                pending.push((entry, depth + 1));
+            }
+            seen.push(objects);
+        }
+        Ok(())
+    }
+
+    /// Refuses the alternate object directory `entry` when it lies inside a job root, unless it
+    /// is the one [`SafeGit::job_object_directory`] names and was not reached through that one's
+    /// own alternates (`from_job`).
+    fn check_alternate(
+        &self,
+        entry: &Path,
+        from_job: bool,
+        in_job_root: &dyn Fn(&Path) -> bool,
+    ) -> Result<()> {
+        if !from_job && self.job_objects.as_deref() == Some(entry) {
+            return Ok(());
+        }
+        if in_job_root(entry) {
+            bail!("{OBJECTS_REFUSAL}: {}", entry.display());
+        }
+        Ok(())
     }
 
     /// The `-c` settings that switch off every driver and configured hook the configuration
@@ -525,11 +701,16 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+/// [`read_regular_file_limited`] with [`GITMODULES_LIMIT`].
+fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    read_regular_file_limited(path, GITMODULES_LIMIT)
+}
+
 /// The contents of `path` when it is a regular file, `None` when nothing is there. Opened without
 /// following a symlink and without blocking (a FIFO would otherwise block the open), then checked
 /// through the open handle, so what is read is what was checked. Anything else there, or a file
-/// over [`GITMODULES_LIMIT`], is an error.
-fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
+/// over `limit` bytes, is an error.
+pub(crate) fn read_regular_file_limited(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     use std::io::Read as _;
 
     let mut options = fs::OpenOptions::new();
@@ -557,19 +738,19 @@ fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
     if !metadata.is_file() {
         return Err(not_regular());
     }
-    if metadata.len() > GITMODULES_LIMIT {
+    if metadata.len() > limit {
         bail!(
-            "refusing {}: it is larger than {GITMODULES_LIMIT} bytes",
+            "refusing {}: it is larger than {limit} bytes",
             path.display()
         );
     }
     let mut contents = Vec::new();
-    file.take(GITMODULES_LIMIT + 1)
+    file.take(limit + 1)
         .read_to_end(&mut contents)
         .with_context(|| format!("reading {}", path.display()))?;
-    if contents.len() as u64 > GITMODULES_LIMIT {
+    if contents.len() as u64 > limit {
         bail!(
-            "refusing {}: it is larger than {GITMODULES_LIMIT} bytes",
+            "refusing {}: it is larger than {limit} bytes",
             path.display()
         );
     }
@@ -641,6 +822,30 @@ pub fn check_git_dir_with(git_dir: &Path, in_job_root: &dyn Fn(&Path) -> bool) -
         return Err(refuse(&common_dir));
     }
     Ok(())
+}
+
+/// The common directory of `git_dir`: the one its `commondir` file names, or `git_dir` itself.
+fn common_dir_of(git_dir: &Path) -> Result<PathBuf> {
+    let commondir_file = git_dir.join("commondir");
+    match fs::read_to_string(&commondir_file) {
+        Ok(text) => Ok(git_dir.join(text.trim())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(git_dir.to_path_buf()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", commondir_file.display())),
+    }
+}
+
+fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        Ok(PathBuf::from(OsStr::from_bytes(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(PathBuf::from(
+            std::str::from_utf8(bytes).context("an alternate path that is not UTF-8")?,
+        ))
+    }
 }
 
 /// The git directory of the linked worktree `tree`, read from its `.git` file and trusted only
