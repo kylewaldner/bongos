@@ -661,7 +661,7 @@ bar.
 ### Windows
 
 Emacs windows are panes. The window commands act on the panes of the editor area and, for picking,
-on the panels that show an editor or a terminal. Nothing here closes a tab or a buffer.
+on the panels that show an editor or a terminal. Nothing here closes a tab or a buffer, except that a moved tab for a file the destination window already shows gives way to that window's existing tab.
 
 - C-x o switches window. With two windows it goes to the other one; with more, every window shows
   a letter (a, s, d, f, ...) in reading order, and the letter you press picks it. The letter goes
@@ -673,7 +673,7 @@ on the panels that show an editor or a terminal. Nothing here closes a tab or a 
   current one and the next stay and the others hand their tabs to the next.
 - C-c down dedicates the current window to what it shows: files opened later go to another
   window. Press it again to undo.
-- C-x + balances the windows to the same size, C-x \ swaps the current window with a picked one
+- C-x + balances the windows to the same size, C-x \ swaps the current window with the next one
   and C-x M-o moves the current tab to a picked window.
 
 ### Kill ring
