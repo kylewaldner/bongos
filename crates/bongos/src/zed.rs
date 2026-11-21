@@ -4804,6 +4804,7 @@ mod tests {
     #[gpui::test]
     async fn test_navigation(cx: &mut TestAppContext) {
         let app_state = init_test(cx);
+        record_implicit_navigation(cx);
         app_state
             .fs
             .as_fake()
@@ -5173,6 +5174,7 @@ mod tests {
     #[gpui::test]
     async fn test_reopening_closed_items(cx: &mut TestAppContext) {
         let app_state = init_test(cx);
+        record_implicit_navigation(cx);
         app_state
             .fs
             .as_fake()
@@ -5946,6 +5948,20 @@ mod tests {
             }
         }
         found
+    }
+
+    /// Turns on the item-switch and large-move recording that the Emacs profile leaves off.
+    fn record_implicit_navigation(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                        record_large_moves: Some(true),
+                        record_item_switches: Some(true),
+                    });
+                });
+            });
+        });
     }
 
     pub(crate) fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
