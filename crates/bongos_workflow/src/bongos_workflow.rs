@@ -62,6 +62,32 @@ pub fn init(cx: &mut App) {
     engine::init(cx);
 }
 
+/// Gives this test process a job roots registry of its own, as the app's startup does with its
+/// data directory: confining a program node records its writable roots there. The registry lies
+/// in a fresh temporary directory, so no two test processes share one, removed when the process
+/// exits.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn init_test_job_roots() {
+    static DIRECTORY: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    #[cfg(unix)]
+    extern "C" fn remove_directory() {
+        if let Some(directory) = DIRECTORY.get() {
+            std::fs::remove_dir_all(directory).ok();
+        }
+    }
+    let directory = tempfile::TempDir::new()
+        .expect("a temporary directory for the job roots registry")
+        .keep();
+    util::job_roots::init(&directory.join("roots.json")).ok();
+    DIRECTORY.set(directory).ok();
+    // SAFETY: registers a function that only reads a static and removes a directory.
+    #[cfg(unix)]
+    unsafe {
+        libc::atexit(remove_directory);
+    }
+}
+
 #[cfg(test)]
 mod actions_tests;
 #[cfg(test)]
