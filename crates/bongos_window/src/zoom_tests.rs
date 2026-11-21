@@ -1,6 +1,9 @@
 use bongos_minibuffer::minibuffer_for_window;
 use editor::Editor;
-use gpui::{BorrowAppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle, point};
+use gpui::{
+    BorrowAppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle,
+    point,
+};
 use project::{Fs as _, Project, ProjectPath};
 use workspace::{
     AppState, MultiWorkspace, Pane, SaveIntent, Workspace, WorkspaceHandle as _,
