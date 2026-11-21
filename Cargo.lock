@@ -2373,6 +2373,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_confine"
+version = "0.1.0"
+dependencies = [
+ "sandbox",
+ "tempfile",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "bongos_emacs"
 version = "0.1.0"
 dependencies = [

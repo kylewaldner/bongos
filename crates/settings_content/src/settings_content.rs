@@ -280,6 +280,9 @@ pub struct SettingsContent {
     /// Settings for task checks: scripts and commands that must pass before a task is done.
     pub task_checks: Option<TaskChecksSettingsContent>,
 
+    /// Settings for confining jobs (agent steps and task checks) to their job tree.
+    pub confinement: Option<ConfinementSettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -1835,6 +1838,37 @@ pub struct TaskChecksSettingsContent {
     ///
     /// Default: 1000
     pub live_write_ms: Option<u32>,
+}
+
+/// Settings for confining jobs to their job tree, scratch directory and declared directories.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ConfinementSettingsContent {
+    /// Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
+    /// directories and the agent CLI's own state paths).
+    ///
+    /// Default: false
+    pub agent_steps: Option<bool>,
+    /// Run task checks inside the sandbox.
+    ///
+    /// Default: false
+    pub task_checks: Option<bool>,
+    /// Paths each agent CLI must write to keep its session and login; `~` is the job's HOME.
+    pub agent_state_paths: Option<ConfinementAgentStatePathsContent>,
+}
+
+/// Paths each agent CLI may write while confined.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ConfinementAgentStatePathsContent {
+    /// Paths the Claude Code CLI writes.
+    ///
+    /// Default: ["~/.claude", "~/.claude.json"]
+    pub claude: Option<Vec<String>>,
+    /// Paths the Codex CLI writes.
+    ///
+    /// Default: ["~/.codex"]
+    pub codex: Option<Vec<String>>,
 }
 
 /// Settings for chat sessions.

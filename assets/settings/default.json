@@ -2963,6 +2963,18 @@
     // At most one live-state write per task per this many milliseconds.
     "live_write_ms": 1000,
   },
+  "confinement": {
+    // Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
+    // directories and the agent CLI's own state paths below).
+    "agent_steps": false,
+    // Run task checks inside the sandbox.
+    "task_checks": false,
+    // Paths each agent CLI must write to keep its session and login; ~ is the job's HOME.
+    "agent_state_paths": {
+      "claude": ["~/.claude", "~/.claude.json"],
+      "codex": ["~/.codex"],
+    },
+  },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
   "server_url": "https://bongos.invalid",
