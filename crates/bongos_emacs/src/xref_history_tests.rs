@@ -91,7 +91,10 @@ fn caret_row(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> (Proj
         let editor = item.downcast::<Editor>().unwrap();
         editor.update(cx, |editor, cx| {
             let display = editor.display_snapshot(cx);
-            (path, editor.selections.newest_display(&display).head().row().0)
+            (
+                path,
+                editor.selections.newest_display(&display).head().row().0,
+            )
         })
     })
 }
@@ -303,10 +306,7 @@ async fn a_closed_buffer_shows_no_text_and_enter_reopens_it(cx: &mut TestAppCont
 
     let shown = rows(&pane, &mut cx);
     assert!(!shown.is_empty());
-    assert!(
-        shown.iter().all(|(_, text)| text.is_empty()),
-        "{shown:?}"
-    );
+    assert!(shown.iter().all(|(_, text)| text.is_empty()), "{shown:?}");
     assert_eq!(shown.last().unwrap().0, "one.txt:1");
     let before = stacks(&pane, &mut cx);
 
@@ -346,7 +346,10 @@ async fn the_command_runs_once_after_the_universal_argument(cx: &mut TestAppCont
     list(&workspace, &mut cx);
     cx.run_until_parked();
 
-    assert!(cx.update(|window, cx| prefix_arg::pending(window, cx)).is_none());
+    assert!(
+        cx.update(|window, cx| prefix_arg::pending(window, cx))
+            .is_none()
+    );
     assert_eq!(stacks(&pane, &mut cx), before);
     // One list is open, and its row count is that of the stack: the argument did not repeat it.
     assert_eq!(rows(&pane, &mut cx).len(), before.2.len());
