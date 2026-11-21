@@ -216,7 +216,7 @@ async fn compute_child_key(
     };
     let mut keys = TreeKeys::default();
     let key = match keys
-        .key(&TaskGit::of(&task.project), &task.index_dir, &repo_trees)
+        .key(&TaskGit::of_task(&task), &task.index_dir, &repo_trees)
         .await
     {
         Ok(key) => key,
@@ -309,9 +309,7 @@ pub(crate) async fn fill_last_keys(
                     Some(this.update(cx, |engine, _| (engine.now)())?)
                 };
                 let git = this.update(cx, |engine, cx| {
-                    engine
-                        .task(&row.id, cx)
-                        .map(|task| TaskGit::of(&task.project))
+                    engine.task(&row.id, cx).map(|task| TaskGit::of_task(&task))
                 })?;
                 if let Some(git) = git {
                     keep(&git, &row.id, &trees).await;
@@ -543,7 +541,7 @@ pub(crate) async fn decide_group(
         })?;
         return Ok(());
     };
-    let git = TaskGit::of(&group_task.project);
+    let git = TaskGit::of_task(&group_task);
 
     // The last child's tree key; computed now, on the tree as found, when there is none.
     let mut found = child_key(&snapshot, &pinned.tree, group_id, &last, 0);
@@ -846,7 +844,7 @@ impl ChecksEngine {
         let names: Vec<String> = checks.into_iter().map(|(name, _, _)| name).collect();
         let scratch = TaskChecksSettings::get_global(cx).scratch_folder();
         let index_dir = scratch.join(TREE_KEYS_FOLDER);
-        let git = TaskGit::of(&group.project);
+        let git = TaskGit::of_task(&group);
         let project = project.to_string();
         let leaf = leaf.to_string();
         // A lent tree is used only apart from every tree a person or a lane works in: the

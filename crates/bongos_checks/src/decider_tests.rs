@@ -190,6 +190,7 @@ impl World {
             base_branch: Some("main".to_string()),
             output_dir: root.join("output"),
             index_dir: root.join("index"),
+            code_repositories: Vec::new(),
         }
     }
 

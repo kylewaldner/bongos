@@ -879,9 +879,11 @@ impl ChecksEngine {
     }
 
     /// Removes the temporary base trees a crash left in the scratch folder: every one whose
-    /// owner process is gone. Resolves with the trees removed. `git` runs the removals.
+    /// owner process is gone. Resolves with the trees removed. `git` runs the removals, trusting
+    /// the temporary trees that are linked worktrees of the configured code repositories.
     pub fn sweep_scratch(&self, git: TaskGit, cx: &mut Context<Self>) -> Task<Vec<PathBuf>> {
         let scratch = TaskChecksSettings::get_global(cx).scratch_folder();
+        let git = git.with_trusted_repositories(self.source.code_repositories(cx));
         cx.background_spawn(async move {
             let index_dir = scratch.join(TREE_KEYS_FOLDER);
             sweep_scratch(&git, &scratch, &index_dir).await
@@ -1368,7 +1370,7 @@ async fn base_trees(
     leftovers: &mut Leftovers,
 ) -> Result<Vec<RepoTree>, NoVerdictReason> {
     let task = &plan.task;
-    let git = &TaskGit::of(&task.project);
+    let git = &TaskGit::of_task(&task);
     let mut protected: Vec<&Path> = tips.iter().map(|tip| tip.path.as_path()).collect();
     protected.push(plan.tree.path.as_path());
     protected.push(task.project.location().repository.as_path());
@@ -1506,7 +1508,7 @@ async fn prepare(
     let task = &plan.task;
     let decl = row.decl.clone();
     let digest = check_digest(&decl, pin)?;
-    let git = TaskGit::of(&task.project);
+    let git = TaskGit::of_task(&task);
     if let Some(recorded) = &plan.recorded {
         let (trees, key, key_inputs) = recorded
             .state(&git, &check_repos(task, &decl), &decl.key_inputs)
@@ -1605,7 +1607,7 @@ fn check_run(
         base,
         tree_key: key,
         key_inputs,
-        git: TaskGit::of(&task.project),
+        git: TaskGit::of_task(&task),
         base_branch: task.base_branch.clone(),
         env: first.env,
         output_dir: task.output_dir.clone(),

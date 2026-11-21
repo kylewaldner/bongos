@@ -19,7 +19,7 @@ pub(crate) enum Problem {
 pub(crate) async fn ensure_top_level(git: &TaskGit, directory: &Path) -> Result<(), Problem> {
     // A tree is the top of its working tree when its git directory is recorded for it; a
     // directory below a tree has no record of its own.
-    match git.check_tree(directory) {
+    match git.check_tree(directory).await {
         Ok(()) => Ok(()),
         Err(error) => match TaskGit::top_above(directory) {
             Some(top) => Err(Problem::NotTopLevel(top)),

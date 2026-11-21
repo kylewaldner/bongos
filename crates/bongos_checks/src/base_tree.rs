@@ -65,11 +65,14 @@ impl TempTree {
             index_dir: index_dir.to_path_buf(),
             armed: true,
         };
-        let added = git
+        let mut added = git
             .worktree_add_detached(repository, &tree.path, commit)
             .await;
         // Git has just made the tree: its git directory is recorded now, before any check runs.
-        if let Err(error) = added.and_then(|()| TaskGit::record_linked(&tree.path).map(|_| ())) {
+        if added.is_ok() {
+            added = git.record_linked(&tree.path).await.map(|_| ());
+        }
+        if let Err(error) = added {
             tree.remove().await;
             return Err(format!("adding a temporary base tree: {error}"));
         }
@@ -221,6 +224,7 @@ async fn remove_temp_tree(
             log::error!("checks: removing {}: {error}", path.display());
         }
     }
+    TaskGit::forget(path);
     if let Some(owner) = owner_file(scratch, path) {
         std::fs::remove_file(owner).ok();
     }

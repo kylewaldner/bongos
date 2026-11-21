@@ -72,6 +72,9 @@ pub async fn changed_files(
     let Some(branch) = base_branch else {
         return Ok(ChangedFiles::NoBaseBranch);
     };
+    // These commands never start git inside a nested repository: `diff` gets
+    // `--ignore-submodules=all`, and the rest read only the index, refs and objects.
+    let git = &git.allowing_nested_repositories();
     let merge_base = merge_base(git, tree, branch).await?;
 
     let tracked = git
@@ -119,6 +122,8 @@ pub(crate) async fn merge_base(
             branch: branch.to_string(),
         });
     }
+    // `rev-parse` and `merge-base` read only refs and objects, so a nested repository is fine.
+    let git = &git.allowing_nested_repositories();
     ensure_top_level(git, tree)
         .await
         .map_err(|problem| match problem {

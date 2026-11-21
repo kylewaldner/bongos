@@ -839,7 +839,7 @@ async fn decide_task(
                     })
                     .collect();
                 if let Err(error) =
-                    crate::retained::keep_trees(&TaskGit::of(&task.project), task_id, &kept).await
+                    crate::retained::keep_trees(&TaskGit::of_task(&task), task_id, &kept).await
                 {
                     log::error!("keeping the tree of {task_id}: {error:#}");
                 }
@@ -978,7 +978,7 @@ pub(crate) async fn judge(
         return Judgment::NoTree;
     };
     let tree_key = match keys
-        .key(&TaskGit::of(&task.project), &task.index_dir, &done_trees)
+        .key(&TaskGit::of_task(&task), &task.index_dir, &done_trees)
         .await
     {
         Ok(key) => key,
@@ -1080,7 +1080,7 @@ async fn state_of(
         .map(|path| first.path.join(path))
         .collect();
     let tree_key = keys
-        .key(&TaskGit::of(&task.project), &task.index_dir, &tips)
+        .key(&TaskGit::of_task(&task), &task.index_dir, &tips)
         .await?;
     let key_inputs = key_inputs_digest(&inputs).map_err(|error| {
         Judgment::Failed(format!(

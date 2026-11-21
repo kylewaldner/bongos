@@ -79,7 +79,6 @@ impl RunWorktrees for NoRuns {
     }
 }
 
-/// Fields drop in order: the engine and the project go before the folder holding them.
 /// A git that runs the real one, except that while `filter/arm` exists in `root` a
 /// `checkout-index` first creates `filter/writing` and waits for `filter/go`: git is slow writing
 /// a tree, with no configured driver (which a job tree's git never runs).
@@ -103,6 +102,7 @@ fn slow_git(root: &Path) -> Git {
     Git::at(script).isolated()
 }
 
+/// Fields drop in order: the engine and the project go before the folder holding them.
 struct World {
     engine: Entity<ChecksEngine>,
     clock: Rc<FakeClock>,
@@ -207,6 +207,7 @@ impl World {
             base_branch: None,
             output_dir: self.root.path().join("output").join(id),
             index_dir: self.root.path().join("index"),
+            code_repositories: vec![self.app.clone()],
         };
         self.source.tasks.borrow_mut().insert(id.to_string(), task);
     }
@@ -1051,7 +1052,7 @@ fn group(
 /// The tree key of `path` as the decider computes it.
 fn key_of(world: &World, path: &Path) -> String {
     futures::executor::block_on(crate::tree_key::tree_key(
-        &crate::task_git::TaskGit::of(&world.repo),
+        &crate::task_git::TaskGit::of(&world.repo).with_trusted_repositories([world.app.clone()]),
         path,
         &world.root.path().join("index"),
     ))

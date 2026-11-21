@@ -2,17 +2,26 @@
 //! tree. A job may write any of them, `.git` included, so git must never discover its repository
 //! from one. [`TaskGit`] runs every command through [`SafeGit`] with the git directory recorded for
 //! the tree, an explicit work tree, and the protections for an untrusted tree (no hook, no filter,
-//! text conversion or fsmonitor, no nested repository).
+//! text conversion or fsmonitor, no nested repository unless the commands stay out of it).
 //!
-//! A tree's git directory is recorded once, the first time bongos meets the tree and before a
-//! check reads it: [`TaskGit::record_linked`] accepts only a git directory that git itself put
-//! directly under `<common>/worktrees/` (see [`linked_git_dir_from_record`]) and whose common
-//! directory lies outside the tree. A temporary base tree is recorded when it is made. After
-//! that the tree's `.git` is never read again, so rewriting it changes nothing. A tree that
-//! cannot be recorded is refused.
+//! A tree's git directory is trusted only as a linked worktree of a trusted repository: the
+//! primary checkouts of the code repositories, a person's own and never job-written, whose common
+//! git directories plain git reports. The git directory must sit directly under
+//! `<trusted common>/worktrees/`, name this tree's `.git` in its `gitdir` file and name the
+//! trusted common directory in its `commondir` file (see [`linked_git_dir_from_record`]). A tree
+//! that no trusted repository vouches for is refused, so a look-alike `worktrees/` a job planted
+//! anywhere else is never used.
 //!
-//! The project repository is not job-written: a command in that directory runs through [`Git`]
-//! as before.
+//! The git directory is recorded, in memory, when bongos meets the tree: a temporary base tree
+//! right after `git worktree add` made it; a task's tree, a leased tree and the tree a temporary
+//! tree is added from at their first command, since the engine is only handed those after they
+//! exist. A record is used only while its git directory's `gitdir` file still names the tree's
+//! `.git` (it does not when the tree was removed and made again); otherwise the tree is
+//! validated again. After that the tree's `.git` is not read again, so rewriting it changes
+//! nothing. A temporary base tree's record goes with the tree.
+//!
+//! The project repository and the primary checkouts are not job-written: a command there runs
+//! through [`Git`] as before.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,12 +30,23 @@ use std::sync::{LazyLock, Mutex};
 use bongos_confine::safe_git::{SafeGit, linked_git_dir_from_record};
 use bongos_project_repo::{Git, GitError, ProjectRepo};
 
+use crate::task_source::TaskChecks;
+
+/// A tree's recorded git directory.
+#[derive(Clone)]
+struct Record {
+    git_dir: PathBuf,
+    /// Whether it is a linked worktree's git directory (its `gitdir` file is checked before use);
+    /// false only for the plain repositories tests make.
+    linked: bool,
+}
+
 /// The recorded git directory of each tree, by canonical tree path.
-static RECORDS: LazyLock<Mutex<HashMap<PathBuf, PathBuf>>> = LazyLock::new(Default::default);
+static RECORDS: LazyLock<Mutex<HashMap<PathBuf, Record>>> = LazyLock::new(Default::default);
 
 /// Where a command runs.
 enum Target {
-    /// The project repository.
+    /// The project repository or a primary checkout.
     Project,
     /// A tree (canonical) with its recorded git directory.
     Tree { tree: PathBuf, git_dir: PathBuf },
@@ -38,9 +58,15 @@ pub struct TaskGit {
     git: Git,
     /// The project repository, whose own commands keep the plain [`Git`] path.
     repository: PathBuf,
-    /// The primary checkouts of the code repositories, a person's own and not job-written: they
-    /// keep the plain path too.
+    /// Primary checkouts of code repositories that keep the plain path too, and whose linked
+    /// worktrees are trusted.
     primaries: Vec<PathBuf>,
+    /// Primary checkouts of code repositories whose linked worktrees are trusted; commands in
+    /// them still go through [`SafeGit`].
+    trusted: Vec<PathBuf>,
+    /// Whether commands may run in a tree holding a nested repository; see
+    /// [`TaskGit::allowing_nested_repositories`].
+    allow_nested: bool,
 }
 
 impl TaskGit {
@@ -49,6 +75,8 @@ impl TaskGit {
             git,
             repository,
             primaries: Vec::new(),
+            trusted: Vec::new(),
+            allow_nested: false,
         }
     }
 
@@ -56,10 +84,36 @@ impl TaskGit {
         Self::new(project.git().clone(), project.location().repository.clone())
     }
 
-    /// Also runs plain git in the primary checkout `directory` of a code repository.
+    /// Git for the trees of `task`: its project's, trusting the linked worktrees of the code
+    /// repositories the task knows.
+    pub(crate) fn of_task(task: &TaskChecks) -> Self {
+        Self::of(&task.project).with_trusted_repositories(task.code_repositories.iter().cloned())
+    }
+
+    /// Also runs plain git in the primary checkout `directory` of a code repository, and trusts
+    /// its linked worktrees.
     pub fn with_primaries(mut self, directories: impl IntoIterator<Item = PathBuf>) -> Self {
         self.primaries.extend(directories);
         self
+    }
+
+    /// Trusts the linked worktrees of the primary checkouts `directories` of code repositories.
+    pub fn with_trusted_repositories(
+        mut self,
+        directories: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        self.trusted.extend(directories);
+        self
+    }
+
+    /// Runs commands in a tree even while it holds a nested repository (a submodule, a vendored
+    /// clone), for callers whose commands never start git inside one; see
+    /// [`SafeGit::allow_nested_repositories`].
+    pub(crate) fn allowing_nested_repositories(&self) -> Self {
+        Self {
+            allow_nested: true,
+            ..self.clone()
+        }
     }
 
     /// The plain runner, for the project repository only.
@@ -67,33 +121,68 @@ impl TaskGit {
         &self.git
     }
 
-    /// Records `git_dir` as the git directory of the tree at `tree`, replacing any record.
-    pub fn record(tree: &Path, git_dir: &Path) -> std::io::Result<()> {
-        let tree = tree.canonicalize()?;
-        let git_dir = git_dir.canonicalize()?;
-        RECORDS.lock().unwrap().insert(tree, git_dir);
-        Ok(())
+    /// The canonical common git directories of the trusted repositories that plain git reports;
+    /// a repository it fails in is left out.
+    async fn trusted_commons(&self) -> Vec<PathBuf> {
+        let mut commons = Vec::new();
+        for primary in self.primaries.iter().chain(&self.trusted) {
+            let Ok(common) = self
+                .git
+                .run(primary, &["rev-parse", "--git-common-dir"])
+                .await
+            else {
+                continue;
+            };
+            // Git reports it relative to the directory it ran in, or absolute.
+            if let Ok(common) = primary.join(common).canonicalize()
+                && !commons.contains(&common)
+            {
+                commons.push(common);
+            }
+        }
+        commons
     }
 
-    /// Records the git directory of the linked worktree at `tree`, validated as the module
-    /// documentation says, and returns it. A tree already recorded keeps its record.
-    pub fn record_linked(tree: &Path) -> Result<PathBuf, GitError> {
+    /// The git directory of the linked worktree at `tree`: its record when it still holds,
+    /// else one validated against the trusted repositories as the module documentation says,
+    /// which is recorded.
+    pub async fn record_linked(&self, tree: &Path) -> Result<PathBuf, GitError> {
         let refused = |message: String| GitError::Refused { message };
         let tree = tree
             .canonicalize()
             .map_err(|error| refused(format!("{} is not usable: {error}", tree.display())))?;
-        if let Some(git_dir) = RECORDS.lock().unwrap().get(&tree) {
-            return Ok(git_dir.clone());
+        let recorded = RECORDS.lock().unwrap().get(&tree).cloned();
+        if let Some(record) = recorded {
+            if !record.linked || names_tree(&record.git_dir, &tree) {
+                return Ok(record.git_dir);
+            }
+            RECORDS.lock().unwrap().remove(&tree);
         }
-        let git_dir = match validated_git_dir(&tree) {
-            Ok(git_dir) => git_dir,
+        let commons = self.trusted_commons().await;
+        let record = match validated_git_dir(&tree, &commons) {
+            Ok(git_dir) => Record {
+                git_dir,
+                linked: true,
+            },
             // Tests build trees with plain `git init`; production trees are linked worktrees.
             #[cfg(test)]
-            Err(_) if tree.join(".git").is_dir() => tree.join(".git"),
+            Err(_) if tree.join(".git").is_dir() => Record {
+                git_dir: tree.join(".git"),
+                linked: false,
+            },
             Err(message) => return Err(refused(message)),
         };
-        RECORDS.lock().unwrap().insert(tree, git_dir.clone());
-        Ok(git_dir)
+        RECORDS.lock().unwrap().insert(tree, record.clone());
+        Ok(record.git_dir)
+    }
+
+    /// Drops the record of the tree at `tree`, which is gone or about to be.
+    pub(crate) fn forget(tree: &Path) {
+        let mut records = RECORDS.lock().unwrap();
+        records.remove(tree);
+        if let Ok(canonical) = tree.canonicalize() {
+            records.remove(&canonical);
+        }
     }
 
     /// The top of the recorded tree or tree-looking directory that holds `directory`, for the
@@ -109,11 +198,11 @@ impl TaskGit {
     }
 
     /// Whether `directory` is a tree that is recorded or can be.
-    pub fn check_tree(&self, directory: &Path) -> Result<(), GitError> {
-        self.target(directory).map(|_| ())
+    pub async fn check_tree(&self, directory: &Path) -> Result<(), GitError> {
+        self.target(directory).await.map(|_| ())
     }
 
-    fn target(&self, directory: &Path) -> Result<Target, GitError> {
+    async fn target(&self, directory: &Path) -> Result<Target, GitError> {
         let canonical = directory
             .canonicalize()
             .map_err(|error| GitError::Refused {
@@ -126,7 +215,7 @@ impl TaskGit {
         {
             return Ok(Target::Project);
         }
-        let git_dir = Self::record_linked(&canonical)?;
+        let git_dir = self.record_linked(&canonical).await?;
         Ok(Target::Tree {
             tree: canonical,
             git_dir,
@@ -192,7 +281,7 @@ impl TaskGit {
         args: &[&str],
     ) -> Result<Vec<u8>, GitError> {
         let shown = args.join(" ");
-        let (tree, git_dir) = match self.target(directory)? {
+        let (tree, git_dir) = match self.target(directory).await? {
             Target::Project => {
                 let settings: Vec<String> = config
                     .iter()
@@ -210,6 +299,9 @@ impl TaskGit {
         let mut safe = SafeGit::new(git_dir, tree)
             .binary(self.git.binary())
             .untrusted_tree();
+        if self.allow_nested {
+            safe = safe.allow_nested_repositories();
+        }
         if self.git.is_isolated() {
             safe = safe
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -248,32 +340,39 @@ fn utf8(path: &Path) -> Result<&str, GitError> {
     })
 }
 
-/// The git directory of the linked worktree at `tree` (canonical): the one its `.git` file names,
-/// when [`linked_git_dir_from_record`] trusts it under the common directory that file's path
-/// implies and that directory is outside the tree.
-fn validated_git_dir(tree: &Path) -> Result<PathBuf, String> {
-    let refuse =
-        |reason: &str| format!("{} is not a linked git worktree: {reason}", tree.display());
-    let text =
-        std::fs::read_to_string(tree.join(".git")).map_err(|error| refuse(&error.to_string()))?;
-    let target = text
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("gitdir:"))
-        .map(str::trim)
-        .filter(|target| !target.is_empty())
-        .ok_or_else(|| refuse("its .git names no git directory"))?;
-    let worktrees = tree
-        .join(target)
-        .parent()
-        .and_then(|parent| parent.canonicalize().ok())
-        .filter(|parent| parent.file_name().is_some_and(|name| name == "worktrees"))
-        .ok_or_else(|| refuse("its git directory is not under worktrees/"))?;
-    let common = worktrees
-        .parent()
-        .ok_or_else(|| refuse("its git directory has no common directory"))?;
-    if common.starts_with(tree) {
-        return Err(refuse("its common git directory lies inside the tree"));
+/// Whether the `gitdir` file of the linked git directory `git_dir` still names the `.git` of
+/// `tree` (canonical). The `.git` itself is not followed: only its parent is resolved.
+fn names_tree(git_dir: &Path, tree: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(git_dir.join("gitdir")) else {
+        return false;
+    };
+    let named = git_dir.join(text.trim_end_matches(['\n', '\r']));
+    named.file_name().is_some_and(|name| name == ".git")
+        && named
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .is_some_and(|parent| parent == tree)
+}
+
+/// The git directory of the linked worktree at `tree` (canonical) under one of the trusted
+/// common directories `commons` (canonical), when [`linked_git_dir_from_record`] trusts it there.
+fn validated_git_dir(tree: &Path, commons: &[PathBuf]) -> Result<PathBuf, String> {
+    let mut reasons = Vec::new();
+    for common in commons {
+        if common.starts_with(tree) {
+            continue;
+        }
+        match linked_git_dir_from_record(tree, common) {
+            Ok(git_dir) => return Ok(git_dir),
+            Err(error) => reasons.push(format!("{error:#}")),
+        }
     }
-    linked_git_dir_from_record(tree, common).map_err(|error| format!("{error:#}"))
+    if reasons.is_empty() {
+        reasons.push("no trusted repository is known for it".to_string());
+    }
+    Err(format!(
+        "{} is not a linked worktree of a trusted repository: {}",
+        tree.display(),
+        reasons.join("; ")
+    ))
 }
