@@ -189,6 +189,10 @@ impl JobRoots {
     /// Every entry for `root` is retired, a job-lifetime entry whose owner is still alive
     /// included: the caller retires a root when the job using it ends, so the owner's liveness no
     /// longer matters.
+    ///
+    /// When the walk for nested repositories cannot finish (too many entries, too deep, or a
+    /// `.git` file that cannot be read or parsed, or that is not a regular file), the whole root
+    /// stays registered permanently instead.
     pub fn retire(&self, root: &Path) -> Result<()> {
         let root = fs::canonicalize(root)
             .with_context(|| format!("canonicalizing job root {}", root.display()))?;
@@ -535,7 +539,7 @@ fn nested_repositories(entry: &Entry) -> Result<Vec<PathBuf>> {
             if is_dir {
                 walk.skip_current_dir();
             } else {
-                nested.push(git_file_target(item.path())?);
+                nested.extend(git_file_target(entry, item.path())?);
             }
             if let Some(parent) = item.path().parent() {
                 nested.push(parent.to_path_buf());
@@ -550,24 +554,61 @@ fn nested_repositories(entry: &Entry) -> Result<Vec<PathBuf>> {
 
 /// The canonical git directory a `.git` entry that is not a directory leads to: the target of a
 /// symbolic link, or the `gitdir:` pointer of a file, resolved from the file's directory. It may
-/// lie outside the root (a linked worktree's git directory). Fails when it cannot be resolved, so
-/// the caller keeps the whole entry instead.
-fn git_file_target(dotgit: &Path) -> Result<PathBuf> {
-    if fs::metadata(dotgit).is_ok_and(|metadata| metadata.is_dir()) {
-        return fs::canonicalize(dotgit)
-            .with_context(|| format!("canonicalizing {}", dotgit.display()));
+/// lie outside the root (a linked worktree's git directory). `None` when the target lies under one
+/// of `entry`'s excluded paths or is not shaped like a git directory, so a planted pointer cannot
+/// get an arbitrary directory refused for good. Fails when it cannot be resolved, or the `.git`
+/// entry is neither a directory nor a regular file (a FIFO or device would block the read while
+/// the registry lock is held), so the caller keeps the whole entry instead.
+fn git_file_target(entry: &Entry, dotgit: &Path) -> Result<Option<PathBuf>> {
+    let metadata = fs::metadata(dotgit)
+        .with_context(|| format!("reading metadata of {}", dotgit.display()))?;
+    let target = if metadata.is_dir() {
+        fs::canonicalize(dotgit).with_context(|| format!("canonicalizing {}", dotgit.display()))?
+    } else if metadata.is_file() {
+        let content = read_git_file(dotgit)?;
+        let pointer = content
+            .strip_prefix("gitdir: ")
+            .with_context(|| format!("{} has no gitdir pointer", dotgit.display()))?
+            .trim();
+        let parent = dotgit
+            .parent()
+            .with_context(|| format!("{} has no parent", dotgit.display()))?;
+        let target = parent.join(pointer);
+        fs::canonicalize(&target).with_context(|| format!("canonicalizing {}", target.display()))?
+    } else {
+        anyhow::bail!("{} is not a regular file", dotgit.display());
+    };
+    if entry
+        .excluded
+        .iter()
+        .any(|excluded| target.starts_with(excluded))
+        || !looks_like_git_directory(&target)
+    {
+        return Ok(None);
     }
-    let content =
-        fs::read_to_string(dotgit).with_context(|| format!("reading {}", dotgit.display()))?;
-    let pointer = content
-        .strip_prefix("gitdir: ")
-        .with_context(|| format!("{} has no gitdir pointer", dotgit.display()))?
-        .trim();
-    let parent = dotgit
-        .parent()
-        .with_context(|| format!("{} has no parent", dotgit.display()))?;
-    let target = parent.join(pointer);
-    fs::canonicalize(&target).with_context(|| format!("canonicalizing {}", target.display()))
+    Ok(Some(target))
+}
+
+/// The first 4096 bytes of the regular file `path`, opened without blocking (on Unix) and
+/// checked again once open, in case it was swapped for a FIFO or device after the caller looked.
+fn read_git_file(path: &Path) -> Result<String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    let file = options
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading metadata of {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    let mut content = String::new();
+    io::Read::read_to_string(&mut io::Read::take(file, 4096), &mut content)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(content)
 }
 
 /// Whether `directory` is shaped like a git directory: it holds `HEAD`, and either `objects` and
@@ -774,6 +815,8 @@ mod tests {
         let linked = directory.path().join("linked");
         fs::create_dir_all(root.join("a")).unwrap();
         fs::create_dir_all(&linked).unwrap();
+        fs::write(linked.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(linked.join("commondir"), "../..\n").unwrap();
         fs::write(
             root.join("a").join(".git"),
             format!("gitdir: {}\n", linked.display()),
@@ -786,6 +829,69 @@ mod tests {
         assert!(roots.contains(&linked));
         assert!(roots.contains(&root.join("a")));
         assert!(!roots.contains(&root));
+    }
+
+    #[test]
+    fn test_retire_skips_git_file_targets_that_are_excluded_or_not_git_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let roots = JobRoots::new(&directory.path().join("registry").join("roots.json"));
+        let root = directory.path().join("tree");
+        let main_git = root.join("main.git");
+        let plain = directory.path().join("plain");
+        fs::create_dir_all(main_git.join("objects")).unwrap();
+        fs::create_dir_all(main_git.join("refs")).unwrap();
+        fs::write(main_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir_all(&plain).unwrap();
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        fs::write(
+            root.join("a").join(".git"),
+            format!("gitdir: {}\n", main_git.display()),
+        )
+        .unwrap();
+        fs::write(
+            root.join("b").join(".git"),
+            format!("gitdir: {}\n", plain.display()),
+        )
+        .unwrap();
+        roots
+            .register(
+                &root,
+                std::slice::from_ref(&main_git),
+                RootLifetime::Permanent,
+            )
+            .unwrap();
+
+        roots.retire(&root).unwrap();
+        assert!(!roots.contains(&main_git));
+        assert!(!roots.contains(&plain));
+        assert!(!roots.contains(&root));
+        assert!(roots.contains(&root.join("a")));
+        assert!(roots.contains(&root.join("b")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_retire_keeps_a_root_whose_git_file_is_a_fifo() {
+        let directory = tempfile::tempdir().unwrap();
+        let roots = JobRoots::new(&directory.path().join("registry").join("roots.json"));
+        let root = directory.path().join("tree");
+        fs::create_dir_all(root.join("a")).unwrap();
+        let fifo = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+            root.join("a").join(".git").as_os_str(),
+        ))
+        .unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        roots.register(&root, &[], RootLifetime::Permanent).unwrap();
+
+        roots.retire(&root).unwrap();
+        assert!(
+            roots
+                .current_entries()
+                .iter()
+                .any(|entry| entry.root == fs::canonicalize(&root).unwrap())
+        );
+        assert!(roots.contains(&root.join("a")));
     }
 
     #[test]
