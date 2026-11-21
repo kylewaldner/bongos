@@ -801,7 +801,11 @@ async fn test_each_exact_change_writes_once_and_a_burst_writes_once(cx: &mut Tes
         c.deliver(event_report(&id, &token, at, event), cx);
     }
     cx.run_until_parked();
-    assert_eq!(active_writes(&c.h, cx) - before, 1, "the first change writes");
+    assert_eq!(
+        active_writes(&c.h, cx) - before,
+        1,
+        "the first change writes"
+    );
     cx.executor().advance_clock(debounce);
     cx.run_until_parked();
     assert_eq!(
