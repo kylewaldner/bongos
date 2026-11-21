@@ -187,6 +187,7 @@ mod imp {
             fs,
             network,
             git: sandbox::GitSandboxPolicy::default(),
+            read_only_masks: Vec::new(),
         }
     }
 

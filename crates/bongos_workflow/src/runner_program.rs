@@ -571,6 +571,7 @@ impl ProgramNode {
                 }
             },
             git,
+            read_only_masks: Vec::new(),
         }
     }
 }
