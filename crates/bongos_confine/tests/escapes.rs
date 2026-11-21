@@ -29,7 +29,7 @@ use std::{
     os::unix::{ffi::OsStrExt as _, fs::OpenOptionsExt as _},
     path::{Path, PathBuf},
     process::{ExitStatus, Output},
-    sync::{Mutex, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
     time::{Duration, SystemTime},
 };
@@ -597,6 +597,7 @@ struct Job {
     release: PathBuf,
     log: PathBuf,
     reader: Option<JoinHandle<()>>,
+    reaped: Arc<Mutex<bool>>,
     exited: bool,
     _sandbox: Sandbox,
 }
@@ -667,12 +668,32 @@ impl Job {
                 sender.send(Event::Ready(fs::read_to_string(&ready))).ok();
             }
         });
-        std::thread::spawn(move || {
-            sender
-                .send(Event::Exited(smol::block_on(child.status())))
-                .ok();
+        let reaped = Arc::new(Mutex::new(false));
+        std::thread::spawn({
+            let reaped = reaped.clone();
+            move || {
+                // Wait without reaping, so `kill` can tell under the lock whether the pid is
+                // still ours.
+                // SAFETY: a zeroed siginfo is a valid out-parameter for waitid.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // SAFETY: plain syscall on our child's pid; WNOWAIT leaves it unreaped.
+                unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        pid as libc::id_t,
+                        &mut info,
+                        libc::WEXITED | libc::WNOWAIT,
+                    );
+                }
+                let mut reaped = reaped.lock().unwrap_or_else(|error| error.into_inner());
+                let status = smol::block_on(child.status());
+                *reaped = true;
+                drop(reaped);
+                sender.send(Event::Exited(status)).ok();
+            }
         });
         Self {
+            reaped,
             pid,
             events,
             ready,
@@ -719,19 +740,33 @@ impl Job {
         }
     }
 
-    /// Unblocks the reader thread (if it still waits for a writer to open `ready`) and joins it.
+    /// Joins the reader thread, which has already sent its event.
     fn join_reader(&mut self) {
         if let Some(reader) = self.reader.take() {
-            if !reader.is_finished() {
-                drop(open_fifo_writer(&self.ready));
-            }
             reader.join().ok();
         }
     }
 
+    /// Never waits for the reader: when the job died before the reader opened `ready`, nobody can
+    /// unblock its `open`, so an unfinished reader is nudged (if a writer can be opened now) and
+    /// detached. It ends with the test process.
+    fn release_reader(&mut self) {
+        if let Some(reader) = self.reader.take() {
+            if !reader.is_finished() {
+                drop(open_fifo_writer(&self.ready));
+            }
+        }
+    }
+
     fn kill(&mut self) {
-        if !self.exited {
-            // SAFETY: plain syscall; the pid is our child, not yet reaped (no exit was seen).
+        // The watcher reaps the child under this lock, so a false flag means the pid is still ours
+        // (running or an unreaped zombie) and cannot have been reused.
+        let reaped = self
+            .reaped
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*reaped {
+            // SAFETY: plain syscall; the pid is our child and the watcher has not reaped it.
             unsafe {
                 libc::kill(self.pid as libc::pid_t, libc::SIGKILL);
             }
@@ -740,7 +775,7 @@ impl Job {
 
     fn fail(&mut self, message: &str) -> ! {
         self.kill();
-        self.join_reader();
+        self.release_reader();
         let log = fs::read_to_string(&self.log).unwrap_or_default();
         panic!("{message}\njob output:\n{log}");
     }
@@ -750,7 +785,7 @@ impl Drop for Job {
     fn drop(&mut self) {
         // A failed host check unwinds while the job is still blocked in the handshake.
         self.kill();
-        self.join_reader();
+        self.release_reader();
     }
 }
 
@@ -918,6 +953,9 @@ fn e2_check(fixture: &Fixture, outcome: &Outcome, _: Phase) {
 
 fn e2_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
     async move {
+        // This control proves only the `commondir` rewrite. A planted `config.worktree` is read
+        // only when `extensions.worktreeConfig` is set, so that marker is covered by the
+        // blocked-write assertions in `e2_check` alone.
         let commondir = fixture.other_git_dir.join("commondir");
         let original = fs::read(&commondir).unwrap();
         fs::write(
