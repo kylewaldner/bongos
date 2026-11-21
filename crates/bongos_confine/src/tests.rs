@@ -278,7 +278,11 @@ fn refuses_each_unsafe_declaration() {
     assert_eq!(
         build(
             scratch.clone(),
-            vec![tree(inside_lane.clone(), TreeAccess::ReadOnly, TreeGit::None)],
+            vec![tree(
+                inside_lane.clone(),
+                TreeAccess::ReadOnly,
+                TreeGit::None
+            )],
             vec![lane.clone()],
             &host
         ),
