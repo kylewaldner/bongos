@@ -1761,3 +1761,321 @@ fn a_second_job_in_a_tree_with_private_git_is_refused_while_the_first_runs() {
     assert_eq!(finish.outcome, Ok(json!({ "status": "done" })));
     assert!(std::fs::symlink_metadata(fixture.path("scratch/second/git")).is_err());
 }
+
+/// A pid no process has (above Linux's largest `pid_max`).
+const DEAD_PID: u32 = 2_000_000_000;
+
+/// The run's binding with `run-worktree` as the run worktree and its linked git directory as the
+/// recorded one.
+fn bound(fixture: &Fixture, common: &Path) -> crate::runtime::RunBinding {
+    let mut binding = crate::dispatch_tests::binding(fixture.root.path(), "check");
+    binding.worktree.path = fixture.path("run-worktree");
+    binding.worktree.git_dir = common.join("worktrees/run-worktree");
+    binding
+}
+
+/// Makes the owner of the marker in `linked` a process that is gone, as when the app crashed.
+fn kill_marker_owner(linked: &Path) {
+    let path = linked.join(bongos_confine::private_git::MARKER);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let own = format!("\npid {}\n", std::process::id());
+    assert!(text.contains(&own), "{text}");
+    std::fs::write(
+        &path,
+        text.replacen(&own, &format!("\npid {DEAD_PID}\n"), 1),
+    )
+    .unwrap();
+}
+
+/// Waits until `path` exists, with a generous hang guard.
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while std::fs::symlink_metadata(path).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_crash_mid_pass_is_recovered_by_the_next_start() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let home = fixture.root.path().to_path_buf();
+    let binding = bound(&fixture, &common);
+    // The run worktree, then a branch worktree (found under `worktrees/`, not in the record).
+    for name in ["run", "other"] {
+        let tree = fixture.path(&format!("{name}-worktree"));
+        let linked = common.join(format!("worktrees/{name}-worktree"));
+        let dot_git = std::fs::read(tree.join(".git")).unwrap();
+        let scratch = fixture.path(&format!("scratch/dead-{name}"));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let private = futures::executor::block_on(bongos_confine::private_git::prepare(
+            &tree, &linked, &scratch,
+        ))
+        .unwrap();
+        git(
+            &home,
+            &tree,
+            &["commit", "-q", "--allow-empty", "-m", "dead"],
+        )
+        .unwrap();
+        // The app dies mid-pass: the tree still points at the private directory.
+        std::mem::forget(private);
+        assert_ne!(std::fs::read(tree.join(".git")).unwrap(), dot_git);
+
+        // While the owner lives the tree is busy, and nothing changes.
+        let busy = crate::dispatch_program::host_git(&binding, &tree).unwrap_err();
+        assert!(busy.contains(bongos_confine::private_git::BUSY), "{busy}");
+        assert_ne!(std::fs::read(tree.join(".git")).unwrap(), dot_git);
+
+        kill_marker_owner(&linked);
+        let (host, tree_git) = crate::dispatch_program::host_git(&binding, &tree).unwrap();
+        assert_eq!(tree_git, TreeGit::Private);
+        assert_eq!(
+            host.git_dirs,
+            vec![
+                common.canonicalize().unwrap(),
+                linked.canonicalize().unwrap()
+            ]
+        );
+        assert_eq!(std::fs::read(tree.join(".git")).unwrap(), dot_git);
+        assert!(std::fs::symlink_metadata(scratch.join("git")).is_err());
+        assert!(
+            std::fs::symlink_metadata(linked.join(bongos_confine::private_git::MARKER)).is_err()
+        );
+        // The dead pass's commit is dropped.
+        assert_eq!(tip_subject(&fixture, name).as_deref(), Some("start"));
+    }
+
+    // The next start in the recovered run worktree runs and imports.
+    let (host, _) =
+        crate::dispatch_program::host_git(&binding, &fixture.path("run-worktree")).unwrap();
+    let mut node = private_node(
+        &fixture,
+        &common,
+        &script(
+            &format!(
+                "{SCRIPT_GIT}\n\
+                 subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'inside'], check=True)"
+            ),
+            "'done'",
+        ),
+        &[],
+    );
+    node.host_git = HostGit {
+        records_dir: node.host_git.records_dir.clone(),
+        ..host
+    };
+    let finish = fixture.run_node(node);
+    assert_eq!(finish.outcome, Ok(json!({ "status": "done" })));
+    assert_eq!(tip_subject(&fixture, "run").as_deref(), Some("inside"));
+}
+
+#[test]
+fn host_git_refuses_a_dot_git_it_does_not_trust() {
+    let Some(fixture) = Fixture::new() else {
+        return;
+    };
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let binding = bound(&fixture, &common);
+    let run = fixture.path("run-worktree");
+    let gitlink = run.join(".git");
+    let dot_git = std::fs::read(&gitlink).unwrap();
+    let other_linked = common.join("worktrees/other-worktree");
+    let untrusted = |tree: &Path| {
+        let error = crate::dispatch_program::host_git(&binding, tree).unwrap_err();
+        assert!(
+            error.starts_with("the git directory of the node's worktree is not trusted"),
+            "{error}"
+        );
+    };
+
+    // A pointer at another worktree's git directory, or outside the repository.
+    for target in [other_linked, fixture.path("elsewhere")] {
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(&gitlink, format!("gitdir: {}\n", target.display())).unwrap();
+        untrusted(&run);
+    }
+    // A symlink to another worktree's `.git`.
+    std::fs::remove_file(&gitlink).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(fixture.path("other-worktree/.git"), &gitlink).unwrap();
+        untrusted(&run);
+        std::fs::remove_file(&gitlink).unwrap();
+    }
+    // A `.git` directory.
+    std::fs::create_dir(&gitlink).unwrap();
+    untrusted(&run);
+    std::fs::remove_dir(&gitlink).unwrap();
+
+    // A tree the record names with another worktree's git directory.
+    std::fs::write(&gitlink, &dot_git).unwrap();
+    let mut swapped = binding.clone();
+    swapped.worktree.path = fixture.path("other-worktree");
+    let error = crate::dispatch_program::host_git(&swapped, &swapped.worktree.path).unwrap_err();
+    assert!(error.contains("not the recorded"), "{error}");
+
+    // The run worktree as git made it is trusted; a worktree with no `.git` gets no git.
+    let (_, tree_git) = crate::dispatch_program::host_git(&binding, &run).unwrap();
+    assert_eq!(tree_git, TreeGit::Private);
+    let bare = fixture.path("no-git");
+    std::fs::create_dir_all(&bare).unwrap();
+    let (_, tree_git) = crate::dispatch_program::host_git(&binding, &bare).unwrap();
+    assert_eq!(tree_git, TreeGit::None);
+}
+
+#[test]
+fn a_stopped_pass_is_imported() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let dot_git = std::fs::read(fixture.path("run-worktree/.git")).unwrap();
+    let gate = fixture.path("scratch/check/gate");
+    let committed = fixture.path("scratch/check/committed");
+    std::fs::create_dir_all(gate.parent().unwrap()).unwrap();
+    let fifo = std::ffi::CString::new(gate.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    // Held open for reading and writing, so the script's read waits until it is stopped.
+    let gate_holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&gate)
+        .unwrap();
+    let node = private_node(
+        &fixture,
+        &common,
+        &script(
+            &format!(
+                "{SCRIPT_GIT}\n\
+                 subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'inside'], check=True)\n\
+                 open({committed:?}, 'w').write('x')\n\
+                 open({gate:?}).read(2)",
+                committed = committed.to_string_lossy(),
+                gate = gate.to_string_lossy(),
+            ),
+            "'done'",
+        ),
+        &[],
+    );
+    fixture.start(node);
+    wait_for_file(&committed);
+    fixture.runner.stop(&[("run-1".to_string(), key())]);
+    drop(gate_holder);
+    assert!(fixture.runner.in_flight().is_empty());
+    assert!(fixture.runner.poll().is_empty());
+    assert_eq!(tip_subject(&fixture, "run").as_deref(), Some("inside"));
+    assert_eq!(
+        std::fs::read(fixture.path("run-worktree/.git")).unwrap(),
+        dot_git
+    );
+    assert!(std::fs::symlink_metadata(fixture.path("scratch/check/git")).is_err());
+}
+
+#[test]
+fn a_failed_import_fails_the_node_and_keeps_the_commits() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let dot_git = std::fs::read(fixture.path("run-worktree/.git")).unwrap();
+    let private = fixture.path("scratch/check/git");
+    // A file in the private object directory that is neither a loose object nor a plain pack
+    // fails the import.
+    let node = private_node(
+        &fixture,
+        &common,
+        &script(
+            &format!(
+                "{SCRIPT_GIT}\n\
+                 subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'inside'], check=True)\n\
+                 open({stray:?}, 'w').write('x')",
+                stray = private.join("objects/stray").to_string_lossy(),
+            ),
+            "'done'",
+        ),
+        &[],
+    );
+    let finish = fixture.run_node(node);
+    let failure = failure(&finish);
+    assert_eq!(
+        failure.reason,
+        FailureReason::WorktreeUnavailable,
+        "{}",
+        says(failure)
+    );
+    assert!(
+        failure
+            .detail
+            .starts_with("could not import the node's commits"),
+        "{}",
+        failure.detail
+    );
+    // Nothing moved; the tree is back on shared git and the commit stays in the private directory.
+    assert_eq!(tip_subject(&fixture, "run").as_deref(), Some("start"));
+    assert_eq!(
+        std::fs::read(fixture.path("run-worktree/.git")).unwrap(),
+        dot_git
+    );
+    let kept = git(
+        fixture.root.path(),
+        fixture.root.path(),
+        &[
+            "--git-dir",
+            &private.to_string_lossy(),
+            "log",
+            "-1",
+            "--format=%s",
+            "refs/heads/run",
+        ],
+    );
+    assert_eq!(kept.as_deref(), Some("inside"));
+}
+
+#[test]
+fn a_failed_prepare_refuses_the_start_and_changes_nothing() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let tree = fixture.path("run-worktree");
+    git(fixture.root.path(), &tree, &["checkout", "-q", "--detach"]).unwrap();
+    let dot_git = std::fs::read(tree.join(".git")).unwrap();
+    let node = private_node(&fixture, &common, &script("", "'done'"), &[]);
+    let failure = fixture.runner.start("run-1", &key(), 1, node).unwrap_err();
+    assert_eq!(failure.reason, FailureReason::WorktreeUnavailable);
+    assert!(
+        failure
+            .detail
+            .contains(bongos_confine::private_git::DETACHED),
+        "{}",
+        failure.detail
+    );
+    assert!(fixture.runner.in_flight().is_empty());
+    assert_eq!(std::fs::read(tree.join(".git")).unwrap(), dot_git);
+    assert!(std::fs::symlink_metadata(fixture.path("scratch/check/git")).is_err());
+    let marker = common
+        .join("worktrees/run-worktree")
+        .join(bongos_confine::private_git::MARKER);
+    assert!(std::fs::symlink_metadata(marker).is_err());
+}

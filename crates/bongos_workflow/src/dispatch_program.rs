@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_confine::private_git::{self, RecoverOutcome};
 use bongos_confine::safe_git::linked_git_dir_from_record;
 use bongos_confine::{HostGit, TreeAccess, TreeGit};
 use bongos_workflow_model::record::TodoRef;
@@ -203,15 +204,23 @@ fn todo_of(binding: &RunBinding) -> TodoRef {
     }
 }
 
-/// What the host trusts about the node's repository, read from the run's record and never from
+/// What the host trusts about the node's repository, read from host-owned records and never from
 /// the tree, and the git the node gets in `worktree`. The common git directory comes from the
-/// run worktree's recorded git directory; the worktree's own linked git directory is the one
-/// under that common directory that names it ([`linked_git_dir_from_record`]). A run or branch
-/// worktree gets [`TreeGit::Private`]; a worktree with no `.git` gets [`TreeGit::None`]; a `.git`
-/// that is not a linked worktree of the run's repository (a directory, a pointer elsewhere)
-/// refuses the start. The run's record directory is the records directory no writable root may
-/// hold.
-fn host_git(binding: &RunBinding, worktree: &Path) -> Result<(HostGit, TreeGit), String> {
+/// run worktree's git directory in the run's record. The worktree's own linked git directory is,
+/// for the run worktree, that recorded git directory; for a branch worktree, the entry under
+/// `<common>/worktrees/` whose `gitdir` file names the worktree's `.git` (files git and the host
+/// write, never the tree). A pass that died with the app leaves the worktree on its private git:
+/// that is recovered first ([`private_git::recover`]; the dead pass's commits are dropped), and a
+/// live job holding the worktree refuses the start with [`private_git::BUSY`]. Then the tree's
+/// `.git` must name the recorded linked git directory ([`linked_git_dir_from_record`]). A run or
+/// branch worktree gets [`TreeGit::Private`]; a worktree with no `.git` gets [`TreeGit::None`]; a
+/// `.git` that is not that linked worktree of the run's repository (a directory, a pointer
+/// elsewhere) refuses the start. The run's record directory is the records directory no writable
+/// root may hold.
+pub(crate) fn host_git(
+    binding: &RunBinding,
+    worktree: &Path,
+) -> Result<(HostGit, TreeGit), String> {
     let records_dir = binding.run_dir.exists().then(|| binding.run_dir.clone());
     let common = common_dir_of(&binding.worktree.git_dir);
     if std::fs::symlink_metadata(worktree.join(".git")).is_err() {
@@ -222,14 +231,76 @@ fn host_git(binding: &RunBinding, worktree: &Path) -> Result<(HostGit, TreeGit),
         return Ok((host, TreeGit::None));
     }
     let common = common?;
-    let linked = linked_git_dir_from_record(worktree, &common).map_err(|error| {
-        format!("the git directory of the node's worktree is not trusted: {error:#}")
-    })?;
+    let untrusted = |detail: String| {
+        format!("the git directory of the node's worktree is not trusted: {detail}")
+    };
+    let recorded = if worktree == binding.worktree.path {
+        Some(binding.worktree.git_dir.clone())
+    } else {
+        branch_git_dir(&common, worktree)
+    };
+    if let Some(recorded) = &recorded {
+        match private_git::recover(recorded) {
+            Ok(RecoverOutcome::InUse) => {
+                return Err(format!("{}: {}", private_git::BUSY, worktree.display()));
+            }
+            Ok(RecoverOutcome::Recovered) => log::info!(
+                "workflows: switched {} back to shared git after a pass that is gone",
+                worktree.display()
+            ),
+            Ok(RecoverOutcome::NoMarker) => {}
+            Err(error) => {
+                return Err(format!(
+                    "could not recover {} from a pass that is gone: {error:#}",
+                    worktree.display()
+                ));
+            }
+        }
+    }
+    let linked = linked_git_dir_from_record(worktree, &common)
+        .map_err(|error| untrusted(format!("{error:#}")))?;
+    let recorded = recorded
+        .and_then(|recorded| recorded.canonicalize().ok())
+        .ok_or_else(|| {
+            untrusted(format!(
+                "no git directory is recorded for {}",
+                worktree.display()
+            ))
+        })?;
+    if linked != recorded {
+        return Err(untrusted(format!(
+            "its .git names {}, not the recorded {}",
+            linked.display(),
+            recorded.display()
+        )));
+    }
     let host = HostGit {
         git_dirs: vec![common, linked],
         records_dir,
     };
     Ok((host, TreeGit::Private))
+}
+
+/// The linked git directory of the branch worktree `worktree`: the directory directly under
+/// `<common>/worktrees/` whose `gitdir` file names `<worktree>/.git`. Only host-owned files are
+/// read; `None` when no entry names it.
+fn branch_git_dir(common: &Path, worktree: &Path) -> Option<PathBuf> {
+    let regular = std::fs::symlink_metadata(worktree.join(".git"))
+        .is_ok_and(|metadata| metadata.file_type().is_file());
+    if !regular {
+        return None;
+    }
+    let gitlink = worktree.canonicalize().ok()?.join(".git");
+    let entries = std::fs::read_dir(common.join("worktrees")).ok()?;
+    entries.flatten().map(|entry| entry.path()).find(|dir| {
+        let is_dir = std::fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.is_dir());
+        is_dir
+            && std::fs::read_to_string(dir.join("gitdir")).is_ok_and(|text| {
+                dir.join(text.trim_end_matches(['\n', '\r']))
+                    .canonicalize()
+                    .is_ok_and(|named| named == gitlink)
+            })
+    })
 }
 
 /// The node's scratch directory, beside the run's worktrees and outside the record.
