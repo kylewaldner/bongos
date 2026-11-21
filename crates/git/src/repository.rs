@@ -1277,6 +1277,16 @@ impl RealGitRepository {
             return Err(refuse());
         }
 
+        // Every command passes the git directory explicitly, which skips git's own
+        // `safe.directory` ownership check, so it runs here instead.
+        #[cfg(unix)]
+        check_ownership(
+            &any_git_binary_path,
+            working_directory.as_deref(),
+            &git_dir,
+            &common_dir,
+        )?;
+
         // A bare repository has no working tree to pin, and keeps running as before.
         let pin = working_directory.as_ref().map(|work_tree| GitPin {
             filter_drivers: read_filter_drivers(&any_git_binary_path, &git_dir, work_tree),
@@ -1317,6 +1327,13 @@ impl RealGitRepository {
                 worktree_path.display()
             )
         };
+        // This repository's own working tree, whatever its git directory is named.
+        if same_directory(&pin.work_tree) {
+            return Ok(Some(GitPin {
+                work_tree: worktree_path.to_path_buf(),
+                ..pin.clone()
+            }));
+        }
         if self.common_dir.file_name() == Some(OsStr::new(".git"))
             && let Some(main_worktree) = self.common_dir.parent()
             && same_directory(main_worktree)
@@ -1339,7 +1356,9 @@ impl RealGitRepository {
             let Ok(gitdir_file) = std::fs::read_to_string(git_dir.join("gitdir")) else {
                 continue;
             };
-            let dotgit = Path::new(gitdir_file.trim_end_matches(['\n', '\r']));
+            // Relative with `worktree.useRelativePaths`, from the entry's own directory.
+            // `same_directory` resolves any `..` the way the kernel does.
+            let dotgit = git_dir.join(gitdir_file.trim_end_matches(['\n', '\r']));
             if dotgit.file_name() == Some(OsStr::new(".git"))
                 && let Some(worktree) = dotgit.parent()
                 && same_directory(worktree)
@@ -3167,6 +3186,10 @@ impl GitRepository for RealGitRepository {
             {
                 let hook_abs_path = git_dir.join("hooks").join(hook.as_str());
                 if hook_abs_path.is_file() && git_binary.is_trusted {
+                    // The same check `build_command` runs before every git command.
+                    if let Some(pin) = &git_binary.pin {
+                        pin.check(&working_directory)?;
+                    }
                     #[allow(clippy::disallowed_methods)]
                     let output = new_command(&hook_abs_path)
                         .envs(env.iter())
@@ -3620,6 +3643,114 @@ fn written_by_job_error(path: &Path) -> anyhow::Error {
     )
 }
 
+/// The user this process runs as.
+#[cfg(unix)]
+fn effective_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    // `/proc/self` belongs to the effective user; without procfs, the home directory stands in.
+    std::fs::metadata("/proc/self")
+        .or_else(|_| std::fs::metadata(paths::home_dir()))
+        .ok()
+        .map(|metadata| metadata.uid())
+}
+
+/// Refuses a repository whose working tree, git directory or common directory belongs to another
+/// user, unless `safe.directory` (from the system or global configuration, as git reads it)
+/// allows its working tree, or its git directory when it has none. Git runs this check itself
+/// only while it discovers the repository, which an explicit `--git-dir` skips.
+#[cfg(unix)]
+fn check_ownership(
+    git_binary_path: &Path,
+    working_directory: Option<&Path>,
+    git_dir: &Path,
+    common_dir: &Path,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let uid = effective_uid().context("cannot tell which user this process runs as")?;
+    let foreign = [working_directory, Some(git_dir), Some(common_dir)]
+        .into_iter()
+        .flatten()
+        .any(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.uid() != uid));
+    if !foreign {
+        return Ok(());
+    }
+    let repository_path = working_directory.unwrap_or(git_dir);
+    if safe_directory_allows(git_binary_path, repository_path) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "not opening {}: it is owned by another user and not listed in safe.directory",
+        repository_path.display()
+    ))
+}
+
+/// Whether the system or global `safe.directory` entries allow `repository_path`, matched the
+/// way git matches them: `*` allows all, a trailing `/*` allows a prefix, and an empty value
+/// clears the entries before it.
+#[cfg(unix)]
+fn safe_directory_allows(git_binary_path: &Path, repository_path: &Path) -> bool {
+    // Runs only for a repository owned by another user, once per open.
+    #[allow(clippy::disallowed_methods)]
+    let output = std::process::Command::new(git_binary_path)
+        .current_dir("/")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .args([
+            "config",
+            "-z",
+            "--show-scope",
+            "--get-all",
+            "safe.directory",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output();
+    let Some(output) = output.log_err() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return false;
+    };
+    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+    let repository_path = canonical(repository_path);
+    let mut allowed = false;
+    // `-z --show-scope` prints `<scope>\0<value>\0` per entry.
+    let fields = stdout.split_terminator('\0').collect::<Vec<_>>();
+    for pair in fields.chunks(2) {
+        let [scope, value] = pair else {
+            return false;
+        };
+        // Git ignores the entries of the repository's own configuration.
+        if !matches!(*scope, "system" | "global" | "command") {
+            continue;
+        }
+        if value.is_empty() {
+            allowed = false;
+            continue;
+        }
+        if *value == "*" {
+            allowed = true;
+            continue;
+        }
+        let expand = |value: &str| match value.strip_prefix("~/") {
+            Some(rest) => paths::home_dir().join(rest),
+            None => PathBuf::from(value),
+        };
+        if let Some(prefix) = value.strip_suffix("/*") {
+            if repository_path.starts_with(canonical(&expand(prefix))) {
+                allowed = true;
+            }
+        } else if canonical(&expand(value)) == repository_path {
+            allowed = true;
+        }
+    }
+    allowed
+}
+
 /// The git data a command is bound to, found when the repository was opened. Commands pass it to
 /// git explicitly, so a `.git` replaced later (for example by a job pointing it at a directory
 /// with its own configuration) is never read.
@@ -3867,6 +3998,11 @@ impl GitBinary {
                     )
                 })?;
                 command.args(["-c", "diff.external="]);
+                // A submodule's `.git` in the tree may point anywhere, so git never follows it
+                // into a repository whose configuration names its own drivers.
+                command.args(["-c", "submodule.recurse=false"]);
+                command.args(["-c", "fetch.recurseSubmodules=false"]);
+                command.args(["-c", "diff.ignoreSubmodules=all"]);
                 for name in filter_drivers.iter() {
                     for setting in ["clean=", "smudge=", "process=", "required=false"] {
                         command.arg("-c");
@@ -3883,13 +4019,23 @@ impl GitBinary {
         match args.split_first() {
             Some((subcommand, rest)) if in_job_tree => {
                 command.arg(subcommand);
-                // Right after the subcommand, so they never land after a `--`.
+                // Right after the subcommand, so they never land after a `--`. The command-line
+                // submodule options also override what the tree's `.gitmodules` says.
                 match subcommand.as_ref().to_str() {
-                    Some("diff" | "log" | "show") => {
+                    Some("diff") => {
+                        command.args(["--no-ext-diff", "--no-textconv", "--ignore-submodules=all"]);
+                    }
+                    Some("log" | "show") => {
                         command.args(["--no-ext-diff", "--no-textconv"]);
                     }
                     Some("blame") => {
                         command.arg("--no-textconv");
+                    }
+                    Some("status") => {
+                        command.arg("--ignore-submodules=all");
+                    }
+                    Some("fetch" | "pull") => {
+                        command.arg("--no-recurse-submodules");
                     }
                     _ => {}
                 }
@@ -3911,6 +4057,19 @@ impl GitBinary {
             command.env("GIT_INDEX_FILE", index_file_path);
         }
         command.envs(&self.envs);
+        if self.pin.is_some() {
+            // The pin decides the git data, so nothing inherited may redirect it or add
+            // configuration (`GIT_CONFIG_KEY_*` are ignored without `GIT_CONFIG_COUNT`).
+            for name in [
+                "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_COUNT",
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_COMMON_DIR",
+            ] {
+                command.env_remove(name);
+            }
+        }
         Ok(command)
     }
 }
@@ -6248,11 +6407,24 @@ mod tests {
             format!("a.txt filter={filter_name} diff=evil\n"),
         )
         .unwrap();
-        fs::write(repo.join("a.txt"), "first\n").unwrap();
+        fs::write(repo.join("a.txt"), "initial\n").unwrap();
         git_command(&repo, ["add", "."]);
         git_command(&repo, ["commit", "-m", "initial"]);
-        fs::write(repo.join("a.txt"), "changed\n").unwrap();
+        change_keeping_size(&repo.join("a.txt"), "changed\n");
         repo
+    }
+
+    /// Writes `contents`, the same size as the file's, and dates the file long before the index,
+    /// so git must hash it (running any clean filter) to tell whether it changed.
+    fn change_keeping_size(path: &Path, contents: &str) {
+        assert_eq!(fs::metadata(path).unwrap().len(), contents.len() as u64);
+        fs::write(path, contents).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+            .unwrap();
     }
 
     #[gpui::test]
@@ -6399,6 +6571,157 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_git_pin_worktree_lookup_relative_paths_and_separate_git_dir(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let main = temp_dir.path().join("main");
+        let real_git_dir = temp_dir.path().join("real-git-dir");
+        fs::create_dir_all(&main).unwrap();
+        git_command(
+            &main,
+            [
+                "init".into(),
+                "-b".into(),
+                "main".into(),
+                format!("--separate-git-dir={}", real_git_dir.display()),
+            ],
+        );
+        fs::write(main.join("a.txt"), "a\n").unwrap();
+        git_command(&main, ["add", "."]);
+        git_command(&main, ["commit", "-m", "initial"]);
+        git_command(&main, ["branch", "feature"]);
+        git_command(&main, ["branch", "topic"]);
+        let linked = temp_dir.path().join("linked");
+        git_command(
+            &main,
+            [
+                "-c".into(),
+                "worktree.useRelativePaths=true".into(),
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                "other".into(),
+                linked.display().to_string(),
+            ],
+        );
+        let gitdir_entry =
+            fs::read_to_string(real_git_dir.join("worktrees").join("linked").join("gitdir"))
+                .unwrap();
+        assert!(
+            Path::new(gitdir_entry.trim()).is_relative(),
+            "{gitdir_entry}"
+        );
+
+        let repository = open_with_job_roots(&roots, &main.join(".git"), cx).unwrap();
+        repository
+            .checkout_branch_in_worktree("feature".into(), linked.clone(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            git_output(&linked, ["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature"
+        );
+        // The repository's own working tree, whose git directory is not named `.git`.
+        repository
+            .checkout_branch_in_worktree("topic".into(), main.clone(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            git_output(&main, ["rev-parse", "--abbrev-ref", "HEAD"]),
+            "topic"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_job_tree_never_follows_submodule_git(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let origin = temp_dir.path().join("origin");
+        git_init_repo(&origin);
+        fs::write(origin.join("b.txt"), "initial\n").unwrap();
+        git_command(&origin, ["add", "."]);
+        git_command(&origin, ["commit", "-m", "initial"]);
+        let repo = temp_dir.path().join("repo");
+        git_init_repo(&repo);
+        git_command(
+            &repo,
+            [
+                "-c".into(),
+                "protocol.file.allow=always".into(),
+                "submodule".into(),
+                "add".into(),
+                origin.display().to_string(),
+                "sub".into(),
+            ],
+        );
+        git_command(&repo, ["commit", "-m", "add submodule"]);
+
+        let repository = open_with_job_roots(&roots, &repo.join(".git"), cx).unwrap();
+        repository.set_trusted(true);
+        roots
+            .register(
+                &repo,
+                &[repo.join(".git")],
+                util::job_roots::RootLifetime::Permanent,
+            )
+            .unwrap();
+
+        // A job points the submodule's `.git` at a directory whose configuration names a clean
+        // filter, selects it for a file, and changes that file so status must hash it.
+        let evil = temp_dir.path().join("evil-git-dir");
+        git_command(
+            temp_dir.path(),
+            [
+                "clone".into(),
+                "--bare".into(),
+                origin.display().to_string(),
+                evil.display().to_string(),
+            ],
+        );
+        git_command(&evil, ["config", "core.bare", "false"]);
+        fs::copy(
+            repo.join(".git").join("modules").join("sub").join("index"),
+            evil.join("index"),
+        )
+        .unwrap();
+        let markers = temp_dir.path().join("markers");
+        fs::create_dir_all(&markers).unwrap();
+        git_command(
+            &evil,
+            [
+                "config".into(),
+                "filter.evil.clean".into(),
+                marker_command(&markers.join("clean")),
+            ],
+        );
+        let sub = repo.join("sub");
+        fs::write(sub.join(".git"), format!("gitdir: {}\n", evil.display())).unwrap();
+        fs::write(sub.join(".gitattributes"), "b.txt filter=evil\n").unwrap();
+        change_keeping_size(&sub.join("b.txt"), "changed\n");
+
+        repository.status(&[]).await.unwrap();
+        repository.diff(DiffType::HeadToWorktree).await.unwrap();
+        let args = command_args(&repository.git_binary(), &["status", "--", "sub"]);
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        let ignore = args
+            .iter()
+            .position(|arg| arg == "--ignore-submodules=all")
+            .unwrap();
+        assert!(ignore < separator, "{args:?}");
+        assert_no_markers(&markers);
+
+        // Plain git status follows the submodule's `.git` and runs the filter.
+        git_output(&repo, ["status"]);
+        assert!(markers.join("clean").exists(), "the control ran no filter");
+    }
+
+    #[gpui::test]
     async fn test_git_pin_outside_roots_gets_no_driver_overrides(cx: &mut TestAppContext) {
         disable_git_global_config();
         cx.executor().allow_parking();
@@ -6424,6 +6747,9 @@ mod tests {
         );
         assert!(args.iter().any(|arg| arg.starts_with("--git-dir=")));
 
+        // Status hashes the same-size change, so the configured clean filter runs.
+        repository.status(&[]).await.unwrap();
+        assert!(markers.join("clean").exists(), "status ran no clean filter");
         repository.diff(DiffType::HeadToWorktree).await.unwrap();
         assert!(markers.join("textconv").exists() || markers.join("external").exists());
     }
