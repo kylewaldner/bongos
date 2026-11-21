@@ -1068,12 +1068,19 @@ impl Git {
 /// directory, or the common directory its `commondir` names, inside a registered job root: a
 /// sandboxed job may have written its configuration and hooks. Everything else runs as before.
 fn refuse_job_written_repository(directory: &Path) -> Result<(), GitError> {
+    refuse_job_written_repository_with(directory, &util::job_roots::contains)
+}
+
+/// [`refuse_job_written_repository`] with `in_job_root` deciding what lies inside a job root.
+pub(crate) fn refuse_job_written_repository_with(
+    directory: &Path,
+    in_job_root: &dyn Fn(&Path) -> bool,
+) -> Result<(), GitError> {
     match discovered_git_dir(directory) {
-        Some(git_dir) => {
-            bongos_confine::safe_git::check_git_dir(&git_dir).map_err(|error| GitError::Refused {
+        Some(git_dir) => bongos_confine::safe_git::check_git_dir_with(&git_dir, in_job_root)
+            .map_err(|error| GitError::Refused {
                 message: error.to_string(),
-            })
-        }
+            }),
         None => Ok(()),
     }
 }

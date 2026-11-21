@@ -714,21 +714,63 @@ fn main_worktree_root_is_registered_for_the_job_and_retired_by_finish() {
 
 #[test]
 fn roots_file_survives_a_reload() {
-    let temp = tempfile::tempdir().unwrap();
-    let file = temp.path().join("confinement").join("roots.json");
-    let made = temp.path().join("made");
-    let checkout = temp.path().join("checkout");
-    fs::create_dir_all(made.join("src")).unwrap();
-    fs::create_dir_all(checkout.join("src")).unwrap();
+    let fixture = Fixture::new();
+    let file = fixture.base.join("confinement").join("roots.json");
+    let made = fixture.dir("made/src").parent().unwrap().to_path_buf();
+    let checkout = fixture.dir("checkout/src").parent().unwrap().to_path_buf();
 
-    util::job_roots::init(&file).unwrap();
-    util::job_roots::register(&made, &[], util::job_roots::RootLifetime::Permanent).unwrap();
-    util::job_roots::register(&checkout, &[], crate::this_process_lifetime().unwrap()).unwrap();
+    let first = JobRoots::new(&file);
+    first
+        .register(&made, &[], util::job_roots::RootLifetime::Permanent)
+        .unwrap();
+    first
+        .register(&checkout, &[], crate::this_process_lifetime().unwrap())
+        .unwrap();
 
-    // A second registry on the same file, as the next start of the app opens it.
-    util::job_roots::init(&file).unwrap();
-    assert!(util::job_roots::contains(&made.join("src")));
-    assert!(util::job_roots::contains(&checkout.join("src")));
-    assert!(!util::job_roots::contains(temp.path()));
-    assert!(JobRoots::new(&file).contains(&made));
+    // A second registry on the same file, as the next start of the app opens and prunes it.
+    // This process is the owner and is alive, so its entry stays.
+    let second = JobRoots::new(&file);
+    second.prune().unwrap();
+    assert!(second.contains(&made.join("src")));
+    assert!(second.contains(&checkout.join("src")));
+    assert!(!second.contains(&fixture.base));
+}
+
+#[test]
+fn two_jobs_in_one_main_worktree_share_its_root_until_both_finish() {
+    let fixture = Fixture::new();
+    let repo = fixture.dir("repo");
+    fixture.file("repo/.git/HEAD", "ref: refs/heads/main\n");
+    let first_scratch = fixture.dir("scratch-one");
+    let second_scratch = fixture.dir("scratch-two");
+    let host = HostGit {
+        git_dirs: vec![repo.join(".git")],
+        records_dir: None,
+    };
+    let build = |scratch: &Path| {
+        fixture
+            .build(
+                &declaration(
+                    scratch.to_path_buf(),
+                    vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
+                    Vec::new(),
+                ),
+                &host,
+            )
+            .unwrap()
+    };
+
+    let first = build(&first_scratch);
+    let second = build(&second_scratch);
+    assert!(fixture.roots.contains(&repo));
+
+    first.finish_in(&fixture.roots).unwrap();
+    assert!(fixture.roots.contains(&repo), "the second job still runs");
+    // Finishing the same job twice releases nothing more.
+    first.finish_in(&fixture.roots).unwrap();
+    assert!(fixture.roots.contains(&repo), "the second job still runs");
+
+    second.finish_in(&fixture.roots).unwrap();
+    assert!(!fixture.roots.contains(&repo));
+    assert!(!fixture.roots.contains(&repo.join(".git")));
 }

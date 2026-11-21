@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use futures::executor::block_on;
 use tempfile::TempDir;
 
-use crate::{Git, GitError, Identity};
+use crate::{Git, GitError, Identity, git::refuse_job_written_repository_with};
 
 fn git() -> Git {
     Git::locate().expect("git is installed").isolated()
@@ -165,4 +165,39 @@ fn a_replacement_ref_does_not_change_what_an_object_reads_as() {
             "the real a"
         );
     });
+}
+
+#[test]
+fn a_repository_whose_git_directory_lies_in_a_job_root_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let roots = util::job_roots::JobRoots::new(&base.join("registry").join("roots.json"));
+    let in_job_root = |path: &std::path::Path| roots.contains(path);
+    let host = base.join("host");
+    let job = base.join("job");
+    std::fs::create_dir_all(host.join(".git")).unwrap();
+    std::fs::create_dir_all(host.join("src")).unwrap();
+    std::fs::create_dir_all(job.join("git")).unwrap();
+    // A tree whose .git file points into the job root, as a job could have written it.
+    let pointed = base.join("pointed");
+    std::fs::create_dir_all(pointed.join("src")).unwrap();
+    std::fs::write(
+        pointed.join(".git"),
+        format!("gitdir: {}\n", job.join("git").display()),
+    )
+    .unwrap();
+    roots
+        .register(&job, &[], util::job_roots::RootLifetime::Permanent)
+        .unwrap();
+
+    refuse_job_written_repository_with(&host.join("src"), &in_job_root).unwrap();
+    let error = refuse_job_written_repository_with(&pointed.join("src"), &in_job_root).unwrap_err();
+    assert!(matches!(error, GitError::Refused { .. }), "{error}");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "refusing to run git with a job-written git directory: {}",
+            job.join("git").display()
+        )
+    );
 }

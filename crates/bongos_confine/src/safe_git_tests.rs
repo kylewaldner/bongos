@@ -114,15 +114,47 @@ impl Fixture {
     /// Runs `args` through `git`, deciding job roots with this fixture's registry, and asserts
     /// it succeeded.
     fn run_safe(&self, git: &SafeGit, args: &[&str]) -> Output {
-        let in_job_root = |path: &Path| self.roots.contains(path);
-        let mut command = smol::block_on(git.command_with(args, &in_job_root)).unwrap();
-        let output = smol::block_on(command.output()).unwrap();
+        let output = self.run_safe_unchecked(git, args);
         assert!(
             output.status.success(),
             "safe git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         output
+    }
+
+    /// Runs `args` through `git` like [`Fixture::run_safe`], whatever its exit status.
+    fn run_safe_unchecked(&self, git: &SafeGit, args: &[&str]) -> Output {
+        let in_job_root = |path: &Path| self.roots.contains(path);
+        let mut command = smol::block_on(git.command_with(args, &in_job_root)).unwrap();
+        smol::block_on(command.output()).unwrap()
+    }
+
+    /// The error building `args` through `git` fails with.
+    fn refused(&self, git: &SafeGit, args: &[&str]) -> String {
+        let in_job_root = |path: &Path| self.roots.contains(path);
+        smol::block_on(git.command_with(args, &in_job_root))
+            .unwrap_err()
+            .to_string()
+    }
+
+    /// The fixture's isolated git, plus an identity for commands that commit.
+    fn safe_git_with_identity(&self, git_dir: &Path, work_tree: &Path) -> SafeGit {
+        self.safe_git(git_dir, work_tree)
+            .config("user.name", "test")
+            .config("user.email", "test@localhost")
+            .config("commit.gpgsign", "false")
+    }
+
+    /// Runs real git on the host repository `host_git` with the work tree `tree`, as git would
+    /// without the protections.
+    fn plain(&self, host_git: &Path, tree: &Path, args: &[&str]) -> Output {
+        let mut all = vec![
+            format!("--git-dir={}", host_git.display()),
+            format!("--work-tree={}", tree.display()),
+        ];
+        all.extend(args.iter().map(|arg| arg.to_string()));
+        self.git(tree, &all)
     }
 }
 
@@ -305,4 +337,243 @@ fn linked_git_dir_is_trusted_only_under_worktrees() {
 
     fixture.dir("main/.git");
     assert!(linked_git_dir_from_record(&fixture.base.join("main"), &host.join(".git")).is_err());
+
+    // A `.git` naming a sibling worktree's git directory is refused.
+    let sibling = fixture.base.join("sibling");
+    let sibling_arg = sibling.to_string_lossy().into_owned();
+    fixture.git(&host, &["worktree", "add", "-q", "--detach", &sibling_arg]);
+    fs::write(
+        linked.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            host.join(".git/worktrees/sibling").display()
+        ),
+    )
+    .unwrap();
+    let error = linked_git_dir_from_record(&linked, &host.join(".git")).unwrap_err();
+    assert!(
+        error.to_string().contains("records another worktree"),
+        "{error}"
+    );
+}
+
+#[test]
+fn safe_git_runs_no_hook_in_a_job_tree() {
+    let fixture = Fixture::new();
+    let file_hook_marker = fixture.base.join("file-hook-ran");
+    let config_hook_marker = fixture.base.join("config-hook-ran");
+    let config_hook = fixture.marker_script("bin/config-hook", &config_hook_marker, "exit 0");
+    let host = fixture.dir("host");
+    fixture.git(&fixture.base, &["init", "-q", "host"]);
+    let host_git = host.join(".git");
+    let tree = fixture.dir("tree");
+    // A relative hooks path, as husky sets: it resolves in the work tree, which the job wrote.
+    fixture.git(&host, &["config", "core.hooksPath", ".husky/_"]);
+    fixture.git(
+        &host,
+        &[
+            "config",
+            "hook.lint.command",
+            &config_hook.to_string_lossy(),
+        ],
+    );
+    fixture.git(&host, &["config", "hook.lint.event", "pre-commit"]);
+    fixture.marker_script("tree/.husky/_/pre-commit", &file_hook_marker, "exit 0");
+
+    fixture.file("tree/a.txt", "one\n");
+    fixture.plain(&host_git, &tree, &["add", "a.txt"]);
+    fixture.plain(&host_git, &tree, &["commit", "-q", "-m", "first"]);
+    assert!(
+        file_hook_marker.exists(),
+        "the hook file was never run by git"
+    );
+    assert!(
+        config_hook_marker.exists(),
+        "the configured hook was never run by git"
+    );
+    fs::remove_file(&file_hook_marker).unwrap();
+    fs::remove_file(&config_hook_marker).unwrap();
+
+    fixture.register(&tree);
+    let git = fixture.safe_git_with_identity(&host_git, &tree);
+    fixture.file("tree/a.txt", "two\n");
+    fixture.run_safe(&git, &["commit", "-q", "-a", "-m", "second"]);
+    fixture.run_safe(&git, &["checkout", "-q", "HEAD~1"]);
+    fixture.run_safe(&git, &["reset", "-q", "--hard", "main"]);
+    assert!(!file_hook_marker.exists());
+    assert!(!config_hook_marker.exists());
+}
+
+#[test]
+fn safe_git_never_enters_a_job_replaced_submodule() {
+    let fixture = Fixture::new();
+    let marker = fixture.base.join("submodule-filter-ran");
+    let filter = fixture.marker_script("bin/filter", &marker, "cat");
+    let filter = filter.to_string_lossy().into_owned();
+    let source = fixture.dir("source");
+    fixture.git(&fixture.base, &["init", "-q", "source"]);
+    fixture.file("source/s.txt", "one\n");
+    fixture.git(&source, &["add", "s.txt"]);
+    fixture.git(&source, &["commit", "-q", "-m", "source"]);
+    let tree = fixture.dir("tree");
+    fixture.git(&fixture.base, &["init", "-q", "tree"]);
+    let source_arg = source.to_string_lossy().into_owned();
+    fixture.git(
+        &tree,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &source_arg,
+            "sub",
+        ],
+    );
+    fixture.git(&tree, &["commit", "-q", "-m", "submodule"]);
+
+    // The job replaces the submodule's repository with its own, which defines a filter its
+    // attributes select, and asks for the submodule to be checked through `.gitmodules`.
+    fs::remove_file(tree.join("sub/.git"))
+        .or_else(|_| fs::remove_dir_all(tree.join("sub/.git")))
+        .unwrap();
+    let sub = tree.join("sub");
+    fixture.git(&sub, &["init", "-q", "."]);
+    fixture.git(&sub, &["add", "s.txt"]);
+    fixture.git(&sub, &["commit", "-q", "-m", "planted"]);
+    fixture.git(&sub, &["config", "filter.planted.clean", &filter]);
+    fixture.file("tree/sub/.gitattributes", "* filter=planted\n");
+    fixture.file("tree/sub/s.txt", "two\n");
+    fixture.git(
+        &tree,
+        &[
+            "config",
+            "-f",
+            ".gitmodules",
+            "submodule.sub.ignore",
+            "none",
+        ],
+    );
+
+    // Plain git enters the submodule and runs the planted filter.
+    fixture.git(&tree, &["status", "--porcelain"]);
+    assert!(marker.exists(), "the submodule filter was never run by git");
+    fs::remove_file(&marker).unwrap();
+
+    // The main worktree is the job root, without its masked `.git`.
+    fixture
+        .roots
+        .register(&tree, &[tree.join(".git")], RootLifetime::Permanent)
+        .unwrap();
+    let git = fixture.safe_git_with_identity(&tree.join(".git"), &tree);
+    for args in [
+        &["status", "--porcelain"][..],
+        &["diff"],
+        &["diff", "HEAD"],
+        &["diff-files"],
+        &["diff-index", "HEAD"],
+        &["add", "-A"],
+        &["commit", "-q", "-m", "job work"],
+        &["stash", "-q"],
+    ] {
+        fixture.run_safe(&git, args);
+        assert!(!marker.exists(), "{args:?} entered the submodule");
+    }
+}
+
+#[test]
+fn safe_git_switches_off_merge_drivers_and_refuses_reenabling_options() {
+    let fixture = Fixture::new();
+    let marker = fixture.base.join("merge-driver-ran");
+    let driver = fixture.marker_script("bin/merge", &marker, "exit 0");
+    let host = fixture.dir("host");
+    fixture.git(&fixture.base, &["init", "-q", "host"]);
+    let host_git = host.join(".git");
+    let tree = fixture.dir("tree");
+    fixture.git(
+        &host,
+        &[
+            "config",
+            "merge.evil.driver",
+            &format!("{} %A", driver.display()),
+        ],
+    );
+    fixture.git(
+        &host,
+        &["config", "diff.evil.command", &driver.to_string_lossy()],
+    );
+
+    fixture.file("tree/m.txt", "base\n");
+    fixture.plain(&host_git, &tree, &["add", "m.txt"]);
+    fixture.plain(&host_git, &tree, &["commit", "-q", "-m", "base"]);
+    fixture.plain(&host_git, &tree, &["branch", "side"]);
+    fixture.file("tree/m.txt", "main\n");
+    fixture.plain(&host_git, &tree, &["commit", "-q", "-a", "-m", "main"]);
+    fixture.plain(&host_git, &tree, &["checkout", "-q", "side"]);
+    fixture.file("tree/m.txt", "side\n");
+    fixture.plain(&host_git, &tree, &["commit", "-q", "-a", "-m", "side"]);
+    fixture.plain(&host_git, &tree, &["checkout", "-q", "main"]);
+    fixture.file("tree/.gitattributes", "m.txt merge=evil diff=evil\n");
+
+    // Plain git runs the driver the job-written attributes select.
+    fixture.plain(&host_git, &tree, &["merge", "-q", "side"]);
+    assert!(marker.exists(), "the merge driver was never run by git");
+    fs::remove_file(&marker).unwrap();
+    fixture.plain(&host_git, &tree, &["reset", "-q", "--hard", "ORIG_HEAD"]);
+
+    fixture.register(&tree);
+    let git = fixture.safe_git_with_identity(&host_git, &tree);
+    // The emptied driver fails to run, so the merge stops with a conflict.
+    let merge = fixture.run_safe_unchecked(&git, &["merge", "-q", "side"]);
+    assert!(!merge.status.success());
+    assert!(!marker.exists());
+    fixture.run_safe(&git, &["merge", "--abort"]);
+
+    for option in [
+        "--ext-diff",
+        "--ext-d",
+        "--textconv",
+        "--textc",
+        "--recurse-submodules",
+        "--recurse-submodules=yes",
+        "--ignore-submodules=none",
+    ] {
+        assert_eq!(
+            fixture.refused(&git, &["diff", option]),
+            format!("refusing the git option {option} in a job tree")
+        );
+    }
+    fixture.run_safe(&git, &["diff", "--text", "--", "--ext-diff"]);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn safe_git_runs_git_from_an_absolute_path_entry() {
+    let fixture = Fixture::new();
+    let tree = fixture.dir("tree");
+    let bin = fixture.dir("bin");
+    let fake = fixture.marker_script("bin/git", &fixture.base.join("unused"), "exit 0");
+    fixture.marker_script("tree/rel/git", &fixture.base.join("unused"), "exit 0");
+    let git_dir = fixture.dir("host/.git");
+    let in_job_root = |_: &Path| false;
+
+    let only_relative = SafeGit::new(&git_dir, &tree).env("PATH", "::rel:./rel");
+    let error = smol::block_on(only_relative.command_with(&["status"], &in_job_root)).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "cannot find git in an absolute PATH entry"
+    );
+
+    let mut path = std::ffi::OsString::from("rel::");
+    path.push(&bin);
+    let command = smol::block_on(
+        SafeGit::new(&git_dir, &tree)
+            .env("PATH", &path)
+            .command_with(&["status"], &in_job_root),
+    )
+    .unwrap();
+    assert_eq!(command.get_program(), fake.as_os_str());
+
+    let relative_binary = SafeGit::new(&git_dir, &tree).binary("rel/git");
+    assert!(smol::block_on(relative_binary.command_with(&["status"], &in_job_root)).is_err());
 }

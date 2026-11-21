@@ -23,8 +23,10 @@ mod safe_git_tests;
 mod tests;
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use sandbox::{GitSandboxPolicy, SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
@@ -221,6 +223,37 @@ pub struct Confinement {
     network: SandboxNetPolicy,
     /// The roots recorded in the job roots registry, each with its lifetime.
     registered: Vec<(PathBuf, RootLifetime)>,
+    /// This build's place in [`HOLDERS`]; clones share it.
+    holder: u64,
+}
+
+/// For each job-lifetime root of this process, the builds still holding it. Every job-lifetime
+/// entry this process records has the same owner (this process), so the registry keeps one entry
+/// per root, and two jobs in the same main worktree share it: the entry is recorded by the first
+/// build to hold the root and retired only when the last holder finishes. Locked across the
+/// registry calls, so a build and a finish on the same root never interleave.
+static HOLDERS: std::sync::Mutex<BTreeMap<PathBuf, BTreeSet<u64>>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+fn holders() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, BTreeSet<u64>>> {
+    HOLDERS.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// Drops `holder` from `root`, and retires the root when no build holds it any more.
+fn release(
+    holders: &mut BTreeMap<PathBuf, BTreeSet<u64>>,
+    root: &Path,
+    holder: u64,
+    registry: &dyn Registry,
+) -> anyhow::Result<()> {
+    if let Some(set) = holders.get_mut(root) {
+        set.remove(&holder);
+        if !set.is_empty() {
+            return Ok(());
+        }
+        holders.remove(root);
+    }
+    registry.retire(root)
 }
 
 impl Confinement {
@@ -239,7 +272,8 @@ impl Confinement {
     /// it (see [`RootExclusions`]); every other root (the trees and scratch bongos made, the
     /// declared directories) permanently. When a root cannot be recorded the build fails, after
     /// retiring the main worktrees it had recorded; the permanent entries stay, which refuses
-    /// more than needed but never less.
+    /// more than needed but never less. Several jobs may work in the same main worktree at once:
+    /// its entry stays until the last of them finishes (see [`Confinement::finish`]).
     pub fn build(declaration: &JobDeclaration, host: &HostGit) -> Result<Self, ConfineError> {
         Self::build_in(declaration, host, &ProcessRegistry)
     }
@@ -389,12 +423,17 @@ impl Confinement {
             exclusions,
             network: declaration.network.clone(),
             registered: Vec::new(),
+            holder: {
+                static NEXT_HOLDER: AtomicU64 = AtomicU64::new(0);
+                NEXT_HOLDER.fetch_add(1, Ordering::Relaxed)
+            },
         })
     }
 
     /// Records every writable root in `registry` (see [`Confinement::build`]).
     fn register(&mut self, registry: &dyn Registry) -> Result<(), ConfineError> {
         let register_error = |error: String| ConfineError::Register { error };
+        let mut holders = holders();
         let mut job_lifetime = None;
         for root in &self.writable_roots {
             let exclusions = self.exclusions.iter().find(|entry| &entry.root == root);
@@ -412,12 +451,37 @@ impl Confinement {
                 }
                 None => (&[][..], RootLifetime::Permanent),
             };
-            if let Err(error) = registry.register(root, excluded, lifetime) {
+            let result = if lifetime == RootLifetime::Permanent {
+                registry.register(root, excluded, lifetime)
+            } else {
+                // A root another build of this process already holds keeps the entry that
+                // build recorded: its exclusions were read before any job of this process could
+                // write the tree, while this build's may name paths the running job made.
+                let set = holders.entry(root.clone()).or_default();
+                let first = set.is_empty();
+                set.insert(self.holder);
+                let result = if first {
+                    registry.register(root, excluded, lifetime)
+                } else {
+                    Ok(())
+                };
+                if result.is_err()
+                    && let Some(set) = holders.get_mut(root)
+                {
+                    set.remove(&self.holder);
+                    if set.is_empty() {
+                        holders.remove(root);
+                    }
+                }
+                result
+            };
+            if let Err(error) = result {
                 // Undo the job-lifetime entries; a permanent entry may predate this build, so
                 // it stays.
                 for (root, lifetime) in &self.registered {
                     if *lifetime != RootLifetime::Permanent
-                        && let Err(retire_error) = registry.retire(root)
+                        && let Err(retire_error) =
+                            release(&mut holders, root, self.holder, registry)
                     {
                         log::error!(
                             "confinement: cannot retire {} after a failed build: {retire_error:#}",
@@ -433,21 +497,23 @@ impl Confinement {
         Ok(())
     }
 
-    /// Retires the job-lifetime roots this build recorded (the main worktrees); permanent roots
-    /// stay. Call it once the job's process group is gone, so nothing the job runs can still
-    /// write the tree. Tries every root, and returns the first failure.
+    /// Retires the job-lifetime roots this build recorded (the main worktrees) that no other
+    /// unfinished build of this process holds; permanent roots stay. Call it once the job's
+    /// process group is gone, so nothing the job runs can still write the tree. A second call
+    /// releases nothing more. Tries every root, and returns the first failure.
     pub fn finish(&self) -> Result<(), ConfineError> {
         self.finish_in(&ProcessRegistry)
     }
 
     /// [`Confinement::finish`] on `registry`.
     pub(crate) fn finish_in(&self, registry: &dyn Registry) -> Result<(), ConfineError> {
+        let mut holders = holders();
         let mut result = Ok(());
         for (root, lifetime) in &self.registered {
             if *lifetime == RootLifetime::Permanent {
                 continue;
             }
-            if let Err(error) = registry.retire(root)
+            if let Err(error) = release(&mut holders, root, self.holder, registry)
                 && result.is_ok()
             {
                 result = Err(ConfineError::Retire {
