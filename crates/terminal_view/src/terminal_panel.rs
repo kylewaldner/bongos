@@ -1662,6 +1662,10 @@ impl Panel for TerminalPanel {
         Some(self.active_pane.clone())
     }
 
+    fn panes(&self, _cx: &App) -> Vec<Entity<Pane>> {
+        self.center.panes().into_iter().cloned().collect()
+    }
+
     fn activation_priority(&self) -> u32 {
         2
     }
@@ -1796,6 +1800,43 @@ mod tests {
             item_count, 5,
             "Terminal panel should bypass max_tabs limit and have all 5 terminals"
         );
+    }
+
+    #[gpui::test]
+    async fn test_panel_lists_its_split_panes(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+
+        let terminal_panel = window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    cx.new(|cx| TerminalPanel::new(workspace, window, cx))
+                })
+            })
+            .unwrap();
+
+        let first = terminal_panel.read_with(cx, |panel, cx| Panel::panes(panel, cx));
+        assert_eq!(first.len(), 1);
+
+        let new_pane = window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                let workspace = multi_workspace.workspace().downgrade();
+                terminal_panel.update(cx, |panel, cx| {
+                    let new_pane = new_terminal_pane(workspace, project, false, window, cx);
+                    panel
+                        .center
+                        .split(&first[0], &new_pane, SplitDirection::Right, cx);
+                    new_pane
+                })
+            })
+            .unwrap();
+
+        let panes = terminal_panel.read_with(cx, |panel, cx| Panel::panes(panel, cx));
+        assert_eq!(panes, vec![first[0].clone(), new_pane]);
     }
 
     #[cfg(unix)]

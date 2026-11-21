@@ -2064,6 +2064,7 @@ dependencies = [
  "bongos_query_replace",
  "bongos_terraform",
  "bongos_version",
+ "bongos_window",
  "bongos_work",
  "bongos_workflow",
  "breadcrumbs",
@@ -2840,6 +2841,27 @@ dependencies = [
 [[package]]
 name = "bongos_version"
 version = "0.1.0"
+
+[[package]]
+name = "bongos_window"
+version = "0.1.0"
+dependencies = [
+ "bongos_emacs",
+ "bongos_minibuffer",
+ "editor",
+ "fs",
+ "gpui",
+ "language",
+ "project",
+ "settings",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
 
 [[package]]
 name = "bongos_work"

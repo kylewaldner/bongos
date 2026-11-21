@@ -25,7 +25,7 @@ use project::Project;
 use settings::{Settings as _, SettingsStore};
 use ui::{IconName, prelude::*, v_flex};
 use workspace::dock::{DockPosition, Panel, PanelEvent};
-use workspace::{OpenOptions, Workspace};
+use workspace::{OpenOptions, Pane, Workspace};
 
 use crate::actions::chat;
 use crate::list_view::ChatListView;
@@ -247,6 +247,12 @@ impl Focusable for ChatPanel {
 impl Panel for ChatPanel {
     fn persistent_name() -> &'static str {
         "Chats Panel"
+    }
+
+    fn panes(&self, cx: &App) -> Vec<Entity<Pane>> {
+        self.session()
+            .map(|session| session.read(cx).visible_panes())
+            .unwrap_or_default()
     }
 
     fn panel_key() -> &'static str {

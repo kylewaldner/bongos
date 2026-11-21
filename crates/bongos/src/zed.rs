@@ -48,6 +48,8 @@ mod symbol_keymap_tests;
 mod universal_argument_tests;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 pub mod visual_tests;
+#[cfg(test)]
+mod window_keymap_tests;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_only_instance;
 #[cfg(test)]

@@ -404,6 +404,8 @@ pub struct Pane {
     activation_history: Vec<ActivationHistoryEntry>,
     next_activation_timestamp: Arc<AtomicUsize>,
     zoomed: bool,
+    badge: Option<SharedString>,
+    dedicated: bool,
     was_focused: bool,
     active_item_index: usize,
     preview_item_id: Option<EntityId>,
@@ -584,6 +586,8 @@ impl Pane {
             next_activation_timestamp: next_timestamp.clone(),
             was_focused: false,
             zoomed: false,
+            badge: None,
+            dedicated: false,
             active_item_index: 0,
             preview_item_id: None,
             max_tabs,
@@ -840,6 +844,10 @@ impl Pane {
         >,
     ) {
         self.can_split_predicate = can_split_predicate;
+    }
+
+    pub fn can_toggle_zoom(&self) -> bool {
+        self.can_toggle_zoom
     }
 
     pub fn set_can_toggle_zoom(&mut self, can_toggle_zoom: bool, cx: &mut Context<Self>) {
@@ -1129,6 +1137,7 @@ impl Pane {
                 focus_item,
                 activate,
                 destination_index,
+                false,
                 window,
                 cx,
             );
@@ -1218,6 +1227,10 @@ impl Pane {
         }
     }
 
+    /// Adds `item` to this pane, or moves it when the pane already shows it.
+    ///
+    /// When `skip_max_tabs` is true, no tab is closed to respect the `max_tabs`
+    /// setting, so moving tabs between panes never closes one.
     pub fn add_item_inner(
         &mut self,
         item: Box<dyn ItemHandle>,
@@ -1225,6 +1238,7 @@ impl Pane {
         focus_item: bool,
         activate: bool,
         destination_index: Option<usize>,
+        skip_max_tabs: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1233,7 +1247,7 @@ impl Pane {
             .iter()
             .any(|existing_item| existing_item.item_id() == item.item_id());
 
-        if !item_already_exists {
+        if !item_already_exists && !skip_max_tabs {
             self.close_items_on_item_open(window, cx);
         }
 
@@ -1357,6 +1371,7 @@ impl Pane {
             focus_item,
             true,
             destination_index,
+            false,
             window,
             cx,
         )
@@ -3727,6 +3742,42 @@ impl Pane {
         self.zoomed
     }
 
+    /// Shows a large label in the pane's top-left corner, or clears it with `None`.
+    /// Not serialized.
+    pub fn set_badge(&mut self, badge: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.badge != badge {
+            self.badge = badge;
+            cx.notify();
+        }
+    }
+
+    pub fn badge(&self) -> Option<&SharedString> {
+        self.badge.as_ref()
+    }
+
+    /// Marks the pane as dedicated to the items it shows: opens that would land here go to
+    /// another pane instead (see `Workspace::pane_for_open`), and an accent border is drawn
+    /// around it. Kept in memory only, never serialized.
+    pub fn set_dedicated(&mut self, dedicated: bool, cx: &mut Context<Self>) {
+        if self.dedicated != dedicated {
+            self.dedicated = dedicated;
+            cx.notify();
+        }
+    }
+
+    pub fn is_dedicated(&self) -> bool {
+        self.dedicated
+    }
+
+    /// When this pane or one of its items was last activated, on the clock shared by all the
+    /// panes of a workspace; `None` for a pane never activated.
+    pub fn last_activation_timestamp(&self) -> Option<usize> {
+        self.activation_history
+            .iter()
+            .map(|entry| entry.timestamp)
+            .max()
+    }
+
     fn handle_drag_move<T: 'static>(
         &mut self,
         event: &DragMoveEvent<T>,
@@ -4306,6 +4357,7 @@ impl Render for Pane {
         v_flex()
             .key_context(key_context)
             .track_focus(&self.focus_handle(cx))
+            .relative()
             .size_full()
             .flex_none()
             .overflow_hidden()
@@ -4583,6 +4635,34 @@ impl Render for Pane {
                     }
                 }),
             )
+            .when(self.dedicated, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .top_0()
+                        .left_0()
+                        .border_2()
+                        .border_color(cx.theme().colors().border_focused)
+                        .debug_selector(|| "pane-dedicated-border".into()),
+                )
+            })
+            .when_some(self.badge.clone(), |this, badge| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .px_2()
+                        .py_1()
+                        .text_size(rems(2.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(cx.theme().colors().text)
+                        .bg(cx.theme().colors().element_background)
+                        .child(badge)
+                        .debug_selector(|| "pane-badge".into()),
+                )
+            })
     }
 }
 
@@ -4649,6 +4729,12 @@ impl ItemNavHistory {
 }
 
 impl NavHistory {
+    /// How many entries the back and the forward stacks hold, in that order.
+    pub fn stack_depths(&self) -> (usize, usize) {
+        let state = self.0.lock();
+        (state.backward_stack.len(), state.forward_stack.len())
+    }
+
     pub fn for_each_entry(
         &self,
         cx: &App,
@@ -8925,6 +9011,58 @@ mod tests {
             pane.activate_next_item(&ActivateNextItem { wrap_around: false }, window, cx);
         });
         assert_item_labels(&pane, ["A", "B", "C*"], cx);
+    }
+
+    #[gpui::test]
+    async fn test_badge_draws_at_top_left_and_clears(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        add_labeled_item(&pane, "A", false, cx);
+
+        assert!(cx.debug_bounds("pane-badge").is_none());
+        pane.update(cx, |pane, cx| pane.set_badge(Some("a".into()), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.badge().cloned()),
+            Some("a".into())
+        );
+        let badge = cx.debug_bounds("pane-badge").expect("the badge is drawn");
+        // The dedicated border covers the whole pane, so its origin is the pane's.
+        pane.update(cx, |pane, cx| pane.set_dedicated(true, cx));
+        cx.run_until_parked();
+        let pane_bounds = cx
+            .debug_bounds("pane-dedicated-border")
+            .expect("the border is drawn");
+        assert_eq!(badge.origin, pane_bounds.origin);
+
+        pane.update(cx, |pane, cx| pane.set_badge(None, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-badge").is_none());
+    }
+
+    #[gpui::test]
+    async fn test_dedicated_border_appears_and_clears(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        add_labeled_item(&pane, "A", false, cx);
+
+        assert!(!pane.read_with(cx, |pane, _| pane.is_dedicated()));
+        assert!(cx.debug_bounds("pane-dedicated-border").is_none());
+        pane.update(cx, |pane, cx| pane.set_dedicated(true, cx));
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.is_dedicated()));
+        assert!(cx.debug_bounds("pane-dedicated-border").is_some());
+        pane.update(cx, |pane, cx| pane.set_dedicated(false, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-dedicated-border").is_none());
     }
 
     #[gpui::test]

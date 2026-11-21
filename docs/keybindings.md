@@ -124,6 +124,12 @@ Each cell reads `Linux / macOS`. Every command is also in the command palette an
 | `todo::Skip` (`w d s`) | `ctrl-c w d s` / `ctrl-c w d s` | `ctrl-k b w d s`, `space w d s` / `cmd-k b w d s`, `space w d s` | `ctrl-k b w d s` / `cmd-k b w d s` |
 | `todo::Start` (`w d b`) | `ctrl-c w d b` / `ctrl-c w d b` | `ctrl-k b w d b`, `space w d b` / `cmd-k b w d b`, `space w d b` | `ctrl-k b w d b` / `cmd-k b w d b` |
 
+## window
+
+| Command | Emacs | Vim | VS Code |
+| --- | --- | --- | --- |
+| `window::ToggleWindowDedication` (`down`) | `ctrl-c down` / `ctrl-c down` | `ctrl-k b down`, `space down` / `cmd-k b down`, `space down` | `ctrl-k b down` / `cmd-k b down` |
+
 ## work
 
 | Command | Emacs | Vim | VS Code |
