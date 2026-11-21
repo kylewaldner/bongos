@@ -573,13 +573,17 @@ fn private_git_failed_snapshot_undoes_everything() {
     let before = fixture.shared_state();
     let script = fixture.base.join("bin/git");
     fs::create_dir_all(script.parent().unwrap()).unwrap();
+    // Written under another name and renamed into place, so no writer holds the script when it
+    // runs (a write handle open at exec fails with ETXTBSY).
+    let staged = fixture.base.join("bin/.git.staged");
     fs::write(
-        &script,
+        &staged,
         "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = for-each-ref ]; then\n    \
          echo 'for-each-ref broken' >&2\n    exit 2\n  fi\ndone\nexec git \"$@\"\n",
     )
     .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&staged, &script).unwrap();
 
     let error = fixture.prepare_using(Some(&script)).unwrap_err();
     assert!(
@@ -688,4 +692,90 @@ fn private_git_marker_round_trips() {
     assert_eq!(Marker::decode(&marker.encode()).unwrap(), marker);
     assert!(Marker::decode(b"").is_err());
     assert!(Marker::decode(b"bongos-confined 1\nend\n").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn private_git_symlinked_dot_git_refuses() {
+    let fixture = Fixture::new();
+    let outside = fixture.base.join("outside-git");
+    fs::write(&outside, fixture.dot_git()).unwrap();
+    let dot_git = fixture.tree.join(".git");
+    fs::remove_file(&dot_git).unwrap();
+    symlink(&outside, &dot_git);
+    let shared = fixture.shared_state();
+
+    assert!(fixture.prepare_using(None).is_err());
+    assert!(
+        fs::symlink_metadata(&dot_git)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&outside).unwrap(), fs::read(&dot_git).unwrap());
+    assert!(!fixture.linked.join(MARKER).exists());
+    assert!(!fixture.private_dir().exists());
+    assert_eq!(fixture.shared_state(), shared);
+}
+
+#[cfg(unix)]
+#[test]
+fn private_git_symlinked_marker_is_refused() {
+    let fixture = Fixture::new();
+    let original = fixture.dot_git();
+    let elsewhere = fixture.base.join("marker-elsewhere");
+    fs::write(&elsewhere, fixture.dead_marker().encode()).unwrap();
+    symlink(&elsewhere, &fixture.linked.join(MARKER));
+    fs::create_dir_all(fixture.private_dir()).unwrap();
+
+    assert!(recover(&fixture.linked).is_err());
+    assert!(fixture.prepare_using(None).is_err());
+    assert!(
+        fs::symlink_metadata(fixture.linked.join(MARKER))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(fixture.private_dir().is_dir());
+    assert_eq!(fixture.dot_git(), original);
+    assert!(elsewhere.is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn private_git_predictable_temporary_name_is_not_followed() {
+    let fixture = Fixture::new();
+    let original = fixture.dot_git();
+    let sentinel = fixture.base.join("sentinel");
+    fs::write(&sentinel, "keep").unwrap();
+    // Plant a symlink at every temporary name this process could pick next to `.git`.
+    for n in 0..256 {
+        symlink(
+            &sentinel,
+            &fixture
+                .tree
+                .join(format!("..git.bongos-{}-{n}", std::process::id())),
+        );
+    }
+    let private = fixture.prepare();
+    private.abandon().unwrap();
+    assert_eq!(fixture.dot_git(), original);
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep");
+}
+
+#[test]
+fn private_git_recovers_dot_git_replaced_by_directory() {
+    let fixture = Fixture::new();
+    let original = fixture.dot_git();
+    let private = fixture.prepare();
+    std::mem::forget(private);
+    let dot_git = fixture.tree.join(".git");
+    fs::remove_file(&dot_git).unwrap();
+    fs::create_dir_all(dot_git.join("sub")).unwrap();
+    fs::write(dot_git.join("sub/file"), "junk").unwrap();
+    fixture.kill_owner();
+
+    assert_eq!(recover(&fixture.linked).unwrap(), RecoverOutcome::Recovered);
+    fixture.assert_switched_back(&original);
+    assert!(fs::symlink_metadata(&dot_git).unwrap().is_file());
 }

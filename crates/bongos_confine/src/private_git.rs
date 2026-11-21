@@ -15,6 +15,13 @@
 //! otherwise list excluded files as untracked or walk past a shallow boundary into missing
 //! commits. [`PrivateGit::abandon`] switches the tree back without importing anything.
 //!
+//! # Before the job starts
+//!
+//! The scratch directory belongs to the host until the sandbox starts, so [`prepare`] must run
+//! before any process of the job exists in the scratch (and in the tree). Its file creations
+//! refuse to follow a symlink only in the last path component; a job that could already rename
+//! or replace a directory on the way to the private directory could redirect them.
+//!
 //! # The marker
 //!
 //! A tree is taken by the marker `<linked git dir>/bongos-confined`, which names the owner (pid
@@ -200,7 +207,8 @@ pub enum RecoverOutcome {
 /// module documentation). Recovers a marker whose owner is gone first; refuses with [`BUSY`]
 /// while another job holds the tree. Any failure after the tree is taken undoes every step done:
 /// the private directory is removed, the `.git` is left (or put back) byte for byte, and the
-/// marker is removed.
+/// marker is removed. Call it before any process of the job exists in the scratch (see the module
+/// documentation).
 pub async fn prepare(tree: &Path, linked_git_dir: &Path, scratch: &Path) -> Result<PrivateGit> {
     prepare_with(tree, linked_git_dir, scratch, &|git| git).await
 }
@@ -244,8 +252,7 @@ pub(crate) async fn prepare_with(
         );
     }
     let dot_git = tree.join(".git");
-    let original_dot_git =
-        fs::read(&dot_git).with_context(|| format!("reading {}", dot_git.display()))?;
+    let original_dot_git = read_regular_no_follow(&dot_git)?;
     let private_dir = scratch.join(PRIVATE_DIR);
     let (pid, start_time) = this_owner()?;
     let mut marker = Marker {
@@ -478,8 +485,9 @@ async fn shared_config(git: &SafeGit) -> Result<SharedConfig> {
     Ok(config)
 }
 
-/// Makes `private_dir` afresh (see the module documentation). Every file is created new, so
-/// nothing is written through a symlink.
+/// Makes `private_dir` afresh (see the module documentation). Every file is created new
+/// (`create_new`), so nothing is written through a symlink in the last path component of a file;
+/// directories on the way are trusted, which is why the scratch must not be job-controlled yet.
 fn write_private_dir(
     private_dir: &Path,
     linked_git_dir: &Path,
@@ -582,6 +590,29 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<()> {
         .with_context(|| format!("writing {}", path.display()))
 }
 
+/// Reads the regular file `path` through one open that refuses a symlink (on Unix); fails when
+/// `path` is a symlink or anything but a regular file.
+fn read_regular_no_follow(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let describe = || format!("reading {}", path.display());
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path).with_context(describe)?;
+    let metadata = file.metadata().with_context(describe)?;
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).with_context(describe)?;
+    Ok(bytes)
+}
+
 /// A name for a temporary file next to `path`, unique in this process.
 fn temporary_name(path: &Path) -> Result<PathBuf> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -602,6 +633,8 @@ fn temporary_name(path: &Path) -> Result<PathBuf> {
 /// then renamed over it, so a symlink at `path` is replaced, never followed.
 fn replace_file(path: &Path, contents: &[u8]) -> Result<()> {
     let temporary = temporary_name(path)?;
+    // The name is predictable: whatever is at it (a symlink too) is removed, never followed.
+    remove_no_follow(&temporary)?;
     write_new(&temporary, contents)?;
     if let Err(error) = fs::rename(&temporary, path) {
         remove_temporary(&temporary);
@@ -650,9 +683,14 @@ fn undo(
     match fs::symlink_metadata(tree) {
         Ok(metadata) if metadata.is_dir() => {
             let dot_git = tree.join(".git");
-            let restored = fs::symlink_metadata(&dot_git).is_ok_and(|metadata| metadata.is_file())
-                && fs::read(&dot_git).is_ok_and(|contents| contents == original_dot_git);
+            let restored =
+                read_regular_no_follow(&dot_git).is_ok_and(|contents| contents == original_dot_git);
             if !restored {
+                // A directory the job put there is junk inside the tree: it cannot be renamed
+                // over, so it goes first (the original text is in the marker).
+                if fs::symlink_metadata(&dot_git).is_ok_and(|metadata| metadata.is_dir()) {
+                    remove_no_follow(&dot_git)?;
+                }
                 replace_file(&dot_git, original_dot_git)?;
             }
         }
