@@ -316,11 +316,6 @@ impl ProgramNode {
         self.scratch.join(SCRATCH_RESULT_FILE)
     }
 
-    /// The repository's common git directory, the first of [`ProgramNode::host_git`]'s.
-    pub fn git_common_dir(&self) -> Option<&Path> {
-        self.host_git.git_dirs.first().map(PathBuf::as_path)
-    }
-
     /// The worktree's linked git directory as the run's record names it, the second of
     /// [`ProgramNode::host_git`]'s; git is never discovered from the worktree.
     /// [`private_git::prepare`] checks that the worktree's `.git` names it under the common
