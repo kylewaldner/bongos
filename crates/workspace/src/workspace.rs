@@ -5480,7 +5480,7 @@ impl Workspace {
                 serialize_workspace = *focus_changed || pane != self.active_pane();
                 if pane == self.active_pane() {
                     self.active_item_path_changed(*focus_changed, window, cx);
-                } else if *local {
+                } else if *local && self.panes.contains(pane) {
                     self.set_active_pane(pane, window, cx);
                 }
             }
@@ -14144,6 +14144,38 @@ mod tests {
         );
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.center_panes(), vec![right.clone()]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_pane_keeping_tabs_never_reactivates_removed_pane(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left, right) = split_center_in_two(&workspace, cx);
+        let a = cx.new(TestItem::new);
+        let b = cx.new(TestItem::new);
+        let c = cx.new(TestItem::new);
+        add_test_items(&workspace, &left, &[&a, &b, &c], cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_active_pane(&left, window, cx);
+            left.update(cx, |pane, cx| pane.activate_item(1, true, true, window, cx));
+            window.focus(&left.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_pane_keeping_tabs(&left, &right, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.center_panes().contains(&left));
+            assert_eq!(workspace.active_pane(), &right);
         });
     }
 
