@@ -2,6 +2,7 @@
 //! work on, in reading order. An Emacs window is a pane here; a frame is the app window.
 
 pub mod actions;
+mod dedication;
 mod layout;
 mod orientation;
 pub mod picker;
@@ -11,6 +12,8 @@ pub mod targets;
 pub mod test_support;
 mod zoom;
 
+#[cfg(test)]
+mod dedication_tests;
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]
@@ -40,6 +43,7 @@ pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(switch_window);
         workspace.register_action(zoom::toggle_zoom);
+        workspace.register_action(dedication::toggle_dedication);
         workspace.register_action(split::split_window_below);
         workspace.register_action(split::split_window_right);
         workspace.register_action(split::delete_window);

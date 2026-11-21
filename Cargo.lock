@@ -2848,6 +2848,7 @@ dependencies = [
  "editor",
  "fs",
  "gpui",
+ "language",
  "project",
  "settings",
  "terminal",

@@ -3745,7 +3745,9 @@ impl Pane {
         self.badge.as_ref()
     }
 
-    /// Draws an accent border around the pane. Not serialized.
+    /// Marks the pane as dedicated to the items it shows: opens that would land here go to
+    /// another pane instead (see `Workspace::pane_for_open`), and an accent border is drawn
+    /// around it. Kept in memory only, never serialized.
     pub fn set_dedicated(&mut self, dedicated: bool, cx: &mut Context<Self>) {
         if self.dedicated != dedicated {
             self.dedicated = dedicated;
@@ -3755,6 +3757,15 @@ impl Pane {
 
     pub fn is_dedicated(&self) -> bool {
         self.dedicated
+    }
+
+    /// When this pane or one of its items was last activated, on the clock shared by all the
+    /// panes of a workspace; `None` for a pane never activated.
+    pub fn last_activation_timestamp(&self) -> Option<usize> {
+        self.activation_history
+            .iter()
+            .map(|entry| entry.timestamp)
+            .max()
     }
 
     fn handle_drag_move<T: 'static>(

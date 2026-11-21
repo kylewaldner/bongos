@@ -4481,6 +4481,7 @@ impl Workspace {
     ) -> bool {
         if let Some(center_pane) = self.last_active_center_pane.clone() {
             if let Some(center_pane) = center_pane.upgrade() {
+                let center_pane = self.pane_for_open(center_pane, window, cx);
                 center_pane.update(cx, |pane, cx| {
                     pane.add_item(item, true, true, None, window, cx)
                 });
@@ -4491,6 +4492,35 @@ impl Workspace {
         } else {
             false
         }
+    }
+
+    /// The pane an open that was not given a pane shows its item in. That is `preferred`, unless
+    /// `preferred` is dedicated; then the non-dedicated center pane activated most recently, or,
+    /// with every center pane dedicated, a new pane split to the right of `preferred`. Callers
+    /// ask only once the item is ready, so an open that fails splits nothing.
+    pub fn pane_for_open(
+        &mut self,
+        preferred: Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Pane> {
+        if !preferred.read(cx).is_dedicated() {
+            return preferred;
+        }
+        let center_panes = self.center.panes();
+        let recent = center_panes
+            .iter()
+            .filter(|pane| !pane.read(cx).is_dedicated())
+            .max_by_key(|pane| pane.read(cx).last_activation_timestamp());
+        if let Some(pane) = recent {
+            return (*pane).clone();
+        }
+        let to_split = if center_panes.contains(&&preferred) {
+            preferred
+        } else {
+            self.center.last_pane()
+        };
+        self.split_pane(to_split, SplitDirection::Right, window, cx)
     }
 
     pub fn add_item_to_active_pane(
@@ -4613,6 +4643,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> Task<anyhow::Result<Box<dyn ItemHandle>>> {
+        // Only a pane picked here, not one the caller named, is routed away from a dedicated
+        // pane.
+        let route = pane.is_none().then(|| self.weak_self.clone());
         let pane = pane.unwrap_or_else(|| {
             self.last_active_center_pane.clone().unwrap_or_else(|| {
                 self.panes
@@ -4627,6 +4660,14 @@ impl Workspace {
         window.spawn(cx, async move |cx| {
             let (project_entry_id, build_item) = task.await?;
 
+            let pane = match (route, pane.upgrade()) {
+                (Some(workspace), Some(preferred)) => workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.pane_for_open(preferred, window, cx)
+                    })?
+                    .downgrade(),
+                _ => pane,
+            };
             pane.update_in(cx, |pane, window, cx| {
                 pane.open_item(
                     project_entry_id,
@@ -4772,7 +4813,8 @@ impl Workspace {
         if let Member::Pane(center_pane) = &self.center.root
             && center_pane.read(cx).items_len() == 0
         {
-            return self.open_path(path, Some(pane), true, window, cx);
+            // Picks the same pane as above, routed away from it once loaded if it is dedicated.
+            return self.open_path(path, None, true, window, cx);
         }
 
         let project_path = path.into();
