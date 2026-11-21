@@ -142,7 +142,9 @@ async fn the_old_interim_rows_are_gone(cx: &mut TestAppContext) {
         for input in ["ctrl-x o", "ctrl-x 0", "ctrl-x 1", "ctrl-x 2", "ctrl-x 3"] {
             let (names, _) = resolve(&keymap, input, &EDITOR);
             assert!(
-                names.first().is_some_and(|name| name.starts_with("window::")),
+                names
+                    .first()
+                    .is_some_and(|name| name.starts_with("window::")),
                 "{}: {input} resolves to {names:?}",
                 platform.emacs
             );
