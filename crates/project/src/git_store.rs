@@ -424,7 +424,7 @@ impl LocalRepositoryState {
         is_trusted: bool,
         cx: &mut AsyncApp,
     ) -> anyhow::Result<Self> {
-        let environment = project_environment
+        let mut environment = project_environment
                 .update(cx, |project_environment, cx| {
                     project_environment.local_directory_environment(&Shell::System, work_directory_abs_path.clone(), cx)
                 })?
@@ -433,6 +433,19 @@ impl LocalRepositoryState {
                     log::error!("failed to get working directory environment for repository {work_directory_abs_path:?}");
                     HashMap::default()
                 });
+        // Every git command gets this environment, after its own settings, so nothing in it may
+        // redirect the repository opened here or add configuration to it.
+        environment.retain(|name, _| {
+            !matches!(
+                name.as_str(),
+                "GIT_DIR"
+                    | "GIT_WORK_TREE"
+                    | "GIT_COMMON_DIR"
+                    | "GIT_CONFIG_PARAMETERS"
+                    | "GIT_CONFIG_COUNT"
+            ) && !name.starts_with("GIT_CONFIG_KEY_")
+                && !name.starts_with("GIT_CONFIG_VALUE_")
+        });
         let search_paths = environment.get("PATH").map(|val| val.to_owned());
         let backend = cx
             .background_spawn({

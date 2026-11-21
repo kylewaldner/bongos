@@ -2491,6 +2491,10 @@ impl GitRepository for RealGitRepository {
         paths: Vec<RepoPath>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
+        // With no path, `stash push` would take the whole tree, following any submodule's `.git`.
+        if paths.is_empty() {
+            return futures::future::ready(Ok(())).boxed();
+        }
         let git = self.git_binary_in_worktree();
         self.executor
             .spawn(async move {
@@ -2913,7 +2917,7 @@ impl GitRepository for RealGitRepository {
                     let head_sha = git.run(&["rev-parse", "HEAD"]).await.ok();
                     let mut excludes = exclude_files(git).await?;
 
-                    git.run(&["add", "--all"]).await?;
+                    git.run(&git.add_all_args().await?).await?;
                     let tree = git.run(&["write-tree"]).await?;
                     let checkpoint_sha = if let Some(head_sha) = head_sha.as_deref() {
                         git.run(&["commit-tree", &tree, "-p", head_sha, "-m", "Checkpoint"])
@@ -2994,7 +2998,7 @@ impl GitRepository for RealGitRepository {
                 // a temporary index so we don't disturb the real one.
                 let unstaged_sha = git
                     .with_temp_index(async |git| {
-                        git.run(&["add", "--all"]).await?;
+                        git.run(&git.add_all_args().await?).await?;
                         let full_tree = git.run(&["write-tree"]).await?;
                         let sha = git
                             .run(&[
@@ -3643,17 +3647,6 @@ fn written_by_job_error(path: &Path) -> anyhow::Error {
     )
 }
 
-/// The user this process runs as.
-#[cfg(unix)]
-fn effective_uid() -> Option<u32> {
-    use std::os::unix::fs::MetadataExt as _;
-    // `/proc/self` belongs to the effective user; without procfs, the home directory stands in.
-    std::fs::metadata("/proc/self")
-        .or_else(|_| std::fs::metadata(paths::home_dir()))
-        .ok()
-        .map(|metadata| metadata.uid())
-}
-
 /// Refuses a repository whose working tree, git directory or common directory belongs to another
 /// user, unless `safe.directory` (from the system or global configuration, as git reads it)
 /// allows its working tree, or its git directory when it has none. Git runs this check itself
@@ -3666,7 +3659,7 @@ fn check_ownership(
     common_dir: &Path,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
-    let uid = effective_uid().context("cannot tell which user this process runs as")?;
+    let uid = nix::unistd::geteuid().as_raw();
     let foreign = [working_directory, Some(git_dir), Some(common_dir)]
         .into_iter()
         .flatten()
@@ -3955,6 +3948,36 @@ impl GitBinary {
             }
         );
         Ok(String::from_utf8(output.stdout)?)
+    }
+
+    /// The arguments of `add --all`. In a job tree they leave out every submodule in the index:
+    /// git follows a submodule's `.git`, which a job may point at a repository whose
+    /// configuration names its own filter drivers, and no configuration option stops it.
+    async fn add_all_args(&self) -> Result<Vec<OsString>> {
+        let in_job_tree = match &self.pin {
+            Some(pin) => pin.check(&self.working_directory)?,
+            None => false,
+        };
+        let mut args = vec![OsString::from("add"), OsString::from("--all")];
+        if !in_job_tree {
+            return Ok(args);
+        }
+        let entries = self
+            .run_raw(&["ls-files", "--stage", "--full-name", "-z"])
+            .await?;
+        args.push("--".into());
+        args.push(":/".into());
+        for entry in entries.split_terminator('\0') {
+            let (info, path) = entry
+                .split_once('\t')
+                .with_context(|| format!("unexpected ls-files entry {entry:?}"))?;
+            if info.starts_with("160000 ") {
+                let mut exclude = OsString::from(":(top,exclude,literal)");
+                exclude.push(path);
+                args.push(exclude);
+            }
+        }
+        Ok(args)
     }
 
     /// Builds a git command. Fails when the pinned git data is now inside a job root, or when the
@@ -6636,18 +6659,26 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn test_git_pin_job_tree_never_follows_submodule_git(cx: &mut TestAppContext) {
-        disable_git_global_config();
-        cx.executor().allow_parking();
-        let temp_dir = tempfile::tempdir().unwrap();
-        let roots = job_roots_in(temp_dir.path());
-        let origin = temp_dir.path().join("origin");
+    /// Opens `<directory>/repo`, which tracks a submodule `sub`, makes the repository a job root,
+    /// then, as a job would, points the submodule's `.git` at a git directory whose configuration
+    /// names a clean filter that creates `<directory>/markers/clean`, selects it for a file and
+    /// changes that file so git must hash it. Returns the repository, its path and the markers.
+    fn job_tree_with_hostile_submodule(
+        directory: &Path,
+        cx: &TestAppContext,
+    ) -> (
+        RealGitRepository,
+        PathBuf,
+        PathBuf,
+        Arc<util::job_roots::JobRoots>,
+    ) {
+        let roots = job_roots_in(directory);
+        let origin = directory.join("origin");
         git_init_repo(&origin);
         fs::write(origin.join("b.txt"), "initial\n").unwrap();
         git_command(&origin, ["add", "."]);
         git_command(&origin, ["commit", "-m", "initial"]);
-        let repo = temp_dir.path().join("repo");
+        let repo = directory.join("repo");
         git_init_repo(&repo);
         git_command(
             &repo,
@@ -6672,11 +6703,9 @@ mod tests {
             )
             .unwrap();
 
-        // A job points the submodule's `.git` at a directory whose configuration names a clean
-        // filter, selects it for a file, and changes that file so status must hash it.
-        let evil = temp_dir.path().join("evil-git-dir");
+        let evil = directory.join("evil-git-dir");
         git_command(
-            temp_dir.path(),
+            directory,
             [
                 "clone".into(),
                 "--bare".into(),
@@ -6690,7 +6719,7 @@ mod tests {
             evil.join("index"),
         )
         .unwrap();
-        let markers = temp_dir.path().join("markers");
+        let markers = directory.join("markers");
         fs::create_dir_all(&markers).unwrap();
         git_command(
             &evil,
@@ -6704,6 +6733,48 @@ mod tests {
         fs::write(sub.join(".git"), format!("gitdir: {}\n", evil.display())).unwrap();
         fs::write(sub.join(".gitattributes"), "b.txt filter=evil\n").unwrap();
         change_keeping_size(&sub.join("b.txt"), "changed\n");
+        (repository, repo, markers, roots)
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_job_tree_checkpoint_never_follows_submodule_git(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (repository, repo, markers, _roots) =
+            job_tree_with_hostile_submodule(temp_dir.path(), cx);
+        fs::write(repo.join("new.txt"), "new\n").unwrap();
+
+        let checkpoint = repository.checkpoint().await.unwrap();
+        let (_, unstaged) = repository.create_archive_checkpoint().await.unwrap();
+        repository
+            .stash_paths(Vec::new(), Arc::new(HashMap::default()))
+            .await
+            .unwrap();
+        assert_no_markers(&markers);
+        // The checkpoints still take the rest of the tree, and keep the submodule as committed.
+        for commit in [checkpoint.commit_sha.to_string(), unstaged] {
+            let files = git_output(&repo, ["ls-tree", "--name-only", commit.as_str()]);
+            assert!(files.lines().any(|file| file == "new.txt"), "{files}");
+            assert_eq!(
+                git_output(&repo, ["rev-parse", &format!("{commit}:sub")]),
+                git_output(&repo, ["rev-parse", "HEAD:sub"]),
+            );
+        }
+        assert!(repo.join("new.txt").exists(), "the empty stash stashed");
+
+        // Plain `git add --all` follows the submodule's `.git` and runs the filter.
+        git_output(&repo, ["add", "--all"]);
+        assert!(markers.join("clean").exists(), "the control ran no filter");
+    }
+
+    #[gpui::test]
+    async fn test_git_pin_job_tree_never_follows_submodule_git(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (repository, repo, markers, _roots) =
+            job_tree_with_hostile_submodule(temp_dir.path(), cx);
 
         repository.status(&[]).await.unwrap();
         repository.diff(DiffType::HeadToWorktree).await.unwrap();
