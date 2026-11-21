@@ -56,8 +56,8 @@ use crate::evidence_store::{evidence_prefix, scan_records_in, store_record, task
 use crate::pin::Pin;
 use crate::pools::{CheckClock, CheckPools, Holder, PoolLease, PoolRequest, WaitStatus};
 use crate::process::{
-    self, PartOutcome, PartScope, PartSpec, PartStart, ProcessRole, StopHandle, kill_orphan_parts,
-    run_part,
+    self, PartConfinement, PartOutcome, PartScope, PartSpec, PartStart, ProcessRole, StopHandle,
+    kill_orphan_parts, run_part,
 };
 use crate::settings::TaskChecksSettings;
 use crate::task_git::TaskGit;
@@ -546,6 +546,7 @@ impl CheckRun {
                 lease.bind_process(pid, start_time);
             }
         };
+        let spec = self.with_tree_git(spec).await;
         let ((), outcome) = futures::join!(bind, run_part(spec));
         drop(lease);
         let part = finished_part(n, started, (self.now)(), &outcome);
@@ -738,14 +739,14 @@ impl CheckRun {
             },
             PartScope::Unscoped,
         );
-        let outcome = run_part(spec).await;
+        let outcome = run_part(self.with_tree_git(spec).await).await;
         if let Some(reason) = ended_early(&outcome) {
             return Err(reason);
         }
         let exit = outcome.exit.ok_or(NoVerdictReason::Interrupted)?;
-        let limit = self.result_limit();
-        let file = read_capped(&result_path, limit);
-        match parse_scope_answer(exit, file.as_deref(), limit)? {
+        // Read by the part runner when the script ended (a confined script writes it in its own
+        // scratch, gone by now).
+        match parse_scope_answer(exit, outcome.scope_answer.as_deref(), self.result_limit())? {
             ScopeAnswer::Items { items, reason } => items_scope(staging, items, reason),
             ScopeAnswer::All { reason } => Ok(Scoped {
                 scope: Scope::All,
@@ -800,7 +801,7 @@ impl CheckRun {
         let mut spec =
             self.script_spec(&plan, &output, ProcessRole::Plan { durations }, part_scope);
         spec.stderr = Some(staging.join("plan.errors.log"));
-        let outcome = run_part(spec).await;
+        let outcome = run_part(self.with_tree_git(spec).await).await;
         if let Some(reason) = ended_early(&outcome) {
             return Err(reason);
         }
@@ -999,7 +1000,26 @@ impl CheckRun {
             kill_grace: Duration::from_secs(u64::from(self.settings.kill_grace_seconds)),
             stop: self.stop.clone(),
             on_start: None,
+            confinement: self.settings.confine.then(|| PartConfinement {
+                records_dir: Some(self.output_dir.clone()),
+                ..PartConfinement::default()
+            }),
         }
+    }
+
+    /// Gives a confined `spec` the git directories bongos recorded for its tree (see
+    /// [`process::host_git_dirs`]): a tree without `.git` has none, and one whose git directory
+    /// is not trusted cannot be confined.
+    async fn with_tree_git(&self, mut spec: PartSpec) -> PartSpec {
+        let Some(confinement) = &mut spec.confinement else {
+            return spec;
+        };
+        confinement.git_dirs = match self.git.record_linked(&spec.tree).await {
+            Ok(git_dir) => Ok(process::host_git_dirs(&git_dir)),
+            Err(_) if std::fs::symlink_metadata(spec.tree.join(".git")).is_err() => Ok(Vec::new()),
+            Err(error) => Err(format!("the tree's git directory is not trusted: {error}")),
+        };
+        spec
     }
 
     /// A spec running `script` from the pin in place of the check's own program, with the

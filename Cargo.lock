@@ -2344,6 +2344,7 @@ dependencies = [
  "project",
  "regex",
  "release_channel",
+ "sandbox",
  "semver",
  "serde",
  "serde_json",
