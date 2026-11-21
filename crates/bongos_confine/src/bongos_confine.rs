@@ -11,12 +11,16 @@
 //!
 //! Every host git command bongos runs in a job tree, or to import a job's work, goes through
 //! [`safe_git::SafeGit`], which takes the git directory from the caller's record of the tree and
-//! refuses one a job could have written.
+//! refuses one a job could have written. A job in a linked worktree with [`TreeGit::Private`]
+//! gets a git directory of its own in its scratch from [`private_git::prepare`].
 
 pub mod annotate;
+pub mod private_git;
 mod promise_text;
 pub mod safe_git;
 
+#[cfg(test)]
+mod private_git_tests;
 #[cfg(test)]
 mod safe_git_tests;
 #[cfg(test)]
