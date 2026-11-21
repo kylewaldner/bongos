@@ -1,6 +1,6 @@
 use bongos_minibuffer::minibuffer_for_window;
 use editor::Editor;
-use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle, point};
+use gpui::{BorrowAppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, WindowHandle, point};
 use project::{Fs as _, Project, ProjectPath};
 use workspace::{
     AppState, MultiWorkspace, Pane, SaveIntent, Workspace, WorkspaceHandle as _,
@@ -26,6 +26,15 @@ async fn setup(
         bongos_emacs::init(cx);
         bongos_minibuffer::init(cx);
         crate::init(cx);
+        // Item switches are recorded only on request, and the layout snapshot checks them.
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                    record_large_moves: Some(true),
+                    record_item_switches: Some(true),
+                });
+            });
+        });
         params
     });
     let fake = params.fs.as_fake();
