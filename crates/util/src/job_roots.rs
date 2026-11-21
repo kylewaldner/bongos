@@ -185,6 +185,10 @@ impl JobRoots {
     /// Retires every entry for `root`, registering each nested repository inside it
     /// permanently. Does nothing when `root` is not registered; fails when `root` cannot be
     /// canonicalized.
+    ///
+    /// Every entry for `root` is retired, a job-lifetime entry whose owner is still alive
+    /// included: the caller retires a root when the job using it ends, so the owner's liveness no
+    /// longer matters.
     pub fn retire(&self, root: &Path) -> Result<()> {
         let root = fs::canonicalize(root)
             .with_context(|| format!("canonicalizing job root {}", root.display()))?;
@@ -497,8 +501,9 @@ fn retire_entry(entry: Entry, entries: &mut Vec<Entry>) {
 }
 
 /// The repositories inside `entry`'s root, outside its excluded paths: each directory holding a
-/// `.git` file or directory, and each directory shaped like a git directory under any name (a
-/// bare repository, or the target of a `.git` file). Does not follow symbolic links.
+/// `.git` file or directory, the git directory each `.git` file leads to (inside the root or not),
+/// and each directory shaped like a git directory under any name (a bare repository, or a linked
+/// worktree's git directory). Does not follow symbolic links while walking.
 fn nested_repositories(entry: &Entry) -> Result<Vec<PathBuf>> {
     let mut nested = Vec::new();
     let mut visited = 0;
@@ -529,6 +534,8 @@ fn nested_repositories(entry: &Entry) -> Result<Vec<PathBuf>> {
         if item.file_name() == ".git" {
             if is_dir {
                 walk.skip_current_dir();
+            } else {
+                nested.push(git_file_target(item.path())?);
             }
             if let Some(parent) = item.path().parent() {
                 nested.push(parent.to_path_buf());
@@ -541,12 +548,34 @@ fn nested_repositories(entry: &Entry) -> Result<Vec<PathBuf>> {
     Ok(nested)
 }
 
-/// Whether `directory` holds `HEAD`, `objects` and `refs`, the entries git looks for in a git
-/// directory. Any file type counts, so a symbolic link does too.
+/// The canonical git directory a `.git` entry that is not a directory leads to: the target of a
+/// symbolic link, or the `gitdir:` pointer of a file, resolved from the file's directory. It may
+/// lie outside the root (a linked worktree's git directory). Fails when it cannot be resolved, so
+/// the caller keeps the whole entry instead.
+fn git_file_target(dotgit: &Path) -> Result<PathBuf> {
+    if fs::metadata(dotgit).is_ok_and(|metadata| metadata.is_dir()) {
+        return fs::canonicalize(dotgit)
+            .with_context(|| format!("canonicalizing {}", dotgit.display()));
+    }
+    let content =
+        fs::read_to_string(dotgit).with_context(|| format!("reading {}", dotgit.display()))?;
+    let pointer = content
+        .strip_prefix("gitdir: ")
+        .with_context(|| format!("{} has no gitdir pointer", dotgit.display()))?
+        .trim();
+    let parent = dotgit
+        .parent()
+        .with_context(|| format!("{} has no parent", dotgit.display()))?;
+    let target = parent.join(pointer);
+    fs::canonicalize(&target).with_context(|| format!("canonicalizing {}", target.display()))
+}
+
+/// Whether `directory` is shaped like a git directory: it holds `HEAD`, and either `objects` and
+/// `refs` or a `commondir` file (a linked worktree's git directory, whose objects and refs live
+/// in its common directory). Any file type counts, so a symbolic link does too.
 fn looks_like_git_directory(directory: &Path) -> bool {
-    ["HEAD", "objects", "refs"]
-        .iter()
-        .all(|name| fs::symlink_metadata(directory.join(name)).is_ok())
+    let has = |name: &str| fs::symlink_metadata(directory.join(name)).is_ok();
+    has("HEAD") && ((has("objects") && has("refs")) || has("commondir"))
 }
 
 /// The start time of process `pid` (field 22 of `/proc/<pid>/stat`, in clock ticks since boot),
@@ -716,6 +745,47 @@ mod tests {
 
         assert!(roots.retire(&directory.path().join("missing")).is_err());
         assert!(roots.contains(&root));
+    }
+
+    #[test]
+    fn test_retire_keeps_a_root_whose_git_file_cannot_be_resolved() {
+        let directory = tempfile::tempdir().unwrap();
+        let roots = JobRoots::new(&directory.path().join("registry").join("roots.json"));
+        let root = directory.path().join("tree");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::write(root.join("a").join(".git"), "gitdir: ../missing\n").unwrap();
+        roots.register(&root, &[], RootLifetime::Permanent).unwrap();
+
+        roots.retire(&root).unwrap();
+        assert!(roots.contains(&root.join("a")));
+        assert!(
+            roots
+                .current_entries()
+                .iter()
+                .any(|entry| entry.root == fs::canonicalize(&root).unwrap())
+        );
+    }
+
+    #[test]
+    fn test_retire_registers_the_git_directory_a_git_file_leads_to() {
+        let directory = tempfile::tempdir().unwrap();
+        let roots = JobRoots::new(&directory.path().join("registry").join("roots.json"));
+        let root = directory.path().join("tree");
+        let linked = directory.path().join("linked");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(&linked).unwrap();
+        fs::write(
+            root.join("a").join(".git"),
+            format!("gitdir: {}\n", linked.display()),
+        )
+        .unwrap();
+        roots.register(&root, &[], RootLifetime::Permanent).unwrap();
+        assert!(!roots.contains(&linked));
+
+        roots.retire(&root).unwrap();
+        assert!(roots.contains(&linked));
+        assert!(roots.contains(&root.join("a")));
+        assert!(!roots.contains(&root));
     }
 
     #[test]

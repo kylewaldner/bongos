@@ -1218,6 +1218,17 @@ impl RealGitRepository {
             }
             normalize_git_metadata_path(path)
         };
+        // The git directory is resolved by the kernel when it exists, so its `commondir` file is
+        // read, and its relative target joined, from where git itself would find them.
+        let checked_resolve = |path: PathBuf| -> Result<PathBuf> {
+            if in_job_root(&path) {
+                return Err(refuse());
+            }
+            match std::fs::canonicalize(&path) {
+                Ok(canonical) => Ok(canonical),
+                Err(_) => normalize_git_metadata_path(path),
+            }
+        };
         let dotgit_parent = dotgit_path.parent().context(".git has no parent")?;
         let has_working_directory =
             dotgit_path.is_file() || dotgit_path.file_name() == Some(OsStr::new(".git"));
@@ -1240,9 +1251,9 @@ impl RealGitRepository {
             } else {
                 dotgit_parent.join(resolved)
             };
-            checked_normalize(resolved)?
+            checked_resolve(resolved)?
         } else {
-            checked_normalize(dotgit_path.to_path_buf())?
+            checked_resolve(dotgit_path.to_path_buf())?
         };
 
         let common_dir = {
@@ -5738,6 +5749,71 @@ mod tests {
             cx,
         ));
         assert!(roots.contains(&other));
+    }
+
+    #[gpui::test]
+    fn test_job_roots_retired_git_file_to_linked_git_directory_stays_refused(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let owner_alive = Arc::new(AtomicBool::new(true));
+        let roots = util::job_roots::JobRoots::with_owner_check(
+            &temp_dir.path().join("registry").join("roots.json"),
+            Arc::new({
+                let owner_alive = owner_alive.clone();
+                move |_, _| owner_alive.load(std::sync::atomic::Ordering::SeqCst)
+            }),
+        );
+        let main = temp_dir.path().join("main");
+        git_init_repo(&main);
+        fs::write(main.join("file.txt"), "initial").unwrap();
+        let common = temp_dir.path().join("common");
+        git_init_repo(&common);
+        roots
+            .register(
+                &main,
+                &[main.join(".git")],
+                util::job_roots::RootLifetime::Job {
+                    pid: 1,
+                    start_time: 1,
+                },
+            )
+            .unwrap();
+
+        // A linked worktree's git directory holds no objects or refs of its own.
+        let linked = main.join("wt");
+        fs::create_dir_all(&linked).unwrap();
+        fs::write(linked.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            linked.join("commondir"),
+            format!("{}\n", common.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(linked.join("config.worktree"), "[core]\n").unwrap();
+        fs::create_dir_all(main.join("a")).unwrap();
+        fs::write(main.join("a").join(".git"), "gitdir: ../wt\n").unwrap();
+        assert_refused(open_with_job_roots(
+            &roots,
+            &main.join("a").join(".git"),
+            cx,
+        ));
+
+        owner_alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        let other = temp_dir.path().join("other");
+        fs::create_dir_all(&other).unwrap();
+        roots
+            .register(&other, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+
+        assert!(!roots.contains(&main.join("file.txt")));
+        assert!(roots.contains(&linked));
+        assert_refused(open_with_job_roots(
+            &roots,
+            &main.join("a").join(".git"),
+            cx,
+        ));
+        assert!(open_with_job_roots(&roots, &common.join(".git"), cx).is_ok());
     }
 
     #[cfg(unix)]
