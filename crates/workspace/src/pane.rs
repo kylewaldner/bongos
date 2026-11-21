@@ -1123,6 +1123,7 @@ impl Pane {
                 focus_item,
                 activate,
                 destination_index,
+                false,
                 window,
                 cx,
             );
@@ -1212,6 +1213,10 @@ impl Pane {
         }
     }
 
+    /// Adds `item` to this pane, or moves it when the pane already shows it.
+    ///
+    /// When `skip_max_tabs` is true, no tab is closed to respect the `max_tabs`
+    /// setting, so moving tabs between panes never closes one.
     pub fn add_item_inner(
         &mut self,
         item: Box<dyn ItemHandle>,
@@ -1219,6 +1224,7 @@ impl Pane {
         focus_item: bool,
         activate: bool,
         destination_index: Option<usize>,
+        skip_max_tabs: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1227,7 +1233,7 @@ impl Pane {
             .iter()
             .any(|existing_item| existing_item.item_id() == item.item_id());
 
-        if !item_already_exists {
+        if !item_already_exists && !skip_max_tabs {
             self.close_items_on_item_open(window, cx);
         }
 
@@ -1351,6 +1357,7 @@ impl Pane {
             focus_item,
             true,
             destination_index,
+            false,
             window,
             cx,
         )
