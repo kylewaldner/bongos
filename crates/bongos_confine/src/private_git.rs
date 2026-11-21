@@ -13,7 +13,9 @@
 //! (`core.filemode`, `core.symlinks`, `core.ignorecase`, `core.precomposeunicode`) are carried
 //! over. The shared `info/exclude` and `shallow` files are copied too, since git in the tree would
 //! otherwise list excluded files as untracked or walk past a shallow boundary into missing
-//! commits. [`PrivateGit::abandon`] switches the tree back without importing anything.
+//! commits. [`PrivateGit::import`] brings the job's commits and branches into the shared
+//! repository and switches the tree back; [`PrivateGit::abandon`] switches it back without
+//! importing anything.
 //!
 //! # Before the job starts
 //!
@@ -48,13 +50,66 @@
 //!
 //! The private directory lies in the job's scratch, a registered job root, so
 //! [`SafeGit`] refuses it as a git directory: its configuration, hooks, `HEAD` and refs are
-//! job-written. Every git command this module runs reads the shared repository only, through the
-//! linked git directory, which is not job-writable. Importing the job's work must not open the
-//! private directory as a repository either: it reads the private refs as data (bounded, each
-//! name and object id checked) and lets git in the shared repository read the private objects
-//! as an extra object directory (`GIT_ALTERNATE_OBJECT_DIRECTORIES` set explicitly through
-//! [`SafeGit::env`]), so no private configuration or hook is ever read. That needs an explicit,
-//! audited variant of the job root check for the one object directory, not a general exception.
+//! job-written. Every git command this module runs is on the shared repository (through the
+//! linked git directory, which is not job-writable), on the tree with the linked git directory,
+//! or on the import directory below. None ever uses the private directory as a git directory, so
+//! no private configuration, hook or fsmonitor ever runs.
+//!
+//! # Importing
+//!
+//! [`PrivateGit::import`] runs once every process of the job is gone. It holds the marker's lock
+//! throughout, and refuses unless the marker still names this preparation.
+//!
+//! 1. The private refs are read as data, never by git: `HEAD`, the loose files under `refs/`
+//!    (walked without following symlinks; each file opened without following a symlink or
+//!    blocking, so a symlink, FIFO or other special file is a refused entry) and `packed-refs`,
+//!    each bounded in size, depth and count. A loose ref overrides a packed one, and a name
+//!    refused in either never falls back to the other. Each name must pass the rules of
+//!    `git check-ref-format` (checked in Rust) and each value must be a full object id of the
+//!    repository's object format (taken from the snapshot); a symbolic ref is refused.
+//! 2. The refs are compared with the snapshot. The own branch may move anywhere (a rewrite too)
+//!    and a new branch under `refs/heads/` may be created; everything else that changed is
+//!    refused and reported, never imported: another branch moved or deleted, the own branch
+//!    deleted, any tag, note, replace ref, remote ref or other namespace. `HEAD` never travels:
+//!    when it names another branch, that branch follows the rules above and the report notes
+//!    that the tree is back on the own branch; when it is detached at a commit no imported or
+//!    snapshot ref reaches (asked of the shared repository after the import), that is a refused
+//!    entry.
+//! 3. With refs to import, the private `objects/` must hold only loose objects, plain packs
+//!    (`pack/pack-*.pack` and `.idx`) and the `info/alternates` prepare wrote; a symlink, a
+//!    changed alternates, a commit graph, multi-pack index, bitmap, reverse index or anything
+//!    else fails the import. Then the import directory `<linked git dir>/bongos-import` is made:
+//!    the linked git directory belongs to the host and lies outside every job root, so the job
+//!    cannot write it and [`SafeGit`] accepts it as a git directory. It is a bare repository
+//!    made by `git init --template=`, whose `objects/info/alternates` names the private then the
+//!    shared object directory; reading the private one is the one exception
+//!    [`SafeGit::job_object_directory`] grants, with commit graphs, multi-pack indexes, bitmaps
+//!    and reverse indexes switched off. There each new tip must be a commit (`cat-file`; a ref
+//!    naming anything else is refused), then `pack-objects --revs --thin` of the new tips
+//!    `--not` the snapshot tips streams into `index-pack --stdin --fix-thin --strict` in the
+//!    shared repository, so only new objects travel and each is checked. Then `rev-list
+//!    --objects --missing=error` of the same range in the shared repository (the same settings
+//!    switched off) checks that every object arrived before any ref moves.
+//! 4. One `update-ref --stdin` transaction writes the refs: the own branch only from its snapshot
+//!    value, a new branch only where none exists. A ref that moved in the shared repository
+//!    fails the whole transaction ("branch <b> moved while the job ran; nothing imported"); a
+//!    stale lock fails it with git's own message, and bongos never removes a git lock.
+//! 5. The tree is switched back: `.git` is restored by an atomic rename, the shared index is
+//!    reset to the own branch when the import moved it (`reset -q` in the tree, keeping the
+//!    working files, so changes the job staged but did not commit become unstaged; when host git
+//!    refuses the tree, a nested repository in it for one, `read-tree` without the work tree
+//!    instead), the import directory and the private directory are removed and the marker last.
+//!
+//! A pass with no ref to import packs nothing and makes no import directory; with the own branch
+//! unmoved the shared index still matches it, so only the switch back runs. When anything was
+//! refused the allowed refs are imported all the same, and the private directory is kept (named
+//! in the report) so no commit is lost; the next [`prepare`] into the same scratch replaces it.
+//! When the import fails (a host git for another git directory, the object check, packing, the
+//! connectivity check, the private alternates changed after packing, or the transaction) no ref
+//! moves, the tree is switched back and the private directory kept the same way, provided the
+//! marker still names this preparation. Failing to remove the private directory or the marker
+//! after refs moved is logged and noted in the report, never returned in its place. Objects
+//! that reached the shared repository before a failure or a crash are unreferenced and harmless.
 
 use std::{
     collections::BTreeMap,
@@ -67,6 +122,13 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::safe_git::{SafeGit, linked_git_dir_from_record};
+
+#[path = "private_git_import.rs"]
+mod import;
+
+pub use import::ImportReport;
+#[cfg(test)]
+pub(crate) use import::check_ref_format;
 
 /// The marker's name in the linked git directory.
 pub const MARKER: &str = "bongos-confined";
@@ -165,6 +227,18 @@ impl PrivateGit {
     pub fn abandon(self) -> Result<()> {
         // No lock is needed: only the owner, alive here, changes a marker whose owner is alive,
         // and the marker goes last, so whoever sees it gone sees the tree restored.
+        self.check_marker()?;
+        undo(
+            &self.linked_git_dir,
+            &self.tree,
+            &self.private_dir,
+            &self.original_dot_git,
+        )
+        .with_context(|| format!("switching {} back to shared git", self.tree.display()))
+    }
+
+    /// Refuses unless the marker names this preparation.
+    fn check_marker(&self) -> Result<()> {
         let marker = Marker::read(&self.linked_git_dir)?;
         match &marker {
             Some(marker)
@@ -183,13 +257,7 @@ impl PrivateGit {
                 self.tree.display()
             ),
         }
-        undo(
-            &self.linked_git_dir,
-            &self.tree,
-            &self.private_dir,
-            &self.original_dot_git,
-        )
-        .with_context(|| format!("switching {} back to shared git", self.tree.display()))
+        Ok(())
     }
 }
 
@@ -526,6 +594,9 @@ fn write_private_dir(
     if let Some(format) = &config.object_format {
         text.push_str(&format!("[extensions]\n\tobjectformat = {format}\n"));
     }
+    // An automatic gc would write a commit graph, reverse indexes and cruft packs, which the
+    // import refuses; the job may still run one by hand.
+    text.push_str("[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n");
     write_new(&private_dir.join("config"), text.as_bytes())?;
 
     // No peeled lines, so git peels tags itself; the names are sorted bytewise (BTreeMap order).
@@ -687,15 +758,32 @@ fn remove_no_follow(path: &Path) -> Result<()> {
     }
 }
 
-/// Restores the tree's `.git`, removes the private directory, then the marker, in that order, so
-/// an undo cut short is finished by the next one. Each step is skipped when already done; a tree
-/// that no longer exists is not recreated.
+/// Restores the tree's `.git`, removes the private directory and a stale import directory, then
+/// the marker, in that order, so an undo cut short is finished by the next one. Each step is
+/// skipped when already done; a tree that no longer exists is not recreated.
 fn undo(
     linked_git_dir: &Path,
     tree: &Path,
     private_dir: &Path,
     original_dot_git: &[u8],
 ) -> Result<()> {
+    restore_dot_git(tree, original_dot_git)?;
+    if !private_dir.is_absolute()
+        || private_dir.file_name() != Some(std::ffi::OsStr::new(PRIVATE_DIR))
+    {
+        bail!(
+            "refusing to remove {}: not a private git directory",
+            private_dir.display()
+        );
+    }
+    remove_no_follow(private_dir)?;
+    remove_no_follow(&linked_git_dir.join(import::IMPORT_DIR))?;
+    remove_marker(linked_git_dir)
+}
+
+/// Puts the tree's `.git` back to `original_dot_git` (by an atomic rename) unless it already
+/// holds it; nothing when the tree no longer exists.
+fn restore_dot_git(tree: &Path, original_dot_git: &[u8]) -> Result<()> {
     match fs::symlink_metadata(tree) {
         Ok(metadata) if metadata.is_dir() => {
             let dot_git = tree.join(".git");
@@ -714,15 +802,11 @@ fn undo(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).with_context(|| format!("reading {}", tree.display())),
     }
-    if !private_dir.is_absolute()
-        || private_dir.file_name() != Some(std::ffi::OsStr::new(PRIVATE_DIR))
-    {
-        bail!(
-            "refusing to remove {}: not a private git directory",
-            private_dir.display()
-        );
-    }
-    remove_no_follow(private_dir)?;
+    Ok(())
+}
+
+/// Removes the marker of `linked_git_dir`, releasing the tree.
+fn remove_marker(linked_git_dir: &Path) -> Result<()> {
     let marker = linked_git_dir.join(MARKER);
     match fs::remove_file(&marker) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
@@ -897,16 +981,30 @@ struct TreeLock {
 }
 
 impl TreeLock {
-    /// Takes the lock, or `None` when another holder has it.
-    fn try_take(linked_git_dir: &Path) -> Result<Option<Self>> {
+    /// Takes the lock, waiting for another holder. Only for the marker's owner: every other
+    /// holder then only reads the marker, finds its owner alive and lets go.
+    fn take(linked_git_dir: &Path) -> Result<Self> {
         let path = linked_git_dir.join(LOCK);
-        let file = fs::OpenOptions::new()
+        let file = Self::open(&path)?;
+        file.lock()
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(Self { _file: file })
+    }
+
+    fn open(path: &Path) -> Result<fs::File> {
+        fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
+            .open(path)
+            .with_context(|| format!("opening {}", path.display()))
+    }
+
+    /// Takes the lock, or `None` when another holder has it.
+    fn try_take(linked_git_dir: &Path) -> Result<Option<Self>> {
+        let path = linked_git_dir.join(LOCK);
+        let file = Self::open(&path)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self { _file: file })),
             Err(fs::TryLockError::WouldBlock) => Ok(None),

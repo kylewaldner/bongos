@@ -817,6 +817,234 @@ fn safe_git_gives_git_only_absolute_path_entries_outside_job_roots() {
 }
 
 #[test]
+fn safe_git_reads_one_job_object_directory_as_an_alternate_only() {
+    let fixture = Fixture::new();
+    let job = fixture.dir("job");
+    fixture.git(&fixture.base, &["init", "-q", "--bare", "job/repo.git"]);
+    fixture.git(&fixture.base, &["init", "-q", "--bare", "host.git"]);
+    let job_objects = job.join("repo.git/objects");
+    let other_objects = fixture.dir("job/other/objects");
+    let host = fixture.base.join("host.git");
+    let outside = fixture.dir("outside");
+    fixture.register(&job);
+    let in_job_root = |path: &Path| fixture.roots.contains(path);
+    let host_git = || {
+        SafeGit::without_work_tree(&host)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", &fixture.home)
+    };
+    let refusal = "refusing to let git read a job-written object directory";
+    let alternates = host.join("objects/info/alternates");
+
+    // Through the repository's alternates: refused, unless it is the one job object directory.
+    fs::write(&alternates, format!("{}\n", job_objects.display())).unwrap();
+    assert_eq!(
+        fixture.refused(&host_git(), &["count-objects"]),
+        format!("{refusal}: {}", job_objects.display())
+    );
+    let allowed = host_git().job_object_directory(&job_objects);
+    let command = smol::block_on(allowed.command_with(&["count-objects"], &in_job_root)).unwrap();
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    for expected in [
+        "core.commitGraph=false",
+        "core.multiPackIndex=false",
+        "pack.useBitmaps=false",
+        "pack.readReverseIndex=false",
+    ] {
+        assert!(args.iter().any(|arg| arg == expected), "{args:?}");
+    }
+    fixture.run_safe(&allowed, &["count-objects"]);
+    // Another object directory in a job root stays refused.
+    assert!(
+        fixture
+            .refused(
+                &host_git().job_object_directory(&other_objects),
+                &["count-objects"]
+            )
+            .starts_with(refusal)
+    );
+    // So does a relative entry that resolves into the job root.
+    fs::write(&alternates, "../../job/repo.git/objects\n").unwrap();
+    assert!(
+        fixture
+            .refused(
+                &host_git().job_object_directory(&job_objects),
+                &["count-objects"]
+            )
+            .starts_with(refusal)
+    );
+    // The job object directory's own alternates may not lead into a job root, itself included.
+    fs::write(&alternates, format!("{}\n", job_objects.display())).unwrap();
+    for target in [&other_objects, &job_objects] {
+        fs::write(
+            job_objects.join("info/alternates"),
+            format!("{}\n", target.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.refused(&allowed, &["count-objects"]),
+            format!("{refusal}: {}", target.display())
+        );
+    }
+    fs::remove_file(job_objects.join("info/alternates")).unwrap();
+    // A quoted entry cannot be checked.
+    fs::write(&alternates, "\"/somewhere\"\n").unwrap();
+    assert!(
+        fixture
+            .refused(&allowed, &["count-objects"])
+            .starts_with(refusal)
+    );
+    fs::remove_file(&alternates).unwrap();
+
+    // Through the environment: only as an alternate, never as the object directory.
+    let through_env = host_git().env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &job_objects);
+    assert!(
+        fixture
+            .refused(&through_env, &["count-objects"])
+            .starts_with(refusal)
+    );
+    fixture.run_safe(
+        &through_env.job_object_directory(&job_objects),
+        &["count-objects"],
+    );
+    let as_object_dir = host_git()
+        .env("GIT_OBJECT_DIRECTORY", &job_objects)
+        .job_object_directory(&job_objects);
+    assert!(
+        fixture
+            .refused(&as_object_dir, &["count-objects"])
+            .starts_with(refusal)
+    );
+
+    // Never as a git directory, never with a work tree, never through a symlink.
+    assert!(
+        fixture
+            .refused(
+                &SafeGit::without_work_tree(job.join("repo.git"))
+                    .job_object_directory(&job_objects),
+                &["count-objects"]
+            )
+            .starts_with("refusing to run git with a job-written git directory")
+    );
+    assert!(
+        fixture
+            .refused(
+                &SafeGit::new(&host, &outside).job_object_directory(&job_objects),
+                &["status"]
+            )
+            .starts_with(refusal)
+    );
+    #[cfg(unix)]
+    {
+        let link = fixture.dir("job/link").join("objects");
+        std::os::unix::fs::symlink(&job_objects, &link).unwrap();
+        assert!(
+            fixture
+                .refused(&host_git().job_object_directory(&link), &["count-objects"])
+                .starts_with(refusal)
+        );
+        // A symlink above the directory is refused too.
+        let linked_parent = job.join("linked-parent");
+        std::os::unix::fs::symlink(job.join("repo.git"), &linked_parent).unwrap();
+        fs::write(
+            &alternates,
+            format!("{}\n", linked_parent.join("objects").display()),
+        )
+        .unwrap();
+        assert!(
+            fixture
+                .refused(
+                    &host_git().job_object_directory(linked_parent.join("objects")),
+                    &["count-objects"]
+                )
+                .contains("not a canonical absolute objects directory")
+        );
+    }
+}
+
+#[test]
+fn safe_git_skips_a_missing_alternate_outside_job_roots() {
+    let fixture = Fixture::new();
+    let job = fixture.dir("job");
+    fixture.git(&fixture.base, &["init", "-q", "--bare", "host.git"]);
+    let host = fixture.base.join("host.git");
+    fixture.register(&job);
+    let host_git = SafeGit::without_work_tree(&host)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("HOME", &fixture.home);
+    let refusal = "refusing to let git read a job-written object directory";
+    let alternates = host.join("objects/info/alternates");
+
+    // A stale entry outside every job root: git skips it, and so does the check.
+    let gone = fixture.base.join("gone/repo.git/objects");
+    fs::write(&alternates, format!("{}\n", gone.display())).unwrap();
+    fixture.run_safe(&host_git, &["count-objects"]);
+    fixture.run_safe(
+        &host_git
+            .clone()
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &gone),
+        &["count-objects"],
+    );
+
+    // A missing entry inside a job root could be created by the job: refused.
+    let not_yet = job.join("not-yet/objects");
+    fs::write(&alternates, format!("{}\n", not_yet.display())).unwrap();
+    assert_eq!(
+        fixture.refused(&host_git, &["count-objects"]),
+        format!("{refusal}: {}", not_yet.display())
+    );
+    // So is an existing one.
+    let existing = fixture.dir("job/existing/objects");
+    fs::write(&alternates, format!("{}\n", existing.display())).unwrap();
+    assert_eq!(
+        fixture.refused(&host_git, &["count-objects"]),
+        format!("{refusal}: {}", existing.display())
+    );
+    // And a missing one named through `..`, which git resolves by name.
+    fs::write(&alternates, "../../gone/../job/not-yet/objects\n").unwrap();
+    assert!(
+        fixture
+            .refused(&host_git, &["count-objects"])
+            .starts_with(refusal)
+    );
+
+    #[cfg(unix)]
+    {
+        // A symlinked alternates file outside every job root is followed.
+        let outside_list = fixture.file("outside/alternates", &format!("{}\n", gone.display()));
+        fs::remove_file(&alternates).unwrap();
+        std::os::unix::fs::symlink(&outside_list, &alternates).unwrap();
+        fixture.run_safe(&host_git, &["count-objects"]);
+        fs::write(&outside_list, format!("{}\n", existing.display())).unwrap();
+        assert_eq!(
+            fixture.refused(&host_git, &["count-objects"]),
+            format!("{refusal}: {}", existing.display())
+        );
+        // One into a job root, or dangling, is refused.
+        let job_list = fixture.file("job/alternates", &format!("{}\n", gone.display()));
+        fs::remove_file(&alternates).unwrap();
+        std::os::unix::fs::symlink(&job_list, &alternates).unwrap();
+        assert!(
+            fixture
+                .refused(&host_git, &["count-objects"])
+                .contains("is a symlink a job could change")
+        );
+        fs::remove_file(&alternates).unwrap();
+        std::os::unix::fs::symlink(fixture.base.join("no-such-file"), &alternates).unwrap();
+        assert!(
+            fixture
+                .refused(&host_git, &["count-objects"])
+                .contains("cannot follow the symlink")
+        );
+    }
+}
+
+#[test]
 fn untrusted_tree_applies_the_job_tree_protections_outside_every_job_root() {
     let fixture = Fixture::new();
     let marker = fixture.base.join("filter-ran");
