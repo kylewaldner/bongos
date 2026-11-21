@@ -4690,7 +4690,7 @@ impl NavHistory {
                 item: entry.item.clone(),
             })
             .collect();
-        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.timestamp));
         rows
     }
 
