@@ -472,13 +472,203 @@ fn safe_git_never_enters_a_job_replaced_submodule() {
         &["diff", "HEAD"],
         &["diff-files"],
         &["diff-index", "HEAD"],
+        &["describe", "--dirty", "--always"],
         &["add", "-A"],
-        &["commit", "-q", "-m", "job work"],
+        &["add", "sub"],
+        &["rm", "-n", "sub"],
+        &["commit", "-q", "-a", "-m", "job work"],
         &["stash", "-q"],
     ] {
-        fixture.run_safe(&git, args);
-        assert!(!marker.exists(), "{args:?} entered the submodule");
+        assert_eq!(
+            fixture.refused(&git, args),
+            format!(
+                "refusing to run git in a job tree that holds a nested repository: {}",
+                sub.display()
+            ),
+            "{args:?}"
+        );
     }
+    assert!(!marker.exists());
+
+    // Once the planted repository is gone, the command runs, with every submodule the work
+    // tree's `.gitmodules` names (read from git's standard input) left unchecked.
+    fs::remove_dir_all(sub.join(".git")).unwrap();
+    fixture.git(
+        &tree,
+        &[
+            "config",
+            "-f",
+            ".gitmodules",
+            "submodule.only-in-tree.path",
+            "elsewhere",
+        ],
+    );
+    let in_job_root = |path: &Path| fixture.roots.contains(path);
+    let command = smol::block_on(git.command_with(&["add", "-A"], &in_job_root)).unwrap();
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    for expected in [
+        "submodule.sub.ignore=all",
+        "submodule.only-in-tree.ignore=all",
+    ] {
+        assert!(args.iter().any(|arg| arg == expected), "{args:?}");
+    }
+    fixture.run_safe(&git, &["add", "-A"]);
+    assert!(!marker.exists());
+}
+
+/// A repository at `tree/<name>` the job made, holding a committed `f` and a filter, selected
+/// for every file by its attributes, that creates `marker` when it runs.
+fn plant_nested_repository(fixture: &Fixture, tree: &Path, name: &str, marker: &Path) -> PathBuf {
+    let filter = fixture.marker_script(&format!("bin/{name}-filter"), marker, "cat");
+    fixture.git(tree, &["init", "-q", name]);
+    let nested = tree.join(name);
+    fs::write(nested.join("f"), "one\n").unwrap();
+    fixture.git(&nested, &["add", "f"]);
+    fixture.git(&nested, &["commit", "-q", "-m", "planted"]);
+    fixture.git(
+        &nested,
+        &["config", "filter.planted.clean", &filter.to_string_lossy()],
+    );
+    fs::write(nested.join(".gitattributes"), "* filter=planted\n").unwrap();
+    nested
+}
+
+/// A main worktree registered as a job root (without its masked `.git`), with one commit.
+fn job_main_worktree(fixture: &Fixture, name: &str) -> PathBuf {
+    fixture.git(&fixture.base, &["init", "-q", name]);
+    let tree = fixture.base.join(name);
+    fixture.git(&tree, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    fixture
+        .roots
+        .register(&tree, &[tree.join(".git")], RootLifetime::Permanent)
+        .unwrap();
+    tree
+}
+
+#[test]
+fn safe_git_refuses_a_job_tree_holding_a_repository_the_job_made() {
+    let fixture = Fixture::new();
+    let marker = fixture.base.join("nested-filter-ran");
+
+    // Plain git: the first `add -A` stages the job's repository as a gitlink, and once the job
+    // edits it, the second runs the job's filter.
+    let control = fixture.dir("control");
+    fixture.git(&control, &["init", "-q", "."]);
+    fixture.git(&control, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    let nested = plant_nested_repository(&fixture, &control, "evil", &marker);
+    fixture.git(&control, &["add", "-A"]);
+    fs::write(nested.join("f"), "two\n").unwrap();
+    fixture.git(&control, &["add", "-A"]);
+    assert!(marker.exists(), "the nested filter was never run by git");
+    fs::remove_file(&marker).unwrap();
+
+    let tree = job_main_worktree(&fixture, "tree");
+    let nested = plant_nested_repository(&fixture, &tree, "evil", &marker);
+    let git = fixture.safe_git_with_identity(&tree.join(".git"), &tree);
+    let refusal = format!(
+        "refusing to run git in a job tree that holds a nested repository: {}",
+        nested.display()
+    );
+    assert_eq!(fixture.refused(&git, &["add", "-A"]), refusal);
+    fs::write(nested.join("f"), "two\n").unwrap();
+    assert_eq!(fixture.refused(&git, &["add", "-A"]), refusal);
+    assert!(!marker.exists());
+
+    // A repository deeper in the tree, with a `.git` file instead of a directory, is found too.
+    fs::remove_dir_all(nested.join(".git")).unwrap();
+    fixture.file("tree/a/b/.git", "gitdir: /nowhere\n");
+    assert_eq!(
+        fixture.refused(&git, &["status"]),
+        format!(
+            "refusing to run git in a job tree that holds a nested repository: {}",
+            tree.join("a/b").display()
+        )
+    );
+    fs::remove_dir_all(tree.join("a")).unwrap();
+    fixture.run_safe(&git, &["add", "-A"]);
+}
+
+#[test]
+fn safe_git_refuses_a_gitlink_with_a_repository_in_the_job_tree() {
+    let fixture = Fixture::new();
+    let marker = fixture.base.join("gitlink-filter-ran");
+    let tree = job_main_worktree(&fixture, "tree");
+    // A gitlink with no `.gitmodules` entry, staged before the job edited its repository.
+    let nested = plant_nested_repository(&fixture, &tree, "sub", &marker);
+    fixture.git(&tree, &["add", "sub"]);
+    fixture.git(&tree, &["commit", "-q", "-m", "gitlink"]);
+    fs::write(nested.join("f"), "two\n").unwrap();
+
+    // Plain git runs the nested filter for each of these.
+    for args in [&["add", "sub"][..], &["add", "-u"], &["add", "."]] {
+        fixture.git(&tree, args);
+        assert!(marker.exists(), "plain git {args:?} never ran the filter");
+        fs::remove_file(&marker).unwrap();
+    }
+
+    let git = fixture.safe_git_with_identity(&tree.join(".git"), &tree);
+    let refusal = format!(
+        "refusing to run git in a job tree that holds a nested repository: {}",
+        nested.display()
+    );
+    for args in [
+        &["add", "sub"][..],
+        &["add", "-u"],
+        &["add", "-A"],
+        &["add", "."],
+        &["rm", "-n", "sub"],
+        &["rm", "--cached", "sub"],
+        &["status", "--porcelain"],
+    ] {
+        assert_eq!(fixture.refused(&git, args), refusal, "{args:?}");
+    }
+    assert!(!marker.exists());
+}
+
+#[test]
+fn nested_repository_walk_skips_the_root_git_and_symlinks() {
+    let fixture = Fixture::new();
+    let tree = fixture.dir("tree");
+    fixture.dir("tree/.git/objects");
+    fixture.dir("outside/repo/.git");
+    fixture.file("tree/src/main.kt", "fun main() {}\n");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(fixture.base.join("outside"), tree.join("link")).unwrap();
+    assert_eq!(
+        crate::safe_git::find_nested_repository(&tree).unwrap(),
+        None
+    );
+
+    fixture.file("tree/src/deep/.GIT", "");
+    assert_eq!(
+        crate::safe_git::find_nested_repository(&tree).unwrap(),
+        Some(tree.join("src/deep"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn safe_git_refuses_a_gitmodules_that_is_not_a_regular_file() {
+    let fixture = Fixture::new();
+    let tree = job_main_worktree(&fixture, "tree");
+    let git = fixture.safe_git(&tree.join(".git"), &tree);
+    let fifo = fixture.base.join("fifo");
+    let fifo_c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+    // SAFETY: `fifo_c` is a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+    let expected = format!(
+        "refusing a {} that is not a regular file",
+        tree.join(".gitmodules").display()
+    );
+    std::os::unix::fs::symlink(&fifo, tree.join(".gitmodules")).unwrap();
+    assert_eq!(fixture.refused(&git, &["status"]), expected);
+    fs::remove_file(tree.join(".gitmodules")).unwrap();
+    fs::rename(&fifo, tree.join(".gitmodules")).unwrap();
+    assert_eq!(fixture.refused(&git, &["status"]), expected);
 }
 
 #[test]
@@ -576,4 +766,52 @@ fn safe_git_runs_git_from_an_absolute_path_entry() {
 
     let relative_binary = SafeGit::new(&git_dir, &tree).binary("rel/git");
     assert!(smol::block_on(relative_binary.command_with(&["status"], &in_job_root)).is_err());
+}
+
+#[test]
+fn safe_git_gives_git_only_absolute_path_entries_outside_job_roots() {
+    let fixture = Fixture::new();
+    let tree = fixture.dir("tree");
+    let bin = fixture.dir("bin");
+    let job_bin = fixture.dir("job/bin");
+    let git_dir = fixture.dir("host/.git");
+    // A stand-in git that prints the PATH it was given.
+    fixture.marker_script(
+        "bin/git",
+        &fixture.base.join("ran"),
+        "printf '%s' \"$PATH\"",
+    );
+    fixture.marker_script("job/bin/git", &fixture.base.join("job-ran"), "exit 0");
+    fixture.register(&fixture.base.join("job"));
+    let in_job_root = |path: &Path| fixture.roots.contains(path);
+
+    let mut path = std::ffi::OsString::from("rel::./x:");
+    path.push(&job_bin);
+    path.push(":");
+    path.push(fixture.base.join("missing"));
+    path.push(":");
+    path.push(&bin);
+    let git = SafeGit::new(&git_dir, &tree).env("PATH", &path);
+    let mut command = smol::block_on(git.command_with(&["status"], &in_job_root)).unwrap();
+    assert_eq!(command.get_program(), bin.join("git").as_os_str());
+    let output = smol::block_on(command.output()).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        bin.to_string_lossy()
+    );
+
+    let error = smol::block_on(
+        SafeGit::new(&git_dir, &tree)
+            .binary(job_bin.join("git"))
+            .command_with(&["status"], &in_job_root),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "refusing to run a git binary inside a job root: {}",
+            job_bin.join("git").display()
+        )
+    );
+    assert!(!fixture.base.join("job-ran").exists());
 }

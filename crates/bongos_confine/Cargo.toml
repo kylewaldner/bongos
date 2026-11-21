@@ -14,11 +14,15 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+futures.workspace = true
 log.workspace = true
 paths.workspace = true
 sandbox.workspace = true
 thiserror.workspace = true
 util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 smol.workspace = true

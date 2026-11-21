@@ -227,11 +227,19 @@ pub struct Confinement {
     holder: u64,
 }
 
-/// For each job-lifetime root of this process, the builds still holding it. Every job-lifetime
-/// entry this process records has the same owner (this process), so the registry keeps one entry
-/// per root, and two jobs in the same main worktree share it: the entry is recorded by the first
-/// build to hold the root and retired only when the last holder finishes. Locked across the
-/// registry calls, so a build and a finish on the same root never interleave.
+/// For each job-lifetime root of this process, the builds of this process still holding it.
+/// Every job-lifetime entry this process records has the same owner (this process), so the
+/// registry keeps one entry per root, and two jobs of this process in the same main worktree
+/// share it: the entry is recorded by the first build to hold the root and retired only when the
+/// last holder finishes. Locked across the registry calls, so a build and a finish on the same
+/// root in this process never interleave.
+///
+/// The count is per process only. `roots.json` is shared by every bongos process of the user,
+/// and the registry keeps one job-lifetime entry per root whatever its owner: a second process's
+/// job in the same main worktree replaces the first process's entry (with its own exclusions and
+/// owner), and either process's last finish retires every entry for the root, while the other
+/// process's job may still be running. Two app processes running jobs in one main worktree at
+/// once are not covered.
 static HOLDERS: std::sync::Mutex<BTreeMap<PathBuf, BTreeSet<u64>>> =
     std::sync::Mutex::new(BTreeMap::new());
 
@@ -272,8 +280,10 @@ impl Confinement {
     /// it (see [`RootExclusions`]); every other root (the trees and scratch bongos made, the
     /// declared directories) permanently. When a root cannot be recorded the build fails, after
     /// retiring the main worktrees it had recorded; the permanent entries stay, which refuses
-    /// more than needed but never less. Several jobs may work in the same main worktree at once:
-    /// its entry stays until the last of them finishes (see [`Confinement::finish`]).
+    /// more than needed but never less. Several jobs of this process may work in the same main
+    /// worktree at once: its entry stays until the last of them finishes (see
+    /// [`Confinement::finish`]). Jobs of two processes in one main worktree are not tracked
+    /// together (see [`HOLDERS`]).
     pub fn build(declaration: &JobDeclaration, host: &HostGit) -> Result<Self, ConfineError> {
         Self::build_in(declaration, host, &ProcessRegistry)
     }
@@ -500,7 +510,9 @@ impl Confinement {
     /// Retires the job-lifetime roots this build recorded (the main worktrees) that no other
     /// unfinished build of this process holds; permanent roots stay. Call it once the job's
     /// process group is gone, so nothing the job runs can still write the tree. A second call
-    /// releases nothing more. Tries every root, and returns the first failure.
+    /// releases nothing more. Tries every root, and returns the first failure. A job of another
+    /// process in the same main worktree is not counted: its entry is retired too (see
+    /// [`HOLDERS`]).
     pub fn finish(&self) -> Result<(), ConfineError> {
         self.finish_in(&ProcessRegistry)
     }

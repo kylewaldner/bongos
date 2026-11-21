@@ -113,6 +113,27 @@ const REDIRECTING_VARIABLES: [&str; 19] = [
 pub struct Git {
     binary: PathBuf,
     isolated: bool,
+    job_roots: JobRootsSource,
+}
+
+/// The job roots registry a [`Git`] consults: the process's, or one given by a test.
+#[derive(Clone, Default)]
+struct JobRootsSource(Option<std::sync::Arc<util::job_roots::JobRoots>>);
+
+impl std::fmt::Debug for JobRootsSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = if self.0.is_some() { "given" } else { "process" };
+        formatter.write_str(source)
+    }
+}
+
+impl JobRootsSource {
+    fn contains(&self, path: &Path) -> bool {
+        match &self.0 {
+            Some(roots) => roots.contains(path),
+            None => util::job_roots::contains(path),
+        }
+    }
 }
 
 impl Git {
@@ -136,12 +157,24 @@ impl Git {
         Self {
             binary,
             isolated: false,
+            job_roots: JobRootsSource::default(),
         }
     }
 
     /// Ignores the user's and the system's git configuration, for tests.
     pub fn isolated(mut self) -> Self {
         self.isolated = true;
+        self
+    }
+
+    /// Decides what lies inside a job root with `roots` instead of the process's registry, for
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn with_job_roots(
+        mut self,
+        roots: std::sync::Arc<util::job_roots::JobRoots>,
+    ) -> Self {
+        self.job_roots = JobRootsSource(Some(roots));
         self
     }
 
@@ -193,7 +226,7 @@ impl Git {
             args: shown.clone(),
             message: error.to_string(),
         };
-        refuse_job_written_repository(directory)?;
+        refuse_job_written_repository(directory, &self.job_roots)?;
         let mut command = self.command(directory, index, args);
         let output = match stdin {
             None => command.output().await.map_err(spawn_error)?,
@@ -288,7 +321,7 @@ impl Git {
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
-        refuse_job_written_repository(directory)?;
+        refuse_job_written_repository(directory, &self.job_roots)?;
         let mut command = self.command(directory, None, args);
         command
             .stdin(util::command::Stdio::null())
@@ -1065,10 +1098,13 @@ impl Git {
 }
 
 /// Refuses to run git in `directory` when the repository git would find there has its git
-/// directory, or the common directory its `commondir` names, inside a registered job root: a
-/// sandboxed job may have written its configuration and hooks. Everything else runs as before.
-fn refuse_job_written_repository(directory: &Path) -> Result<(), GitError> {
-    refuse_job_written_repository_with(directory, &util::job_roots::contains)
+/// directory, or the common directory its `commondir` names, inside a job root of `job_roots`:
+/// a sandboxed job may have written its configuration and hooks. Everything else runs as before.
+fn refuse_job_written_repository(
+    directory: &Path,
+    job_roots: &JobRootsSource,
+) -> Result<(), GitError> {
+    refuse_job_written_repository_with(directory, &|path: &Path| job_roots.contains(path))
 }
 
 /// [`refuse_job_written_repository`] with `in_job_root` deciding what lies inside a job root.

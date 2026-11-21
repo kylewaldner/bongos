@@ -10,8 +10,25 @@
 //! ([`util::job_roots`]), since a job may have written its configuration. When the work tree
 //! itself lies inside a job root, every driver a job-written `.gitattributes` could select and
 //! every hook is switched off, git does not recurse into submodules (whose repositories the job
-//! may have replaced), and caller options that would turn any of that back on are refused. The
-//! git binary is resolved to an absolute path first, so the work tree is never searched for it.
+//! may have replaced), and caller options that would turn any of that back on are refused.
+//!
+//! No setting keeps git out of a nested repository: `git add` (and `describe --dirty`) start
+//! `git status` inside any gitlink whose directory holds a `.git`, whatever
+//! `diff.ignoreSubmodules` or `submodule.<name>.ignore` say, and that runs the nested
+//! repository's own filters. A job can make one itself (`git init` a directory, let one command
+//! stage it as a gitlink, then edit it). So every command for a job tree is refused while any
+//! directory below the work tree's root holds a `.git` entry (a file, directory or symlink of
+//! that name, in any ASCII case): host git never opens a nested repository of a job tree. The
+//! check walks the whole work tree before each command, without following symlinks (git does not
+//! follow them to a nested repository either), and fails closed when a directory cannot be read
+//! or the tree has more than [`NESTED_WALK_LIMIT`] entries. It sees the tree as it is at that
+//! moment: a job still running could add a `.git` after it, which the submodule settings above
+//! then only partly cover, so a command whose correctness matters runs once the job is gone.
+//!
+//! The git binary is resolved to an absolute path first, so the work tree is never searched for
+//! it, and is refused when it lies inside a job root. The command gets a `PATH` of the absolute
+//! entries outside every job root only, so the programs git itself looks up (`ssh`, a pager, a
+//! `git-<name>` command, a remote helper) are never found in a job-written directory either.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -76,6 +93,23 @@ const REDIRECTING_VARIABLES: &[&str] = &[
 
 /// The message of a refusal, followed by the refused path.
 const REFUSAL: &str = "refusing to run git with a job-written git directory";
+
+/// The message of a refusal for a job tree holding a nested repository, followed by the
+/// directory holding its `.git`.
+const NESTED_REFUSAL: &str = "refusing to run git in a job tree that holds a nested repository";
+
+/// The most directory entries the nested repository check reads in one work tree; a larger tree
+/// is refused rather than half checked.
+pub const NESTED_WALK_LIMIT: usize = 1_000_000;
+
+/// The largest work tree `.gitmodules` read for its submodule names; a larger one is refused.
+const GITMODULES_LIMIT: u64 = 1 << 20;
+
+/// The git binary a command runs and the `PATH` it gets.
+struct Program {
+    binary: PathBuf,
+    path: OsString,
+}
 
 /// Builds host git commands for one repository and work tree, both named by the caller. See the
 /// module documentation.
@@ -155,21 +189,24 @@ impl SafeGit {
         }
         check_git_dir_with(&self.git_dir, in_job_root)?;
 
-        let job_tree = self
-            .work_tree
-            .as_deref()
-            .is_some_and(|tree| in_job_root(tree));
-        if job_tree {
+        let job_tree = self.work_tree.as_deref().filter(|tree| in_job_root(tree));
+        if job_tree.is_some() {
             check_job_tree_args(&args[1..])?;
         }
-        let binary = self.resolved_binary()?;
+        let program = self.program(in_job_root)?;
+        if let Some(tree) = job_tree
+            && let Some(nested) = find_nested_repository(tree)?
+        {
+            bail!("{NESTED_REFUSAL}: {}", nested.display());
+        }
+        let job_tree = job_tree.is_some();
         let overrides = if job_tree {
-            self.job_tree_overrides(&binary).await?
+            self.job_tree_overrides(&program).await?
         } else {
             Vec::new()
         };
 
-        let mut command = self.base_command(&binary);
+        let mut command = self.base_command(&program);
         let subcommand_text = subcommand.to_string_lossy();
         if READ_ONLY_COMMANDS.contains(&subcommand_text.as_ref()) {
             command.arg("--no-optional-locks");
@@ -214,20 +251,13 @@ impl SafeGit {
         Ok(command)
     }
 
-    /// The git binary as an absolute path. A bare name is looked up in the `PATH` the command
-    /// gets, skipping empty and relative entries: the command runs in the work tree, where a
-    /// relative entry would find a job-written `git`.
-    fn resolved_binary(&self) -> Result<PathBuf> {
-        if self.binary.is_absolute() {
-            return Ok(self.binary.clone());
-        }
-        if self.binary.components().count() != 1 {
-            bail!(
-                "the git binary must be an absolute path or a bare name, not {}",
-                self.binary.display()
-            );
-        }
-        let path = self
+    /// The git binary as an absolute path, and the `PATH` the command gets: the entries of the
+    /// caller's `PATH` (or the inherited one) that are absolute, existing directories outside
+    /// every job root. The command runs in the work tree, where a relative entry would find a
+    /// job-written program, and git looks up more than itself there. A bare binary name is looked
+    /// up in that `PATH`; a binary inside a job root is refused.
+    fn program(&self, in_job_root: &dyn Fn(&Path) -> bool) -> Result<Program> {
+        let inherited = self
             .envs
             .iter()
             .rev()
@@ -235,23 +265,45 @@ impl SafeGit {
             .map(|(_, value)| value.clone())
             .or_else(|| std::env::var_os("PATH"))
             .unwrap_or_default();
-        std::env::split_paths(&path)
-            .filter(|dir| dir.is_absolute())
-            .map(|dir| dir.join(&self.binary))
-            .find(|candidate| is_executable_file(candidate))
-            .ok_or_else(|| {
-                anyhow!(
-                    "cannot find {} in an absolute PATH entry",
-                    self.binary.display()
-                )
-            })
+        let entries: Vec<PathBuf> = std::env::split_paths(&inherited)
+            .filter(|dir| dir.is_absolute() && dir.is_dir() && !in_job_root(dir))
+            .collect();
+        let path = std::env::join_paths(&entries).context("joining the PATH for git")?;
+
+        let binary = if self.binary.is_absolute() {
+            self.binary.clone()
+        } else if self.binary.components().count() == 1 {
+            entries
+                .iter()
+                .map(|dir| dir.join(&self.binary))
+                .find(|candidate| is_executable_file(candidate))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "cannot find {} in an absolute PATH entry",
+                        self.binary.display()
+                    )
+                })?
+        } else {
+            bail!(
+                "the git binary must be an absolute path or a bare name, not {}",
+                self.binary.display()
+            );
+        };
+        if in_job_root(&binary) {
+            bail!(
+                "refusing to run a git binary inside a job root: {}",
+                binary.display()
+            );
+        }
+        Ok(Program { binary, path })
     }
 
     /// A git command for this repository with the inherited redirecting variables removed, the
-    /// caller's environment and configuration set, then the protections every command gets (no
-    /// fsmonitor, no untracked cache, no implicit bare repository), and no subcommand yet.
-    fn base_command(&self, binary: &Path) -> util::command::Command {
-        let mut command = util::command::new_command(binary);
+    /// caller's environment and configuration set, then the protections every command gets (the
+    /// cleaned `PATH`, no fsmonitor, no untracked cache, no implicit bare repository), and no
+    /// subcommand yet.
+    fn base_command(&self, program: &Program) -> util::command::Command {
+        let mut command = util::command::new_command(&program.binary);
         for name in REDIRECTING_VARIABLES {
             command.env_remove(name);
         }
@@ -269,6 +321,7 @@ impl SafeGit {
         for (key, value) in &self.envs {
             command.env(key, value);
         }
+        command.env("PATH", &program.path);
         let mut git_dir = OsString::from("--git-dir=");
         git_dir.push(&self.git_dir);
         command.arg(git_dir);
@@ -294,6 +347,11 @@ impl SafeGit {
     /// for every submodule a `.gitmodules` names (the work tree's, the index's and `HEAD`'s, as git
     /// reads them), since a job-written `submodule.<name>.ignore` would otherwise send a command
     /// that takes no `--ignore-submodules` (`stash`, for one) into the submodule's repository.
+    /// (The nested repository refusal already keeps git out of every submodule; these settings
+    /// remain for a `.git` a running job adds after that check.) The work tree's `.gitmodules` is
+    /// read through a handle opened without following a symlink or blocking on a FIFO, and git
+    /// reads those bytes from its standard input; one that is not a regular file (a FIFO git
+    /// would block on forever, for one) refuses the command.
     ///
     /// A driver runs only when the configuration names its command, so listing the configuration
     /// (`git config --get-regexp`, run like the command itself: the same git directory, work tree,
@@ -301,7 +359,7 @@ impl SafeGit {
     /// way) finds every driver a `.gitattributes` could select. Reading the configuration runs
     /// nothing. A listing that fails, or a name that cannot be overridden through `-c`, fails the
     /// command instead of running it with a driver left on.
-    async fn job_tree_overrides(&self, binary: &Path) -> Result<Vec<String>> {
+    async fn job_tree_overrides(&self, program: &Program) -> Result<Vec<String>> {
         let mut settings = Vec::new();
         let mut push = |setting: String| {
             if !settings.contains(&setting) {
@@ -309,7 +367,7 @@ impl SafeGit {
             }
         };
         let drivers = self
-            .config_keys(binary, &[], r"^(filter|diff|merge|hook)\.")
+            .config_keys(program, &[], None, r"^(filter|diff|merge|hook)\.")
             .await?;
         for (section, name, variable) in &drivers {
             match (section.as_str(), variable.as_str()) {
@@ -327,20 +385,22 @@ impl SafeGit {
             }
         }
 
+        let work_tree_gitmodules = match &self.work_tree {
+            Some(work_tree) => read_regular_file(&work_tree.join(".gitmodules"))?,
+            None => None,
+        };
         let mut sources = Vec::new();
-        if let Some(work_tree) = &self.work_tree {
-            let gitmodules = work_tree.join(".gitmodules");
-            if fs::symlink_metadata(&gitmodules).is_ok() {
-                let mut file = OsString::from("--file=");
-                file.push(&gitmodules);
-                sources.push(file);
-            }
+        if let Some(contents) = &work_tree_gitmodules {
+            sources.push(("--file=-", Some(contents.as_slice())));
         }
-        sources.push(OsString::from("--blob=:.gitmodules"));
-        sources.push(OsString::from("--blob=HEAD:.gitmodules"));
-        for source in sources {
-            let source = [source, OsString::from("--no-includes")];
-            for (_, name, _) in self.config_keys(binary, &source, r"^submodule\.").await? {
+        sources.push(("--blob=:.gitmodules", None));
+        sources.push(("--blob=HEAD:.gitmodules", None));
+        for (source, stdin) in sources {
+            let source = [OsString::from(source), OsString::from("--no-includes")];
+            for (_, name, _) in self
+                .config_keys(program, &source, stdin, r"^submodule\.")
+                .await?
+            {
                 push(format!("submodule.{name}.ignore=all"));
             }
         }
@@ -353,20 +413,44 @@ impl SafeGit {
     /// nothing matches). Refuses a name holding '=', which `-c` cannot override.
     async fn config_keys(
         &self,
-        binary: &Path,
+        program: &Program,
         source: &[OsString],
+        stdin: Option<&[u8]>,
         regexp: &str,
     ) -> Result<Vec<(String, String, String)>> {
-        let mut command = self.base_command(binary);
+        use futures::AsyncWriteExt as _;
+
+        let mut command = self.base_command(program);
         // Reading a blob from the index reads the index, so no optional lock is taken.
         command
             .args(["--no-optional-locks", "config"])
             .args(source)
             .args(["--null", "--get-regexp", regexp]);
-        let output = command
-            .output()
-            .await
-            .with_context(|| format!("listing the git configuration {regexp}"))?;
+        let context = || format!("listing the git configuration {regexp}");
+        let output = match stdin {
+            None => command.output().await.with_context(context)?,
+            Some(input) => {
+                command
+                    .stdin(util::command::Stdio::piped())
+                    .stdout(util::command::Stdio::piped())
+                    .stderr(util::command::Stdio::piped());
+                let mut child = command.spawn().with_context(context)?;
+                let mut pipe = child.stdin.take();
+                // Written while the output is read, so neither pipe can stall the other.
+                let feed = async move {
+                    if let Some(pipe) = pipe.as_mut() {
+                        pipe.write_all(input).await?;
+                        pipe.close().await?;
+                    }
+                    drop(pipe);
+                    Ok::<(), io::Error>(())
+                };
+                let (fed, output) = futures::join!(feed, child.output());
+                let output = output.with_context(context)?;
+                fed.with_context(context)?;
+                output
+            }
+        };
         if !output.status.success() && output.status.code() != Some(1) {
             bail!(
                 "listing the git configuration {regexp} failed: {}",
@@ -439,6 +523,94 @@ fn is_executable_file(path: &Path) -> bool {
     {
         metadata.is_file()
     }
+}
+
+/// The contents of `path` when it is a regular file, `None` when nothing is there. Opened without
+/// following a symlink and without blocking (a FIFO would otherwise block the open), then checked
+/// through the open handle, so what is read is what was checked. Anything else there, or a file
+/// over [`GITMODULES_LIMIT`], is an error.
+fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let not_regular = || anyhow!("refusing a {} that is not a regular file", path.display());
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        // `O_NOFOLLOW` fails a symlink with `ELOOP`.
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) => {
+            return Err(not_regular());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("opening {}", path.display()));
+        }
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading {}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(not_regular());
+    }
+    if metadata.len() > GITMODULES_LIMIT {
+        bail!(
+            "refusing {}: it is larger than {GITMODULES_LIMIT} bytes",
+            path.display()
+        );
+    }
+    let mut contents = Vec::new();
+    file.take(GITMODULES_LIMIT + 1)
+        .read_to_end(&mut contents)
+        .with_context(|| format!("reading {}", path.display()))?;
+    if contents.len() as u64 > GITMODULES_LIMIT {
+        bail!(
+            "refusing {}: it is larger than {GITMODULES_LIMIT} bytes",
+            path.display()
+        );
+    }
+    Ok(Some(contents))
+}
+
+/// The first directory below `tree` (not `tree` itself) that holds an entry named `.git` in any
+/// ASCII case, found by walking `tree` without following symlinks and without entering `tree`'s
+/// own `.git`. Fails when a directory cannot be read or the walk passes [`NESTED_WALK_LIMIT`]
+/// entries, so a tree is never taken as clean without having been read in full.
+pub(crate) fn find_nested_repository(tree: &Path) -> Result<Option<PathBuf>> {
+    let mut pending = vec![tree.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = pending.pop() {
+        let reading = || format!("reading {} to look for a nested repository", dir.display());
+        for entry in fs::read_dir(&dir).with_context(reading)? {
+            let entry = entry.with_context(reading)?;
+            seen += 1;
+            if seen > NESTED_WALK_LIMIT {
+                bail!(
+                    "refusing to run git in a job tree of more than {NESTED_WALK_LIMIT} entries: {}",
+                    tree.display()
+                );
+            }
+            let is_git = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(".git"));
+            if is_git {
+                if dir == tree {
+                    continue;
+                }
+                return Ok(Some(dir));
+            }
+            // The type of the entry itself; a symlink is not followed.
+            if entry.file_type().with_context(reading)?.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Refuses `git_dir` when it, its `commondir` target or the common directory lies inside a

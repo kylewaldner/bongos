@@ -2378,6 +2378,8 @@ name = "bongos_confine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures 0.3.32",
+ "libc",
  "log",
  "paths",
  "sandbox",
