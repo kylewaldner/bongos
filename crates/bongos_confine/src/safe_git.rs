@@ -23,7 +23,9 @@
 //! follow them to a nested repository either), and fails closed when a directory cannot be read
 //! or the tree has more than [`NESTED_WALK_LIMIT`] entries. It sees the tree as it is at that
 //! moment: a job still running could add a `.git` after it, which the submodule settings above
-//! then only partly cover, so a command whose correctness matters runs once the job is gone.
+//! then only partly cover, so a command whose correctness matters runs once the job is gone. A
+//! caller whose commands never start git inside a gitlink may skip the refusal
+//! ([`SafeGit::allow_nested_repositories`]).
 //!
 //! The git binary is resolved to an absolute path first, so the work tree is never searched for
 //! it, and is refused when it lies inside a job root. The command gets a `PATH` of the absolute
@@ -121,6 +123,7 @@ pub struct SafeGit {
     config: Vec<(String, String)>,
     envs: Vec<(OsString, OsString)>,
     untrusted_tree: bool,
+    allow_nested: bool,
 }
 
 impl SafeGit {
@@ -144,6 +147,7 @@ impl SafeGit {
             config: Vec::new(),
             envs: Vec::new(),
             untrusted_tree: false,
+            allow_nested: false,
         }
     }
 
@@ -152,6 +156,19 @@ impl SafeGit {
     /// cannot rely on the registry to know a tree a job may have written.
     pub fn untrusted_tree(mut self) -> Self {
         self.untrusted_tree = true;
+        self
+    }
+
+    /// Runs a job tree's commands even while the tree holds a nested repository, skipping the
+    /// nested repository walk; every other protection stays. Only for commands that never start
+    /// git inside a gitlink: those this type gives `--ignore-submodules=all` (`status`, `diff`,
+    /// `diff-files`, `diff-index`), commands that only read the index or objects (`ls-files`,
+    /// `write-tree`, `rev-parse`, `merge-base`, `cat-file`), `update-index --force-remove`, and
+    /// `add` against an index that holds no gitlink (git stages a new nested repository from its
+    /// `HEAD` without running anything, but checks an indexed gitlink with `git status` inside
+    /// it, which runs the nested repository's own filters). Keeping to that is the caller's part.
+    pub fn allow_nested_repositories(mut self) -> Self {
+        self.allow_nested = true;
         self
     }
 
@@ -208,6 +225,7 @@ impl SafeGit {
         }
         let program = self.program(in_job_root)?;
         if let Some(tree) = job_tree
+            && !self.allow_nested
             && let Some(nested) = find_nested_repository(tree)?
         {
             bail!("{NESTED_REFUSAL}: {}", nested.display());
@@ -658,7 +676,9 @@ pub fn check_git_dir_with(git_dir: &Path, in_job_root: &dyn Fn(&Path) -> bool) -
 
 /// The git directory of the linked worktree `tree`, read from its `.git` file and trusted only
 /// where git puts it: a directory directly under `common_dir/worktrees/` that holds `gitdir` and
-/// `commondir` files and whose `gitdir` file names this tree's `.git`. Anything else (a `.git`
+/// `commondir` files, whose `commondir` names `common_dir` and whose `gitdir` file names this
+/// tree's `.git`. `common_dir` must come from the caller's own trusted record (the common
+/// directory of a repository's primary checkout, say), never from the tree. Anything else (a `.git`
 /// directory or symlink, a pointer elsewhere or to another worktree's git directory, a symlinked
 /// git directory) is refused. Returns the canonical git directory.
 pub fn linked_git_dir_from_record(tree: &Path, common_dir: &Path) -> Result<PathBuf> {
@@ -698,6 +718,18 @@ pub fn linked_git_dir_from_record(tree: &Path, common_dir: &Path) -> Result<Path
     }
     if !is_file(&git_dir.join("gitdir")) || !is_file(&git_dir.join("commondir")) {
         return Err(refuse("its git directory lacks a gitdir or commondir file"));
+    }
+    // Git reads the common directory from `commondir`, not from where the git directory sits:
+    // it must name `common_dir` itself (git writes it relative to the git directory).
+    let named = fs::read_to_string(git_dir.join("commondir"))
+        .map_err(|error| refuse(&error.to_string()))?;
+    let named = git_dir.join(named.trim_end_matches(['\n', '\r']));
+    let same_common = match (fs::canonicalize(&named), fs::canonicalize(common_dir)) {
+        (Ok(named), Ok(common)) => named == common,
+        _ => false,
+    };
+    if !same_common {
+        return Err(refuse("its commondir names another common directory"));
     }
     // The git directory must record this tree's `.git` as its own, or it belongs to another
     // worktree (git writes an absolute path there, or one relative to the git directory).
