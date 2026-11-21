@@ -2921,6 +2921,34 @@ impl Workspace {
         }
     }
 
+    /// Goes to the backward or forward entry of `pane` with this timestamp without changing
+    /// either stack: nothing is popped, and nothing is pushed in the disabled mode.
+    pub fn navigate_to_history_entry(
+        &mut self,
+        pane: WeakEntity<Pane>,
+        timestamp: usize,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Task<Result<()>> {
+        let Some(entry) = pane
+            .upgrade()
+            .and_then(|pane| pane.read(cx).nav_history().entry_with_timestamp(timestamp))
+        else {
+            return Task::ready(Ok(()));
+        };
+        // Handed back once: a second call means the first did not navigate (the caret is
+        // already there), and the walk must end instead of looping.
+        let mut target = Some(entry);
+        let task = self.navigate_history_impl(
+            pane,
+            NavigationMode::Disabled,
+            window,
+            &mut |_, _| target.take(),
+            cx,
+        );
+        Self::ignore_navigated(task, cx)
+    }
+
     pub fn go_back(
         &mut self,
         pane: WeakEntity<Pane>,

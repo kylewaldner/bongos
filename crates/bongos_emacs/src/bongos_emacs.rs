@@ -35,6 +35,7 @@ mod symbol_jump;
 mod symbol_overlay;
 mod transpose;
 mod words;
+mod xref_history;
 mod yank;
 mod zap;
 
@@ -95,6 +96,8 @@ mod transpose_tests;
 #[cfg(test)]
 mod words_tests;
 #[cfg(test)]
+mod xref_history_tests;
+#[cfg(test)]
 mod yank_tests;
 #[cfg(test)]
 mod zap_tests;
@@ -118,6 +121,7 @@ pub fn init(cx: &mut App) {
     count_adapters::init(cx);
     cursor::init(cx);
     global_mark::init(cx);
+    xref_history::init(cx);
     goto_stack::init(cx);
     for name in [
         actions::SymbolJumpNext::name_for_type(),
