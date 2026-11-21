@@ -27,6 +27,7 @@ async fn setup(
         editor::init(cx);
         crate::init(cx);
         bongos_minibuffer::init(cx);
+        crate::goto_stack_tests::record_implicit_navigation(cx);
         cx.default_global::<MinibufferRouting>()
             .set_routes(vec!["xref_history".to_string()]);
         app_state

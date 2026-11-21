@@ -3013,6 +3013,17 @@ mod tests {
         cx.update(|cx| {
             editor::init(cx);
             workspace::init(app_state.clone(), cx);
+            // The recent-files list is built from item-switch history entries.
+            use gpui::UpdateGlobal as _;
+            settings::SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.editor.navigation_history =
+                        Some(settings::NavigationHistoryContent {
+                            record_large_moves: Some(true),
+                            record_item_switches: Some(true),
+                        });
+                });
+            });
         });
 
         app_state
