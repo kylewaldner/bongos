@@ -104,8 +104,11 @@
 //! unmoved the shared index still matches it, so only the switch back runs. When anything was
 //! refused the allowed refs are imported all the same, and the private directory is kept (named
 //! in the report) so no commit is lost; the next [`prepare`] into the same scratch replaces it.
-//! When the import fails (the object check, packing, the connectivity check or the transaction)
-//! no ref moves, the tree is switched back and the private directory kept the same way. Objects
+//! When the import fails (a host git for another git directory, the object check, packing, the
+//! connectivity check, the private alternates changed after packing, or the transaction) no ref
+//! moves, the tree is switched back and the private directory kept the same way, provided the
+//! marker still names this preparation. Failing to remove the private directory or the marker
+//! after refs moved is logged and noted in the report, never returned in its place. Objects
 //! that reached the shared repository before a failure or a crash are unreferenced and harmless.
 
 use std::{

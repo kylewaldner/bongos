@@ -71,23 +71,67 @@ impl PrivateGit {
         git: &SafeGit,
         in_job_root: &(dyn Fn(&Path) -> bool + Sync),
     ) -> Result<ImportReport> {
-        let git_dir = canonical(git.git_dir(), "git directory")?;
-        if git_dir != self.linked_git_dir {
-            bail!(
-                "importing into {} needs git for {}",
-                git_dir.display(),
-                self.linked_git_dir.display()
-            );
-        }
-        // Held to the end, so no preparation or recovery of the tree runs during the import.
-        let _lock = TreeLock::take(&self.linked_git_dir)?;
-        self.check_marker()?;
+        let checked = (|| {
+            let git_dir = canonical(git.git_dir(), "git directory")?;
+            if git_dir != self.linked_git_dir {
+                bail!(
+                    "importing into {} needs git for it, not for {}",
+                    self.linked_git_dir.display(),
+                    git_dir.display()
+                );
+            }
+            // Held to the end, so no preparation or recovery of the tree runs during the import.
+            let lock = TreeLock::take(&self.linked_git_dir)?;
+            self.check_marker()?;
+            Ok(lock)
+        })();
+        let _lock = match checked {
+            Ok(lock) => lock,
+            Err(error) => return Err(self.give_up(error)),
+        };
 
         let shared = git.for_git_dir(&self.linked_git_dir, None);
         let import_dir = self.linked_git_dir.join(IMPORT_DIR);
         let transferred = transfer(&self, &shared, &import_dir, in_job_root).await;
         self.finish(&shared, &import_dir, transferred, in_job_root)
             .await
+    }
+
+    /// Switches the tree back after the import failed before any transfer (`error`), so the tree
+    /// is never left taken by a preparation that can no longer be imported or abandoned: when the
+    /// marker still names this preparation, restores `.git`, keeps the private directory and
+    /// releases the marker. When the marker names another job, is gone or cannot be read, nothing
+    /// is changed.
+    fn give_up(&self, error: anyhow::Error) -> anyhow::Error {
+        if self.check_marker().is_err() {
+            return error;
+        }
+        if let Err(restore_error) = restore_dot_git(&self.tree, &self.original_dot_git) {
+            log::error!(
+                "private git: cannot switch {} back: {restore_error:#}",
+                self.tree.display()
+            );
+            return error.context(format!(
+                "nothing was imported, and switching the tree back failed too \
+                 ({restore_error:#}); the marker in {} is left for recovery",
+                self.linked_git_dir.display()
+            ));
+        }
+        if let Err(remove_error) = remove_no_follow(&self.linked_git_dir.join(IMPORT_DIR)) {
+            log::error!("private git: {remove_error:#}");
+        }
+        if let Err(marker_error) = remove_marker(&self.linked_git_dir) {
+            log::error!("private git: {marker_error:#}");
+            return error.context(format!(
+                "nothing was imported; the tree is switched back, but releasing it failed \
+                 ({marker_error:#})"
+            ));
+        }
+        error.context(format!(
+            "nothing was imported; the tree is switched back and the private directory {} is \
+             kept until the next preparation",
+            self.private_dir.display()
+        ))
     }
 
     /// Switches the tree back after the transfer: restores `.git`, resets the shared index to the
@@ -139,14 +183,36 @@ impl PrivateGit {
                 self.private_dir.display()
             ))),
         };
+        // Refs may have moved by now, so a failure to clean up is reported, never returned in
+        // place of the report.
         if keep {
             if let Ok(report) = &mut report {
                 report.kept_private_dir = Some(self.private_dir.clone());
             }
-        } else {
-            remove_no_follow(&self.private_dir)?;
+        } else if let Err(error) = remove_no_follow(&self.private_dir) {
+            log::error!("private git: {error:#}");
+            if let Ok(report) = &mut report {
+                report.notes.push(format!(
+                    "the private directory could not be removed ({error:#}); the next \
+                     preparation replaces it"
+                ));
+                report.kept_private_dir = Some(self.private_dir.clone());
+            }
         }
-        remove_marker(&self.linked_git_dir)?;
+        if let Err(error) = remove_marker(&self.linked_git_dir) {
+            log::error!("private git: {error:#}");
+            let note = format!(
+                "the tree is switched back, but releasing it failed ({error:#}); it is released \
+                 once this process is gone"
+            );
+            report = match report {
+                Ok(mut report) => {
+                    report.notes.push(note);
+                    Ok(report)
+                }
+                Err(failure) => Err(failure.context(note)),
+            };
+        }
         report
     }
 
@@ -222,9 +288,11 @@ async fn transfer(
     let import = shared
         .for_git_dir(import_dir, None)
         .job_object_directory(&objects);
+    // The private alternates prepare wrote, once there is anything to import.
+    let mut expected = Vec::new();
     if !updates.is_empty() {
         let shared_objects = private.common_dir.join("objects");
-        let mut expected = line_bytes(&shared_objects, "shared object directory")?.to_vec();
+        expected = line_bytes(&shared_objects, "shared object directory")?.to_vec();
         expected.push(b'\n');
         check_private_objects(&objects, hex_len, &expected)?;
 
@@ -268,6 +336,18 @@ async fn transfer(
         )
         .await
         .context("the imported commits are not complete in the shared repository")?;
+
+        // Packing read the private directory through these alternates; had they changed since
+        // the check, git could have read other object directories than the ones checked.
+        let alternates = objects.join("info/alternates");
+        if read_regular_file_limited(&alternates, ALTERNATES_LIMIT)?.as_deref()
+            != Some(expected.as_slice())
+        {
+            bail!(
+                "refusing the private object directory: {} was changed during the import",
+                alternates.display()
+            );
+        }
 
         write_refs(shared, &updates, in_job_root).await?;
     }

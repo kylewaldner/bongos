@@ -253,7 +253,21 @@ impl Fixture {
     /// Imports through host git isolated like the fixture's, with the scratch and the tree as
     /// the job roots.
     fn import(&self, private: PrivateGit) -> anyhow::Result<ImportReport> {
-        let git = SafeGit::without_work_tree(&self.linked)
+        self.import_into(private, &self.linked, None)
+    }
+
+    /// [`Fixture::import`] with host git for `git_dir`, running `binary` when given.
+    fn import_into(
+        &self,
+        private: PrivateGit,
+        git_dir: &Path,
+        binary: Option<&Path>,
+    ) -> anyhow::Result<ImportReport> {
+        let mut git = SafeGit::without_work_tree(git_dir);
+        if let Some(binary) = binary {
+            git = git.binary(binary);
+        }
+        let git = git
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("HOME", &self.home);
@@ -1639,6 +1653,92 @@ fn private_git_import_fails_on_a_mismatched_object() {
             || text.contains("not complete in the shared repository"),
         "{text}"
     );
+    fixture.assert_imported_back(&original, true);
+    assert_eq!(fixture.shared_ref("refs/heads/feature"), Some(feature));
+}
+
+#[test]
+fn private_git_import_with_git_for_another_directory_switches_back() {
+    let fixture = Fixture::new();
+    let original = fixture.dot_git();
+    let before = fixture.shared_state();
+    let private = fixture.prepare();
+    fixture.commit_file("b.txt", "two\n", "second");
+
+    let error = fixture
+        .import_into(private, &fixture.main.join(".git"), None)
+        .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("needs git for it"), "{text}");
+    assert!(text.contains("nothing was imported"), "{text}");
+    fixture.assert_imported_back(&original, true);
+    assert_eq!(fixture.shared_state(), before);
+
+    // The tree is free again.
+    fixture.prepare().abandon().unwrap();
+    fixture.assert_switched_back(&original);
+}
+
+#[cfg(unix)]
+#[test]
+fn private_git_import_reports_a_private_directory_it_cannot_remove() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        // Root removes the read-only directory all the same.
+        return;
+    }
+    let fixture = Fixture::new();
+    let original = fixture.dot_git();
+    let private = fixture.prepare();
+    let tip = fixture.commit_file("b.txt", "two\n", "second");
+    let blob = fixture.rev(&fixture.tree, "HEAD:b.txt");
+    let stuck = fixture.private_dir().join("objects").join(&blob[..2]);
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let report = fixture.import(private);
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = report.unwrap();
+    assert_eq!(report.imported, vec!["refs/heads/feature".to_string()]);
+    assert!(report.refused.is_empty(), "{report:?}");
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("the private directory could not be removed")),
+        "{report:?}"
+    );
+    assert_eq!(report.kept_private_dir, Some(fixture.private_dir()));
+    fixture.assert_imported_back(&original, true);
+    assert_eq!(fixture.shared_ref("refs/heads/feature"), Some(tip));
+}
+
+#[test]
+fn private_git_import_fails_when_the_private_alternates_change_while_packing() {
+    let fixture = Fixture::new();
+    let original = fixture.dot_git();
+    let feature = fixture.rev(&fixture.main, "feature");
+    let private = fixture.prepare();
+    fixture.commit_file("b.txt", "two\n", "second");
+    let alternates = fixture.private_dir().join("objects/info/alternates");
+    let wrapper = fixture.base.join("bin/git-wrapper");
+    fixture.write_script(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = index-pack ]; then\n    \
+             printf '%s\\n' '{}' >> '{}'\n  fi\ndone\nexec git \"$@\"\n",
+            fixture.base.join("elsewhere").display(),
+            alternates.display()
+        ),
+    );
+
+    let error = fixture
+        .import_into(private, &fixture.linked, Some(&wrapper))
+        .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("was changed during the import"), "{text}");
+    assert!(text.contains("nothing was imported"), "{text}");
     fixture.assert_imported_back(&original, true);
     assert_eq!(fixture.shared_ref("refs/heads/feature"), Some(feature));
 }
