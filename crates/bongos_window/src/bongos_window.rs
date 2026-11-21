@@ -2,6 +2,7 @@
 //! work on, in reading order. An Emacs window is a pane here; a frame is the app window.
 
 pub mod actions;
+mod orientation;
 pub mod picker;
 mod split;
 pub mod targets;
@@ -9,6 +10,8 @@ pub mod targets;
 pub mod test_support;
 mod zoom;
 
+#[cfg(test)]
+mod orientation_tests;
 #[cfg(test)]
 mod picker_tests;
 #[cfg(test)]
@@ -37,6 +40,8 @@ pub fn init(cx: &mut App) {
         workspace.register_action(split::split_window_below);
         workspace.register_action(split::split_window_right);
         workspace.register_action(split::delete_window);
+        workspace.register_action(orientation::split_window_horizontally_instead);
+        workspace.register_action(orientation::split_window_vertically_instead);
     })
     .detach();
 }
