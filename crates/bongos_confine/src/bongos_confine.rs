@@ -88,7 +88,10 @@ pub struct HostGit {
 }
 
 /// Paths under a writable root that are not job-written, because they stayed masked read-only
-/// for the whole job (a main worktree's `.git` and the `.git` of each nested repository).
+/// for the whole job: a main worktree's own `.git` and any nested worktree that is a direct child
+/// of the root. Deeper masks (the `.git` of a nested repository, a nested worktree further down)
+/// are not listed: the job may rename an ancestor between the root and the mask and recreate the
+/// path, so what is there after the job may be job-written.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RootExclusions {
     pub root: PathBuf,
@@ -111,13 +114,19 @@ pub enum ConfineError {
     )]
     GitDirectory { root: PathBuf, git_dir: PathBuf },
     #[error(
-        "the writable path {} contains the run records directory {}",
+        "the writable path {} overlaps the run records directory {}",
         root.display(),
         records_dir.display()
     )]
     RecordsDirectory { root: PathBuf, records_dir: PathBuf },
     #[error("a read-only tree cannot have private git: {}", tree.display())]
     ReadOnlyTreeWithPrivateGit { tree: PathBuf },
+    #[error(
+        "the read-only tree {} lies inside the writable path {}",
+        tree.display(),
+        root.display()
+    )]
+    ReadOnlyTreeInsideWritable { tree: PathBuf, root: PathBuf },
     #[error("a job in a main worktree gets read-only git, not private git: {}", tree.display())]
     MainWorktreeWithPrivateGit { tree: PathBuf },
     #[error("a read-only mask must not be a symlink: {}", path.display())]
@@ -143,11 +152,13 @@ impl Confinement {
     /// Every path is canonicalized first. The build refuses a relative or unresolvable path, a
     /// writable root that is `/`, a writable root that equals, contains or lies inside a trusted
     /// git directory (except a main worktree's own `.git`, which is masked), a writable root
-    /// containing the run records directory, a read-only tree with private git and a main
-    /// worktree with private git. A read-only tree is not a writable root.
+    /// that contains or lies inside the run records directory, a read-only tree with private
+    /// git, a read-only tree that equals or lies inside a writable root and a main worktree with
+    /// private git. A read-only tree is not a writable root.
     pub fn build(declaration: &JobDeclaration, host: &HostGit) -> Result<Self, ConfineError> {
         let mut roots = vec![canonical(&declaration.scratch)?];
         let mut writable_trees = Vec::new();
+        let mut read_only_trees = Vec::new();
         for tree in &declaration.trees {
             if tree.access == TreeAccess::ReadOnly && tree.git == TreeGit::Private {
                 return Err(ConfineError::ReadOnlyTreeWithPrivateGit {
@@ -155,9 +166,12 @@ impl Confinement {
                 });
             }
             let path = canonical(&tree.path)?;
-            if tree.access == TreeAccess::Writable {
-                roots.push(path.clone());
-                writable_trees.push((path, tree.git));
+            match tree.access {
+                TreeAccess::Writable => {
+                    roots.push(path.clone());
+                    writable_trees.push((path, tree.git));
+                }
+                TreeAccess::ReadOnly => read_only_trees.push(path),
             }
         }
         for dir in declaration
@@ -171,6 +185,15 @@ impl Confinement {
 
         if let Some(root) = roots.iter().find(|root| root.parent().is_none()) {
             return Err(ConfineError::FilesystemRoot { path: root.clone() });
+        }
+
+        for tree in &read_only_trees {
+            if let Some(root) = roots.iter().find(|root| tree.starts_with(root)) {
+                return Err(ConfineError::ReadOnlyTreeInsideWritable {
+                    tree: tree.clone(),
+                    root: root.clone(),
+                });
+            }
         }
 
         let mut main_worktrees = Vec::new();
@@ -219,7 +242,10 @@ impl Confinement {
 
         if let Some(records_dir) = &host.records_dir {
             let records_dir = canonical(records_dir)?;
-            if let Some(root) = roots.iter().find(|root| records_dir.starts_with(root)) {
+            if let Some(root) = roots
+                .iter()
+                .find(|root| records_dir.starts_with(root) || root.starts_with(&records_dir))
+            {
                 return Err(ConfineError::RecordsDirectory {
                     root: root.clone(),
                     records_dir,
@@ -233,11 +259,19 @@ impl Confinement {
             let dot_git = tree.join(".git");
             let nested_worktrees = nested_worktrees(tree)?;
             let nested_repositories = nested_repositories(tree, &nested_worktrees)?;
-            masks.push(dot_git.clone());
+            // Only a mask directly under the root is held in place by the root's own mount. A
+            // deeper mask can be sidestepped: the job renames an ancestor between the root and
+            // the mask (`mv vendor v2`) and recreates the path, so a nested repository's `.git`
+            // or a deeper nested worktree may be job-written after the job and is not excluded.
+            let excluded = std::iter::once(&dot_git)
+                .chain(&nested_worktrees)
+                .chain(&nested_repositories)
+                .filter(|mask| mask.parent() == Some(tree.as_path()))
+                .cloned()
+                .collect();
+            masks.push(dot_git);
             masks.extend(nested_worktrees);
-            masks.extend(nested_repositories.iter().cloned());
-            let mut excluded = vec![dot_git];
-            excluded.extend(nested_repositories);
+            masks.extend(nested_repositories);
             exclusions.push(RootExclusions {
                 root: tree.clone(),
                 excluded,

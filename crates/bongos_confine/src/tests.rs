@@ -243,6 +243,67 @@ fn refuses_each_unsafe_declaration() {
             records_dir: records,
         }
     );
+    let outer_records = fixture.dir("records");
+    let inside_records = fixture.dir("records/lane");
+    let records_outside_scratch = HostGit {
+        records_dir: Some(outer_records.clone()),
+        ..host.clone()
+    };
+    assert_eq!(
+        build(
+            scratch.clone(),
+            Vec::new(),
+            vec![inside_records.clone()],
+            &records_outside_scratch
+        ),
+        ConfineError::RecordsDirectory {
+            root: inside_records,
+            records_dir: outer_records,
+        }
+    );
+    let lane = fixture.dir("lane");
+    let inside_lane = fixture.dir("lane/snapshot");
+    assert_eq!(
+        build(
+            scratch.clone(),
+            vec![tree(lane.clone(), TreeAccess::ReadOnly, TreeGit::None)],
+            vec![lane.clone()],
+            &host
+        ),
+        ConfineError::ReadOnlyTreeInsideWritable {
+            tree: lane.clone(),
+            root: lane.clone(),
+        }
+    );
+    assert_eq!(
+        build(
+            scratch.clone(),
+            vec![tree(inside_lane.clone(), TreeAccess::ReadOnly, TreeGit::None)],
+            vec![lane.clone()],
+            &host
+        ),
+        ConfineError::ReadOnlyTreeInsideWritable {
+            tree: inside_lane,
+            root: lane,
+        }
+    );
+    let inside_scratch = fixture.dir("scratch/copy");
+    assert_eq!(
+        build(
+            scratch.clone(),
+            vec![tree(
+                inside_scratch.clone(),
+                TreeAccess::ReadOnly,
+                TreeGit::ReadOnly
+            )],
+            Vec::new(),
+            &host
+        ),
+        ConfineError::ReadOnlyTreeInsideWritable {
+            tree: inside_scratch,
+            root: scratch.clone(),
+        }
+    );
 
     #[cfg(unix)]
     {
@@ -335,9 +396,113 @@ fn main_worktree_skips_a_stale_gitdir_entry_and_lists_exclusions() {
         confinement.exclusions(),
         [RootExclusions {
             root: repo.clone(),
-            excluded: vec![repo.join(".git"), repo.join("sub/.git")],
+            excluded: vec![repo.join(".git")],
         }]
     );
+}
+
+#[test]
+fn nested_clone_git_is_masked_but_not_excluded() {
+    let fixture = Fixture::new();
+    let repo = fixture.dir("repo");
+    fixture.file("repo/.git/HEAD", "ref: refs/heads/main\n");
+    let direct_worktree = repo.join("wt");
+    let direct_git_dir = fixture.add_worktree("wt", &direct_worktree);
+    let deep_worktree = repo.join(".bongos-worktrees/task");
+    let deep_git_dir = fixture.add_worktree("task", &deep_worktree);
+    fixture.file("repo/vendor/lib/.git/config", "[core]\n");
+    let scratch = fixture.dir("scratch");
+
+    let confinement = Confinement::build(
+        &declaration(
+            scratch,
+            vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
+            Vec::new(),
+        ),
+        &HostGit {
+            git_dirs: vec![repo.join(".git"), direct_git_dir, deep_git_dir],
+            records_dir: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        confinement.masks(),
+        [
+            repo.join(".git"),
+            deep_worktree.clone(),
+            direct_worktree.clone(),
+            repo.join("vendor/lib/.git"),
+        ]
+    );
+    assert_eq!(
+        confinement.exclusions(),
+        [RootExclusions {
+            root: repo.clone(),
+            excluded: vec![repo.join(".git"), direct_worktree],
+        }]
+    );
+    let excluded = &confinement.exclusions()[0].excluded;
+    assert!(!excluded.contains(&repo.join("vendor/lib/.git")));
+    assert!(!excluded.contains(&deep_worktree));
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_a_tree_whose_git_is_a_symlink() {
+    let fixture = Fixture::new();
+    let repo = fixture.dir("repo");
+    let real_git = fixture.dir("elsewhere/.git");
+    std::os::unix::fs::symlink(&real_git, repo.join(".git")).unwrap();
+    let scratch = fixture.dir("scratch");
+
+    assert_eq!(
+        Confinement::build(
+            &declaration(
+                scratch,
+                vec![tree(repo.clone(), TreeAccess::Writable, TreeGit::ReadOnly)],
+                Vec::new(),
+            ),
+            &HostGit::default(),
+        )
+        .unwrap_err(),
+        ConfineError::MaskSymlink {
+            path: repo.join(".git")
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_a_main_worktree_with_an_unreadable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let repo = fixture.dir("repo");
+    fixture.file("repo/.git/HEAD", "ref: refs/heads/main\n");
+    let locked = fixture.dir("repo/locked");
+    let scratch = fixture.dir("scratch");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root (or a capability that bypasses permissions) can still read the directory; the walk
+    // then succeeds and this case cannot be produced, so the test checks nothing there.
+    let readable = fs::read_dir(&locked).is_ok();
+
+    let result = Confinement::build(
+        &declaration(
+            scratch,
+            vec![tree(repo, TreeAccess::Writable, TreeGit::ReadOnly)],
+            Vec::new(),
+        ),
+        &HostGit::default(),
+    );
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+    if !readable {
+        assert!(matches!(
+            result,
+            Err(ConfineError::Walk { path, .. }) if path == locked
+        ));
+    }
 }
 
 #[test]
