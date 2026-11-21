@@ -232,6 +232,7 @@ impl VsCodeSettings {
             linear: None,
             workflows: None,
             task_checks: None,
+            confinement: None,
             modeline_lines: None,
             feature_flags: None,
             instrumentation: None,

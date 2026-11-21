@@ -1,0 +1,20 @@
+[package]
+name = "bongos_confine"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_confine.rs"
+doctest = false
+
+[dependencies]
+sandbox.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
