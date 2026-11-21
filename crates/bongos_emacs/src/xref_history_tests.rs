@@ -3,7 +3,9 @@ use std::rc::Rc;
 
 use bongos_minibuffer::SessionView;
 use editor::Editor;
-use gpui::{Action as _, BorrowAppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle};
+use gpui::{
+    Action as _, BorrowAppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle,
+};
 use project::{Fs as _, Project, ProjectPath};
 use settings::SettingsStore;
 use text::Point;
