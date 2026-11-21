@@ -5522,7 +5522,7 @@ impl Workspace {
                 serialize_workspace = *focus_changed || pane != self.active_pane();
                 if pane == self.active_pane() {
                     self.active_item_path_changed(*focus_changed, window, cx);
-                } else if *local {
+                } else if *local && self.panes.contains(pane) {
                     self.set_active_pane(pane, window, cx);
                 }
             }
@@ -5727,6 +5727,217 @@ impl Workspace {
     /// The center panes in tree order (left before right, top before bottom).
     pub fn center_panes(&self) -> Vec<Entity<Pane>> {
         self.center.panes().into_iter().cloned().collect()
+    }
+
+    /// Closes the center pane `pane` after moving every one of its tabs into the
+    /// center pane `into`, so no tab or buffer is closed and no save prompt shows.
+    ///
+    /// Tabs move in tab order. Pinned tabs join the end of `into`'s pinned run and
+    /// stay pinned, the rest go to the end; none is activated. A preview tab stays
+    /// a preview only when `into` has none. A tab for a file that `into` already
+    /// shows is dropped in favor of `into`'s tab, which shares the same buffer.
+    /// The emptied pane is then removed once and `into` is focused.
+    ///
+    /// Errors without any change when either pane is not a center pane or both
+    /// are the same pane.
+    pub fn close_pane_keeping_tabs(
+        &mut self,
+        pane: &Entity<Pane>,
+        into: &Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        anyhow::ensure!(pane != into, "cannot close a pane into itself");
+        let center_panes = self.center_panes();
+        anyhow::ensure!(
+            center_panes.contains(pane) && center_panes.contains(into),
+            "both panes must be center panes"
+        );
+
+        // Removing a tab clears its pinned and preview state, so record both first.
+        let tabs = {
+            let source = pane.read(cx);
+            let pinned_count = source.pinned_count();
+            let preview_id = source.preview_item_id();
+            source
+                .items()
+                .enumerate()
+                .map(|(ix, item)| {
+                    let item_id = item.item_id();
+                    (item_id, ix < pinned_count, preview_id == Some(item_id))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for (item_id, pinned, preview) in tabs {
+            let destination_index = if pinned {
+                Some(into.read(cx).pinned_count())
+            } else {
+                None
+            };
+            if self.move_item_keeping_pane_at(
+                pane,
+                into,
+                item_id,
+                destination_index,
+                false,
+                window,
+                cx,
+            ) != KeptPaneMove::Moved
+            {
+                continue;
+            }
+            into.update(cx, |into, cx| {
+                if pinned {
+                    into.set_pinned_count(into.pinned_count() + 1);
+                } else if preview && into.preview_item_id().is_none() {
+                    into.set_preview_item_id(Some(item_id), cx);
+                }
+                cx.notify();
+            });
+        }
+
+        if pane.read(cx).is_zoomed() {
+            pane.update(cx, |pane, cx| pane.set_zoomed(false, cx));
+            if self.zoomed_position.is_none() {
+                self.zoomed = None;
+                cx.emit(Event::ZoomChanged);
+            }
+        }
+        self.remove_pane(pane.clone(), Some(into.clone()), window, cx);
+        Ok(())
+    }
+
+    /// Moves the tab `item_id` from `source` to the end of `destination` without
+    /// closing either pane or any other tab: `source` stays even when this empties
+    /// it, and no `destination` tab closes under the `max_tabs` setting. When
+    /// `destination` already shows the tab's file, the moved tab is dropped in
+    /// favor of the existing one, which shares the same buffer.
+    ///
+    /// Returns false, changing nothing, when `source` no longer holds the tab (it
+    /// was closed elsewhere) or both panes are the same.
+    pub fn move_item_keeping_pane(
+        &mut self,
+        source: &Entity<Pane>,
+        destination: &Entity<Pane>,
+        item_id: EntityId,
+        activate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.move_item_keeping_pane_at(source, destination, item_id, None, activate, window, cx)
+            != KeptPaneMove::Gone
+    }
+
+    /// Like `move_item_keeping_pane`, inserting at `destination_index` (the end
+    /// when `None`). Keeps the destination's active tab when not activating.
+    fn move_item_keeping_pane_at(
+        &mut self,
+        source: &Entity<Pane>,
+        destination: &Entity<Pane>,
+        item_id: EntityId,
+        destination_index: Option<usize>,
+        activate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> KeptPaneMove {
+        if source == destination {
+            return KeptPaneMove::Gone;
+        }
+        let Some(item) = source
+            .read(cx)
+            .items()
+            .find(|item| item.item_id() == item_id)
+            .cloned()
+        else {
+            return KeptPaneMove::Gone;
+        };
+
+        let duplicate = item.buffer_kind(cx) == ItemBufferKind::Singleton
+            && item.project_entry_ids(cx).first().is_some_and(|entry_id| {
+                destination.read(cx).items().any(|existing| {
+                    existing.buffer_kind(cx) == ItemBufferKind::Singleton
+                        && existing.project_entry_ids(cx).first() == Some(entry_id)
+                })
+            });
+
+        source.update(cx, |source, cx| {
+            source.remove_item(item_id, false, false, window, cx);
+        });
+        if duplicate {
+            return KeptPaneMove::Dropped;
+        }
+
+        destination.update(cx, |destination, cx| {
+            let previously_active = destination.active_item().map(|item| item.item_id());
+            let index = destination_index
+                .unwrap_or(destination.items_len())
+                .min(destination.items_len());
+            destination.add_item_inner(
+                item,
+                activate,
+                activate,
+                activate,
+                Some(index),
+                true,
+                window,
+                cx,
+            );
+            let previously_active_ix = previously_active.and_then(|previously_active| {
+                destination
+                    .items()
+                    .position(|item| item.item_id() == previously_active)
+            });
+            if !activate
+                && let Some(ix) = previously_active_ix
+                && ix != destination.active_item_index()
+            {
+                destination.activate_item(ix, false, false, window, cx);
+            }
+            if activate {
+                window.focus(&destination.focus_handle(cx), cx);
+            }
+        });
+        KeptPaneMove::Moved
+    }
+
+    /// Lays out the center, which must hold exactly `first` and `second`, as one
+    /// `axis` with `first` before `second`. Keeps the split sizes when the center
+    /// already is a split along `axis`. Errors without a change otherwise.
+    pub fn arrange_center_pair(
+        &mut self,
+        first: &Entity<Pane>,
+        second: &Entity<Pane>,
+        axis: gpui::Axis,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        self.center.arrange_pair(first, second, axis, cx)?;
+        cx.notify();
+        Ok(())
+    }
+
+    /// Swaps the places of two different center panes in the split tree.
+    /// Errors without a change when either is not a center pane.
+    pub fn swap_center_panes(
+        &mut self,
+        a: &Entity<Pane>,
+        b: &Entity<Pane>,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let center_panes = self.center_panes();
+        anyhow::ensure!(
+            a != b && center_panes.contains(a) && center_panes.contains(b),
+            "both panes must be different center panes"
+        );
+        self.center.swap(a, b, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    /// The center pane next to `pane`: the following member of its parent split,
+    /// else the preceding one, descending into a nested split to the nearest pane.
+    pub fn center_sibling(&self, pane: &Entity<Pane>) -> Option<Entity<Pane>> {
+        self.center.sibling_of(pane)
     }
 
     /// Stops every center pane and dock panel from being zoomed. Docks stay open
@@ -10169,6 +10380,17 @@ fn move_all_items(
     }
 }
 
+/// What happened to a tab moved between panes without closing either pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeptPaneMove {
+    /// The tab is no longer in the source pane, so nothing changed.
+    Gone,
+    /// The destination already shows the tab's file; the moved tab was dropped.
+    Dropped,
+    /// The tab now sits in the destination pane.
+    Moved,
+}
+
 pub fn move_item(
     source: &Entity<Pane>,
     destination: &Entity<Pane>,
@@ -10204,6 +10426,7 @@ pub fn move_item(
             activate,
             activate,
             Some(destination_index),
+            false,
             window,
             cx,
         );
@@ -13660,6 +13883,527 @@ mod tests {
                 "focus does not move"
             );
         });
+    }
+
+    /// Splits the only center pane to the right, returning `(left, right)`.
+    fn split_center_in_two(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> (Entity<Pane>, Entity<Pane>) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left = workspace.active_pane().clone();
+            let right = workspace.split_pane(left.clone(), SplitDirection::Right, window, cx);
+            (left, right)
+        })
+    }
+
+    fn add_test_items(
+        workspace: &Entity<Workspace>,
+        pane: &Entity<Pane>,
+        items: &[&Entity<TestItem>],
+        cx: &mut VisualTestContext,
+    ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            for item in items {
+                workspace.add_item(
+                    pane.clone(),
+                    Box::new((*item).clone()),
+                    None,
+                    false,
+                    false,
+                    window,
+                    cx,
+                );
+            }
+        });
+    }
+
+    fn pane_item_ids(pane: &Entity<Pane>, cx: &mut VisualTestContext) -> Vec<EntityId> {
+        pane.read_with(cx, |pane, _| {
+            pane.items().map(|item| item.item_id()).collect()
+        })
+    }
+
+    fn set_workspace_max_tabs(cx: &mut VisualTestContext, max_tabs: Option<usize>) {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.workspace.max_tabs = max_tabs.and_then(std::num::NonZeroUsize::new);
+                });
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_pane_keeping_tabs_moves_every_tab_in_order(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left, right) = split_center_in_two(&workspace, cx);
+
+        let a = cx.new(TestItem::new);
+        let b = cx.new(TestItem::new);
+        let c = cx.new(TestItem::new);
+        let d = cx.new(TestItem::new);
+        let x = cx.new(TestItem::new);
+        let y = cx.new(TestItem::new);
+        add_test_items(&workspace, &left, &[&a, &b, &c, &d], cx);
+        add_test_items(&workspace, &right, &[&x, &y], cx);
+        let d_id = d.entity_id();
+        left.update(cx, |pane, cx| {
+            pane.set_pinned_count(2);
+            pane.set_preview_item_id(Some(d_id), cx);
+        });
+        right.update(cx, |pane, _| pane.set_pinned_count(1));
+        let active_before = right.read_with(cx, |pane, _| pane.active_item_index());
+        assert_eq!(active_before, 1, "y is active in the destination");
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_pane_keeping_tabs(&left, &right, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane_item_ids(&right, cx),
+            vec![
+                x.entity_id(),
+                a.entity_id(),
+                b.entity_id(),
+                y.entity_id(),
+                c.entity_id(),
+                d.entity_id(),
+            ],
+            "pinned tabs join the pinned run, the rest go to the end, in tab order"
+        );
+        right.read_with(cx, |pane, _| {
+            assert_eq!(pane.pinned_count(), 3, "moved pinned tabs stay pinned");
+            assert_eq!(
+                pane.active_item().map(|item| item.item_id()),
+                Some(y.entity_id()),
+                "no moved tab is activated"
+            );
+            assert_eq!(
+                pane.preview_item_id(),
+                Some(d_id),
+                "the preview stays a preview"
+            );
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.center_panes(), vec![right.clone()]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_pane_keeping_tabs_keeps_dirty_buffer_dirty(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left, right) = split_center_in_two(&workspace, cx);
+
+        let dirty = cx.new(|cx| {
+            TestItem::new(cx)
+                .with_dirty(true)
+                .with_project_items(&[dirty_project_item(1, "dirty.txt", cx)])
+        });
+        add_test_items(&workspace, &left, &[&dirty], cx);
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_pane_keeping_tabs(&left, &right, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(!cx.has_pending_prompt(), "no save prompt is shown");
+        assert_eq!(pane_item_ids(&right, cx), vec![dirty.entity_id()]);
+        right.read_with(cx, |pane, cx| {
+            assert!(pane.items().all(|item| item.is_dirty(cx)));
+        });
+        dirty.read_with(cx, |item, cx| {
+            assert!(item.project_items[0].read(cx).is_dirty);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_pane_keeping_tabs_ignores_max_tabs(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        set_workspace_max_tabs(cx, Some(2));
+        cx.run_until_parked();
+        let (left, right) = split_center_in_two(&workspace, cx);
+
+        let a = cx.new(TestItem::new);
+        let b = cx.new(TestItem::new);
+        let x = cx.new(TestItem::new);
+        let y = cx.new(TestItem::new);
+        add_test_items(&workspace, &left, &[&a, &b], cx);
+        add_test_items(&workspace, &right, &[&x, &y], cx);
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_pane_keeping_tabs(&left, &right, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            pane_item_ids(&right, cx),
+            vec![x.entity_id(), y.entity_id(), a.entity_id(), b.entity_id()],
+            "no tab is closed to respect max_tabs"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_close_pane_keeping_tabs_drops_duplicate_file(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left, right) = split_center_in_two(&workspace, cx);
+
+        let shared = cx.update(|_, cx| dirty_project_item(1, "shared.txt", cx));
+        let left_copy = cx.new(|cx| {
+            TestItem::new(cx)
+                .with_dirty(true)
+                .with_project_items(std::slice::from_ref(&shared))
+        });
+        let other = cx.new(|cx| {
+            TestItem::new(cx).with_project_items(&[TestProjectItem::new(2, "other.txt", cx)])
+        });
+        let right_copy = cx.new(|cx| {
+            TestItem::new(cx)
+                .with_dirty(true)
+                .with_project_items(std::slice::from_ref(&shared))
+        });
+        add_test_items(&workspace, &left, &[&left_copy, &other], cx);
+        add_test_items(&workspace, &right, &[&right_copy], cx);
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_pane_keeping_tabs(&left, &right, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(!cx.has_pending_prompt(), "no save prompt is shown");
+        assert_eq!(
+            pane_item_ids(&right, cx),
+            vec![right_copy.entity_id(), other.entity_id()],
+            "the destination's tab for the shared file is kept"
+        );
+        right_copy.read_with(cx, |item, cx| {
+            assert!(item.is_dirty);
+            assert_eq!(item.project_items[0].entity_id(), shared.entity_id());
+            assert!(item.project_items[0].read(cx).is_dirty, "no text is lost");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_pane_keeping_tabs_removes_pane_once_and_focuses_into(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left, right) = split_center_in_two(&workspace, cx);
+        let a = cx.new(TestItem::new);
+        let b = cx.new(TestItem::new);
+        add_test_items(&workspace, &left, &[&a, &b], cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_active_pane(&left, window, cx);
+            window.focus(&left.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.active_pane(),
+                &left,
+                "the closed pane starts active"
+            );
+        });
+
+        let panes_removed = Rc::new(std::cell::Cell::new(0));
+        let remove_requests = Rc::new(std::cell::Cell::new(0));
+        let _subscriptions = workspace.update(cx, |_, cx| {
+            let panes_removed = panes_removed.clone();
+            let remove_requests = remove_requests.clone();
+            [
+                cx.subscribe(&workspace, move |_, _, event: &Event, _| {
+                    if matches!(event, Event::PaneRemoved) {
+                        panes_removed.set(panes_removed.get() + 1);
+                    }
+                }),
+                cx.subscribe(&left, move |_, _, event: &pane::Event, _| {
+                    if matches!(event, pane::Event::Remove { .. }) {
+                        remove_requests.set(remove_requests.get() + 1);
+                    }
+                }),
+            ]
+        });
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_pane_keeping_tabs(&left, &right, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(panes_removed.get(), 1, "the pane is removed exactly once");
+        assert_eq!(
+            remove_requests.get(),
+            0,
+            "the emptied pane never asks to be removed"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(workspace.center_panes(), vec![right.clone()]);
+            assert!(!workspace.panes().contains(&left));
+            assert_eq!(workspace.active_pane(), &right);
+            assert!(right.read(cx).focus_handle(cx).contains_focused(window, cx));
+        });
+
+        // An empty pane is removed with nothing moved.
+        let empty = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_pane(right.clone(), SplitDirection::Down, window, cx)
+        });
+        panes_removed.set(0);
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_pane_keeping_tabs(&empty, &right, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(panes_removed.get(), 1);
+        assert_eq!(
+            pane_item_ids(&right, cx),
+            vec![a.entity_id(), b.entity_id()]
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.center_panes(), vec![right.clone()]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_pane_keeping_tabs_never_reactivates_removed_pane(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left, right) = split_center_in_two(&workspace, cx);
+        let a = cx.new(TestItem::new);
+        let b = cx.new(TestItem::new);
+        let c = cx.new(TestItem::new);
+        add_test_items(&workspace, &left, &[&a, &b, &c], cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_active_pane(&left, window, cx);
+            left.update(cx, |pane, cx| pane.activate_item(1, true, true, window, cx));
+            window.focus(&left.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_pane_keeping_tabs(&left, &right, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.center_panes().contains(&left));
+            assert_eq!(workspace.active_pane(), &right);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_close_pane_keeping_tabs_rejects_same_or_dock_pane(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left, right) = split_center_in_two(&workspace, cx);
+        let a = cx.new(TestItem::new);
+        let docked = cx.new(TestItem::new);
+        add_test_items(&workspace, &left, &[&a], cx);
+
+        let dock_pane = workspace.update_in(cx, |workspace, window, cx| {
+            let dock_pane = cx.new(|cx| {
+                Pane::new(
+                    workspace.weak_handle(),
+                    workspace.project().clone(),
+                    Default::default(),
+                    None,
+                    NewFile.boxed_clone(),
+                    false,
+                    window,
+                    cx,
+                )
+            });
+            dock_pane.update(cx, |pane, cx| {
+                pane.add_item(Box::new(docked.clone()), false, false, None, window, cx);
+            });
+            let panel = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Right, 100, cx);
+                panel.pane = Some(dock_pane.clone());
+                panel
+            });
+            workspace.add_panel(panel, window, cx);
+            dock_pane
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace
+                    .close_pane_keeping_tabs(&left, &left, window, cx)
+                    .is_err()
+            );
+            assert!(
+                workspace
+                    .close_pane_keeping_tabs(&left, &dock_pane, window, cx)
+                    .is_err()
+            );
+            assert!(
+                workspace
+                    .close_pane_keeping_tabs(&dock_pane, &right, window, cx)
+                    .is_err()
+            );
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.center_panes(), vec![left.clone(), right.clone()]);
+        });
+        assert_eq!(pane_item_ids(&left, cx), vec![a.entity_id()]);
+        assert!(pane_item_ids(&right, cx).is_empty());
+        assert_eq!(pane_item_ids(&dock_pane, cx), vec![docked.entity_id()]);
+    }
+
+    #[gpui::test]
+    async fn test_arrange_swap_and_sibling_keeping_center_panes(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let (left, right) = split_center_in_two(&workspace, cx);
+
+        let root_flexes = |workspace: &Workspace| match &workspace.center.root {
+            Member::Axis(axis) => Some((axis.axis, axis.flexes.lock().clone())),
+            Member::Pane(_) => None,
+        };
+        workspace.update(cx, |workspace, _| {
+            if let Member::Axis(axis) = &workspace.center.root {
+                *axis.flexes.lock() = vec![0.6, 1.4];
+            }
+        });
+
+        // Same axis: the order changes and the sizes stay.
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .arrange_center_pair(&right, &left, gpui::Axis::Horizontal, cx)
+                .unwrap();
+            assert_eq!(workspace.center_panes(), vec![right.clone(), left.clone()]);
+            assert_eq!(
+                root_flexes(workspace),
+                Some((gpui::Axis::Horizontal, vec![0.6, 1.4]))
+            );
+        });
+        // Other axis: a fresh split.
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .arrange_center_pair(&left, &right, gpui::Axis::Vertical, cx)
+                .unwrap();
+            assert_eq!(workspace.center_panes(), vec![left.clone(), right.clone()]);
+            assert_eq!(
+                root_flexes(workspace),
+                Some((gpui::Axis::Vertical, vec![1.0, 1.0]))
+            );
+        });
+
+        // Three panes: left above a row of right and third.
+        let third = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_pane(right.clone(), SplitDirection::Right, window, cx)
+        });
+        workspace.update(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.center_panes(),
+                vec![left.clone(), right.clone(), third.clone()]
+            );
+            assert!(
+                workspace
+                    .arrange_center_pair(&left, &right, gpui::Axis::Horizontal, cx)
+                    .is_err(),
+                "a pair needs exactly two center panes"
+            );
+            assert_eq!(
+                workspace.center_panes(),
+                vec![left.clone(), right.clone(), third.clone()]
+            );
+
+            assert_eq!(workspace.center_sibling(&left), Some(right.clone()));
+            assert_eq!(workspace.center_sibling(&right), Some(third.clone()));
+            assert_eq!(workspace.center_sibling(&third), Some(right.clone()));
+
+            assert!(workspace.swap_center_panes(&left, &left, cx).is_err());
+            workspace.swap_center_panes(&left, &third, cx).unwrap();
+            assert_eq!(
+                workspace.center_panes(),
+                vec![third.clone(), right.clone(), left.clone()]
+            );
+            assert_eq!(workspace.center_sibling(&left), Some(right.clone()));
+            assert_eq!(workspace.center_sibling(&third), Some(right.clone()));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_move_item_keeping_pane_keeps_empty_source(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        set_workspace_max_tabs(cx, Some(2));
+        cx.run_until_parked();
+        let (left, right) = split_center_in_two(&workspace, cx);
+        let a = cx.new(TestItem::new);
+        let x = cx.new(TestItem::new);
+        let y = cx.new(TestItem::new);
+        add_test_items(&workspace, &left, &[&a], cx);
+        add_test_items(&workspace, &right, &[&x, &y], cx);
+
+        let moved = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.move_item_keeping_pane(&left, &right, a.entity_id(), false, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(moved);
+        assert!(pane_item_ids(&left, cx).is_empty());
+        assert_eq!(
+            pane_item_ids(&right, cx),
+            vec![x.entity_id(), y.entity_id(), a.entity_id()],
+            "no destination tab closes under max_tabs"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.center_panes(), vec![left.clone(), right.clone()]);
+        });
+
+        // A tab that is gone is skipped.
+        let moved_again = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.move_item_keeping_pane(&left, &right, a.entity_id(), false, window, cx)
+        });
+        assert!(!moved_again);
+        assert_eq!(pane_item_ids(&right, cx).len(), 3);
     }
 
     #[gpui::test]

@@ -283,6 +283,53 @@ impl PaneGroup {
         self.root.invert_pane_axies();
         self.mark_positions(cx);
     }
+
+    /// Lays out a group that holds exactly `first` and `second` as one `axis`
+    /// with `first` before `second`. When the root already is a two-pane split
+    /// along `axis`, its flexes are kept. Errors without a change when the group
+    /// holds any other set of panes.
+    pub fn arrange_pair(
+        &mut self,
+        first: &Entity<Pane>,
+        second: &Entity<Pane>,
+        axis: Axis,
+        cx: &mut App,
+    ) -> Result<()> {
+        let panes = self.panes();
+        anyhow::ensure!(
+            first != second
+                && panes.len() == 2
+                && panes.contains(&first)
+                && panes.contains(&second),
+            "the group must hold exactly the two given panes"
+        );
+        let members = vec![Member::Pane(first.clone()), Member::Pane(second.clone())];
+        match &mut self.root {
+            Member::Axis(root)
+                if root.axis == axis
+                    && root.members.len() == 2
+                    && root
+                        .members
+                        .iter()
+                        .all(|member| matches!(member, Member::Pane(_))) =>
+            {
+                root.members = members;
+            }
+            _ => self.root = Member::Axis(PaneAxis::new(axis, members)),
+        }
+        self.mark_positions(cx);
+        Ok(())
+    }
+
+    /// The pane next to `pane` in its parent split: the following member when
+    /// there is one, else the preceding one, descending into a nested split to
+    /// the pane nearest `pane`. `None` when `pane` is the only pane or absent.
+    pub fn sibling_of(&self, pane: &Entity<Pane>) -> Option<Entity<Pane>> {
+        match &self.root {
+            Member::Pane(_) => None,
+            Member::Axis(axis) => axis.sibling_of(pane),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -755,6 +802,29 @@ impl PaneAxis {
             apply_changes(ix, amount, flexes.as_mut_slice());
         }
         Some(true)
+    }
+
+    fn sibling_of(&self, pane: &Entity<Pane>) -> Option<Entity<Pane>> {
+        for (idx, member) in self.members.iter().enumerate() {
+            match member {
+                Member::Axis(axis) => {
+                    if let Some(sibling) = axis.sibling_of(pane) {
+                        return Some(sibling);
+                    }
+                }
+                Member::Pane(member_pane) if member_pane == pane => {
+                    return if let Some(next) = self.members.get(idx + 1) {
+                        Some(next.first_pane())
+                    } else {
+                        idx.checked_sub(1)
+                            .and_then(|prev| self.members.get(prev))
+                            .map(|prev| prev.last_pane())
+                    };
+                }
+                Member::Pane(_) => {}
+            }
+        }
+        None
     }
 
     fn swap(&mut self, from: &Entity<Pane>, to: &Entity<Pane>) {
