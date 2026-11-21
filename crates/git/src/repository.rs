@@ -1203,6 +1203,21 @@ impl RealGitRepository {
         log::info!(
             "opening git repository at {dotgit_path:?} using git binary {any_git_binary_path:?}"
         );
+        let refuse = || {
+            anyhow!(
+                "not opening {}: its git data was written by a bongos job",
+                dotgit_path.display()
+            )
+        };
+        // Git and the kernel resolve symbolic links before `..`, so a path is checked as written
+        // as well as after lexical normalization: `link/..` may lead somewhere else than the
+        // normalized path does.
+        let checked_normalize = |path: PathBuf| -> Result<PathBuf> {
+            if in_job_root(&path) {
+                return Err(refuse());
+            }
+            normalize_git_metadata_path(path)
+        };
         let dotgit_parent = dotgit_path.parent().context(".git has no parent")?;
         let has_working_directory =
             dotgit_path.is_file() || dotgit_path.file_name() == Some(OsStr::new(".git"));
@@ -1225,9 +1240,9 @@ impl RealGitRepository {
             } else {
                 dotgit_parent.join(resolved)
             };
-            normalize_git_metadata_path(resolved)?
+            checked_normalize(resolved)?
         } else {
-            normalize_git_metadata_path(dotgit_path.to_path_buf())?
+            checked_normalize(dotgit_path.to_path_buf())?
         };
 
         let common_dir = {
@@ -1242,17 +1257,14 @@ impl RealGitRepository {
                 } else {
                     git_dir.join(resolved)
                 };
-                normalize_git_metadata_path(resolved)?
+                checked_normalize(resolved)?
             } else {
                 git_dir.clone()
             }
         };
 
         if in_job_root(&git_dir) || in_job_root(&common_dir) {
-            bail!(
-                "not opening {}: its git data was written by a bongos job",
-                dotgit_path.display()
-            );
+            return Err(refuse());
         }
 
         Ok(Self {
@@ -5717,7 +5729,7 @@ mod tests {
             .register(&other, &[], util::job_roots::RootLifetime::Permanent)
             .unwrap();
 
-        assert!(open_with_job_roots(&roots, &main.join("mirror.git"), cx).is_ok());
+        assert_refused(open_with_job_roots(&roots, &main.join("mirror.git"), cx));
         assert!(open_with_job_roots(&roots, &main.join(".git"), cx).is_ok());
         assert!(!roots.contains(&main.join("file.txt")));
         assert_refused(open_with_job_roots(
@@ -5726,5 +5738,83 @@ mod tests {
             cx,
         ));
         assert!(roots.contains(&other));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn test_job_roots_git_file_through_symlink_and_parent_into_root_is_refused(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let parent = temp_dir.path().join("parent");
+        let root = parent.join("tree");
+        fs::create_dir_all(root.join("x").join("y")).unwrap();
+        std::os::unix::fs::symlink(root.join("x").join("y"), root.join("s")).unwrap();
+        // The kernel resolves `tree/s/../..` to `tree`; lexically it is `parent`.
+        git_init_repo(&root.join("repo"));
+        git_init_repo(&parent.join("repo"));
+        let gitdir = root
+            .join("s")
+            .join("..")
+            .join("..")
+            .join("repo")
+            .join(".git");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            outside.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        roots
+            .register(&root, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+
+        assert!(!roots.contains(&parent.join("repo").join(".git")));
+        assert!(roots.contains(&gitdir));
+        assert_refused(open_with_job_roots(&roots, &outside.join(".git"), cx));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn test_job_roots_commondir_through_symlink_and_parent_into_root_is_refused(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let roots = job_roots_in(temp_dir.path());
+        let parent = temp_dir.path().join("parent");
+        let root = parent.join("tree");
+        fs::create_dir_all(root.join("x").join("y")).unwrap();
+        std::os::unix::fs::symlink(root.join("x").join("y"), root.join("s")).unwrap();
+        git_init_repo(&root.join("repo"));
+        git_init_repo(&parent.join("repo"));
+        let git_dir = temp_dir.path().join("linked-git-dir");
+        fs::create_dir_all(&git_dir).unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            outside.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        let common_dir = root
+            .join("s")
+            .join("..")
+            .join("..")
+            .join("repo")
+            .join(".git");
+        fs::write(
+            git_dir.join("commondir"),
+            format!("{}\n", common_dir.display()),
+        )
+        .unwrap();
+        roots
+            .register(&root, &[], util::job_roots::RootLifetime::Permanent)
+            .unwrap();
+
+        assert_refused(open_with_job_roots(&roots, &outside.join(".git"), cx));
     }
 }

@@ -67,7 +67,8 @@ struct RootsFile {
 }
 
 /// What identifies one version of `roots.json`: every write replaces the file by a rename, so a
-/// new version has a new inode.
+/// new version has a new inode. The cache keeps the cached version open, so its inode cannot be
+/// freed and reused by a later version while it is cached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stamp {
     inode: u64,
@@ -92,7 +93,17 @@ impl Stamp {
 #[derive(Default)]
 struct Cache {
     stamp: Option<Stamp>,
+    /// The open version of the file `stamp` describes, held so its inode stays allocated.
+    file: Option<File>,
     entries: Arc<Vec<Entry>>,
+}
+
+/// One version of the file as read: its entries, its stamp and the open handle (both `None` when
+/// the file does not exist).
+struct Version {
+    entries: Vec<Entry>,
+    stamp: Option<Stamp>,
+    file: Option<File>,
 }
 
 /// One view of a registry file. Several instances may share a file, in one process or many.
@@ -127,13 +138,16 @@ impl JobRoots {
             return Ok(());
         }
         self.modify(false, |entries| {
+            // By design: an entry whose root is gone has nothing left to protect, so it is
+            // dropped.
             entries.retain(|entry| entry.root.exists());
             Ok(())
         })
     }
 
-    /// Registers `root`, except the paths in `excluded`. Replaces an earlier entry for the same
-    /// root.
+    /// Registers `root`, except the paths in `excluded`, which must exist. A job-lifetime entry
+    /// replaces an earlier job-lifetime entry for the same root; a permanent entry is never
+    /// replaced, the new entry is added beside it.
     pub fn register(
         &self,
         root: &Path,
@@ -144,7 +158,10 @@ impl JobRoots {
             .with_context(|| format!("canonicalizing job root {}", root.display()))?;
         let excluded = excluded
             .iter()
-            .map(|path| canonicalize_lenient(path))
+            .map(|path| {
+                fs::canonicalize(path)
+                    .with_context(|| format!("canonicalizing excluded path {}", path.display()))
+            })
             .collect::<Result<Vec<_>>>()?;
         let entry = Entry {
             root,
@@ -152,25 +169,35 @@ impl JobRoots {
             lifetime,
         };
         self.modify(true, move |entries| {
-            entries.retain(|existing| existing.root != entry.root);
-            entries.push(entry);
+            if matches!(entry.lifetime, RootLifetime::Job { .. }) {
+                entries.retain(|existing| {
+                    existing.root != entry.root
+                        || !matches!(existing.lifetime, RootLifetime::Job { .. })
+                });
+            }
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
             Ok(())
         })
     }
 
-    /// Retires the entry for `root`, registering each nested repository inside it permanently.
-    /// Does nothing when `root` is not registered.
+    /// Retires every entry for `root`, registering each nested repository inside it
+    /// permanently. Does nothing when `root` is not registered; fails when `root` cannot be
+    /// canonicalized.
     pub fn retire(&self, root: &Path) -> Result<()> {
-        let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let root = fs::canonicalize(root)
+            .with_context(|| format!("canonicalizing job root {}", root.display()))?;
         if !self.path.exists() {
             return Ok(());
         }
         self.modify(false, |entries| {
-            let Some(index) = entries.iter().position(|entry| entry.root == root) else {
-                return Ok(());
-            };
-            let entry = entries.remove(index);
-            retire_entry(entry, entries);
+            let (retired, kept): (Vec<_>, Vec<_>) =
+                entries.drain(..).partition(|entry| entry.root == root);
+            *entries = kept;
+            for entry in retired {
+                retire_entry(entry, entries);
+            }
             Ok(())
         })
     }
@@ -213,26 +240,33 @@ impl JobRoots {
             }
         }
         if stamp.is_none() {
-            let mut cache = self.write_cache();
-            *cache = Cache::default();
-            return cache.entries.clone();
+            // The old handle is closed after the lock is released.
+            let _old = std::mem::take(&mut *self.write_cache());
+            return Arc::default();
         }
         match self.read_shared() {
-            Ok((entries, stamp)) => {
-                let entries = Arc::new(entries);
-                let mut cache = self.write_cache();
-                cache.stamp = stamp;
-                cache.entries = entries.clone();
+            Ok(version) => {
+                let entries = Arc::new(version.entries);
+                let _old_file = {
+                    let mut cache = self.write_cache();
+                    cache.stamp = version.stamp;
+                    cache.entries = entries.clone();
+                    std::mem::replace(&mut cache.file, version.file)
+                };
                 entries
             }
-            Err(ReadError::Corrupt(stamp, error)) => {
+            Err(ReadError::Corrupt(stamp, file, error)) => {
                 log::error!(
                     "job roots: {} is corrupt, keeping the last copy: {error:#}",
                     self.path.display()
                 );
-                let mut cache = self.write_cache();
-                cache.stamp = Some(stamp);
-                cache.entries.clone()
+                let (entries, _old_file) = {
+                    let mut cache = self.write_cache();
+                    cache.stamp = Some(stamp);
+                    let old_file = std::mem::replace(&mut cache.file, Some(file));
+                    (cache.entries.clone(), old_file)
+                };
+                entries
             }
             Err(ReadError::Io(error)) => {
                 log::error!(
@@ -265,7 +299,7 @@ impl JobRoots {
     }
 
     /// Reads the file under a shared lock. A missing file is an empty list.
-    fn read_shared(&self) -> std::result::Result<(Vec<Entry>, Option<Stamp>), ReadError> {
+    fn read_shared(&self) -> std::result::Result<Version, ReadError> {
         let lock = self.open_lock_file().map_err(ReadError::Io)?;
         lock.lock_shared()
             .with_context(|| format!("locking {}", self.lock_path.display()))
@@ -277,10 +311,16 @@ impl JobRoots {
         result
     }
 
-    fn read_file(&self) -> std::result::Result<(Vec<Entry>, Option<Stamp>), ReadError> {
+    fn read_file(&self) -> std::result::Result<Version, ReadError> {
         let mut file = match File::open(&self.path) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Version {
+                    entries: Vec::new(),
+                    stamp: None,
+                    file: None,
+                });
+            }
             Err(error) => {
                 return Err(ReadError::Io(
                     anyhow!(error).context(format!("opening {}", self.path.display())),
@@ -298,8 +338,12 @@ impl JobRoots {
             .with_context(|| format!("reading {}", self.path.display()))
             .map_err(ReadError::Io)?;
         match serde_json::from_str::<RootsFile>(&text) {
-            Ok(file) => Ok((file.roots, Some(stamp))),
-            Err(error) => Err(ReadError::Corrupt(stamp, anyhow!(error))),
+            Ok(contents) => Ok(Version {
+                entries: contents.roots,
+                stamp: Some(stamp),
+                file: Some(file),
+            }),
+            Err(error) => Err(ReadError::Corrupt(stamp, file, anyhow!(error))),
         }
     }
 
@@ -327,9 +371,11 @@ impl JobRoots {
 
     fn modify_locked(&self, change: impl FnOnce(&mut Vec<Entry>) -> Result<()>) -> Result<()> {
         let (mut entries, file_exists) = match self.read_file() {
-            Ok((entries, stamp)) => (entries, stamp.is_some()),
+            Ok(version) => (version.entries, version.stamp.is_some()),
             Err(ReadError::Io(error)) => return Err(error),
-            Err(ReadError::Corrupt(_, error)) => {
+            // By design: the entries of a corrupt file cannot be trusted, so they are dropped and
+            // the file is set aside for inspection.
+            Err(ReadError::Corrupt(_, _, error)) => {
                 self.set_corrupt_file_aside(&error)?;
                 (Vec::new(), false)
             }
@@ -415,7 +461,7 @@ impl JobRoots {
 
 enum ReadError {
     Io(anyhow::Error),
-    Corrupt(Stamp, anyhow::Error),
+    Corrupt(Stamp, File, anyhow::Error),
 }
 
 /// Registers each nested repository inside `entry`'s root permanently (into `entries`). When the
@@ -427,12 +473,13 @@ fn retire_entry(entry: Entry, entries: &mut Vec<Entry>) {
     match nested_repositories(&entry) {
         Ok(nested) => {
             for root in nested {
-                if !entries.iter().any(|existing| existing.root == root) {
-                    entries.push(Entry {
-                        root,
-                        excluded: Vec::new(),
-                        lifetime: RootLifetime::Permanent,
-                    });
+                let entry = Entry {
+                    root,
+                    excluded: Vec::new(),
+                    lifetime: RootLifetime::Permanent,
+                };
+                if !entries.contains(&entry) {
+                    entries.push(entry);
                 }
             }
         }
@@ -449,8 +496,9 @@ fn retire_entry(entry: Entry, entries: &mut Vec<Entry>) {
     }
 }
 
-/// The working directories of the repositories inside `entry`'s root: each directory holding a
-/// `.git` file or directory, other than the excluded ones. Does not follow symbolic links.
+/// The repositories inside `entry`'s root, outside its excluded paths: each directory holding a
+/// `.git` file or directory, and each directory shaped like a git directory under any name (a
+/// bare repository, or the target of a `.git` file). Does not follow symbolic links.
 fn nested_repositories(entry: &Entry) -> Result<Vec<PathBuf>> {
     let mut nested = Vec::new();
     let mut visited = 0;
@@ -467,40 +515,38 @@ fn nested_repositories(entry: &Entry) -> Result<Vec<PathBuf>> {
         if item.depth() == MAX_WALK_DEPTH && item.file_type().is_dir() {
             anyhow::bail!("deeper than {MAX_WALK_DEPTH} directories");
         }
-        if item.file_name() != ".git" {
-            continue;
-        }
-        if item.file_type().is_dir() {
-            walk.skip_current_dir();
-        }
+        let is_dir = item.file_type().is_dir();
         if entry
             .excluded
             .iter()
             .any(|excluded| excluded == item.path())
         {
+            if is_dir {
+                walk.skip_current_dir();
+            }
             continue;
         }
-        if let Some(parent) = item.path().parent() {
-            nested.push(parent.to_path_buf());
+        if item.file_name() == ".git" {
+            if is_dir {
+                walk.skip_current_dir();
+            }
+            if let Some(parent) = item.path().parent() {
+                nested.push(parent.to_path_buf());
+            }
+        } else if is_dir && looks_like_git_directory(item.path()) {
+            walk.skip_current_dir();
+            nested.push(item.path().to_path_buf());
         }
     }
     Ok(nested)
 }
 
-/// Canonicalizes `path`, or its parent when `path` itself does not exist.
-fn canonicalize_lenient(path: &Path) -> Result<PathBuf> {
-    if let Ok(canonical) = fs::canonicalize(path) {
-        return Ok(canonical);
-    }
-    let parent = path
-        .parent()
-        .with_context(|| format!("canonicalizing {}", path.display()))?;
-    let name = path
-        .file_name()
-        .with_context(|| format!("canonicalizing {}", path.display()))?;
-    Ok(fs::canonicalize(parent)
-        .with_context(|| format!("canonicalizing {}", parent.display()))?
-        .join(name))
+/// Whether `directory` holds `HEAD`, `objects` and `refs`, the entries git looks for in a git
+/// directory. Any file type counts, so a symbolic link does too.
+fn looks_like_git_directory(directory: &Path) -> bool {
+    ["HEAD", "objects", "refs"]
+        .iter()
+        .all(|name| fs::symlink_metadata(directory.join(name)).is_ok())
 }
 
 /// The start time of process `pid` (field 22 of `/proc/<pid>/stat`, in clock ticks since boot),
@@ -602,5 +648,100 @@ mod tests {
 
         second.retire(&root).unwrap();
         assert!(!first.contains(&root.join("src")));
+    }
+
+    #[test]
+    fn test_register_never_replaces_a_permanent_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let roots = JobRoots::with_owner_check(
+            &directory.path().join("registry").join("roots.json"),
+            Arc::new(|_, _| true),
+        );
+        let root = directory.path().join("tree");
+        fs::create_dir_all(root.join("masked")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        roots.register(&root, &[], RootLifetime::Permanent).unwrap();
+        let job = RootLifetime::Job {
+            pid: 1,
+            start_time: 1,
+        };
+        roots.register(&root, &[root.join("masked")], job).unwrap();
+        assert!(roots.contains(&root.join("masked")));
+
+        let second_job = RootLifetime::Job {
+            pid: 2,
+            start_time: 2,
+        };
+        roots
+            .register(&root, &[root.join("masked")], second_job)
+            .unwrap();
+        let entries = roots.current_entries();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.lifetime == RootLifetime::Permanent)
+        );
+        assert!(entries.iter().any(|entry| entry.lifetime == second_job));
+        assert!(roots.contains(&root.join("masked")));
+        assert!(roots.contains(&root.join("src")));
+    }
+
+    #[test]
+    fn test_register_refuses_an_excluded_path_that_does_not_exist() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("registry").join("roots.json");
+        let roots = JobRoots::new(&file);
+        let root = directory.path().join("tree");
+        fs::create_dir_all(&root).unwrap();
+
+        assert!(
+            roots
+                .register(&root, &[root.join("later")], RootLifetime::Permanent)
+                .is_err()
+        );
+        assert!(!file.exists());
+        fs::create_dir_all(root.join("later")).unwrap();
+        assert!(!roots.contains(&root.join("later")));
+    }
+
+    #[test]
+    fn test_retire_of_a_missing_root_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let roots = JobRoots::new(&directory.path().join("registry").join("roots.json"));
+        let root = directory.path().join("tree");
+        fs::create_dir_all(&root).unwrap();
+        roots.register(&root, &[], RootLifetime::Permanent).unwrap();
+
+        assert!(roots.retire(&directory.path().join("missing")).is_err());
+        assert!(roots.contains(&root));
+    }
+
+    #[test]
+    fn test_same_size_rewrites_are_each_seen() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("registry").join("roots.json");
+        let reader = JobRoots::new(&file);
+        let writer = JobRoots::new(&file);
+        let first = directory.path().join("tree-a");
+        let second = directory.path().join("tree-b");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        for _ in 0..20 {
+            writer
+                .register(&first, &[], RootLifetime::Permanent)
+                .unwrap();
+            assert!(reader.contains(&first));
+            assert!(!reader.contains(&second));
+            writer.retire(&first).unwrap();
+            writer
+                .register(&second, &[], RootLifetime::Permanent)
+                .unwrap();
+            assert!(!reader.contains(&first));
+            assert!(reader.contains(&second));
+            writer.retire(&second).unwrap();
+        }
     }
 }
