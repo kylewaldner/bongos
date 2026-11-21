@@ -682,7 +682,7 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
     }
     let output = lock(&sink).finish();
     let scope_answer = match (&ending, &scope_answer) {
-        (Ending::Exited, Some(path)) => read_capped(path, spec.result_limit),
+        (Ending::Exited, Some(path)) => read_capped(path, spec.result_limit, scratch.is_some()),
         _ => None,
     };
     let (verdict, result) = match ending {
@@ -691,7 +691,7 @@ fn run_blocking(mut spec: PartSpec) -> PartOutcome {
             let read = spec
                 .decl
                 .writes_result_file()
-                .then(|| read_result(&files.result, spec.result_limit))
+                .then(|| read_result(&files.result, spec.result_limit, scratch.is_some()))
                 .flatten();
             let result = read.as_ref().and_then(|read| read.as_ref().ok()).cloned();
             let verdict = match exit {
@@ -795,7 +795,18 @@ fn resolved(path: &Path) -> Result<PathBuf, String> {
 /// Refuses a declared directory that equals, contains or lies inside the checks' output folder
 /// (`records_dir`) or bongos's data folder, or that equals or contains the home folder. Checked
 /// before anything is made at a declared path.
-fn check_declared_dirs(dirs: &[PathBuf], records_dir: Option<&Path>) -> Result<(), String> {
+///
+/// Also refuses one reached through a symlink (its resolved path differs from its own), and one
+/// that equals, contains or lies inside another writable root (the tree, the part's scratch,
+/// another declared directory; the same directory declared twice is fine): a part that can
+/// write where a declared directory is could replace it with a symlink to anywhere, which the
+/// next confinement would then make writable.
+fn check_declared_dirs(
+    dirs: &[PathBuf],
+    records_dir: Option<&Path>,
+    tree: &Path,
+    scratch: &Path,
+) -> Result<(), String> {
     let lenient = |path: &Path| resolved(path).unwrap_or_else(|_| path.to_path_buf());
     let mut both_ways = vec![("the bongos data folder", lenient(paths::data_dir()))];
     if let Some(records_dir) = records_dir {
@@ -820,6 +831,61 @@ fn check_declared_dirs(dirs: &[PathBuf], records_dir: Option<&Path>) -> Result<(
                 home.display()
             ));
         }
+        if path != *dir {
+            return Err(format!(
+                "the declared directory {} is reached through a symlink (it resolves to {})",
+                dir.display(),
+                path.display()
+            ));
+        }
+    }
+    let roots = [("the tree", tree), ("the part's scratch", scratch)];
+    for dir in dirs {
+        for (what, root) in roots {
+            for root in [root.to_path_buf(), lenient(root)] {
+                if dir.starts_with(&root) || root.starts_with(dir) {
+                    return Err(format!(
+                        "the declared directory {} overlaps {what} {}",
+                        dir.display(),
+                        root.display()
+                    ));
+                }
+            }
+        }
+        for other in dirs {
+            if other != dir && (dir.starts_with(other) || other.starts_with(dir)) {
+                return Err(format!(
+                    "the declared directory {} overlaps the declared directory {}",
+                    dir.display(),
+                    other.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Makes the checked declared directories, dropping one that cannot be made (it is not
+/// writable then), and refuses the lot when one made is reached through a symlink after all.
+fn make_declared_dirs(dirs: &mut Vec<PathBuf>) -> Result<(), String> {
+    dirs.retain(|dir| std::fs::create_dir_all(dir).is_ok());
+    for dir in dirs.iter() {
+        match dir.canonicalize() {
+            Ok(canonical) if canonical == *dir => {}
+            Ok(canonical) => {
+                return Err(format!(
+                    "the declared directory {} is reached through a symlink (it resolves to {})",
+                    dir.display(),
+                    canonical.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "the declared directory {} cannot be resolved: {error}",
+                    dir.display()
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -840,10 +906,16 @@ fn confine_command(
         .clone()
         .map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
     let mut declared_dirs = spec.env.declared_dirs().to_vec();
-    check_declared_dirs(&declared_dirs, options.records_dir.as_deref())
+    check_declared_dirs(
+        &declared_dirs,
+        options.records_dir.as_deref(),
+        &spec.tree,
+        scratch,
+    )
+    .map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
+    // Only once they are checked.
+    make_declared_dirs(&mut declared_dirs)
         .map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
-    // Only once they are checked; one that cannot be made is not writable.
-    declared_dirs.retain(|dir| std::fs::create_dir_all(dir).is_ok());
     let declaration = JobDeclaration {
         kind: JobKind::Check,
         trees: vec![JobTree {
@@ -965,31 +1037,53 @@ fn annotation(line: &[u8], roots: &[PathBuf]) -> Option<String> {
     annotate::refusal(&String::from_utf8_lossy(line), roots).map(|note| format!("{note}\n"))
 }
 
-/// Opens `path` for reading, refusing a symlink there: a file the process wrote in its scratch
-/// is read as it is, never through a link to somewhere else.
-fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+/// Opens a file the process wrote, for reading. For a confined part only a regular file is
+/// read, as it is: a symlink there is refused (never followed to somewhere else), and so is a
+/// FIFO or device (opened without blocking, then refused), which would otherwise block bongos
+/// forever. An unconfined part's file is opened as before.
+fn open_part_file(path: &Path, confined: bool) -> std::io::Result<std::fs::File> {
+    if !confined {
+        return std::fs::File::open(path);
+    }
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    Ok(file)
 }
 
-/// At most `limit` + 1 bytes of the file at `path` (no symlink); `None` when it cannot be read.
-fn read_capped(path: &Path, limit: usize) -> Option<Vec<u8>> {
-    let file = open_no_follow(path).ok()?;
+/// At most `limit` + 1 bytes of the file at `path`; `None` when it cannot be read (see
+/// [`open_part_file`]).
+fn read_capped(path: &Path, limit: usize, confined: bool) -> Option<Vec<u8>> {
+    let file = match open_part_file(path, confined) {
+        Ok(file) => file,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("checks: not reading {}: {error}", path.display());
+            }
+            return None;
+        }
+    };
     let mut bytes = Vec::new();
     let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
     file.take(cap).read_to_end(&mut bytes).ok()?;
     Some(bytes)
 }
 
-/// The result file: `None` when there is none; refused when larger than `limit`.
-fn read_result(path: &Path, limit: usize) -> Option<Result<ResultFile, String>> {
-    let file = match open_no_follow(path) {
+/// The result file: `None` when there is none; refused when larger than `limit` (or, for a
+/// confined part, when it is not a regular file).
+fn read_result(path: &Path, limit: usize, confined: bool) -> Option<Result<ResultFile, String>> {
+    let file = match open_part_file(path, confined) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => return Some(Err(format!("reading it: {error}"))),

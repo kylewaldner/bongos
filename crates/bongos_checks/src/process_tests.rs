@@ -1095,3 +1095,157 @@ fn a_sandbox_that_cannot_be_created_is_a_start_failure_and_nothing_runs() {
     assert!(outcome.start.is_none());
     assert!(!marker.exists(), "the check ran unconfined");
 }
+
+/// Runs `spec` on its own thread; a part that never ends fails the test instead of hanging it.
+fn run_guarded(spec: PartSpec) -> PartOutcome {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        sender.send(block_on(run_part(spec))).ok();
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(120))
+        .expect("the part never ended (bongos blocked reading a file the part made)")
+}
+
+#[test]
+fn a_confined_result_file_that_is_a_fifo_is_refused_not_read() {
+    let fixture = fixture();
+    if !sandbox_available(&fixture) {
+        return;
+    }
+    let _registry = own_registry(&fixture);
+    let decl = CheckDecl {
+        result_file: Some(true),
+        ..shell("fifo", "mkfifo \"$BONGOS_CHECK_RESULT\" || exit 9")
+    };
+    let spec = confined_spec(&fixture, decl, &[]);
+    let output = spec.output.clone();
+    let outcome = run_guarded(spec);
+    assert_eq!(
+        outcome.exit,
+        Some(Exit::Code(0)),
+        "{}",
+        output_text(&output)
+    );
+    match outcome.verdict {
+        Verdict::NoVerdict(NoVerdictReason::InvalidResult(reason)) => {
+            assert!(reason.contains("not a regular file"), "{reason}");
+        }
+        other => panic!("expected an invalid result, got {other:?}"),
+    }
+    assert!(outcome.result.is_none());
+}
+
+#[test]
+fn a_confined_scope_answer_that_is_a_fifo_is_no_answer() {
+    let fixture = fixture();
+    if !sandbox_available(&fixture) {
+        return;
+    }
+    let _registry = own_registry(&fixture);
+    let staging = fixture.root.path().join("output/scope");
+    std::fs::create_dir_all(&staging).unwrap();
+    let changed = staging.join("changed-files.txt");
+    std::fs::write(&changed, "src/lib.rs\n").unwrap();
+    let mut spec = confined_spec(
+        &fixture,
+        shell("scope", "mkfifo \"$BONGOS_SCOPE_RESULT\" || exit 9"),
+        &[],
+    );
+    spec.output = staging.join("scope.log");
+    spec.role = crate::process::ProcessRole::Scope {
+        changed_files: changed,
+        result: staging.join("scope-answer.json"),
+    };
+    let output = spec.output.clone();
+    let outcome = run_guarded(spec);
+    assert_eq!(
+        outcome.exit,
+        Some(Exit::Code(0)),
+        "{}",
+        output_text(&output)
+    );
+    assert!(outcome.scope_answer.is_none());
+}
+
+/// The start failure reason of a confined part declaring `dirs`; the sandbox is never asked.
+fn declared_dirs_refusal(fixture: &Fixture, dirs: &[&Path]) -> String {
+    let marker = fixture.tree.join("ran");
+    let mut spec = confined_spec(
+        fixture,
+        shell("dirs", &format!("touch {}", marker.display())),
+        dirs,
+    );
+    spec.confinement = Some(crate::process::PartConfinement {
+        probe: Some(Arc::new(|_, _| Ok(()))),
+        ..crate::process::PartConfinement::default()
+    });
+    let outcome = block_on(run_part(spec));
+    assert!(!marker.exists(), "the check ran");
+    match outcome.verdict {
+        Verdict::NoVerdict(NoVerdictReason::StartFailed(reason)) => reason,
+        other => panic!("expected a start failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_declared_directory_reached_through_a_symlink_is_refused() {
+    let fixture = fixture();
+    let _registry = own_registry(&fixture);
+    let sensitive = fixture.root.path().join("sensitive");
+    std::fs::create_dir_all(&sensitive).unwrap();
+    let lane = fixture.root.path().join("lane");
+    std::fs::create_dir_all(&lane).unwrap();
+    let link = lane.join("build");
+    std::os::unix::fs::symlink(&sensitive, &link).unwrap();
+    let reason = declared_dirs_refusal(&fixture, &[&link]);
+    assert!(reason.contains("reached through a symlink"), "{reason}");
+    // Through a symlinked parent too, even where nothing exists yet.
+    let below = link.join("deep");
+    let reason = declared_dirs_refusal(&fixture, &[&below]);
+    assert!(reason.contains("reached through a symlink"), "{reason}");
+    assert!(!sensitive.join("deep").exists());
+}
+
+#[test]
+fn a_declared_directory_nested_in_another_writable_root_is_refused() {
+    let fixture = fixture();
+    let _registry = own_registry(&fixture);
+    let in_tree = fixture.tree.join("target");
+    let reason = declared_dirs_refusal(&fixture, &[&in_tree]);
+    assert!(reason.contains("overlaps the tree"), "{reason}");
+    assert!(!in_tree.exists(), "made before it was checked");
+
+    let build = fixture.root.path().join("lane/build");
+    let nested = build.join("index");
+    let reason = declared_dirs_refusal(&fixture, &[&build, &nested]);
+    assert!(
+        reason.contains("overlaps the declared directory"),
+        "{reason}"
+    );
+    assert!(!build.exists(), "made before it was checked");
+
+    let scratch = fixture.root.path().join("output/dirs/part-1.scratch/cache");
+    let reason = declared_dirs_refusal(&fixture, &[&scratch]);
+    assert!(reason.contains("overlaps the part's scratch"), "{reason}");
+}
+
+#[test]
+fn a_declared_directory_named_twice_is_fine() {
+    let fixture = fixture();
+    let _registry = own_registry(&fixture);
+    let build = fixture.root.path().join("lane/build");
+    let mut spec = confined_spec(&fixture, shell("twice", "true"), &[&build, &build]);
+    spec.confinement = Some(crate::process::PartConfinement {
+        probe: Some(Arc::new(|_, _| Err("stop after the checks".to_string()))),
+        ..crate::process::PartConfinement::default()
+    });
+    let outcome = block_on(run_part(spec));
+    match outcome.verdict {
+        Verdict::NoVerdict(NoVerdictReason::StartFailed(reason)) => {
+            assert!(reason.contains("stop after the checks"), "{reason}");
+        }
+        other => panic!("expected the probe's start failure, got {other:?}"),
+    }
+    assert!(build.is_dir());
+}
