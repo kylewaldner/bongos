@@ -139,6 +139,44 @@ async fn test_dual_layout_shows_two_panes_and_chat_only_one(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+async fn test_panel_lists_the_shown_sessions_panes(cx: &mut TestAppContext) {
+    use workspace::dock::Panel as _;
+
+    let h = harness(cx, true, 60, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &id, cx).await;
+    let (workspace, cx) = panel_window(&h, cx).await;
+    let panel = panel_of(&workspace, cx);
+
+    assert!(
+        panel.read_with(cx, |panel, cx| panel.panes(cx)).is_empty(),
+        "the session list has no panes"
+    );
+
+    let session = show(&panel, &id, cx);
+    wait_prompts_loaded(&session, cx).await;
+    let dual = panel.read_with(cx, |panel, cx| panel.panes(cx));
+    assert_eq!(dual.len(), 2);
+    assert_eq!(dual, session.read_with(cx, |s, _| s.visible_panes()));
+    let terminal_panes: Vec<_> = dual
+        .iter()
+        .filter(|pane| {
+            pane.read_with(cx, |pane, _| {
+                pane.active_item()
+                    .is_some_and(|item| item.downcast::<terminal_view::TerminalView>().is_some())
+            })
+        })
+        .cloned()
+        .collect();
+    assert_eq!(terminal_panes.len(), 1, "one pane holds the terminal");
+    let terminal_pane = terminal_panes[0].clone();
+
+    dispatch(cx, "chat::TogglePromptEditor");
+    let alone = panel.read_with(cx, |panel, cx| panel.panes(cx));
+    assert_eq!(alone, vec![terminal_pane]);
+}
+
+#[gpui::test]
 async fn test_toggling_the_prompt_editor_keeps_the_buffer_and_the_terminal(
     cx: &mut TestAppContext,
 ) {
