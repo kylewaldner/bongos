@@ -33,9 +33,9 @@ mod region_commands;
 mod repeat;
 pub mod snapshot_text;
 mod space;
+mod string_rectangle;
 mod symbol_jump;
 mod symbol_overlay;
-mod string_rectangle;
 mod transpose;
 mod words;
 mod xref_history;
@@ -97,11 +97,11 @@ mod repeat_tests;
 #[cfg(test)]
 mod space_tests;
 #[cfg(test)]
+mod string_rectangle_tests;
+#[cfg(test)]
 mod symbol_jump_tests;
 #[cfg(test)]
 mod symbol_overlay_tests;
-#[cfg(test)]
-mod string_rectangle_tests;
 #[cfg(test)]
 mod transpose_tests;
 #[cfg(test)]

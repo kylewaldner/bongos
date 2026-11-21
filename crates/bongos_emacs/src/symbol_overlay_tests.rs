@@ -211,6 +211,22 @@ async fn the_commands_say_nothing_in_the_minibuffer(cx: &mut TestAppContext) {
     assert!(messages.borrow().is_empty());
 }
 
+#[gpui::test]
+async fn put_with_no_symbol_at_point_says_so(cx: &mut TestAppContext) {
+    let mut cx = context(cx, "foo ˇ bar").await;
+    let messages = Rc::new(RefCell::new(Vec::<String>::new()));
+    cx.update(|_, cx| {
+        let messages = messages.clone();
+        cx.default_global::<MinibufferRouting>()
+            .set_message_hook(Some(Rc::new(move |_, _, text, _| {
+                messages.borrow_mut().push(text.to_string());
+                true
+            })));
+    });
+    cx.dispatch_action(SymbolOverlayPut);
+    assert_eq!(*messages.borrow(), vec!["No symbol at point".to_string()]);
+}
+
 fn use_theme(name: &str, cx: &mut EditorTestContext) {
     cx.update(|_, cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {

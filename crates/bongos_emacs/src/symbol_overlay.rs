@@ -215,13 +215,14 @@ fn watch(editor: &Entity<Editor>, buffer: BufferId, cx: &mut App) {
 pub(crate) fn symbol_overlay_put_command(
     _: &SymbolOverlayPut,
     editor: &Entity<Editor>,
-    _: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) {
     if propagate_in_single_line(editor, cx) {
         return;
     }
     let Some((buffer, word)) = symbol_at_caret(editor.read(cx), cx) else {
+        bongos_minibuffer::message(window, cx, "No symbol at point");
         return;
     };
     watch(editor, buffer, cx);
