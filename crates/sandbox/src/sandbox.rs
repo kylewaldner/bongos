@@ -37,6 +37,11 @@ pub struct SandboxPolicy {
     pub fs: SandboxFsPolicy,
     pub network: SandboxNetPolicy,
     pub git: GitSandboxPolicy,
+    /// Paths inside the writable roots that stay read-only in place. Each must
+    /// exist when a command is wrapped on Linux (a missing one is refused with
+    /// [`SandboxError::MaskMissing`], never skipped or widened to a parent);
+    /// on macOS a missing one is simply denied too.
+    pub read_only_masks: Vec<PathBuf>,
 }
 
 /// Filesystem policy for a sandboxed command.
@@ -135,6 +140,7 @@ impl SandboxPolicy {
             fs: self.fs.merge(other.fs),
             network: self.network.merge(other.network),
             git: self.git.merge(other.git),
+            read_only_masks: merge_paths(self.read_only_masks, other.read_only_masks),
         }
     }
 
@@ -145,6 +151,17 @@ impl SandboxPolicy {
         self.git = git;
         self
     }
+}
+
+/// Union two path lists, keeping the first list's order and skipping
+/// duplicates.
+fn merge_paths(mut paths: Vec<PathBuf>, other: Vec<PathBuf>) -> Vec<PathBuf> {
+    for path in other {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 impl SandboxFsPolicy {
@@ -243,6 +260,9 @@ pub enum SandboxError {
     InvalidRequest(String),
     /// An I/O error occurred (e.g. spawning the network proxy).
     Io(String),
+    /// A read-only mask names a path that does not exist, so it can't be bound
+    /// read-only in place. Refused rather than skipped or widened to a parent.
+    MaskMissing(PathBuf),
     /// Any other sandbox setup failure.
     Other(String),
 }
@@ -274,6 +294,11 @@ impl fmt::Display for SandboxError {
             SandboxError::UnsupportedPolicy(message) => write!(formatter, "{message}"),
             SandboxError::InvalidRequest(message) => write!(formatter, "{message}"),
             SandboxError::Io(message) => write!(formatter, "{message}"),
+            SandboxError::MaskMissing(path) => write!(
+                formatter,
+                "read-only mask {} does not exist, so the sandbox refuses to run",
+                path.display()
+            ),
             SandboxError::Other(message) => write!(formatter, "{message}"),
         }
     }
@@ -314,6 +339,8 @@ pub struct Sandbox {
     /// The project's `.git` directories and whether they're writable. Enforced
     /// on macOS/Linux; ignored by the WSL sandbox for now.
     git: GitSandboxPolicy,
+    /// Paths kept read-only in place inside the writable roots.
+    read_only_masks: Vec<PathBuf>,
     /// In-process network proxy for the restricted-network case, spawned on the
     /// first `wrap`. Dropped on a background thread (the join blocks).
     proxy: Option<ProxyHandle>,
@@ -352,6 +379,7 @@ impl Sandbox {
             fs,
             network,
             git: policy.git,
+            read_only_masks: policy.read_only_masks,
             proxy: None,
             #[cfg(target_os = "macos")]
             seatbelt_config: None,
@@ -503,6 +531,7 @@ impl Sandbox {
 
     #[cfg(target_os = "linux")]
     fn wrap_linux(&mut self, command: &CommandAndArgs) -> Result<WrappedCommand, SandboxError> {
+        check_masks_exist(&self.read_only_masks)?;
         let mut env = command.env.clone();
         let proxy = self.ensure_restricted_proxy(&mut env)?;
 
@@ -528,6 +557,8 @@ impl Sandbox {
             .collect();
         writable.extend(git_writable.iter().map(PathBuf::as_path));
         let protected_git_dirs: Vec<&Path> = git_protected.iter().map(PathBuf::as_path).collect();
+        let read_only_masks: Vec<&Path> =
+            self.read_only_masks.iter().map(PathBuf::as_path).collect();
 
         let bridge_program = std::env::current_exe()
             .map_err(|error| SandboxError::BridgeExecutableUnavailable(error.to_string()))?;
@@ -543,6 +574,7 @@ impl Sandbox {
             permissions,
             &writable,
             &protected_git_dirs,
+            &read_only_masks,
             command.cwd.as_deref(),
             &command.program,
             &command.args,
@@ -584,12 +616,15 @@ impl Sandbox {
             .collect();
         writable.extend(git_writable.iter().map(PathBuf::as_path));
         let protected: Vec<&Path> = git_protected.iter().map(PathBuf::as_path).collect();
+        let read_only_masks: Vec<&Path> =
+            self.read_only_masks.iter().map(PathBuf::as_path).collect();
         let (program, args, config) = macos_seatbelt::wrap_invocation(
             &command.program,
             &command.args,
             &writable,
             &protected,
             &[],
+            &read_only_masks,
             permissions,
         )
         .map_err(map_anyhow_error)?;
@@ -613,6 +648,8 @@ impl Sandbox {
         // Git-dir protection isn't enforced for the WSL sandbox yet, so the
         // policy's Git directories are intentionally ignored here.
         let _ = self.git.git_dirs();
+        // Read-only masks aren't enforced for the WSL sandbox yet either.
+        let _ = &self.read_only_masks;
         let permissions = windows_wsl::SandboxPermissions {
             allow_network: matches!(self.network, NetSetup::Unrestricted),
             allow_fs_write: self.fs.allow_fs_write,
@@ -659,6 +696,17 @@ impl Drop for Sandbox {
 pub fn run_sandbox_launcher_if_invoked() {
     #[cfg(target_os = "linux")]
     linux_bubblewrap::run_launcher_if_invoked();
+}
+
+/// Refuse a read-only mask that doesn't exist: bwrap can't bind a missing path
+/// read-only, and skipping it or binding a parent instead would silently change
+/// what is protected.
+#[cfg(target_os = "linux")]
+fn check_masks_exist(read_only_masks: &[PathBuf]) -> Result<(), SandboxError> {
+    match read_only_masks.iter().find(|mask| !mask.exists()) {
+        Some(missing) => Err(SandboxError::MaskMissing(missing.clone())),
+        None => Ok(()),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -895,6 +943,63 @@ mod tests {
             hosts(&["a.com"]).merge(SandboxNetPolicy::Unrestricted),
             SandboxNetPolicy::Unrestricted
         );
+    }
+
+    fn policy_with_masks(masks: &[&str]) -> SandboxPolicy {
+        SandboxPolicy {
+            fs: SandboxFsPolicy::Restricted {
+                writable_paths: vec![PathBuf::from("/a")],
+            },
+            network: SandboxNetPolicy::Blocked,
+            git: GitSandboxPolicy::default(),
+            read_only_masks: masks.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    #[test]
+    fn policy_merge_unions_read_only_masks() {
+        let merged =
+            policy_with_masks(&["/a/x", "/a/y"]).merge(policy_with_masks(&["/a/y", "/a/z"]));
+        assert_eq!(
+            merged.read_only_masks,
+            vec![
+                PathBuf::from("/a/x"),
+                PathBuf::from("/a/y"),
+                PathBuf::from("/a/z")
+            ]
+        );
+        assert!(
+            policy_with_masks(&[])
+                .merge(policy_with_masks(&[]))
+                .read_only_masks
+                .is_empty()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wrap_refuses_missing_read_only_mask() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present");
+        std::fs::create_dir(&present).unwrap();
+        let missing = dir.path().join("missing");
+        let mut policy = policy_with_masks(&[]);
+        policy.read_only_masks = vec![present.clone(), missing.clone()];
+
+        let mut sandbox = Sandbox::new(policy).unwrap();
+        let command = CommandAndArgs {
+            program: "/bin/true".to_string(),
+            ..CommandAndArgs::default()
+        };
+        let result = futures::executor::block_on(sandbox.wrap(&command));
+        assert_eq!(result, Err(SandboxError::MaskMissing(missing.clone())));
+        assert!(
+            SandboxError::MaskMissing(missing)
+                .to_string()
+                .contains("does not exist")
+        );
+        assert_eq!(check_masks_exist(&[present]), Ok(()));
+        assert_eq!(check_masks_exist(&[]), Ok(()));
     }
 
     #[test]
