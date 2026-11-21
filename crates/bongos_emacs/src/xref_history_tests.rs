@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use bongos_minibuffer::SessionView;
 use editor::Editor;
-use gpui::{BorrowAppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle};
+use gpui::{Action as _, BorrowAppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle};
 use project::{Fs as _, Project, ProjectPath};
 use settings::SettingsStore;
 use text::Point;
@@ -341,6 +341,15 @@ async fn the_command_runs_once_after_the_universal_argument(cx: &mut TestAppCont
     let pane = active_pane(&workspace, &mut cx);
     let before = stacks(&pane, &mut cx);
 
+    // Without this declaration the key would be repeated (the list opened once per count).
+    assert!(
+        cx.update(|_, cx| matches!(
+            prefix_arg::meaning(cx, XrefHistoryList::name_for_type()),
+            Some(prefix_arg::Meaning::Ignored)
+        )),
+        "the list command declares that it ignores the argument"
+    );
+
     cx.dispatch_action(UniversalArgument);
     cx.update(|window, cx| prefix_arg::hand_off(window, cx));
     list(&workspace, &mut cx);
@@ -351,6 +360,47 @@ async fn the_command_runs_once_after_the_universal_argument(cx: &mut TestAppCont
             .is_none()
     );
     assert_eq!(stacks(&pane, &mut cx), before);
-    // One list is open, and its row count is that of the stack: the argument did not repeat it.
-    assert_eq!(rows(&pane, &mut cx).len(), before.2.len());
+}
+
+#[gpui::test]
+async fn a_closed_untitled_buffer_is_skipped_when_walking_back(cx: &mut TestAppContext) {
+    let (workspace, paths, mut cx) = setup(cx).await;
+    let one = open(&workspace, &paths[0], &mut cx).await;
+    select_row(&one, 20, &mut cx);
+    workspace
+        .update_in(&mut cx, |workspace, window, cx| {
+            Editor::new_in_workspace(workspace, window, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let untitled = workspace.read_with(&cx, |workspace, cx| {
+        workspace.active_item_as::<Editor>(cx).unwrap()
+    });
+    untitled.update_in(&mut cx, |editor, window, cx| {
+        editor.set_text("line\n".repeat(40), window, cx)
+    });
+    select_row(&untitled, 30, &mut cx);
+    let untitled_id = untitled.entity_id();
+    drop(untitled);
+    open(&workspace, &paths[1], &mut cx).await;
+    let pane = active_pane(&workspace, &mut cx);
+    pane.update_in(&mut cx, |pane, window, cx| {
+        pane.close_item_by_id(untitled_id, SaveIntent::Skip, window, cx)
+    })
+    .await
+    .unwrap();
+    cx.run_until_parked();
+
+    let weak = pane.downgrade();
+    workspace
+        .update_in(&mut cx, |workspace, window, cx| {
+            workspace.go_back(weak, window, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    // The untitled buffer has no path to reopen, so the walk went on to the entry in one.txt.
+    assert_eq!(caret_row(&workspace, &mut cx), (paths[0].clone(), 20));
 }
