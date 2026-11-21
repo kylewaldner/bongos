@@ -2939,13 +2939,14 @@ impl Workspace {
         // Handed back once: a second call means the first did not navigate (the caret is
         // already there), and the walk must end instead of looping.
         let mut target = Some(entry);
-        self.navigate_history_impl(
+        let task = self.navigate_history_impl(
             pane,
             NavigationMode::Disabled,
             window,
             &mut |_, _| target.take(),
             cx,
-        )
+        );
+        Self::ignore_navigated(task, cx)
     }
 
     pub fn go_back(
