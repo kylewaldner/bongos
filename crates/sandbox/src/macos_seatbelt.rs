@@ -336,8 +336,9 @@ fn generate_seatbelt_config(
 
     // Read-only masks come after every write allow (and the Git denies): in
     // Seatbelt a later matching rule wins, so these keep a path read-only even
-    // inside a writable directory. A mask that doesn't exist yet is denied too,
-    // so it can't be created.
+    // inside a writable directory. A mask that doesn't exist yet is denied
+    // too (so it can't be created) only while its parent exists; callers
+    // should pass existing paths, as the Linux path refuses a missing one.
     for mask in read_only_masks {
         let canonical = crate::canonicalize_allowing_missing_leaf(mask);
         let escaped_path = escape_sandbox_path(&canonical)?;

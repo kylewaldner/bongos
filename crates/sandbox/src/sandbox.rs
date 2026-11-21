@@ -38,9 +38,16 @@ pub struct SandboxPolicy {
     pub network: SandboxNetPolicy,
     pub git: GitSandboxPolicy,
     /// Paths inside the writable roots that stay read-only in place. Each must
-    /// exist when a command is wrapped on Linux (a missing one is refused with
-    /// [`SandboxError::MaskMissing`], never skipped or widened to a parent);
-    /// on macOS a missing one is simply denied too.
+    /// be absolute and not a symlink (otherwise [`SandboxError::MaskInvalid`])
+    /// and, on Linux, must exist when a command is wrapped (a missing one is
+    /// refused with [`SandboxError::MaskMissing`], never skipped or widened to
+    /// a parent). On macOS a missing mask is denied only while its parent
+    /// exists, so macOS callers should pass existing paths too.
+    ///
+    /// Masks are meant for paths directly under a writable root (for example
+    /// `<root>/.git`), where the root's own bind mount protects them. A deeper
+    /// mask does not stop the process renaming an ancestor directory between
+    /// the root and the mask and recreating the path.
     pub read_only_masks: Vec<PathBuf>,
 }
 
@@ -263,6 +270,8 @@ pub enum SandboxError {
     /// A read-only mask names a path that does not exist, so it can't be bound
     /// read-only in place. Refused rather than skipped or widened to a parent.
     MaskMissing(PathBuf),
+    /// A read-only mask is not usable (not absolute, or a symlink).
+    MaskInvalid(PathBuf, &'static str),
     /// Any other sandbox setup failure.
     Other(String),
 }
@@ -297,6 +306,11 @@ impl fmt::Display for SandboxError {
             SandboxError::MaskMissing(path) => write!(
                 formatter,
                 "read-only mask {} does not exist, so the sandbox refuses to run",
+                path.display()
+            ),
+            SandboxError::MaskInvalid(path, reason) => write!(
+                formatter,
+                "read-only mask {} is invalid ({reason}), so the sandbox refuses to run",
                 path.display()
             ),
             SandboxError::Other(message) => write!(formatter, "{message}"),
@@ -703,10 +717,19 @@ pub fn run_sandbox_launcher_if_invoked() {
 /// what is protected.
 #[cfg(target_os = "linux")]
 fn check_masks_exist(read_only_masks: &[PathBuf]) -> Result<(), SandboxError> {
-    match read_only_masks.iter().find(|mask| !mask.exists()) {
-        Some(missing) => Err(SandboxError::MaskMissing(missing.clone())),
-        None => Ok(()),
+    for mask in read_only_masks {
+        if !mask.is_absolute() {
+            return Err(SandboxError::MaskInvalid(mask.clone(), "not absolute"));
+        }
+        match std::fs::symlink_metadata(mask) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(SandboxError::MaskInvalid(mask.clone(), "is a symlink"));
+            }
+            Ok(_) => {}
+            Err(_) => return Err(SandboxError::MaskMissing(mask.clone())),
+        }
     }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1000,6 +1023,55 @@ mod tests {
         );
         assert_eq!(check_masks_exist(&[present]), Ok(()));
         assert_eq!(check_masks_exist(&[]), Ok(()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wrap_refuses_symlink_read_only_mask() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut policy = policy_with_masks(&[]);
+        policy.read_only_masks = vec![link.clone()];
+
+        let mut sandbox = Sandbox::new(policy).unwrap();
+        let command = CommandAndArgs {
+            program: "/bin/true".to_string(),
+            ..CommandAndArgs::default()
+        };
+        let result = futures::executor::block_on(sandbox.wrap(&command));
+        assert_eq!(
+            result,
+            Err(SandboxError::MaskInvalid(link.clone(), "is a symlink"))
+        );
+        assert!(
+            SandboxError::MaskInvalid(link, "is a symlink")
+                .to_string()
+                .contains("invalid")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wrap_refuses_relative_read_only_mask() {
+        let mut policy = policy_with_masks(&[]);
+        policy.read_only_masks = vec![PathBuf::from("plans")];
+
+        let mut sandbox = Sandbox::new(policy).unwrap();
+        let command = CommandAndArgs {
+            program: "/bin/true".to_string(),
+            ..CommandAndArgs::default()
+        };
+        let result = futures::executor::block_on(sandbox.wrap(&command));
+        assert_eq!(
+            result,
+            Err(SandboxError::MaskInvalid(
+                PathBuf::from("plans"),
+                "not absolute"
+            ))
+        );
     }
 
     #[test]
