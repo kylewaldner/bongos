@@ -90,6 +90,8 @@ pub const DETACHED: &str = "the tree's HEAD is detached; private git needs a che
 const MARKER_HEADER: &str = "bongos-confined 1";
 
 /// The largest marker read.
+/// The largest `.git` file read back.
+const DOT_GIT_LIMIT: u64 = 64 << 10;
 const MARKER_LIMIT: u64 = 256 << 20;
 
 /// The ref namespaces the snapshot copies.
@@ -601,21 +603,35 @@ fn read_regular_no_follow(path: &Path) -> Result<Vec<u8>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // O_NONBLOCK so a FIFO planted at `path` cannot block the open; the regular-file check
+        // below then refuses it.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let mut file = options.open(path).with_context(describe)?;
+    let file = options.open(path).with_context(describe)?;
     let metadata = file.metadata().with_context(describe)?;
     if !metadata.is_file() {
         bail!("{} is not a regular file", path.display());
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).with_context(describe)?;
+    file.take(DOT_GIT_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .with_context(describe)?;
+    if bytes.len() as u64 > DOT_GIT_LIMIT {
+        bail!("{} is larger than {DOT_GIT_LIMIT} bytes", path.display());
+    }
     Ok(bytes)
+}
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// The counter value the next temporary name will use.
+#[cfg(test)]
+pub(crate) fn next_temporary_counter() -> u64 {
+    NEXT.load(Ordering::Relaxed)
 }
 
 /// A name for a temporary file next to `path`, unique in this process.
 fn temporary_name(path: &Path) -> Result<PathBuf> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
     let name = path
         .file_name()
         .ok_or_else(|| anyhow!("{} has no file name", path.display()))?;

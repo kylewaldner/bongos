@@ -7,7 +7,8 @@ use std::{
 
 use crate::{
     private_git::{
-        BUSY, DETACHED, MARKER, Marker, PrivateGit, RecoverOutcome, UNBORN, prepare_with, recover,
+        BUSY, DETACHED, MARKER, Marker, PrivateGit, RecoverOutcome, UNBORN, next_temporary_counter,
+        prepare_with, recover,
     },
     safe_git::SafeGit,
 };
@@ -566,24 +567,21 @@ fn private_git_keeps_sha256() {
 #[cfg(unix)]
 #[test]
 fn private_git_failed_snapshot_undoes_everything() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let fixture = Fixture::new();
     let original = fixture.dot_git();
     let before = fixture.shared_state();
     let script = fixture.base.join("bin/git");
     fs::create_dir_all(script.parent().unwrap()).unwrap();
-    // Written under another name and renamed into place, so no writer holds the script when it
-    // runs (a write handle open at exec fails with ETXTBSY).
-    let staged = fixture.base.join("bin/.git.staged");
-    fs::write(
-        &staged,
-        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = for-each-ref ]; then\n    \
-         echo 'for-each-ref broken' >&2\n    exit 2\n  fi\ndone\nexec git \"$@\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::rename(&staged, &script).unwrap();
+    // Created by a child process (script text passed as an argument), so this process never holds a write descriptor on the script:
+    // another test thread's forked child could inherit one and make the exec fail with ETXTBSY.
+    let body = "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = for-each-ref ]; then\n    \
+                echo 'for-each-ref broken' >&2\n    exit 2\n  fi\ndone\nexec git \"$@\"\n";
+    let mut writer = util::command::new_command("sh");
+    writer
+        .args(["-c", "printf '%s' \"$1\" > \"$0\" && chmod 755 \"$0\""])
+        .arg(&script)
+        .arg(body);
+    assert!(smol::block_on(writer.output()).unwrap().status.success());
 
     let error = fixture.prepare_using(Some(&script)).unwrap_err();
     assert!(
@@ -749,7 +747,8 @@ fn private_git_predictable_temporary_name_is_not_followed() {
     let sentinel = fixture.base.join("sentinel");
     fs::write(&sentinel, "keep").unwrap();
     // Plant a symlink at every temporary name this process could pick next to `.git`.
-    for n in 0..256 {
+    let start = next_temporary_counter();
+    for n in start..start + 64 {
         symlink(
             &sentinel,
             &fixture
@@ -761,6 +760,26 @@ fn private_git_predictable_temporary_name_is_not_followed() {
     private.abandon().unwrap();
     assert_eq!(fixture.dot_git(), original);
     assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn private_git_recovers_dot_git_replaced_by_fifo() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let fixture = Fixture::new();
+    let original = fixture.dot_git();
+    let private = fixture.prepare();
+    std::mem::forget(private);
+    let dot_git = fixture.tree.join(".git");
+    fs::remove_file(&dot_git).unwrap();
+    let c_path = std::ffi::CString::new(dot_git.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    fixture.kill_owner();
+
+    assert_eq!(recover(&fixture.linked).unwrap(), RecoverOutcome::Recovered);
+    fixture.assert_switched_back(&original);
+    assert!(fs::symlink_metadata(&dot_git).unwrap().is_file());
 }
 
 #[test]
