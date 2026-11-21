@@ -5677,6 +5677,11 @@ impl Workspace {
         &self.panes
     }
 
+    /// The center's pane tree.
+    pub fn center_group(&self) -> &PaneGroup {
+        &self.center
+    }
+
     /// The center panes in tree order (left before right, top before bottom).
     pub fn center_panes(&self) -> Vec<Entity<Pane>> {
         self.center.panes().into_iter().cloned().collect()

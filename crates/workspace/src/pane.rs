@@ -4679,6 +4679,12 @@ impl ItemNavHistory {
 }
 
 impl NavHistory {
+    /// How many entries the back and the forward stacks hold, in that order.
+    pub fn stack_depths(&self) -> (usize, usize) {
+        let state = self.0.lock();
+        (state.backward_stack.len(), state.forward_stack.len())
+    }
+
     pub fn for_each_entry(
         &self,
         cx: &App,
