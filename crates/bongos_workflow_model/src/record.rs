@@ -347,6 +347,11 @@ pub struct Attempt {
     pub definition_commit: Option<String>,
     pub worktree: String,
     pub branch: String,
+    /// The run worktree's linked git directory, read when the worktree was made, which host git
+    /// names explicitly instead of discovering one from the tree. `None` for records older than
+    /// the field; the lifecycle fills it in when it loads such a record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_dir: Option<String>,
     /// `workflows.loop_bound` as it was when the attempt began: the passes of a loop whose route
     /// sets no `max_passes`. A relaunch keeps it; `None` for records older than the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]

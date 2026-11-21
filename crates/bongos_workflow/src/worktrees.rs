@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, SystemTime};
 
+use bongos_confine::safe_git::{SafeGit, linked_git_dir_from_record};
 use bongos_work_model::TaskFile;
 use bongos_workflow_model::record::{EndState, Lifecycle};
 
@@ -78,33 +79,68 @@ impl Git {
         }
     }
 
-    /// Whether `directory`'s worktree has uncommitted changes, untracked files included.
-    pub(crate) async fn is_dirty(&self, directory: &Path) -> Result<bool, GitError> {
+    /// [`Git::output`] in a tree with an explicit git directory: the command is built by
+    /// [`SafeGit`], so git never discovers its repository from a `.git` in the tree. A job tree
+    /// also gets the job tree protections (no hook, driver or external diff the tree could name).
+    pub(crate) async fn output_at(&self, at: At<'_>, args: &[&str]) -> Result<Output, GitError> {
+        let error = |message: String| GitError {
+            args: args.join(" "),
+            message,
+        };
+        let mut safe = SafeGit::new(at.git_dir, at.directory).binary(&self.binary);
+        for (key, value) in &self.envs {
+            safe = safe.env(key, value);
+        }
+        if at.job {
+            safe = safe.untrusted_tree();
+            // Only a merge can start git inside a gitlink; a command that cannot skips the walk.
+            if args.first() != Some(&"merge") {
+                safe = safe.allow_nested_repositories();
+            }
+        }
+        let mut command = safe
+            .command(args)
+            .await
+            .map_err(|refusal| error(format!("{refusal:#}")))?;
+        command
+            .output()
+            .await
+            .map_err(|failure| error(failure.to_string()))
+    }
+
+    /// [`Git::run`] in a tree with an explicit git directory; see [`Git::output_at`].
+    pub(crate) async fn run_at(&self, at: At<'_>, args: &[&str]) -> Result<String, GitError> {
+        let output = self.output_at(at, args).await?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(GitError {
+                args: args.join(" "),
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
+    }
+
+    /// Whether the worktree at `at` has uncommitted changes, untracked files included.
+    pub(crate) async fn is_dirty(&self, at: At<'_>) -> Result<bool, GitError> {
         let status = self
-            .run(
-                directory,
-                &["status", "--porcelain", "--untracked-files=normal"],
-            )
+            .run_at(at, &["status", "--porcelain", "--untracked-files=normal"])
             .await?;
         Ok(!status.is_empty())
     }
 
-    /// Merges `args` (a `git merge` command line after `merge`) in `directory`. On a conflict it
-    /// lists the unmerged files, runs `git merge --abort` and returns them; every branch stays as
-    /// it was before the merge.
-    pub(crate) async fn merge_or_abort(
-        &self,
-        directory: &Path,
-        args: &[&str],
-    ) -> Result<(), MergeError> {
+    /// Merges `args` (a `git merge` command line after `merge`) in the worktree `at`. On a conflict
+    /// it lists the unmerged files, runs `git merge --abort` and returns them; every branch stays
+    /// as it was before the merge.
+    pub(crate) async fn merge_or_abort(&self, at: At<'_>, args: &[&str]) -> Result<(), MergeError> {
         let mut command = vec!["merge"];
         command.extend_from_slice(args);
-        let output = self.output(directory, &command).await?;
+        let output = self.output_at(at, &command).await?;
         if output.status.success() {
             return Ok(());
         }
         let unmerged = self
-            .run(directory, &["diff", "--name-only", "--diff-filter=U"])
+            .run_at(at, &["diff", "--name-only", "--diff-filter=U"])
             .await
             .unwrap_or_default();
         let files: Vec<String> = unmerged
@@ -114,11 +150,11 @@ impl Git {
             .collect();
         // Abort whenever a merge is in progress, conflict or not, so nothing is left half done.
         let in_progress = self
-            .run(directory, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+            .run_at(at, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
             .await
             .is_ok();
         if in_progress || !files.is_empty() {
-            self.run(directory, &["merge", "--abort"]).await?;
+            self.run_at(at, &["merge", "--abort"]).await?;
         }
         if files.is_empty() {
             Err(MergeError::Git(GitError {
@@ -129,6 +165,75 @@ impl Git {
             Err(MergeError::Conflict(files))
         }
     }
+}
+
+/// A worktree and the git directory bongos recorded for it, which every host git command in it
+/// names explicitly (see [`Git::output_at`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct At<'a> {
+    pub git_dir: &'a Path,
+    pub directory: &'a Path,
+    /// Whether a job may have written the tree: a run or branch worktree. The task worktree is
+    /// the user's own and keeps the user's hooks and drivers.
+    pub job: bool,
+}
+
+impl RunWorktree {
+    /// The run worktree (or, for a branch's record, its branch worktree) as a job tree.
+    pub(crate) fn at(&self) -> At<'_> {
+        At {
+            git_dir: &self.git_dir,
+            directory: &self.path,
+            job: true,
+        }
+    }
+}
+
+/// The common git directory of the linked git directory `git_dir`, from its `commondir` file; a
+/// git directory without one is its own common directory.
+pub(crate) fn common_dir_of(git_dir: &Path) -> Result<PathBuf, String> {
+    let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(text) => git_dir.join(text.trim_end_matches(['\n', '\r'])),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir.to_path_buf(),
+        Err(error) => return Err(format!("{}: {error}", git_dir.display())),
+    };
+    common
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", common.display()))
+}
+
+/// The main checkout of the repository whose run worktree has the git directory `git_dir`, without
+/// reading any tree.
+pub(crate) fn repository_of(git_dir: &Path) -> Result<PathBuf, String> {
+    let common = common_dir_of(git_dir)?;
+    Ok(match common.file_name() {
+        Some(name) if name == ".git" => common.parent().map(Path::to_path_buf).unwrap_or(common),
+        _ => common,
+    })
+}
+
+/// The git directory of the task worktree `task_tree`, trusted only as the common directory of the
+/// run's own git directory `run_git_dir` says: a linked worktree of it ([`linked_git_dir_from_record`])
+/// or its main checkout, whose `.git` directory is that common directory itself.
+pub(crate) fn task_git_dir(task_tree: &Path, run_git_dir: &Path) -> Result<PathBuf, String> {
+    let common = common_dir_of(run_git_dir)?;
+    let gitlink = task_tree.join(".git");
+    let main_checkout = std::fs::symlink_metadata(&gitlink)
+        .is_ok_and(|metadata| metadata.file_type().is_dir())
+        && gitlink.canonicalize().ok().as_ref() == Some(&common);
+    if main_checkout {
+        return Ok(common);
+    }
+    linked_git_dir_from_record(task_tree, &common).map_err(|error| format!("{error:#}"))
+}
+
+/// The git directory of the linked worktree just created at `path`, read with git itself before any
+/// job ran there.
+async fn read_git_dir(git: &Git, path: &Path) -> Result<PathBuf, GitError> {
+    let text = git
+        .run(path, &["rev-parse", "--path-format=absolute", "--git-dir"])
+        .await?;
+    Ok(PathBuf::from(text))
 }
 
 /// A git command that failed.
@@ -196,6 +301,9 @@ pub struct RunWorktree {
     pub run_dir: PathBuf,
     pub path: PathBuf,
     pub branch: String,
+    /// The worktree's linked git directory, read when the worktree was made and before any job ran
+    /// there. Host git names it explicitly and never discovers one from the tree's `.git`.
+    pub git_dir: PathBuf,
 }
 
 /// The last 8 hex digits of a run id.
@@ -466,13 +574,25 @@ pub async fn create_run(
         )
         .await?;
     let run_dir = run_dir(&runs, &task.slug, run_id, attempt);
-    let worktree = RunWorktree {
-        path: run_worktree_path(&run_dir),
-        branch: run_branch_name(task_branch, run_id, attempt),
+    let path = run_worktree_path(&run_dir);
+    let branch = run_branch_name(task_branch, run_id, attempt);
+    add_worktree(
+        git,
+        Added::From(task_worktree),
+        &run_dir,
+        &path,
+        &branch,
+        &head,
+    )
+    .await?;
+    // Read right after git made the tree, before any job could write its `.git`.
+    let git_dir = read_git_dir(git, &path).await?;
+    Ok(RunWorktree {
         run_dir,
-    };
-    add_worktree(git, task_worktree, &worktree, &head).await?;
-    Ok(worktree)
+        path,
+        branch,
+        git_dir,
+    })
 }
 
 /// Creates the worktree of fan-out branch `index` of node `node` from the head of the run branch,
@@ -484,8 +604,8 @@ pub async fn create_branch(
     index: u32,
 ) -> Result<RunWorktree, WorktreeError> {
     let head = git
-        .run(
-            &run.path,
+        .run_at(
+            run.at(),
             &[
                 "rev-parse",
                 "--verify",
@@ -493,39 +613,86 @@ pub async fn create_branch(
             ],
         )
         .await?;
-    let worktree = RunWorktree {
+    let path = branch_worktree_path(&run.run_dir, node, index);
+    let branch = fan_out_branch_name(&run.branch, node, index);
+    add_worktree(
+        git,
+        Added::FromRun(run),
+        &run.run_dir,
+        &path,
+        &branch,
+        &head,
+    )
+    .await?;
+    let git_dir = read_git_dir(git, &path).await?;
+    Ok(RunWorktree {
         run_dir: run.run_dir.clone(),
-        path: branch_worktree_path(&run.run_dir, node, index),
-        branch: fan_out_branch_name(&run.branch, node, index),
-    };
-    add_worktree(git, &run.path, &worktree, &head).await?;
-    Ok(worktree)
+        path,
+        branch,
+        git_dir,
+    })
+}
+
+/// Where `git worktree add` runs.
+enum Added<'a> {
+    /// In the task worktree.
+    From(&'a Path),
+    /// For the run worktree's repository, named by the run's recorded git directory; the tree
+    /// itself is never read.
+    FromRun(&'a RunWorktree),
 }
 
 async fn add_worktree(
     git: &Git,
-    from: &Path,
-    worktree: &RunWorktree,
+    from: Added<'_>,
+    run_dir: &Path,
+    path: &Path,
+    branch: &str,
     head: &str,
 ) -> Result<(), WorktreeError> {
-    std::fs::create_dir_all(&worktree.run_dir).map_err(|error| WorktreeError::Io {
-        path: worktree.run_dir.clone(),
+    std::fs::create_dir_all(run_dir).map_err(|error| WorktreeError::Io {
+        path: run_dir.to_path_buf(),
         message: error.to_string(),
     })?;
-    let path = worktree.path.to_string_lossy();
-    git.run(
-        from,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &worktree.branch,
-            "--end-of-options",
-            &path,
-            head,
-        ],
-    )
-    .await?;
+    let path = path.to_string_lossy();
+    let args = [
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        "--end-of-options",
+        &*path,
+        head,
+    ];
+    match from {
+        Added::From(task_worktree) => {
+            git.run(task_worktree, &args).await?;
+        }
+        Added::FromRun(run) => {
+            let error = |message: String| GitError {
+                args: args.join(" "),
+                message,
+            };
+            let mut safe = SafeGit::without_work_tree(&run.git_dir).binary(&git.binary);
+            for (key, value) in &git.envs {
+                safe = safe.env(key, value);
+            }
+            let mut command = safe
+                .command(&args)
+                .await
+                .map_err(|refusal| error(format!("{refusal:#}")))?;
+            let output = command
+                .current_dir(run_dir)
+                .output()
+                .await
+                .map_err(|failure| error(failure.to_string()))?;
+            if !output.status.success() {
+                return Err(
+                    error(String::from_utf8_lossy(&output.stderr).trim().to_string()).into(),
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -557,7 +724,7 @@ pub async fn join(
         let message = format!("Join {node} branch {index}");
         match git
             .merge_or_abort(
-                &run.path,
+                run.at(),
                 &["--no-ff", "-m", &message, "--end-of-options", &branch],
             )
             .await
@@ -774,9 +941,14 @@ pub async fn plan_clear(
                 continue;
             }
         }
-        for mut item in run_worktrees(git, &run.worktree).await {
+        for (mut item, git_dir) in run_worktrees(git, &run.worktree).await {
             if item.reason.is_none() && item.path.is_dir() {
-                match git.is_dirty(&item.path).await {
+                let at = At {
+                    git_dir: &git_dir,
+                    directory: &item.path,
+                    job: true,
+                };
+                match git.is_dirty(at).await {
                     Ok(false) => {}
                     Ok(true) => item.reason = Some("uncommitted changes".to_string()),
                     Err(error) => item.reason = Some(format!("git failed: {}", error.message)),
@@ -813,8 +985,11 @@ async fn task_repository(
     Ok(repository)
 }
 
-/// The run worktree and its fan-out worktrees (`b-*` beside it), with their branches.
-async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<ClearItem> {
+/// The run worktree and its fan-out worktrees (`b-*` beside it), with their branches and the git
+/// directory to run git with in each. A fan-out worktree's is the linked directory under the run's
+/// common directory that names it ([`linked_git_dir_from_record`]), so nothing is trusted from
+/// its own `.git`; one that has none is kept, with the reason.
+async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<(ClearItem, PathBuf)> {
     let mut items = Vec::new();
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&run.run_dir)
         .map(|entries| {
@@ -839,32 +1014,58 @@ async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<ClearItem> {
             name.strip_prefix("b-").unwrap_or(&name)
         );
         // Only a worktree still on its own fan-out branch is removed with that branch.
-        let reason = match git.run(&path, &["symbolic-ref", "--short", "HEAD"]).await {
+        let linked = common_dir_of(&run.git_dir).and_then(|common| {
+            linked_git_dir_from_record(&path, &common).map_err(|error| format!("{error:#}"))
+        });
+        let git_dir = match linked {
+            Ok(git_dir) => git_dir,
+            Err(error) => {
+                items.push((
+                    ClearItem {
+                        path,
+                        branch,
+                        reason: Some(format!("git directory not trusted: {error}")),
+                        unmerged: None,
+                    },
+                    PathBuf::new(),
+                ));
+                continue;
+            }
+        };
+        let at = At {
+            git_dir: &git_dir,
+            directory: &path,
+            job: true,
+        };
+        let reason = match git.run_at(at, &["symbolic-ref", "--short", "HEAD"]).await {
             Ok(head) if head == branch => None,
             Ok(head) => Some(format!("on branch {head}, not {branch}")),
             Err(_) => Some("HEAD is detached or unreadable".to_string()),
         };
         let unmerged = if reason.is_none() {
             let range = format!("{}..{branch}", run.branch);
-            git.run(&path, &["rev-list", "--count", "--end-of-options", &range])
+            git.run_at(at, &["rev-list", "--count", "--end-of-options", &range])
                 .await
                 .ok()
                 .and_then(|count| count.parse().ok())
         } else {
             None
         };
-        items.push(ClearItem {
-            path,
-            branch,
-            reason,
-            unmerged,
-        });
+        items.push((
+            ClearItem {
+                path,
+                branch,
+                reason,
+                unmerged,
+            },
+            git_dir,
+        ));
     }
     // Only a run worktree still on the run branch is removed with it. When the worktree is gone,
     // its branch name was checked against the record ([`check_run_branch`]) and goes alone.
     let reason = if run.path.is_dir() {
         match git
-            .run(&run.path, &["symbolic-ref", "--short", "HEAD"])
+            .run_at(run.at(), &["symbolic-ref", "--short", "HEAD"])
             .await
         {
             Ok(head) if head == run.branch => None,
@@ -874,12 +1075,15 @@ async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<ClearItem> {
     } else {
         None
     };
-    items.push(ClearItem {
-        path: run.path.clone(),
-        branch: run.branch.clone(),
-        reason,
-        unmerged: None,
-    });
+    items.push((
+        ClearItem {
+            path: run.path.clone(),
+            branch: run.branch.clone(),
+            reason,
+            unmerged: None,
+        },
+        run.git_dir.clone(),
+    ));
     items
 }
 
