@@ -258,6 +258,10 @@ fn main() {
         paths::set_custom_data_dir(dir);
     }
 
+    // The job roots registry lives in the data directory, so it is opened once that is known.
+    // A sandbox helper process has already been dispatched above and never opens it.
+    bongos_confine::init();
+
     #[cfg(target_os = "windows")]
     match util::get_zed_cli_path() {
         Ok(path) => askpass::set_askpass_program(path),

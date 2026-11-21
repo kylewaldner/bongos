@@ -72,6 +72,7 @@ anyhow.workspace = true
 askpass.workspace = true
 assets.workspace = true
 audio.workspace = true
+bongos_confine.workspace = true
 breadcrumbs.workspace = true
 chrono.workspace = true
 clap.workspace = true
