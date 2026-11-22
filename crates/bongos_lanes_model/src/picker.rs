@@ -251,7 +251,8 @@ pub fn pick(
 }
 
 /// The dry run: [`pick`] for every lane in index order against a scratch copy of the state, so
-/// a later lane sees an earlier lane's hypothetical claim. Writes nothing.
+/// a later lane sees an earlier lane's hypothetical claim. A paused, stopped or halted lane's
+/// outcome is listed but its claim is not applied. Writes nothing.
 pub fn explain(
     graph: &PickGraph,
     state: &LanesState,
@@ -274,6 +275,12 @@ pub fn explain(
     let mut assigned = BTreeSet::new();
     for lane in &lanes {
         let outcome = Picker::new(graph, table, &scratch_opts).pick(&scratch, lane);
+        // A paused, stopped or halted lane takes nothing in the real pass, so its hypothetical
+        // claim is shown but not applied for the lanes after it.
+        if !lane_live(&scratch, lane) {
+            per_lane.push((lane.clone(), outcome));
+            continue;
+        }
         match &outcome {
             PickOutcome::Assign(assignment) => {
                 apply_changes(&mut scratch, &assignment.owner_change, lane);
@@ -314,17 +321,7 @@ pub fn explain(
         waiting.truncate(limit);
     }
 
-    let live = lanes
-        .iter()
-        .filter(|lane| {
-            state.lanes.get(*lane).is_none_or(|record| {
-                !matches!(
-                    record.state,
-                    LaneState::Paused | LaneState::Stopped | LaneState::Halted
-                )
-            })
-        })
-        .count() as u32;
+    let live = lanes.iter().filter(|lane| lane_live(state, lane)).count() as u32;
     let started = |task: &TaskId| top_started(graph, state, task);
     DryRun {
         per_lane,
@@ -464,6 +461,17 @@ fn effective_count(table: &LaneTable, opts: &PickOptions, kind: &str) -> Option<
 /// Whether the lane still exists: its kind is declared and its index is within the count.
 fn lane_exists(table: &LaneTable, opts: &PickOptions, lane: &LaneId) -> bool {
     effective_count(table, opts, &lane.kind).is_some_and(|count| lane.index <= count)
+}
+
+/// Whether the lane can take work: it has no record yet, or its record is not paused, stopped or
+/// halted.
+fn lane_live(state: &LanesState, lane: &LaneId) -> bool {
+    state.lanes.get(lane).is_none_or(|record| {
+        !matches!(
+            record.state,
+            LaneState::Paused | LaneState::Stopped | LaneState::Halted
+        )
+    })
 }
 
 /// The owner of a leaf: its top-level task, or itself with `owner = "self"`.
@@ -1152,13 +1160,7 @@ impl<'a> Picker<'a> {
             }
             if let Some(to) = &target.lane {
                 let running = LaneId::parse(to).is_some_and(|pinned| {
-                    lane_exists(self.table, self.opts, &pinned)
-                        && state.lanes.get(&pinned).is_none_or(|record| {
-                            !matches!(
-                                record.state,
-                                LaneState::Paused | LaneState::Stopped | LaneState::Halted
-                            )
-                        })
+                    lane_exists(self.table, self.opts, &pinned) && lane_live(state, &pinned)
                 });
                 return Err(if running {
                     WaitReason::Pin { to: to.clone() }
