@@ -1,3 +1,5 @@
+pub mod lanes_cli;
+
 use std::path::PathBuf;
 
 use anyhow::Result;

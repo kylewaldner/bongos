@@ -174,7 +174,14 @@ fn handle(
             let text = lanes.resume(&parse_lane(payload.lane.as_deref())?)?;
             Ok(Task::ready(Ok(message(text))))
         }
-        LanesVerb::Status => Ok(Task::ready(Ok(message(status_text(&lanes.status()?))))),
+        LanesVerb::Status => {
+            let status = lanes.status()?;
+            let doc = status_document(&status, cx);
+            Ok(Task::ready(Ok(json!({
+                "message": status_text(&status),
+                "status": doc,
+            }))))
+        }
         LanesVerb::Start if EngineHostProcess::is_running(cx) => {
             let starting = lanes.start(
                 StartLanes {
@@ -217,6 +224,44 @@ fn handle(
 fn parse_lane(text: Option<&str>) -> Result<LaneId> {
     let text = text.ok_or_else(|| anyhow!("name a lane"))?;
     LaneId::parse(text).ok_or_else(|| anyhow!("{text} is not a lane (like build-2)"))
+}
+
+/// The `lanes-status 1` document of this process's project.
+fn status_document(status: &LanesStatus, cx: &App) -> serde_json::Value {
+    let repo = sole_writer_repo(cx).ok();
+    let split = repo
+        .as_ref()
+        .and_then(|repo| repo.split_master().ok().flatten());
+    let project = repo
+        .as_ref()
+        .map(|repo| repo.location().id.clone())
+        .unwrap_or_default();
+    let graph = WorkStore::global(cx)
+        .and_then(|store| store.read(cx).snapshot())
+        .and_then(|tree| from_work_tree(&tree, &project, &LiveFacts::default()));
+    let engine = cx.try_global::<WorkflowEngine>().cloned();
+    crate::status_doc::status_doc(
+        status,
+        &crate::status_doc::StatusFacts {
+            project: &project,
+            split: split.as_ref(),
+            goal: &|task| {
+                graph
+                    .as_ref()
+                    .and_then(|graph| graph.task(task))
+                    .map(|task| task.name.clone())
+            },
+            run_lifecycle: &|run| {
+                engine
+                    .as_ref()
+                    .and_then(|engine| engine.lifecycle().status(run))
+                    .map(|status| format!("{status:?}").to_lowercase())
+            },
+            // A running job of a lane waits on the landing while master is split; the
+            // landing's own wait event is not tracked per lane here.
+            waits_on_landing: &|_| true,
+        },
+    )
 }
 
 fn status_text(status: &LanesStatus) -> String {

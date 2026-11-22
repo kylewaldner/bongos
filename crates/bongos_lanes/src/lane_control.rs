@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use anyhow::{Result, bail};
 use bongos_lanes_model::{
-    Author, LaneId, LaneRecord, LaneState, LanesState, StopCause, TaskId, WaitReason,
+    Author, JobRecord, LaneId, LaneRecord, LaneState, LanesState, StopCause, TaskId, WaitReason,
     stop_at_job_boundary,
 };
 use bongos_project_repo::StateTx;
@@ -106,6 +106,10 @@ pub struct LaneStatus {
     /// What the lane asks of a person while it waits on one (a lane wait handler's ask), until
     /// `lanes: resume`.
     pub asked: Option<String>,
+    /// The job the lane runs now.
+    pub job: Option<JobRecord>,
+    /// The jobs the lane finished.
+    pub jobs_done: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +362,8 @@ fn status(parts: &LanesParts) -> Result<LanesStatus> {
             pause_requested: lane.pause_requested,
             stop_requested: lane.stop_requested.is_some(),
             asked: asked_text(&state, &asks, &lane.id()),
+            job: lane.job.clone(),
+            jobs_done: lane.jobs_done,
         })
         .collect();
     Ok(LanesStatus {
