@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use bongos_workflow_model::{Ceilings, Limits, ValidationContext};
 use settings::{RegisterSetting, Settings, SettingsContent};
 
+use crate::agent_confinement::AgentConfinementSettings;
 use crate::runner_claude::AgentDefaults;
 use crate::runner_program::ProgramSettings;
 
@@ -34,6 +35,8 @@ pub struct WorkflowsSettings {
     pub mcp_exclude: Vec<String>,
     /// The directory holding workflow definitions; `None` means `~/.bongos/workflows`.
     pub definitions_dir: Option<PathBuf>,
+    /// Whether agent steps run confined, and the state paths of each CLI (`confinement.*`).
+    pub agent_confinement: AgentConfinementSettings,
 }
 
 impl WorkflowsSettings {
@@ -65,6 +68,11 @@ impl Default for WorkflowsSettings {
             keep_finished_days: 14,
             limits: Limits::default(),
             programs: ProgramSettings::default(),
+            agent_confinement: AgentConfinementSettings {
+                agent_steps: false,
+                claude_state_paths: vec!["~/.claude".to_string(), "~/.claude.json".to_string()],
+                codex_state_paths: vec!["~/.codex".to_string()],
+            },
         }
     }
 }
@@ -82,7 +90,14 @@ impl Settings for WorkflowsSettings {
         let agent_defaults = AgentDefaults::default();
         let ceilings = workflows.ceilings.clone().unwrap_or_default();
         let ceiling_defaults = Ceilings::default();
+        let confinement = content.confinement.clone().unwrap_or_default();
+        let state_paths = confinement.agent_state_paths.unwrap_or_default();
         Self {
+            agent_confinement: AgentConfinementSettings {
+                agent_steps: confinement.agent_steps.unwrap_or(false),
+                claude_state_paths: state_paths.claude.unwrap_or_default(),
+                codex_state_paths: state_paths.codex.unwrap_or_default(),
+            },
             agents: AgentDefaults {
                 model: agents
                     .claude

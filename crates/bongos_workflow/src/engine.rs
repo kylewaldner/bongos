@@ -266,6 +266,7 @@ impl SnapshotBuilder {
         next.agents = reading.settings.agents.clone();
         next.mcp_exclude = reading.settings.mcp_exclude.clone();
         next.programs = reading.settings.programs.clone();
+        next.agent_confinement = reading.settings.agent_confinement.clone();
         match reading.health {
             Some(found) => {
                 let failed = found.health.state == HealthState::Unchecked;

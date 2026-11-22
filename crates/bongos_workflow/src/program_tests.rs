@@ -155,6 +155,7 @@ impl Fixture {
                 turns: None,
                 elapsed_ms: 0,
                 session_id: None,
+                confinement_refusals: Vec::new(),
             },
         ]);
         let state = state_doc::build(

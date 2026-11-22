@@ -150,6 +150,10 @@ pub enum Event {
         elapsed_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// The writes a confined agent step's sandbox refused, each as the annotation naming
+        /// the rule. Absent in older logs and for an unconfined try.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        confinement_refusals: Vec<String>,
     },
     GateOpened {
         key: NodeKey,
@@ -688,6 +692,7 @@ fn apply(state: &mut RunState, event: &Event) {
             turns,
             elapsed_ms,
             session_id,
+            confinement_refusals: _,
         } => {
             let had_start = match state.running.get(key) {
                 Some(running) if running.try_number == *try_number => {
