@@ -5633,6 +5633,7 @@ mod tests {
                 "artifact",
                 "assistant",
                 "assistant2",
+                "avy",
                 "branch_picker",
                 "bedrock",
                 "bongos",
