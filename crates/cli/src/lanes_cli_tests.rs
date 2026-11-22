@@ -636,7 +636,19 @@ mod socket {
     /// with `answer(&command)`. Ends when the client closes.
     fn serve(listener: UnixListener, version: &'static str, answer: fn(&Value) -> Value) {
         std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            for stream in listener.incoming() {
+                let stream = stream.unwrap();
+                serve_connection(stream, version, answer);
+            }
+        });
+    }
+
+    fn serve_connection(
+        stream: std::os::unix::net::UnixStream,
+        version: &str,
+        answer: fn(&Value) -> Value,
+    ) {
+        {
             let mut writer = stream.try_clone().unwrap();
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
@@ -669,7 +681,7 @@ mod socket {
                 )
                 .unwrap();
             }
-        });
+        }
     }
 
     #[test]
