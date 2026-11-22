@@ -118,7 +118,7 @@ mod tests {
     fn lane(index: u32, state: LaneState, task: Option<&str>, job: bool) -> LaneStatus {
         let id = LaneId::new("build", index);
         LaneStatus {
-            id: id.clone(),
+            id,
             state,
             reason: None,
             task: task.map(TaskId::new),

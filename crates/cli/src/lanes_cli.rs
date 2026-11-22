@@ -934,6 +934,8 @@ pub(crate) mod real {
             }
         }
 
+        // The command line has nothing else to do while the read mode runs, so it blocks.
+        #[allow(clippy::disallowed_methods)]
         fn read_mode(&self, project: &ProjectRef, args: &[String]) -> Result<ReadOutput, String> {
             let output = std::process::Command::new(&self.program)
                 .arg("--engine-host")
