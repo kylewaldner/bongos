@@ -11,6 +11,7 @@ pub use settings::{
     MultiCursorModifier, ScrollBeyondLastLine, ScrollbarDiagnostics, SeedQuerySetting, ShowMinimap,
     SnippetSortOrder,
 };
+use std::time::Duration;
 use ui::scrollbars::ShowScrollbar;
 
 /// Imports from the VSCode settings at
@@ -32,6 +33,8 @@ pub struct EditorSettings {
     pub save_kill_ring: bool,
     /// Whether terminal copies and pastes use the kill ring (`emacs.terminal_uses_kill_ring`).
     pub terminal_uses_kill_ring: bool,
+    /// How long the Avy jump waits for another key (`emacs.avy_timeout`).
+    pub avy_timeout: Duration,
     pub current_line_highlight: CurrentLineHighlight,
     pub selection_highlight: bool,
     pub rounded_selection: bool,
@@ -311,6 +314,13 @@ impl Settings for EditorSettings {
                 .as_ref()
                 .and_then(|emacs| emacs.terminal_uses_kill_ring)
                 .unwrap_or(false),
+            avy_timeout: Duration::from_millis(
+                content
+                    .emacs
+                    .as_ref()
+                    .and_then(|emacs| emacs.avy_timeout)
+                    .map_or(500, |delay| delay.0),
+            ),
             current_line_highlight: editor.current_line_highlight.unwrap(),
             selection_highlight: editor.selection_highlight.unwrap(),
             rounded_selection: editor.rounded_selection.unwrap(),
@@ -445,5 +455,47 @@ pub fn ui_scrollbar_settings_from_raw(
         settings::ShowScrollbar::System => ShowScrollbar::System,
         settings::ShowScrollbar::Always => ShowScrollbar::Always,
         settings::ShowScrollbar::Never => ShowScrollbar::Never,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{BorrowAppContext as _, TestAppContext};
+    use settings::SettingsStore;
+
+    fn init_settings(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+        });
+    }
+
+    #[gpui::test]
+    fn test_avy_timeout_defaults_to_500_ms(cx: &mut TestAppContext) {
+        init_settings(cx);
+        cx.update(|cx| {
+            assert_eq!(
+                EditorSettings::get_global(cx).avy_timeout,
+                Duration::from_millis(500)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_avy_timeout_reads_the_user_value(cx: &mut TestAppContext) {
+        init_settings(cx);
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.emacs.get_or_insert_default().avy_timeout =
+                        Some(settings::DelayMs(250));
+                })
+            });
+            assert_eq!(
+                EditorSettings::get_global(cx).avy_timeout,
+                Duration::from_millis(250)
+            );
+        });
     }
 }

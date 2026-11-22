@@ -813,6 +813,22 @@ another way in: the variants above are commands in the command palette (`task: a
 `prompts: send without marking`, `workflow: retry step fresh`), and C-x C-SPC stands in for
 C-u C-SPC.
 
+### Avy jump
+
+Avy jumps the cursor to any visible text with a few keys, as in Emacs. It is on by default with the
+Emacs keys, works in full editors (a file you edit) and not in terminals, a picker's query editor,
+the minibuffer or other small editors. Three commands, each in the command palette:
+
+- **M-;** (avy-goto-char-timer): type the characters to look for, then pause. Labels appear on
+  every visible match. Press **Enter** to show the labels at once, without waiting for the pause.
+  The pause is `emacs.avy_timeout` in milliseconds (default 500), editable in Settings.
+- **C-;** (avy-goto-word-1): type one character; labels appear on the visible words that start with it.
+- **C-M-;** (avy-goto-line): labels appear on the start of every visible line.
+
+Type the label characters to jump; the cursor moves there, and into another pane when the label is
+in one. **C-g** or **Escape** cancels the labels and leaves the cursor where it was, and nothing
+you typed is inserted.
+
 ## Keybinding profiles
 
 bongos has three keybinding profiles, set with `base_keymap` in settings: `"Emacs"` (the default),

@@ -1,5 +1,7 @@
 mod app_menus;
 #[cfg(test)]
+mod avy_keymap_tests;
+#[cfg(test)]
 mod bongos_tests;
 #[cfg(test)]
 mod builder_keymap_tests;
@@ -5633,6 +5635,7 @@ mod tests {
                 "artifact",
                 "assistant",
                 "assistant2",
+                "avy",
                 "branch_picker",
                 "bedrock",
                 "bongos",
