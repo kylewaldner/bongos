@@ -1,12 +1,17 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bongos_lanes_model::{
     Author, JobRecord, LaneId, LaneRecord, LaneState, LanesState, OwnerRecord, OwnerState,
-    RunSubject, TaskId,
+    RunSubject, TaskId, WaitReason,
 };
 use bongos_project_repo::{Location, StateApplyHooks, StateStore, StateWriter};
 use bongos_project_repo_model::{DefinitionTree, RelPath};
+use futures::channel::oneshot;
+use gpui::{App, Task};
 use tempfile::TempDir;
+
+use crate::hooks::{BeforeJob, JobEnd, JobHook, JobHookCx};
 
 /// A writer over a state directory inside `root`, with its own hook registry, so tests never
 /// share the global one.
@@ -70,6 +75,122 @@ pub(crate) fn lanes_state() -> LanesState {
         ]
         .into(),
         lanes: [(build, running), (docs, idle)].into(),
+    }
+}
+
+/// One call a [`GatedHook`] heard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HookCall {
+    /// `before_job` of the job with this run id.
+    Before(String),
+    /// `after_job` of the job with this run id.
+    After(String, JobEnd),
+}
+
+/// A job hook whose `before_job` and `after_job` answer when the test says so. Ungated, each
+/// answers at once (`before_job` with its `answer`).
+#[derive(Default)]
+pub(crate) struct GatedHook {
+    /// `before_job` waits for [`GatedHook::decide`].
+    pub(crate) gate_before: AtomicBool,
+    /// `after_job` waits for [`GatedHook::release_after`].
+    pub(crate) gate_after: AtomicBool,
+    /// What an ungated `before_job` answers; `Go` when unset.
+    pub(crate) answer: Mutex<Option<BeforeJob>>,
+    /// Shown with `set_wait` when `before_job` is called.
+    pub(crate) wait: Mutex<Option<WaitReason>>,
+    calls: Mutex<Vec<HookCall>>,
+    before_gates: Mutex<Vec<oneshot::Sender<BeforeJob>>>,
+    after_gates: Mutex<Vec<oneshot::Sender<()>>>,
+    /// How many `before_job` futures were dropped before they answered.
+    dropped: Arc<AtomicUsize>,
+}
+
+impl GatedHook {
+    pub(crate) fn calls(&self) -> Vec<HookCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    pub(crate) fn dropped(&self) -> usize {
+        self.dropped.load(Ordering::SeqCst)
+    }
+
+    /// Answers every waiting `before_job` with `decision`.
+    pub(crate) fn decide(&self, decision: BeforeJob) {
+        for gate in self.before_gates.lock().unwrap().drain(..) {
+            gate.send(decision.clone()).ok();
+        }
+    }
+
+    /// Lets every waiting `after_job` resolve.
+    pub(crate) fn release_after(&self) {
+        for gate in self.after_gates.lock().unwrap().drain(..) {
+            gate.send(()).ok();
+        }
+    }
+}
+
+/// Counts a `before_job` future dropped while still armed.
+struct DropCounter {
+    dropped: Arc<AtomicUsize>,
+    armed: bool,
+}
+
+impl Drop for DropCounter {
+    fn drop(&mut self) {
+        if self.armed {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl JobHook for GatedHook {
+    fn before_job(
+        &self,
+        _lane: &LaneId,
+        job: &JobRecord,
+        hcx: JobHookCx,
+        cx: &mut App,
+    ) -> Task<BeforeJob> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HookCall::Before(job.run_id.clone()));
+        if let Some(reason) = self.wait.lock().unwrap().clone() {
+            hcx.set_wait(reason);
+        }
+        if !self.gate_before.load(Ordering::SeqCst) {
+            let answer = self.answer.lock().unwrap().clone();
+            return Task::ready(answer.unwrap_or(BeforeJob::Go));
+        }
+        let (sender, receiver) = oneshot::channel();
+        self.before_gates.lock().unwrap().push(sender);
+        let counter = DropCounter {
+            dropped: self.dropped.clone(),
+            armed: true,
+        };
+        cx.foreground_executor().spawn(async move {
+            // The whole counter moves into the future, not only its flag.
+            let mut counter = counter;
+            let decision = receiver.await;
+            counter.armed = false;
+            decision.unwrap_or(BeforeJob::Go)
+        })
+    }
+
+    fn after_job(&self, _lane: &LaneId, job: &JobRecord, end: &JobEnd, cx: &mut App) -> Task<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HookCall::After(job.run_id.clone(), end.clone()));
+        if !self.gate_after.load(Ordering::SeqCst) {
+            return Task::ready(());
+        }
+        let (sender, receiver) = oneshot::channel();
+        self.after_gates.lock().unwrap().push(sender);
+        cx.foreground_executor().spawn(async move {
+            receiver.await.ok();
+        })
     }
 }
 

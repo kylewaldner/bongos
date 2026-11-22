@@ -169,6 +169,10 @@ pub enum WaitReason {
         point: String,
         message: String,
     },
+    /// The lane waits for room in the resource pool `name`; its text comes from the pool's owner.
+    Pool {
+        name: String,
+    },
     Failed(String),
     Other(String),
 }
@@ -215,6 +219,7 @@ impl fmt::Display for WaitReason {
             WaitReason::Bound => f.write_str("outside the bound"),
             WaitReason::Finished => f.write_str("finished"),
             WaitReason::Hook { point, message } => write!(f, "{point}: {message}"),
+            WaitReason::Pool { name } => write!(f, "waits for pool {name}"),
             WaitReason::Environment(text) | WaitReason::Failed(text) | WaitReason::Other(text) => {
                 f.write_str(text)
             }
