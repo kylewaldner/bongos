@@ -22,6 +22,7 @@ use crate::dispatcher::{
     DispatcherRecord, JobCommit, JobDefinitionPolicy, JobEngine, JobSetup, Lanes, LanesHost,
     LanesParts, LanesStarted, NOTHING_READY, StartLanes, VerifiedCommitPolicy, put_dispatcher,
 };
+use crate::lane_control::RunEnd;
 use crate::store::{put_lane, put_owner, read_state};
 use crate::test_support::{SINCE, tree, writer};
 
@@ -146,6 +147,8 @@ struct FakeEngine {
     /// The next job start is refused with this.
     refuse: RefCell<Option<Refusal>>,
     observers: RefCell<Vec<Rc<Observer>>>,
+    /// Every end of the dispatcher's run.
+    ends: RefCell<Vec<(String, RunEnd, String)>>,
 }
 
 impl JobEngine for FakeEngine {
@@ -185,6 +188,12 @@ impl JobEngine for FakeEngine {
 
     fn observe(&self, f: Observer, _cx: &mut App) {
         self.observers.borrow_mut().push(Rc::new(f));
+    }
+
+    fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, _cx: &mut App) {
+        self.ends
+            .borrow_mut()
+            .push((run.to_string(), end, note.to_string()));
     }
 }
 
@@ -259,6 +268,7 @@ fn harness_with(
             .collect(),
         refuse: RefCell::new(None),
         observers: RefCell::new(Vec::new()),
+        ends: RefCell::new(Vec::new()),
     });
     let lanes = Lanes::new(LanesParts {
         host: host.clone(),
@@ -278,6 +288,7 @@ fn harness_with(
 fn start_request() -> StartLanes {
     StartLanes {
         bound: None,
+        max_jobs: None,
         unattended: None,
         by: Author::Person("kim".to_string()),
     }
@@ -441,6 +452,8 @@ async fn start_attaches_to_the_dispatcher_of_a_live_host(cx: &mut TestAppContext
                     bound: None,
                     unattended: None,
                     definition_commit: None,
+                    stopped_by: None,
+                    ended: None,
                 },
             )
         })
@@ -1179,3 +1192,6 @@ async fn a_start_is_skipped_when_the_lane_no_longer_holds_the_run(cx: &mut TestA
 
     assert!(harness.engine.job_tasks().is_empty());
 }
+
+#[path = "lane_control_tests.rs"]
+mod lane_control_tests;
