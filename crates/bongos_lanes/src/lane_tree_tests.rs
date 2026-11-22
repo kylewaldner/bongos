@@ -177,7 +177,7 @@ impl Fixture {
             project_id: "project-1".to_string(),
             project_folder: base.join("project"),
             project_repository: Some(base.join("project/repository")),
-            home: home.clone(),
+            home,
             central: base.join("data/worktrees"),
             repositories: vec![
                 RepositoryPlace {

@@ -107,7 +107,7 @@ async fn a_registered_extra_repository_gets_its_tree_in_the_job_trees(cx: &mut T
     cx.update(|cx| CurrentJobTrees::set(lane.clone(), started.trees.clone(), cx));
     assert_eq!(
         cx.update(|cx| CurrentJobTrees::of(&lane, cx)),
-        Some(started.trees.clone())
+        Some(started.trees)
     );
     cx.update(|cx| CurrentJobTrees::clear(&lane, cx));
     assert_eq!(cx.update(|cx| CurrentJobTrees::of(&lane, cx)), None);
