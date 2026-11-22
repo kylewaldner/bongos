@@ -3,26 +3,11 @@
 
 use std::{process, sync::Arc};
 
+use bongos_lanes::LanesSettings;
 use fs::{Fs, RealFs};
 use gpui::{App, UpdateGlobal as _};
 use release_channel::{AppCommitSha, AppVersion};
-use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
-
-/// The `lanes` settings (user level only).
-#[derive(Clone, Debug, PartialEq, RegisterSetting)]
-pub struct LanesSettings {
-    /// Whether lanes are on (off by default). While false, no engine host starts.
-    pub enabled: bool,
-}
-
-impl Settings for LanesSettings {
-    fn from_settings(content: &SettingsContent) -> Self {
-        let lanes = content.lanes.clone().expect("default.json defines `lanes`");
-        Self {
-            enabled: lanes.enabled.expect("default.json defines `lanes.enabled`"),
-        }
-    }
-}
+use settings::{Settings, SettingsStore};
 
 /// The message naming the first setting the engine host needs that is off.
 fn first_setting_off(cx: &App) -> Option<&'static str> {
@@ -94,6 +79,7 @@ pub fn run(project_id: String, probe: bool) -> ! {
             cx,
         );
         bongos_workflow::init(cx);
+        bongos_lanes::init(cx);
 
         if let Some(message) = first_setting_off(cx) {
             fail(1, message);

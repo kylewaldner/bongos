@@ -2055,6 +2055,7 @@ dependencies = [
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",
+ "bongos_lanes",
  "bongos_language_status",
  "bongos_languages",
  "bongos_linear",
@@ -2560,6 +2561,28 @@ dependencies = [
  "workspace",
  "worktree",
  "zed_actions",
+]
+
+[[package]]
+name = "bongos_lanes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_lanes_model",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_workflow",
+ "bongos_workflow_model",
+ "command_palette_hooks",
+ "gpui",
+ "project",
+ "release_channel",
+ "semver",
+ "settings",
+ "tempfile",
+ "toml 0.8.23",
+ "util",
+ "workspace",
 ]
 
 [[package]]
