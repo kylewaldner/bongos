@@ -5,10 +5,7 @@ use editor::{
     Editor, MultiBuffer, MultiBufferOffset, ToOffset as _,
     display_map::{BlockPlacement, BlockProperties, BlockStyle, DisplayRow},
 };
-use gpui::{
-    AppContext as _, Entity, EntityId, IntoElement as _, TestAppContext, VisualTestContext, div,
-    point,
-};
+use gpui::{Entity, EntityId, IntoElement as _, TestAppContext, VisualTestContext, div, point};
 use language::{Point, language_settings::SoftWrap};
 use workspace::{Workspace, dock::DockPosition};
 
