@@ -56,7 +56,7 @@ impl Dispatcher {
                     .read(read_state)
                     .map(|state| lane_holds(&state, &pending.lane, &pending.job.run_id));
                 match holds {
-                    Ok(true) => {}
+                    Ok(true) => self.start_run(&pending, setup, cx),
                     Ok(false) => {
                         log::info!(
                             "lanes: {} no longer holds run {}, not starting it",
@@ -65,24 +65,13 @@ impl Dispatcher {
                         );
                         return;
                     }
+                    // The job cannot be started, so it is cleared and the lane waits.
                     Err(error) => {
                         log::error!("lanes: reading the state before a start: {error:#}");
-                        return;
+                        Some(Cleared::Wait(WaitReason::Other(format!(
+                            "reading the state before a start: {error:#}"
+                        ))))
                     }
-                }
-                let trees = setup.trees.clone();
-                let request = self.start_request(&pending, setup);
-                match self.parts().engine.start(request, cx) {
-                    Ok(_) => {
-                        if let Some(trees) = trees {
-                            CurrentJobTrees::set(pending.lane.clone(), trees, cx);
-                        }
-                        None
-                    }
-                    Err(refusal) if environment_refusal(refusal.kind) => {
-                        Some(Cleared::Wait(WaitReason::Environment(refusal.to_string())))
-                    }
-                    Err(refusal) => Some(Cleared::Halt(refusal.to_string())),
                 }
             }
         };
@@ -101,6 +90,24 @@ impl Dispatcher {
             );
         }
         self.schedule(false, cx);
+    }
+
+    /// Starts the run of a job its lane still holds; returns how to clear a refusal.
+    fn start_run(&self, pending: &PendingJob, setup: JobSetup, cx: &mut App) -> Option<Cleared> {
+        let trees = setup.trees.clone();
+        let request = self.start_request(pending, setup);
+        match self.parts().engine.start(request, cx) {
+            Ok(_) => {
+                if let Some(trees) = trees {
+                    CurrentJobTrees::set(pending.lane.clone(), trees, cx);
+                }
+                None
+            }
+            Err(refusal) if environment_refusal(refusal.kind) => {
+                Some(Cleared::Wait(WaitReason::Environment(refusal.to_string())))
+            }
+            Err(refusal) => Some(Cleared::Halt(refusal.to_string())),
+        }
     }
 
     fn start_request(&self, pending: &PendingJob, setup: JobSetup) -> StartRequest {
@@ -237,22 +244,38 @@ fn job_changed(
         | RunStatus::Paused
         | RunStatus::WaitingOnYou => {
             let live = matches!(status, RunStatus::Queued | RunStatus::Running);
-            if live
-                && lane.state == LaneState::Halted
-                && let Some((task, owner)) = &held
-                && let Some(transition) = lane_after_retry(owner, &lane, now)
-            {
-                put_lane(tx, &transition.lane)?;
-                put_owner(tx, task, &transition.owner)?;
-                if let Some(history) = &transition.history {
-                    append_history(tx, task, history, now)?;
+            if live && lane.state == LaneState::Halted {
+                match &held {
+                    Some((task, owner)) => {
+                        if let Some(transition) = lane_after_retry(owner, &lane, now) {
+                            put_lane(tx, &transition.lane)?;
+                            put_owner(tx, task, &transition.owner)?;
+                            if let Some(history) = &transition.history {
+                                append_history(tx, task, history, now)?;
+                            }
+                        }
+                    }
+                    // A job with no owner resumes its lane on retry; no owner is written.
+                    None => {
+                        let mut resumed = lane;
+                        resumed.state = LaneState::Running;
+                        resumed.reason = None;
+                        put_lane(tx, &resumed)?;
+                    }
                 }
             }
             return Ok(Some(id));
         }
     };
-    // An end applies once, to a running lane: a repeated or out-of-order end changes nothing.
-    if lane.state != LaneState::Running {
+    // An end applies once. The lane holds this run (it was found by it), so a duplicate end after
+    // the job was cleared never gets here. A running lane takes any end; a lane halted by this
+    // run's failure takes only a cancel, since its failure was already applied.
+    let applies = match lane.state {
+        LaneState::Running => true,
+        LaneState::Halted => matches!(outcome, JobEnd::Cancelled),
+        LaneState::Idle | LaneState::Paused | LaneState::Waiting | LaneState::Stopped => false,
+    };
+    if !applies {
         return Ok(None);
     }
     let lane_kind_is_ahead = table

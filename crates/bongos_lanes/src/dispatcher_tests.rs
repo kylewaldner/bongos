@@ -1075,6 +1075,88 @@ async fn a_failed_job_with_no_task_leaves_an_unrelated_owner_alone(cx: &mut Test
     assert_eq!(harness.state().owners[&TaskId::new("z")], owner);
 }
 
+// A cancel of a failed job, whose lane is halted and still holds it, pauses the lane and clears
+// the job; the owner keeps the task.
+#[gpui::test]
+async fn a_cancel_after_a_failure_pauses_the_halted_lane(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let _started = start(&harness, start_request(), cx).await;
+
+    harness.set_run("a", RunStatus::Failed, cx);
+    assert_eq!(harness.lane("build", 1).state, LaneState::Halted);
+
+    harness.set_run("a", RunStatus::Cancelled, cx);
+    let lane = harness.lane("build", 1);
+    assert_eq!(lane.state, LaneState::Paused);
+    assert_eq!(lane.job, None);
+    assert_eq!(
+        lane.reason,
+        Some(WaitReason::Other("job cancelled".to_string()))
+    );
+    let owner = harness.state().owners[&TaskId::new("a")].clone();
+    assert_eq!(owner.lane, Some(LaneId::new("build", 1)));
+}
+
+// A second failure of a run whose failure halted its lane changes nothing.
+#[gpui::test]
+async fn a_duplicate_failure_of_a_halted_lane_changes_nothing(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let _started = start(&harness, start_request(), cx).await;
+
+    harness.set_run("a", RunStatus::Failed, cx);
+    let halted = harness.state();
+    let events = history_of(&harness, "a");
+
+    harness.set_run("a", RunStatus::Failed, cx);
+    assert_eq!(harness.state(), halted);
+    assert_eq!(history_of(&harness, "a"), events);
+}
+
+// A task-less job that fails halts its lane; a retry resumes it and its success leaves it idle.
+#[gpui::test]
+async fn a_task_less_job_resumes_on_retry_and_ends(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![]), &[]);
+    let _started = start(&harness, start_request(), cx).await;
+    let mut lane = harness.lane("build", 1);
+    let done_before = lane.jobs_done;
+    harness
+        .writer
+        .transact(|tx| {
+            lane.state = LaneState::Running;
+            lane.job = Some(JobRecord {
+                run_id: "0190extension".to_string(),
+                subject: RunSubject::Other("project-1".to_string()),
+                workflow: "w".to_string(),
+                started: SINCE.to_string(),
+                definition_commit: None,
+            });
+            put_lane(tx, &lane)
+        })
+        .unwrap();
+
+    cx.update(|cx| harness.engine.set("0190extension", RunStatus::Failed, cx));
+    cx.run_until_parked();
+    assert_eq!(harness.lane("build", 1).state, LaneState::Halted);
+
+    cx.update(|cx| harness.engine.set("0190extension", RunStatus::Running, cx));
+    cx.run_until_parked();
+    let resumed = harness.lane("build", 1);
+    assert_eq!(resumed.state, LaneState::Running);
+    assert_eq!(resumed.reason, None);
+
+    cx.update(|cx| {
+        harness
+            .engine
+            .set("0190extension", RunStatus::Succeeded, cx)
+    });
+    cx.run_until_parked();
+    let ended = harness.lane("build", 1);
+    assert_eq!(ended.state, LaneState::Idle);
+    assert_eq!(ended.job, None);
+    assert_eq!(ended.jobs_done, done_before + 1);
+    assert!(harness.state().owners.is_empty());
+}
+
 // A start whose lane lost its job while the job was prepared starts no run.
 #[gpui::test]
 async fn a_start_is_skipped_when_the_lane_no_longer_holds_the_run(cx: &mut TestAppContext) {
