@@ -1360,18 +1360,32 @@ fn a_new_task_waits_for_a_conflicting_task_in_flight_on_another_lane() {
     );
     let found = reasons(&pick_on(&area_pair(), &state, &table, &lane("build", 1)));
     let expected = area("ui", "a", "in flight on build-2");
-    assert!(found.contains(&("b".to_string(), expected.clone())), "{found:?}");
-    assert_eq!(expected.to_string(), "area ui shared with a, in flight on build-2");
+    assert!(
+        found.contains(&("b".to_string(), expected.clone())),
+        "{found:?}"
+    );
+    assert_eq!(
+        expected.to_string(),
+        "area ui shared with a, in flight on build-2"
+    );
 
     // From an empty state the dry run lets the second lane see the first one's claim.
-    let dry = explain(&area_pair(), &LanesState::default(), &table, &PickOptions::default());
+    let dry = explain(
+        &area_pair(),
+        &LanesState::default(),
+        &table,
+        &PickOptions::default(),
+    );
     assert_eq!(picked(&dry.per_lane[0].1), pair("a", "w"));
     assert!(
         reasons(&dry.per_lane[1].1)
             .contains(&("b".to_string(), area("ui", "a", "in flight on build-1")))
     );
     assert_eq!(dry.waiting.len(), 1);
-    assert_eq!(dry.waiting[0].reason, area("ui", "a", "in flight on build-1"));
+    assert_eq!(
+        dry.waiting[0].reason,
+        area("ui", "a", "in flight on build-1")
+    );
 }
 
 // PRD 9: halted and stopped tasks count as in flight, and so does an unowned task started past
@@ -1410,7 +1424,10 @@ fn halted_and_stopped_tasks_count_as_in_flight() {
         &table,
         &lane("build", 1),
     ));
-    assert!(found.contains(&("b".to_string(), area("ui", "A", "in flight"))), "{found:?}");
+    assert!(
+        found.contains(&("b".to_string(), area("ui", "A", "in flight"))),
+        "{found:?}"
+    );
 
     // A task stopped on a lane that is gone is picked up first; the conflicting new task waits.
     let state = owners(&[("a", OwnerState::Stopped, Some(lane("build", 3)))]);
@@ -1498,12 +1515,21 @@ fn areas_off_and_exemptions_let_conflicting_tasks_run() {
     );
     let by_tasks = table_with_exemption("tasks = [\"a\", \"b\"]");
     assert_eq!(
-        picked(&pick_on(&area_graph(), &state, &by_tasks, &lane("build", 1))),
+        picked(&pick_on(
+            &area_graph(),
+            &state,
+            &by_tasks,
+            &lane("build", 1)
+        )),
         pair("b", "w")
     );
 
     // An exemption of a tag the two do not share, or of another task pair, does not help.
-    for other in ["tags = [\"db\"]", "tasks = [\"a\", \"c\"]", "tasks = [\"b\"]"] {
+    for other in [
+        "tags = [\"db\"]",
+        "tasks = [\"a\", \"c\"]",
+        "tasks = [\"b\"]",
+    ] {
         let table = table_with_exemption(other);
         assert_eq!(
             picked(&pick_on(&area_graph(), &state, &table, &lane("build", 1))),
@@ -1543,7 +1569,12 @@ fn a_pin_to_a_lane_that_is_not_running_never_goes_elsewhere() {
 
     // A pin to a lane above the count waits the same way.
     let gone = pinned("lane = \"build-3\"");
-    let dry = explain(&graph, &LanesState::default(), &gone, &PickOptions::default());
+    let dry = explain(
+        &graph,
+        &LanesState::default(),
+        &gone,
+        &PickOptions::default(),
+    );
     assert!(dry.per_lane.iter().all(|(_, outcome)| reasons(outcome)
         == vec![(
             "a".to_string(),
@@ -1554,7 +1585,12 @@ fn a_pin_to_a_lane_that_is_not_running_never_goes_elsewhere() {
 
     // A pin to a kind: only a lane of that kind takes it.
     let to_kind = pinned("kind = \"design\"");
-    let dry = explain(&graph, &LanesState::default(), &to_kind, &PickOptions::default());
+    let dry = explain(
+        &graph,
+        &LanesState::default(),
+        &to_kind,
+        &PickOptions::default(),
+    );
     assert_eq!(
         reasons(&dry.per_lane[0].1),
         vec![(
@@ -1633,7 +1669,10 @@ fn the_ahead_cap_counts_prepared_unstarted_and_running_preparations() {
         &table,
         &lane("design", 1),
     ));
-    assert!(found.contains(&("F3.d".to_string(), cap.clone())), "{found:?}");
+    assert!(
+        found.contains(&("F3.d".to_string(), cap.clone())),
+        "{found:?}"
+    );
     assert!(found.contains(&("F4.d".to_string(), cap.clone())));
     assert!(found.contains(&(
         "F2.d".to_string(),
@@ -1755,7 +1794,10 @@ fn a_stale_stamp_stops_every_lane() {
     };
     let state = LanesState::default();
     let fresh = explain(&graph_two(), &state, &table, &opts);
-    assert_eq!(fresh, explain(&graph_two(), &state, &table, &PickOptions::default()));
+    assert_eq!(
+        fresh,
+        explain(&graph_two(), &state, &table, &PickOptions::default())
+    );
 
     let mut progressed = w("a");
     progressed.state = TaskState::InProgress;
@@ -1787,7 +1829,12 @@ fn a_stale_stamp_stops_every_lane() {
     }
     // Without a stamp the check is off.
     assert_eq!(
-        picked(&pick_on(&changed, &LanesState::default(), &table, &lane("build", 1))),
+        picked(&pick_on(
+            &changed,
+            &LanesState::default(),
+            &table,
+            &lane("build", 1)
+        )),
         pair("a", "w")
     );
 }
@@ -2016,8 +2063,16 @@ fn concurrency_case(rng: &mut Rng) -> Concurrency {
 
     let mut text = format!(
         "{}[[kind]]\nname = \"build\"\ncount = 2\nrules = [\"step\", \"any\"]\n{}[[kind]]\nname = \"design\"\ncount = 2\nrules = [\"prepare\"]\nahead = {{ cap = {} }}\n",
-        if rng.chance(15) { "owner = \"self\"\n" } else { "" },
-        if rng.chance(20) { "areas = false\n" } else { "" },
+        if rng.chance(15) {
+            "owner = \"self\"\n"
+        } else {
+            ""
+        },
+        if rng.chance(20) {
+            "areas = false\n"
+        } else {
+            ""
+        },
         1 + rng.below(2),
     );
     text.push_str("[rules.step]\nwork_kind = \"step\"\nworkflow = \"w1\"\n");
@@ -2033,7 +2088,11 @@ fn concurrency_case(rng: &mut Rng) -> Concurrency {
     }
     if rng.chance(15) {
         let task = rng.pick(&top).clone();
-        let target = rng.pick(&["lane = \"build-1\"", "lane = \"build-2\"", "kind = \"build\""]);
+        let target = rng.pick(&[
+            "lane = \"build-1\"",
+            "lane = \"build-2\"",
+            "kind = \"build\"",
+        ]);
         text.push_str(&format!("[[pin]]\ntask = \"{task}\"\n{target}\n"));
     }
     let table = table(&text);
@@ -2131,7 +2190,10 @@ fn apply(
 ) {
     let changes = match outcome {
         PickOutcome::Assign(assignment) => {
-            *opts.assigned.entry(assignment.workflow.clone()).or_insert(0) += 1;
+            *opts
+                .assigned
+                .entry(assignment.workflow.clone())
+                .or_insert(0) += 1;
             if running {
                 state
                     .lanes
@@ -2230,10 +2292,7 @@ fn two_lanes_in_either_order_never_take_conflicting_work() {
                         &unit_b,
                         &case.graph.subtree_areas(&unit_b),
                     );
-                    assert_eq!(
-                        conflict, None,
-                        "{context}: {leaf_a} and {leaf_b} conflict"
-                    );
+                    assert_eq!(conflict, None, "{context}: {leaf_a} and {leaf_b} conflict");
                     if !case.graph.subtree_areas(&unit_a).is_empty() {
                         area_checked += 1;
                     }

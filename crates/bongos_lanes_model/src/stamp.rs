@@ -140,11 +140,8 @@ fn table_text(table: &LaneTable) -> String {
         .iter()
         .map(|exempt| {
             let tags: BTreeSet<String> = exempt.tags.iter().map(|tag| quote(&tag.value)).collect();
-            let tasks: BTreeSet<String> = exempt
-                .tasks
-                .iter()
-                .map(|task| quote(&task.value))
-                .collect();
+            let tasks: BTreeSet<String> =
+                exempt.tasks.iter().map(|task| quote(&task.value)).collect();
             format!("exempt tags {} tasks {}\n", join(&tags), join(&tasks))
         })
         .collect();

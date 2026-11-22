@@ -725,7 +725,9 @@ impl<'a> Picker<'a> {
     /// rule reads and the ahead count.
     fn lane_context(&self, state: &LanesState, lane: &LaneId) -> LaneContext<'a> {
         let kind = self.table.kinds.iter().find(|kind| kind.name == lane.kind);
-        let ahead_cap = kind.and_then(|kind| kind.ahead.as_ref()).map(|ahead| ahead.cap);
+        let ahead_cap = kind
+            .and_then(|kind| kind.ahead.as_ref())
+            .map(|ahead| ahead.cap);
         let areas = kind.is_some_and(|kind| kind.areas) && ahead_cap.is_none();
         let units = if areas {
             self.units(state)
@@ -794,7 +796,11 @@ impl<'a> Picker<'a> {
                 None => what.to_string(),
             },
         };
-        match state.owners.get(unit).map(|owner| (owner.state, &owner.lane)) {
+        match state
+            .owners
+            .get(unit)
+            .map(|owner| (owner.state, &owner.lane))
+        {
             Some((OwnerState::Active, lane)) => Some(at("in flight", lane)),
             Some((OwnerState::Halted, lane)) => Some(at("halted", lane)),
             Some((OwnerState::Stopped, lane)) => Some(at("stopped", lane)),
@@ -879,9 +885,7 @@ impl<'a> Picker<'a> {
             self.check_areas(ctx, lane, leaf, owned)?;
         }
         self.check_instances(&matched.workflow)?;
-        if ahead
-            && let Some(cap) = ctx.ahead_cap
-        {
+        if ahead && let Some(cap) = ctx.ahead_cap {
             let resumes = owner_change
                 .as_ref()
                 .is_some_and(|change| change.from == Some(OwnerState::Ahead));

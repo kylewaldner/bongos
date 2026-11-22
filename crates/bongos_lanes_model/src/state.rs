@@ -185,7 +185,10 @@ impl fmt::Display for WaitReason {
             WaitReason::Pin { to } => write!(f, "pinned to {to}"),
             WaitReason::PinNotRunning { to } => write!(f, "pinned to {to}, which is not running"),
             WaitReason::AheadCap { n, cap } => {
-                write!(f, "ahead cap reached: {n} prepared or preparing (cap {cap})")
+                write!(
+                    f,
+                    "ahead cap reached: {n} prepared or preparing (cap {cap})"
+                )
             }
             WaitReason::StaleGraph { diff } => write!(f, "{diff}"),
             WaitReason::InstanceLimit {
