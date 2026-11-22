@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::graph::*;
 use crate::picker::*;
+use crate::rank::critical_path;
 use crate::state::*;
 use crate::table::{LaneTable, parse};
 
@@ -109,7 +110,7 @@ fn pair(task: &str, workflow: &str) -> (String, String) {
     (task.to_string(), workflow.to_string())
 }
 
-// PRD 7: a leaf, its workflow and the reason, reading only the graph and run state.
+// A leaf, its workflow and the reason, reading only the graph and run state.
 #[test]
 fn picks_the_best_ranked_leaf_with_its_workflow_and_reason() {
     let graph = graph(&["a", "b"], vec![w("a"), w("b")]);
@@ -142,7 +143,7 @@ fn picks_the_best_ranked_leaf_with_its_workflow_and_reason() {
     );
 }
 
-// PRD 8: changing one edge changes the next pick; rank is never stored.
+// Changing one edge changes the next pick; rank is never stored.
 #[test]
 fn changing_one_edge_changes_the_next_pick() {
     let table = builds(1);
@@ -256,7 +257,7 @@ fn with_kind(mut task: PickTask, kind: &str) -> PickTask {
     task
 }
 
-// PRD 15: first rule wins, the todo's workflow as fallback, "no workflow".
+// First rule wins, the todo's workflow as fallback, "no workflow".
 #[test]
 fn the_first_matching_rule_wins() {
     let table = rule_table();
@@ -386,7 +387,7 @@ fn owned_graph(a2_run: Option<&str>, a2_state: TaskState) -> PickGraph {
     )
 }
 
-// PRD 10: an owning lane picks only under its task.
+// An owning lane picks only under its task.
 #[test]
 fn an_owning_lane_picks_only_under_its_task() {
     let table = builds(2);
@@ -462,7 +463,86 @@ fn a_finished_own_task_with_nothing_else_reports_the_release() {
     }
 }
 
-// PRD 11: a stopped task only for its lane, or once that lane no longer exists; halted never.
+/// Twenty-four siblings, each with an edge to every other: every pair is a cycle.
+fn clique() -> Vec<PickTask> {
+    let names: Vec<String> = (0..24).map(|index| format!("n{index:02}")).collect();
+    names
+        .iter()
+        .map(|name| {
+            let mut task = w(name);
+            for other in names.iter().filter(|other| *other != name) {
+                task = after(task, other, false, "waits");
+            }
+            task
+        })
+        .collect()
+}
+
+#[test]
+fn edge_cycles_terminate_and_do_not_depend_on_input_order() {
+    let table = builds(1);
+    let top: Vec<String> = (0..24).map(|index| format!("n{index:02}")).collect();
+    let top_refs: Vec<&str> = top.iter().map(String::as_str).collect();
+    let tasks = clique();
+    let expected_graph = graph(&top_refs, tasks.clone());
+    let expected_path = critical_path(&expected_graph);
+    let expected_pick = pick_on(
+        &expected_graph,
+        &LanesState::default(),
+        &table,
+        &lane("build", 1),
+    );
+    let mut rng = Rng(0xc1c1e);
+    for _ in 0..5 {
+        let mut shuffled = tasks.clone();
+        rng.shuffle(&mut shuffled);
+        let graph = graph(&top_refs, shuffled);
+        assert_eq!(critical_path(&graph), expected_path);
+        assert_eq!(
+            pick_on(&graph, &LanesState::default(), &table, &lane("build", 1)),
+            expected_pick
+        );
+    }
+    assert!(expected_path > 0);
+}
+
+#[test]
+fn a_duplicated_task_id_is_dropped_whatever_the_input_order() {
+    let mut finished = w("b");
+    finished.state = TaskState::Done;
+    let table = builds(1);
+    for tasks in [
+        vec![w("a"), w("b"), finished.clone()],
+        vec![finished.clone(), w("b"), w("a")],
+        vec![w("b"), w("a"), finished.clone()],
+    ] {
+        let graph = graph(&["a", "b"], tasks);
+        assert!(graph.task(&id("b")).is_none());
+        let outcome = pick_on(&graph, &LanesState::default(), &table, &lane("build", 1));
+        assert_eq!(picked(&outcome), pair("a", "w"));
+    }
+}
+
+#[test]
+fn an_own_task_missing_from_the_graph_is_not_released() {
+    let table = builds(1);
+    let state = owners(&[("gone", OwnerState::Active, Some(lane("build", 1)))]);
+    let graph = graph(&["b"], vec![w("b")]);
+    match pick_on(&graph, &state, &table, &lane("build", 1)) {
+        PickOutcome::Nothing {
+            reasons,
+            owner_change,
+        } => {
+            assert!(owner_change.is_empty());
+            assert_eq!(reasons.len(), 1);
+            assert_eq!(reasons[0].task, id("gone"));
+            assert_eq!(reasons[0].reason.to_string(), "task is missing from the graph");
+        }
+        other => panic!("expected nothing, got {other:?}"),
+    }
+}
+
+// A stopped task only for its lane, or once that lane no longer exists; halted never.
 #[test]
 fn a_stopped_task_is_resumed_only_by_its_lane() {
     let graph = graph(&["a", "b"], vec![w("a"), w("b")]);
@@ -558,7 +638,7 @@ fn a_prepared_task_is_free_for_any_lane() {
     );
 }
 
-// PRD 21: a leaf with an active run is left alone.
+// A leaf with an active run is left alone.
 #[test]
 fn a_leaf_with_an_active_run_is_skipped() {
     let mut a = w("a");
@@ -1109,6 +1189,18 @@ fn random_case(rng: &mut Rng) -> Case {
     }
     if rng.chance(30) {
         opts.counts.insert("build".to_string(), rng.below(3) as u32);
+    }
+
+    // Sometimes list a task id a second time, with different data.
+    if rng.chance(25) {
+        let mut copy = rng.pick(&tasks).clone();
+        copy.name.push_str(" (copy)");
+        copy.state = if copy.state == TaskState::Done {
+            TaskState::Ready
+        } else {
+            TaskState::Done
+        };
+        tasks.push(copy);
     }
 
     Case {

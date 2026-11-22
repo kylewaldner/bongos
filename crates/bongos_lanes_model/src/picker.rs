@@ -169,7 +169,7 @@ struct Picker<'a> {
     chains: Chains,
 }
 
-/// Picks the work of `lane` (D5 rules 2, 3, 4 and 7).
+/// Picks the work of `lane` (rules 2, 3, 4 and 7).
 pub fn pick(
     graph: &PickGraph,
     state: &LanesState,
@@ -496,6 +496,18 @@ impl<'a> Picker<'a> {
                 return Err(LaneHold {
                     task: task.clone(),
                     reason: owner.reason.clone().unwrap_or_else(|| "halted".to_string()),
+                });
+            }
+            // A task missing from the graph is not finished: hold the lane's claim and wait.
+            if self.graph.task(task).is_none() {
+                return Ok(Evaluation {
+                    eligible: Vec::new(),
+                    waiting: vec![Ranked {
+                        rank: RankKey { levels: Vec::new() },
+                        task: task.clone(),
+                        value: WaitReason::Other("task is missing from the graph".to_string()),
+                    }],
+                    released: Vec::new(),
                 });
             }
             let leaves = self.graph.leaves_under(task);

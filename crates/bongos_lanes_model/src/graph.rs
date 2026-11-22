@@ -168,12 +168,21 @@ pub struct PickGraph {
 
 impl PickGraph {
     /// Builds the view from the top-level task ids in order and the tasks in any order. A child
-    /// id with no task, or a task listed a second time, is skipped; tasks not reachable from
-    /// `top` are kept but never walked.
+    /// id with no task is skipped; a task id listed more than once is dropped entirely (all its
+    /// copies), so the result never depends on the input order; tasks not reachable from `top`
+    /// are kept but never walked.
     pub fn new(top: Vec<TaskId>, tasks: impl IntoIterator<Item = PickTask>) -> Self {
-        let mut map = BTreeMap::new();
+        let mut map: BTreeMap<TaskId, PickTask> = BTreeMap::new();
+        let mut duplicated = BTreeSet::new();
         for task in tasks {
-            map.entry(task.id.clone()).or_insert(task);
+            if map.contains_key(&task.id) {
+                duplicated.insert(task.id.clone());
+            } else {
+                map.insert(task.id.clone(), task);
+            }
+        }
+        for id in &duplicated {
+            map.remove(id);
         }
         let mut walk = Vec::new();
         let mut parent = BTreeMap::new();

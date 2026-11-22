@@ -20,16 +20,16 @@ pub struct Chains {
 impl Chains {
     /// `remaining(leaf) = size` (default 1) unless finished; `remaining(group)` is the sum over
     /// its children. `chain(t) = remaining(t) + max(chain(d))` over the not finished dependents
-    /// `d` of `t` (siblings with an edge to `t`). A cycle of edges counts each task once.
+    /// `d` of `t` (siblings with an edge to `t`). A cycle of edges is cut at its back edge, which counts 0.
     pub fn compute(graph: &PickGraph) -> Self {
         let mut chains = Self::default();
         for task in graph.walk() {
             chains.remaining_of(graph, &task.id);
         }
+        // Canonical order (the depth-first walk) so a cycle resolves the same way every time.
+        let mut visiting = BTreeSet::new();
         for task in graph.walk() {
-            let mut visiting = BTreeSet::new();
-            let (value, _) = chains.chain_of(graph, &task.id, &mut visiting);
-            chains.chain.entry(task.id.clone()).or_insert(value);
+            chains.chain_of(graph, &task.id, &mut visiting);
         }
         chains
     }
@@ -69,23 +69,24 @@ impl Chains {
         value
     }
 
-    /// The chain of `id` and whether its computation met a cycle. Only values computed without
-    /// one are memoized, since inside a cycle a value depends on where the walk entered it.
+    /// The chain of `id`, memoized for every task so the walk is linear in tasks and edges even
+    /// with cycles. A back edge to a task still being computed contributes 0, so inside a cycle a
+    /// value depends on where the walk entered it; [`Chains::compute`] always enters in the
+    /// graph's depth-first order, which keeps the result the same for the same graph.
     fn chain_of(
         &mut self,
         graph: &PickGraph,
         id: &TaskId,
         visiting: &mut BTreeSet<TaskId>,
-    ) -> (u32, bool) {
+    ) -> u32 {
         if let Some(&value) = self.chain.get(id) {
-            return (value, false);
+            return value;
         }
         if !visiting.insert(id.clone()) {
-            return (0, true);
+            return 0;
         }
         let own = self.remaining_of(graph, id);
         let mut longest = 0;
-        let mut cyclic = false;
         for dependent in graph.dependents(id) {
             if graph
                 .task(&dependent)
@@ -93,16 +94,12 @@ impl Chains {
             {
                 continue;
             }
-            let (value, hit) = self.chain_of(graph, &dependent, visiting);
-            longest = longest.max(value);
-            cyclic |= hit;
+            longest = longest.max(self.chain_of(graph, &dependent, visiting));
         }
         visiting.remove(id);
         let value = own.saturating_add(longest);
-        if !cyclic {
-            self.chain.insert(id.clone(), value);
-        }
-        (value, cyclic)
+        self.chain.insert(id.clone(), value);
+        value
     }
 }
 
