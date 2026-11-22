@@ -221,6 +221,7 @@ mod lane_tree_tests;
 mod lanes_view_surface_tests;
 #[cfg(test)]
 mod lanes_view_tests;
+#[cfg(test)]
 mod last_window_tests;
 #[cfg(test)]
 mod locations_tests;
