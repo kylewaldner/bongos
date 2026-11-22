@@ -17,9 +17,20 @@ pub fn default_hosts_dir() -> PathBuf {
 /// The socket of project `project_id` in `hosts_dir`: the first 12 hex digits of the SHA-256 of
 /// the id, so any id gives a short path.
 pub fn socket_path(hosts_dir: &Path, project_id: &str) -> PathBuf {
+    hosts_dir.join(format!("{}.sock", project_hex(project_id)))
+}
+
+/// The first 12 hex digits of the SHA-256 of `project_id`, which name its socket and its engine
+/// host's log.
+pub fn project_hex(project_id: &str) -> String {
     let digest = Sha256::digest(project_id.as_bytes());
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    hosts_dir.join(format!("{}.sock", &hex[..12]))
+    hex[..12].to_string()
+}
+
+/// The engine host's log of project `project_id`: `<logs_dir>/engine-host-<12 hex>.log`.
+pub fn host_log_path(logs_dir: &Path, project_id: &str) -> PathBuf {
+    logs_dir.join(format!("engine-host-{}.log", project_hex(project_id)))
 }
 
 /// Binds the socket at `path`. A socket file nobody answers on is a dead writer's and is

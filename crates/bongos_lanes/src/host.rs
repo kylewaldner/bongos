@@ -4,15 +4,16 @@
 //! this executable (the peer's identity says so), and from any other peer the command is recorded
 //! as the system's.
 //!
-//! Starting the dispatcher and the commands that need it (`start`, `dry run`, `pick`) belong to
-//! the engine host process, not to a window: a window answers that they run there.
+//! Starting the dispatcher and the commands that need it (`start`, `pick`) belong to the engine
+//! host process, not to a window: a window answers that they run there. The engine host keeps the
+//! dispatcher it started in [`HostDispatcher`] until its run ends.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
-use bongos_engine_host::{HostCommands, HostEvent, LanesVerb, WriterHosts};
+use bongos_engine_host::{EngineHostProcess, HostCommands, HostEvent, LanesVerb, WriterHosts};
 use bongos_lanes_model::{
     Author, JobRecord, LaneId, LaneTable, LiveFacts, PickGraph, Problem, RunSubject, StampFile,
     TaskId, from_work_tree, parse,
@@ -23,7 +24,7 @@ use bongos_work::{OpenProjectRepos, WorkStore};
 use bongos_workflow::WorkflowEngine;
 use bongos_workflow::worktrees::{Git, run_branch_name};
 use chrono::Utc;
-use gpui::{App, AppContext as _, Task};
+use gpui::{App, AppContext as _, Global, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use settings::Settings as _;
@@ -33,7 +34,9 @@ use crate::accept_graph::{accept_graph_for_peer, file_at, read_stamp};
 use crate::actions::{OFF_MESSAGE, WindowLanes, accepted_message, adopted_message};
 use crate::adopt::{AdoptRequest, LeftWork};
 use crate::definitions::{LANES_FILE, LANES_FOLDER};
-use crate::dispatcher::{JobEngine, Lanes, LanesHost, LanesParts, VerifiedCommitPolicy};
+use crate::dispatcher::{
+    Dispatcher, JobEngine, Lanes, LanesHost, LanesParts, StartLanes, VerifiedCommitPolicy,
+};
 use crate::job_trees::forbidden_for;
 use crate::lane_control::{LaneTarget, LanesStatus};
 use crate::lane_tree::{LastEnd, LastRun, ResetRequest};
@@ -65,6 +68,9 @@ fn message(text: impl Into<String>) -> serde_json::Value {
 pub fn register_host(cx: &mut App) {
     HostCommands::serve_lanes(
         Rc::new(|verb, payload, peer, cx| {
+            if EngineHostProcess::is_running(cx) {
+                log::info!("lanes {verb:?} from pid {}", peer.pid());
+            }
             let answered = handle(verb, payload, peer, cx);
             if answered.is_ok() {
                 WriterHosts::broadcast(&HostEvent::LanesChanged, cx);
@@ -161,9 +167,40 @@ fn handle(
             Ok(Task::ready(Ok(message(text))))
         }
         LanesVerb::Status => Ok(Task::ready(Ok(message(status_text(&lanes.status()?))))),
-        LanesVerb::Start | LanesVerb::DryRun | LanesVerb::Pick => Ok(Task::ready(Err(anyhow!(
-            "starting lanes, `dry run` and `pick` run in the engine host process, which this \
-             window does not start"
+        LanesVerb::Start if EngineHostProcess::is_running(cx) => {
+            let starting = lanes.start(
+                StartLanes {
+                    bound: None,
+                    max_jobs: None,
+                    unattended: None,
+                    by,
+                },
+                cx,
+            );
+            Ok(cx.spawn(async move |cx| {
+                let started = starting.await?;
+                let run = started.run_id.clone();
+                if let Some(dispatcher) = started.dispatcher {
+                    log::info!("lanes started: dispatcher run {run}");
+                    cx.update(|cx| cx.set_global(HostDispatcher(Some(dispatcher))));
+                    Ok(message(format!("Lanes started (run {run})")))
+                } else {
+                    Ok(message(format!("Lanes already run (run {run})")))
+                }
+            }))
+        }
+        LanesVerb::Pick if EngineHostProcess::is_running(cx) => {
+            let dispatcher = running_dispatcher(cx)
+                .ok_or_else(|| anyhow!("lanes are not started here; start them first"))?;
+            dispatcher.pick_now(cx);
+            Ok(Task::ready(Ok(message("Looking for work now"))))
+        }
+        LanesVerb::Start | LanesVerb::Pick => Ok(Task::ready(Err(anyhow!(
+            "starting lanes and `pick` run in the engine host process, which this window does \
+             not start"
+        )))),
+        LanesVerb::DryRun => Ok(Task::ready(Err(anyhow!(
+            "`dry run` is not served by the engine host of this build yet"
         )))),
         LanesVerb::AcceptGraph => unreachable!("handled above"),
     }
@@ -187,6 +224,25 @@ fn status_text(status: &LanesStatus) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The dispatcher the engine host process started, kept until its run ends.
+#[derive(Default)]
+pub struct HostDispatcher(Option<Dispatcher>);
+
+impl Global for HostDispatcher {}
+
+/// The dispatcher this process runs, while its run has not ended.
+fn running_dispatcher(cx: &App) -> Option<Dispatcher> {
+    cx.try_global::<HostDispatcher>()?
+        .0
+        .clone()
+        .filter(|dispatcher| !dispatcher.has_ended())
+}
+
+/// Whether this process runs the lanes' dispatcher now (the engine host is busy while it does).
+pub fn dispatcher_running(cx: &App) -> bool {
+    running_dispatcher(cx).is_some()
 }
 
 /// The only project repository open here, which this process must hold the writer of.
@@ -214,7 +270,11 @@ pub fn ensure_window_lanes(cx: &mut App) -> Option<Rc<Lanes>> {
     let repo = sole_writer_repo(cx).ok()?;
     let writer = repo.state()?.writer()?.clone();
     let engine = WorkflowEngine::ensure(cx)?;
-    let host: Rc<dyn LanesHost> = Rc::new(ProjectLanesHost::new(repo));
+    let mut project_host = ProjectLanesHost::new(repo);
+    if EngineHostProcess::is_running(cx) {
+        project_host.id_prefix = HOST_PREFIX;
+    }
+    let host: Rc<dyn LanesHost> = Rc::new(project_host);
     let engine: Rc<dyn JobEngine> = Rc::new(engine);
     let lanes = Rc::new(Lanes::new(LanesParts {
         host,
@@ -233,7 +293,14 @@ pub struct ProjectLanesHost {
     /// The lane table and stamp text at the commits [`LanesHost::load_commit`] read, so the
     /// sync calls never run git on the main thread.
     loaded: Rc<RefCell<HashMap<String, AtCommit>>>,
+    /// How [`LanesHost::host_id`] names this process: [`WINDOW_PREFIX`] or [`HOST_PREFIX`].
+    pub id_prefix: &'static str,
 }
+
+/// The prefix of a window's host id.
+pub const WINDOW_PREFIX: &str = "window";
+/// The prefix of an engine host process's host id.
+pub const HOST_PREFIX: &str = "host";
 
 /// What git said about a commit's lane files.
 #[derive(Clone)]
@@ -262,6 +329,7 @@ impl ProjectLanesHost {
         Self {
             repo,
             loaded: Rc::default(),
+            id_prefix: WINDOW_PREFIX,
         }
     }
 
@@ -357,18 +425,23 @@ impl LanesHost for ProjectLanesHost {
         from_work_tree(&tree, &self.project_id(), &LiveFacts::default())
     }
 
-    /// `window-<pid>-<start time>`, or `window-<pid>` where the system reports no start time.
+    /// `window-<pid>-<start time>` (`host-` in an engine host process), or `window-<pid>` where
+    /// the system reports no start time.
     fn host_id(&self) -> String {
         let pid = std::process::id();
+        let prefix = self.id_prefix;
         match bongos_workflow::process::start_time(pid) {
-            Some(start) => format!("window-{pid}-{start}"),
-            None => format!("window-{pid}"),
+            Some(start) => format!("{prefix}-{pid}-{start}"),
+            None => format!("{prefix}-{pid}"),
         }
     }
 
     /// The same rule as `host.json`: the pid runs now with the start time the id recorded.
     fn host_live(&self, host: &str) -> bool {
-        let Some(rest) = host.strip_prefix("window-") else {
+        let Some(rest) = [WINDOW_PREFIX, HOST_PREFIX]
+            .iter()
+            .find_map(|prefix| host.strip_prefix(prefix)?.strip_prefix('-'))
+        else {
             return false;
         };
         let (pid, start) = match rest.split_once('-') {

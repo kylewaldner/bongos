@@ -9,7 +9,9 @@ mod attach;
 mod checks;
 mod client;
 mod commands;
+mod ensure;
 mod host_file;
+mod host_process;
 pub mod protocol;
 pub mod server;
 mod socket;
@@ -22,16 +24,24 @@ pub use attach::{OpenedState, open_state, open_state_with_hooks};
 pub use checks::{checks_handler, register_checks};
 pub use client::{ANSWER_TIMEOUT, ClientOptions, HostClient, Welcomed, not_answering};
 pub use commands::{HostCommands, HostHandler, VerbHandler, local_identity};
+pub use ensure::{
+    Attach, ENGINE_HOST_FLAG, EnsureHost, HostSpawner, POLL_INTERVAL, ProgramSpawner, SpawnedHost,
+    ensure_host,
+};
 pub use host_file::{
     HOST_FILE, HostInfo, Moving, host_file_path, live_host, process_is, read_host_file,
     write_host_file,
+};
+pub use host_process::{
+    BUSY_RECHECK, EngineHostProcess, HostBusy, HostProcessOptions, held_by_message, host_is_busy,
+    open_host_writer, stop_serving, wait_until_idle,
 };
 pub use protocol::{
     ClientMessage, HostCommand, HostCtl, HostEvent, HostMode, HostResult, HostTopic, LanesVerb,
     PROTOCOL_VERSION, ServerMessage, WorkflowVerb, version_refusal,
 };
 pub use server::EngineServer;
-pub use socket::{bind_socket, default_hosts_dir, socket_path};
+pub use socket::{bind_socket, default_hosts_dir, host_log_path, project_hex, socket_path};
 pub use window::{WindowHosting, WriterHosts, install_window};
 pub use workflow::{install_workflow_remote, register_workflow};
 pub use writer_host::{WriterHost, WriterOptions};

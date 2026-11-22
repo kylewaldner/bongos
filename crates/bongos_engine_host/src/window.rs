@@ -38,7 +38,7 @@ pub struct WindowHosting {
 /// The projects this window holds the writer of, announced in `host.json` and served on their
 /// sockets while lanes are on.
 #[derive(Default)]
-pub struct WriterHosts(Vec<WriterHost>);
+pub struct WriterHosts(pub(crate) Vec<WriterHost>);
 
 impl Global for WriterHosts {}
 
@@ -104,6 +104,11 @@ pub fn install_window(hosting: WindowHosting, cx: &mut App) {
         }
     })
     .detach();
+    broadcast_runs(cx);
+}
+
+/// Sends every change of a run to the clients of the projects this process serves.
+pub(crate) fn broadcast_runs(cx: &mut App) {
     WorkflowEngine::observe(cx, |event, cx| {
         let WorkflowEvent::Changed {
             run,

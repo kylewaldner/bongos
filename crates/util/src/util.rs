@@ -8,6 +8,7 @@ pub mod paths;
 pub mod process;
 pub mod redact;
 pub mod rel_path;
+pub mod rotating_log;
 pub mod schemars;
 pub mod serde;
 pub mod shell;
