@@ -3,8 +3,8 @@ use fs::Fs;
 
 use gpui::{
     AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, Tiling, WeakEntity,
-    Window, WindowId, actions, deferred, px,
+    Global, ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, Tiling,
+    WeakEntity, Window, WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project};
@@ -284,6 +284,16 @@ pub struct ProjectGroupState {
     pub last_active_workspace: Option<WeakEntity<Workspace>>,
 }
 
+/// Lets the app act first when a window closes through [`CloseWindow`] (or the platform close,
+/// which goes through it): the closure returns true when it took the close over, and then
+/// closes the window itself through [`MultiWorkspace::close_window_unguarded`] when it should.
+#[derive(Clone)]
+pub struct CloseWindowGuard(
+    pub Rc<dyn Fn(&WeakEntity<MultiWorkspace>, &mut Window, &mut App) -> bool>,
+);
+
+impl Global for CloseWindowGuard {}
+
 pub struct MultiWorkspace {
     window_id: WindowId,
     retained_workspaces: Vec<Entity<Workspace>>,
@@ -538,6 +548,18 @@ impl MultiWorkspace {
     }
 
     pub fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(guard) = cx
+            .try_global::<CloseWindowGuard>()
+            .map(|guard| guard.0.clone())
+            && guard(&cx.weak_entity(), window, cx)
+        {
+            return;
+        }
+        self.close_window_unguarded(window, cx);
+    }
+
+    /// Closes the window as [`CloseWindow`] does, without asking the [`CloseWindowGuard`].
+    pub fn close_window_unguarded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
             let workspaces = this.update(cx, |multi_workspace, _cx| {
                 multi_workspace.workspaces().cloned().collect::<Vec<_>>()

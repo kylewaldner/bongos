@@ -2,23 +2,31 @@
 //! writer (the lanes' dispatcher, say). Each is told when this process becomes a project's writer
 //! ([`WriterParticipant::started`]) and is drained, in registration order, when the writer moves
 //! to another process, after the workflow runs and the task checks are drained, so no participant
-//! drains while any node process runs. [`WriterParticipants::undrain`] undrains them in reverse
-//! order; the handover does not call it yet (a take-back after the participants drained will).
+//! drains while any node process runs. When the writer stays here after all (a cancelled
+//! handover, or a take-back from an engine host that did not start),
+//! [`WriterParticipants::undrain`] undrains them in reverse order and then every one is
+//! [`WriterParticipant::started`] again.
 
 use std::rc::Rc;
 
+use anyhow::Result;
 use gpui::{App, Global, Task};
 
 /// A part of the app that works only in the process holding a project's writer.
+///
+/// `started` and `undrain` may come again for a project already started or not drained (a
+/// handover cancelled before the participants drained, a second take-back): both must be
+/// idempotent.
 pub trait WriterParticipant {
-    /// This process became the writer of `project` (a window that opened it first, or the engine
-    /// host once it took the lock).
+    /// This process became the writer of `project` (a window that opened it first, the engine
+    /// host once it took the lock, or a window that kept or took back the writer).
     fn started(&self, project: &str, cx: &mut App);
     /// The writer of `project` moves away: stop starting work; resolves once the work it began has
     /// stopped or reached a point the next writer continues from.
     fn drain(&self, project: &str, cx: &mut App) -> Task<()>;
-    /// The writer of `project` stays here after a drain: work starts again.
-    fn undrain(&self, project: &str, cx: &mut App);
+    /// The writer of `project` stays here after a drain: work starts again. A failure is logged
+    /// and the other participants undrain all the same.
+    fn undrain(&self, project: &str, cx: &mut App) -> Result<()>;
 }
 
 /// The participants registered in this process, in registration order.
@@ -63,10 +71,13 @@ impl WriterParticipants {
         })
     }
 
-    /// Undrains every participant for `project`, in reverse registration order.
+    /// Undrains every participant for `project`, in reverse registration order. One that fails is
+    /// logged and the rest still undrain.
     pub fn undrain(project: &str, cx: &mut App) {
         for participant in Self::all(cx).into_iter().rev() {
-            participant.undrain(project, cx);
+            if let Err(error) = participant.undrain(project, cx) {
+                log::error!("undraining a writer participant of {project}: {error:#}");
+            }
         }
     }
 }

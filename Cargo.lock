@@ -2609,6 +2609,7 @@ dependencies = [
  "chrono",
  "command_palette_hooks",
  "editor",
+ "fs",
  "futures 0.3.32",
  "gpui",
  "language",
