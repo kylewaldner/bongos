@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::runner_program::{
-    Clock, DENIALS_END, DENIALS_FILE, INTERPRETER_FIX, Interpreter, MCP_REFUSAL, PollPlan,
-    ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe,
+    Clock, DENIALS_END, DENIALS_FILE, INTERPRETER_FIX, Interpreter, MCP_REFUSAL, POLICY_FILE,
+    PollPlan, ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe,
     add_git_config, os_sandbox_probe,
 };
 use crate::runtime::Finish;
@@ -363,7 +363,11 @@ fn a_write_into_the_task_worktree_is_denied() {
     ));
     let failure = failure(&finish);
     assert_eq!(failure.reason, FailureReason::PermissionDenied);
-    assert!(failure.detail.starts_with("write "), "{}", failure.detail);
+    assert!(
+        failure.detail.starts_with(&format!("{RULE}: ")),
+        "{}",
+        failure.detail
+    );
     assert!(
         failure.detail.contains("task-worktree"),
         "{}",
@@ -724,7 +728,7 @@ fn a_write_through_a_directory_descriptor_is_checked() {
     ));
     assert_eq!(
         says(failure(&finish)),
-        "permission denied: write /bongos-no-such-file"
+        format!("permission denied: {RULE}: /bongos-no-such-file")
     );
 
     let finish = fixture.run(&script(
@@ -735,7 +739,7 @@ fn a_write_through_a_directory_descriptor_is_checked() {
     ));
     assert_eq!(
         says(failure(&finish)),
-        "permission denied: write relative to a directory descriptor: bongos-x"
+        format!("permission denied: {RULE}: relative to a directory descriptor: bongos-x")
     );
 }
 
@@ -917,7 +921,10 @@ fn fifos_and_changes_through_read_only_descriptors_are_checked() {
         "'done'",
     ));
     let detail = says(failure(&finish));
-    assert!(detail.starts_with("permission denied: write "), "{detail}");
+    assert!(
+        detail.starts_with(&format!("permission denied: {RULE}: ")),
+        "{detail}"
+    );
     assert!(detail.ends_with("task-worktree/fifo"), "{detail}");
     assert!(!Path::new(&task).join("fifo").exists());
     assert!(fixture.path("run-worktree/own-fifo").exists());
@@ -931,7 +938,10 @@ fn fifos_and_changes_through_read_only_descriptors_are_checked() {
         "'done'",
     ));
     let detail = says(failure(&finish));
-    assert!(detail.starts_with("permission denied: write "), "{detail}");
+    assert!(
+        detail.starts_with(&format!("permission denied: {RULE}: ")),
+        "{detail}"
+    );
     assert!(detail.ends_with("task-worktree/target"), "{detail}");
 }
 
@@ -1033,10 +1043,306 @@ fn the_shim_refuses_git_metadata_outside_the_writable_roots() {
         let finish = fixture.run_node(node);
         let detail = says(failure(&finish));
         let tail = target.strip_prefix(fixture.root.path()).unwrap();
-        assert!(detail.starts_with("permission denied: write "), "{detail}");
+        assert!(
+            detail.starts_with(&format!("permission denied: {RULE}: ")),
+            "{detail}"
+        );
         assert!(detail.ends_with(&*tail.to_string_lossy()), "{detail}");
         assert_eq!(std::fs::read(&target).ok(), before, "{}", target.display());
     }
+}
+
+/// The message the shim gives for a write to `path` (already canonical).
+fn refusal(path: &Path) -> String {
+    format!("permission denied: {RULE}: {}", path.display())
+}
+
+#[test]
+fn a_write_outside_the_roots_names_the_rule() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let outside = fixture.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = std::fs::canonicalize(&outside).unwrap().join("x.txt");
+    let finish = fixture.run(&script(
+        &format!(
+            "try:\n    open({target:?}, 'w').write('theirs')\n\
+             except PermissionError as error:\n    \
+             assert str(error) == {message:?}, error",
+            target = target.to_string_lossy(),
+            message = refusal(&target),
+        ),
+        "'done'",
+    ));
+    let failure = failure(&finish);
+    assert_eq!(failure.reason, FailureReason::PermissionDenied);
+    assert_eq!(says(failure), refusal(&target));
+    assert!(!target.exists());
+    let denials = std::fs::read_to_string(fixture.path(TRY_DIR).join(DENIALS_FILE)).unwrap();
+    let lines: Vec<&str> = denials.lines().collect();
+    assert_eq!(lines.len(), 2, "{denials}");
+    assert_eq!(
+        serde_json::from_str::<Value>(lines[0]).unwrap(),
+        json!({ "what": format!("{RULE}: {}", target.display()) })
+    );
+    assert_eq!(lines[1], DENIALS_END);
+}
+
+#[test]
+fn a_caught_denial_still_fails_the_node() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let target = fixture.path("outside.txt");
+    let finish = fixture.run(&script(
+        &format!(
+            "try:\n    open({target:?}, 'w')\nexcept PermissionError:\n    pass\n\
+             open('own.txt', 'w').write('mine')",
+            target = target.to_string_lossy()
+        ),
+        "'done'",
+    ));
+    // The script carried on and wrote its result, and the node failed all the same.
+    assert_eq!(failure(&finish).reason, FailureReason::PermissionDenied);
+    assert!(failure(&finish).detail.starts_with(&format!("{RULE}: ")));
+    assert_eq!(
+        std::fs::read_to_string(fixture.path("run-worktree/own.txt")).unwrap(),
+        "mine"
+    );
+    assert!(!target.exists());
+}
+
+#[test]
+fn an_empty_mask_list_is_valid() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let finish = fixture.run(&script(
+        "os.makedirs('sub/deep')\nopen('sub/deep/f', 'w').write('mine')",
+        "'done'",
+    ));
+    assert_eq!(finish.outcome, Ok(json!({ "status": "done" })));
+    let policy = std::fs::read_to_string(fixture.path(TRY_DIR).join(POLICY_FILE)).unwrap();
+    let policy: Value = serde_json::from_str(&policy).unwrap();
+    assert_eq!(policy["masks"], json!([]));
+    assert!(
+        policy["writable"]
+            .as_array()
+            .is_some_and(|roots| !roots.is_empty())
+    );
+    assert!(policy.get("git").is_none() && policy.get("protected").is_none());
+}
+
+#[test]
+fn a_write_to_a_mask_names_the_rule() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let pointer = std::fs::canonicalize(fixture.path("run-worktree"))
+        .unwrap()
+        .join(".git");
+    let before = std::fs::read(&pointer).unwrap();
+    let node = private_node(
+        &fixture,
+        &common,
+        &script(
+            "open('own.txt', 'w').write('mine')\n\
+             try:\n    open('.git', 'a').write('x')\nexcept PermissionError:\n    pass",
+            "'done'",
+        ),
+        &[],
+    );
+    let finish = fixture.run_node(node);
+    assert_eq!(says(failure(&finish)), refusal(&pointer));
+    assert_eq!(std::fs::read(&pointer).unwrap(), before);
+    let policy = std::fs::read_to_string(fixture.path(TRY_DIR).join(POLICY_FILE)).unwrap();
+    let policy: Value = serde_json::from_str(&policy).unwrap();
+    assert!(
+        policy["masks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(pointer.to_string_lossy())),
+        "{policy}"
+    );
+    // Inside the roots and outside the mask, a write is fine.
+    assert_eq!(
+        std::fs::read_to_string(fixture.path("run-worktree/own.txt")).unwrap(),
+        "mine"
+    );
+}
+
+#[test]
+fn a_rename_and_a_hard_link_out_of_the_roots_are_denied() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let outside = fixture.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside = std::fs::canonicalize(&outside).unwrap();
+    // A rename and a link inside the roots are allowed.
+    let finish = fixture.run(&script(
+        "open('src.txt', 'w').write('mine')\n\
+         os.link('src.txt', 'linked.txt')\nos.rename('linked.txt', 'moved.txt')",
+        "'done'",
+    ));
+    assert_eq!(finish.outcome, Ok(json!({ "status": "done" })));
+    std::fs::remove_file(fixture.path("run-worktree/moved.txt")).unwrap();
+    let source = std::fs::canonicalize(fixture.path("run-worktree/src.txt")).unwrap();
+
+    for (call, name) in [("rename", "moved.txt"), ("link", "linked.txt")] {
+        let target = outside.join(name);
+        let finish = fixture.run(&script(
+            &format!(
+                "open('src.txt', 'w').write('mine')\n\
+                 try:\n    os.{call}('src.txt', {target:?})\nexcept PermissionError:\n    pass",
+                target = target.to_string_lossy(),
+            ),
+            "'done'",
+        ));
+        assert_eq!(says(failure(&finish)), refusal(&target), "{call}");
+        assert!(!target.exists(), "{call}");
+    }
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), "mine");
+
+    // The source of a rename is checked too: nothing is taken out of a read-only place.
+    let held = outside.join("held.txt");
+    std::fs::write(&held, "theirs").unwrap();
+    let finish = fixture.run(&script(
+        &format!(
+            "try:\n    os.rename({held:?}, 'taken.txt')\nexcept PermissionError:\n    pass",
+            held = held.to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    assert_eq!(says(failure(&finish)), refusal(&held));
+    assert_eq!(std::fs::read_to_string(&held).unwrap(), "theirs");
+}
+
+#[test]
+fn a_write_through_a_symlink_is_checked_where_it_leads() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let outside = fixture.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside = std::fs::canonicalize(&outside).unwrap();
+    let target = outside.join("x.txt");
+    // Making the symlink is allowed inside the roots; writing through it is not.
+    let finish = fixture.run(&script(
+        &format!(
+            "os.symlink({dir:?}, 'to-outside')\n\
+             try:\n    open('to-outside/x.txt', 'w').write('theirs')\nexcept PermissionError:\n    pass",
+            dir = outside.to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    assert_eq!(says(failure(&finish)), refusal(&target));
+    assert!(!target.exists());
+    assert!(std::fs::symlink_metadata(fixture.path("run-worktree/to-outside")).is_ok());
+}
+
+#[test]
+fn a_symlink_leading_outside_can_be_removed_and_renamed_but_not_written_through() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let outside = fixture.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside = std::fs::canonicalize(&outside).unwrap();
+    let held = outside.join("held.txt");
+    std::fs::write(&held, "theirs").unwrap();
+    // The links themselves are inside the writable root, so removing or renaming them is fine,
+    // whatever they lead to; a directory of links goes with shutil.rmtree.
+    let finish = fixture.run(&script(
+        &format!(
+            "import shutil\nos.symlink({held:?}, 'file-link')\nos.symlink({held:?}, 'other-link')\n\
+             os.symlink({dir:?}, 'dir-link')\n\
+             os.rename('file-link', 'renamed-link')\nos.remove('renamed-link')\n\
+             os.unlink('dir-link')\n\
+             os.makedirs('venv/bin')\nos.symlink({held:?}, 'venv/bin/python')\n\
+             shutil.rmtree('venv')\n\
+             os.rename('other-link', 'final-link')",
+            held = held.to_string_lossy(),
+            dir = outside.to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    assert_eq!(finish.outcome, Ok(json!({ "status": "done" })));
+    let tree = fixture.path("run-worktree");
+    for gone in [
+        "file-link",
+        "renamed-link",
+        "dir-link",
+        "venv",
+        "other-link",
+    ] {
+        assert!(
+            std::fs::symlink_metadata(tree.join(gone)).is_err(),
+            "{gone}"
+        );
+    }
+    assert!(std::fs::symlink_metadata(tree.join("final-link")).is_ok());
+    assert_eq!(std::fs::read_to_string(&held).unwrap(), "theirs");
+
+    // Writing through the link is still refused.
+    let finish = fixture.run(&script(
+        &format!(
+            "os.symlink({held:?}, 'through')\n\
+             try:\n    open('through', 'w').write('mine')\nexcept PermissionError:\n    pass",
+            held = held.to_string_lossy(),
+        ),
+        "'done'",
+    ));
+    assert_eq!(says(failure(&finish)), refusal(&held));
+    assert_eq!(std::fs::read_to_string(&held).unwrap(), "theirs");
+}
+
+#[test]
+fn a_directory_holding_a_mask_cannot_be_renamed_or_removed() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    if cfg!(not(unix)) {
+        return;
+    }
+    let Some(common) = git_repo(&fixture) else {
+        return;
+    };
+    let tree = std::fs::canonicalize(fixture.path("run-worktree")).unwrap();
+    let moved = tree.with_file_name("run-worktree-moved");
+    let node = private_node(
+        &fixture,
+        &common,
+        &script(
+            &format!(
+                "try:\n    os.rename({tree:?}, {moved:?})\nexcept PermissionError:\n    pass",
+                tree = tree.to_string_lossy(),
+                moved = moved.to_string_lossy(),
+            ),
+            "'done'",
+        ),
+        &[],
+    );
+    let finish = fixture.run_node(node);
+    assert_eq!(says(failure(&finish)), refusal(&tree));
+    assert!(tree.join(".git").exists());
+    assert!(!moved.exists());
 }
 
 #[test]
@@ -1298,7 +1604,11 @@ fn declared_directories_are_writable_and_undeclared_ones_are_not() {
     let finish = fixture.run_node(node);
     let failure = failure(&finish);
     assert_eq!(failure.reason, FailureReason::PermissionDenied);
-    assert!(failure.detail.starts_with("write "), "{}", failure.detail);
+    assert!(
+        failure.detail.starts_with(&format!("{RULE}: ")),
+        "{}",
+        failure.detail
+    );
     assert!(
         failure.detail.ends_with("undeclared/x.txt"),
         "{}",
