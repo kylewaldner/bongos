@@ -825,6 +825,11 @@ pub struct EmacsSettingsContent {
     ///
     /// Default: false
     pub terminal_uses_kill_ring: Option<bool>,
+    /// Time in milliseconds the Avy jump waits for another key before it jumps to the only
+    /// candidate left.
+    ///
+    /// Default: 500
+    pub avy_timeout: Option<DelayMs>,
 }
 
 /// Which cursor shape the Emacs mode asks for.
