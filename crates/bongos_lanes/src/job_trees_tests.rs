@@ -12,8 +12,8 @@ use gpui::TestAppContext;
 use crate::job_trees::{
     CurrentJobTrees, JobRepositories, JobRepository, JobStart, JobTrees, start_job_trees,
 };
-use crate::lane_tree_tests::{Fixture, RUN_1, RUN_2, TASK_BRANCH, git, last};
 use crate::lane_tree::LastEnd;
+use crate::lane_tree_tests::{Fixture, RUN_1, RUN_2, TASK_BRANCH, git, last};
 
 const BOTH_TABLE: &str = r#"schema = 1
 
@@ -166,7 +166,12 @@ async fn a_failing_reset_or_a_lane_out_of_the_table_waits_and_deletes_nothing(
     // A git command of the reset fails: an environment wait, and nothing deleted.
     let lock = PathBuf::from(git(
         &tip,
-        &["rev-parse", "--path-format=absolute", "--git-path", "index.lock"],
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index.lock",
+        ],
     ));
     std::fs::write(&lock, "").unwrap();
     let mut failed = start(&fixture, RUN_2, Vec::new());

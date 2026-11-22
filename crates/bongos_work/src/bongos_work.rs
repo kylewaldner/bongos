@@ -76,6 +76,7 @@ pub use registry::{
     RunStart, observe_view_opened,
 };
 pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
+pub use root_resolvers::{WorktreeRootResolver, WorktreeRootResolvers};
 pub use seams::{
     ChangeId, DefinitionWriter, DefinitionWriters, ProjectSource, ProjectSources, WriteOutcome,
 };
@@ -90,7 +91,6 @@ pub use text_views::{open_file_at_line, open_following_text};
 pub use working_copy_commands::{
     edit_in_working_copy, working_copy_open_path, working_copy_to_edit,
 };
-pub use root_resolvers::{WorktreeRootResolver, WorktreeRootResolvers};
 pub use worktrees::{BranchStart, expand_home, make_branch, plan_branch_start, probe_writable};
 
 /// Where the work tree lives. The app passes `~/.bongos`; tests pass a temporary directory, so no

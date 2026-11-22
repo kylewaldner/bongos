@@ -95,7 +95,12 @@ fn resolved(path: &Path) -> PathBuf {
 /// must not be, hold or sit inside a primary checkout, a task worktree or another lane's
 /// location. Returns the path with links resolved.
 pub fn check_own_tree(path: &Path, own: &Path, forbidden: &Forbidden) -> Result<PathBuf, String> {
-    let refuse = |why: String| Err(format!("{} is not this lane's tree to reset: {why}", path.display()));
+    let refuse = |why: String| {
+        Err(format!(
+            "{} is not this lane's tree to reset: {why}",
+            path.display()
+        ))
+    };
     if !path.is_absolute() {
         return refuse("it is not an absolute path".to_string());
     }
@@ -132,7 +137,10 @@ pub fn check_own_tree(path: &Path, own: &Path, forbidden: &Forbidden) -> Result<
 /// `repository`, with its own top at `tree` (not a directory inside another checkout).
 async fn check_linked_worktree(git: &Git, tree: &Path, repository: &Path) -> Result<(), String> {
     let top = git
-        .run(tree, &["rev-parse", "--path-format=absolute", "--show-toplevel"])
+        .run(
+            tree,
+            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        )
         .await
         .map_err(|error| error.to_string())?;
     if resolved(Path::new(&top)) != resolved(tree) {
@@ -209,7 +217,15 @@ pub fn git_tree_maker(git: Git, from: BTreeMap<String, String>) -> MakeTree {
         // The maker runs on a background thread; waiting for git there is fine.
         futures::executor::block_on(git.run(
             &request.repository_path,
-            &["worktree", "add", "-q", "--detach", "--end-of-options", &path, from],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                "--end-of-options",
+                &path,
+                from,
+            ],
         ))
         .map(|_| ())
         .map_err(anyhow::Error::from)
@@ -426,7 +442,9 @@ fn inside(tree: &Path, dirs: &[PathBuf]) -> Vec<String> {
 /// The paths `git status --porcelain -z` lists (ignored files excluded), both sides of a rename.
 fn changed_paths(status: &[u8]) -> Vec<String> {
     let mut paths = Vec::new();
-    let mut fields = status.split(|byte| *byte == 0).filter(|field| !field.is_empty());
+    let mut fields = status
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
     while let Some(entry) = fields.next() {
         if entry.len() < 4 {
             continue;
@@ -460,7 +478,12 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
         return Ok(None);
     }
     let tree = request.location()?.path.as_path();
-    let refused = |why: String| format!("saving the work of run {} failed: {why}; nothing was reset", last.run_id);
+    let refused = |why: String| {
+        format!(
+            "saving the work of run {} failed: {why}; nothing was reset",
+            last.run_id
+        )
+    };
     let status = git
         .output(
             tree,
@@ -476,7 +499,9 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
         .await
         .map_err(|error| refused(error.to_string()))?;
     if !status.status.success() {
-        return Err(refused(String::from_utf8_lossy(&status.stderr).trim().to_string()));
+        return Err(refused(
+            String::from_utf8_lossy(&status.stderr).trim().to_string(),
+        ));
     }
     let excluded = inside(tree, &request.named_dirs());
     let mut selected = Vec::new();
@@ -524,10 +549,7 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
         std::fs::remove_file(file).ok();
     }
     let commit = result.map_err(refused)?;
-    Ok(Some(Saved {
-        commit,
-        skipped,
-    }))
+    Ok(Some(Saved { commit, skipped }))
 }
 
 async fn commit_saved(
@@ -572,10 +594,7 @@ async fn commit_saved(
         .map_err(git_error)?;
     let pathspec_arg = format!("--pathspec-from-file={}", pathspec.display());
     saving
-        .run(
-            tree,
-            &["add", "-A", "--pathspec-file-nul", &pathspec_arg],
-        )
+        .run(tree, &["add", "-A", "--pathspec-file-nul", &pathspec_arg])
         .await
         .map_err(git_error)?;
     let written = saving.run(tree, &["write-tree"]).await.map_err(git_error)?;
@@ -588,7 +607,10 @@ async fn commit_saved(
     }
     let message = format!("work left by {word} run {}", last.run_id);
     let commit = saving
-        .run(tree, &["commit-tree", &written, "-p", &parent, "-m", &message])
+        .run(
+            tree,
+            &["commit-tree", &written, "-p", &parent, "-m", &message],
+        )
         .await
         .map_err(git_error)?;
 
@@ -717,8 +739,7 @@ pub async fn merge_in_lane_tree(
     let location =
         lane_tree(&request.locations, &request.repo, false).map_err(LaneMergeError::NotOwnTree)?;
     let tree = location.path.as_path();
-    check_own_tree(tree, &location.path, &request.forbidden)
-        .map_err(LaneMergeError::NotOwnTree)?;
+    check_own_tree(tree, &location.path, &request.forbidden).map_err(LaneMergeError::NotOwnTree)?;
     check_linked_worktree(git, tree, &request.repository)
         .await
         .map_err(LaneMergeError::NotOwnTree)?;

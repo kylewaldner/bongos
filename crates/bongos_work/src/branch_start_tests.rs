@@ -181,7 +181,10 @@ fn a_resolver_root_names_its_layer_and_never_falls_back() {
         assert!(error.contains(&*blocked.to_string_lossy()), "{error}");
         assert!(error.contains(layer), "{error}");
         assert!(error.ends_with("nothing was created"), "{error}");
-        assert!(!temp.path().join("data").exists(), "nothing central was made");
+        assert!(
+            !temp.path().join("data").exists(),
+            "nothing central was made"
+        );
     }
 
     // A bad template from a resolver names the root and its layer.
@@ -192,7 +195,9 @@ fn a_resolver_root_names_its_layer_and_never_falls_back() {
         panic!("expected a refusal");
     };
     assert!(
-        message.starts_with("the worktree root /trees/{user} of invoicing (from project profile fast-disk layer)"),
+        message.starts_with(
+            "the worktree root /trees/{user} of invoicing (from project profile fast-disk layer)"
+        ),
         "{message}"
     );
 }
@@ -221,10 +226,19 @@ async fn a_branch_only_start_cuts_the_branch_records_it_and_makes_no_worktree(
     assert_eq!(started.branch, "backfill");
     assert_eq!(started.base, "main");
     assert_eq!(started.base_sha, main);
-    assert_eq!(git(&repository, &["rev-parse", "refs/heads/backfill"]), main);
+    assert_eq!(
+        git(&repository, &["rev-parse", "refs/heads/backfill"]),
+        main
+    );
     // No worktree, and the checkout is still on main and clean.
     let worktrees = git(&repository, &["worktree", "list", "--porcelain"]);
-    assert_eq!(worktrees.lines().filter(|l| l.starts_with("worktree ")).count(), 1);
+    assert_eq!(
+        worktrees
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        1
+    );
     assert_eq!(git(&repository, &["branch", "--show-current"]), "main");
     assert_eq!(git(&repository, &["status", "--porcelain"]), "");
     assert!(!base.join("data").exists());
@@ -246,7 +260,10 @@ async fn a_branch_only_start_cuts_the_branch_records_it_and_makes_no_worktree(
     assert!(model::record_branch(&tree, &ctx(), "l1", started).is_err());
     let again = make_branch(fs, &start).await.unwrap_err().to_string();
     assert!(again.contains("already exists"), "{again}");
-    assert_eq!(git(&repository, &["rev-parse", "refs/heads/backfill"]), main);
+    assert_eq!(
+        git(&repository, &["rev-parse", "refs/heads/backfill"]),
+        main
+    );
 
     // A babysit leaf starts on a PR's head, so it is refused here.
     let babysit = layout::child_dir(&layout::project_dir(&root, "invoicing"), "watch");

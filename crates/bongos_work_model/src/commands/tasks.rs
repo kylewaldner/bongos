@@ -516,7 +516,10 @@ pub fn record_branch(tree: &WorkTree, ctx: &Context, id: &str, started: StartedB
             ));
         }
         if let Some(existing) = &file.branch {
-            return Err(format!("{} already has the branch {existing}", place.slug()));
+            return Err(format!(
+                "{} already has the branch {existing}",
+                place.slug()
+            ));
         }
         file.branch = Some(started.branch.clone());
         file.base = Some(started.base.clone());

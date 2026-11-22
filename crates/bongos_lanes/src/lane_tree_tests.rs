@@ -14,8 +14,8 @@ use tempfile::TempDir;
 
 use crate::job_trees::{JobRepository, forbidden_for};
 use crate::lane_tree::{
-    Forbidden, LaneMerge, LaneMergeError, LaneMerged, LastEnd, LastRun, MergeTarget,
-    ResetRequest, SaveTarget, check_own_tree, merge_in_lane_tree, reset_tree,
+    Forbidden, LaneMerge, LaneMergeError, LaneMerged, LastEnd, LastRun, MergeTarget, ResetRequest,
+    SaveTarget, check_own_tree, merge_in_lane_tree, reset_tree,
 };
 use crate::locations::{LaneLocations, LocationInputs, RepositoryPlace, binding_of, resolve_lane};
 use crate::locations_tests::{FakeProfile, table};
@@ -112,7 +112,9 @@ impl Fixture {
         let temp = TempDir::new().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let profile = profile(&base);
-        let profile = profile.as_ref().map(|profile| profile as &dyn LaneProfileSource);
+        let profile = profile
+            .as_ref()
+            .map(|profile| profile as &dyn LaneProfileSource);
         let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(base.join("data")).unwrap();
@@ -307,8 +309,14 @@ async fn ignored_output_survives_two_jobs_and_nothing_else_is_touched(cx: &mut T
         assert!(!outcome.added);
         assert_eq!(outcome.saved, None, "a succeeded run's tree is not saved");
         assert_eq!(current_branch(&tip), job.run_branch);
-        assert_eq!(std::fs::read_to_string(tip.join("README.md")).unwrap(), "readme\n");
-        assert!(!tip.join("scratch.txt").exists(), "untracked files are removed");
+        assert_eq!(
+            std::fs::read_to_string(tip.join("README.md")).unwrap(),
+            "readme\n"
+        );
+        assert!(
+            !tip.join("scratch.txt").exists(),
+            "untracked files are removed"
+        );
         assert_eq!(
             std::fs::read_to_string(tip.join("target/app.bin")).unwrap(),
             "build output",
@@ -356,10 +364,18 @@ async fn a_failed_runs_work_is_saved_on_its_run_branch_with_large_files_listed(
     };
     assert_eq!(branch, run_branch);
     assert_eq!(git(&fixture.app, &["rev-parse", &run_branch]), commit);
-    assert_eq!(git(&fixture.app, &["rev-parse", &format!("{commit}^")]), start);
     assert_eq!(
-        git(&fixture.app, &["log", "-1", "--format=%s|%an <%ae>|%cn <%ce>", &commit]),
-        format!("work left by failed run {RUN_1}|bongos <bongos@localhost>|bongos <bongos@localhost>")
+        git(&fixture.app, &["rev-parse", &format!("{commit}^")]),
+        start
+    );
+    assert_eq!(
+        git(
+            &fixture.app,
+            &["log", "-1", "--format=%s|%an <%ae>|%cn <%ce>", &commit]
+        ),
+        format!(
+            "work left by failed run {RUN_1}|bongos <bongos@localhost>|bongos <bongos@localhost>"
+        )
     );
     let files = git(&fixture.app, &["ls-tree", "-r", "--name-only", &commit]);
     let files: Vec<&str> = files.lines().collect();
@@ -369,13 +385,20 @@ async fn a_failed_runs_work_is_saved_on_its_run_branch_with_large_files_listed(
         "half done"
     );
     assert_eq!(saved.skipped, [("big.bin".to_string(), 2000)]);
-    assert!(saved.history().contains("too large to save: big.bin (2000 bytes)"));
+    assert!(
+        saved
+            .history()
+            .contains("too large to save: big.bin (2000 bytes)")
+    );
 
     // Then the reset: the new run branch, the large file gone, the named directory and the
     // ignored output kept. The task branch did not move.
     assert_eq!(current_branch(&tip), job.run_branch);
     assert!(!tip.join("big.bin").exists() && !tip.join("new.txt").exists());
-    assert_eq!(std::fs::read_to_string(keep.join("cache")).unwrap(), "named directory");
+    assert_eq!(
+        std::fs::read_to_string(keep.join("cache")).unwrap(),
+        "named directory"
+    );
     assert!(tip.join("target/out").exists());
     assert_eq!(
         git(&fixture.app, &["rev-parse", TASK_BRANCH]),
@@ -392,7 +415,10 @@ async fn work_off_the_run_branch_is_saved_at_a_saved_ref_never_on_a_task_branch(
     let tip = fixture.tip();
     fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
     let task_y = git(&fixture.app, &["rev-parse", "task/y"]);
-    let run_1 = git(&fixture.app, &["rev-parse", &run_branch_name(TASK_BRANCH, RUN_1, 1)]);
+    let run_1 = git(
+        &fixture.app,
+        &["rev-parse", &run_branch_name(TASK_BRANCH, RUN_1, 1)],
+    );
 
     // Detached, after a halted run.
     git(&tip, &["checkout", "-q", "--detach"]);
@@ -421,7 +447,10 @@ async fn work_off_the_run_branch_is_saved_at_a_saved_ref_never_on_a_task_branch(
     assert_eq!(target, format!("refs/bongos/saved/build-1/{RUN_2}"));
     assert_eq!(git(&fixture.app, &["rev-parse", "task/y"]), task_y);
     assert_eq!(
-        git(&fixture.app, &["rev-parse", &run_branch_name(TASK_BRANCH, RUN_1, 1)]),
+        git(
+            &fixture.app,
+            &["rev-parse", &run_branch_name(TASK_BRANCH, RUN_1, 1)]
+        ),
         run_1
     );
     assert_eq!(current_branch(&tip), job.run_branch);
@@ -447,7 +476,10 @@ async fn a_second_tree_is_never_saved(cx: &mut TestAppContext) {
         "",
         "no saved ref"
     );
-    assert_eq!(std::fs::read_to_string(second.join("README.md")).unwrap(), "readme\n");
+    assert_eq!(
+        std::fs::read_to_string(second.join("README.md")).unwrap(),
+        "readme\n"
+    );
 }
 
 #[gpui::test]
@@ -458,12 +490,20 @@ async fn a_failed_save_or_reset_deletes_nothing(cx: &mut TestAppContext) {
     fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
     std::fs::write(tip.join("README.md"), "precious\n").unwrap();
     std::fs::write(tip.join("new.txt"), "also precious\n").unwrap();
-    let run_1 = git(&fixture.app, &["rev-parse", &run_branch_name(TASK_BRANCH, RUN_1, 1)]);
+    let run_1 = git(
+        &fixture.app,
+        &["rev-parse", &run_branch_name(TASK_BRANCH, RUN_1, 1)],
+    );
 
     // The save cannot make its index: nothing is reset.
     let index = PathBuf::from(git(
         &tip,
-        &["rev-parse", "--path-format=absolute", "--git-path", "bongos-save-index"],
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "bongos-save-index",
+        ],
     ));
     std::fs::create_dir_all(index.join("blocker")).unwrap();
     let job = fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Failed)));
@@ -471,7 +511,10 @@ async fn a_failed_save_or_reset_deletes_nothing(cx: &mut TestAppContext) {
     assert!(error.contains("saving the work of run"), "{error}");
     assert!(error.ends_with("nothing was reset"), "{error}");
     let still = |tip: &Path| {
-        assert_eq!(std::fs::read_to_string(tip.join("README.md")).unwrap(), "precious\n");
+        assert_eq!(
+            std::fs::read_to_string(tip.join("README.md")).unwrap(),
+            "precious\n"
+        );
         assert_eq!(
             std::fs::read_to_string(tip.join("new.txt")).unwrap(),
             "also precious\n"
@@ -480,7 +523,10 @@ async fn a_failed_save_or_reset_deletes_nothing(cx: &mut TestAppContext) {
     };
     still(&tip);
     assert_eq!(
-        git(&fixture.app, &["rev-parse", &run_branch_name(TASK_BRANCH, RUN_1, 1)]),
+        git(
+            &fixture.app,
+            &["rev-parse", &run_branch_name(TASK_BRANCH, RUN_1, 1)]
+        ),
         run_1
     );
     std::fs::remove_dir_all(&index).unwrap();
@@ -488,7 +534,12 @@ async fn a_failed_save_or_reset_deletes_nothing(cx: &mut TestAppContext) {
     // A git command of the reset fails (the index is locked): an error, and nothing deleted.
     let lock = PathBuf::from(git(
         &tip,
-        &["rev-parse", "--path-format=absolute", "--git-path", "index.lock"],
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index.lock",
+        ],
     ));
     std::fs::write(&lock, "").unwrap();
     let job = fixture.task_job(RUN_2, None);
@@ -579,7 +630,10 @@ async fn a_lane_never_resets_a_path_that_is_not_its_own_tree(cx: &mut TestAppCon
     std::fs::create_dir_all(&tip).unwrap();
     std::fs::write(tip.join("file.txt"), "not a lane tree\n").unwrap();
     let error = fixture.reset(&job).await.unwrap_err();
-    assert!(error.contains("is not a git worktree of its own"), "{error}");
+    assert!(
+        error.contains("is not a git worktree of its own"),
+        "{error}"
+    );
     assert_eq!(
         std::fs::read_to_string(tip.join("file.txt")).unwrap(),
         "not a lane tree\n"
@@ -636,19 +690,33 @@ async fn a_project_job_starts_from_its_start_and_merges_into_merge_into(cx: &mut
     let integration = git(&fixture.app, &["rev-parse", "integration"]);
     let nothing = merge_in_lane_tree(
         &fixture.git,
-        &lane_merge(&fixture, MergeTarget::MergeInto(None), &job.run_branch, RUN_1),
+        &lane_merge(
+            &fixture,
+            MergeTarget::MergeInto(None),
+            &job.run_branch,
+            RUN_1,
+        ),
     )
     .await
     .unwrap();
     assert_eq!(nothing, LaneMerged::Nothing);
-    assert_eq!(git(&fixture.app, &["rev-parse", "integration"]), integration);
+    assert_eq!(
+        git(&fixture.app, &["rev-parse", "integration"]),
+        integration
+    );
     assert_eq!(current_branch(&tip), job.run_branch);
 
     // integration checked out in another worktree (the user's): refused, the run branch intact.
     let elsewhere = fixture.base.join("elsewhere");
     git(
         &fixture.app,
-        &["worktree", "add", "-q", &elsewhere.to_string_lossy(), "integration"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &elsewhere.to_string_lossy(),
+            "integration",
+        ],
     );
     let into = MergeTarget::MergeInto(Some("integration".to_string()));
     let refused = merge_in_lane_tree(
@@ -662,9 +730,15 @@ async fn a_project_job_starts_from_its_start_and_merges_into_merge_into(cx: &mut
         "{refused:?}"
     );
     assert_eq!(git(&fixture.app, &["rev-parse", &job.run_branch]), work);
-    assert_eq!(git(&fixture.app, &["rev-parse", "integration"]), integration);
+    assert_eq!(
+        git(&fixture.app, &["rev-parse", "integration"]),
+        integration
+    );
     assert_eq!(current_branch(&tip), job.run_branch);
-    git(&fixture.app, &["worktree", "remove", &elsewhere.to_string_lossy()]);
+    git(
+        &fixture.app,
+        &["worktree", "remove", &elsewhere.to_string_lossy()],
+    );
 
     // At success the run branch is merged into integration in the lane tree.
     let merged = merge_in_lane_tree(
@@ -678,7 +752,10 @@ async fn a_project_job_starts_from_its_start_and_merges_into_merge_into(cx: &mut
         panic!("expected a merge: {merged:?}");
     };
     assert_eq!(git(&fixture.app, &["rev-parse", "integration"]), head);
-    git(&fixture.app, &["merge-base", "--is-ancestor", &work, "integration"]);
+    git(
+        &fixture.app,
+        &["merge-base", "--is-ancestor", &work, "integration"],
+    );
     assert_eq!(git(&fixture.app, &["rev-parse", &job.run_branch]), work);
     assert_eq!(current_branch(&fixture.app), "main");
 
@@ -709,7 +786,10 @@ async fn a_branch_only_leaf_merges_into_its_task_branch_in_the_lane_tree(cx: &mu
     )
     .await
     .unwrap();
-    assert_eq!(merged, LaneMerged::Merged(Merged::FastForward { head: work.clone() }));
+    assert_eq!(
+        merged,
+        LaneMerged::Merged(Merged::FastForward { head: work.clone() })
+    );
     assert_eq!(git(&fixture.app, &["rev-parse", "task/y"]), work);
     assert_eq!(current_branch(&tip), "task/y");
 

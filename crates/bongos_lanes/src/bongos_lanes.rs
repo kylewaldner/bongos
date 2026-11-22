@@ -43,9 +43,9 @@ pub use job_trees::{
     StartedTrees, forbidden_for, start_job_trees,
 };
 pub use lane_tree::{
-    Forbidden, LaneMerge, LaneMergeError, LaneMerged, LastEnd, LastRun, MergeTarget,
-    ResetOutcome, ResetRequest, SAVE_EMAIL, SAVE_NAME, SAVED_REFS, SaveTarget, Saved, add_tree,
-    check_own_tree, git_tree_maker, lane_tree, merge_in_lane_tree, reset_tree,
+    Forbidden, LaneMerge, LaneMergeError, LaneMerged, LastEnd, LastRun, MergeTarget, ResetOutcome,
+    ResetRequest, SAVE_EMAIL, SAVE_NAME, SAVED_REFS, SaveTarget, Saved, add_tree, check_own_tree,
+    git_tree_maker, lane_tree, merge_in_lane_tree, reset_tree,
 };
 pub use locations::{
     Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
