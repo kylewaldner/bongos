@@ -19,6 +19,8 @@ const ALLOWED: &[&str] = &[
     "bongos_project_repo/src/landing_view.rs",
     // `task: edit checks` makes a working copy as the person who pressed the key.
     "bongos_checks/src/actions.rs",
+    // `lanes: accept graph` lands the graph stamp, and `lanes: adopt` records who adopted.
+    "bongos_lanes/src/actions.rs",
 ];
 
 /// The one file that defines `from_action`.

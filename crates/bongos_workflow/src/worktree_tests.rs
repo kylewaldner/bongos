@@ -1019,3 +1019,97 @@ async fn clear_finished_refuses_a_run_dir_swapped_for_a_symlink_after_the_plan(
     assert!(elsewhere.join("run").join("README.md").exists());
     assert!(branch_exists(git, &fixture.repository, &run.branch).await);
 }
+
+const SAVED_REF: &str = "refs/bongos/saved/build-1/01890a5d";
+
+/// A cancelled run whose branch head saves the work it left, and a saved ref holding the work of
+/// another run; returns the run and the short shas of the run branch head and the saved ref.
+async fn saved_work_fixture(fixture: &Fixture) -> (RunWorktree, String, String) {
+    let git = &fixture.git;
+    let run = fixture.create_run(RUN_ID).await;
+    let subject = format!("work left by cancelled run {RUN_ID}");
+    git_out(
+        git,
+        &run.path,
+        &["commit", "-q", "--allow-empty", "-m", &subject],
+    )
+    .await;
+    let branch_head = rev(git, &run.path, "HEAD").await;
+    let saved = git_out(
+        git,
+        &fixture.repository,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "work left by failed run 01890a5d",
+        ],
+    )
+    .await;
+    git_out(git, &fixture.repository, &["update-ref", SAVED_REF, &saved]).await;
+    // An ordinary commit on a branch is not saved work.
+    commit_file(git, fixture.task_worktree(), "task.txt", "task\n").await;
+    (run, branch_head[..12].to_string(), saved[..12].to_string())
+}
+
+async fn ref_exists(git: &Git, directory: &Path, reference: &str) -> bool {
+    git.run(directory, &["rev-parse", "--verify", "-q", reference])
+        .await
+        .is_ok()
+}
+
+#[gpui::test]
+async fn clear_finished_lists_and_keeps_saved_work_unless_confirmed(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    for confirmed in [false, true] {
+        let fixture = Fixture::new().await;
+        let git = &fixture.git;
+        let (run, branch_sha, saved_sha) = saved_work_fixture(&fixture).await;
+        let finished = vec![fixture.finished(RUN_ID, Lifecycle::Cancelled, day(1), &run)];
+        let mut plan = plan_clear(git, &finished, None, &fixture.home(), 14, day(100))
+            .await
+            .unwrap();
+
+        assert!(!plan.delete_saved, "saved work is kept by default");
+        assert_eq!(plan.saved_count(), 2);
+        let summary = plan.summary();
+        assert!(
+            summary.contains(&format!("keep {} at {branch_sha}: saved work", run.branch)),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&format!("keep {SAVED_REF} at {saved_sha}: saved work")),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains(&format!("keep {TASK_BRANCH} at")),
+            "{summary}"
+        );
+
+        plan.delete_saved = confirmed;
+        let report = apply_clear(git, &fixture.repository, &plan).await;
+        assert!(!run.path.exists(), "the clean run worktree goes either way");
+        let listed = vec![
+            format!("{} at {branch_sha}", run.branch),
+            format!("{SAVED_REF} at {saved_sha}"),
+        ];
+        if confirmed {
+            assert_eq!(report.deleted_saved, listed, "{report}");
+            assert!(report.kept_saved.is_empty(), "{report}");
+        } else {
+            assert_eq!(report.kept_saved, listed, "{report}");
+            assert!(report.deleted_saved.is_empty(), "{report}");
+        }
+        assert_eq!(
+            branch_exists(git, &fixture.repository, &run.branch).await,
+            !confirmed
+        );
+        assert_eq!(
+            ref_exists(git, &fixture.repository, SAVED_REF).await,
+            !confirmed
+        );
+        assert!(branch_exists(git, &fixture.repository, TASK_BRANCH).await);
+    }
+}

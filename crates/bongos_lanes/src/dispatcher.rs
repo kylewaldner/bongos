@@ -29,8 +29,8 @@ use anyhow::{Context as _, Result};
 use bongos_lanes_model::{
     AssignedWork, Assignment, Author, JobRecord, LaneId, LaneRecord, LaneState, LaneTable,
     LanesState, OwnerChange, OwnerRecord, OwnerState, PickBound, PickGraph, PickOptions,
-    PickOutcome, Problem, RunSubject, StopCause, TaskId, WaitReason, pick, reconcile_counts,
-    stop_at_job_boundary,
+    PickOutcome, Problem, RunSubject, StampFile, StopCause, TaskId, WaitReason, owner_after_stop,
+    pick, reconcile_counts, stop_at_job_boundary,
 };
 use bongos_project_repo::{CommitId, RepoEvent, StateTx, StateWriter};
 use bongos_workflow::lifecycle::RefusalKind;
@@ -42,6 +42,7 @@ use futures::channel::mpsc;
 use gpui::{App, Task};
 use serde::{Deserialize, Serialize};
 
+use crate::adopt::LeftWork;
 use crate::dispatch_job::HookedJob;
 use crate::job_trees::JobTrees;
 use crate::lane_control::{BOUND_REASON, LaneEvents, RunEnd, paused_reason};
@@ -223,6 +224,19 @@ pub trait LanesHost {
     ) -> Task<Result<JobSetup, WaitReason>> {
         Task::ready(Ok(JobSetup::default()))
     }
+
+    /// The lane's persistent trees `job` ran in, each with what saving the work it left there
+    /// needs (`lanes: adopt` saves it before cancelling the job's run). The request's `last` names
+    /// `job`'s run. With no persistent tree (fresh run worktrees, kept by the run) there is none.
+    fn left_work(&self, _lane: &LaneId, _job: &JobRecord, _cx: &App) -> Vec<LeftWork> {
+        Vec::new()
+    }
+
+    /// The recorded graph stamp (`lanes/stamp.toml`) at the verified commit `commit`; `None` when
+    /// there is none, which turns the stamp check off.
+    fn stamp(&self, _commit: &str) -> Result<Option<StampFile>, String> {
+        Ok(None)
+    }
 }
 
 /// The run engine as the dispatcher uses it: [`WorkflowEngine`] in the app.
@@ -239,6 +253,8 @@ pub trait JobEngine {
     /// Ends the dispatcher's own run: cancelled when every lane was stopped on request, succeeded
     /// when every lane stopped for its bound. `note` says why.
     fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, cx: &mut App);
+    /// Cancels the run of a lane's job (`lanes: adopt` closes out a halted job's failed run).
+    fn cancel_run(&self, run: &str, cx: &mut App) -> Result<(), String>;
 }
 
 impl JobEngine for WorkflowEngine {
@@ -290,6 +306,10 @@ impl JobEngine for WorkflowEngine {
             // The engine has no way to finish a run on its own yet; the run stays active.
             RunEnd::Succeeded => log::info!("lanes: the dispatcher run {run} is done: {note}"),
         }
+    }
+
+    fn cancel_run(&self, run: &str, cx: &mut App) -> Result<(), String> {
+        WorkflowEngine::cancel(self, &run.to_string(), cx).map_err(|refusal| refusal.to_string())
     }
 }
 
@@ -472,17 +492,8 @@ fn start_verified(
         .start(start, cx)
         .map_err(StartRefusal::Engine)?;
 
-    let counts: BTreeMap<String, u32> = table
-        .kinds
-        .iter()
-        .map(|kind| {
-            let count = profile
-                .as_deref()
-                .and_then(|profile| profile.count(&project, &kind.name))
-                .unwrap_or(kind.count);
-            (kind.name.clone(), count)
-        })
-        .collect();
+    let counts = effective_counts(&table, &project, profile.as_deref());
+    let stamp = read_stamp(host.as_ref(), &verified);
     let now = host.now();
     let record = DispatcherRecord {
         run_id: run_id.clone(),
@@ -515,6 +526,7 @@ fn start_verified(
         max_jobs: request.max_jobs,
         unattended,
         verified,
+        stamp,
         events,
     });
     dispatcher.run(cx);
@@ -523,6 +535,34 @@ fn start_verified(
         run_id,
         attached: false,
         dispatcher: Some(dispatcher),
+    })
+}
+
+/// The lane count of each kind of `table`: the profile's, else the table's.
+fn effective_counts(
+    table: &LaneTable,
+    project: &str,
+    profile: Option<&dyn crate::LaneProfileSource>,
+) -> BTreeMap<String, u32> {
+    table
+        .kinds
+        .iter()
+        .map(|kind| {
+            let count = profile
+                .and_then(|profile| profile.count(project, &kind.name))
+                .unwrap_or(kind.count);
+            (kind.name.clone(), count)
+        })
+        .collect()
+}
+
+/// The recorded stamp at `commit`; one that cannot be read turns the check off, logged.
+fn read_stamp(host: &dyn LanesHost, commit: &str) -> Option<StampFile> {
+    host.stamp(commit).unwrap_or_else(|error| {
+        log::error!(
+            "lanes: the graph stamp at {commit} cannot be read, so it is not checked: {error}"
+        );
+        None
     })
 }
 
@@ -624,6 +664,8 @@ pub struct DispatcherConfig {
     /// The start's unattended choice.
     pub unattended: Option<UnattendedChoice>,
     pub verified: String,
+    /// The recorded graph stamp at `verified`.
+    pub stamp: Option<StampFile>,
     pub events: LaneEvents,
 }
 
@@ -635,6 +677,11 @@ pub(crate) struct Inner {
     pub(crate) config: DispatcherConfig,
     table: RefCell<LaneTable>,
     verified: RefCell<String>,
+    /// The effective lane count of each kind, changed at a profile or table change.
+    counts: RefCell<BTreeMap<String, u32>>,
+    stamp: RefCell<Option<StampFile>>,
+    /// Lanes held waiting because their locations overlap another lane's, with the reason.
+    overlapping: RefCell<BTreeMap<LaneId, String>>,
     /// A pass is running.
     passing: Cell<bool>,
     /// A pass was asked for while one ran: `Some(full)`.
@@ -646,6 +693,7 @@ pub(crate) struct Inner {
     /// Each lane's `jobs_done` when this dispatcher first saw it, for `max_jobs`.
     baseline: RefCell<BTreeMap<LaneId, u32>>,
     triggers: RefCell<Vec<Task<()>>>,
+    subscriptions: RefCell<Vec<gpui::Subscription>>,
     /// The jobs that passed the job hooks, by lane, until their `after_job` resolved. A lane
     /// listed here is not evaluated, and the dispatcher's run does not end while any is listed.
     ///
@@ -677,6 +725,9 @@ impl Dispatcher {
         Self(Rc::new(Inner {
             table: RefCell::new(config.table.clone()),
             verified: RefCell::new(config.verified.clone()),
+            counts: RefCell::new(config.counts.clone()),
+            stamp: RefCell::new(config.stamp.clone()),
+            overlapping: RefCell::new(BTreeMap::new()),
             config,
             passing: Cell::new(false),
             again: Cell::new(None),
@@ -685,6 +736,7 @@ impl Dispatcher {
             ended: Cell::new(false),
             baseline: RefCell::new(BTreeMap::new()),
             triggers: RefCell::new(Vec::new()),
+            subscriptions: RefCell::new(Vec::new()),
             hooked: RefCell::new(BTreeMap::new()),
         }))
     }
@@ -770,16 +822,88 @@ impl Dispatcher {
             }
         }));
         self.0.triggers.borrow_mut().extend(triggers);
+
+        let weak = self.downgrade();
+        let profile_changed = cx.observe_global::<LaneProfiles>(move |cx| {
+            if let Some(inner) = weak.upgrade() {
+                Dispatcher(inner).counts_changed(cx);
+            }
+        });
+        self.0.subscriptions.borrow_mut().push(profile_changed);
     }
 
-    /// A new verified commit: its lane table, then a full pass.
+    /// A new verified commit: its lane table, its stamp and the counts they give, then a full
+    /// pass.
     pub fn verified_commit_changed(&self, commit: String, cx: &mut App) {
         match self.parts().host.lane_table(&commit) {
             Ok(table) => *self.0.table.borrow_mut() = table,
             Err(error) => log::error!("lanes: the lane table at {commit} cannot be read: {error}"),
         }
+        *self.0.stamp.borrow_mut() = read_stamp(self.parts().host.as_ref(), &commit);
         *self.0.verified.borrow_mut() = commit;
+        self.apply_counts(cx);
         self.evaluate(true, cx);
+    }
+
+    /// The project profile changed: its lane counts apply now, at each lane's job boundary.
+    pub fn counts_changed(&self, cx: &mut App) {
+        if self.apply_counts(cx) {
+            self.evaluate(true, cx);
+        }
+    }
+
+    /// The effective counts now, from the table and the profile, applied with no restart: lanes up
+    /// to a raised count are made (held waiting while their locations overlap another lane's),
+    /// free lanes above a lowered count are removed with their task stopped, and running ones
+    /// stop after their job. A lane removed is never reset; its trees stay on disk as they are.
+    /// Returns whether anything changed.
+    fn apply_counts(&self, cx: &mut App) -> bool {
+        let parts = self.parts().clone();
+        let table = self.table();
+        let profile = LaneProfiles::source(cx);
+        let counts = effective_counts(&table, &self.0.config.project, profile.as_deref());
+        if counts == *self.0.counts.borrow() {
+            return false;
+        }
+        let lanes = table_lane_ids(&table, &self.0.config.project, profile.as_deref());
+        let overlap = parts.host.check_locations(&table, &lanes, cx).err();
+        let existing = match parts.writer.read(crate::store::read_state) {
+            Ok(state) => state.lanes.into_keys().collect::<BTreeSet<_>>(),
+            Err(error) => {
+                log::error!("lanes: reading the lanes state for a count change: {error:#}");
+                return false;
+            }
+        };
+        {
+            let mut overlapping = self.0.overlapping.borrow_mut();
+            match &overlap {
+                None => overlapping.clear(),
+                Some(found) => {
+                    let reason = problems(found);
+                    overlapping.retain(|lane, _| lanes.contains(lane));
+                    for lane in &lanes {
+                        if !existing.contains(lane) || overlapping.contains_key(lane) {
+                            overlapping.insert(lane.clone(), reason.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let held = self.0.overlapping.borrow().clone();
+        let now = parts.host.now();
+        let result = parts
+            .writer
+            .transact(|tx| change_counts(tx, &counts, &held, &now));
+        match result {
+            Ok(()) => {
+                *self.0.counts.borrow_mut() = counts;
+                true
+            }
+            Err(error) => {
+                log::error!("lanes: applying a count change: {error:#}");
+                false
+            }
+        }
     }
 
     /// A lane command asks the lanes to look for work now.
@@ -832,6 +956,10 @@ impl Dispatcher {
 
     fn pass(&self, full: bool, cx: &mut App) {
         self.0.passes.set(self.0.passes.get() + 1);
+        let writer = &self.parts().writer;
+        if let Err(error) = writer.transact(|tx| self.forget_stopped_above_count(tx)) {
+            log::error!("lanes: removing the stopped lanes above their count: {error:#}");
+        }
         let lanes = match self.begin_pass(cx) {
             Ok(state) => {
                 self.sweep_hooked(&state, cx);
@@ -912,6 +1040,13 @@ impl Dispatcher {
         };
         let free = record.state == LaneState::Idle || (full && record.state == LaneState::Waiting);
         if !free || record.job.is_some() || !self.lane_exists(lane) {
+            return Ok(LaneStep::Nothing);
+        }
+        if let Some(reason) = self.0.overlapping.borrow().get(lane) {
+            let mut held = record.clone();
+            held.state = LaneState::Waiting;
+            held.reason = Some(WaitReason::Environment(reason.clone()));
+            write_lane_if_changed(tx, record, &held)?;
             return Ok(LaneStep::Nothing);
         }
         let mut updated = record.clone();
@@ -1063,10 +1198,22 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// Removes the record of a lane above its count once it stopped, so a later raise makes it
+    /// again; its task keeps its stopped owner, which any lane may take. Nothing on disk changes.
+    fn forget_stopped_above_count(&self, tx: &mut StateTx) -> Result<()> {
+        let state = read_state_in(tx)?;
+        for (id, lane) in &state.lanes {
+            if lane.state == LaneState::Stopped && !self.lane_exists(id) {
+                delete_lane(tx, id)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn lane_exists(&self, lane: &LaneId) -> bool {
         self.0
-            .config
             .counts
+            .borrow()
             .get(&lane.kind)
             .is_some_and(|count| lane.index <= *count)
     }
@@ -1108,12 +1255,12 @@ impl Dispatcher {
             })
             .collect();
         PickOptions {
-            counts: self.0.config.counts.clone(),
+            counts: self.0.counts.borrow().clone(),
             instances,
             assigned: BTreeMap::new(),
             bound: self.0.config.bound.clone(),
             waiting_limit: None,
-            stamp: None,
+            stamp: self.0.stamp.borrow().clone(),
         }
     }
 
@@ -1183,6 +1330,56 @@ pub(crate) fn held_task<'a>(
                 OwnerState::Active | OwnerState::Stopped | OwnerState::Halted | OwnerState::Ahead
             )
     })
+}
+
+/// Applies changed counts in one transaction. Lanes up to a count that do not exist are made idle,
+/// or waiting with the reason when `held` names them. Above a count: a lane with a job (running,
+/// or waiting with a reserved job) stops after it; a free one stops now, its task stopped with it
+/// so any lane may take it, and its record is removed; a halted one stays until a person acts. A
+/// lane back within its count forgets a stop the count asked for.
+fn change_counts(
+    tx: &mut StateTx,
+    counts: &BTreeMap<String, u32>,
+    held: &BTreeMap<LaneId, String>,
+    now: &str,
+) -> Result<()> {
+    let state = read_state_in(tx)?;
+    let plan = reconcile_counts(counts, &state);
+    for id in &plan.create {
+        let mut lane = LaneRecord::new(id, LaneState::Idle);
+        if let Some(reason) = held.get(id) {
+            lane.state = LaneState::Waiting;
+            lane.reason = Some(WaitReason::Environment(reason.clone()));
+        }
+        put_lane(tx, &lane)?;
+    }
+    for id in plan.remove_now.iter().chain(&plan.stop_after_job) {
+        let Some(lane) = state.lanes.get(id) else {
+            continue;
+        };
+        if lane.job.is_some() {
+            let mut lane = lane.clone();
+            lane.stop_requested = Some(StopCause::Count);
+            put_lane(tx, &lane)?;
+            continue;
+        }
+        if let Some((task, owner)) = held_task(&state, id) {
+            let stopped = owner_after_stop(owner, StopCause::Count, now);
+            if stopped != *owner {
+                put_owner(tx, task, &stopped)?;
+            }
+        }
+        delete_lane(tx, id)?;
+    }
+    for (id, lane) in &state.lanes {
+        let within = counts.get(&id.kind).is_some_and(|count| id.index <= *count);
+        if within && lane.stop_requested == Some(StopCause::Count) {
+            let mut lane = lane.clone();
+            lane.stop_requested = None;
+            put_lane(tx, &lane)?;
+        }
+    }
+    Ok(())
 }
 
 fn write_lane_if_changed(tx: &mut StateTx, before: &LaneRecord, after: &LaneRecord) -> Result<()> {

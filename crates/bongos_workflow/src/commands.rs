@@ -9,7 +9,7 @@ use bongos_workflow_model::definition::{FieldType, ItemType};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{EndState, Lifecycle as RunLifecycle};
 use editor::{Editor, MultiBuffer};
-use gpui::{Action, AppContext as _, ClipboardItem, Context, Window};
+use gpui::{Action, App, AppContext as _, ClipboardItem, Context, WeakEntity, Window};
 use language::Capability;
 use serde_json::{Number, Value};
 use std::path::{Path, PathBuf};
@@ -532,10 +532,14 @@ pub(crate) async fn apply_plan(git: &Git, plan: &ClearPlan) -> ClearReport {
             Some(root) => {
                 let one = ClearPlan {
                     runs: vec![run.clone()],
+                    saved: Vec::new(),
+                    delete_saved: plan.delete_saved,
                 };
                 let applied = apply_clear(git, root, &one).await;
                 report.removed.extend(applied.removed);
                 report.skipped.extend(applied.skipped);
+                report.kept_saved.extend(applied.kept_saved);
+                report.deleted_saved.extend(applied.deleted_saved);
             }
             None => {
                 for item in run.remove.iter().chain(&run.skipped) {
@@ -548,6 +552,15 @@ pub(crate) async fn apply_plan(git: &Git, plan: &ClearPlan) -> ClearReport {
             }
         }
     }
+    // The saved work on no item's branch, once; each entry names its own repository.
+    let saved = ClearPlan {
+        runs: Vec::new(),
+        saved: plan.saved.clone(),
+        delete_saved: plan.delete_saved,
+    };
+    let applied = apply_clear(git, Path::new(""), &saved).await;
+    report.kept_saved.extend(applied.kept_saved);
+    report.deleted_saved.extend(applied.deleted_saved);
     report
 }
 
@@ -624,19 +637,23 @@ pub(crate) fn offer_removal(
         }
     };
     let (remove, skipped) = plan_counts(&plan);
+    let saved = plan.saved_count();
+    let weak = cx.entity().downgrade();
     if remove == 0 {
-        if skipped > 0 {
+        if skipped > 0 || saved > 0 {
             notes.push(format!("Kept:\n{}", plan.summary()));
         } else if notes.is_empty() {
             notes.push("No finished runs to clear".to_string());
         }
         show_toast(workspace, notes.join(". "), cx);
+        if saved > 0 {
+            ask_delete_saved(plan, saved, workspace, window, cx);
+        }
         return;
     }
     log::info!("workflows: clear finished would\n{}", plan.summary());
     notes.push(plan.summary());
     show_toast(workspace, notes.join("\n"), cx);
-    let weak = cx.entity().downgrade();
     bongos_minibuffer::yes_or_no(
         workspace,
         bongos_work::MINIBUFFER_NAME,
@@ -644,24 +661,63 @@ pub(crate) fn offer_removal(
             "Remove {remove} worktrees and branches of finished runs ({skipped} kept)? (y or n) "
         ),
         false,
-        move |yes, _, cx| {
+        move |yes, window, cx| {
             if !yes {
                 return;
             }
-            let applied =
-                cx.background_spawn(async move { apply_plan(&Git::new("git"), &plan).await });
-            cx.spawn(async move |cx| {
-                let report = applied.await;
+            if saved == 0 {
+                apply_and_report(plan, weak, cx);
+                return;
+            }
+            // The next question opens once this one has closed.
+            window.defer(cx, move |window, cx| {
                 weak.update(cx, |workspace, cx| {
-                    show_toast(workspace, report.to_string(), cx)
+                    ask_delete_saved(plan, saved, workspace, window, cx)
                 })
                 .ok();
-            })
-            .detach();
+            });
         },
         window,
         cx,
     );
+}
+
+/// Asks whether to delete the `saved` branches and refs holding saved work, `no` by default. The
+/// plan is applied either way, with `delete_saved` set to the answer.
+fn ask_delete_saved(
+    plan: ClearPlan,
+    saved: usize,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let weak = cx.entity().downgrade();
+    bongos_minibuffer::yes_or_no(
+        workspace,
+        bongos_work::MINIBUFFER_NAME,
+        format!("Also delete the {saved} branches and refs holding saved work? (y or n) "),
+        false,
+        move |yes, _, cx| {
+            let mut plan = plan;
+            plan.delete_saved = yes;
+            apply_and_report(plan, weak, cx);
+        },
+        window,
+        cx,
+    );
+}
+
+/// Applies `plan` in the background and shows its report.
+fn apply_and_report(plan: ClearPlan, weak: WeakEntity<Workspace>, cx: &mut App) {
+    let applied = cx.background_spawn(async move { apply_plan(&Git::new("git"), &plan).await });
+    cx.spawn(async move |cx| {
+        let report = applied.await;
+        weak.update(cx, |workspace, cx| {
+            show_toast(workspace, report.to_string(), cx)
+        })
+        .ok();
+    })
+    .detach();
 }
 
 /// Opens `path` as a workspace of this window and activates it.

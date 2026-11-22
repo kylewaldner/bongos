@@ -348,8 +348,87 @@ impl Saved {
     }
 }
 
+impl Saved {
+    /// The history entry of a save made before a halted job's task moves to another lane: "work
+    /// left on <branch or ref> at <short sha>", with the files too large to keep.
+    pub fn left_on(&self) -> String {
+        let mut text = match &self.commit {
+            Some((commit, SaveTarget::Branch(name) | SaveTarget::Ref(name))) => {
+                format!("work left on {name} at {}", short(commit))
+            }
+            None => "no work left to save".to_string(),
+        };
+        if !self.skipped.is_empty() {
+            let files: Vec<String> = self
+                .skipped
+                .iter()
+                .map(|(path, size)| format!("{path} ({size} bytes)"))
+                .collect();
+            text.push_str(&format!("; too large to save: {}", files.join(", ")));
+        }
+        text
+    }
+}
+
 fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
+}
+
+/// Why the work a run left in a lane tree was not saved.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SaveError {
+    /// The tree cannot be read at all: its directory is missing, or its drive is not mounted.
+    #[error("the tree {} cannot be read: {why}", path.display())]
+    Unreadable { path: PathBuf, why: String },
+    /// The save itself failed (git failed, the disk is full); nothing was written over.
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// Saves the uncommitted work the last run of `request` left in the lane's tree, without
+/// resetting it, by the same rule as the save before a reset ([`reset_tree`]): only a tip tree,
+/// only after a run that failed, halted or was cancelled. `request.run_branch` names no new run
+/// (it may be empty). A save on the run branch moves that branch; the tree's index is then set to
+/// the save commit so its files on disk show as committed, and no file is touched. A tree whose
+/// directory cannot be read is [`SaveError::Unreadable`]; every other failure leaves the tree and
+/// its branches as they were.
+pub async fn save_left_work(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, SaveError> {
+    if request.second {
+        return Ok(None);
+    }
+    let location = request.location().map_err(SaveError::Failed)?;
+    let tree = location.path.as_path();
+    let unreadable = |why: String| SaveError::Unreadable {
+        path: tree.to_path_buf(),
+        why,
+    };
+    match std::fs::metadata(tree) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(unreadable("it is not a directory".to_string())),
+        Err(error) => return Err(unreadable(error.to_string())),
+    }
+    if let Err(error) = std::fs::read_dir(tree) {
+        return Err(unreadable(error.to_string()));
+    }
+    check_own_tree(tree, &location.path, &request.forbidden).map_err(SaveError::Failed)?;
+    check_linked_worktree(git, tree, &request.repository)
+        .await
+        .map_err(SaveError::Failed)?;
+    let saved = save(git, request).await.map_err(SaveError::Failed)?;
+    if let Some(Saved {
+        commit: Some((_, SaveTarget::Branch(_))),
+        ..
+    }) = &saved
+    {
+        // Only the index: the files on disk stay as the run left them.
+        git.run(
+            tree,
+            &no_hooks(&["-c", "submodule.recurse=false", "reset", "-q"]),
+        )
+        .await
+        .map_err(|error| SaveError::Failed(git_error(error)))?;
+    }
+    Ok(saved)
 }
 
 /// What a reset did.

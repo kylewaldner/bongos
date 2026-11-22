@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bongos_lanes_model::{EnvEdit, LaneId, Problem};
-use gpui::{App, Global, Task};
+use gpui::{App, BorrowAppContext as _, Global, Task};
 
 /// What a project profile answers. Every method takes the project id; each default answers "no
 /// profile here": `None`, an empty list or `Ok`.
@@ -74,6 +74,14 @@ impl LaneProfiles {
     /// Makes `source` the project profile; a later registration replaces it.
     pub fn register(source: Arc<dyn LaneProfileSource>, cx: &mut App) {
         cx.default_global::<Self>().source = Some(source);
+    }
+
+    /// Tells the running dispatchers that the profile's answers changed (a lane count, say); they
+    /// apply the new counts at once, each lane at its job boundary.
+    pub fn changed(cx: &mut App) {
+        if cx.has_global::<Self>() {
+            cx.update_global::<Self, _>(|_, _| {});
+        }
     }
 
     /// The registered source, or `None` when there is no profile.
