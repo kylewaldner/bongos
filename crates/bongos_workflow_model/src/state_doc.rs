@@ -48,7 +48,7 @@ pub struct InstanceResult {
 pub struct RunInfo {
     pub id: String,
     pub workflow: String,
-    pub todo: TodoRef,
+    pub todo: Option<TodoRef>,
     pub task_id: String,
     pub task_dir: PathBuf,
     /// The task's branch.
@@ -71,7 +71,7 @@ pub struct Paths {
 pub struct RunIdentity {
     pub id: String,
     pub workflow: String,
-    pub todo: TodoRef,
+    pub todo: Option<TodoRef>,
     pub task_id: String,
     pub task_dir: PathBuf,
     pub branch: String,

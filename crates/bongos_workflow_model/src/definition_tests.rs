@@ -23,8 +23,8 @@ fn every_top_level_key_parses() {
         definition.description.as_deref(),
         Some("Triage, plan, fan out over work items, test and review")
     );
-    assert_eq!(definition.start.value, "triage");
-    assert_eq!(definition.start.line, line_of(FULL, "start = "));
+    assert_eq!(definition.start_node(), "triage");
+    assert_eq!(definition.start_line(), line_of(FULL, "start = "));
     assert!(definition.unknown_keys.is_empty());
     assert!(definition.warnings().is_empty());
 }

@@ -158,10 +158,10 @@ impl Fixture {
             RunIdentity {
                 id: "run-1".to_string(),
                 workflow: "check".to_string(),
-                todo: TodoRef {
+                todo: Some(TodoRef {
                     index: 0,
                     name: "check".to_string(),
-                },
+                }),
                 task_id: "task-1".to_string(),
                 task_dir: self.path("task"),
                 branch: "feature/check".to_string(),
