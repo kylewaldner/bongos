@@ -122,9 +122,80 @@ pub enum WaitReason {
     Pin {
         to: String,
     },
+    /// A pin sends the task to a lane that is not running.
+    PinNotRunning {
+        to: String,
+    },
+    /// The workflow's instance limit has no room.
+    InstanceLimit {
+        workflow: String,
+        active: u32,
+        limit: u32,
+        /// One run holding an instance, when known.
+        #[serde(default)]
+        run: Option<String>,
+    },
+    /// No dispatch rule of the lane's kind gives a workflow, and the open todo names none.
+    NoWorkflow,
+    /// Another lane kind's rules give this task a workflow; this one's do not.
+    LaneKind {
+        kind: String,
+    },
+    /// The leaf already has an active run.
+    ActiveRun {
+        run: String,
+    },
+    Held {
+        reason: String,
+    },
+    /// The task is outside the dispatcher's bound.
+    Bound,
+    /// The task is already done.
+    Finished,
     Environment(String),
     Failed(String),
     Other(String),
+}
+
+impl fmt::Display for WaitReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WaitReason::Dependency { on, progress } if progress.is_empty() => {
+                write!(f, "waits on {on}")
+            }
+            WaitReason::Dependency { on, progress } => write!(f, "waits on {on}: {progress}"),
+            WaitReason::Area { tag, with, where_ } if where_.is_empty() => {
+                write!(f, "area {tag} shared with {with}")
+            }
+            WaitReason::Area { tag, with, where_ } => {
+                write!(f, "area {tag} shared with {with}, {where_}")
+            }
+            WaitReason::Owner { lane, state } => write!(f, "owned by {lane} ({state})"),
+            WaitReason::Pin { to } => write!(f, "pinned to {to}"),
+            WaitReason::PinNotRunning { to } => write!(f, "pinned to {to}, which is not running"),
+            WaitReason::InstanceLimit {
+                workflow,
+                active,
+                limit,
+                run,
+            } => {
+                write!(f, "workflow {workflow} at its limit ({active} of {limit})")?;
+                if let Some(run) = run {
+                    write!(f, ", run {}", short_run(run))?;
+                }
+                Ok(())
+            }
+            WaitReason::NoWorkflow => f.write_str("no workflow"),
+            WaitReason::LaneKind { kind } => write!(f, "only a {kind} lane takes it"),
+            WaitReason::ActiveRun { run } => write!(f, "run {} is active", short_run(run)),
+            WaitReason::Held { reason } => write!(f, "held: {reason}"),
+            WaitReason::Bound => f.write_str("outside the bound"),
+            WaitReason::Finished => f.write_str("finished"),
+            WaitReason::Environment(text) | WaitReason::Failed(text) | WaitReason::Other(text) => {
+                f.write_str(text)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
