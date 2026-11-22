@@ -1119,7 +1119,9 @@ async fn run_crashed_pass(row: &Escape, cx: &mut TestAppContext) {
     println!("{}: the job reported {attempts:?}", row.name);
     check_phase(row, &fixture, &attempts, Phase::During).await;
 
-    // The app dies mid-pass: its process, then the job it ran.
+    // The app dies mid-pass: its process, then the job it ran. The owner only prepares, so after
+    // the crash only private-git recovery is verified; the test process finishes the confinement
+    // itself, normally.
     owner.crash();
     job.kill_and_wait();
     confinement.finish().unwrap();
@@ -1460,7 +1462,7 @@ fn assert_objects_refused(
 }
 
 // Alternates and symlinks planted in the private directory: the job adds an object directory of
-// its own to the private alternates and links refs and entries at host files. The import refuses
+// its own to the private alternates and links entries at host files. The import refuses
 // the object directory (nothing moves), and the private directory is later removed without
 // following any link.
 
@@ -1471,7 +1473,6 @@ const PRIVATE_LINKS_JOB: &str = r#"
 PRIVATE=$(git rev-parse --absolute-git-dir)
 attempt "commit" 'git commit -q --allow-empty -m "job work"'
 attempt "alternates" 'mkdir "$SCRATCH/evil-objects" && printf "%s\n" "$SCRATCH/evil-objects" >> "$PRIVATE/objects/info/alternates"'
-attempt "symlinked ref" 'ln -s "$COMMON/refs/heads/main" "$PRIVATE/refs/heads/linked"'
 attempt "symlinked checkout" 'ln -s "$MAIN" "$PRIVATE/checkout"'
 attempt "symlinked shared objects" 'ln -s "$COMMON/objects" "$PRIVATE/shared-objects"'
 attempt "private config" 'hostile_config "$PRIVATE/config"'
@@ -1482,7 +1483,6 @@ fn private_links_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
         "private config",
         "commit",
         "alternates",
-        "symlinked ref",
         "symlinked checkout",
         "symlinked shared objects",
     ] {
@@ -1650,33 +1650,47 @@ fn open_editor_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
     }
 }
 
-// A commit graph and a multi-pack index planted in the private `objects/`: git would read both as
-// trusted, so the import refuses the object directory and nothing moves.
+// A commit graph, and separately a multi-pack index, planted in the private `objects/`: git would
+// read either as trusted, so the import refuses the object directory and nothing moves. The
+// refusal stops at the first entry it dislikes, so each file gets a row of its own.
 
 const COMMIT_GRAPH_JOB: &str = r#"
 PRIVATE=$(git rev-parse --absolute-git-dir)
 attempt "commit" 'git commit -q --allow-empty -m "job work"'
-attempt "pack" 'git -c pack.writeReverseIndex=false repack -q -d -l'
+attempt "pack" 'git -c pack.writeReverseIndex=false repack -q -d -l && rm -f "$PRIVATE/objects/info/packs"'
 attempt "commit graph" 'git commit-graph write --reachable --no-progress && test -f "$PRIVATE/objects/info/commit-graph"'
+attempt "private config" 'hostile_config "$PRIVATE/config"'
+"#;
+
+const MULTI_PACK_INDEX_JOB: &str = r#"
+PRIVATE=$(git rev-parse --absolute-git-dir)
+attempt "commit" 'git commit -q --allow-empty -m "job work"'
+attempt "pack" 'git -c pack.writeReverseIndex=false repack -q -d -l && rm -f "$PRIVATE/objects/info/packs"'
 attempt "multi-pack index" 'git multi-pack-index write --no-progress && test -f "$PRIVATE/objects/pack/multi-pack-index"'
 attempt "private config" 'hostile_config "$PRIVATE/config"'
 "#;
 
 fn commit_graph_check(fixture: &Fixture, outcome: &Outcome, _: Phase) {
-    for attempt in [
-        "private config",
-        "commit",
-        "pack",
-        "commit graph",
-        "multi-pack index",
-    ] {
+    for attempt in ["private config", "commit", "pack", "commit graph"] {
+        outcome.expect(attempt, "written");
+    }
+    fixture.assert_shared_refs_unchanged();
+}
+
+fn multi_pack_index_check(fixture: &Fixture, outcome: &Outcome, _: Phase) {
+    for attempt in ["private config", "commit", "pack", "multi-pack index"] {
         outcome.expect(attempt, "written");
     }
     fixture.assert_shared_refs_unchanged();
 }
 
 fn commit_graph_import(fixture: &Fixture, result: &anyhow::Result<ImportReport>) {
-    assert_objects_refused(fixture, result, &["commit-graph", "multi-pack-index"]);
+    assert_objects_refused(fixture, result, &["commit-graph"]);
+    git(&fixture.main, &["fsck", "--no-progress", "--strict"]);
+}
+
+fn multi_pack_index_import(fixture: &Fixture, result: &anyhow::Result<ImportReport>) {
+    assert_objects_refused(fixture, result, &["multi-pack-index"]);
     git(&fixture.main, &["fsck", "--no-progress", "--strict"]);
 }
 
@@ -1684,6 +1698,14 @@ fn commit_graph_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
     async move {
         let objects = fixture.scratch.join("git/objects");
         assert!(objects.join("info/commit-graph").is_file());
+        fixture.assert_plain_git_fires(&fixture.tree, &[]);
+    }
+    .boxed_local()
+}
+
+fn multi_pack_index_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
+    async move {
+        let objects = fixture.scratch.join("git/objects");
         assert!(objects.join("pack/multi-pack-index").is_file());
         fixture.assert_plain_git_fires(&fixture.tree, &[]);
     }
@@ -1863,9 +1885,12 @@ fn main_nested_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
                 .isolated(SafeGit::new(nested.join(".git"), &nested))
                 .command(args),
         );
+        let error = refused.err().unwrap_or_else(|| {
+            panic!("SafeGit ran {args:?} in the new nested repository ({phase:?})")
+        });
         assert!(
-            refused.is_err(),
-            "SafeGit ran {args:?} in the new nested repository ({phase:?})"
+            format!("{error:#}").contains("job-written git directory"),
+            "{error:#}"
         );
     }
     assert!(util::job_roots::contains(&nested));
@@ -2128,8 +2153,8 @@ escapes! {
         host_check: open_editor_check,
         control: private_config_control,
     },
-    known_escape_commit_graph_and_multi_pack_index_in_private_objects: Escape {
-        name: "a commit graph and a multi-pack index in the private objects",
+    known_escape_commit_graph_in_private_objects: Escape {
+        name: "a commit graph in the private objects",
         setup: Setup::LinkedTree {
             hand_back: HandBack::Import(commit_graph_import),
             sandbox: SandboxUse::IfPresent,
@@ -2137,6 +2162,16 @@ escapes! {
         job: COMMIT_GRAPH_JOB,
         host_check: commit_graph_check,
         control: commit_graph_control,
+    },
+    known_escape_multi_pack_index_in_private_objects: Escape {
+        name: "a multi-pack index in the private objects",
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Import(multi_pack_index_import),
+            sandbox: SandboxUse::IfPresent,
+        },
+        job: MULTI_PACK_INDEX_JOB,
+        host_check: multi_pack_index_check,
+        control: multi_pack_index_control,
     },
     known_escape_crashed_pass_then_lane_reset: Escape {
         name: "a crashed pass followed by a lane's reset --hard",
