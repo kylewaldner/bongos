@@ -37,6 +37,20 @@ Each cell reads `Linux / macOS`. Every command is also in the command palette an
 | `chat::TogglePanel` (`c shift-p`) | `ctrl-c c shift-p` / `ctrl-c c shift-p` | `ctrl-k b c shift-p`, `space c shift-p` / `cmd-k b c shift-p`, `space c shift-p` | `ctrl-k b c shift-p` / `cmd-k b c shift-p` |
 | `chat::TogglePromptEditor` (`c p`) | `ctrl-c c p` / `ctrl-c c p` | `ctrl-k b c p`, `space c p` / `cmd-k b c p`, `space c p` | `ctrl-k b c p` / `cmd-k b c p` |
 
+## lanes
+
+| Command | Emacs | Vim | VS Code |
+| --- | --- | --- | --- |
+| `lanes::AcceptGraph` (`f shift-l a`) | `ctrl-c f shift-l a` / `ctrl-c f shift-l a` | `ctrl-k b f shift-l a`, `space f shift-l a` / `cmd-k b f shift-l a`, `space f shift-l a` | `ctrl-k b f shift-l a` / `cmd-k b f shift-l a` |
+| `lanes::Adopt` (`f shift-l o`) | `ctrl-c f shift-l o` / `ctrl-c f shift-l o` | `ctrl-k b f shift-l o`, `space f shift-l o` / `cmd-k b f shift-l o`, `space f shift-l o` | `ctrl-k b f shift-l o` / `cmd-k b f shift-l o` |
+| `lanes::DryRun` (`f shift-l d`) | `ctrl-c f shift-l d` / `ctrl-c f shift-l d` | `ctrl-k b f shift-l d`, `space f shift-l d` / `cmd-k b f shift-l d`, `space f shift-l d` | `ctrl-k b f shift-l d` / `cmd-k b f shift-l d` |
+| `lanes::Pause` (`f shift-l p`) | `ctrl-c f shift-l p` / `ctrl-c f shift-l p` | `ctrl-k b f shift-l p`, `space f shift-l p` / `cmd-k b f shift-l p`, `space f shift-l p` | `ctrl-k b f shift-l p` / `cmd-k b f shift-l p` |
+| `lanes::Pick` (`f shift-l j`) | `ctrl-c f shift-l j` / `ctrl-c f shift-l j` | `ctrl-k b f shift-l j`, `space f shift-l j` / `cmd-k b f shift-l j`, `space f shift-l j` | `ctrl-k b f shift-l j` / `cmd-k b f shift-l j` |
+| `lanes::Resume` (`f shift-l c`) | `ctrl-c f shift-l c` / `ctrl-c f shift-l c` | `ctrl-k b f shift-l c`, `space f shift-l c` / `cmd-k b f shift-l c`, `space f shift-l c` | `ctrl-k b f shift-l c` / `cmd-k b f shift-l c` |
+| `lanes::Show` (`f shift-l shift-l`) | `ctrl-c f shift-l shift-l` / `ctrl-c f shift-l shift-l` | `ctrl-k b f shift-l shift-l`, `space f shift-l shift-l` / `cmd-k b f shift-l shift-l`, `space f shift-l shift-l` | `ctrl-k b f shift-l shift-l` / `cmd-k b f shift-l shift-l` |
+| `lanes::Start` (`f shift-l s`) | `ctrl-c f shift-l s` / `ctrl-c f shift-l s` | `ctrl-k b f shift-l s`, `space f shift-l s` / `cmd-k b f shift-l s`, `space f shift-l s` | `ctrl-k b f shift-l s` / `cmd-k b f shift-l s` |
+| `lanes::Stop` (`f shift-l shift-s`) | `ctrl-c f shift-l shift-s` / `ctrl-c f shift-l shift-s` | `ctrl-k b f shift-l shift-s`, `space f shift-l shift-s` / `cmd-k b f shift-l shift-s`, `space f shift-l shift-s` | `ctrl-k b f shift-l shift-s` / `cmd-k b f shift-l shift-s` |
+
 ## project
 
 | Command | Emacs | Vim | VS Code |

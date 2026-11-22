@@ -1474,3 +1474,26 @@ mod lane_waits_tests;
 
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
+
+// A fresh home has no project profile and a project has no lane table: the implicit table gives
+// exactly one lane.
+#[test]
+fn a_fresh_home_with_no_profile_and_no_lane_table_runs_exactly_one_lane() {
+    let table = LaneTable::implicit();
+    let lanes = crate::locations::table_lane_ids(&table, "project-1", None);
+    assert_eq!(lanes, [LaneId::new("default", 1)]);
+}
+
+// A project with no lanes running is in window mode: no engine host process, nothing started, no
+// lane record, until a start is asked for.
+#[gpui::test]
+async fn a_project_with_no_lanes_running_is_in_window_mode_with_no_host_process(
+    cx: &mut TestAppContext,
+) {
+    let harness = harness("", graph(vec![leaf("a")]), &[]);
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| bongos_engine_host::EngineHostProcess::is_running(cx)));
+    assert!(harness.engine.dispatcher_starts.borrow().is_empty());
+    assert!(harness.engine.jobs.borrow().is_empty());
+    assert!(harness.state().lanes.is_empty());
+}
