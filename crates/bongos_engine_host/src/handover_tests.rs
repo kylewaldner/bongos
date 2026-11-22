@@ -1255,6 +1255,187 @@ async fn participants_drain_in_order_only_after_the_runs_and_checks_drained(
     wait_for(cx, |cx| is_remote(&fixture, cx));
 }
 
+/// run-1 in a check whose run is still stopping (task checks' drain waits for
+/// [`release_checks`]), and `busy` nodes in all.
+fn checking_window(
+    fixture: &Fixture,
+    runs: &[&str],
+    busy: usize,
+    cx: &mut TestAppContext,
+) -> Rc<RefCell<FakeState>> {
+    let state = Rc::new(RefCell::new(FakeState {
+        busy,
+        runs: runs.iter().map(ToString::to_string).collect(),
+        checking: vec![("run-1".to_string(), check_key())],
+        stopped_checks: vec![("run-1".to_string(), check_key())],
+        hold_checks: true,
+        ..FakeState::default()
+    }));
+    window_from(fixture, state, LONG, cx)
+}
+
+// "Cancel" chosen up front while task checks still stop a check: the window keeps the writer
+// only once their drain resolved and the check's node got `ChecksDrained`, and undrains task
+// checks after that, so the node starts again from its kept parts instead of taking its
+// cancelled run as its result.
+#[gpui::test]
+async fn a_cancel_while_a_check_stops_records_checks_drained_before_undraining_checks(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = checking_window(&fixture, &["run-1"], 1, cx);
+    let id = fixture.location().id.clone();
+    let watch = cx
+        .update(|cx| {
+            expect_handover(
+                &id,
+                HandoverRequest {
+                    choice: DrainChoice::Cancel,
+                    ask_again: None,
+                },
+                cx,
+            )
+        })
+        .unwrap();
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    cx.run_until_parked();
+    assert_eq!(log(&state), vec!["live", "drain", "drain checks"]);
+    assert!(taken.try_recv().is_err(), "the window has not answered yet");
+
+    release_checks(&state);
+    let Err(refused) = wait_for_writer(&taken, cx) else {
+        panic!("the host took the writer of a cancelled handover");
+    };
+    assert!(refused.contains(crate::CANCELLED), "{refused}");
+    assert!(watch.done.await.unwrap().is_err());
+    assert_eq!(
+        log(&state),
+        vec![
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            format!("checks drained run-1 {}", check_key()),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+    assert!(!writer_of(&fixture).is_released());
+}
+
+// Asked again past the timeout, the person cancels while a check is still stopping: as with a
+// cancel up front, the check's node gets `ChecksDrained` before task checks are undrained.
+#[gpui::test]
+async fn a_cancel_asked_again_while_a_check_stops_records_checks_drained_first(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = checking_window(&fixture, &["run-1", "run-2"], 2, cx);
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let prompt_asked = asked.clone();
+    let id = fixture.location().id.clone();
+    let watch = cx
+        .update(|cx| {
+            expect_handover(
+                &id,
+                HandoverRequest {
+                    choice: DrainChoice::Wait,
+                    ask_again: Some(Rc::new(move |busy, _cx| {
+                        prompt_asked.borrow_mut().push(busy);
+                        Task::ready(DrainChoice::Cancel)
+                    })),
+                },
+                cx,
+            )
+        })
+        .unwrap();
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    cx.executor().advance_clock(HANDOVER_TIMEOUT);
+    cx.run_until_parked();
+    assert_eq!(*asked.borrow(), vec![2]);
+    assert_eq!(
+        log(&state),
+        vec!["live", "drain", "drain checks"],
+        "nothing undrained while the check stops"
+    );
+    assert!(taken.try_recv().is_err(), "the window has not answered yet");
+
+    release_checks(&state);
+    let Err(refused) = wait_for_writer(&taken, cx) else {
+        panic!("the host took the writer of a cancelled handover");
+    };
+    assert!(refused.contains(crate::CANCELLED), "{refused}");
+    assert!(watch.done.await.unwrap().is_err());
+    assert_eq!(
+        log(&state),
+        vec![
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            format!("checks drained run-1 {}", check_key()),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+}
+
+// "Interrupt them now" chosen up front while run-1's only node in flight is a stopping check:
+// the check's node gets `ChecksDrained` before the runs are interrupted, so run-1 is parked, not
+// recorded interrupted.
+#[gpui::test]
+async fn interrupt_them_now_waits_for_the_stopped_checks_to_be_recorded_first(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = checking_window(&fixture, &["run-1"], 1, cx);
+    let id = fixture.location().id.clone();
+    let watch = cx
+        .update(|cx| {
+            expect_handover(
+                &id,
+                HandoverRequest {
+                    choice: DrainChoice::InterruptNow,
+                    ask_again: None,
+                },
+                cx,
+            )
+        })
+        .unwrap();
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    cx.run_until_parked();
+    assert_eq!(
+        log(&state),
+        vec!["live", "drain", "drain checks"],
+        "not interrupted before the stopped check is recorded"
+    );
+
+    release_checks(&state);
+    let writer = wait_for_writer(&taken, cx).unwrap();
+    let pid = std::process::id();
+    assert_eq!(
+        log(&state),
+        vec![
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            format!("checks drained run-1 {}", check_key()),
+            "interrupt [\"run-1\"]".to_string(),
+            "live".to_string(),
+            format!("hand over [\"run-1\"] to {pid}"),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+    let (_host, _) = serve_host(&fixture, writer, host_cx);
+    assert!(watch.done.await.unwrap().is_ok());
+}
+
 // With no participant and no check running, the drain is the runs' alone: the writer moves once
 // the running node finishes, with nothing recorded for checks.
 #[gpui::test]

@@ -29,7 +29,9 @@
 //! and attaches to the new writer. One that read `host.json` before `moving` was written and
 //! then won the lock reads it again right after ([`take_writer_checked`]) and lets the lock go.
 //!
-//! A cancelled handover undrains the runs and task checks here; undraining the writer
+//! A cancelled handover undrains the runs and task checks here, only once task checks' drain
+//! resolved and each node whose check it stopped got `ChecksDrained` (so that node starts again
+//! from its kept parts); "interrupt them now" waits for that too. Undraining the writer
 //! participants on a take-back belongs with the take-back.
 
 use std::cell::RefCell;
@@ -503,6 +505,12 @@ impl Move {
     /// The runs' drain and task checks' drain, started together. Each workflow node whose check
     /// was stopped gets `ChecksDrained` (exactly those task checks name), which parks it, so the
     /// runs' drain then waits only on the other nodes.
+    ///
+    /// Every way out waits for task checks' drain to resolve and its nodes to be recorded first:
+    /// a cancel (then the checks are undrained, and a stopped check whose run ended after that
+    /// would no longer count as drained, so its cancelled report would become the node's
+    /// result), and "interrupt them now" (a run whose only node in flight is a check is parked,
+    /// not recorded interrupted).
     async fn drain_runs_and_checks(
         &self,
         request: Option<HandoverRequest>,
@@ -516,14 +524,22 @@ impl Move {
         });
         let runs_source = self.runs_source.clone();
         let recording = cx.clone();
-        let mut drained = async move {
+        let checks = async move {
             let stopped = checks_drained.await;
             recording.update(|cx| {
                 for (run, key) in &stopped {
                     runs_source.checks_drained(run, key, cx);
                 }
             });
-            runs_drained.await
+        }
+        .boxed_local()
+        .shared();
+        let mut drained = {
+            let checks = checks.clone();
+            async move {
+                checks.await;
+                runs_drained.await
+            }
         }
         .boxed_local()
         .fuse();
@@ -532,8 +548,12 @@ impl Move {
             .map_or(DrainChoice::Wait, |request| request.choice);
         loop {
             match choice {
-                DrainChoice::Cancel => bail!(CANCELLED),
+                DrainChoice::Cancel => {
+                    checks.await;
+                    bail!(CANCELLED);
+                }
                 DrainChoice::InterruptNow => {
+                    checks.clone().await;
                     cx.update(|cx| self.runs_source.interrupt(&self.runs, cx));
                     choice = DrainChoice::Wait;
                 }

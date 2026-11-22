@@ -2,7 +2,8 @@
 //! writer (the lanes' dispatcher, say). Each is told when this process becomes a project's writer
 //! ([`WriterParticipant::started`]) and is drained, in registration order, when the writer moves
 //! to another process, after the workflow runs and the task checks are drained, so no participant
-//! drains while any node process runs. A take-back undrains them in reverse order.
+//! drains while any node process runs. [`WriterParticipants::undrain`] undrains them in reverse
+//! order; the handover does not call it yet (a take-back after the participants drained will).
 
 use std::rc::Rc;
 
