@@ -2055,6 +2055,7 @@ dependencies = [
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",
+ "bongos_lanes",
  "bongos_language_status",
  "bongos_languages",
  "bongos_linear",

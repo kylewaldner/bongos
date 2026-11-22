@@ -1616,6 +1616,93 @@ pub struct LanesSettingsContent {
     ///
     /// Default: false
     pub enabled: Option<bool>,
+    /// Seconds between two looks at the project for work a lane could take.
+    ///
+    /// Default: 60
+    pub reevaluate_interval: Option<u64>,
+    /// Whether the engine host exits once every lane is idle and nothing is left to take.
+    ///
+    /// Default: false
+    pub exit_when_idle: Option<bool>,
+    /// What happens to a lane run that an interruption stopped: ask first, or resume it once on
+    /// its own. A project's `lanes.toml` may override it.
+    ///
+    /// Default: ask
+    pub on_interruption: Option<LanesOnInterruption>,
+    /// What closing the last window does while lanes run in it: ask, keep them running in an
+    /// engine host, or stop them.
+    ///
+    /// Default: ask
+    pub on_last_window_close: Option<LanesOnLastWindowClose>,
+    /// Whether a lane run waiting on a person shows a desktop notification.
+    ///
+    /// Default: true
+    pub desktop_notifications: Option<bool>,
+    /// The most picks `lanes: dry run` lists.
+    ///
+    /// Default: 12
+    pub dry_run_limit: Option<u32>,
+    /// Seconds a staleness script may run before it counts as failed.
+    ///
+    /// Default: 60
+    pub staleness_timeout_seconds: Option<u64>,
+    /// The largest file, in bytes, kept when a lane tree is saved before a reset; larger files
+    /// are skipped and listed.
+    ///
+    /// Default: 10485760
+    pub save_max_file_bytes: Option<u64>,
+    /// How the engine host that runs lanes behaves.
+    pub host: Option<LanesHostSettingsContent>,
+}
+
+/// What happens to a lane run that an interruption stopped.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LanesOnInterruption {
+    /// Ask a person before the run goes on.
+    #[default]
+    Ask,
+    /// Resume the run once on its own.
+    Resume,
+}
+
+/// What closing the last window does while lanes run in it.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LanesOnLastWindowClose {
+    /// Ask whether to keep the lanes running.
+    #[default]
+    Ask,
+    /// Keep the lanes running in an engine host.
+    Keep,
+    /// Stop the lanes.
+    Stop,
+}
+
+/// Settings of the engine host that runs lanes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct LanesHostSettingsContent {
+    /// Seconds an engine host with no lane running and no client waits before it exits.
+    ///
+    /// Default: 300
+    pub idle_exit_seconds: Option<u64>,
+    /// Seconds a window waits for a starting engine host to answer.
+    ///
+    /// Default: 15
+    pub start_timeout_seconds: Option<u64>,
+    /// Seconds a handover between a window and an engine host may take.
+    ///
+    /// Default: 1800
+    pub handover_timeout_seconds: Option<u64>,
+    /// The largest the engine host's log grows, in bytes, before it is rotated.
+    ///
+    /// Default: 1048576
+    pub log_max_bytes: Option<u64>,
 }
 
 /// Settings for workflows.

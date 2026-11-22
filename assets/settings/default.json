@@ -2951,6 +2951,35 @@
     // Whether lanes are on. While it is off, no engine host starts and it only says "lanes
     // are off (lanes.enabled)".
     "enabled": false,
+    // Seconds between two looks at the project for work a lane could take.
+    "reevaluate_interval": 60,
+    // Whether the engine host exits once every lane is idle and nothing is left to take.
+    "exit_when_idle": false,
+    // What happens to a lane run that an interruption stopped: "ask" or "resume" (once). A
+    // project's lanes.toml may override it.
+    "on_interruption": "ask",
+    // What closing the last window does while lanes run in it: "ask", "keep" or "stop".
+    "on_last_window_close": "ask",
+    // Whether a lane run waiting on a person shows a desktop notification.
+    "desktop_notifications": true,
+    // The most picks `lanes: dry run` lists.
+    "dry_run_limit": 12,
+    // Seconds a staleness script may run before it counts as failed.
+    "staleness_timeout_seconds": 60,
+    // The largest file, in bytes, kept when a lane tree is saved before a reset; larger files
+    // are skipped and listed.
+    "save_max_file_bytes": 10485760,
+    // How the engine host that runs lanes behaves.
+    "host": {
+      // Seconds an engine host with no lane running and no client waits before it exits.
+      "idle_exit_seconds": 300,
+      // Seconds a window waits for a starting engine host to answer.
+      "start_timeout_seconds": 15,
+      // Seconds a handover between a window and an engine host may take.
+      "handover_timeout_seconds": 1800,
+      // The largest the engine host's log grows, in bytes, before it is rotated.
+      "log_max_bytes": 1048576,
+    },
   },
   "task_checks": {
     // Whether task checks are on. It is on by default; set it to false and no check runs,

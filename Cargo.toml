@@ -513,7 +513,7 @@ bongos_work = { path = "crates/bongos_work" }
 bongos_work_model = { path = "crates/bongos_work_model" }
 bongos_workflow = { path = "crates/bongos_workflow" }
 bongos_lanes = { path = "crates/bongos_lanes" }
-bongos_lanes_model ={ path = "crates/bongos_lanes_model" }
+bongos_lanes_model = { path = "crates/bongos_lanes_model" }
 bongos_workflow_model = { path = "crates/bongos_workflow_model" }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }

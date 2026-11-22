@@ -1,5 +1,7 @@
 //! Tests of the `lanes` settings and actions: off by default, hidden and toasting while off.
 
+use std::time::Duration;
+
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::{BorrowAppContext as _, TestAppContext, VisualTestContext};
 use project::Project;
@@ -8,9 +10,23 @@ use workspace::notifications::NotificationId;
 use workspace::{AppState, MultiWorkspace, Workspace};
 
 use crate::actions::LastToast;
-use crate::{ENGINE_HOST_MESSAGE, LanesSettings, LanesToast, OFF_MESSAGE, action_types};
+use crate::{
+    ENGINE_HOST_MESSAGE, LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose,
+    LanesSettings, LanesToast, OFF_MESSAGE, action_types,
+};
 
-const NAMES: &[&str] = &["lanes::Start", "lanes::Stop", "lanes::Show"];
+const NAMES: &[&str] = &[
+    "lanes::Show",
+    "lanes::Start",
+    "lanes::Stop",
+    "lanes::Pause",
+    "lanes::Resume",
+    "lanes::DryRun",
+    "lanes::Pick",
+    "lanes::Adopt",
+    "lanes::AcceptGraph",
+    "lanes::Dump",
+];
 
 fn use_default_settings(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -46,8 +62,52 @@ fn lanes_settings_are_off_by_default(cx: &mut TestAppContext) {
     cx.update(|cx| {
         assert_eq!(
             *LanesSettings::get_global(cx),
-            LanesSettings { enabled: false }
+            LanesSettings {
+                enabled: false,
+                reevaluate_interval: Duration::from_secs(60),
+                exit_when_idle: false,
+                on_interruption: LanesOnInterruption::Ask,
+                on_last_window_close: LanesOnLastWindowClose::Ask,
+                desktop_notifications: true,
+                dry_run_limit: 12,
+                staleness_timeout: Duration::from_secs(60),
+                save_max_file_bytes: 10_485_760,
+                host: LanesHostSettings {
+                    idle_exit: Duration::from_secs(300),
+                    start_timeout: Duration::from_secs(15),
+                    handover_timeout: Duration::from_secs(1800),
+                    log_max_bytes: 1_048_576,
+                },
+            }
         );
+    });
+}
+
+#[gpui::test]
+fn lanes_user_settings_override_the_defaults(cx: &mut TestAppContext) {
+    use_default_settings(cx);
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store
+                .set_user_settings(
+                    r#"{ "lanes": { "on_interruption": "resume", "on_last_window_close": "stop",
+                         "dry_run_limit": 3, "host": { "idle_exit_seconds": 5 } } }"#,
+                    cx,
+                )
+                .result()
+                .unwrap();
+        });
+        let settings = LanesSettings::get_global(cx);
+        assert_eq!(settings.on_interruption, LanesOnInterruption::Resume);
+        assert_eq!(settings.on_last_window_close, LanesOnLastWindowClose::Stop);
+        assert_eq!(settings.dry_run_limit, 3);
+        assert_eq!(settings.host.idle_exit, Duration::from_secs(5));
+        assert_eq!(
+            settings.host.start_timeout,
+            Duration::from_secs(15),
+            "an unset key keeps its default"
+        );
+        assert!(!settings.enabled);
     });
 }
 
@@ -103,7 +163,9 @@ fn toasts(workspace: &gpui::Entity<Workspace>, cx: &mut VisualTestContext) -> Ve
         cx.update(|window, cx| window.dispatch_action(action, cx));
         cx.run_until_parked();
         assert!(
-            workspace.read_with(cx, |workspace, _| workspace.notification_ids().contains(&id)),
+            workspace.read_with(cx, |workspace, _| workspace
+                .notification_ids()
+                .contains(&id)),
             "{name} shows a toast"
         );
         shown.push(cx.update(|_, cx| cx.global::<LastToast>().0.clone()));
@@ -115,8 +177,11 @@ fn toasts(workspace: &gpui::Entity<Workspace>, cx: &mut VisualTestContext) -> Ve
 async fn lanes_dispatch_by_name_shows_the_off_toast_while_off(cx: &mut TestAppContext) {
     let (workspace, cx) = workspace_with_actions(cx).await;
     assert_eq!(OFF_MESSAGE, "Lanes are off (lanes.enabled)");
-    assert_eq!(toasts(&workspace, cx), [OFF_MESSAGE; 3]);
+    assert_eq!(toasts(&workspace, cx), vec![OFF_MESSAGE; NAMES.len()]);
 
     cx.update(|_, cx| set_enabled(cx, true));
-    assert_eq!(toasts(&workspace, cx), [ENGINE_HOST_MESSAGE; 3]);
+    assert_eq!(
+        toasts(&workspace, cx),
+        vec![ENGINE_HOST_MESSAGE; NAMES.len()]
+    );
 }

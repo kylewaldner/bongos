@@ -23,8 +23,10 @@ pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validat
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
 pub use runs::{LaneActivity, LaneLiveSource, LaneRuns, OwnedScope, SOURCE_NAME};
 pub use scope::LaneRunScope;
-pub use settings::LanesSettings;
-pub use store::{LANES_NAMESPACE, OWNERS_NAMESPACE, put_lane, put_owner, read_state, write_state};
+pub use settings::{LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose, LanesSettings};
+pub use store::{
+    LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, put_lane, put_owner, read_state, write_state,
+};
 
 /// Registers the settings, the `lanes` definition folder and the prompt check, the `lanes` state
 /// exporter, the live and activity sources, and the `lane-run-scope` approval hook, all over one
@@ -36,10 +38,7 @@ pub fn init(cx: &mut App) {
     definitions::register(cx);
     LanesExporter::register();
     let runs = LaneRuns::default();
-    LiveSources::register(
-        Arc::new(LaneLiveSource { runs: runs.clone() }),
-        cx,
-    );
+    LiveSources::register(Arc::new(LaneLiveSource { runs: runs.clone() }), cx);
     ActivitySources::global().register(Arc::new(LaneActivity { runs: runs.clone() }));
     LaneRunScope::register(runs.clone(), cx);
     cx.set_global(runs);
