@@ -22,19 +22,25 @@
 //!    first, in order) and reaches the engines through it from then on.
 //!
 //! When the host never takes the lock (it died, or the start timeout passed with the lock free),
-//! the window takes the writer back: `moving` is cleared, the lock taken again, the queued writes
-//! applied here, the runs loaded again, and the person told "the engine host did not start".
+//! the window takes the writer back: the lock again (tried again while a third process holds it
+//! for an instant, up to [`TAKE_BACK_GUARD`]), then `moving` cleared, the queued writes applied
+//! here, the work undrained ([`undrain_here`]), the runs loaded again, and the person told "the
+//! engine host did not start; see <log>". The lock is taken before `moving` is cleared, so no
+//! third process keeps it in between.
 //!
 //! While `moving` is set no other process tries the lock: an opener waits for the move to end
 //! and attaches to the new writer. One that read `host.json` before `moving` was written and
-//! then won the lock reads it again right after ([`take_writer_checked`]) and lets the lock go.
+//! then won the lock reads it again right after ([`take_writer_checked`]) and lets the lock go,
+//! unless the move is stale (the writer and the process it moves to both dead): then it clears
+//! `moving` and keeps the writer.
 //!
-//! A cancelled handover undrains the runs and task checks here, only once task checks' drain
-//! resolved and each node whose check it stopped got `ChecksDrained` (so that node starts again
-//! from its kept parts); "interrupt them now" waits for that too. Undraining the writer
-//! participants on a take-back belongs with the take-back.
+//! Every handover that does not end with the host holds the writer here again, exactly once: a
+//! cancel, a failure before the release, and a take-back after it all end in [`undrain_here`].
+//! A cancel waits for task checks' drain to resolve and each node whose check it stopped to get
+//! `ChecksDrained` first (so that node starts again from its kept parts); "interrupt them now"
+//! waits for that too.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -59,7 +65,10 @@ use serde_json::json;
 use crate::access::{EngineAccess, EngineAccesses};
 use crate::client::{ClientOptions, HostClient};
 use crate::ensure::{HostSpawner, POLL_INTERVAL};
-use crate::host_file::{HostInfo, Moving, move_in_progress, process_is, read_host_file};
+use crate::host_file::{
+    Alive, HostInfo, Moving, ProcessCheck, move_in_progress_by, process_is, read_host_file,
+    system_process_check, write_host_file,
+};
 use crate::participants::WriterParticipants;
 use crate::protocol::{HostCommand, HostCtl, HostEvent, HostTopic};
 use crate::window::WriterHosts;
@@ -98,6 +107,11 @@ pub const CANCELLED: &str = "the person kept the writer in the window; the runs 
 pub fn did_not_start(log: &Path) -> String {
     format!("the engine host did not start; see {}", log.display())
 }
+
+/// How long a take-back keeps trying the lock while another process holds it after the host
+/// died. Only the window and the host keep the lock; a third process holds it for an instant at
+/// most, so this only guards against a hang.
+pub const TAKE_BACK_GUARD: Duration = Duration::from_secs(120);
 
 /// The runs of the project being handed over, as this process's engine holds them.
 pub trait HandoverRuns {
@@ -240,6 +254,9 @@ struct Handovers {
     /// Keyed by pid with the process's start time, so a later process given the same pid is not
     /// refused; entries whose process ended are dropped.
     abandoned: HashMap<u32, Option<u64>>,
+    /// Whether the process the writer moves to still runs ([`process_is`] unless a test injects
+    /// another).
+    alive: ProcessCheck,
 }
 
 impl Handovers {
@@ -286,7 +303,27 @@ pub fn install_handovers(
         began: HashMap::new(),
         done: HashMap::new(),
         abandoned: HashMap::new(),
+        alive: system_process_check(),
     });
+}
+
+/// Makes this process's handovers ask `alive` whether the process the writer moves to still
+/// runs, instead of the system. For tests, which stand in for a host that dies.
+pub fn set_process_check(alive: ProcessCheck, cx: &mut App) {
+    if cx.has_global::<Handovers>() {
+        cx.global_mut::<Handovers>().alive = alive;
+    }
+}
+
+/// The writer of `project_id` stays in, or came back to, this process after a drain: the writer
+/// participants undrain in reverse registration order, then task checks, then the runs (the
+/// reverse of the drain), and then every participant is told this process is the writer again.
+/// Each step is idempotent, so a second call changes nothing.
+pub(crate) fn undrain_here(project_id: &str, runs: &Rc<dyn HandoverRuns>, cx: &mut App) {
+    WriterParticipants::undrain(project_id, cx);
+    runs.undrain_checks(cx);
+    runs.undrain(cx);
+    WriterParticipants::started(project_id, cx);
 }
 
 /// Whether the writer of `project_id` is moving away from this process now.
@@ -370,6 +407,7 @@ pub(crate) fn serve_handover(
     let runs_source = handovers.runs.clone();
     let times = (handovers.times)(cx);
     let client = handovers.client.clone();
+    let alive = handovers.alive.clone();
     let runs = match runs_source.live_runs(repo, cx) {
         Ok(runs) => runs,
         Err(error) => return Task::ready(Err(error)),
@@ -400,6 +438,8 @@ pub(crate) fn serve_handover(
         times,
         client,
         queue: Arc::new(QueueSink::new(cx.background_executor().clone())),
+        alive,
+        ended: Rc::new(Cell::new(false)),
     };
     cx.spawn(async move |cx| {
         let mut moving_written = false;
@@ -410,11 +450,27 @@ pub(crate) fn serve_handover(
             }
             Err(error) => {
                 log::warn!("the handover of {} stopped: {error:#}", move_.id);
-                cx.update(|cx| move_.keep(moving_written, &error, cx));
+                move_.keep(moving_written, &error, cx).await;
                 Err(error)
             }
         }
     })
+}
+
+/// Takes `repo`'s writer back after a release, trying again while another process holds the
+/// lock (a third process holds it for an instant at most), up to `guard`. Blocks.
+fn retake_retrying(repo: &ProjectRepo, guard: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + guard;
+    loop {
+        let error = match repo.retake_writer() {
+            Ok(()) => return Ok(()),
+            Err(error) => error.to_string(),
+        };
+        if Instant::now() >= deadline {
+            return Err(error);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
 }
 
 /// One handover in progress.
@@ -431,6 +487,9 @@ struct Move {
     times: HandoverTimes,
     client: ClientOptions,
     queue: Arc<QueueSink>,
+    alive: ProcessCheck,
+    /// Set once the move ended here (attached, kept or taken back): a second ending is ignored.
+    ended: Rc<Cell<bool>>,
 }
 
 impl Move {
@@ -585,20 +644,26 @@ impl Move {
         }
     }
 
-    /// A handover that stopped before the writer was released: the writer stays here. Once
-    /// `moving` was written the runs were handed over too, so this is a take-back: they load
-    /// again here and the queued writes land here.
-    fn keep(&self, moving_written: bool, error: &anyhow::Error, cx: &mut App) {
-        self.runs_source.undrain(cx);
-        self.runs_source.undrain_checks(cx);
-        if moving_written {
-            if let Err(error) = self.repo.retake_writer() {
-                log::error!("keeping the writer of {}: {error:#}", self.id);
-            }
-            self.take_back(&format!("{error:#}"), cx);
+    /// A handover that stopped before the writer was released (a cancel, or a failure): the
+    /// writer stays here and the work undrains. Once `moving` was written the runs were handed
+    /// over too, so this is a take-back: the lock again (still held unless the release went
+    /// through), then they load again here and the queued writes land here.
+    async fn keep(&self, moving_written: bool, error: &anyhow::Error, cx: &mut AsyncApp) {
+        let reason = format!("{error:#}");
+        if !moving_written {
+            cx.update(|cx| {
+                if !self.ended.replace(true) {
+                    undrain_here(&self.id, &self.runs_source, cx);
+                }
+                finish(&self.id, Err(reason), cx);
+            });
             return;
         }
-        finish(&self.id, Err(format!("{error:#}")), cx);
+        let retaken = retake_off_thread(self.repo.clone()).await;
+        cx.update(|cx| match retaken {
+            Ok(()) => self.take_back(&reason, cx),
+            Err(error) => self.lost(&error, cx),
+        });
     }
 
     /// Steps 4 and 5 from the window's side, after the release: waits for the new writer and
@@ -622,6 +687,7 @@ impl Move {
             cx.update(|cx| match next {
                 NextWriter::Took(client) => this.attach(client, cx),
                 NextWriter::Back(reason) => this.take_back(&reason, cx),
+                NextWriter::Lost(reason) => this.lost(&reason, cx),
             });
         })
         .detach();
@@ -635,11 +701,15 @@ impl Move {
             start_timeout: self.times.start_timeout,
             client: self.client.clone(),
             executor,
+            alive: self.alive.clone(),
         }
     }
 
     /// Step 5: this window is a client of the new writer from now on.
     fn attach(&self, client: HostClient, cx: &mut App) {
+        if self.ended.replace(true) {
+            return;
+        }
         log::info!(
             "the writer of {} moved to pid {}",
             self.id,
@@ -689,8 +759,13 @@ impl Move {
         finish(&self.id, Ok(client), cx);
     }
 
-    /// The host never took the writer: it comes back here and the runs continue here.
+    /// The host never took the writer, and this process holds the lock again: `moving` is
+    /// cleared, the queued writes land here, the work undrains ([`undrain_here`]) and the runs
+    /// continue here. Called once per move; a second call changes nothing.
     fn take_back(&self, reason: &str, cx: &mut App) {
+        if self.ended.replace(true) {
+            return;
+        }
         log::warn!("taking the writer of {} back: {reason}", self.id);
         if let Err(error) = with_writer_host(&self.id, cx, |host, cx| host.take_back(cx)) {
             log::error!("announcing {} again: {error:#}", self.id);
@@ -708,9 +783,46 @@ impl Move {
             })
             .detach();
         }
+        undrain_here(&self.id, &self.runs_source, cx);
         let handed = self.handed.borrow().clone();
         self.runs_source.reload(&handed, cx);
         finish(&self.id, Err(did_not_start(&self.client.log)), cx);
+    }
+
+    /// The host never took the writer and the lock could not be taken back within
+    /// [`TAKE_BACK_GUARD`]: another process kept it, against the rule that only the window and
+    /// the host keep it. Nothing loads here; the person is told.
+    fn lost(&self, reason: &str, cx: &mut App) {
+        if self.ended.replace(true) {
+            return;
+        }
+        log::error!("could not take the writer of {} back: {reason}", self.id);
+        finish(
+            &self.id,
+            Err(format!(
+                "{}; the writer could not be taken back: {reason}",
+                did_not_start(&self.client.log)
+            )),
+            cx,
+        );
+    }
+}
+
+/// [`retake_retrying`] on a thread of its own, with [`TAKE_BACK_GUARD`].
+fn retake_off_thread(repo: ProjectRepo) -> impl std::future::Future<Output = Result<(), String>> {
+    let (sender, receiver) = oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("engine-host-take-back".to_string())
+        .spawn(move || {
+            sender.send(retake_retrying(&repo, TAKE_BACK_GUARD)).ok();
+        });
+    async move {
+        if let Err(error) = spawned {
+            return Err(format!("taking the writer back: {error}"));
+        }
+        receiver
+            .await
+            .unwrap_or_else(|_| Err("the take-back ended with no answer".to_string()))
     }
 }
 
@@ -722,23 +834,31 @@ struct Waiting {
     start_timeout: Duration,
     client: ClientOptions,
     executor: BackgroundExecutor,
+    alive: ProcessCheck,
 }
 
 enum NextWriter {
     Took(HostClient),
+    /// This process holds the lock again.
     Back(String),
+    /// The host is gone and another process kept the lock past [`TAKE_BACK_GUARD`].
+    Lost(String),
 }
 
 impl Waiting {
     /// Waits until `host.json` names a live writer with no move and this window can connect to
     /// it; takes the writer back once the host is gone, or once the start timeout passed and
-    /// the lock is free (a third process's momentary hold is waited out).
+    /// the lock is free. While the host lives and holds the lock it is still opening the project,
+    /// so this waits; once it is gone, another process holding the lock holds it for an instant,
+    /// so this tries again, up to [`TAKE_BACK_GUARD`].
     fn wait(&self) -> NextWriter {
+        let alive: Alive<'_> = &*self.alive;
         let deadline = Instant::now() + self.start_timeout;
+        let mut held_since: Option<Instant> = None;
         loop {
             if let Some(info) = read_host_file(&self.location)
                 && info.moving.is_none()
-                && info.is_live()
+                && info.is_live_by(alive)
                 && let Some(socket) = &info.socket
             {
                 match HostClient::connect(socket, self.client.clone(), self.executor.clone()) {
@@ -746,7 +866,7 @@ impl Waiting {
                     Err(error) => log::info!("connecting to the engine host: {error:#}"),
                 }
             }
-            let gone = !self.to.is_live();
+            let gone = !self.to.is_live_by(alive);
             if gone || Instant::now() >= deadline {
                 match self.repo.retake_writer() {
                     Ok(()) => {
@@ -760,11 +880,21 @@ impl Waiting {
                             )
                         });
                     }
-                    // The host holds it (it is still opening the project), or a third process
-                    // for an instant: wait.
-                    Err(OpenError::HeldBy { .. }) => {}
-                    Err(OpenError::Store(error)) => {
-                        log::error!("taking the writer back: {error:#}");
+                    Err(error) => {
+                        if let OpenError::Store(error) = &error {
+                            log::error!("taking the writer back: {error:#}");
+                        }
+                        if gone {
+                            let since = *held_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= TAKE_BACK_GUARD {
+                                return NextWriter::Lost(format!(
+                                    "pid {} ended before it took the writer, and after {}s: \
+                                     {error}",
+                                    self.to.to_pid,
+                                    TAKE_BACK_GUARD.as_secs()
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -908,27 +1038,59 @@ impl StateSink for QueueSink {
 }
 
 /// Takes `location`'s writer lock and reads `host.json` again right after: when it records a
-/// move in progress to a live process other than `own_pid`, the lock is let go at once and
-/// `Ok(None)` says to wait for the move like the others (an opener that read `host.json` before
-/// the move was written can still win the lock after the window released it).
+/// move in progress to a process other than `own_pid`, the lock is let go at once and `Ok(None)`
+/// says to wait for the move like the others (an opener that read `host.json` before the move
+/// was written can still win the lock after the window released it, or while the window takes it
+/// back from a host that died). Only the window and the host keep the lock.
+///
+/// A stale move (the writer and the process it moves to both dead, pid and start time checked)
+/// is cleared from `host.json` and the writer kept: nobody finishes that move, and the opener goes
+/// on to its startup recovery.
 pub fn take_writer_checked(
     location: &Location,
     hooks: &StateApplyHooks,
     own_pid: u32,
 ) -> Result<Option<StateWriter>, OpenError> {
+    take_writer_checked_by(location, hooks, own_pid, &process_is)
+}
+
+/// [`take_writer_checked`] with liveness as `alive` says.
+pub fn take_writer_checked_by(
+    location: &Location,
+    hooks: &StateApplyHooks,
+    own_pid: u32,
+    alive: Alive<'_>,
+) -> Result<Option<StateWriter>, OpenError> {
     let writer = StateStore::open_writer_with_hooks(location, hooks)?;
-    if let Some(info) = read_host_file(location)
-        && let Some(moving) = move_in_progress(&info)
-        && moving.to_pid != own_pid
-        && moving.is_live()
-    {
-        log::info!(
-            "{}: the writer is moving to pid {}; letting the lock go",
-            location.id,
-            moving.to_pid
-        );
-        drop(writer);
-        return Ok(None);
+    let Some(mut info) = read_host_file(location) else {
+        return Ok(Some(writer));
+    };
+    match move_in_progress_by(&info, alive) {
+        Some(moving) if moving.to_pid != own_pid => {
+            log::info!(
+                "{}: the writer is moving to pid {}; letting the lock go",
+                location.id,
+                moving.to_pid
+            );
+            drop(writer);
+            return Ok(None);
+        }
+        Some(_) => {}
+        None => {
+            if let Some(stale) = info.moving.take() {
+                log::warn!(
+                    "{}: clearing a stale move of the writer (pid {}) to pid {}: both ended",
+                    location.id,
+                    info.pid,
+                    stale.to_pid
+                );
+                // The lock is held here, so this process alone writes `host.json` now. Should the
+                // write fail, the move stays stale and this writer's own `host.json` replaces it.
+                if let Err(error) = write_host_file(location, &info) {
+                    log::error!("{}: clearing the stale move: {error:#}", location.id);
+                }
+            }
+        }
     }
     Ok(Some(writer))
 }

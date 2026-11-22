@@ -4,6 +4,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use bongos_project_repo::Location;
@@ -36,16 +37,38 @@ impl Moving {
 
     /// Whether the process the writer moves to runs now.
     pub fn is_live(&self) -> bool {
-        process_is(self.to_pid, self.to_start_time)
+        self.is_live_by(&process_is)
     }
+
+    /// [`Self::is_live`] as `alive` says.
+    pub fn is_live_by(&self, alive: Alive<'_>) -> bool {
+        alive(self.to_pid, self.to_start_time)
+    }
+}
+
+/// Whether a pid runs now with a start time: [`process_is`] in the app, a fake in tests.
+pub type Alive<'a> = &'a dyn Fn(u32, Option<u64>) -> bool;
+
+/// An [`Alive`] to keep: [`process_is`] unless a test injects another.
+pub type ProcessCheck = Arc<dyn Fn(u32, Option<u64>) -> bool + Send + Sync>;
+
+/// The [`ProcessCheck`] of the system: [`process_is`].
+pub fn system_process_check() -> ProcessCheck {
+    Arc::new(process_is)
 }
 
 /// The move in progress `host.json` records, `None` when it records none or a stale one: both
 /// the writer it names and the process it moves to are dead (pid and start time checked), so
 /// nobody finishes it and an opener goes to the lock as usual.
 pub fn move_in_progress(info: &HostInfo) -> Option<&Moving> {
+    move_in_progress_by(info, &process_is)
+}
+
+/// [`move_in_progress`] with liveness as `alive` says. A live process the writer moves to, or a
+/// live writer, makes the move not stale.
+pub fn move_in_progress_by<'a>(info: &'a HostInfo, alive: Alive<'_>) -> Option<&'a Moving> {
     let moving = info.moving.as_ref()?;
-    (moving.is_live() || info.is_live()).then_some(moving)
+    (moving.is_live_by(alive) || info.is_live_by(alive)).then_some(moving)
 }
 
 /// The contents of `host.json`.
@@ -86,7 +109,12 @@ impl HostInfo {
 
     /// Whether the process it names is running now with the start time it recorded.
     pub fn is_live(&self) -> bool {
-        process_is(self.pid, self.start_time)
+        self.is_live_by(&process_is)
+    }
+
+    /// [`Self::is_live`] as `alive` says.
+    pub fn is_live_by(&self, alive: Alive<'_>) -> bool {
+        alive(self.pid, self.start_time)
     }
 }
 
