@@ -12,7 +12,9 @@
 //! the first one's records.
 //!
 //! Passes run on: a run's status change, a committed state transaction, a new verified commit, a
-//! lane command, and every `lanes.reevaluate_interval`. A lane waiting on its environment is
+//! lane command, and every `lanes.reevaluate_interval`. Each pass first clears the `Done` owners
+//! that may go ([`crate::done_owners`]), so a write of the checks' markers or done records, a
+//! committed transaction like any other, re-checks them. A lane waiting on its environment is
 //! looked at again only by the timer, a new verified commit or a lane command, so a write of this
 //! loop never wakes the loop into retrying the same failing environment.
 
@@ -45,6 +47,7 @@ use crate::lane_control::{BOUND_REASON, LaneEvents, RunEnd, paused_reason};
 use crate::locations::table_lane_ids;
 use crate::profile::LaneProfiles;
 use crate::store::{LANES_NAMESPACE, delete_lane, put_lane, put_owner, read_state_in};
+use crate::task_trees::LaneTreeSetup;
 
 /// The key of the dispatcher record in the lanes namespace.
 pub const DISPATCHER_KEY: &str = "dispatcher";
@@ -125,6 +128,9 @@ pub struct JobSetup {
     pub lane_dirs: BTreeMap<String, PathBuf>,
     /// The trees of the job, kept in [`crate::CurrentJobTrees`] once it starts.
     pub trees: Option<JobTrees>,
+    /// What the lane's trees offer outside the job, from the same start; set in the app's
+    /// [`crate::LaneTaskTrees`] once the run starts.
+    pub lane_trees: Option<LaneTreeSetup>,
 }
 
 impl JobSetup {
@@ -145,7 +151,15 @@ impl JobSetup {
             env,
             lane_dirs,
             trees: Some(trees),
+            lane_trees: None,
         }
+    }
+
+    /// This setup with what the lane's trees offer outside the job. `setup.second_checked`
+    /// comes from the same start's [`crate::StartedTrees::second_checked`].
+    pub fn with_lane_trees(mut self, setup: LaneTreeSetup) -> Self {
+        self.lane_trees = Some(setup);
+        self
     }
 }
 
@@ -748,8 +762,7 @@ impl Dispatcher {
 
     fn pass(&self, full: bool, cx: &mut App) {
         self.0.passes.set(self.0.passes.get() + 1);
-        let writer = &self.parts().writer;
-        let lanes = match writer.read(crate::store::read_state) {
+        let lanes = match self.begin_pass(cx) {
             Ok(state) => state.lanes.into_keys().collect::<Vec<_>>(),
             Err(error) => {
                 log::error!("lanes: reading the lanes state: {error:#}");
@@ -931,7 +944,7 @@ impl Dispatcher {
         Ok(())
     }
 
-    fn lane_exists(&self, lane: &LaneId) -> bool {
+    pub(crate) fn lane_exists(&self, lane: &LaneId) -> bool {
         self.0
             .config
             .counts

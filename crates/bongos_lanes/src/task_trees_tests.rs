@@ -22,12 +22,12 @@ use crate::lane_tree_tests::{Fixture, RUN_1, RUN_2, RUN_3, git};
 use crate::locations::{Place, binding_of};
 use crate::locations_tests::table;
 use crate::runs::LaneRuns;
-use crate::task_trees::{LaneTaskTrees, LaneTreeSetup, ProcessEnv, TopLevelOf};
+use crate::task_trees::{LaneTaskTrees, LaneTreeSetup, OwedTasks, ProcessEnv, TopLevelOf};
 use crate::test_support::SINCE;
 
 /// `app`'s second tree shares `out` with nothing (it gets `out-base`); `lib`'s lists no
 /// directory, so it shares `out` and `cache` with the tip.
-const TABLE: &str = r#"schema = 1
+pub(crate) const TABLE: &str = r#"schema = 1
 
 [[kind]]
 name = "build"
@@ -43,7 +43,7 @@ trees = [
 
 const PROJECT: &str = "project-1";
 
-fn build(index: u32) -> LaneId {
+pub(crate) fn build(index: u32) -> LaneId {
     LaneId::new("build", index)
 }
 
@@ -54,7 +54,7 @@ fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 /// An injected process environment: the tests never read the real one.
-fn process(list: &[(&str, &str)]) -> ProcessEnv {
+pub(crate) fn process(list: &[(&str, &str)]) -> ProcessEnv {
     let env = pairs(list);
     Arc::new(move || env.clone())
 }
@@ -72,7 +72,7 @@ fn top_levels() -> TopLevelOf {
     Arc::new(move |task| tops.get(task).map(|top| TaskId::new(*top)))
 }
 
-fn owner(lane: &LaneId, state: OwnerState) -> OwnerRecord {
+pub(crate) fn owner(lane: &LaneId, state: OwnerState) -> OwnerRecord {
     OwnerRecord {
         lane: Some(lane.clone()),
         state,
@@ -111,7 +111,7 @@ fn state(state: OwnerState, job_task: &str) -> LanesState {
     }
 }
 
-fn setup(fixture: &Fixture, profile: Vec<EnvEdit>) -> LaneTreeSetup {
+pub(crate) fn setup(fixture: &Fixture, profile: Vec<EnvEdit>) -> LaneTreeSetup {
     let table = table(TABLE);
     LaneTreeSetup {
         binding: binding_of(&table, &build(1)).unwrap().clone(),
@@ -128,6 +128,7 @@ fn setup(fixture: &Fixture, profile: Vec<EnvEdit>) -> LaneTreeSetup {
         },
         profile,
         forbidden: fixture.forbidden(),
+        second_checked: ["app".to_string(), "lib".to_string()].into(),
     }
 }
 
@@ -178,7 +179,11 @@ fn lib_too(_: &JobRecord, _: &WorkTree) -> Vec<String> {
 }
 
 /// Starts a job of `build-1` in `app` and `lib`, sharing the leases of `trees`.
-async fn start_job(fixture: &Fixture, trees: &LaneTaskTrees, run_id: &str) -> StartedTrees {
+pub(crate) async fn start_job(
+    fixture: &Fixture,
+    trees: &LaneTaskTrees,
+    run_id: &str,
+) -> StartedTrees {
     let start = JobStart {
         locations: fixture.locations.clone(),
         table_lanes: vec![build(1), build(2)],
@@ -193,7 +198,7 @@ async fn start_job(fixture: &Fixture, trees: &LaneTaskTrees, run_id: &str) -> St
         .unwrap()
 }
 
-fn path_of(fixture: &Fixture, name: &str) -> PathBuf {
+pub(crate) fn path_of(fixture: &Fixture, name: &str) -> PathBuf {
     fixture.locations.get(name).unwrap().path.clone()
 }
 
@@ -211,7 +216,7 @@ fn lease(trees: &LaneTaskTrees, task: &str, repo: &str) -> Box<dyn SecondTreeLea
     }
 }
 
-fn answer(trees: &LaneTaskTrees, task: &str, repo: &str) -> &'static str {
+pub(crate) fn answer(trees: &LaneTaskTrees, task: &str, repo: &str) -> &'static str {
     match trees.second_tree(task, repo) {
         SecondTree::Lease(_) => "lease",
         SecondTree::Busy => "busy",
@@ -307,7 +312,8 @@ async fn the_owning_lane_lends_its_second_tree_to_one_caller_at_a_time(cx: &mut 
     assert_eq!(answer(&trees, "leaf", "checkout"), "unavailable");
     assert_eq!(answer(&trees, "docs-top", "app"), "unavailable");
 
-    // Stopped and halted owners lend; a done (for now) or ahead owner does not.
+    // Stopped and halted owners lend; an ahead owner does not, nor a done one while nothing
+    // reads the checks owed.
     for (owner_state, expected) in [
         (OwnerState::Stopped, "lease"),
         (OwnerState::Halted, "lease"),
@@ -597,4 +603,59 @@ async fn a_second_tree_at_a_plain_checkout_or_a_forbidden_place_is_not_lent(
 
     trees.set_lane(build(1), setup(&fixture, Vec::new()));
     assert_eq!(answer(&trees, "leaf", "app"), "lease");
+}
+
+/// Reads the tasks owing checks as `owed` says: a set, or a failed read.
+fn owed_reader(owed: Arc<std::sync::Mutex<Result<Vec<&'static str>, String>>>) -> OwedTasks {
+    Arc::new(move || match &*owed.lock().unwrap() {
+        Ok(tasks) => Ok(tasks.iter().map(|task| task.to_string()).collect()),
+        Err(error) => Err(anyhow::anyhow!("{error}")),
+    })
+}
+
+#[gpui::test]
+async fn a_done_owner_lends_only_while_checks_are_owed_under_its_task(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::build(TABLE, |_| None);
+    let runs = LaneRuns::default();
+    // The lane's owner is done and its current job is on a task it does not own.
+    runs.set(PROJECT, state(OwnerState::Done, "loose"));
+    let jobs = CurrentJobTrees::default();
+    let trees = trees(&fixture, &runs, &jobs, Vec::new(), process(&[]));
+    start_job(&fixture, &trees, RUN_1).await;
+    let owed = Arc::new(std::sync::Mutex::new(Ok(Vec::new())));
+    trees.set_owed(owed_reader(owed.clone()));
+    let set = |tasks: Result<Vec<&'static str>, String>| *owed.lock().unwrap() = tasks;
+
+    // Nothing owed under the task, or only under another top-level task: nothing lent.
+    assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
+    set(Ok(vec!["loose", "docs-top", "nowhere"]));
+    assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
+
+    // A marker on the top-level task, or on a task under it, lends the lane's tree; exclusively.
+    for marked in ["feature", "leaf-2"] {
+        set(Ok(vec!["loose", marked]));
+        let held = lease(&trees, "leaf", "app");
+        assert_eq!(held.path(), path_of(&fixture, "tree:app:base"), "{marked}");
+        assert_eq!(answer(&trees, "feature", "app"), "busy", "{marked}");
+        drop(held);
+    }
+
+    // A read that fails lends nothing.
+    set(Err("the store is gone".to_string()));
+    assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
+
+    // A repository whose second tree the start did not check is not lent.
+    set(Ok(vec!["leaf"]));
+    let mut unchecked = setup(&fixture, Vec::new());
+    unchecked.second_checked.remove("lib");
+    trees.set_lane(build(1), unchecked);
+    assert_eq!(answer(&trees, "leaf", "app"), "lease");
+    assert_eq!(answer(&trees, "leaf", "lib"), "unavailable");
+
+    // An owner naming a lane that left the table lends nothing.
+    let mut gone = state(OwnerState::Done, "loose");
+    gone.lanes.remove(&build(1));
+    runs.set(PROJECT, gone);
+    assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
 }
