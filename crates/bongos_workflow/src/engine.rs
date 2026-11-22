@@ -65,7 +65,7 @@ use crate::runner_program::Interpreter;
 use crate::runtime::{Runner, Settlement};
 use crate::shipped::Template;
 use crate::task_link::{self, Completed, Finale, Next, StoreWrites, TaskWrites, WriteCommand};
-use crate::worktrees::{Git, RunWorktree, TaskCheckout, branch_worktree_path};
+use crate::worktrees::{Git, RunWorktree, TaskCheckout};
 
 /// The runner the engine's runs use.
 pub type EngineRunner = Box<dyn Runner + Send>;
@@ -1675,7 +1675,7 @@ impl WorkflowEngine {
                     .task
                     .as_ref()
                     .ok_or("the run's task is not loaded")?;
-                let root = source_root(&context.worktree, &reported.key, path);
+                let root = outcomes::source_root(&context.worktree, &reported.key, path);
                 let source = outcomes::source_file(&root, path)?;
                 let name = outcomes::copy_document(&source, &task.dir)?;
                 let description = outcomes::document_description(&context.run, &reported.key.node);
@@ -1697,26 +1697,13 @@ impl WorkflowEngine {
                     .task
                     .as_ref()
                     .ok_or("the run's task is not loaded")?;
-                let root = source_root(&context.worktree, &reported.key, path);
+                let root = outcomes::source_root(&context.worktree, &reported.key, path);
                 let source = outcomes::source_file(&root, path)?;
                 let written = outcomes::copy_proposal(task, &source, &context.workflow)?;
                 Ok(Delivered::Proposal { path: written })
             }
         }
     }
-}
-
-/// The worktree an outcome path of `key` is relative to: its fan-out branch worktree while that
-/// still holds the file, else the run worktree (where the join merged it). A snapshot, which has
-/// no branch, is the only tree of its run.
-fn source_root(worktree: &RunWorktree, key: &NodeKey, path: &str) -> PathBuf {
-    if let Some((fan, index)) = key.branch.last().filter(|_| !worktree.branch.is_empty()) {
-        let branch = branch_worktree_path(&worktree.run_dir, fan, *index);
-        if branch.join(path).exists() {
-            return branch;
-        }
-    }
-    worktree.path.clone()
 }
 
 /// The final merge of the run into its task branch.

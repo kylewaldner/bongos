@@ -145,6 +145,10 @@ pub const INTERPRETER_FIX: &str = "install Python 3.8+ or set workflows.programs
 pub const SNAPSHOT_NEEDS_SANDBOX: &str =
     "a program of a snapshot run needs the OS sandbox to keep the snapshot read-only";
 
+/// Why a program of a run in a project's work directory does not start when the OS sandbox is
+/// unavailable.
+pub const WORK_DIR_NEEDS_SANDBOX: &str = "a program of a project run with no repository needs the OS sandbox to keep the project's records read-only";
+
 /// Why a node with MCP permissions does not start in v1.
 pub const MCP_REFUSAL: &str = "MCP from program nodes needs the bongos MCP server (feature 21)";
 
@@ -328,6 +332,9 @@ pub struct ProgramNode {
     /// The worktree is a snapshot the run reads and never writes: it is left out of the writable
     /// paths, so only the scratch directory (and `extra_writable`) can be written.
     pub read_only_worktree: bool,
+    /// The script never runs without the OS sandbox: its worktree is a work directory beside
+    /// records only the sandbox keeps it from writing.
+    pub needs_sandbox: bool,
     /// More writable directories: the named directories of a lane run.
     pub extra_writable: Vec<PathBuf>,
     /// The run's edits to the environment.
@@ -1636,6 +1643,9 @@ impl ProgramRunner {
             // commands write it, so such a program never runs without the sandbox.
             Err(reason) if node.read_only_worktree => {
                 return Err(format!("{SNAPSHOT_NEEDS_SANDBOX}: {reason}"));
+            }
+            Err(reason) if node.needs_sandbox => {
+                return Err(format!("{WORK_DIR_NEEDS_SANDBOX}: {reason}"));
             }
             Err(reason) => {
                 log::warn!("workflows: a program runs without the OS sandbox: {reason}");

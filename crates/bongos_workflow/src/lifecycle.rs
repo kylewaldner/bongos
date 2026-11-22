@@ -478,6 +478,8 @@ pub struct ProjectEnd {
     pub merge: Option<ProjectMergeRequest>,
     /// The merge is recorded already.
     pub merged: bool,
+    /// The `document` outcomes to copy into the project's files folder once merged.
+    pub documents: Option<crate::outcomes::ProjectDocuments>,
 }
 
 /// How the success end of a run with no task settles ([`project_settlement`]).
@@ -494,11 +496,24 @@ pub struct ProjectSettled {
 /// branch and every checkout as they were, and once the person approves the merge is tried
 /// again (nothing is merged when the branch already holds the run's commits). A conflict or any
 /// other refusal fails the run, the run branch intact. With no branch to merge into, or a merge
-/// already recorded, the run succeeds and nothing is merged.
+/// already recorded, nothing is merged. Once merged (or with nothing to merge) the run's
+/// `document` outcomes are copied into the project's files folder
+/// ([`crate::outcomes::deliver_project_documents`]); a promised document that could not be
+/// delivered fails the run, else it succeeds.
 pub async fn project_settlement(git: &Git, end: &ProjectEnd) -> ProjectSettled {
-    let succeed = |merged_head| ProjectSettled {
-        settlement: Settlement::Succeed,
-        merged_head,
+    let succeed = |merged_head| {
+        let settlement = match end
+            .documents
+            .as_ref()
+            .map(crate::outcomes::deliver_project_documents)
+        {
+            Some(Err(failure)) => Settlement::Fail(failure),
+            _ => Settlement::Succeed,
+        };
+        ProjectSettled {
+            settlement,
+            merged_head,
+        }
     };
     let Some(request) = end.merge.as_ref().filter(|_| !end.merged) else {
         return succeed(None);
@@ -762,14 +777,78 @@ fn setup_of(record: &RunToml, tree: &WorkTree, project_dir: &Path) -> RunSetup {
         lane_dirs: record.lane_dirs.clone(),
         env: record.env.clone(),
         snapshot: snapshot.is_some(),
+        work_dir: matches!(record.tree, Some(RunTreeRecord::Work)),
         project,
     }
 }
 
 /// `<project dir>/work/<run id>`: where a run with no task keeps what it writes besides its tree
-/// (the scratch directories of its programs), beside its records and never inside them.
+/// (the scratch directories of its programs), beside its records and never inside them. A run
+/// with no repository and no snapshot works in it.
 pub fn project_work_dir(project_dir: &Path, run_id: &str) -> PathBuf {
     project_dir.join(PROJECT_WORK_DIR).join(run_id)
+}
+
+/// `run_id` as one plain path name: not empty, no separator, not `.` or `..`.
+fn plain_name(run_id: &str) -> Option<&str> {
+    let mut components = Path::new(run_id).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) if name.to_str() == Some(run_id) => {
+            Some(run_id)
+        }
+        _ => None,
+    }
+}
+
+/// Makes the work directory of a new run with no repository, `<project dir>/work/<run id>`,
+/// with its parent. Refused when `work` is not a real directory of the project folder (a
+/// symbolic link could lead the run's writes anywhere, its records included) or the run's own
+/// directory is already there.
+fn create_project_work_dir(project_dir: &Path, run_id: &str) -> std::io::Result<PathBuf> {
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+    let run_id = plain_name(run_id).ok_or_else(|| invalid(format!("bad run id '{run_id}'")))?;
+    let parent = project_dir.join(PROJECT_WORK_DIR);
+    match fs::symlink_metadata(&parent) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(invalid(format!(
+                "{} is not a directory of the project folder",
+                parent.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(&parent)?,
+        Err(error) => return Err(error),
+    }
+    let dir = parent.join(run_id);
+    fs::create_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Removes the work directory of the run `run_id` with no repository, `<project dir>/work/<run
+/// id>`, and only that: a run id that is not one plain name, a `work` that is not a real
+/// directory, and a run directory that is a symbolic link or no directory are refused, and
+/// nothing is removed. A directory already gone is `Ok(false)`. Links inside it are removed, never
+/// followed.
+pub fn remove_project_work_dir(project_dir: &Path, run_id: &str) -> std::io::Result<bool> {
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+    let run_id = plain_name(run_id).ok_or_else(|| invalid(format!("bad run id '{run_id}'")))?;
+    let parent = project_dir.join(PROJECT_WORK_DIR);
+    let dir = parent.join(run_id);
+    for path in [&parent, &dir] {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(invalid(format!(
+                    "{} is not a real directory",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    fs::remove_dir_all(&dir)?;
+    Ok(true)
 }
 
 /// The first of `writable` that `snapshot` contains or lies inside, symlinks resolved, so a
@@ -979,7 +1058,32 @@ impl<R: Runner> Lifecycle<R> {
             _ => None,
         };
         let state = self.runtime.state(run)?;
+        let documents = self.runtime.definition(run).and_then(|definition| {
+            use crate::outcomes::{self, ProjectDocument, ProjectDocuments, RunOutcome};
+            let files_dir = entry.dir.parent()?.parent()?.to_path_buf();
+            let documents = outcomes::collect(definition, &state)
+                .into_iter()
+                .filter_map(|reported| match reported.outcome {
+                    RunOutcome::Document { path } => Some(ProjectDocument {
+                        root: outcomes::source_root(&entry.worktree, &reported.key, &path),
+                        key: reported.key,
+                        path,
+                    }),
+                    _ => None,
+                })
+                .collect();
+            let limits = self.runtime.run_limits(run);
+            Some(ProjectDocuments {
+                files_dir,
+                run_id: entry.id.clone(),
+                documents,
+                promised: outcomes::promised(definition, &state, &limits)
+                    .contains(&bongos_workflow_model::definition::Outcome::Document),
+                marker: entry.attempt_dir().join(crate::engine::DELIVERED_FILE),
+            })
+        });
         Some(ProjectEnd {
+            documents,
             merge: merge_into.map(|merge_into| ProjectMergeRequest {
                 run_tree: entry.worktree.path.clone(),
                 run_branch: entry.worktree.branch.clone(),
@@ -1366,8 +1470,11 @@ impl<R: Runner> Lifecycle<R> {
     ///   ([`crate::builtin_merge::merge_project_run`]), never before.
     /// - `RunTree::Snapshot`: the nodes run in the snapshot, which no program may write; there is
     ///   no run branch and nothing is merged.
+    /// - `RunTree::Fresh` with no repository: no worktree and no branch; the nodes run in the
+    ///   run's work directory ([`project_work_dir`]), the only part of the project folder its
+    ///   programs may write, and nothing is merged.
     ///
-    /// A run with no repository and no snapshot cannot start yet. The record is written under the
+    /// The record is written under the
     /// project's own folder, `runs/<id>`; the agents are pointed at the snapshot, else at
     /// [`StartContext::definitions`].
     fn start_project(
@@ -1485,15 +1592,62 @@ impl<R: Runner> Lifecycle<R> {
                 };
                 (checkout, worktree, record)
             }
+            RunTree::Fresh {
+                repo: None,
+                base: None,
+                merge_into: None,
+            } => {
+                let work = project_work_dir(&project_dir, &id);
+                // The work directory is the only part of the project folder the run may write:
+                // a lane directory may not share files with the rest of it.
+                let folder = crate::lifecycle::resolved(&project_dir);
+                let own = crate::lifecycle::resolved(&work);
+                if let Some(shared) = request.lane_dirs.values().find(|dir| {
+                    let dir = crate::lifecycle::resolved(dir);
+                    folder.starts_with(&dir) || (dir.starts_with(&folder) && !dir.starts_with(&own))
+                }) {
+                    return Err(Refusal::new(
+                        RefusalKind::BadRequest,
+                        format!(
+                            "The lane directory {} overlaps the project folder {}, which holds \
+                             the project's runs.",
+                            shared.display(),
+                            project_dir.display()
+                        ),
+                        "Keep the lane directories outside the project folder.",
+                    ));
+                }
+                let work = create_project_work_dir(&project_dir, &id).map_err(|error| {
+                    Refusal::new(
+                        RefusalKind::BadRequest,
+                        format!(
+                            "The work directory {} cannot be made: {error}.",
+                            work.display()
+                        ),
+                        "Make the project's work folder a plain directory.",
+                    )
+                })?;
+                let checkout = TaskCheckout {
+                    slug: slug.clone(),
+                    worktree: None,
+                    branch: None,
+                };
+                let worktree = RunWorktree {
+                    run_dir: work.clone(),
+                    path: work,
+                    branch: String::new(),
+                };
+                (checkout, worktree, RunTreeRecord::Work)
+            }
             RunTree::Fresh { repo: None, .. } | RunTree::Lane { .. } => {
                 return Err(unsupported(
-                    "A run with no task and no repository cannot start yet.",
+                    "A run with no task cannot be made in this tree.",
                 ));
             }
         };
         let definitions = match &record_tree {
             RunTreeRecord::Snapshot { path } => path.clone(),
-            RunTreeRecord::Repository { .. } => context
+            RunTreeRecord::Repository { .. } | RunTreeRecord::Work => context
                 .definitions
                 .clone()
                 .unwrap_or_else(|| project_dir.clone()),
@@ -1546,7 +1700,15 @@ impl<R: Runner> Lifecycle<R> {
             .definition_commit
             .clone()
             .filter(|_| resolved.layer == Layer::Project);
-        self.begin_attempt(&mut entry, 1, &resolved.dir, definition, created, commit)?;
+        if let Err(refusal) =
+            self.begin_attempt(&mut entry, 1, &resolved.dir, definition, created, commit)
+        {
+            // The run never began: its empty work directory goes with it.
+            if entry.setup.work_dir {
+                remove_project_work_dir(&project_dir, &id).ok();
+            }
+            return Err(refusal);
+        }
         if held_back {
             self.runtime.hold_back(&id);
         }
@@ -1727,16 +1889,30 @@ impl<R: Runner> Lifecycle<R> {
                 worktree: Some(repo.clone()),
                 branch: Some(base.clone()),
             },
-            (Some(RunTreeRecord::Snapshot { .. }), _) | (None, None) => TaskCheckout {
-                slug: task.slug.clone(),
-                worktree: None,
-                branch: None,
-            },
+            (Some(RunTreeRecord::Snapshot { .. } | RunTreeRecord::Work), _) | (None, None) => {
+                TaskCheckout {
+                    slug: task.slug.clone(),
+                    worktree: None,
+                    branch: None,
+                }
+            }
             (None, Some(file)) => TaskCheckout::from_task(task.slug.clone(), file),
         };
-        if matches!(record.tree, Some(RunTreeRecord::Snapshot { .. })) {
-            // The snapshot is no run directory: the run's own directory is its work directory.
-            worktree.run_dir = project_work_dir(&task.dir, &record.id);
+        match record.tree {
+            Some(RunTreeRecord::Snapshot { .. }) => {
+                // The snapshot is no run directory: the run's own directory is its work directory.
+                worktree.run_dir = project_work_dir(&task.dir, &record.id);
+            }
+            Some(RunTreeRecord::Work) => {
+                // The work directory is where the project folder has it, whatever the record says.
+                let work = project_work_dir(&task.dir, &record.id);
+                worktree = RunWorktree {
+                    run_dir: work.clone(),
+                    path: work,
+                    branch: String::new(),
+                };
+            }
+            _ => {}
         }
         let setup = setup_of(&record, tree, &task.dir);
         let task_id = record.task_id.clone();
@@ -1763,9 +1939,10 @@ impl<R: Runner> Lifecycle<R> {
     }
 
     /// `workflow: clear finished`, the first half: every run that ended succeeded or was
-    /// cancelled leaves the lifecycle. Its `cleared` marker is written first (and synced), then the
-    /// run is dropped from the runtime; a run whose marker cannot be written stays listed and is
-    /// reported in [`ClearOutcome::failed`]. A failed run counts as active and stays, and so does
+    /// cancelled leaves the lifecycle. A run with no repository has its work directory removed
+    /// first ([`remove_project_work_dir`], nothing outside it). Its `cleared` marker is written
+    /// (and synced), then the run is dropped from the runtime; a run whose work directory or
+    /// marker cannot be written stays listed and is reported in [`ClearOutcome::failed`]. A failed run counts as active and stays, and so does
     /// every other active run: the status is read again here, so a run that became active again
     /// is never cleared. A second call finds nothing to do. The caller holds the lifecycle lock,
     /// which serializes this against a tick or a command. Nothing is written when no run is
@@ -1787,6 +1964,30 @@ impl<R: Runner> Lifecycle<R> {
             };
             if self.status(&id).is_none_or(RunStatus::is_active) {
                 continue;
+            }
+            // A run with no repository takes its work directory with it, before its marker, so
+            // a directory that cannot be removed leaves the run listed to clear again.
+            if self.runs[index].setup.work_dir {
+                let entry = &self.runs[index];
+                let removed = entry
+                    .dir
+                    .parent()
+                    .filter(|runs| runs.file_name().is_some_and(|name| name == RUNS_DIR))
+                    .and_then(Path::parent)
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("{} is not in a runs directory", entry.dir.display()),
+                        )
+                    })
+                    .and_then(|project_dir| remove_project_work_dir(project_dir, &entry.id));
+                if let Err(error) = removed {
+                    log::error!(
+                        "workflows: could not remove the work directory of run {id}: {error}"
+                    );
+                    outcome.failed.push((id, error.to_string()));
+                    continue;
+                }
             }
             let marker = self.runs[index].dir.join(CLEARED_FILE);
             if let Err(error) = fs::File::create(&marker).and_then(|file| file.sync_all()) {
@@ -1958,6 +2159,13 @@ impl<R: Runner> Lifecycle<R> {
         if entry.setup.snapshot {
             return None;
         }
+        // A work directory has no branches; its run directory is the tree itself.
+        if entry.setup.work_dir {
+            return Some(HaltWorktrees {
+                run: entry.worktree.path.clone(),
+                branches: Vec::new(),
+            });
+        }
         let mut branches: Vec<PathBuf> = fs::read_dir(&entry.worktree.run_dir)
             .into_iter()
             .flatten()
@@ -2108,8 +2316,9 @@ impl<R: Runner> Lifecycle<R> {
         let (resolved, definition) = load_definition(dirs, &name, validation, None)?;
         let attempt = self.runs[index].attempt() + 1;
         let checkout = self.runs[index].task.clone();
-        // A snapshot is read, never made: the new attempt runs on the same one.
-        let worktree = if self.runs[index].setup.snapshot {
+        // A snapshot is read, never made, and a work directory is the run's own: the new attempt
+        // runs in the same one.
+        let worktree = if self.runs[index].setup.branchless() {
             self.runs[index].worktree.clone()
         } else {
             self.create_worktree(&checkout, run, attempt)?
@@ -2235,9 +2444,9 @@ impl<R: Runner> Lifecycle<R> {
             .node(&finished.key.node)
             .map(|node| agent_of(definition, node))
             .unwrap_or(AgentKind::Claude);
-        // Every key of a run on a snapshot ran in the snapshot.
+        // Every key of a run on a snapshot or in a work directory ran in that one tree.
         let directory = match finished.key.branch.last() {
-            Some((fan, index)) if !entry.setup.snapshot => {
+            Some((fan, index)) if !entry.setup.branchless() => {
                 branch_worktree_path(&entry.worktree.run_dir, fan, *index)
             }
             _ => entry.worktree.path.clone(),
